@@ -1,6 +1,34 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
-## Status (2026-08-24): unrelated `gimple_cpp_core.py` generator-typing fix landed; error count 178 → 187, but the shift is coverage noise in the already-tracked bare-name-collision class, not a new bug
+## Status (re-verified 2026-08-25): still does not build; error count 187 → 213, same already-catalogued grab-bag categories, no new failure class
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
+fresh against current master (past the struct-method cross-call scalar
+contract "Pass 1.3e", generator-consumption-ordering fixed-point retry +
+defaults-aware arg padding, `**kwargs`-forward slot-alignment fix, and
+coroutine-body `int()`/`float()` builtin support landed since the
+2026-08-24 entry below). 213 `error:` lines (was 187). Bucketed the
+error messages by normalized shape rather than re-running a full sorted
+A/B diff (time-boxed): every top category matches ones already
+catalogued in this doc's history — `expected expression before 'X'`
+(operator.py's `partial`/lambda lowering), `'X' has no member named
+'X'` / `request for member 'X' in something not a structure or union`
+(posixpath/ntpath struct-shape mismatch, argparse's `_kw_default`),
+`invalid operands to binary % ` (enum.py's struct/dict `%`), `'X'
+undeclared here (not in a function)` (the still-open task #141
+bare-name-collision class), `perror(...)` lines reappearing in the
+context snippets (the same `perror`-misdetection shape from tokenize.py/
+argparse.py noted in earlier entries). No new error category observed.
+Consistent with the 2026-08-24 finding that this file's error count
+oscillates as a side effect of which functions successfully type-check
+as coroutine bodies shifting whole-program compile order and which
+module "wins" a bare-name race — not a regression from any of this
+session's landed fixes, and none of those fixes target this file's
+still-open blockers (task #141 general struct-field-table qualification,
+operator.py partial/lambda lowering, enum.py struct/dict codegen,
+posixpath/ntpath collision). Quality gate for the intervening fixes
+verified clean at their own landing commits (see git log). Doc kept
+open — still not a narrow, single-cause fix.
 
 Landed the `_cpp_trusted_fn_return_types`/`_cpp_fn_container_shape`
 coroutine-body-typing feature (see `bugs/COMPILE_FAIL_ctypes_

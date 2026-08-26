@@ -1,5 +1,25 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (updated 2026-08-25 -- re-verified, no evidence of change)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+test/test_string/test_string.py` fresh against current master (past the
+struct-method cross-call scalar contract "Pass 1.3e",
+generator-consumption-ordering fixed-point retry + defaults-aware arg
+padding, `**kwargs`-forward slot-alignment fix, coroutine-body
+`int()`/`float()` builtin support, and this session's own
+`cls.<attr>`/`ClassName.<attr>` write fix — none plausibly touch
+function-body-local class discovery). The whole-program build didn't
+finish within this session's safety-wrapped time budget (large
+transitive import graph); the partial debug log shows no per-function
+"not eligible" note naming `parse` before the watcher killed it,
+consistent with this doc's own established finding that `BarFormatter`
+(and its `parse` method) never reach the struct-registration/
+generator-method-compile loop at all, hence no per-function debug
+breadcrumb. No evidence of any change; root cause and classification
+(function-body-local class discovery, feature-sized, out of scope)
+unchanged.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C3 cluster. The blocker (`BarFormatter` -- and its generator method `parse` -- defined INSIDE `test_override_parse`'s function body, so struct registration never sees it) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies) -- same nested-class-discovery family as test_ensurepip.py above. Still feature-sized; untouched.

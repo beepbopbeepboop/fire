@@ -2753,6 +2753,37 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     and s.target.obj.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
                 val = gen._cpp_expr(s.value)
                 return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = {val};"]
+            # `cls.<attr> = val` / `ClassName.<attr> = val` — the write-side
+            # analogue of the class-level-attribute READ support just above
+            # (`_cpp_expr`'s `cls.<attr>`/`ClassName.<attr>` MemberExpr
+            # case, ~line 831 in this file): both redirect through the
+            # SAME `gen._class_attrs[struct][attr] -> mangled global`
+            # table the ordinary (non-coroutine) GIMPLE path's own
+            # `_lower_MemberExpr`/assignment lowering already uses for a
+            # class-level (not instance) attribute. Found via
+            # Lib/test/test_finalization.py's `@classmethod def test(cls):
+            # ... NonGCSimpleBase._cleaning = False` (a plain-classname-
+            # qualified write to a class attribute from inside a
+            # classmethod generator body) — `cls.<attr>` reads already
+            # worked (task #, enum.py's Flag._iter_member_by_value_ fix),
+            # but no assignment-target case existed for either spelling,
+            # so any class-attribute write fell all the way through to the
+            # generic "only a plain identifier assignment target is
+            # supported" refusal below. `cls` resolves via the enclosing
+            # classmethod generator's own struct (`_cpp_gen_self_struct`);
+            # a literal class name resolves directly via `_class_attrs`.
+            if isinstance(s.target, gimple_ctypes.MemberExpr) and isinstance(s.target.obj, gimple_ctypes.IdentExpr):
+                _tgt_struct = None
+                if s.target.obj.name == 'cls':
+                    _tgt_struct = getattr(gen, '_cpp_gen_self_struct', None)
+                elif s.target.obj.name in gen._class_attrs:
+                    _tgt_struct = s.target.obj.name
+                if _tgt_struct is not None:
+                    _cls_gname = gen._class_attrs.get(_tgt_struct, {}).get(s.target.member)
+                    if _cls_gname is not None:
+                        gen._cpp_class_attr_refs.add(_cls_gname)
+                        val = gen._cpp_expr(s.value)
+                        return [f"{indent}{_cls_gname} = {val};"]
             # arr[i] = val / d[k] = val  →  a real runtime-helper write
             # (mojo_list_set_*/mojo_dict_set_*), mirroring the plain
             # (non-generator) GIMPLE path's own SubscriptExpr-target

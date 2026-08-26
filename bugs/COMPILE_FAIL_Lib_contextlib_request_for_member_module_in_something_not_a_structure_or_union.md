@@ -1,5 +1,22 @@
 # COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-25): unchanged; unaffected by this session's intervening fixes
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
+fresh against current master (past the struct-method cross-call scalar
+contract "Pass 1.3e", generator-consumption-ordering fixed-point retry +
+defaults-aware arg padding, `**kwargs`-forward slot-alignment fix, and
+coroutine-body `int()`/`float()` builtin support — none of which touch
+the async-eligibility gate this file is blocked on). Byte-for-byte
+identical failure: same `RuntimeError` naming the same 11 async
+functions (`__aenter__` x3, `__aexit__` x4, `_exit_wrapper`, `aclose`,
+`enter_async_context`, `inner`), same "every `return` must carry a
+scalar value" / "*args/**kwargs parameters not supported for compiled
+async functions" per-function reasons. Confirmed still the same
+genuinely large, out-of-scope feature (non-scalar `__aenter__`-return
+boxing/type-erasure + variadic `__aexit__`-parameter support in the
+C++20 coroutine codegen) — not attempted. DOCUMENTED-NOT-FIXED.
+
 ## Status (re-verified 2026-08-24): unchanged, unaffected by the unrelated `gimple_cpp_core.py` generator-typing fix landed this session
 
 Landed `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s targeted fix

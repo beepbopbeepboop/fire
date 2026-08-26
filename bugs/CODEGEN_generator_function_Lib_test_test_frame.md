@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (updated 2026-08-25 -- re-verified, unchanged)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+test/test_frame.py` fresh against current master (past the struct-method
+cross-call scalar contract "Pass 1.3e", generator-consumption-ordering
+fixed-point retry + defaults-aware arg padding, `**kwargs`-forward
+slot-alignment fix, coroutine-body `int()`/`float()` builtin support,
+and this session's own `cls.<attr>`/`ClassName.<attr>` write fix — none
+touch runtime integer division-by-zero). Per-function debug log shows
+the identical refusal byte-for-byte at both retry passes: `generator
+'g' not eligible for C++ coroutine path ...: unsupported expression
+statement in generator body (BinaryOp)`, from the same `1/0` bare
+statement inside `try: 1/0 except ZeroDivisionError`. Confirmed still a
+genuine, standalone feature gap (no runtime int-div-by-zero trapping
+anywhere in the compiled path, plain-GIMPLE or coroutine); not
+attempted. Untouched.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C3 cluster. The blocker (no runtime integer division-by-zero trapping anywhere in the compiled path, plain-GIMPLE or coroutine) is unrelated to and unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still a standalone correctness-feature project; untouched.

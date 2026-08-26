@@ -1,5 +1,46 @@
 # CODEGEN_generator_function: Lib/test/test_finalization.py
 
+## Status (updated 2026-08-25 -- old blocker FIXED, NEW distinct blocker found; file still doesn't build)
+
+Re-verified fresh against current master and found the previous
+classification stale: `cls.<attr>` READS were already fixed by an
+intervening session (enum.py's `Flag._iter_member_by_value_` fix,
+2026-08-21) — `cls.del_calls.clear()` etc. no longer trip the "no
+class-level attribute/method access" refusal this doc's history
+describes. The refusal `test()`'s isolated compile actually hits now
+is a DIFFERENT message: `only a plain identifier assignment target is
+supported`, from `NonGCSimpleBase._cleaning = False` — a WRITE to a
+class attribute via the literal class name (not `cls`), which had no
+AssignStmt case at all (only reads were wired up).
+
+**Fixed this session**: added the write-side counterpart in
+`gimple_cpp_core.py`'s `_cpp_stmt` `AssignStmt` handling — `cls.<attr>
+= val` (resolved via the enclosing classmethod generator's own struct)
+and `ClassName.<attr> = val` (resolved directly via `gen._class_attrs`)
+both now redirect to the same mangled class-attribute global the
+existing read path already uses, mirroring the `self.field = val`
+case immediately above it. Verified via an isolated
+`compile_to_gimple_with_cpp(..., do_imports=False)` call: the
+`_cleaning` assignment no longer triggers any refusal.
+
+**New blocker exposed, NOT fixed**: with that gap out of the way, the
+isolated compile now fails on `raise cls.errors[0]` (test method body,
+~line 68) — `unsupported \`raise\` value expression in generator body
+(only \`raise ExcName(...)\`/\`raise ExcName\` with a statically known
+exception class name is supported)`. `cls.errors[0]` is a previously
+CAUGHT exception instance re-raised by value, not a fresh
+`SomeException(...)` construction with a statically-known class name —
+this codegen's coroutine `raise` lowering has no representation for
+re-raising an arbitrary runtime exception VALUE (as opposed to
+constructing a new instance of a statically-named class), which is a
+separate, structural gap (dynamic exception-value re-raise, not
+narrowly fixable the way the assignment-target gap was). Not attempted
+here — file still does not build end-to-end.
+
+Quality gate for the assignment-write fix: `test_gimple.py` 253/253,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skips.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C3 cluster. The blocker (inherited `test` classmethod generator reading `cls.del_calls`/etc. -- no class-level attribute-access story for compiled generators) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still structural; untouched.
