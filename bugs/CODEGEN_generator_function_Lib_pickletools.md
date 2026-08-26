@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical refusal
+
+Fresh real `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+pickletools.py` against current master (f0f6e78): dies at pickletools'
+own module compile with the byte-identical honest refusal —
+`Unsupported shape(s): _genops: a call to unresolved callee
+'getpos(...)' is not supported in a compiled generator/coroutine body...`
+(twice: module-qualify pass + closure pass). None of the campaign
+mechanisms landed since 2026-08-25 touch opaque-receiver bound-method
+values. The 2026-08-25 entry's depth analysis stands (BytesIO,
+`data.read(1)`/`opcode.arg.reader(data)` runtime-typed chains, non-
+literal `%`-format all behind the first shape); feature-sized, out of
+scope. No code change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; refusal unchanged, and confirmed deeper than `getpos`: the whole function body is dynamically-receiver territory)
 
 Re-ran a fresh isolated
