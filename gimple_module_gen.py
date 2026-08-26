@@ -1834,15 +1834,59 @@ def gen_module_impl(self, stmts):
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
             self.func_return_types[s.name] = self._resolve_type(s.return_type)
+        _s_pts = None
         if isinstance(s, FunctionDef) and s.params:
             if any(pn.startswith('*') for pn, _ in s.params):
-                self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                _s_pts = self._signature_ctypes(s.params, s)
+                self.func_param_types[s.name] = _s_pts
                 self._note_vararg_trailing_param_types(s)
             else:
-                self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
+                _s_pts = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
+                self.func_param_types[s.name] = _s_pts
+        # Does THIS gen's resolution tiers (`_func_csym`/`_effective_param_
+        # types`: own top-level defs first, then lexical import scopes, then
+        # home-module records, then the oscillating shared slot) resolve
+        # `s.name` to `s` ITSELF? Only then may `s` register its per-def
+        # auxiliary tables under the tiers-derived mangled key.
+        # BUG-2026-052: this loop iterates EVERY module's stmts of the whole
+        # transitive closure (`all_functions = stmts + imported_stmts`), but
+        # `_func_csym(s.name)` resolves by BARE NAME — so when two sibling
+        # modules both define a same-named free function, each unit's own
+        # def claims those tiers (tier 1), and a FOREIGN homonym flowing
+        # through this same loop later registered ITS data under the LOCAL
+        # def's mangled symbol. Real instance: re/_compiler.py's
+        # `_compile(code, pattern, flags)` (no defaults) vs codeop.py's
+        # unrelated homonym `_compile(source, filename, symbol,
+        # incomplete_input=True, *, flags=0)` — codeop's trailing defaults
+        # landed under re/_compiler's mangled key
+        # (`__compiler__compile_132aaf`), and every default-padding lookup
+        # at re/_compiler's own call sites then found TWO spurious trailing
+        # slots to fill (GCC "too many arguments ... expected 3, have 5" at
+        # all 20 recursive `_compile(...)` statement calls). The owning
+        # unit's OWN pass already registers each def under the symbol ITS
+        # tiers derive — skipping a foreign homonym here is purely
+        # de-poisoning; single-definition names (the overwhelming common
+        # case, incl. every cross-module default-padding consumer) still
+        # register exactly as before.
+        # Deliberately an IDENTITY check only, with no tier-SHAPE probe:
+        # consulting `_effective_param_types` here would resolve through
+        # `_local_def_pts`, whose lazy memo would then freeze every def's
+        # param ctypes at this loop's EARLY point — before Pass 1.x param
+        # inference (and the struct registration passes further down
+        # gen_module) have settled them — and `_emit_call`'s argument
+        # coercion reads exactly that memoized shape via `_func_csym`'s
+        # mangled-key mirror, so an early freeze regressed every
+        # unannotated-param callee's call sites to int64_t coercion
+        # ("makes pointer from integer without a cast" across typing.py's
+        # `_type_check` callers) before the probe idea was reverted.
+        _s_owns_tiers = True
+        if isinstance(s, FunctionDef):
+            _ldn_owner = (getattr(self, '_local_def_nodes', None) or {}).get(s.name)
+            if _ldn_owner is not None and _ldn_owner is not s:
+                _s_owns_tiers = False
         if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
             _dflts = getattr(s, 'param_defaults', None) or {}
-            if _dflts:
+            if _dflts and _s_owns_tiers:
                 try:
                     _mangled = self._func_csym(s.name)
                 except Exception:
@@ -1866,12 +1910,13 @@ def gen_module_impl(self, stmts):
             if _kw_i >= 0:
                 self._func_kwargs_slot[s.name] = _kw_i
                 self._func_kwargs_has_vararg[s.name] = _seen_star
-                try:
-                    _mangled_kw_name = self._func_csym(s.name)
-                    self._func_kwargs_slot[_mangled_kw_name] = _kw_i
-                    self._func_kwargs_has_vararg[_mangled_kw_name] = _seen_star
-                except Exception:
-                    pass
+                if _s_owns_tiers:
+                    try:
+                        _mangled_kw_name = self._func_csym(s.name)
+                        self._func_kwargs_slot[_mangled_kw_name] = _kw_i
+                        self._func_kwargs_has_vararg[_mangled_kw_name] = _seen_star
+                    except Exception:
+                        pass
         if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
             self._mangled_funcs.add(s.name)
         if isinstance(s, FunctionDef) and 'export' in (getattr(s, 'decorators', None) or []):

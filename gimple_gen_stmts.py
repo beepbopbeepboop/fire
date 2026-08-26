@@ -2413,7 +2413,26 @@ def _gen_stmt_ExprStmt(gen, node):
         # is what fixed the memcpy-in-isolated-compile bug investigated
         # 2026-07-15 without over-firing for a struct constructor called
         # with stale/vestigial kwargs (not in _KNOWN_SIGS, so untouched).
-        expected_params = gen.func_param_types.get(raw_name, [])
+        # BUG-2026-024 tiered truth, statement-level twin of the identical
+        # `_ggf_eff._effective_param_types` lookup in _lower_named_call:
+        # the raw bare-name `func_param_types` slot permanently oscillates
+        # between sibling homonyms in a whole-program closure (whichever
+        # module's registration pass ran last owns it), so padding arity
+        # against it silently retargeted THIS unit's own same-named def's
+        # call sites at ANOTHER module's signature. Real instance:
+        # re/_compiler.py's `_compile(code, pattern, flags)` — three bare
+        # ExprStmt-level recursive calls — padded out to FIVE arguments
+        # with codeop.py's unrelated homonym's trailing defaults
+        # (`incomplete_input=True, *, flags=0`), i.e. GCC "too many
+        # arguments to function '__compiler__compile_132aaf'; expected 3,
+        # have 5" at all 20 recursive call sites, whenever codeop was in
+        # the same program's transitive closure. Tier order here must
+        # mirror _func_csym's (which picked this very call site's mangled
+        # symbol) so arity and symbol can't disagree.
+        import gimple_gen_funcs as _ggf_stmt_eff
+        expected_params = _ggf_stmt_eff._effective_param_types(gen, raw_name)
+        if not expected_params:
+            expected_params = gen.func_param_types.get(raw_name, [])
         if not expected_params and fname in gen._KNOWN_SIGS:
             expected_params = gen._KNOWN_SIGS[fname][1]
         # `f(*iterable)` unpacking against a fixed-arity callee — shared
