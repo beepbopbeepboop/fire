@@ -114,6 +114,66 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
     return 'MojoBoundMethod *', t
 
 
+def _lower_builtin_method_value(gen, ot: str, ov: str, method: str) -> tuple[str, str]:
+    """Lower a BUILTIN-CONTAINER method referenced as a plain value —
+    `append = l.append` (python_mapdef_code's accumulator idiom in
+    Tools/unicode/gencodec.py), `add = myset.add`, etc.
+
+    _lower_bound_method_value above covers USER-STRUCT methods only: a
+    struct method has a real, statically-known mangled C symbol to take
+    a function pointer of. A builtin container (MojoList*/MojoDict*/
+    MojoSet*) has NO per-method C function at all — its methods are
+    lowered inline at each direct call site (`mojo_list_append_int` vs
+    `mojo_list_append_str` chosen by the ARGUMENT's type at that call),
+    so there is nothing for a MojoBoundMethod*'s fn pointer to point at.
+    Binding one therefore can't reuse the fn+self representation.
+
+    What it CAN do is record the binding and lower every call THROUGH
+    the value as a direct container-method call on the receiver:
+    - the receiver pointer is materialized into its own hidden void*
+      local ONCE here, so the bound value keeps pointing at the ORIGINAL
+      list even if the source variable is rebound afterwards (Python
+      aliasing semantics);
+    - the value itself stays the established boxed-int64_t handle
+      (exactly what the generic getattr fallback produced before), so
+      variable declarations, coercions and ABI are all unchanged;
+    - the (receiver ctype, hidden local, method name) triple rides in
+      gen._builtin_method_values keyed by this temp's C name, propagated
+      onto assigned variable names by the same side-table carry-through
+      AssignStmt/VarDecl already do for _bound_method_ret_types;
+    - a later call through such a var (_lower_builtin_bound_method_call)
+      dispatches into _lower_list_method/_lower_dict_method/
+      _lower_set_method verbatim — identical behavior and element-type
+      tracking to spelling the call directly on the container.
+
+    Uses of the value OTHER than calling it in the same function
+    (returning it, storing it in a container, passing cross-function)
+    keep today's opaque-handle behavior — unsupported there before,
+    unchanged now."""
+    recv = gen._new_val('void *', f'(void *){ov}')
+    t = gen._new_temp('int64_t')
+    gen._emit(f"  {t} = (int64_t){recv};")
+    gen._builtin_method_values[t] = (ot, recv, method)
+    return 'int64_t', t
+
+
+def _lower_builtin_bound_method_call(gen, fname_raw: str,
+                                     node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """Call through a builtin-container method previously bound as a
+    VALUE (`append = l.append; ...; append(x)`) — see
+    _lower_builtin_method_value for why this can't go through the
+    MojoBoundMethod* fn-pointer machinery. Dispatches to the exact same
+    per-container lowering a direct `<recv>.<method>(...)` call uses, so
+    argument typing (int vs str append), element-type propagation and
+    return types all match the direct-call spelling exactly."""
+    recv_ct, recv_v, method = gen._builtin_method_values[fname_raw]
+    if recv_ct == 'MojoList *':
+        return gen._lower_list_method(recv_v, method, node.args)
+    if recv_ct == 'MojoDict *':
+        return gen._lower_dict_method(recv_v, method, node.args)
+    return gen._lower_set_method(recv_v, method, node.args)
+
+
 def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
     """Auto-invoke a deferred, uncalled `MojoBoundMethod *` value (`ov`)
     and return the invoked result's (ctype, value) — the shared lowering

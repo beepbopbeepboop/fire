@@ -171,6 +171,22 @@ def _reset_func(gen, body: list = None, params: list = None):
     # Reset per function for the same reason _actual_types is: temp
     # names (_tN) recycle across functions. See _lower_bound_method_value.
     gen._bound_method_ret_types: dict[str, str] = {}
+    # Builtin-container method bound as a first-class VALUE (`append =
+    # l.append`, the classic accumulator-aliasing idiom) — key: the C
+    # name of the temp/var holding the boxed value; value: (receiver
+    # ctype, receiver hidden-local C name, method name). A later call
+    # through the stored value (_lower_named_call / _gen_stmt_ExprStmt's
+    # statement-level twin) lowers as a DIRECT container-method call on
+    # the recorded hidden receiver local, reusing _lower_list_method/
+    # _lower_dict_method/_lower_set_method verbatim — so per-call-site
+    # int/str element dispatch behaves exactly like the direct
+    # `l.append(x)` spelling. The receiver is captured into its own
+    # void* hidden local at the reference site, so rebinding the source
+    # variable afterwards can't redirect an already-taken bound method.
+    # Reset per function for the same reason _bound_method_ret_types is:
+    # temp names (_tN) recycle across functions. See
+    # _lower_builtin_method_value.
+    gen._builtin_method_values: dict[str, tuple] = {}
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from

@@ -2674,6 +2674,10 @@ class GimpleGen:
         return gmp._lower_bound_method_call(self, fname_raw, node, stored_ctype)
     def _lower_bound_method_call_value(self, bm: str, node: CallExpr, ret_type: str='int64_t') -> tuple[str, str]:
         return gmp._lower_bound_method_call_value(self, bm, node, ret_type)
+    def _lower_builtin_method_value(self, ot: str, ov: str, method: str) -> tuple[str, str]:
+        return gmp._lower_builtin_method_value(self, ot, ov, method)
+    def _lower_builtin_bound_method_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
+        return gmp._lower_builtin_bound_method_call(self, fname_raw, node)
     def _lower_method_call(self, node: CallExpr) -> tuple[str, str]:
         return gmp._lower_method_call(self, node)
     def _lower_dict_method(self, ov: str, method: str, args: list) -> tuple:

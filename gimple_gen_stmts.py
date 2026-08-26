@@ -286,6 +286,13 @@ def _gen_stmt_VarDecl(gen, node):
         # a few lines below this method).
         if actual_dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
             gen._bound_method_ret_types[node.name] = gen._bound_method_ret_types[v]
+        # `append = l.append` (a builtin-container method bound as a
+        # value, see _lower_builtin_method_value): carry the recorded
+        # (receiver, method) binding from the RHS temp onto the variable,
+        # mirroring the _bound_method_ret_types propagation just above —
+        # a later `append(...)` call dispatches on the VARIABLE's name.
+        if v in gen._builtin_method_values:
+            gen._builtin_method_values[node.name] = gen._builtin_method_values[v]
         # `var tg = TaskGroup()` -- mirrors the `MojoAsync *` case just
         # above exactly (see `_lower_call`'s `TaskGroup()` construction
         # docstring / `self._taskgroup_var_api`'s own docstring).
@@ -766,6 +773,13 @@ def _gen_stmt_AssignStmt(gen, node):
         # correctly instead of assuming int64_t.
         if dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
             gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
+        # `append = l.append` (a builtin-container method bound as a
+        # value, see _lower_builtin_method_value): carry the recorded
+        # (receiver, method) binding from the RHS temp onto the variable,
+        # mirroring the _bound_method_ret_types propagation just above —
+        # a later `append(...)` call dispatches on the VARIABLE's name.
+        if v in gen._builtin_method_values:
+            gen._builtin_method_values[tname] = gen._builtin_method_values[v]
         # `g = counter(3)` / `g = obj.countdown(n)`: the generator-call
         # lowering above recorded which extern "C" resume/value/destroy
         # API this coroutine uses, keyed by the CALL SITE's own SSA temp
@@ -2188,6 +2202,15 @@ def _gen_stmt_ExprStmt(gen, node):
         # _lower_call's own identical guard a few hundred lines up for
         # the same fix already proven correct there.
         _var_ctype = gen.var_types.get(raw_name, '')
+        # Statement-level twin of _lower_named_call's builtin-container
+        # bound-method guard (`append = l.append; append(x)` with the
+        # value discarded) — must precede the fnptr guard below for the
+        # same reason: the boxed handle var is int64_t-declared, and the
+        # fnptr path would call through an opaque getattr box. See
+        # _lower_builtin_method_value / _lower_builtin_bound_method_call.
+        if raw_name in gen._builtin_method_values:
+            gen._lower_builtin_bound_method_call(raw_name, node.value)
+            return
         if gen._get_actual_type(_var_ctype, raw_name) == 'MojoBoundMethod *':
             # A closure/bound-method VALUE stored in a local and called
             # as a bare statement — mirrors _lower_call's identical

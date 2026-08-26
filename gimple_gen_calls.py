@@ -1180,6 +1180,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `_lower_named_call` below, which just guesses the call target is a
     # C function literally named after the Mojo variable (never true
     # here) instead of recognizing it as a real function-pointer value.
+    # Local variable holding a BUILTIN-container method bound as a value
+    # (`append = l.append; ...; append(x)`) — must be checked BEFORE both
+    # bound-method/fnptr guards below: the boxed handle var is declared
+    # int64_t exactly like a plain fnptr value, so the fnptr guard would
+    # otherwise emit mojo_fnptr_call_N on an opaque getattr box. See
+    # _lower_builtin_method_value / _lower_builtin_bound_method_call.
+    if fname_raw in gen._builtin_method_values:
+        return gen._lower_builtin_bound_method_call(fname_raw, node)
+
     _fname_var_ctype = gen.var_types.get(fname_raw) or gen._global_var_types.get(fname_raw, '')
     if gen._get_actual_type(_fname_var_ctype, fname_raw) == 'MojoBoundMethod *':
         return gen._lower_bound_method_call(fname_raw, node, _fname_var_ctype)
