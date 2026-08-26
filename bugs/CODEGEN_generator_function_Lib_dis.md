@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical single refusal —
+`_get_instructions_bytes` on the same `*`/`**`-unpack call-argument
+guard (`Positions(*next(co_positions, ()))`, a spread argument into a
+dynamically-constructed `collections.namedtuple` type this codegen has
+no static representation for). Confirms the opencode-genlib2 entry
+immediately below. Two-feature stack (namedtuple-as-struct support +
+unpack-call-argument support) on top of the separate `co.co_positions()`
+introspection gap; genuinely feature-sized, not attempted. No code
+change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/opencode-genlib2 — re-verified fresh; refusal byte-identical, both feature-stack legs re-confirmed post-backend-split)
 
 Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:

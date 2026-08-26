@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical 4-function
+refusal — `__iter__, _fwalk, fwalk, walk` (generator function(s),
+contain a yield/yield from). Confirms the wtOpencode_genlib3 entry
+immediately below. Root cause unchanged: the tagged-union/variant
+value-representation gap (`stack`'s runtime-heterogeneous str/tuple
+elements + `isinstance(top, tuple)` discrimination) — no
+representation in this codegen's statically-typed container model.
+Feature-sized (tagged-union redesign); not attempted. No code change;
+doc stays open.
+
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical refusal, tagged-union diagnosis stands
 
 Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
