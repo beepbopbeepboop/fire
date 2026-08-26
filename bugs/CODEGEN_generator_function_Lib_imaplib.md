@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: Python-level lowering succeeds
+(no `_UnsupportedGeneratorShape` raised), matching the opencode-genlib2
+entry's observation that the remaining blocker is a downstream g++
+`.cpp`-stage type error (`invalid conversion from 'MojoList*' to
+'int64_t'` at `co_yield Idler___next__(self);`), not re-run here (g++
+`-fsyntax-only` stage not independently re-executed this pass, but no
+mechanism landed since would plausibly change it — the root cause is
+yield-site type inference for `next(x)` not consulting
+`func_return_types` the way the walrus-hoist path does, compounded by a
+separate mixed-yield tuple-return-coherence gap). Feature-sized in
+aggregate; not attempted. No code change; doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — exactly ONE .cpp error left (blocker 2); blocker 1's silent constant-fold confirmed in the generated text; inference/emitter asymmetry pinned down)
 
 Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)` +

@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical refusal —
+`Message[...] = ...` subscript store on user-defined struct 'Message'
+(no `__setitem__`/backing container field) — the known
+`do_imports=False` probe artifact from `BabylMessage.__setitem__`'s
+`self._visible[header] = self[header]` (`email.message.Message`'s real
+base is invisible under an isolated compile). Confirms the
+opencode-genlib2 entry immediately below: this doc's own generator-
+codegen concern remains fully resolved (own generators clean under the
+real whole-program path per that entry); the file's end-to-end build
+failure is the separately-tracked transitive cascade. No code change;
+doc stays open per convention.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — isolated probes match documented behavior; bounded full build spent entire 15-min budget in transitive fallbacks without implicating mailbox)
 
 Two fresh probes, no compiler change:

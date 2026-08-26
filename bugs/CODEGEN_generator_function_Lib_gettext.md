@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: **compiles clean** — `_tokenize`'s
+own generator lowers with no `_UnsupportedGeneratorShape` refusal,
+confirming the opencode-genlib2 entry immediately below. This doc's own
+subject (the generator-codegen concern) remains fully resolved; the
+file's remaining whole-program build failure is entirely the
+separately-tracked transitive cascade plus the 4 pre-documented
+non-generator own-file residuals. No code change; doc stays open per
+convention.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — own-generator fix holds: isolated compile completely clean)
 
 Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)` +

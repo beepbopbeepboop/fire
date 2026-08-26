@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` (strict, not relaxed) repro on the real file:
+byte-identical 4-generator refusal — `_collapse_addresses_internal`,
+`_find_address_range`, `subnets` (both `IPv4Network`/`IPv6Network`), and
+`summarize_address_range`, all "every `yield` must carry a value.../
+unresolved callee" family shapes. Confirms the opencode-genlib2 entry
+immediately below. Aggregate remains feature-sized (min/list builtins,
+struct-dict keys, property-as-bound-method, plus the excluded
+unannotated-init-param family); not attempted. No code change; doc
+stays open.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — exactly the 19d entry's 23 errors, same families)
 
 Fresh relaxed isolated compile (`GimpleGen(do_imports=False,

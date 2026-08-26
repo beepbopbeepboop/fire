@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical refusal —
+`_genops` refused for "a call to unresolved callee 'getpos(...)' is not
+supported in a compiled generator/coroutine body" (`getpos = data.tell`,
+a bound-method value off an opaque-typed parameter). Confirms the
+wtOpencode_genlib3 entry immediately below. Even a hypothetical fix for
+this one site would only expose the next opaque-receiver-dependent shape
+in the same function body (`io.BytesIO` modeling, `data.read(1)`/
+`opcode.arg.reader(data)` dynamically-typed chains, non-literal
+`%`-format) — confirmed feature-sized by prior passes' full-body read.
+Not attempted. No code change; doc stays open.
+
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical refusal
 
 Fresh real `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

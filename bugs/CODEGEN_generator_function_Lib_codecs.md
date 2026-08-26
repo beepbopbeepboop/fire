@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical refusal —
+`iterdecode, iterencode` on "a `*`/`**`-unpack call argument is not
+supported in a compiled generator/coroutine body" at
+`getincrementalencoder(encoding)(errors, **kwargs)`. Confirms the
+opencode-genlib2 entry immediately below with a completely separate
+harness run. Per this campaign's explicit mandate, not attempting the
+underlying dynamic-callee kwargs-spread feature (large, already assessed
+repeatedly). No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/opencode-genlib2 — re-verified fresh; refusal byte-identical, classification re-confirmed from the current guard code)
 
 Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:

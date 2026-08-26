@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical refusal set —
+`_iter_member_`, `_iter_member_by_def_`, `_iter_member_by_value_` (both
+`Flag` and `IntFlag`) all refused with "a @classmethod generator that
+references `cls` in its body in an unsupported way is not supported".
+Confirms the opencode-genlib2 entry immediately below. Root cause
+unchanged: `cls._flag_mask_`/`cls._value2member_map_` exist only through
+`EnumMeta.__new__`'s dynamic metaclass machinery, never as literal
+class-body assignments — a real dynamic-metaclass-attribute-modeling
+gap, feature-sized. No code change; doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2): unchanged — same 3-function `cls`-access refusal set
 
 Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:

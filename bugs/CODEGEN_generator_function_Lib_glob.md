@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical 5-generator
+refusal set — `_iglob` ("unsupported for-loop iterable type: CallExpr"),
+`_iterdir` (unresolved `bytes(...)` callee), and `select_recursive`/
+`select_recursive_step`/`select_wildcard` (unresolved `match(...)`
+callee). Confirms the opencode-genlib2 entry immediately below.
+Dominated by the out-of-scope opaque-callable-value/dynamic-generator-
+dispatch feature gap; `bytes()` would need a real bytes value
+representation. No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/opencode-genlib2 — re-verified fresh; refusal set byte-identical, `bytes()` absence re-confirmed post-split)
 
 Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:
