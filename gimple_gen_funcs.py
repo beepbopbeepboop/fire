@@ -862,7 +862,23 @@ def _local_def_pts(gen, bare_name: str):
     seeding comment for why lazily — struct-typed params need the struct
     registration passes to have run first). Memoized in
     `_local_def_param_types`; None when this unit doesn't define the name or
-    its signature can't be resolved."""
+    its signature can't be resolved.
+
+    Every successful resolution here is ALSO the DEFINITION-side truth for
+    this (home module, name) pair — the same resolution gen_func uses for
+    the emitted definition's own mangled symbol — so it is recorded into
+    the WHOLE-PROGRAM-SHARED `_home_def_param_types` store. Importers'
+    `_imported_def_pts` consults that store FIRST: an importer's own eager
+    `_signature_ctypes` snapshot of the callee can legitimately disagree
+    with the definer's (each gen's `_inferred_param_types` is per-instance,
+    so call-site literal evidence an importer sees — e.g. every _global.py
+    call passing a string literal as log_match's `group` — is invisible to
+    the definer, which has no call sites of its own and freezes int64_t).
+    Without this store the two halves of one mangled free-function symbol
+    hashed different suffixes (`__common_log_match_c52cbf` call sites vs
+    the `..._7a6366` definition — "implicit declaration of function" at
+    g++). Only the defining unit ever writes here (only it has the node),
+    and a miss falls through to the prior tiers unchanged."""
     m = getattr(gen, '_local_def_param_types', None)
     if m is None:
         return None
@@ -878,6 +894,14 @@ def _local_def_pts(gen, bare_name: str):
     if not pts:
         return None
     m[bare_name] = pts
+    # Record the DEFINITION-side truth for this (home, name) pair into the
+    # whole-program-shared store so every importer's `_imported_def_pts`
+    # hashes the SAME suffix the emitted definition uses (see this
+    # function's docstring for the log_match failure this closes).
+    _home_store = getattr(gen, '_home_def_param_types', None)
+    if _home_store is not None:
+        _q = getattr(gen, 'module_name', None) or ''
+        _home_store[(_q.replace('.', '_').replace('-', '_'), bare_name)] = list(pts)
     return pts
 
 
@@ -903,9 +927,23 @@ def _imported_def_pts(gen, bare_name: str):
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
     refusal for genuinely ambiguous references stays in _func_qualifier,
-    which every _func_csym call runs anyway."""
+    which every _func_csym call runs anyway.
+
+    Tier 0, ahead of this instance's own eager snapshot: the SHARED
+    `_home_def_param_types` store the DEFINING unit populated when its own
+    `_local_def_pts` resolved (only a unit that actually defines the name
+    can write there). The definer's committed signature is authoritative —
+    exactly one definition symbol gets emitted — while an importer's own
+    `_signature_ctypes` snapshot of the same FunctionDef can legitimately
+    disagree: each gen's `_inferred_param_types` is per-instance, so an
+    importer's call-site literal evidence (`log_match('literal', ...)`
+    freezing `group` to char * in _global.py) is invisible to the definer,
+    which has no call sites and freezes int64_t. Preferring the definer's
+    truth keeps both halves of one mangled symbol on one suffix regardless
+    of which module's inference saw what."""
+    _def_store = getattr(gen, '_home_def_param_types', None)
     store = getattr(gen, '_imported_home_param_types', None)
-    if not store:
+    if not store and not _def_store:
         return None
 
     def _sanitize(q):
@@ -932,9 +970,15 @@ def _imported_def_pts(gen, bare_name: str):
         if shared_home and bare_name in shared_home:
             candidate_quals.append(shared_home[bare_name])
     for q in candidate_quals:
-        pts = store.get((_sanitize(q), bare_name))
-        if pts is not None:
-            return pts
+        _sq = _sanitize(q)
+        if _def_store:
+            pts = _def_store.get((_sq, bare_name))
+            if pts is not None:
+                return pts
+        if store:
+            pts = store.get((_sq, bare_name))
+            if pts is not None:
+                return pts
     return None
 
 
