@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
+
+Source re-confirmed against current tree (`a913ab8`): `grep -rn weakref
+gimple_codegen.py gimple_cpp_core.py gimple_gen_calls.py runtime/
+mojo_runtime.c runtime/mojo_runtime.h` finds zero implementation hits
+(only comments citing this doc) — still no `mojo_weakref_new/deref`,
+no `_weakref` C-extension recognition anywhere. None of this campaign's
+recent landings add a callable-value representation that could host a
+value read out of a dict (the exact gap finding 2 of the 2026-08-25
+entry below describes). Classification unchanged: blocked on the
+structural callable-value gap PLUS a missing weakref runtime
+representation, both genuinely feature-sized. Not attempted. No code
+change (nothing on the compiled path touched, so no quality-gate rerun
+required for this doc specifically).
+
 ## Status (updated 2026-08-25, worktree wtOpencode_weakref — assignment was to investigate whether weakref-ref CALLING has a narrower solution than the general callable-value gap; verdict: genuinely feature-sized, NO weakref runtime representation exists anywhere; no code change)
 
 Fresh repro on branch tip (`2d0823b`, under the mandated RAM/wall-clock

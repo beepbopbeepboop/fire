@@ -1,5 +1,28 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
+## Re-verified 2026-08-26 (branch fix/rest-remainder15): minimal repro still corrupts identically; general plan remains DOCUMENTED-NOT-FIXED, deliberately not attempted
+
+Re-ran the exact minimal 2-file repro (`mod_a.Dialog{widgetName}` /
+`mod_b.Dialog{result}`, both constructed from a `main.py`) fresh against
+current tree (`a913ab8`) via
+`gimple_codegen.compile_to_gimple_cached(do_imports=True)` + a real
+`gcc-mp-15 -fgimple -x c` compile: byte-for-byte the same failure as the
+2026-08-23 entry below — one `typedef struct Dialog { int64_t
+widgetName; } Dialog;` wins the bare-name race, and `mod_b_Dialog___init__`
+still emits `self->result = ...` against it: `mod_b.py:3:7: error:
+'Dialog' has no member named 'result'`. Per this task's explicit
+guidance (rated moderate-to-high risk historically; only proceed if
+something genuinely narrow turns up), read the doc's own 4-step "what a
+real fix needs" plan again end-to-end: step 2 (propagating a value's
+resolved qualified-type identity through every later field-access site
+derived from it) remains a genuinely broad dataflow problem across
+`_actual_types`/construction-site tracking/`_imported_struct_home`, not
+a local, contained change — nothing about this session's shared fixes
+(map()/getattr gaps, dict-subscript, generator-consumption ordering,
+etc.) touches struct field-table/type-identity registration at all.
+Confirmed nothing narrow presented itself. DOCUMENTED-NOT-FIXED, not
+attempted, per instructions. No code change.
+
 ## Re-verified 2026-08-23 (triage pass): minimal repro still corrupts at the TYPE-IDENTITY layer; general plan remains DOCUMENTED-NOT-FIXED
 
 Re-ran the minimal 3-file repro (mod_a.py and mod_b.py each defining

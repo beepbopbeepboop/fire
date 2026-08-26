@@ -1,5 +1,41 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged, all 3 gaps confirmed genuinely feature-sized)
+
+Fresh `MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Lib/pkgutil.py` against current tree (`a913ab8`, includes the self-host
+bootstrap fix and every other shared mechanism landed through
+2026-08-25): byte-for-byte the same three refusals as the 2026-08-25
+entry below — `iter_importers` (`getattr(obj, name)` non-static name),
+`iter_modules` (`map(...)` unresolved callee), `walk_packages`
+(consumes `iter_modules`, which never becomes a translated generator).
+Also confirmed by direct source reading, not just re-running the build:
+
+- `gimple_cpp_core.py`'s `_cpp_expr` CallExpr dispatch (~line 2632-2660)
+  has no case for `map`/`filter` anywhere — its own comment explicitly
+  lists "Python builtins with no coroutine-body lowering (map/filter...)"
+  as a known-unhandled bucket, falling through to the generic
+  unresolved-callee refusal. No shared fix (zip_longest, isinstance,
+  int()/float(), etc.) touches this; `map()` remains categorically
+  unsupported.
+- `getattr(obj, name)` with a non-static `name` is a DELIBERATE,
+  commented refusal (same file, ~line 2224-2251): "no runtime
+  attribute-reflection table exists in this codegen" — not a narrow
+  gap, a structural one (this compiler resolves every field/method to a
+  fixed compile-time offset/symbol, never a runtime string).
+
+Both are genuine, still-unimplemented feature gaps (real `map()`
+lowering with either eager materialization or a driving-loop consumer,
+and a real name->member reflection table for `getattr`), not narrow
+widenings of existing machinery. `walk_packages` remains additionally
+blocked by the 5 further independent unsupported constructs the
+2026-08-11 entry catalogued (nested closure w/ mutable default,
+`__import__`, `sys.modules[...]`, 3-arg `getattr`, reassigned-param
+self-recursion) even if `iter_modules` were fixed. No code change.
+Doc stays open — module still does not build. Quality gate unaffected
+(no compiler-source change this pass): `test_gimple.py` 256/256,
+`test_module_cache.py` 76/76 (both re-run fresh this session).
+
 ## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering blocker FIXED at the machinery level; this file stays open on its own separately-classified gaps)
 
 The "generator-consumption ordering" blocker this doc was the primary

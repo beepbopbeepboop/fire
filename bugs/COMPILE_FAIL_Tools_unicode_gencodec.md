@@ -4,6 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged, both remaining gaps confirmed genuinely missing runtime/codegen machinery)
+
+Fresh end-to-end rebuild + run against current tree (`a913ab8`):
+`python3 mojo.py build .../Tools/unicode/gencodec.py` exits 0; running
+the binary on a 2-file test dir prints both `converting ...` lines
+identical to real CPython and writes `readme.py`/`readme.mapping` (this
+took a moment to reproduce correctly — real CPython's own
+`convertdir()` writes output files relative to the CURRENT WORKING
+DIRECTORY, not the scanned `dir`, since `dirprefix=''` by default and
+`codefile`/`marshalfile` are never joined with `dir`; the compiled
+binary matches this exactly, confirmed by a side-by-side run of real
+`python3 gencodec.py` from the same cwd — NOT a compiled-path bug, a
+red herring from testing with cwd == target dir the first time).
+Content confirmed identical to yesterday's diagnosis: header line
+prints pointer digits (`Codec 49241363248 generated from
+'49237138400'`), `readme.mapping` is 0 bytes. Source-confirmed both
+remaining gaps are still real: `grep -rn marshal` across
+gimple_gen_calls.py/gimple_module_gen.py/gimple_gen_infra.py finds zero
+runtime implementation of `marshal.dump`/`marshal.load` anywhere (real
+CPython marshal binary format was never implemented, a large feature on
+its own), and the `%`-format-of-runtime-boxed-values gap
+(`_lower_percent_format`, gimple_exprtypes.py) is unaffected by any of
+this campaign's other landings (int()/float() coroutine builtins,
+generator-consumption ordering, etc. — none touch `%`-format lowering).
+Neither attempted — both are genuinely missing feature machinery, not
+narrow gaps. No code change.
+
 ## Status (2026-08-25 later): both diagnosed gaps FIXED; output files are
 ## now PRODUCED. Doc re-scoped onto the newly-reached %-formatting/marshal
 ## gaps inside the generated content.

@@ -1,5 +1,24 @@
 # HARD BUG: `lambda` expressions are entirely unsupported inside a compiled generator body
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
+
+Direct source re-check of `gimple_cpp_core.py`'s `LambdaExpr` case
+(~line 1334-1412) against current tree (`a913ab8`): still exactly two
+declared-type categories, `_CPP_CALLABLE_CTYPE` (0-arg) and
+`_CPP_CALLABLE_CTYPE_1ARG` (1 plain param) — the same
+`len(e.params) > 1 or (e.params and (starts-with-* or has-default))`
+guard from the 2026-08-21 entry still refuses any wider shape
+honestly. No shared fix from this campaign's other recent landings
+(generator-consumption fixed-point retry, defaults-aware arg padding,
+int()/float() coroutine builtins, map()/getattr investigation for
+pkgutil) touches callable-value representation at all. Occurrence #2
+(fsutil.py's `lambda *a, **k`) remains open for the same reasons the
+2026-08-24 entry gives (feature-sized, needs a real variadic
+args/kwargs-forwarding callable-value representation this project's
+history warns against attempting narrowly), and remains insufficient
+on its own even if fixed (fsutil.py has 5 further independently-refused
+generators — see that file's own doc). Not attempted. No code change.
+
 ## Status (updated 2026-08-24, occurrence #2 investigated deeper — still open, now with evidence it is ALSO insufficient on its own)
 
 Session task attempted to extend this file's mechanism to fsutil.py's

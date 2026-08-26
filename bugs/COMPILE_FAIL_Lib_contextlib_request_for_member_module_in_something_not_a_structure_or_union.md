@@ -1,5 +1,23 @@
 # COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15): unchanged, byte-for-byte identical failure
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+contextlib.py` against current tree (`a913ab8`): exit 1, byte-for-byte
+the same `RuntimeError` naming the same 11 async functions (`__aenter__`
+x3, `__aexit__` x4, `_exit_wrapper`, `aclose`, `enter_async_context`,
+`inner`), same "every `return` must carry a scalar value" /
+"*args/**kwargs parameters not supported for compiled async functions"
+reasons. Source-confirmed both refusal messages are still emitted
+verbatim from `gimple_cpp_async.py` (line ~1399 and ~1146/2325) with no
+change since. None of this campaign's other landings (pkgutil's
+map()/getattr investigation, struct-collision re-check, lambda-in-
+generator re-check) touch the async-eligibility gate. Confirmed still
+the same genuinely large, out-of-scope feature (non-scalar
+`__aenter__`-return boxing/type-erasure + variadic `__aexit__`-parameter
+support in the C++20 coroutine codegen) — not attempted.
+DOCUMENTED-NOT-FIXED.
+
 ## Status (re-verified 2026-08-25): unchanged; unaffected by this session's intervening fixes
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
