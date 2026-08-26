@@ -1543,7 +1543,40 @@ def _is_concrete_type_arg(ann: str) -> bool:
     return True
 
 
-_BRACKET_HEAD_RE = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
+_BRACKET_HEAD_RE = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[')
+
+
+def _matching_bracket(src: str, open_idx: int) -> int:
+    """Index of the `]` closing the `[` at `open_idx`, counting nesting, or
+    -1 if unbalanced. Skips string literals (single/double-quoted, with
+    backslash escapes) so a bracket inside a default-value string can't
+    throw off the depth count. Needed because a bracket parameter's type
+    annotation routinely contains ITS OWN brackets — dict.mojo's
+    `_write_dict_body[f_key: def(Self.K, mut Some[Writer]) thin, ...]` —
+    and a naive capture truncated the list at that inner `]`,
+    silently dropping every parameter declared after it (f_val) from
+    _method_threaded_comptime_params registration."""
+    depth, i, n = 0, open_idx, len(src)
+    while i < n:
+        c = src[i]
+        if c in ('"', "'"):
+            q = c
+            i += 1
+            while i < n:
+                if src[i] == '\\':
+                    i += 2
+                    continue
+                if src[i] == q:
+                    break
+                i += 1
+        elif c == '[':
+            depth += 1
+        elif c == ']':
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
 
 
 def _bracket_param_type_annotations(gsrc: str, name: str, occurrence: int = 0) -> dict:
@@ -1582,8 +1615,11 @@ def _bracket_param_type_annotations(gsrc: str, name: str, occurrence: int = 0) -
         m = _BRACKET_HEAD_RE.search(gsrc, m.end())
     if not m:
         return {}
+    close = _matching_bracket(gsrc, m.end() - 1)
+    if close == -1:
+        return {}
     out = {}
-    for part in _split_top_level_commas(m.group(2)):
+    for part in _split_top_level_commas(gsrc[m.end():close]):
         part = part.strip()
         if not part or part in ('/', '*') or ':' not in part:
             continue

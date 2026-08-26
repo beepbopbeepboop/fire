@@ -413,9 +413,6 @@ def _compute_exc_descendants(all_struct_defs):
     return descendants
 
 
-_BRACKET_HEAD_RE = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
-
-
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,
     `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target

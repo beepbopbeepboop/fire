@@ -445,7 +445,23 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         orders_by_oid = gen._method_comptime_param_order.get((_struct_name, method_name))
         if orders_by_oid:
             idx = node.func.index
-            elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+            # Keyword-form bracket arguments (`m[f_val=fmt.write_to[V]](...)`)
+            # are kept in SubscriptExpr.attrs as (name, value) pairs — the
+            # parser emits them there precisely so they survive (see its
+            # "keyword-style bracket" branch); the index itself is just the
+            # empty-subscript placeholder in that form. Positional form keeps
+            # flowing through `index`. Dict.mojo/counter.mojo bind their
+            # function-typed comptime params exclusively by keyword, so
+            # ignoring attrs here silently forwarded NO function values — the
+            # arity padder in _lower_struct_method_call then filled the gap
+            # with literal zeros ("call through NULL" segfaults), while any
+            # param NOT covered by threading degraded to the weak stub.
+            _bracket_attrs = getattr(node.func, 'attrs', None) or []
+            _kw_bracket = {nm: val for nm, val in _bracket_attrs if nm is not None}
+            if _bracket_attrs:
+                elems = [val for nm, val in _bracket_attrs if nm is None]
+            else:
+                elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
             # Which sibling overload does this call site's bracket-
             # argument COUNT match? Real overload resolution happens
             # deeper (in _lower_method_call, called below), which this
@@ -460,14 +476,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # an extra argument to an overload compiled WITHOUT a
             # matching trailing parameter.
             _candidates = [oid for oid, order in orders_by_oid.items()
-                           if len(order) == len(elems)]
+                           if len(order) == len(elems) + len(_kw_bracket)]
             if len(_candidates) == 1:
                 oid = _candidates[0]
                 order = orders_by_oid[oid]
                 threaded = gen._method_threaded_comptime_params.get((_struct_name, method_name), {}).get(oid, [])
                 for i, cp_name in enumerate(order):
-                    if cp_name in threaded and i < len(elems):
-                        extra_args.append(elems[i])
+                    if cp_name not in threaded:
+                        continue
+                    _arg = _kw_bracket.get(cp_name)
+                    if _arg is None and i < len(elems):
+                        _arg = elems[i]
+                    if _arg is not None:
+                        extra_args.append(_arg)
         inner = gimple_ctypes.CallExpr(func=node.func.obj, args=list(node.args) + extra_args,
                          kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0))
         return gen._lower_method_call(inner)

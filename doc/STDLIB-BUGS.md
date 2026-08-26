@@ -123,6 +123,33 @@ previously known, and NOT all handled by the collision-dedup stopgap:**
   happened to be first. Now silently dropped from the reflection table by
   the safety net (source-fallback instead of a crash) rather than
   individually root-caused.
+- **Found 2026-08-26 — cross-module SIBLING-OVERLOAD call-site collapse
+  (NOT fixed; warning-visible):** `std/pwd/pwd.mojo`'s
+  `getpwnam(name)`/`getpwuid(uid)` each branch on
+  `CompilationTarget.is_macos()` and call `_getpw_macos(...)` — which is
+  TWO sibling overloads in `std/pwd/_macos.mojo`
+  (`_getpw_macos(uid: UInt32)` / `_getpw_macos(var name: String)`). On the
+  per-module-standalone dylib path, BOTH pwd.mojo call sites resolve to the
+  ONE mangled symbol `std_pwd__macos__getpw_macos_5dfbd6`, so `getpwnam`'s
+  `String` argument is coerced through the UInt32 overload's parameter
+  shape — emitted as `(uint32_t)name` on a `char *` (gcc
+  `-Wpointer-to-int-cast`, the only visible symptom; same truncated-pointer
+  coercion on the `_getpw_linux` side). Same underlying family as the
+  `CUDA(DeviceContext)/CUDA(DeviceStream)` same-module collapse above, but
+  cross-module via `from ._macos import _getpw_macos`: the importer has no
+  sibling-overload resolution for imported free functions, so every call
+  site lands on whichever single mangled symbol the signature registry
+  happens to carry. A minimal local repro (`from helpers import pick` over
+  `def pick(x: Int)` / `def pick(s: String)`) shows the general shape fails
+  harder OUTSIDE the dylib pipeline: the importer mangles per-argument-type
+  (`_pick__Int` / `_pick__String`) while the standalone definer exports
+  different symbols → hard link failure, then interpreter fallback. Proper
+  fix = real overload resolution for imported free functions at the call
+  site (matching the defining module's exported overload set), not more
+  mangling. Note the practical impact today is bounded: compiled-mode pwd
+  was already non-functional independent of this (`is_macos()` lowers to a
+  stubbed `0`, so every branch takes the Linux path even on macOS), and
+  dylib clients fall back to source for anything whose symbol misbehaves.
 
 **FIXED (real fix, not the collision-dedup stopgap) — 2026-07-28, commit
 `bf96f55` + follow-up.** Free-function C symbols are now module-qualified
