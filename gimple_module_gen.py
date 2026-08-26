@@ -1915,7 +1915,8 @@ def gen_module_impl(self, stmts):
         if isinstance(s, StructDef):
             for m in s.methods:
                 key = f"{s.name}_{m.name}"
-                self._inferred_param_types[key] = self._infer_param_types(m)
+                self._inferred_param_types[key] = self._infer_param_types(
+                    m, owner_struct=s.name)
     # Cross-module generator scalar contracts (see the pre-pass beside the
     # modules_to_compile loop that collects them): entries whose
     # home-module qualifier matches THIS compile's own module_name are
@@ -2144,7 +2145,28 @@ def gen_module_impl(self, stmts):
                 if pname in defaults:
                     continue                 # respect default-value inference
                 cur = self._inferred_param_types.get(key, {}).get(pname)
-                if cur in (None, 'int', 'int64_t'):
+                # A usage-heuristic 'MojoList *' is a GUESS on the str/list
+                # ambiguity axis, not resolved knowledge: _infer_param_types
+                # (gimple_gen_infra.py) types any subscripted/sliced-but-
+                # otherwise-unsignaled param 'MojoList *' — its own docstrings
+                # record several prior misfires of exactly this guess. When
+                # every OBSERVABLE call site passes an expression that is
+                # PROVABLY a string (a string literal, f-string, or provably-
+                # str join/concat — the only sources of a {'char *'} entry),
+                # that observation outranks the guess: real Python could not
+                # even run with a genuine list there. Narrow on purpose — only
+                # {'char *'} flips 'MojoList *' (never double, never any other
+                # resolved type), so annotation/default/other-scalar respect
+                # above is untouched. Found via Tools/gdb/libpython.py's
+                # TruncatedStringIO.write(self, data): `data[0:n]` slicing was
+                # its only body signal → inferred MojoList* → the body lowered
+                # len()/slice as list ops while self._val stayed char*, so
+                # `self._val += data[...]` emitted raw `char * + MojoList *`
+                # pointer addition and gcc -fgimple died with "internal
+                # compiler error: in build2, at tree.cc" (bugs/
+                # COMPILE_FAIL_Tools_gdb_libpython.md).
+                if cur in (None, 'int', 'int64_t') \
+                        or (cur == 'MojoList *' and types == {'char *'}):
                     self._inferred_param_types.setdefault(key, {})[pname] = (
                         'double' if types == {'double'} else 'char *')
                     changed = True

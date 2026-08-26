@@ -4,6 +4,98 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, second session — the `-fgimple` ICE is ## ROOT-CAUSED and FIXED; the file advances to the .cpp coroutine stage ## and is blocked there by the SAME error family the 2026-08-23 entry ## documented — those were MASKED by earlier refusals, never resolved)
+
+The ICE was not GCC being flaky — the emitted GIMPLE was genuinely
+self-contradictory. Root cause chain:
+
+1. `TruncatedStringIO.write(self, data)`'s ONLY body-level type signals
+   are a slice (`data[0:n]`) and `len(data)` (excluded as sized-container
+   evidence), so `_infer_param_types` (gimple_gen_infra.py) took its
+   documented subscripted-without-str-signals branch and typed `data`
+   `'MojoList *'` — the same str/list heuristic guess its own docstrings
+   already record three prior misfires of.
+2. `self._val`, meanwhile, stays `char *` (from `__init__`'s
+   `self._val = ''` via gen_module's field-registration pass), so the
+   body lowered `len(data)`→`mojo_list_len`, `data[0:n]`→
+   `mojo_list_slice`, and then `self._val += data[...]` fell through
+   BinOp '+' dispatch (which has branches for char*+char*,
+   char*+char, MojoList*+MojoList* but nothing for the mixed shape)
+   into generic arithmetic emission: raw `_t17 = _t10 + _t16;` —
+   `char * + MojoList *`. gcc's `-fgimple` frontend cannot build a
+   PLUS_EXPR tree between two pointer operands → "internal compiler
+   error: in build2, at tree.cc:5208".
+
+FIXED (commit `31f79c3`) at the INFERENCE level, with two narrow,
+independent evidence sources that resolve such a param to `char *`
+(fixing only BinOp's fall-through would have silenced the ICE but left
+`mojo_list_len(char_ptr)` garbage at runtime):
+
+- `_infer_param_types` gained an optional `owner_struct` param (threaded
+  only from gen_module's struct-method loop) and `analyze_param_usage`
+  records every `self.<member> += <param-derived value>` sink as a pure
+  name signal; the decision step resolves all recorded sinks against
+  `struct_field_types` (populated from `__init__`'s own
+  `self._val = ''` by `_collect_self_assigns`) and picks `char *` when
+  every sink is char*-typed — sound because `str += <list>` is a
+  TypeError in real Python. THIS is the mechanism that fires for
+  libpython.py: every `.write(...)` receiver there is an `out` parameter
+  forwarded through write_repr chains, so no call-site observer can see
+  the struct.
+- Pass 1.3e's method cross-call scalar observation (`_apply_method_
+  scalar_obs` in gimple_module_gen.py) may now override a
+  usage-heuristic `'MojoList *'` when EVERY observable call site passes
+  provably-str arguments ({'char *} unanimity — string literals/
+  f-strings/provably-str joins are the only sources of such entries).
+  Fires for shapes where receivers DO resolve (verified on an isolated
+  repro where `t = TruncatedStringIO(None)` locals exist).
+
+Verified end-to-end: libpython.ci now emits
+`void __GIMPLE TruncatedStringIO_mojo_write (TruncatedStringIO * self, char * data)`
+with `mojo_strlen(data)` / `mojo_cstr_slice(data, 0, n)` /
+`mojo_str_cat(self->_val, ...)` throughout — the .c/-fgimple stage
+compiles clean for the first time. Isolated TruncatedStringIO repros
+also BUILD AND RUN correctly (truncation path: writes 'abcde', raises,
+caller catches StringTruncated and getvalue returns the truncated
+value; unbounded path appends normally).
+
+The file still does not build end-to-end. With the ICE gone, the build
+now reaches the Milestone-B companion `.cpp` compile
+(`libpython_gen.cpp`, the C++20-coroutine units for items_from_keys_
+and_values / iteritems / iter_locals / parse_location_table) and fails
+there — and the error list IS the 2026-08-23 entry's list below, which
+that entry's re-triage declared "GONE". They were never resolved; the
+earlier up-front generator refusals merely made them unreachable.
+Confirmed still present, verbatim:
+
+- `(void)(PyDictObjectPtr._get_entries(keys));` — a class-qualified
+  method call lowered as `.method(...)` ON THE CLASS NAME ("expected
+  primary-expression before '.'");
+- `for (auto i : safe_range_0c85c9(nentries))` — `begin`/`end` not
+  declared ×4 each in these standalone coroutine TUs;
+- `PyObjectPtr` undeclared ×4 (struct declaration coverage in
+  coroutine units);
+- 10× `invalid conversion from 'const char*' to 'int64_t'`, the
+  clearest being a WRONG LOWERING, not just a type mismatch:
+  `ep["me_key"]` (a str-KEY dict subscript) routed to string-slice
+  codegen — `mojo_cstr_slice((char *)(ep), "me_key", ("me_key") + 1)` —
+  the coroutine emitter (`gimple_cpp_core.py`'s `_cpp_expr`) has no
+  dict-subscript dispatch and reuses slice lowering for any subscript;
+- `obj_ptr_ptr = 0.pointer().pointer();` → operator""pointer (the
+  unresolved-receiver shape, still present in iter_locals);
+- plus int64_t→MojoList*, PyDictObjectPtr*→MojoDict*, char→char*, and
+  pointer-vs-integer comparison conversions around the same sites.
+
+These remain compiled-generator/cpp-emission project scope (struct
+declaration coverage/ordering in standalone coroutine units,
+unresolved-receiver method dispatch, missing dict-subscript dispatch in
+the coroutine expression emitter) — several distinct gaps, each
+needing its own focused session; deliberately not attempted here per
+the standing warning about narrow-looking edits to shared
+coroutine-emission machinery. Quality gate after `31f79c3`:
+test_gimple.py 256/256, test_module_cache.py 76/76, make check-selfhost
+clean, from-scratch stdlib dylib build exit 0 with ZERO skip lines.
+
 ## Status (updated 2026-08-25 — `iteritems`'s own remaining refusal FIXED;
 ## a genuinely different, deeper GCC ICE now blocks the file)
 

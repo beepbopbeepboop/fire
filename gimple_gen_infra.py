@@ -1135,11 +1135,17 @@ def _resolve_type(gen, ann: str | None) -> str:
     return gimple_ctypes._mojo_type(ann)
 
 
-def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
+def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
+                       owner_struct: str | None = None) -> dict[str, str]:
     """Infer parameter types from member accesses and function calls in function body.
 
     If a parameter is accessed with .field, infer it's a struct with that field.
     If a parameter is passed to a known function, infer type from that function.
+
+    `owner_struct`: the StructDef whose method `func` is, when it is one —
+    needed ONLY so the decision step below can resolve `self.<member>` AugAssign
+    sinks against `_g.struct_field_types`; pure signal collection inside
+    analyze_param_usage never touches it (see its Phase 3 memoization note).
     """
     inferred = {}
 
@@ -1272,6 +1278,39 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
         is_str_key_subscripted = False
         is_nondict_key_subscripted = False
         str_vars: set = set()
+        # `self.<member> += <param-derived value>` sinks (root ident name,
+        # member name). An augmented assignment whose RHS involves the param
+        # is real Python string/list CONCATENATION-INTO evidence, but the
+        # scan itself can't tell a str sink from a list sink — only the
+        # decision step can, by resolving the member's declared ctypes
+        # against struct_field_types (populated from the class's own
+        # `self.<member> = <init>` assignments by gen_module's
+        # _collect_self_assigns pass). Collected here as pure names; judged
+        # there.
+        aug_member_targets: set = set()
+
+        def _expr_mentions_param(e):
+            """Does expression `e` involve `param_name` directly (a bare
+            identifier read, or a subscript/slice OF one)? Deliberately
+            shallower than a full walk: concatenation sinks take simple
+            values (`self._val += data`, `... += data[0:n]`), and every
+            extra shape widened here would widen what counts as "param
+            flows into this sink" without adding real certainty."""
+            if isinstance(e, gimple_ctypes.IdentExpr):
+                return e.name == param_name
+            if isinstance(e, gimple_ctypes.SliceExpr):
+                return (_expr_mentions_param(e.obj)
+                        or (e.start is not None and _expr_mentions_param(e.start))
+                        or (e.stop is not None and _expr_mentions_param(e.stop)))
+            if isinstance(e, gimple_ctypes.SubscriptExpr):
+                return (_expr_mentions_param(e.obj)
+                        or _expr_mentions_param(e.index))
+            if isinstance(e, gimple_ctypes.BinaryOp):
+                return (_expr_mentions_param(e.left)
+                        or _expr_mentions_param(e.right))
+            if isinstance(e, gimple_ctypes.UnaryOp):
+                return _expr_mentions_param(e.operand)
+            return False
 
         def _expr_is_stringish(e):
             if isinstance(e, gimple_ctypes.StringLiteral):
@@ -1522,6 +1561,29 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                 elif isinstance(node, gimple_ctypes.AugAssignStmt):
                     scan_expr(node.target)
                     scan_expr(node.value)
+                    # `self.<member> += <param-derived>` — record the sink
+                    # member for the decision step (see aug_member_targets'
+                    # declaration above). Found via Tools/gdb/libpython.py's
+                    # TruncatedStringIO.write(self, data): both of data's
+                    # non-len uses are `self._val += data` /
+                    # `self._val += data[0:n]`, and __init__ declares
+                    # `self._val = ''` — so struct_field_types knows the sink
+                    # is char* and real Python semantics (str += <list> is a
+                    # TypeError) make the param one too. Without this signal,
+                    # the slice alone typed data MojoList*, the body lowered
+                    # len()/slice as list ops against a char* self->_val, and
+                    # the += emitted raw `char * + MojoList *` pointer
+                    # addition — gcc -fgimple "internal compiler error: in
+                    # build2, at tree.cc" (bugs/
+                    # COMPILE_FAIL_Tools_gdb_libpython.md).
+                    if isinstance(node.target, gimple_ctypes.MemberExpr) \
+                            and _expr_mentions_param(node.value):
+                        _aug_root = node.target.obj
+                        while isinstance(_aug_root, gimple_ctypes.MemberExpr):
+                            _aug_root = _aug_root.obj
+                        if isinstance(_aug_root, gimple_ctypes.IdentExpr):
+                            aug_member_targets.add((_aug_root.name,
+                                                    node.target.member))
                 elif isinstance(node, gimple_ctypes.MultiAssignStmt):
                     for t in node.targets:
                         scan_expr(t)
@@ -1548,7 +1610,8 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
         scan_nodes(nodes)
         return (accessed_fields, function_calls, is_subscripted, is_string_method,
                 is_iterated, is_char_compared, is_str_key_subscripted,
-                is_nondict_key_subscripted, called_methods, is_dict_method)
+                is_nondict_key_subscripted, called_methods, is_dict_method,
+                aug_member_targets)
 
     # For each parameter without a type annotation, infer from usage
     for pname, ptype in func.params:
@@ -1572,16 +1635,19 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
             if _pu_cached is not None:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
-                 is_nondict_key_subscripted, called_methods, is_dict_method) = _pu_cached
+                 is_nondict_key_subscripted, called_methods, is_dict_method,
+                 aug_member_targets) = _pu_cached
             else:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
-                 is_nondict_key_subscripted, called_methods, is_dict_method
+                 is_nondict_key_subscripted, called_methods, is_dict_method,
+                 aug_member_targets
                  ) = analyze_param_usage(func.body, pname)
                 _g._param_usage_scan_cache[_pu_key] = (
                     fields_accessed, function_calls, is_subscripted, is_string_method,
                     is_iterated, is_char_compared, is_str_key_subscripted,
-                    is_nondict_key_subscripted, called_methods, is_dict_method)
+                    is_nondict_key_subscripted, called_methods, is_dict_method,
+                    aug_member_targets)
 
             # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
             is_polymorphic = any(
@@ -1607,7 +1673,22 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                     # declaration above for the motivating repro.
                     inferred[pname] = 'MojoDict *'
                 else:
-                    inferred[pname] = 'char *' if (is_string_method or is_char_compared) else 'MojoList *'
+                    # `self.<member> += <param>` evidence: every such sink
+                    # member whose declared ctype is resolvable must be char*
+                    # (and at least one sink must exist) — a genuine list
+                    # operand on a str sink would be a TypeError in real
+                    # Python. Requires owner_struct to resolve `self`;
+                    # unresolvable sinks make this signal silent (no flip),
+                    # never wrong. Motivating repro in aug_member_targets's
+                    # declaration above.
+                    _aug_into_str = (
+                        bool(aug_member_targets) and owner_struct is not None
+                        and all(
+                            _root == 'self'
+                            and _g.struct_field_types.get(owner_struct, {}).get(_member) == 'char *'
+                            for _root, _member in aug_member_targets))
+                    inferred[pname] = 'char *' if (is_string_method or is_char_compared
+                                                   or _aug_into_str) else 'MojoList *'
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
