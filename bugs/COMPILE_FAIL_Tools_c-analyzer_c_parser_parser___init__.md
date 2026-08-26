@@ -4,6 +4,63 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-26, wtOpencode_canalyzer2 — BOTH prior error groups
+## resolved; the `log_match` mangled-suffix mismatch FIXED in shared source;
+## remaining errors are the documented `_iter_source` struct-state-machine family)
+
+Fresh bounded build first reproduced the 2026-08-26 entry's two error
+groups, MINUS the four `_fix_filename` errors (gone as a side effect of
+this session's global-homonym fix in c_analyzer/info.py's doc — same
+shared-dict instability family). That left exactly ONE error:
+`_global.py:72: implicit declaration of function
+'__common_log_match_c52cbf'; did you mean '__common_log_match_7a6366'?`.
+
+Root-caused and FIXED this session (commit `b00c157`, shared source):
+a cross-module free-function OVERLOAD-SUFFIX split. Hash-confirmed both
+sides: the definition (`c_parser/parser/_common.py`'s `log_match(group,
+m, depth_before=None, depth_after=None)`, all params unannotated) was
+emitted as `(int64_t, int64_t, int64_t, int64_t)` → `_7a6366`, while the
+three importers (`_global.py`, `_func_body.py`, `_compound_decl_body.py`)
+hashed `(char *, int64_t, int64_t, int64_t)` → `_c52cbf`. Mechanism: each
+gen's `_inferred_param_types` is PER-INSTANCE, so the importers' own
+call-site literal evidence (every `_global.py` site passes a string
+literal as `group`) froze `group` to `char *` in THEIR inference state,
+while the definer — which has no call sites of its own — froze int64_t.
+The BUG-2026-024 snapshot faithfully recorded what the IMPORTER's own
+resolver said at import time, which is exactly why it could disagree with
+the definer's committed signature. Fix: `_local_def_pts` now records each
+defining unit's resolved signature into a whole-program-shared
+`_home_def_param_types` store (shared into temp_gens like the other
+cross-module dicts), and `_imported_def_pts` consults that
+definition-side truth FIRST for the resolved home qualifier (prior tiers
+remain as fallback). Both halves of one mangled symbol now always agree.
+
+Full mandatory gate after the change: `test_gimple.py` 256/256,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with **0 skip lines**; zipfile/_path's
+end-to-end build re-verified still exit 0.
+
+With the suffix mismatch fixed, the build ADVANCES into the coroutine
+unit and now fails on the NEXT layer — exactly the `_iter_source`
+struct-state-machine family this doc's 2026-08-09 entry already root-
+caused (unannotated generator params/locals/fields defaulting to
+int64_t; cross-module struct-typed yield values; MojoList* field method
+calls emitted with `.` instead of `->`; SourceInfo ctor arity):
+
+```
+__init___gen.cpp:160: ISO C++ forbids comparison between pointer and integer
+__init___gen.cpp:161: request for member 'pop' in 'filestack', which is of
+                      pointer type 'MojoList*' (maybe you meant '->' ?)
+__init___gen.cpp:168: too few arguments to function
+                      'void __info_SourceInfo___init__(SourceInfo*, int64_t, int64_t)'
+...
+```
+
+16 g++ errors, all in `_mojogen__iter_source_impl`/`_mojogen_parse_impl`.
+This is feature-sized generator-body type-inference work on shared
+machinery (adjacent to the explicitly out-of-scope unannotated-init-param
+family), not attempted. Doc stays open on that layer.
+
 ## Status (re-verified 2026-08-26 — blocker has SHIFTED past the 2026-08-25 pm eligibility refusals; new failure mode)
 
 Fresh repro against this session's tree (`fix/rest-remainder18`): the
