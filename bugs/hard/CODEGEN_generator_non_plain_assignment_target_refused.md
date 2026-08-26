@@ -1,5 +1,23 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-group4 — no new work; both remaining refusals reconfirmed correct)
+
+Re-ran `test_gimple_generator_runner.py`: **53 passed, 0 failed** (up
+from 42 at the 2026-08-23 pass — grew via other sessions' additions,
+never shrank) — every shape this doc records as fixed still holds.
+Freshly re-checked `runtime/mojo_runtime.h`: still NO splice-write
+facility exists (`mojo_list_del_slice` for deletion and read-only
+`mojo_list_slice` are the only slice mutators/readers), confirming the
+bounded/stepped slice-assign characterization. A fresh bounded
+slice-assign generator repro (`d[0:2] = [7, 8]` inside `def g(d): ...
+yield ...`) under `python3 mojo.py build` still refuses honestly with
+"only a plain identifier assignment target is supported" (whole module
+falls back to source interpretation) — verified this session after an
+initial false positive where running the repro file with plain
+`python3` (not through mojo.py) naturally produced correct output via
+real CPython. Non-self/non-sys MemberExpr targets remain unchanged.
+Both stay deliberately refused.
+
 ## Status (re-verified 2026-08-23 — no new work)
 
 Re-ran `test_gimple_generator_runner.py`: **42/42 pass** — every shape
