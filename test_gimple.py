@@ -2667,6 +2667,228 @@ def main():
 
     test_generator_callable_local_call_compiles_via_cpp_path()
 
+    # A generator body iterating a MODULE-LEVEL container global with a
+    # flat tuple target (`for flagname, flagvalue in _flags:`) must lower
+    # through the boxed-pointer cached-list + per-slot unpack protocol —
+    # NOT the generic range-for, which emitted the comma-joined target as
+    # one bogus C++ declarator ("declaration of 'auto flagname' has no
+    # initializer"). Generator units compile before the module-globals
+    # typing passes, so the element ctypes come from the initializing
+    # literal itself (_global_literal_slot_ctypes): slot 0 of a
+    # tuples-of-(str, int) list must be read via mojo_list_get_str, not
+    # the int64_t default. Real: Lib/symtable.py's Symbol._flags_str.
+    def test_generator_global_container_tuple_target_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+_flags = [('USE', 1), ('DEF', 2)]
+
+class S:
+    def __init__(self):
+        self.f = 0
+
+    def m(self):
+        for name, val in _flags:
+            yield name
+
+def main():
+    s = S()
+    for n in s.m():
+        print(n)
+
+main()
+"""
+        name = "generator_global_container_tuple_target_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if 'mojo_list_get_str' not in cpp_src or 'for (auto' in cpp_src:
+            print(f"FAIL  {name}: .cpp must unpack slots via "
+                  "mojo_list_get_str/get_int, not range-for over globals")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_global_container_tuple_target_compiles_via_cpp_path()
+
+    # The single-name sibling: iterating a module-level container global
+    # whose C type isn't resolved yet at unit-compile time (generator
+    # units run before the globals-typing passes) must emit the indexed
+    # loop over the boxed pointer, NOT `for (auto x : _root_globals._names)`
+    # over a raw field read ("'begin' was not declared in this scope").
+    def test_generator_global_container_single_name_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+_names = ['a', 'b']
+
+def gen():
+    for x in _names:
+        yield x
+
+def main():
+    for x in gen():
+        print(x)
+
+main()
+"""
+        name = "generator_global_container_single_name_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if 'mojo_list_len' not in cpp_src or 'for (auto' in cpp_src:
+            print(f"FAIL  {name}: .cpp must iterate the global via an "
+                  "indexed mojo_list_len loop, not range-for")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_global_container_single_name_compiles_via_cpp_path()
+
+    # A zero-arg dict-method iterable on a SCALAR-typed self field
+    # (`for k in self.dict.keys():` where `dict` is an unannotated-init
+    # param, typed int64_t) is genuinely not a container under this
+    # codegen's boxing convention: it must take the documented
+    # zero-iteration stub path (same convention as the bare
+    # `for line in self.file:` self-field case), NOT emit the raw member
+    # call `self->dict.keys()` ("request for member 'keys' in ... of
+    # non-class type 'int64_t'"). Real: Lib/shelve.py's Shelf.__iter__.
+    def test_generator_scalar_self_field_method_iter_zero_iter_stub():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+class Shelf:
+    def __init__(self, d):
+        self.dict = d
+
+    def __iter__(self):
+        for k in self.dict.keys():
+            yield k
+
+def main():
+    s = Shelf(0)
+    for k in s.__iter__():
+        print(k)
+    print('done')
+
+main()
+"""
+        name = "generator_scalar_self_field_method_iter_zero_iter_stub"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '.keys()' in cpp_src:
+            print(f"FAIL  {name}: .cpp must not emit a raw .keys() member "
+                  "call on a scalar-typed self field")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_scalar_self_field_method_iter_zero_iter_stub()
+
+
     # Still-out-of-scope `yield from` shapes: delegating to a generator
     # that ITSELF failed to compile via the C++20-coroutine path (here,
     # because its own parameter is a String, out of scope since the

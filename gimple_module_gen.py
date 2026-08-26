@@ -2819,6 +2819,67 @@ def gen_module_impl(self, stmts):
         self._generator_cpp_units.append(cpp_text)
         _generator_fns.pop(id(s), None)
 
+    # Seed container-element C types for TOP-LEVEL literal-container
+    # globals BEFORE any generator unit compiles. Generator units run
+    # ahead of the Phase 1.7 / module-globals-declaration passes (this
+    # function's own pass ordering), so a coroutine body iterating a
+    # module-level container global (`for flagname, flagvalue in
+    # _flags:`) cannot consult `_global_var_types` yet — and until now
+    # had NO source for the iterable's per-slot element types either,
+    # forcing int64_t-default reads that print raw pointers where the
+    # real element is a string. This scan records ONLY what is statically
+    # decidable from the initializing literal itself (same `_quick_type`
+    # + TypeLattice.join_all primitives every other element-type
+    # inference here uses): per-slot ctypes when every element is a flat
+    # equal-length tuple/list literal (the tuple-unpack shape), else the
+    # joined whole-container element type. Additive-only: nothing reads
+    # this map except the coroutine-body for-loop lowering's
+    # module-global branches; later passes keep full authority over
+    # `_global_var_types` itself.
+    self._global_literal_slot_ctypes = {}
+    for _s in stmts:
+        _tgts = []
+        if isinstance(_s, AssignStmt):
+            _t = _s.target.name if isinstance(_s.target, IdentExpr) else _s.target
+            if isinstance(_t, str):
+                _tgts = [_t]
+        elif isinstance(_s, MultiAssignStmt):
+            _tgts = [(t.name if isinstance(t, IdentExpr) else t)
+                     for t in _s.targets]
+            _tgts = [t for t in _tgts if isinstance(t, str)]
+        if not _tgts or not isinstance(_s.value, (ListExpr, TupleExpr, SetExpr)):
+            continue
+        _els = _s.value.elements
+        if not _els:
+            continue
+        _outer = None
+        _slots = None
+        try:
+            if all(isinstance(e, (ListExpr, TupleExpr)) and e.elements
+                   for e in _els):
+                _lens = {len(e.elements) for e in _els}
+                if len(_lens) == 1:
+                    _n = _lens.pop()
+                    _slots = [gimple_ctypes.TypeLattice.join_all(
+                        [self._quick_type(e.elements[j]) for e in _els])
+                        for j in range(_n)]
+                    _slots = [st for st in _slots
+                              if st in ('int64_t', 'double', '_Bool', 'char *')]
+                    if len(_slots) != _n:
+                        _slots = None
+            if _slots is None:
+                _joined = gimple_ctypes.TypeLattice.join_all(
+                    [self._quick_type(e) for e in _els])
+                if _joined in ('int64_t', 'double', '_Bool', 'char *'):
+                    _outer = _joined
+        except Exception:
+            _slots = None
+            _outer = None
+        if _slots is None and _outer is None:
+            continue
+        for _t in _tgts:
+            self._global_literal_slot_ctypes[_t] = _slots if _slots is not None else _outer
+
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):

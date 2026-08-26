@@ -5001,6 +5001,81 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
             return lines
+        # `for a, b, ... in <module-level container global>:` — a flat
+        # (>=2-name) tuple target over a bare identifier that is NOT a
+        # declared local/param of this generator unit. Generator units
+        # compile BEFORE the module-globals typing passes run (see
+        # gen_module_impl's pass ordering), so the global's C type is
+        # not yet in `_global_var_types` here — but `_cpp_expr`'s own
+        # name resolution already distinguishes a real module global
+        # (emitted as a `_root_globals.<name>` field read) from an
+        # undeclared local, and every container global is stored under
+        # the same boxed convention (the pointer itself, cast through
+        # int64_t — see how `_gscan_declare_global` initializes such
+        # fields from literal containers), so `(MojoList *)(...)`
+        # round-trips it losslessly. Lower through the SAME cached-list
+        # + per-slot unpack protocol the declared-local boxed-container
+        # case below uses. Before this, the loop fell through to the
+        # paren-stripped single-name path and emitted the comma-joined
+        # target as ONE bogus C++ declarator/range-for (`for (auto
+        # flagname, flagvalue : _root_globals._flags)` — "declaration of
+        # 'auto flagname' has no initializer"), or worse for a KNOWN
+        # list global, `int64_t a, b;` + the no-op comma-expression
+        # assignment `a, b = mojo_list_get_int(...)` that silently
+        # unpacked nothing. Real: Lib/symtable.py's `Symbol._flags_str`
+        # (`for flagname, flagvalue in _flags:`).
+        if (len(_names) >= 2
+                and all(gimple_ctypes.re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', n)
+                        for n in _names)
+                and isinstance(s.iterable, gimple_ctypes.IdentExpr)
+                and (gen._cpp_declared is None
+                     or s.iterable.name not in gen._cpp_declared)
+                and not s.else_body):
+            try:
+                _giter_expr = gen._cpp_expr(s.iterable)
+            except gimple_exprtypes._UnsupportedGeneratorShape:
+                _giter_expr = None
+            if _giter_expr is not None and _giter_expr.startswith('_root_globals.'):
+                _slot_types = getattr(gen, '_global_literal_slot_ctypes', {}).get(
+                    s.iterable.name)
+                _slot_types = (_slot_types if isinstance(_slot_types, list)
+                               and len(_slot_types) == len(_names) else None)
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tupvar = gen._cpp_fresh_name("_mg_tup")
+                lines = []
+                for _ni, _nm in enumerate(_names):
+                    if _nm not in declared:
+                        _tct = None
+                        if _slot_types is not None:
+                            _tct = _slot_types[_ni]
+                        if _tct not in ('int64_t', 'double', '_Bool', 'char *'):
+                            _tct = ('char *'
+                                    if _cpp_body_str_evidence(_nm, s.body)
+                                    else 'int64_t')
+                        declared[_nm] = _tct
+                        lines.append(f"{indent}{_tct} {_nm};")
+                lines.append(f"{indent}MojoList *{_tupvar}_list = "
+                             f"(MojoList *)({_giter_expr});")
+                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                             f"{_ctr} < mojo_list_len({_tupvar}_list); "
+                             f"{_ctr}++) {{")
+                lines.append(f"{indent}    MojoList *{_tupvar} = "
+                             f"(MojoList *)mojo_list_get_int({_tupvar}_list, {_ctr});")
+                for _si, _nm in enumerate(_names):
+                    _nct = declared.get(_nm, 'int64_t')
+                    if _nct == 'char *':
+                        lines.append(f"{indent}    {_nm} = "
+                                     f"mojo_list_get_str({_tupvar}, {_si});")
+                    elif _nct == 'double':
+                        lines.append(f"{indent}    {_nm} = "
+                                     f"mojo_list_get_double({_tupvar}, {_si});")
+                    else:
+                        lines.append(f"{indent}    {_nm} = "
+                                     f"mojo_list_get_int({_tupvar}, {_si});")
+                for inner in s.body:
+                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+                return lines
         target = target[1:-1]
     if isinstance(target, str):
         # `for x in <call to another already-compiled generator>():` —
@@ -5245,6 +5320,36 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     and getattr(gen, '_cpp_gen_self_struct', None)):
                 _stub_ft = gen.struct_field_types.get(
                     gen._cpp_gen_self_struct, {}).get(s.iterable.member)
+                if _stub_ft in ('int64_t', 'double', '_Bool', 'char *'):
+                    _self_scalar_iter_stub = True
+            elif (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                    and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
+                    and not s.iterable.args
+                    and s.iterable.func.member in ('keys', 'values', 'items',
+                                                   'copy')
+                    and isinstance(s.iterable.func.obj, gimple_ctypes.MemberExpr)
+                    and isinstance(s.iterable.func.obj.obj,
+                                   gimple_ctypes.IdentExpr)
+                    and s.iterable.func.obj.obj.name == 'self'
+                    and getattr(gen, '_cpp_gen_self_struct', None)):
+                # The method-call sibling of the bare self-field case just
+                # above: `for k in self.<field>.keys():` (and its
+                # .values()/.items()/.copy() siblings) where the FIELD's
+                # resolved C type is one of the four scalars — genuinely
+                # not a container per this codegen's own boxing convention
+                # (real: Lib/shelve.py's `Shelf.__iter__`:
+                # `for k in self.dict.keys():`, where `dict` is an
+                # unannotated-init param typed int64_t). The single-name
+                # `.keys()`-family dispatch below only fires for a
+                # MojoDict*-typed receiver, so this shape previously fell
+                # all the way to the generic range-for emitting the raw
+                # member call text (`for (auto k : self->dict.keys())` —
+                # "request for member 'keys' in ... non-class type
+                # 'int64_t'"). Same documented zero-iteration stub
+                # convention as the bare-field case.
+                _stub_ft = gen.struct_field_types.get(
+                    gen._cpp_gen_self_struct, {}).get(
+                    s.iterable.func.obj.member)
                 if _stub_ft in ('int64_t', 'double', '_Bool', 'char *'):
                     _self_scalar_iter_stub = True
             _pre_lines: list[str] = []
@@ -5520,6 +5625,38 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     and s.iterable.name not in gen._cpp_declared \
                     and gen._global_var_types.get(s.iterable.name) == 'MojoList *':
                 _iter_list_expr = f"(MojoList *)({gen._cpp_expr(s.iterable)})"
+            elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
+                    and gen._cpp_declared is not None
+                    and s.iterable.name not in gen._cpp_declared
+                    and isinstance(target, str) and ',' not in target
+                    and isinstance(iter_expr, str)
+                    and iter_expr.startswith('_root_globals.')):
+                # The same module-level-global case with the global's C
+                # type NOT yet resolved (`_global_var_types` is populated
+                # by the module-globals passes, which run AFTER generator
+                # units compile — see the tuple-target sibling of this
+                # branch above for the full pass-ordering rationale). If
+                # `_cpp_expr` resolved the bare name to a real
+                # `_root_globals.<name>` field read at all, that field is
+                # a boxed container under this codegen's own convention
+                # (the pointer, cast through int64_t), so the identical
+                # cached-local + indexed-loop lowering applies. Element
+                # type: string evidence in the loop body upgrades the
+                # target to char*, else the boxed int64_t default. Before
+                # this branch, the iterable fell to the generic range-for
+                # over the raw field read ("'begin' was not declared in
+                # this scope" — a raw pointer/int64_t member has no ADL
+                # begin/end). Real: any generator body iterating a
+                # module-level list global (minimal repro:
+                # `_names = ['a', 'b']` + `def g(): for x in _names:
+                # yield x`).
+                _iter_list_expr = f"(MojoList *)({iter_expr})"
+                _g_slot_info = getattr(gen, '_global_literal_slot_ctypes', {}).get(
+                    s.iterable.name)
+                if isinstance(_g_slot_info, str):
+                    _iter_elem = _g_slot_info
+                elif _cpp_body_str_evidence(target, s.body):
+                    _iter_elem = 'char *'
             if _iter_list_expr is not None and not isinstance(target, str):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     "unsupported for-loop target over a list-typed iterable")
