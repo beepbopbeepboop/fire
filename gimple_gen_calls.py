@@ -32,6 +32,7 @@ import gimple_ctypes
 import gimple_solvers
 import gimple_exprtypes
 import gimple_codegen
+import gimple_gen_exprs as gex
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
 
@@ -1512,8 +1513,27 @@ def _lower_builtin_set(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    if not node.args:
+    if not node.args and not node.kwargs:
         return 'MojoDict *', gen._new_val('MojoDict *', 'mojo_dict_new ()')
+    # `dict(k=v, ...)` kwarg form — previously silently DROPPED (an
+    # all-kwargs call hit the `not node.args` early return above and built
+    # an EMPTY dict; kwargs-mixed-with-args never reached here either).
+    # Real repro: argparse.py's own `text % dict(prog=self._prog)` inside
+    # HelpFormatter — the dict-keyed `%` lowering routes that call's result
+    # into mojo_str_format_dict, which then raised a genuine runtime
+    # KeyError('prog') because nothing ever stored the key. Pairs lower
+    # through the SAME per-pair store helper the `{k: v}` literal uses, so
+    # key coercion and per-type setter dispatch stay in one place.
+    if node.kwargs and not node.args:
+        t = gen._new_val('MojoDict *', "mojo_dict_new ()")
+        for _kw_key, _kw_val in node.kwargs:
+            # StringLiteral.value is the parser's already-quote-stripped
+            # text, so the bare key name is the correct literal payload.
+            gex._emit_dict_pair_store(gen, t,
+                                      gimple_ctypes.StringLiteral(value=_kw_key,
+                                                                  line=node.line, col=node.col),
+                                      _kw_val)
+        return 'MojoDict *', t
     at, av = gen.lower_expr(node.args[0])
     t = gen._new_temp('MojoDict *')
     if at == 'MojoList *':

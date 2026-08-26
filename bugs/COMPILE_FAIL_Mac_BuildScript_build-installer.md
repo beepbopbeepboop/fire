@@ -4,6 +4,44 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — ROOT CAUSE 2 FIXED in shared source; only the excluded high-risk root cause 1 remains)
+
+Fresh safety-wrapped `mojo.py build`: of the three long-standing
+diagnostics, **the two `%`-format errors (`1447:17` / `1456:17`,
+`int64_t % MojoDict *`) are GONE.** Fixed by commit `e1e12bb`:
+
+- New runtime primitive `mojo_str_format_dict(char *fmt, MojoDict
+  *vals)` (runtime/mojo_runtime.c) implementing Python's dict-keyed
+  `%`-formatting against a DYNAMIC template at runtime — %(key)s/%(key)d/
+  width/precision, per-slot value-kind tags on `_DictSlot` so an int
+  value formats correctly under `%s`, real catchable KeyError on a miss.
+  This is exactly the "genuinely new C runtime primitive" this doc's
+  root-cause-2 analysis called for; it does NOT require recovering the
+  template text at compile time, sidestepping the no-constant-propagation
+  limitation entirely.
+- `_lower_percent` (gimple_gen_exprs.py) routes any `%` whose RHS is
+  dict-shaped (DictExpr literal / `dict(k=v,...)` builtin /
+  MojoDict*-typed expression) to that primitive BEFORE falling through
+  to numeric modulo; all other shapes are untouched.
+- Bonus gap found and fixed en route: `_lower_builtin_dict` silently
+  DROPPED kwargs — `dict(VER=..., FULLVER=...)` (this file's own line
+  1443 shape!) built an EMPTY dict; now lowered via the same shared
+  pair-store helper as `{k: v}` literals.
+- End-to-end verified: a distilled repro of packageFromRecipe's exact
+  `textvars = dict(...)` + `readme % textvars` shape builds AND produces
+  output byte-identical to CPython.
+
+**Remaining blocker: root cause 1 only** (`704:17: invalid operands to
+binary + (have 'char *' and 'MojoList *')`) — the Phase-1.7 global
+prescan blind to cross-function `global FW_VERSION_PREFIX`
+reassignment, still explicitly high-risk shared machinery per this
+doc's analysis below and still not attempted. Full quality gate for
+`e1e12bb`: test_gimple.py 260/260 (4 new regression tests),
+test_module_cache.py 76/76, check-selfhost clean, stdlib dylib rebuild
+2 skips = this worktree's pre-existing baseline (io.mojo/process.mojo
+dup/pipe libc conflicts, A/B-verified against a stashed tree — not
+attributable). Doc stays open on root cause 1 alone.
+
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c): byte-identical errors, both root causes unchanged
 
 Fresh `mojo.py build`: exact same three diagnostics

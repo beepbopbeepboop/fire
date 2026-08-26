@@ -2,6 +2,23 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): identical 17-generator refusal, unchanged
+
+Fresh safety-wrapped `python3 mojo.py build .../randdec.py` against
+this worktree (includes this session's dict-keyed %-formatting landing,
+commit `e1e12bb` — unrelated to any of the four causes below):
+byte-identical refusal list to the same-day entries below — all 17
+generators (`all_binary` ... `un_random_mixed_op`), same per-generator
+causes (8 × unresolved `from random import randrange, sample` callees,
+6 × function-valued loop-variable calls, `un_incr_digits_tuple`'s mixed
+scalar/tuple shape, 3 × consumption-ordering-derived). Note the
+campaign's broader finding that CPython Lib modules are invisible to
+every import resolver for entry files OUTSIDE Lib/ (`.mojo`-only
+resolvers; walk-up from Modules/_decimal/tests never reaches Lib/) —
+the unresolved-`random` group is an instance of that shared mechanism,
+not randdec-specific. No tractable angle found; not attempted; no code
+change.
+
 ## Status (re-verified 2026-08-26, wtRest19b — second independent re-check same day)
 
 Independent fresh repro (own safety-wrapped build, this worktree)

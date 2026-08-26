@@ -4,6 +4,51 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified + root cause CORRECTED, 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — build still exits 0; the "argparse runtime AttributeError" blocker re-root-caused: argparse is never compiled into the binary at all, in EITHER mode)
+
+Fresh `mojo.py build` (safety-wrapped): still exits 0 with 0 own-file
+error lines. Re-investigation this pass CORRECTS item 2's diagnosis
+from the entries below:
+
+- The runtime death (`Unhandled exception: AttributeError: verbose`) is
+  NOT "argparse's default-population control flow not reaching
+  Namespace" and needs NO auditing of argparse's compiled logic —
+  **argparse is not compiled into the binary at all**. lldb on the
+  inline-built binary shows `_gimple_main` → `mojo_obj_getattr` raising,
+  and the generated `.ci` shows every argparse call lowered as a
+  receiver-stub: `_t48 = _t41; /* int64_t.parse_args() stubbed */` — so
+  `args` IS THE PARSER OBJECT and `args.verbose` is getattr(parser,
+  'verbose'). A minimal `import argparse; add_argument("-v",
+  action="store_true"); parse_args([]); print(args.verbose)` repro
+  reproduces identically.
+- WHY argparse never resolves: the inline importer's search path is
+  sys.path-inserts + the importing file's dir + bounded ancestor walk +
+  CWD/script_dir (`_module_candidate_paths`), and both resolver layers
+  are `.mojo`-only for PATH-based resolution (`imports._find` looks for
+  `<name>.mojo`/`<name>/__init__.mojo` only). From Tools/build/, no
+  walk-up reaches CPython's Lib/, so `import argparse/contextlib/re/
+  collections/types/builtins` all degrade silently to stubs — while
+  sibling umarshal.py DOES resolve via the walk-up (17 umarshal symbols
+  nm-verified in an inline-forced build). PYTHONPATH does NOT help:
+  imports.py honors the env var for its search PATH, but `_find` only
+  ever probes `<dir>/<name>.mojo` / `<dir>/<name>/__init__.mojo`
+  candidates — a `.py` file on that path is still invisible; verified
+  empirically that `PYTHONPATH=<tree>/Lib` leaves
+  resolve_source('argparse') = None.
+- A principled fix direction (recorded, deliberately not forced):
+  detect a CPython source checkout (entry file whose ancestors contain
+  a `Lib/` dir) and append `<root>/Lib` to the candidate search dirs.
+  Bounded blast radius (only entry files inside such trees), but it
+  would newly INLINE large Lib closures into currently-"green"
+  stub-built binaries — e.g. deepfreeze would then hit contextlib.py's
+  async-codegen refusal (see bugs/COMPILE_FAIL_Lib_contextlib_*.md) and
+  fail honestly instead — a real behavioral shift across concurrent
+  agents' baselines, so recorded here rather than forced.
+
+Item 1 (link-mode sibling degradation) unchanged. Doc stays open;
+still blocked on non-compile families (link-mode sibling support /
+inline Lib resolution) plus, past those, contextlib's async feature.
+
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c — build still exits 0 with 0 errors; both remaining gaps re-investigated, neither newly tractable)
 
 Fresh `mojo.py build .../Tools/build/deepfreeze.py`: still exits 0, 0
