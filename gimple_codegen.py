@@ -667,6 +667,26 @@ class GimpleGen:
         # is exactly the tuple-key-plus-iteration shape that breaks self-
         # hosted compilation.
         self._xmod_gen_param_hints: dict[str, dict[str, str]] = {}
+        # Companion to _xmod_gen_param_hints for LIST-ELEMENT types:
+        # "<home-qualifier>::<fn>" -> {param name -> unanimous element ctype}.
+        # Collected from THIS module's own call sites whose argument is a
+        # collection LITERAL of same-typed scalars (e.g. a list of string
+        # literals), shared with temp_gens, and applied by the defining
+        # temp_gen into its own _param_list_elem_types — which
+        # _gen_cpp_generator_unit then seeds into _cpp_list_local_elem_types,
+        # so `for line in lines:` over that param emits mojo_list_get_str and
+        # types the loop variable char * instead of the boxed-int64_t default.
+        # Without it, a foreign generator yielding strings always inferred an
+        # int64_t promise type and every next()/for consumption downstream saw
+        # a number instead of a string. Same composite-string-key rationale as
+        # _xmod_gen_param_hints above.
+        self._xmod_gen_elem_hints: dict[str, dict[str, str]] = {}
+        # This module's own free-function generators' param -> element ctype,
+        # merged from _xmod_gen_elem_hints entries matching this module_name
+        # (plus available for same-module seeding). Consumed only by
+        # _gen_cpp_generator_unit's per-unit seeding of the coroutine-body
+        # emitter's local-elem-type registry.
+        self._param_list_elem_types: dict[str, dict[str, str]] = {}
         # Default empty; gen_module overwrites this with the module's real
         # set once it's scanned (see that assignment's own docstring) —
         # this fallback just keeps `_cpp_for_generator_delegate`'s caller
@@ -738,6 +758,30 @@ class GimpleGen:
         # *` of int64_t-cast `MojoAsync *` handles) -- mirrors `self.
         # _async_var_api`'s identical name-keyed side-table pattern.
         self._taskgroup_var_api: dict[str, dict] = {}
+        # Coroutine-BODY (.cpp emitter) analogue of _generator_var_api:
+        # local-variable name -> the {'base', 'value_ctype', ...} api dict
+        # of a compiled generator whose start-call that local holds (`g =
+        # sub(...)` / `lines = strutil._iter_significant_lines(f)` inside
+        # a compiled generator's own body). The ordinary GIMPLE path's
+        # own dict above is consumed by .c-side lowering (for-loops,
+        # next()); THIS one is consumed exclusively by gimple_cpp_core's
+        # _cpp_expr/_cpp_stmt — chiefly `next(g)` inside a coroutine
+        # body, which lowers to {base}_resume/_value plus a real
+        # StopIteration throw on exhaustion. Reset per unit via
+        # _cpp_reset_unit_state (a local only means something within the
+        # unit that declared it), same convention as _cpp_kw_param_renames.
+        self._cpp_generator_var_api: dict[str, dict] = {}
+        # Coroutine-body generator APIs this module's .cpp unit REFERENCES
+        # but does not itself define: base name -> {'value_ctype', 'params'}.
+        # Populated whenever a coroutine body emits a `{base}_start(...)`
+        # construction (same-module-earlier or cross-module); gen_module
+        # emits matching guarded extern "C" declarations of all four
+        # `{base}_start/_resume/_value/_destroy` symbols into generated_cpp's
+        # preamble, so a foreign sibling unit's own object file (compiled +
+        # linked by _compile_imported_module -> _compile_link_inline_cpp_unit)
+        # satisfies them at link time. Sorted at emission for deterministic
+        # (CAS-cache-stable) output.
+        self._cpp_xmod_generator_refs: dict[str, dict] = {}
         # Concatenated .cpp text (one C++20 translation unit) for every
         # supported generator in this module, or '' if none. Set at the very
         # end of gen_module, once the API is fully known — the caller

@@ -1027,6 +1027,31 @@ def _import_targets(node) -> list:
     return [(node.module, node.alias)] + list(getattr(node, 'extra', None) or [])
 
 
+def _join_import_member(mod: str, name: str) -> str:
+    """Canonical dotted string naming what `from mod import name` binds —
+    the exact string _module_candidate_paths/_compile_imported_module must
+    resolve (and the string _generator_home_api keys are built from), so a
+    binding site and a defining module's own compile always derive the SAME
+    module identity from one `from X import Y` statement.
+
+    For an ABSOLUTE `mod` this is plain `mod + '.' + name` (`pkg` +
+    `sub` -> `pkg.sub`) — unchanged from the historical f-string shape.
+
+    For a RELATIVE `mod` consisting ONLY of leading dots, appending another
+    separator dot would double-count the depth: `from . import sibling`
+    (mod='.') spelled '.' + '.' + 'sibling' as '..sibling' reads as a
+    level-2 name and resolves one directory TOO HIGH (or nowhere). Real
+    Python binds `sibling` in the level-1 package — so concatenate
+    directly: '.' + 'sibling' == '.sibling' (level 1) and '..' +
+    'sibling2' == '..sibling2' (level 2). A suffixed relative mod keeps
+    the separator: '.mod' + '.' + 'name' == '.mod.name' (level 1, suffix
+    'mod.name') — exactly how myinterpreter.py's own relative-import rule
+    splits dots-then-suffix."""
+    if mod and not mod.replace('.', ''):
+        return mod + name
+    return f"{mod}.{name}"
+
+
 def _c_escape(s: str) -> str:
     """Escape a Mojo string-literal's content for the body of a C string literal.
 

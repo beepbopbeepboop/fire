@@ -419,6 +419,21 @@ def _cpp_receiver_ctype(gen, e):
             and not e.args and e.func.member == 'copy'):
         rc = _cpp_receiver_ctype(gen, e.func.obj)
         return rc if rc in ('MojoDict *', 'MojoList *') else None
+    # `next(<tracked generator local>)` as a receiver (`next(lines).strip()`,
+    # c_common/tables.py's read_table): the call's value IS that generator's
+    # promise value, so its static ctype is the api's value_ctype — letting
+    # the char*-method dispatch above lower the chained .strip()/etc. instead
+    # of falling through to the generic `{obj}.{member}(...)` emission on a
+    # lambda expression (invalid C++). Only the tracked-local shape is
+    # recognized here: a direct `next(sub(x))` receiver would re-emit the
+    # construction twice if typed, so it stays untyped/generic.
+    if (isinstance(e, gimple_ctypes.CallExpr)
+            and isinstance(e.func, gimple_ctypes.IdentExpr)
+            and e.func.name == 'next' and len(e.args) == 1
+            and isinstance(e.args[0], gimple_ctypes.IdentExpr)):
+        api = getattr(gen, '_cpp_generator_var_api', {}).get(e.args[0].name)
+        if api is not None:
+            return gimple_exprtypes._c_to_cpp_scalar_type(api.get('value_ctype') or 'int64_t')
     return None
 
 
@@ -777,10 +792,253 @@ def _cpp_reset_unit_state(gen):
     (rebuilt per unit so func_return_types corrections earlier passes made
     meanwhile are re-read — see _func_csym's stale-freeze warning), plus the
     per-unit map of locals statically known to hold a dict/list (from a
-    container-shaped callee), consumed by SubscriptExpr lowering."""
+    container-shaped callee), consumed by SubscriptExpr lowering — and the
+    per-unit map of locals holding a compiled generator's coroutine handle
+    (`_cpp_generator_var_api`, consumed by next()-on-a-generator-local
+    lowering)."""
     gen._cpp_trusted_fn_returns = None
     gen._cpp_fn_shape_cache = {}
     gen._cpp_local_container_shapes = {}
+    gen._cpp_generator_var_api = {}
+
+
+def _cpp_sanitize_module_qualifier(mod: str) -> str:
+    """The module-string -> C-qualifier sanitization EVERY cross-module
+    registry key in this codegen uses (`_generator_home_api` keys, the
+    FromImportStmt binding probes) — factored out so the coroutine emitter's
+    bound-module generator resolution derives keys byte-identically instead
+    of re-spelling the same replace chain (one more site and they WILL
+    drift)."""
+    return mod.replace('.', '_').replace('-', '_')
+
+
+def _cpp_expr_static_ctype(gen, e):
+    """Best-effort static C type of an expression in a coroutine body —
+    the small intersection of shapes this emitter types reliably:
+    declared locals/params, string literals, subscript/slice results
+    (always char * here), and char*-method calls on char*-typed receivers
+    (strip family/lower/upper/replace). Returns None for anything else.
+    Consumed by `not`-truthiness lowering (a char* operand must test
+    emptyness, not pointer-nullness); deliberately conservative so a
+    wrong 'char *' guess can never corrupt non-string lowering."""
+    if isinstance(e, gimple_ctypes.IdentExpr):
+        return (gen._cpp_declared.get(e.name)
+                if gen._cpp_declared is not None else None)
+    if isinstance(e, gimple_ctypes.StringLiteral):
+        return 'char *'
+    if isinstance(e, (gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
+        return 'char *'
+    if isinstance(e, gimple_ctypes.CallExpr) and isinstance(e.func, gimple_ctypes.MemberExpr):
+        if e.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
+                             'replace', 'partition', 'rpartition'):
+            rc = _cpp_receiver_ctype(gen, e.func.obj)
+            if rc == 'char *':
+                # partition/rpartition actually yield a MojoList*; only
+                # their [0]-subscript (handled as SubscriptExpr above) is
+                # a string — the bare call itself is not.
+                if e.func.member in ('partition', 'rpartition'):
+                    return 'MojoList *'
+                return 'char *'
+    return None
+
+
+def _cpp_resolve_generator_call_api(gen, func):
+    """Resolve a CallExpr's callee to a compiled generator's api dict
+    ({'base', 'value_ctype', 'params', ...}) — or None when the callee is
+    not a generator this whole-program compile knows. Three shapes:
+
+      - bare name bound to a same-module generator DEFINED EARLIER in this
+        module (Pass 1.3d registers each unit into the shared
+        _generator_api strictly in source order — the exact one-scope
+        restriction _cpp_yield_from's delegation already documents);
+      - an (optionally aliased) `from M import gen_fn` binding
+        (_imported_generator_bindings, populated at registration time from
+        the whole-program _generator_home_api registry);
+      - `<module>.<gen_fn>` where `<module>` is a bound MODULE name (plain
+        `import m` / submodule-binding `from pkg import m`) whose home
+        module's generators are in _generator_home_api under the canonical
+        sanitized qualifier derived from imported_symbols[bound]['module'].
+
+    The third shape is what makes FOREIGN-module generators drivable from
+    this module's coroutine bodies (c_common/tables.py's read_table doing
+    `lines = strutil._iter_significant_lines(infile)`): since relative
+    imports resolve on the compiled path (gimple_ctypes._join_import_member /
+    _module_candidate_paths), the foreign sibling compiles as part of THIS
+    same whole-program build, its own units land in its own linked object,
+    and only extern "C" declarations of its four {base}_* symbols are needed
+    here — the identical opaque-MojoGenerator*-handle ABI every other
+    consumer uses."""
+    if isinstance(func, gimple_ctypes.IdentExpr):
+        name = func.name
+        api = gen._generator_api.get(name)
+        if api is not None:
+            return api
+        ib = getattr(gen, '_imported_generator_bindings', {})
+        if name in ib:
+            return ib[name]
+        return None
+    if isinstance(func, gimple_ctypes.MemberExpr) and isinstance(func.obj, gimple_ctypes.IdentExpr):
+        bname = func.obj.name
+        ma_names = getattr(gen, '_module_alias_names', None)
+        if not ma_names or bname not in ma_names:
+            return None
+        info = getattr(gen, 'imported_symbols', {}).get(bname) or {}
+        mod = info.get('module')
+        if not mod:
+            return None
+        qual = _cpp_sanitize_module_qualifier(mod)
+        return gen._generator_home_api.get(f"{qual}::{func.member}")
+    return None
+
+
+def _cpp_emit_generator_start_expr(gen, call, api):
+    """Emit the `{base}_start(...)` construction expression for a call to a
+    resolved compiled generator inside a coroutine body, registering the
+    four-symbol extern "C" API for preamble declaration (_cpp_xmod_generator_refs).
+    Argument handling mirrors _cpp_yield_from's delegation call EXACTLY (same
+    defaults-aware trailing padding via _trailing_default_at/_default_expr_to_pair,
+    same kwargs-appended-positionally simplification); pointer-typed parameters
+    additionally get an explicit cast to their declared ctype, because the
+    extern "C" signature takes real pointers and a boxed-int64_t caller
+    expression must not rely on implicit conversion (invalid C++)."""
+    sub_params: list = api.get('params') or []
+    _dflts = (api.get('defaults')
+              or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
+              or [])
+    arg_exprs = []
+    for _aa in call.args:
+        # A collection LITERAL argument has no valid C++ text at an argument
+        # position (`_cpp_expr` lowers it to a braced-init-list, and casting
+        # `(MojoList *)({...})` is invalid C++). Build a REAL MojoList*
+        # instead, as an immediately-invoked lambda (the same one-expression
+        # convention `_cpp_expr`'s own struct-constructor case uses): an
+        # empty literal is just `mojo_list_new ()`; a non-empty one appends
+        # each element through its scalar accessor. A literal mixing
+        # element types has no single accessor — refuse honestly.
+        if isinstance(_aa, gimple_ctypes.ListExpr):
+            arg_exprs.append(_cpp_list_literal_arg_expr(gen, _aa))
+            continue
+        if isinstance(_aa, (gimple_ctypes.TupleExpr,
+                            gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a tuple/dict/set literal as a compiled-generator call "
+                "argument is not supported in a coroutine body")
+        arg_exprs.append(gen._cpp_expr(_aa))
+    arg_exprs.extend(gen._cpp_expr(_kv) for _kn, _kv in (call.kwargs or []))
+    while len(arg_exprs) < len(sub_params):
+        _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
+        if _dv is None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"call to compiled generator '{api['base']}': expected "
+                f"{len(sub_params)} argument(s), got {len(arg_exprs)} "
+                f"(no default at slot {len(arg_exprs)})")
+        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+    if len(arg_exprs) > len(sub_params):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"call to compiled generator '{api['base']}': expected "
+            f"{len(sub_params)} argument(s), got {len(arg_exprs)}")
+    cargs = []
+    for _i, _ae in enumerate(arg_exprs):
+        _pt = sub_params[_i]
+        if isinstance(_pt, str) and _pt.endswith(' *'):
+            cargs.append(f"({_pt})({_ae})")
+        else:
+            cargs.append(_ae)
+    base = api['base']
+    refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+    if refs is not None:
+        refs.setdefault(base, {'value_ctype': api.get('value_ctype', 'int64_t'),
+                               'params': list(sub_params)})
+    return f"{base}_start({', '.join(cargs)})"
+
+
+def _cpp_list_literal_arg_expr(gen, lit):
+    """A list LITERAL at a compiled-generator call-argument position, as ONE
+    MojoList*-valued C++ expression: `mojo_list_new ()` for the empty literal,
+    otherwise an immediately-invoked lambda that constructs the list and
+    appends every element through its scalar accessor (append_str/_int/
+    _double). All elements must agree on one scalar type — anything else
+    refuses (the caller's contract collection already hints nothing for
+    mixed literals)."""
+    elems = lit.elements
+    if not elems:
+        return 'mojo_list_new ()'
+    kinds = []
+    for el in elems:
+        if isinstance(el, gimple_ctypes.StringLiteral):
+            kinds.append(('str', gen._cpp_expr(el)))
+        elif isinstance(el, gimple_ctypes.IntLiteral):
+            kinds.append(('int', str(el.value)))
+        elif isinstance(el, gimple_ctypes.FloatLiteral):
+            kinds.append(('flt', gen._cpp_expr(el)))
+        else:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a non-scalar element in a list-literal argument of a "
+                "compiled-generator call is not supported in a coroutine "
+                "body")
+    kind = kinds[0][0]
+    if any(k != kind for k, _ in kinds):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "a list-literal argument with mixed element types is not "
+            "supported at a compiled-generator call in a coroutine body")
+    append_fn = {'str': 'mojo_list_append_str',
+                 'int': 'mojo_list_append_int',
+                 'flt': 'mojo_list_append_double'}[kind]
+    tmp = gen._cpp_fresh_name("_mg_lit")
+    body = ''.join(f" {append_fn}({tmp}, {v});" for _, v in kinds)
+    return (f"[&]() -> MojoList * {{ MojoList *{tmp} = mojo_list_new ();"
+            f"{body} return {tmp}; }}()")
+
+
+def _cpp_next_on_generator_expr(gen, handle_expr, api):
+    """`next(<generator-handle>)` inside a coroutine body, lowered to the
+    SAME extern "C" drive API _cpp_yield_from's delegation loop already uses:
+    `{base}_resume(handle)` advancing to the next yield; false means EITHER
+    real exhaustion OR an exception that escaped the sub-generator's body
+    (its own unhandled_exception() translated it into the shared mojo_exc_*
+    globals + pending flag and reported done — the exact ambiguity Milestone D
+    documents). Disambiguate exactly like that loop does: pending -> re-throw
+    a fresh _MojoCppExc built from those globals; otherwise raise StopIteration
+    (a real tagged _MojoCppExc, catchable by an enclosing try/except in THIS
+    body via the existing _cpp_try_stmt machinery). On success, return
+    `{base}_value(handle)` — the promise's current_value, typed by the api's
+    value_ctype. Thrown from inside a lambda so the whole thing stays ONE
+    value-expression (every _cpp_expr caller expects a single expression
+    string); the throw unwinds normally through the lambda frame, running any
+    enclosing try/catch this body has. The handle is NOT destroyed on
+    exhaustion — matching this narrow model's documented never-frees
+    convention (same as a dropped MojoGenerator * anywhere else here)."""
+    base = api['base']
+    vct = gimple_exprtypes._c_to_cpp_scalar_type(api.get('value_ctype') or 'int64_t')
+    stop_tag = gen._exc_type_id('StopIteration')
+    refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+    if refs is not None:
+        refs.setdefault(base, {'value_ctype': api.get('value_ctype', 'int64_t'),
+                               'params': list(api.get('params') or [])})
+    if handle_expr.isidentifier():
+        # A tracked generator-handle local: resume/value read it directly.
+        h = handle_expr
+        return (
+            f"[&]() -> {vct} {{ "
+            f"if (!{base}_resume({h})) {{ "
+            f"if (mojo_exc_pending_get()) {{ mojo_exc_pending_set(0); "
+            f"throw _MojoCppExc{{ mojo_exc_type_get(), mojo_exc_msg_get(), "
+            f"mojo_exc_obj_get() }}; }} "
+            f"throw _MojoCppExc{{ (int64_t){stop_tag}, nullptr, (void *)nullptr }}; }} "
+            f"return {base}_value({h}); }}()"
+        )
+    # A direct construction (`next(sub(x))`): evaluate start ONCE into a
+    # lambda-local so resume/value observe the same handle.
+    local_name = gen._cpp_fresh_name("_mojogen_next_g")
+    return (
+        f"[&]() -> {vct} {{ MojoGenerator *{local_name} = {handle_expr}; "
+        f"if (!{base}_resume({local_name})) {{ "
+        f"if (mojo_exc_pending_get()) {{ mojo_exc_pending_set(0); "
+        f"throw _MojoCppExc{{ mojo_exc_type_get(), mojo_exc_msg_get(), "
+        f"mojo_exc_obj_get() }}; }} "
+        f"throw _MojoCppExc{{ (int64_t){stop_tag}, nullptr, (void *)nullptr }}; }} "
+        f"return {base}_value({local_name}); }}()"
+    )
 
 
 def _cpp_expr(gen, e) -> str:
@@ -1140,6 +1398,17 @@ def _cpp_expr(gen, e) -> str:
                 f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
     if isinstance(e, gimple_ctypes.UnaryOp):
         op = {'not': '!'}.get(e.op, e.op)
+        # `not <string>` — Python truthiness for a str is NON-EMPTYNESS,
+        # not pointer-non-null: every char* in this model (a stripped/
+        # partitioned result included) is a valid non-NULL pointer even
+        # when the string is "", so raw C++ `!ptr` would evaluate "" as
+        # TRUE (strutil.py's `if not line.strip(): continue` filter then
+        # never fires and comment lines leak through). Lower a char*-
+        # typed operand to an explicit emptyness test instead.
+        if e.op == 'not':
+            _not_ct = _cpp_expr_static_ctype(gen, e.operand)
+            if _not_ct == 'char *':
+                return f"(mojo_strlen((char *)({gen._cpp_expr(e.operand)})) == 0)"
         return f"({op}{gen._cpp_expr(e.operand)})"
     if isinstance(e, gimple_ctypes.TernaryExpr):
         return f"({gen._cpp_expr(e.condition)} ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"
@@ -1325,6 +1594,22 @@ def _cpp_expr(gen, e) -> str:
                 "compiled generator/coroutine body")
         # Simple function call in generator body (e.g. os.path.join(a, b))
         if isinstance(e.func, gimple_ctypes.MemberExpr):
+            # `<bound-module>.<compiled-generator>(...)` — a FOREIGN module's
+            # generator reached through its bound module name (`lines =
+            # strutil._iter_significant_lines(infile)`), resolved via
+            # _cpp_resolve_generator_call_api against the whole-program
+            # _generator_home_api registry. Checked FIRST, before the
+            # module-member stub below: a bound module object is an opaque
+            # int64_t in this body model, so the generic path used to emit a
+            # stubbed `0` for the whole call — silently discarding the
+            # construction and typing the assigned local int64_t, which then
+            # made any later next() on it unsupportable. With relative imports
+            # now resolving, the foreign sibling compiles into this same
+            # whole-program build (its own linked object); only extern "C"
+            # declarations of its {base}_* drive symbols are needed here.
+            _mg_api = _cpp_resolve_generator_call_api(gen, e.func)
+            if _mg_api is not None:
+                return _cpp_emit_generator_start_expr(gen, e, _mg_api)
             # `.format(...)` on a string literal — mirrors the GIMPLE
             # path's _lower_string_method_call stub (returns the format
             # string itself, diagnosed via _debug_note; the interpolation
@@ -1621,6 +1906,21 @@ def _cpp_expr(gen, e) -> str:
             # — real `int`-returning runtime helpers (`mojo_str_
             # startswith`/`mojo_str_endswith`), same receiver-ctype gate
             # as the string methods just above.
+            if _str_obj_ctype == 'char *' and e.func.member in ('partition', 'rpartition') \
+                    and len(e.args) == 1:
+                # `<char*-typed obj>.partition(sep)` / `.rpartition(sep)` —
+                # the SAME `mojo_str_partition`/`mojo_str_rpartition` runtime
+                # helpers the ordinary GIMPLE path's str-method dispatch uses
+                # (gimple_gen_methods.py), returning the real 3-element list.
+                # Consumed by SubscriptExpr's matching `[0]`-on-a-partition-
+                # result case just below (strutil.py's
+                # `line = line.partition('#')[0]` inside a compiled generator)
+                # — before this, the generic `{obj}.{member}(...)` fallback
+                # emitted invalid C++ member-call syntax on a raw char*.
+                _obj_expr = gen._cpp_expr(e.func.obj)
+                _a0 = gen._cpp_expr(e.args[0])
+                _fn = 'mojo_str_partition' if e.func.member == 'partition' else 'mojo_str_rpartition'
+                return f"({_fn}((char *)({_obj_expr}), (char *)({_a0})))"
             if _str_obj_ctype == 'char *' and e.func.member in ('startswith', 'endswith') \
                     and len(e.args) == 1:
                 _obj_expr = gen._cpp_expr(e.func.obj)
@@ -1749,6 +2049,26 @@ def _cpp_expr(gen, e) -> str:
             return f"{obj}.{e.func.member}({args})"
         if isinstance(e.func, gimple_ctypes.IdentExpr):
             fname = e.func.name
+            # A call to a COMPILED GENERATOR this whole-program compile knows
+            # (same-module defined earlier, an aliased `from M import gen_fn`
+            # binding, or — since relative imports resolve — a foreign
+            # sibling's `<module>.<gen>` reached through its bound module
+            # name): construct the coroutine via `{base}_start(...)`, exactly
+            # the construction convention _cpp_yield_from's delegation and the
+            # ordinary GIMPLE path's Milestone-B branch already use. Checked
+            # BEFORE any arg lowering (the start-expr helper lowers args
+            # itself, with defaults padding) and before every other callee
+            # class below: a generator has NO ordinary C function definition
+            # anywhere (Phase 2a skips it), so falling through used to emit a
+            # call to that never-defined symbol (`a_sub_79c856(lines)`) —
+            # silently wrong at best, undefined at link time at worst.
+            # Shadowing guard: a declared LOCAL of the same name wins (real
+            # Python scoping) — only an undeclared callee name resolves as a
+            # generator here.
+            if fname not in (gen._cpp_declared or ()):
+                _gc_api = _cpp_resolve_generator_call_api(gen, e.func)
+                if _gc_api is not None:
+                    return _cpp_emit_generator_start_expr(gen, e, _gc_api)
             args = [gen._cpp_expr(a) for a in e.args]
             # Python builtins that map directly onto runtime helpers —
             # mirrors the GIMPLE path's own builtin lowering (len/range/
@@ -1902,6 +2222,38 @@ def _cpp_expr(gen, e) -> str:
                 # identifier ("'iter' was not declared in this scope").
                 return args[0]
             if fname == 'next' and len(e.args) == 1:
+                # next(<compiled-generator handle>) — a local assigned from a
+                # compiled generator's start-call (`lines =
+                # strutil._iter_significant_lines(f)`, same-module
+                # `g = sub(x)`, or an aliased/bound-module import), tracked in
+                # the per-unit _cpp_generator_var_api side-table. Lowers to
+                # {base}_resume/_value plus real exhaustion semantics (a
+                # tagged StopIteration _MojoCppExc, catchable by an enclosing
+                # try/except in THIS body — read_table's `try: h = next(lines)
+                # except StopIteration:` shape) — see
+                # _cpp_next_on_generator_expr for the full resume/pending-exc
+                # disambiguation contract, shared with _cpp_yield_from's
+                # delegation loop. Also accepts a DIRECT construction
+                # (`next(sub(x))`) whose start-call the lambda evaluates once.
+                # Before this, the emitter had NO notion of a generator-typed
+                # local at all — whether same-module or foreign — so any
+                # next() on one fell through to the unresolved-callee refusal
+                # below and refused the whole module (the last blocker on
+                # bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
+                _next_arg = e.args[0]
+                _next_gen_api = None
+                _next_gen_handle = None
+                if isinstance(_next_arg, gimple_ctypes.IdentExpr):
+                    _next_gen_api = getattr(gen, '_cpp_generator_var_api', {}).get(_next_arg.name)
+                    if _next_gen_api is not None:
+                        _next_gen_handle = _next_arg.name
+                elif isinstance(_next_arg, gimple_ctypes.CallExpr):
+                    _ngc_api = _cpp_resolve_generator_call_api(gen, _next_arg.func)
+                    if _ngc_api is not None:
+                        _next_gen_handle = _cpp_emit_generator_start_expr(gen, _next_arg, _ngc_api)
+                        _next_gen_api = _ngc_api
+                if _next_gen_api is not None:
+                    return _cpp_next_on_generator_expr(gen, _next_gen_handle, _next_gen_api)
                 # next(x) -> x.__next__() (imaplib.py's `Idler.burst`:
                 # `yield next(self)`, since `Idler` implements the
                 # iterator protocol on itself — `__next__` is an
@@ -1916,7 +2268,6 @@ def _cpp_expr(gen, e) -> str:
                 # `next` fell through to the generic bare-name call at
                 # the bottom of this block, an undeclared C++
                 # identifier ("'next' was not declared in this scope").
-                _next_arg = e.args[0]
                 _next_struct = None
                 if isinstance(_next_arg, gimple_ctypes.IdentExpr) and _next_arg.name == 'self':
                     _next_struct = getattr(gen, '_cpp_gen_self_struct', None)
@@ -2338,6 +2689,18 @@ def _cpp_expr(gen, e) -> str:
                 and e.obj.func.name in gen.func_return_types
                 and gen.func_return_types[e.obj.func.name] == 'MojoList *'):
             return (f"mojo_list_get_int((MojoList *)({obj}), "
+                    f"(int64_t)({idx}))")
+        # Subscripting a str.partition/rpartition RESULT (`line.partition('#')
+        # [0]`, strutil.py's significant-line filter inside a compiled
+        # generator): the partition call above yields the real 3-element
+        # MojoList* of strings, so element access goes through
+        # mojo_list_get_str — NOT the boxed-int getter (which would leave a
+        # pointer-as-int where the caller expects char*) and NOT a raw C++
+        # `[...]` on a call expression (invalid C++).
+        if (isinstance(e.obj, gimple_ctypes.CallExpr)
+                and isinstance(e.obj.func, gimple_ctypes.MemberExpr)
+                and e.obj.func.member in ('partition', 'rpartition')):
+            return (f"mojo_list_get_str((MojoList *)({obj}), "
                     f"(int64_t)({idx}))")
         return f"({obj})[{idx}]"
     if isinstance(e, gimple_ctypes.AwaitExpr):
@@ -3151,18 +3514,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "only a plain identifier assignment target is supported")
         name = s.target.name
-        # A list/dict/set LITERAL RHS (`lines = []`, ftplib.py's mlsd) is
-        # NOT representable as the raw C++ brace-init text `_cpp_expr`'s
-        # literal cases emit — for a container-typed local that text must
-        # become a real runtime construction instead (`mojo_list_new()` +
-        # element appends). Handled for BOTH the first assignment (which
-        # also declares the local with its real container type via
-        # `_infer_simple_expr_ctype`'s matching cases) and any later
-        # re-assignment of an already-container-typed local.
-        _container_literal = isinstance(s.value, (gimple_ctypes.ListExpr,
-                                                  gimple_ctypes.DictExpr,
-                                                  gimple_ctypes.SetExpr))
-        val = gen._cpp_expr(s.value)
         # See self._cpp_kw_param_renames's docstring — an assignment
         # TARGET is emitted directly (`name = val`, bypassing
         # _cpp_expr's own IdentExpr branch entirely), so a keyword-
@@ -3181,6 +3532,47 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             gen._cpp_kw_param_renames[name] = cpp_name
         else:
             cpp_name = name
+        # `g = <compiled-generator>(args)` — a generator CONSTRUCTION as the
+        # assigned value: declare the local a real `MojoGenerator *` (the
+        # opaque coroutine-handle type every drive symbol speaks), emit the
+        # {base}_start construction via the shared helper, and track
+        # name -> api in _cpp_generator_var_api so later next(g) lowers to
+        # real resume/value/StopIteration driving. Checked BEFORE the generic
+        # RHS lowering below, which used to lower this exact shape to a call
+        # to the generator's never-emitted ORDINARY C symbol (`a_sub_79c856`)
+        # and type the local int64_t — silently wrong either way. Re-binding
+        # an already-declared non-generator local to a generator handle is
+        # refused honestly (the earlier declaration's C++ type can't change).
+        if isinstance(s.value, gimple_ctypes.CallExpr):
+            _ga_api = _cpp_resolve_generator_call_api(gen, s.value.func)
+            if _ga_api is not None:
+                _ga_existing = declared.get(name)
+                if _ga_existing is not None and _ga_existing != 'MojoGenerator *':
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"assigning a compiled-generator handle to "
+                        f"'{name}', already declared {_ga_existing!r} in "
+                        f"this coroutine body")
+                if name not in declared:
+                    declared[name] = 'MojoGenerator *'
+                    if gen._cpp_func_scope_decls is not None:
+                        gen._cpp_func_scope_decls.append(f"MojoGenerator *{cpp_name};")
+                gen._cpp_generator_var_api[name] = _ga_api
+                _ga_start = _cpp_emit_generator_start_expr(gen, s.value, _ga_api)
+                if name in gen._cpp_mut_capture_names:
+                    return [f"{indent}*{cpp_name} = {_ga_start};"]
+                return [f"{indent}{cpp_name} = {_ga_start};"]
+        # A list/dict/set LITERAL RHS (`lines = []`, ftplib.py's mlsd) is
+        # NOT representable as the raw C++ brace-init text `_cpp_expr`'s
+        # literal cases emit — for a container-typed local that text must
+        # become a real runtime construction instead (`mojo_list_new()` +
+        # element appends). Handled for BOTH the first assignment (which
+        # also declares the local with its real container type via
+        # `_infer_simple_expr_ctype`'s matching cases) and any later
+        # re-assignment of an already-container-typed local.
+        _container_literal = isinstance(s.value, (gimple_ctypes.ListExpr,
+                                                  gimple_ctypes.DictExpr,
+                                                  gimple_ctypes.SetExpr))
+        val = gen._cpp_expr(s.value)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
             # struct-constructor branch just above, which already
@@ -3194,6 +3586,20 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                     and s.value.func.name in gen._cpp_ctor_struct_names):
                 ctype = f"{s.value.func.name} *"
+            elif (isinstance(s.value, gimple_ctypes.CallExpr)
+                    and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                    and s.value.func.name == 'next' and len(s.value.args) == 1
+                    and isinstance(s.value.args[0], gimple_ctypes.IdentExpr)
+                    and gen._cpp_generator_var_api.get(s.value.args[0].name) is not None):
+                # `v = next(g)` on a tracked generator-handle local: the
+                # lambda _cpp_expr emits returns the sub-generator's promise
+                # value — give the LOCAL that exact type instead of letting
+                # generic inference default it to int64_t (which mismatches
+                # the emitted char*-returning lambda for a string generator,
+                # "invalid conversion from 'char*' to 'int64_t'").
+                ctype = gimple_exprtypes._c_to_cpp_scalar_type(
+                    gen._cpp_generator_var_api[s.value.args[0].name].get('value_ctype')
+                    or 'int64_t')
             elif gen._cpp_is_callable_value_expr(s.value):
                 # A zero-arg `lambda` / bound-method-as-value RHS (see
                 # `_cpp_is_callable_value_expr`'s docstring) — give the
@@ -3282,6 +3688,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     if isinstance(s, gimple_ctypes.WhileStmt):
         lines = gen._cpp_hoist_walrus_decls(s.condition, declared, indent)
         cond = gen._cpp_expr(s.condition)
+        if _cpp_expr_static_ctype(gen, s.condition) == 'char *':
+            cond = f"(mojo_strlen((char *)({cond})) != 0)"
         if s.else_body:
             brk_var = gen._cpp_fresh_name("_mg_brk")
             lines.append(f"{indent}bool {brk_var} = false;")
@@ -3340,6 +3748,12 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             return lines
         lines = gen._cpp_hoist_walrus_decls(s.condition, declared, indent)
         cond = gen._cpp_expr(s.condition)
+        # Bare `if <string>:` — same Python-truthiness rule as `not`'s
+        # char* case above (an empty string is FALSE even though its
+        # char* pointer is non-NULL); a non-char*-typed condition's text
+        # is emitted verbatim exactly as before.
+        if _cpp_expr_static_ctype(gen, s.condition) == 'char *':
+            cond = f"(mojo_strlen((char *)({cond})) != 0)"
         lines.append(f"{indent}if ({cond}) {{")
         for inner in s.then_body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))

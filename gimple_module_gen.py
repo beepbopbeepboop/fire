@@ -419,7 +419,16 @@ def gen_module_impl(self, stmts):
                 if isinstance(stmt, FromImportStmt):
                     modules_to_compile.add(stmt.module)
                     for _fn, _fa in (stmt.names or []):
-                        modules_to_compile.add(f"{stmt.module}.{_fn}")
+                        # _join_import_member, not a blind f"{module}.{name}":
+                        # for a bare-relative module (`from . import strutil`,
+                        # module == '.') the separator dot would double-count
+                        # the depth ('.' + '.' + 'strutil' spells '..strutil',
+                        # a level-2 name that resolves one directory too high
+                        # or nowhere at all). The joined string must be EXACTLY
+                        # what _module_candidate_paths resolves and what the
+                        # temp_gen's own module_name/qualifier derive from —
+                        # see _join_import_member's docstring.
+                        modules_to_compile.add(gimple_ctypes._join_import_member(stmt.module, _fn))
                 elif isinstance(stmt, ImportStmt):
                     for _m, _a in _import_targets(stmt):
                         modules_to_compile.add(_m)
@@ -453,7 +462,10 @@ def gen_module_impl(self, stmts):
         if self.do_imports:
             _xg_alias_mod: dict = {}
             _xg_alias_orig: dict = {}
-            _xg_calls = []
+            # Bound-MODULE bindings for `<module>.<gen>(...)` attribute
+            # calls: as-bound name -> the FromImportStmt module string it
+            # came from (`from . import strutil` binds 'strutil' -> '.').
+            _xg_module_binding: dict = {}
             for _xg_n in _walk_ast(stmts):
                 if isinstance(_xg_n, FromImportStmt) and not getattr(_xg_n, 'wildcard', False):
                     for _xg_name, _xg_alias in (_xg_n.names or []):
@@ -464,26 +476,183 @@ def gen_module_impl(self, stmts):
                             _xg_alias_orig[_xg_bound] = _xg_name
                         elif _xg_pm != _xg_n.module or _xg_alias_orig.get(_xg_bound) != _xg_name:
                             _xg_alias_mod[_xg_bound] = None  # ambiguous binding — no hints
-                elif isinstance(_xg_n, CallExpr) and isinstance(_xg_n.func, IdentExpr):
-                    _xg_calls.append(_xg_n)
-            for _xg_call in _xg_calls:
-                _xg_cname = _xg_call.func.name
-                if _xg_cname not in _xg_alias_mod:
-                    continue
-                _xg_mod = _xg_alias_mod.get(_xg_cname)
-                if not _xg_mod:
-                    continue
-                _xg_orig = _xg_alias_orig.get(_xg_cname)
+                        # Every from-import binding COULD name a submodule;
+                        # recorded unconditionally — an attribute call through
+                        # a binding that actually names an ordinary symbol
+                        # simply finds no registry entry and hints nothing.
+                        if _xg_module_binding.get(_xg_bound, _xg_n.module) != _xg_n.module:
+                            _xg_module_binding[_xg_bound] = None  # ambiguous
+                        else:
+                            _xg_module_binding[_xg_bound] = _xg_n.module
+
+            def _xg_homog_elem(_xa):
+                """Unanimous scalar element ctype of a collection LITERAL
+                argument, or None (mixed / empty / non-scalar elements hint
+                nothing)."""
+                _xel = None
+                for _xle in _xa.elements:
+                    if isinstance(_xle, StringLiteral):
+                        _let = 'char *'
+                    elif isinstance(_xle, IntLiteral):
+                        _let = 'int64_t'
+                    elif isinstance(_xle, FloatLiteral):
+                        _let = 'double'
+                    else:
+                        return None
+                    if _let is None or (_xel is not None and _xel != _let):
+                        return None
+                    _xel = _let
+                return _xel
+
+            def _xg_parse_mod(_xm):
+                """Parsed top-level stmts of module string `_xm`, or [] —
+                via the cached _parsed_import when its resolver can see the
+                module, else via the SAME candidate-path resolution
+                _compile_imported_module uses (imports.resolve_source doesn't
+                see every plain project sibling the do_imports pipeline
+                itself compiles)."""
                 try:
-                    _xg_parsed = self._parsed_import(_xg_mod)[2] or []
+                    _xp = self._parsed_import(_xm)[2] or []
                 except Exception:
+                    _xp = []
+                if _xp:
+                    return _xp
+                for _xc in self._module_candidate_paths(_xm):
+                    if not gimple_ctypes.os.path.exists(_xc):
+                        continue
+                    try:
+                        with open(_xc, 'r') as _xf:
+                            _xs = _xf.read()
+                        return (gimple_ctypes.ast_rewriter.rewrite(
+                            gimple_ctypes.Parser(
+                                gimple_ctypes.py_tokenize(_xs))
+                            .parse_module()) or [])
+                    except Exception:
+                        return []
+                return []
+
+            def _xg_gen_fn(_xm, _xorig):
+                """The generator FunctionDef named `_xorig` in module `_xm`'s
+                own source, or None."""
+                for _xs in _xg_parse_mod(_xm):
+                    if isinstance(_xs, FunctionDef) and _xs.name == _xorig:
+                        return _xs if _xs.is_generator else None
+                return None
+
+            def _xg_record_hint(_xkey, _xpname, _xct):
+                """Record one list-elem contract into _xmod_gen_elem_hints;
+                disagreeing sites hint nothing (same unanimity rule as the
+                scalar param hints)."""
+                if not _xct or not _xpname:
+                    return
+                _xe_map = self._xmod_gen_elem_hints.setdefault(_xkey, {})
+                if _xe_map.get(_xpname, _xct) != _xct:
+                    _xe_map[_xpname] = None
+                else:
+                    _xe_map[_xpname] = _xct
+
+            # ONE-LEVEL FORWARDING CONTRACTS: a call to THIS module's own
+            # function with a homogeneous collection-literal argument fixes
+            # that CALLEE param's element type (`main` calling
+            # `read_table(["a"])` proves read_table's `lines` holds strings).
+            # Recorded per callee so an IMPORTED-GENERATOR call site one
+            # level deeper (`read_table`'s body forwarding its `lines` param
+            # to the foreign generator) can contribute a hint from an
+            # IDENTIFIER argument — without this, a foreign generator
+            # reached through any wrapper always compiled an int64_t-boxed
+            # promise and was unusable via next()/for consumption. Pure AST
+            # analysis over THIS module's own parsed bodies; still runs
+            # strictly before any imported module is inlined.
+            _xg_local_param_elems: dict = {}  # callee fn name -> {param -> elem ct}
+            _xg_local_fns = {s.name: s for s in stmts if isinstance(s, FunctionDef)}
+            for _xg_fd in stmts:
+                if not isinstance(_xg_fd, FunctionDef):
                     continue
-                _xg_fn = None
-                for _xg_s in _xg_parsed:
-                    if isinstance(_xg_s, FunctionDef) and _xg_s.name == _xg_orig:
-                        _xg_fn = _xg_s
-                        break
-                if _xg_fn is None or not _xg_fn.is_generator:
+                for _xg_n2 in _walk_ast(_xg_fd.body):
+                    if not (isinstance(_xg_n2, CallExpr) and isinstance(_xg_n2.func, IdentExpr)):
+                        continue
+                    _xg_callee = _xg_local_fns.get(_xg_n2.func.name)
+                    if _xg_callee is None:
+                        continue
+                    _xg_cparams = [pn.lstrip('*') for pn, _pt in (_xg_callee.params or [])]
+                    for _xi2, _xa2 in enumerate(_xg_n2.args):
+                        if _xi2 >= len(_xg_cparams):
+                            break
+                        if not isinstance(_xa2, (ListExpr, TupleExpr)):
+                            continue
+                        _xg_record_hint_local = _xg_homog_elem(_xa2)
+                        if _xg_record_hint_local is None:
+                            continue
+                        _xg_own_map = _xg_local_param_elems.setdefault(_xg_callee.name, {})
+                        if _xg_own_map.get(_xg_cparams[_xi2], _xg_record_hint_local) != _xg_record_hint_local:
+                            _xg_own_map[_xg_cparams[_xi2]] = None
+                        else:
+                            _xg_own_map[_xg_cparams[_xi2]] = _xg_record_hint_local
+
+            # Per-call-site hint collection WITH enclosing-function context
+            # (a flat module-level walk would descend into these bodies
+            # anyway but lose which FunctionDef each call sits in). Both
+            # callee shapes are collected: bare-name calls to a from-import
+            # binding AND `<bound-module>.<gen>(...)` attribute calls — the
+            # latter being exactly c_common/tables.py's
+            # `strutil._iter_significant_lines(infile)` shape.
+            _xg_calls = []
+            for _xg_fd in stmts:
+                if not isinstance(_xg_fd, FunctionDef):
+                    continue
+                for _xg_n3 in _walk_ast(_xg_fd.body):
+                    if isinstance(_xg_n3, CallExpr):
+                        _xg_calls.append((_xg_n3, _xg_fd))
+
+            for _xg_call, _xg_enclosing in _xg_calls:
+                if isinstance(_xg_call.func, gimple_ctypes.IdentExpr):
+                    _xg_cname = _xg_call.func.name
+                    if _xg_cname not in _xg_alias_mod:
+                        continue
+                    _xg_mod = _xg_alias_mod.get(_xg_cname)
+                    if not _xg_mod:
+                        continue
+                    _xg_orig = _xg_alias_orig.get(_xg_cname)
+                elif isinstance(_xg_call.func, gimple_ctypes.MemberExpr) \
+                        and isinstance(_xg_call.func.obj, gimple_ctypes.IdentExpr):
+                    _xg_bname = _xg_call.func.obj.name
+                    _xg_bmod = _xg_module_binding.get(_xg_bname)
+                    if not _xg_bmod:
+                        continue
+                    # The binding names a SUBMODULE FILE: its own compiled
+                    # module_name is the member-path join of the FROM-IMPORT
+                    # module and the BINDING ('.' + 'strutil_like' ->
+                    # '.strutil_like') — exactly how find_imports synthesized
+                    # that file's compilation candidate, so the temp_gen's
+                    # module_name (and registry qualifier) matches. The called
+                    # FUNCTION lives inside that file.
+                    _xg_mod_joined = gimple_ctypes._join_import_member(
+                        _xg_bmod, _xg_bname)
+                    _xg_fn = _xg_gen_fn(_xg_mod_joined, _xg_call.func.member)
+                    if _xg_fn is None:
+                        continue
+                    # Composite "<qualifier>::<name>" key — same string
+                    # convention as every other _generator_home_api /
+                    # hint-dict consumer (see _xmod_gen_param_hints's
+                    # docstring for why not a real tuple).
+                    _xg_key = (_xg_mod_joined.replace('.', '_').replace('-', '_')
+                               + '::' + _xg_call.func.member)
+                    _xg_pnames = [pn.lstrip('*') for pn, _pt in (_xg_fn.params or [])]
+                    _xg_enc_map = (_xg_local_param_elems.get(_xg_enclosing.name, {})
+                                   if _xg_enclosing is not None else {})
+                    for _xi, _xa in enumerate(_xg_call.args):
+                        if _xi >= len(_xg_pnames):
+                            break
+                        if isinstance(_xa, (ListExpr, TupleExpr)):
+                            _xg_record_hint(_xg_key, _xg_pnames[_xi], _xg_homog_elem(_xa))
+                        elif (isinstance(_xa, gimple_ctypes.IdentExpr)
+                              and _xg_enc_map.get(_xa.name)):
+                            _xg_record_hint(_xg_key, _xg_pnames[_xi], _xg_enc_map[_xa.name])
+                    continue
+                else:
+                    continue
+                _xg_fn = _xg_gen_fn(_xg_mod, _xg_orig)
+                if _xg_fn is None:
                     continue  # ordinary callees keep Pass 1.3d's own ordering
                 # Composite string key ("<qualifier>::<name>"), not a
                 # genuine tuple — see _xmod_gen_param_hints's docstring
@@ -491,20 +660,23 @@ def gen_module_impl(self, stmts):
                 # dict's self-hosted compilation.
                 _xg_key = _xg_mod.replace('.', '_').replace('-', '_') + '::' + _xg_orig
                 _xg_pnames = [pn.lstrip('*') for pn, _pt in (_xg_fn.params or [])]
+                # The ENCLOSING function's own param-elem contracts (from the
+                # literal-list call sites recorded above), for identifier
+                # arguments forwarded straight through to the generator.
+                _xg_enc_map = (_xg_local_param_elems.get(_xg_enclosing.name, {})
+                               if _xg_enclosing is not None else {})
                 for _xi, _xa in enumerate(_xg_call.args):
                     if _xi >= len(_xg_pnames):
                         break
-                    if isinstance(_xa, StringLiteral):
-                        _xt = 'char *'
-                    elif isinstance(_xa, FloatLiteral):
-                        _xt = 'double'
-                    else:
-                        continue
-                    _xg_map = self._xmod_gen_param_hints.setdefault(_xg_key, {})
-                    if _xg_map.get(_xg_pnames[_xi], _xt) != _xt:
-                        _xg_map[_xg_pnames[_xi]] = None  # sites disagree — no hint
-                    else:
-                        _xg_map[_xg_pnames[_xi]] = _xt
+                    if isinstance(_xa, (ListExpr, TupleExpr)):
+                        _xg_record_hint(_xg_key, _xg_pnames[_xi], _xg_homog_elem(_xa))
+                    elif (isinstance(_xa, gimple_ctypes.IdentExpr)
+                          and _xg_enc_map.get(_xa.name)):
+                        # An IDENTIFIER argument whose value this module's own
+                        # call sites prove is a homogeneous list (the
+                        # one-level forwarding contract): same elem hint,
+                        # just derived transitively.
+                        _xg_record_hint(_xg_key, _xg_pnames[_xi], _xg_enc_map[_xa.name])
 
         for module_name in sorted(modules_to_compile):
             if module_name not in self._compiled_modules:
@@ -1431,7 +1603,15 @@ def gen_module_impl(self, stmts):
                         return
                     if not s.wildcard and self._from_import_name_is_submodule(s.module, orig_name):
                         self.imported_symbols[sym_name] = {
-                            'module': f"{s.module}.{orig_name}",
+                            # _join_import_member: same canonical member-module
+                            # string find_imports compiled the submodule under —
+                            # consumers (including the coroutine emitter's
+                            # bound-module generator resolution) key off THIS
+                            # value, so it must match the temp_gen's own
+                            # module_name byte for byte (a bare-relative
+                            # `from . import strutil` means '.strutil', never
+                            # '..strutil').
+                            'module': gimple_ctypes._join_import_member(s.module, orig_name),
                             'return_type': 'unknown',
                         }
                         self._module_alias_names.add(sym_name)
@@ -1561,8 +1741,24 @@ def gen_module_impl(self, stmts):
                             # cross-module generator units are only emitted/
                             # linked on the inline-compile pipeline.
                             if not s.wildcard and self.do_imports:
-                                _gmh_api = self._generator_home_api.get(
-                                    s.module.replace('.', '_').replace('-', '_') + '::' + name)
+                                # Two candidate defining-module spellings,
+                                # probed in order: (1) the MODULE ITSELF
+                                # (`from pkg import gen_fn` — the generator
+                                # lives IN pkg's own source, registry key
+                                # '<pkg>::gen_fn'); (2) the MEMBER-PATH form
+                                # (_join_import_member: `from . import sub`
+                                # binds the SUBMODULE FILE compiled under
+                                # '.sub', whose own generators register as
+                                # '<_sub>::<fn>'). The blind f"{module}.{name}"
+                                # spelling double-counted depth for bare-
+                                # relative modules ('.' + '.' + 'sub' ==
+                                # '..sub', level 2) and never matched.
+                                _gmh_api = (
+                                    self._generator_home_api.get(
+                                        s.module.replace('.', '_').replace('-', '_') + '::' + name)
+                                    or self._generator_home_api.get(
+                                        gimple_ctypes._join_import_member(s.module, name)
+                                        .replace('.', '_').replace('-', '_') + '::' + name))
                                 if _gmh_api is not None:
                                     self._imported_generator_bindings[sym_name] = _gmh_api
                                     continue
@@ -1580,16 +1776,29 @@ def gen_module_impl(self, stmts):
                         # same program's closure (its generators are in the
                         # registry either way).
                         if self.do_imports:
-                            _fb_gmh = self._generator_home_api.get(
-                                s.module.replace('.', '_').replace('-', '_') + '::' + _fb_name)
+                            # Same two-candidate probe as the resolved-exports
+                            # branch above (module-itself key first, then the
+                            # _join_import_member member-path key for a
+                            # bare-relative submodule binding).
+                            _fb_gmh = (
+                                self._generator_home_api.get(
+                                    s.module.replace('.', '_').replace('-', '_') + '::' + _fb_name)
+                                or self._generator_home_api.get(
+                                    gimple_ctypes._join_import_member(s.module, _fb_name)
+                                    .replace('.', '_').replace('-', '_') + '::' + _fb_name))
                             if _fb_gmh is not None:
                                 self._imported_generator_bindings[_fb_sym] = _fb_gmh
                                 continue
                         if self._from_import_name_is_submodule(s.module, _fb_name):
                             self.imported_symbols[_fb_sym] = {
-                                'module': f"{s.module}.{_fb_name}",
+                                # Same canonical member-module string the
+                                # submodule's temp_gen was compiled under (see
+                                # _join_import_member) — the coroutine emitter's
+                                # bound-module generator resolution reads THIS.
+                                'module': gimple_ctypes._join_import_member(s.module, _fb_name),
                                 'return_type': 'unknown',
                             }
+                            self._module_alias_names.add(_fb_sym)
                             continue
                         self._unresolved_import_aliases.add(_fb_sym)
 
@@ -1944,6 +2153,21 @@ def gen_module_impl(self, stmts):
                 _xg_ct = _xg_pmap[_xg_pn]
                 if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
+    # Companion list-ELEMENT hints merge: same qualifier match as the scalar
+    # hints above, applied into this gen's own _param_list_elem_types for
+    # _gen_cpp_generator_unit to seed the coroutine-body emitter with.
+    if getattr(self, '_xmod_gen_elem_hints', None) and self.module_name:
+        _xe_self_q = self.module_name.replace('.', '_').replace('-', '_')
+        for _xe_key in self._xmod_gen_elem_hints:
+            _xe_hq, _xe_hfn = _xe_key.split('::', 1)
+            if _xe_hq != _xe_self_q:
+                continue
+            _xe_pmap = self._xmod_gen_elem_hints[_xe_key]
+            _xe_tgt = self._param_list_elem_types.setdefault(_xe_hfn, {})
+            for _xe_pn in _xe_pmap:
+                _xe_ct = _xe_pmap[_xe_pn]
+                if _xe_ct and not _xe_tgt.get(_xe_pn):
+                    _xe_tgt[_xe_pn] = _xe_ct
 
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
     for s in all_functions:
@@ -5867,6 +6091,35 @@ def gen_module_impl(self, stmts):
                         f'extern "C" {_smret_cpp} {_smsym} ({_smparam_str});')
                 except Exception:
                     continue
+            cpp_parts.append('')
+        if getattr(self, '_cpp_xmod_generator_refs', None):
+            # Extern "C" declarations of every compiled-generator drive API a
+            # coroutine body of THIS module references via
+            # {base}_start/_resume/_value/_destroy (see _cpp_resolve_generator_
+            # call_api / _cpp_emit_generator_start_expr). Same-module bases are
+            # defined later in this very TU (the units below) — a redundant
+            # declaration ahead of the definition is ordinary C++; FOREIGN
+            # bases (a transitively-imported sibling's own generators, e.g.
+            # c_common/strutil.py's `_iter_significant_lines`) are defined in
+            # that sibling's OWN object file (compiled + linked by
+            # _compile_imported_module -> _compile_link_inline_cpp_unit), which
+            # these declarations let the linker satisfy. Sorted for
+            # deterministic (CAS-cache-stable) output.
+            cpp_parts.append('/* Extern declarations for compiled-generator')
+            cpp_parts.append('   drive APIs referenced by this module\'s')
+            cpp_parts.append('   coroutine bodies (defined in this TU\'s own')
+            cpp_parts.append('   units below, or in an imported sibling\'s')
+            cpp_parts.append('   linked object). */')
+            for _xg_base in sorted(self._cpp_xmod_generator_refs):
+                _xg_info = self._cpp_xmod_generator_refs[_xg_base]
+                _xg_vct = (_xg_info.get('value_ctype') or 'int64_t').replace('_Bool', 'bool')
+                _xg_params = ', '.join(
+                    p.replace('_Bool', 'bool') if isinstance(p, str) else p
+                    for p in (_xg_info.get('params') or [])) or 'void'
+                cpp_parts.append(f'extern "C" MojoGenerator *{_xg_base}_start ({_xg_params});')
+                cpp_parts.append(f'extern "C" bool {_xg_base}_resume (MojoGenerator *);')
+                cpp_parts.append(f'extern "C" {_xg_vct} {_xg_base}_value (MojoGenerator *);')
+                cpp_parts.append(f'extern "C" void {_xg_base}_destroy (MojoGenerator *);')
             cpp_parts.append('')
         for unit in self._generator_cpp_units:
             cpp_parts.append(unit)

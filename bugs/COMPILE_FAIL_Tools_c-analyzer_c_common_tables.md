@@ -4,6 +4,74 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25 — `next()` on a foreign generator FIXED (commit c4c88fa, verified end-to-end); read_table now reaches the NEXT unsupported shape: `for row in _get_reader(...)`)
+
+The doc's tracked blocker — `read_table`'s
+`lines = strutil._iter_significant_lines(infile)` +
+`next(lines).strip()` inside a compiled coroutine body — is now genuinely
+fixed in shared compiler source (commit `c4c88fa` on this branch), and the
+fix was verified END-TO-END (build exits 0 AND runtime output correct) on
+stand-in repros that isolate this exact shape:
+
+- same-module generator driven by `next()` inside a generator body,
+  with `try/except StopIteration`;
+- foreign sibling module (`import m` / `from m import gen` /
+  package-relative `from . import m`) whose generator is consumed via
+  `next()`; runtime values round-trip as real strings and exhaustion
+  raises/catches StopIteration correctly.
+
+What it took (all landed in shared source):
+
+1. **Relative imports never resolved on the compiled path at all.**
+   Root-caused during this session: `from . import strutil` produced
+   literal candidate filenames like `<dir>/..strutil.py` (the parser keeps
+   leading dots; find_imports concatenated another dot), so strutil was
+   NEVER part of tables.py's whole-program build — the doc's "foreign"
+   framing was stronger than assumed. `_module_candidate_paths` now
+   normalizes leading-dot names with the interpreter's own dots/level rule,
+   and the new `_join_import_member` keeps the binding site's and the
+   defining temp_gen's module strings byte-identical (including the
+   synthesized per-name candidates).
+2. **Generator-handle locals + `next()`** in gimple_cpp_core's coroutine
+   emitter: assignments from compiled-generator constructions declare
+   `MojoGenerator *` locals and emit `{base}_start(...)`; `next(g)` lowers
+   to `{base}_resume/_value` with Milestone D's pending-exception
+   disambiguation and a tagged StopIteration `_MojoCppExc` throw (so
+   `except StopIteration:` works via the existing try/except machinery);
+   chained `.strip()` etc. type correctly.
+3. **Cross-module linkage**: root `.cpp` preambles emit extern "C"
+   declarations for every referenced generator drive API; foreign siblings'
+   units already compiled+linked as their own objects
+   (`_compile_link_inline_cpp_unit`).
+4. **Value typing**: cross-module list-element contracts
+   (`_xmod_gen_elem_hints`, incl. one-level forwarding through local
+   wrappers) give foreign string generators a real `char *` promise instead
+   of a boxed int64_t. Supporting fixes that this surfaced: char*
+   truthiness for `not`/`if`/`while` (an empty string is falsy — raw `!ptr`
+   made `if not line.strip(): continue` silently never fire),
+   `str.partition(...)[0]`, collection-literal call arguments, and a silent
+   `object()` placeholder (the old weak stub printed "unavailable" once per
+   process from any `X = object()` module init).
+
+**This file still does not build**, blocked by the NEXT, precisely-
+diagnosed shape one line further down `read_table`:
+
+```
+Unsupported shape(s): read_table: unsupported for-loop iterable type:
+CallExpr.
+```
+
+i.e. `for row in _get_reader(lines, delimiter=sep or '\t'):` — iterating a
+CALLABLE PARAMETER whose default is `csv.reader`. That needs: callable-param
+values holding builtin/module functions (`_open=open`,
+`_get_reader=csv.reader` are parameter DEFAULTS carrying non-representable
+values), invoking such a value, AND driving its result as an iterator — plus
+whatever csv.reader itself would have to do in this scalar model. Also still
+ahead in the same body: `fix_row = _normalize_fix_read(fix)` (a factory
+returning a NESTED function) invoked as `fix_row(row)`. These are separate,
+feature-sized capability gaps in the coroutine emitter, not regressions;
+not attempted this round.
+
 ## Status (re-verified 2026-08-25 — down to ONE blocker: `next()` on a cross-module generator handle)
 
 Re-ran fresh against `fix/rest-remainder9`. Real progress since 2026-08-23:

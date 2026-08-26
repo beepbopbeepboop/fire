@@ -202,7 +202,8 @@ def _from_import_name_is_submodule(gen, module: str, name: str) -> bool:
                 for _rn, _ra in s.names:
                     if (_ra if _ra else _rn) == name:
                         return False
-    return gen._submodule_source_path(f"{module}.{name}") is not None
+    return gen._submodule_source_path(
+        gimple_ctypes._join_import_member(module, name)) is not None
 
 
 def _gen_stmt_FromImportStmt(gen, node):

@@ -2322,6 +2322,20 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         if fname not in gen._renamed_builtin_calls:
             gen._renamed_builtin_calls[fname] = ret_type
 
+    # `object()` — the bare base-object constructor: this model has no
+    # Python-object representation, so lower to a quiet null placeholder.
+    # Before this, `object()` fell through to the unknown-name weak stub,
+    # which PRINTS "object: unavailable in compiled mode" on every call —
+    # and module-init code calls it eagerly (`c_common/__init__.py`'s
+    # `NOT_SET = object()`), polluting stdout once per process for any
+    # program whose transitive closure contains that idiom. Mirrors the
+    # coroutine-body emitter's own existing `object()` case (which returns
+    # an opaque allocation, same "no representation, stay quiet" intent).
+    if (fname_raw == 'object' and not node.args
+            and not gen._locally_binds_name('object')
+            and 'object' not in gen.func_return_types):
+        return 'int64_t', gen._new_val('int64_t', '0')
+
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     kwargs    = getattr(node, 'kwargs', []) or []
     kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
