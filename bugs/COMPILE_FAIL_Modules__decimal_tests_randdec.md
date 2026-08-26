@@ -2,6 +2,116 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (updated 2026-08-25, wtOpencode_randdec — doc's headline blocker is OBSOLETE (varying-arity tuple yields already fixed by later work); true remaining causes re-diagnosed per-generator; one real latent honesty bug found on this file's exact mixed-yield shape FIXED (commit 3dcd224); whole file still does not build)
+
+Fresh repro on this branch tip (`python3 mojo.py build .../randdec.py`,
+under the mandated RAM/wall-clock watcher). The doc's previous framing is
+substantially stale; current ground truth:
+
+**1. The doc's named blocker — varying-arity tuple yields — no longer
+exists.** `unary_optarg` (2-tuple + 3-tuple), `binary_optarg` (3+4),
+`ternary_optarg` (4+5) are NOT in the refusal list at all anymore:
+`_generator_tuple_yield_slot_ctypes` now unifies differing arities to the
+LONGEST site's shape with zero-padding (landed for pickletools.py's
+`_genops`, which has the same 3-vs-4 shape) and `unary_optarg` et al.
+compile past the eligibility gate. The task prompt's skeptical question
+("are they really variable-arity?") is answered: they genuinely were
+(2/3, 3/4, 4/5 pairs in one body), but the padding mechanism made that
+harmless — consumer unpacking reads only the common prefix.
+
+**2. Today's actual refusal list is 17 generators, all reducible to four
+real causes:**
+
+- **8 × unresolved IMPORT callees in generator bodies**
+  (`un_close_to_pow10`, `bin_close_to_pow10`, `un_incr_digits`,
+  `bin_incr_digits`, `un_incr_digits_tuple`, `logical_un_incr_digits`,
+  `logical_bin_incr_digits`, `tern_incr_digits`; refusal text: "a call to
+  unresolved callee 'sample(...)'..."). `from random import randrange,
+  sample` cannot resolve: module_loader only resolves Mojo stdlib/test
+  modules (.mojo files); CPython's Lib/random.py is invisible to every
+  resolver (`_parsed_import` → imports.resolve_source MOJO_PATH search +
+  `_resolve_test_relative_module` .mojo-only walk-up). In compiled mode
+  these names bind to the weak auto-stubs that PRINT "unavailable in
+  compiled mode" and return 0 (verified end-to-end with a standalone
+  repro: ordinary-path `sample(range(10), 3)` in a compiled binary prints
+  the stub message and yields nothing usable). Per fd909e9 and
+  CODEGEN_generator_function_Lib_weakref.md's 2026-08-25 finding 3, the
+  coroutine emitter DELIBERATELY refuses here: compiling these bodies
+  against stubs would convert today's working whole-module interpreter
+  fallback into compiled code whose every random value is 0 / whose
+  sample() returns a null list — strictly worse. Genuinely fixing it
+  means teaching module_loader to inline-compile arbitrary CPython Lib
+  modules (the campaign's broader goal, not narrow).
+
+- **6 × function-valued loop variables CALLED inside generator bodies**
+  (`un_close_numbers`, `bin_close_numbers`, `tern_close_numbers`,
+  `un_random_mixed_op`, `bin_random_mixed_op`,
+  `tern_random_mixed_op`; refusal: "a call to unresolved callee
+  'func(...)'/'func1(...)'"). Shape: `for func in close_funcs: yield
+  func(prec, emax, emin)` over the module-global `close_funcs` /
+  `number_funcs` lists of same-module function references. Same
+  structural callable-value gap documented across the weakref/
+  pickletools/operator docs: a value read out of a runtime container has
+  no callable representation in this scalar coroutine-body model (the
+  existing `_CPP_CALLABLE_CTYPE` local path requires a statically-known
+  lambda/method-RHS assignment, not an iteration binding). Not
+  attempted; feature-sized.
+
+- **1 × mixed scalar/tuple yields, masked**: `un_incr_digits_tuple`'s
+  LISTED reason today is `sample(...)`, but underneath that sit TWO more
+  independent layers: (a) scalar `yield from_triple(...)` sites infer
+  char* while its tuple sites contribute 'MojoList *', and the old
+  char*-preference merge silently unified the promise to `char *` —
+  so the tuple sites would have reached g++ as
+  `cannot convert 'MojoList*' to 'char*'` (hard .cpp compile failure,
+  verified pre-fix via a minimal repro) — see item 3; (b) even with
+  honest refusal at (a), the tuple site's own middle element
+  `tuple(map(int, str(ndigits(m))))` is a runtime-constructed nested
+  tuple (`map` has no coroutine-body lowering), still unsupported.
+
+- **3 × derived consumption-ordering refusals** (`all_binary`,
+  `all_ternary`, `all_unary`): purely downstream of the earlier groups —
+  each consumes generators this compile could not translate ("consumed
+  generator must be defined earlier AND supported" rule).
+
+**3. FIXED this session (commit 3dcd224): the honesty layer under (a)
+above, plus two sibling holes proven by repro.** `_generator_yield_ctype`
+(gimple_exprtypes.py) now:
+- refuses the 'MojoList *'×'char *' cross-unification in BOTH merge
+  branches (YieldExpr and YieldFromExpr) instead of letting the
+  char*-preference pick a promise type one of the sites provably cannot
+  co_yield into;
+- refuses DIRECT collection-literal yield values (`yield [1, 2]`,
+  `yield {...}`): `_cpp_expr` lowers these to raw braced-init-lists,
+  valid as a co_yield operand for NO promise type (previously reached
+  g++ as `co_yield {1, 2};` → hard failure).
+The glob.py load-bearing char*-preference for inference-fallback sites
+(int-inferred-but-really-stringy) is untouched; int×str and
+int×MojoList* disagreements keep their existing behavior. Cannot regress
+any currently-compiling module: a body emitting both genuine char* and
+genuine MojoList* values into one promise never linked. Quality gate:
+test_gimple.py 256/256 (3 new regression tests), test_module_cache.py
+76/76, make check-selfhost clean, stdlib dylib rebuild 0 skips. NOTE:
+this fix does not change randdec.py's visible refusal list (the
+emission-time `sample`/`func` refusals fire before yield-type
+unification ever runs for these bodies) — it removes the guaranteed g++
+failure waiting one layer beneath `un_incr_digits_tuple`.
+
+**Residual, documented-not-fixed (adjacent finding, not exercised by any
+currently-compiling file):** a BARE `yield` appearing AFTER another
+yield site contributes no type opinion (`if ctype is None` guard,
+gimple_exprtypes.py ~line 1151) while emitting `co_yield (int64_t)0;` —
+so a generator like `yield 'abc'` followed by bare `yield` would unify
+to char* and hit the same invalid-conversion g++ failure. Same class as
+item 3; left alone this pass to keep the change minimal.
+
+**Verdict:** the file as a whole still does not build, and per the
+conventions above none of the remaining causes is narrowly tractable:
+two require campaign-sized import/callable machinery, and the third
+(un_incr_digits_tuple's deeper layers) is structural even after the
+honesty fix. Doc stays open as DOCUMENTED-NOT-FIXED, now with accurate
+per-generator reasons.
+
 ## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — same 5-generator remainder, one now DERIVED)
 
 Re-ran the repro fresh. The refusal list is exactly 5 generators:
