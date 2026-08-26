@@ -2207,6 +2207,41 @@ def f():
     yield 1.5
 """, "generator function")
 
+    # Mixed yield kinds whose EMITTED C++ can never share one promise type:
+    # a tuple-yield site always co_yields a MojoList* pointer
+    # (_cpp_yield_tuple) while a str site emits char*, and the old
+    # char*-preference merge rule silently picked `char *` for the promise —
+    # so the tuple site reached g++ as "cannot convert 'MojoList*' to
+    # 'char*'" (a hard, unreadable .cpp compile failure) instead of an
+    # honest refusal. Real instance: randdec.py's un_incr_digits_tuple
+    # (scalar from_triple(...) yields mixed with 3-tuple yields). See
+    # bugs/COMPILE_FAIL_Modules__decimal_tests_randdec.md's 2026-08-25
+    # entry for the full mechanism and repros.
+    test_raises("generator_mixed_str_and_tuple_yield_honest_fallback", """\
+def f():
+    yield 'abc'
+    yield (1, 2)
+""", "generator function")
+
+    # Same MojoList*×char* hole, list-valued-expression flavor: `sorted(...)`
+    # both infers AND emits a real `MojoList *`, so pairing it with a str
+    # yield site is the same broken promise-type pick — same honest refusal.
+    test_raises("generator_mixed_str_and_list_expr_yield_honest_fallback", """\
+def f(items):
+    yield 'abc'
+    yield sorted(items)
+""", "generator function")
+
+    # A DIRECT collection-literal yield value (`yield [1, 2]`) emits a raw
+    # C++ braced-init-list (`co_yield {1, 2};`) that is not a valid co_yield
+    # operand for ANY promise type — previously a guaranteed g++ failure
+    # ("cannot convert '<brace-enclosed initializer list>' to 'MojoList*'").
+    # Refuse honestly at the same single-source-of-truth chokepoint.
+    test_raises("generator_collection_literal_yield_honest_fallback", """\
+def f():
+    yield [1, 2]
+""", "generator function")
+
     # Milestone B positive case: the ONE generator shape this codegen now
     # actually compiles — no params, no try/except/with, no `yield from` —
     # gets routed to the new C++20-coroutine .cpp path instead of the

@@ -1194,9 +1194,28 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                 # reaches emission, exactly like any other unsupported
                 # yield shape in this function already does.
                 if any(isinstance(el, (TupleExpr, ListExpr, DictExpr, SetExpr))
-                       for el in n.value.elements):
+                        for el in n.value.elements):
                     return None
                 t = 'MojoList *'
+            elif isinstance(n.value, (ListExpr, DictExpr, SetExpr)):
+                # A DIRECT collection-literal yield value (`yield [1, 2]`,
+                # `yield {'k': v}`, `yield {1, 2}`) — same braced-init-list
+                # lowering problem as the nested-element case just above,
+                # but one level up: `_cpp_stmt`'s YieldExpr case emits a
+                # bare `co_yield <expr>;` and `_cpp_expr` lowers these
+                # literals to `{...}` — which is not a valid co_yield
+                # operand for ANY promise value type (verified empirically:
+                # `def g(): yield [1, 2]` reached g++ as
+                # `co_yield {1, 2};` against a MojoList*-typed promise and
+                # failed with "cannot convert '<brace-enclosed initializer
+                # list>' to 'MojoList*'"). Note only a yield of a
+                # LIST-VALUED EXPRESSION whose C++ text is itself a real
+                # `MojoList *` (a local/param/field/call result — the shape
+                # this function's plain 'MojoList *' inference was built
+                # for) is emitable; a literal never is. Refuse honestly so
+                # gen_module falls back to source interpretation instead of
+                # emitting .cpp g++ always rejects.
+                return None
             else:
                 t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api,
                                              known_structs, dict_val_types, method_return_types,
@@ -1206,7 +1225,24 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             if ctype is None:
                 ctype = t
             elif ctype != t:
-                # Type disagreement: prefer char* if either is a string
+                # Type disagreement. The char*-preference below is the
+                # long-standing inference-fallback reconciliation for sites
+                # whose INFERRED type disagrees but whose EMITTED C++ is
+                # stringy anyway (glob.py: subscript/slice results that
+                # used to infer int64_t while actually emitting char*
+                # expressions) — keep it. But it must NEVER reconcile a
+                # 'MojoList *'-emitting site with a 'char *'-emitting site:
+                # a tuple-yield site ALWAYS emits a MojoList* pointer
+                # (`_cpp_yield_tuple`), a list-valued-variable site emits
+                # its MojoList* local/field, and a str site emits char* —
+                # no single promise type converts from both, so one side
+                # provably reaches g++ as an invalid conversion
+                # ("cannot convert 'MojoList*' to 'char*'", verified via a
+                # mixed `yield 'abc'` / `yield (1, 2)` repro). Refuse
+                # honestly instead; gen_module then falls back to source
+                # interpretation, which runs the generator correctly.
+                if ('MojoList *' in (ctype, t)) and ('char *' in (ctype, t)):
+                    return None
                 if ctype == 'char *' or t == 'char *':
                     ctype = 'char *'
                 else:
@@ -1240,6 +1276,19 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             if ctype is None:
                 ctype = t
             elif ctype != t:
+                # Same MojoList*×char* guard as the YieldExpr merge above.
+                # Here 'MojoList *' arrives via a KNOWN compiled generator
+                # delegate's registered value_ctype (`api.get('value_ctype')`
+                # — e.g. `yield from <tuple-yielding generator>()`) while
+                # 'char *' is this function's generic fallback for
+                # unresolved/stringy delegates; _cpp_yield_from co_yields
+                # the delegate's own `<base>_value()` result straight into
+                # THIS body's promise, so one body mixing both shapes can
+                # never satisfy one promise type — refuse rather than let
+                # the char*-preference silently pick a promise one of the
+                # two sites provably can't co_yield into.
+                if ('MojoList *' in (ctype, t)) and ('char *' in (ctype, t)):
+                    return None
                 # Prefer char* if either is a string (same as YieldExpr above)
                 if ctype == 'char *' or t == 'char *':
                     ctype = 'char *'
