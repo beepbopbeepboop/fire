@@ -751,6 +751,16 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # call at all).
         if e.func.member == 'join' and len(e.args) == 1:
             return 'char *'
+        # `<str>.split([sep])` / `.rsplit([sep])` / `.splitlines()` —
+        # mirrors `_cpp_expr`'s matching CallExpr/MemberExpr split-family
+        # case (routes through the real `mojo_str_split`/`mojo_str_rsplit`/
+        # `mojo_str_splitlines` runtime helpers), always returning a
+        # `MojoList *` of strings — same rationale as `.replace`/`.join`
+        # just above: without an entry, a first-assigned local like
+        # `parts = line.split(";")` defaulted to int64_t and every later
+        # list use of it miscompiled.
+        if e.func.member in ('split', 'rsplit', 'splitlines') and len(e.args) <= 1:
+            return 'MojoList *'
         # `<str>.startswith(prefix)` / `.endswith(suffix)` — mirrors the
         # matching `_cpp_expr` case below (`mojo_str_startswith`/
         # `mojo_str_endswith`, both real C `int`-returning helpers).

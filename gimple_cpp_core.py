@@ -394,6 +394,24 @@ def _cpp_receiver_ctype(gen, e):
     declared = getattr(gen, '_cpp_declared', None)
     if isinstance(e, gimple_ctypes.IdentExpr):
         return declared.get(e.name) if declared is not None else None
+    if isinstance(e, (gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
+        # `<char*-typed root>[...]` / `[a:b]` — a string subscript/slice is
+        # itself a char* (`mojo_cstr_slice`), so a method call chained off
+        # it (`facts_found[:-1].split(";")`, ftplib.py's mlsd) dispatches
+        # through the char* method family. Gated on the ROOT being a
+        # known-char* local/field (or an untracked root, where Python
+        # semantics of the chained str-method already imply a string) — a
+        # container element subscript keeps whatever type its own lookup
+        # rules give, never guessed char* here.
+        _root = e.obj
+        _root_ct = None
+        if isinstance(_root, gimple_ctypes.IdentExpr) and declared is not None:
+            _root_ct = declared.get(_root.name)
+        elif isinstance(_root, gimple_ctypes.MemberExpr):
+            _root_ct = _cpp_receiver_ctype(gen, _root)
+        if _root_ct in ('char *', 'int64_t', None):
+            return 'char *'
+        return None
     if isinstance(e, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         if (_self_struct and isinstance(e.obj, gimple_ctypes.IdentExpr)
@@ -1951,6 +1969,35 @@ def _cpp_expr(gen, e) -> str:
                 _a0 = gen._cpp_expr(e.args[0])
                 return (f"(char *)mojo_str_join((char *)({_obj_expr}), "
                         f"(MojoList *)({_a0}))")
+            # `<char*-typed obj>.split([sep])` / `.rsplit([sep])` /
+            # `.splitlines()` — the split family, the same
+            # receiver-ctype-gated mechanism as every string method above,
+            # routed through the SAME `mojo_str_split`/`mojo_str_rsplit`/
+            # `mojo_str_splitlines` runtime helpers the ordinary GIMPLE
+            # path's char*-method dispatch already uses (reused, not
+            # reinvented; mojo_str_split's NULL-sep form IS Python's
+            # whitespace `s.split()`, and mojo_str_rsplit's negative
+            # maxsplit is unlimited — exactly Python's one-arg default).
+            # Returns a real MojoList* of strings, consumable as a
+            # for-loop iterable (the `_cpp_for_stmt` list-iterable branch
+            # recognizes this call shape) or any other list context.
+            # Real: ftplib.py's mlsd (`facts_found[:-1].split(";")` iterated
+            # directly by a for loop — before this, the generic
+            # `{obj}.{member}(...)` fallback emitted invalid C++ member-call
+            # syntax on a raw char*).
+            if (_str_obj_ctype == 'char *'
+                    and e.func.member in ('split', 'rsplit', 'splitlines')
+                    and len(e.args) <= 1):
+                _obj_expr = gen._cpp_expr(e.func.obj)
+                _sep_e = gen._cpp_expr(e.args[0]) if e.args else '0'
+                if e.func.member == 'splitlines':
+                    return (f"(MojoList *)mojo_str_splitlines"
+                            f"((char *)({_obj_expr}))")
+                if e.func.member == 'split':
+                    return (f"(MojoList *)mojo_str_split((char *)({_obj_expr}), "
+                            f"(char *)({_sep_e}))")
+                return (f"(MojoList *)mojo_str_rsplit((char *)({_obj_expr}), "
+                        f"(char *)({_sep_e}), (int64_t)(-1))")
             # `<dict-typed obj>.get(key)` / `.get(key, default)` — a real
             # dict method call on a local/self-field this narrow body
             # model already knows is `MojoDict *`, which (like `.replace`
@@ -5015,6 +5062,24 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if gen.func_return_types.get(_callee) == 'MojoList *':
                     _iter_list_expr = f"(MojoList *)({gen._cpp_expr(s.iterable)})"
                     _iter_elem = gen._return_elem_types.get(_callee)
+            elif (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                    and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
+                    and s.iterable.func.member in ('split', 'rsplit', 'splitlines')
+                    and len(s.iterable.args) <= 1
+                    and _cpp_receiver_ctype(gen, s.iterable.func.obj) == 'char *'):
+                # `for fact in <char*-expr>.split(sep):` — a str.split-family
+                # call used DIRECTLY as the loop iterable. `_cpp_expr`'s own
+                # split-family case lowers the call to a real MojoList* of
+                # strings (`mojo_str_split` family); this branch just routes
+                # it through the same cached-local + indexed-loop lowering
+                # every other list-iteration shape here uses, with element
+                # type char* (a string split always yields strings). Before
+                # this, the iterable fell to the generic range-for over the
+                # raw pointer expression ("'begin' was not declared in this
+                # scope" / invalid member-call on char*, depending on which
+                # fallback caught it first). Real: ftplib.py's mlsd.
+                _iter_list_expr = f"(MojoList *)({gen._cpp_expr(s.iterable)})"
+                _iter_elem = 'char *'
             elif isinstance(s.iterable, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared is not None \
                     and s.iterable.name not in gen._cpp_declared \
