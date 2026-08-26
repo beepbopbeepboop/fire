@@ -1,5 +1,86 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (updated 2026-08-26 — fresh deep-dive per task request; doc remains OPEN, but the documented blocker text is now substantially stale and the remaining gap is precisely characterized)
+
+Fresh investigation this session, as explicitly requested (the recent
+generator value-carrying-return work prompted a re-check of whether
+cross-generator `yield from` delegation is now plausibly tractable).
+Reproduced today's isolated refusal — same two shapes, byte-for-byte:
+
+```
+Unsupported shape(s): _candidate_paths: _candidate_paths: a
+@classmethod generator that references `cls` in its body in an
+unsupported way (...); _resolve_zip_path: unsupported for-loop
+iterable type: CallExpr.
+```
+
+### What changed since the 2026-08-25 write-up (stale-text corrections)
+
+1. **Cross-generator delegation is NO LONGER "a real, separate,
+   not-yet-built mechanism" in general.** The old text's premise is now
+   only ~half true. Verified fresh via minimal repros against current
+   master:
+   - `yield from <plain-name>(...)` delegating to another compiled
+     free-function generator WORKS (`_generator_api` + fixed-point
+     retry passes for forward references);
+   - `for x in self.<genmethod>(...)` / generator-METHOD delegation
+     WORKS (`_generator_method_api`, receiver passed as literal
+     `self`);
+   - @classmethod generators with receiver passing WORK; and,
+     notably discovered this session: **@staticmethod generators are
+     silently routed through the FREE-FUNCTION generator path**
+     (gimple_module_gen.py's free-fn loop skips only first-param-
+     self/cls functions), compiling to a module-unqualified
+     `_mojogen_<name>_*` unit registered under their bare name. A
+     minimal repro confirms `_resolve_zip_path`'s trivially-reduced
+     body (plain string yields) compiles fine standalone.
+2. **The "plain `yield` of a foreign-module constructor" half of the
+   old blocker is GONE.** `yield pathlib.Path(path_str)` inside a
+   generator body now compiles (verified with an isolated probe).
+
+### What ACTUALLY remains missing for `_candidate_paths`
+
+Exactly one narrow thing: `_cls_refs_supported` deliberately excludes
+`cls.<method>(...)` when `<method>` is a generator method of the
+enclosing struct, and `_cpp_yield_from`'s delegation dispatcher has no
+branch resolving a `cls.` receiver (it handles bare IdentExpr callees
+and literal-self receivers only). A minimal two-method repro (classmethod
+generator doing `yield from cls.<staticmethod-gen>(...)`) refuses at
+eligibility even though the staticmethod callee itself fully compiles.
+Extending it would be: relax the exclusion for generator methods that
+have (or, via the existing retry passes, will get) an api entry, plus a
+`cls.`-receiver branch in the yield-from/for-consumption emitters
+(staticmethod callee → no receiver arg; classmethod callee → opaque
+int64_t placeholder, mirroring `_gen_cpp_generator_unit`'s own `('cls',
+'int64_t')` convention). Plausibly a small, mechanical change.
+
+### Why it was nevertheless NOT attempted, and why this doc stays open
+
+Fixing delegation alone cannot close this file, because
+`_resolve_zip_path` independently refuses on shapes that are genuinely
+feature-sized:
+- `for match in reversed(list(re.finditer(r'[\\/]', path_str)))` —
+  CallExpr iterable still refused (re-probed fresh); and beneath that,
+- `match.end()`/`match.start()` are calls on `re.Match` objects
+  produced by the CPython C-extension `_sre` engine — there is no
+  compiled representation of them anywhere in this pipeline (re itself
+  falls back to source interpretation during the build), so consuming
+  them inside a coroutine frame would need a foreign/interpreted-object
+  model the scalar-only coroutine codegen deliberately does not have;
+- the guarded body runs under `with contextlib.suppress(...)` whose
+  exception-suppression semantics the plain-generator path currently
+  ELIDES entirely (documented convention) — acceptable only because
+  nothing here can represent the suppressed exceptions anyway.
+
+Also relevant to the cost/benefit: `grep -rn "yield from cls\."`
+across the entire Lib/ tree hits exactly ONE site — this file's line
+162. The narrow delegation extension would have zero other consumers
+today, and it edits shared coroutine eligibility/emission machinery
+(the exact class of change CLAUDE.md's regression history warns
+about). Per the campaign's risk policy — don't touch shared machinery
+without end-to-end payoff — deferred until some real consumer can
+actually compile end-to-end once it exists.
+
 ## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged, root cause pinned down precisely)
 
 Re-ran an isolated `compile_to_gimple_with_cpp` check fresh (post this
