@@ -4,6 +4,43 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — build exits 0 with 0 errors; the shared umarshal root cause is FIXED; remaining gaps are link-mode sibling-import degradation + argparse runtime, both outside this compile-fail doc's subject)
+
+Re-verified fresh: `python3 mojo.py build .../Tools/build/deepfreeze.py`
+**exits 0 with 0 error lines**, and deepfreeze.py's OWN source compiles
+clean in isolation too (fresh `do_imports=False` + `gcc -fgimple
+-fsyntax-only`: 0 errors — the 2026-08-09 entry's own-file `max()` fix
+holds).
+
+The SHARED root cause this doc always pointed at — umarshal.py's 17
+compile errors — is now fully fixed (see that doc's 2026-08-25 entry:
+missing-member writes route through `_mojo_dispatch_setattr` runtime
+dispatch, plus the funcptr-`main` declaration fix).
+
+**What is NOT yet resolved here, verified precisely**:
+
+1. **Link mode still silently degrades `import umarshal`.** MOJO_DEBUG
+   shows `load_module('umarshal') failed; treating module as empty:
+   Only stdlib and test imports supported` — link mode's import loader
+   has no support for non-stdlib SIBLING files, so the built binary
+   contains no `Reader`/`_r_object`/`loads` symbols (`nm`-verified).
+   Same treatment for its other imports (`__future__`, `typing`,
+   `collections.abc`). This is exactly the masking gap the 2026-08-09
+   entry documented — it just no longer hides any compile ERROR, only
+   functionality. Fixing it means real per-module compilation of
+   arbitrary sibling files into link mode (feature-sized, shared
+   machinery) — not attempted.
+2. **Runtime**: the binary starts and dies at deepfreeze's own
+   `args = parser.parse_args(); verbose = args.verbose` with a runtime
+   `AttributeError: verbose` — argparse's returned Namespace doesn't
+   carry attributes readable by compiled dynamic-getattr yet. An
+   ordinary-path runtime-support family, unrelated to compile failures.
+
+No code change for THIS file; no gate run attributable to it beyond
+those already run for the umarshal fixes (all green). Doc stays open,
+reclassified as blocked on the two non-compile families above.
+
+
 ## Status (re-verified 2026-08-09): found + fixed a real, narrow, SEPARATE bug in this file's own code; the file's SHARED root cause (umarshal.py) is still open, now masked rather than fixed
 
 Re-ran fresh against current master. Besides the shared `umarshal.py`
