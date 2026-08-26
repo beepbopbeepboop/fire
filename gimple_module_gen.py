@@ -3736,7 +3736,15 @@ def gen_module_impl(self, stmts):
                 elif ret == 'char *':
                     return 'char *'
                 else:
-                    return 'int64_t'
+                    # Delegate the unknown-callee fallback to _quick_type,
+                    # which knows shape-specific results this table has no
+                    # row for — notably the one-char*-arg opaque-constructor
+                    # passthrough (`X = Path(some_str)` → the value IS its
+                    # char* argument at runtime, see _lower_opaque_ctor).
+                    # Everything else quick-types to int64_t here, matching
+                    # this branch's old unconditional default.
+                    qt2 = self._quick_type(_value)
+                    return qt2 if qt2 == 'char *' else 'int64_t'
             elif (isinstance(_value.func, MemberExpr)
                     and _value.func.member in ('read', 'readline')
                     and not _value.args):
@@ -3772,7 +3780,12 @@ def gen_module_impl(self, stmts):
                     return 'int'
                 else:
                     return 'int64_t'
-            return 'int64_t'
+            # Not a known imported-module global: delegate to _quick_type,
+            # whose shape rows (e.g. `.name`/`.parent` on a path-shaped
+            # char* value → 'char *', matching _lower_MemberExpr) are the
+            # single source of truth for these RHS types.
+            qt3 = self._quick_type(_value)
+            return qt3 if qt3 == 'char *' else 'int64_t'
         else:
             qt = self._quick_type(_value) or 'int64_t'
             if qt.endswith(' *'):
@@ -4861,14 +4874,24 @@ def gen_module_impl(self, stmts):
                     global_decls.append(f"{ret} {gname};")
                     self._global_var_types[gname] = ret
                     self._global_c_decl_types[gname] = ret
-                elif ret == 'char *':
-                    global_decls.append(f"char * {gname};")
-                    self._global_var_types[gname] = 'char *'
-                    self._global_c_decl_types[gname] = 'char *'
                 else:
-                    global_decls.append(f"int64_t {gname};")
-                    self._global_var_types[gname] = 'int64_t'
-                    self._global_c_decl_types[gname] = 'int64_t'
+                    # Final fallback consults the shared Phase 1.7 RHS-type
+                    # table (same consolidation precedent as the MemberExpr
+                    # branch just below): it knows the one-char*-arg opaque-
+                    # constructor passthrough (`X = Path(some_str)` → the
+                    # value IS its char* argument at runtime, see _lower_
+                    # opaque_ctor) that would otherwise be mis-declared
+                    # int64_t here, and returns int64_t for every shape the
+                    # explicit rows above already handled identically.
+                    _ivt = _phase17_value_type(value)
+                    if _ivt == 'char *':
+                        global_decls.append(f"char * {gname};")
+                        self._global_var_types[gname] = 'char *'
+                        self._global_c_decl_types[gname] = 'char *'
+                    else:
+                        global_decls.append(f"int64_t {gname};")
+                        self._global_var_types[gname] = 'int64_t'
+                        self._global_c_decl_types[gname] = 'int64_t'
             elif isinstance(value.func, MemberExpr):
                 # Consolidated with Phase 1.7's own RHS-type table
                 # (`_phase17_value_type`) instead of maintaining a third
@@ -4962,12 +4985,14 @@ def gen_module_impl(self, stmts):
                     self._global_var_types[gname] = f"{_struct_name} *"
                     self._global_c_decl_types[gname] = f"{_struct_name} *"
                 else:
-                    _ret = self.func_return_types.get(_gv.func.name, '')
-                    if _ret.endswith(' *'):
-                        global_decls.append(f"{_ret} {gname};")
-                        self._global_var_types[gname] = _ret
-                        self._global_c_decl_types[gname] = _ret
-                    elif _ret == 'char *':
+                    # Same shared-table fallback as _gscan_declare_global's
+                    # IdentExpr-callee branch just above: the Phase 1.7
+                    # table knows the one-char*-arg opaque-constructor
+                    # passthrough (`X = Path(some_str)` → declare char *),
+                    # and returns int64_t for every shape this branch's
+                    # explicit rows already handled identically.
+                    _ivt = _phase17_value_type(_gv)
+                    if _ivt == 'char *':
                         global_decls.append(f"char * {gname};")
                         self._global_var_types[gname] = 'char *'
                         self._global_c_decl_types[gname] = 'char *'

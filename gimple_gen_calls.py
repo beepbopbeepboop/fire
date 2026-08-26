@@ -1588,6 +1588,26 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
 
 
 def _lower_opaque_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    # Single-STRING-argument opaque constructor passthrough (real:
+    # `pathlib.Path(x)` / any imported class this compile never inlined,
+    # constructed from one path-shaped string). This codegen represents
+    # path-like values AS their char* string — the established convention
+    # `/` on a char* receiver already relies on (lowered to mojo_path_join)
+    # and every `.name`/`.parent`/`.resolve()` member/method dispatch below
+    # consumes — so return the argument UNCHANGED with its own 'char *'
+    # static type instead of re-boxing it to int64_t. Re-boxing broke that
+    # convention end-to-end: the boxed result then reached member access as
+    # an untyped int64_t, fell to the generic dynamic-getattr dispatch, and
+    # raised a fatal runtime `AttributeError: name` (real:
+    # Apple/__main__.py's module level `SCRIPT_NAME = Path(__file__).name`,
+    # crashing the program before main()). Only the exact one-positional-
+    # -arg, zero-kwargs, char*-argument shape takes this path; every other
+    # opaque construction keeps the original first-arg-as-int64_t behavior
+    # below unchanged.
+    if (len(node.args) == 1 and not getattr(node, 'kwargs', None)
+            and gen._quick_type(node.args[0]) == 'char *'):
+        at, av = gen.lower_expr(node.args[0])
+        return at, av
     ctor_args = [gen.lower_expr(a) for a in node.args]
     t = gen._new_temp('int64_t')
     if ctor_args:

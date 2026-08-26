@@ -3221,6 +3221,20 @@ char *int64_t_basename(char *path) {
     return (char *)base;
 }
 
+/* pathlib.Path.resolve() (strict=False default) / os.path.realpath: make
+ * the path absolute AND resolve symlinks via POSIX realpath(3). Matches
+ * Python's strict=False convention: when the path (or any leading tail of
+ * it) doesn't exist, realpath(3) fails and we return the input unchanged
+ * rather than raising — every caller of this helper is a Path-shaped value
+ * this codegen represents as its char* string, and resolve() on a
+ * not-yet-existing path is ordinary, non-exceptional Python. */
+char *int64_t_realpath(char *path) {
+    if (!path) return "";
+    char resolved[4096];
+    if (realpath(path, resolved)) return strdup(resolved);
+    return strdup(path);
+}
+
 /* os.path.splitext(path) -> (root, ext). Codegen (see the os.path.splitext
  * call site in gimple_codegen.py) treats this function's return value as
  * the root and builds a [root, ""] list around it — but this returned

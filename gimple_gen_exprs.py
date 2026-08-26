@@ -829,6 +829,27 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             gen._emit(f"  {t} = mojo_list_new ();  /* sys.path stub */")
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
+        if module_name == 'sys' and node.member in ('stdout', 'stderr', 'stdin'):
+            # The three standard stream FILE objects. This runtime has no
+            # Python-file-object model, so each is represented as its POSIX
+            # file descriptor (0/1/2 — the same identity libc's
+            # fileno(stdin/stdout/stderr) yields) boxed as an opaque scalar
+            # handle: enough for `for s in [sys.stdout, sys.stderr]:
+            # s.reconfigure(...)` (the unknown-method scalar stub passes the
+            # handle through, an honest no-op — this runtime's printf output
+            # is already unbuffered) and any future fd-level write support,
+            # WITHOUT crashing the way the previous fallthrough did: `sys`
+            # binds to a bare module marker (int64_t 0), so the generic
+            # dynamic-getattr dispatch received obj=NULL and raised a fatal
+            # `AttributeError: stdout` at runtime (real:
+            # Apple/__main__.py's entry tail reconfigures both streams
+            # before main()). Deliberately NOT the ast_rewriter's
+            # `sys.stdin.read()` rule's job — that fires on the CALL shape
+            # before this value read is ever reached; this case covers
+            # bare VALUE reads of the streams themselves.
+            fd = {'stdin': '0', 'stdout': '1', 'stderr': '2'}[node.member]
+            t = gen._new_val('int64_t', fd)
+            return 'int64_t', t
 
         # Special handling for os.path attribute access
         if module_name == 'os' and node.member == 'path':
@@ -861,6 +882,26 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             t = gen._new_val('char *',
                              gen._intern_string(gimple_ctypes._c_escape(val)))
             return 'char *', t
+
+        # signal.SIG* — the portable POSIX signal numbers, genuine
+        # compile-time constants fixed by the OS ABI (identical on every
+        # POSIX system this runtime targets). `signal` binds to a bare
+        # module marker, so these fell through to the dynamic-getattr
+        # fallback — obj=NULL, fatal `AttributeError: SIGTERM` at runtime
+        # (real: Apple/__main__.py's main(): `signal.signal(signal.SIGTERM,
+        # signal_handler)`). Only the eleven numbers that are identical
+        # across all POSIX platforms are listed; BSD/Linux-only members
+        # (SIGUSR1/SIGCHLD/...) deliberately keep the honest AttributeError
+        # rather than risk emitting a wrong number.
+        if module_name == 'signal' and node.member in (
+                'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGABRT',
+                'SIGFPE', 'SIGKILL', 'SIGSEGV', 'SIGPIPE', 'SIGALRM',
+                'SIGTERM'):
+            val = {'SIGHUP': 1, 'SIGINT': 2, 'SIGQUIT': 3, 'SIGILL': 4,
+                   'SIGABRT': 6, 'SIGFPE': 8, 'SIGKILL': 9, 'SIGSEGV': 11,
+                   'SIGPIPE': 13, 'SIGALRM': 14, 'SIGTERM': 15}[node.member]
+            t = gen._new_val('int64_t', str(val))
+            return 'int64_t', t
 
         # Class attribute access: ClassName.ATTR
         # Check if module_name is a known struct/class (not an instance variable)
@@ -1343,6 +1384,30 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # reason _new_val special-cases int64_t constants).
             return '_Bool', gen._new_val('_Bool', '(_Bool)1' if mv else '(_Bool)0')
     field_map = gen.struct_field_types.get(struct_name, {})
+    # pathlib.Path attribute reads on a value this codegen represents as
+    # its char* path string. A Path-representing value reaches here as a
+    # plain `char *` (the single-string-argument opaque-constructor
+    # passthrough — see _lower_opaque_ctor's char*-identity case, the same
+    # strings-as-path-values convention that already lowers `/` on char*
+    # receivers to mojo_path_join). `.name` is os.path.basename and
+    # `.parent` is os.path.dirname — both real runtime helpers this table
+    # already shares with the os.path call sites (int64_t_basename/
+    # int_dirname). Scoped to EXACTLY ot == 'char *' so a boxed struct
+    # handle (int64_t/void *) reading its genuine `.name` FIELD still goes
+    # through the struct-handle-aware paths below (_resolved_field /
+    # _known_field_type / runtime tag dispatch) unchanged; those never
+    # have a static 'char *' type. Before these cases, both reads fell to
+    # the generic dynamic-getattr dispatch, which has no string-attribute
+    # model and raised a fatal `AttributeError: name` at runtime (real:
+    # Apple/__main__.py's module level `SCRIPT_NAME = Path(__file__).name`,
+    # which crashed the whole program before main() ran).
+    if ot == 'char *' and node.member in ('name', 'parent'):
+        if node.member == 'name':
+            return 'char *', gen._call_expr('char *', 'int64_t_basename',
+                                            [('char *', ov)])
+        dn = gen._call_expr('int64_t', 'int_dirname',
+                            [('int64_t', '0'), ('char *', ov)])
+        return 'char *', gen._new_val('char *', f"(char *){dn}")
     if node.member in field_map:
         field_type = field_map[node.member]
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
