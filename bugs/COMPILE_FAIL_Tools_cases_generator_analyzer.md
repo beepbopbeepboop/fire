@@ -4,6 +4,50 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, branch fix/opencode-group1 — FIXED: the zip_longest blocker is resolved; build exits 0 and real-input output is byte-identical to CPython's; one unrelated pre-existing exit-time crash documented below)
+
+The `itertools.zip_longest` gap root-caused in the 2026-08-25 entry below is
+now fixed in shared source (commit `8dfd12f` on fix/opencode-group1):
+`for (a, b) in itertools.zip_longest(sa, sb)` lowers as a plain index loop
+over max(len_a, len_b) — each tuple-target slot assigned from its OWN
+sequence's element i (that sequence's tracked element-type accessor), or
+the fill value past its length (default 0 = this model's None, so the
+body's `x is None` guards test a genuine 0/NULL). Per-slot element typing
+propagates from each sequence's own `_elem_types` entry, so
+analyzer.py's `list[StackItem]` inputs/outputs give genuinely struct-typed
+loop variables (fixing BOTH error sites: line 386's chained member writes
+AND line 401's `input.used = True`, which was poisoned by first-decl-wins
+off the same mistyped loop). The dispatch is transactional: any unprovable
+shape (non-2-arity, non-tuple target, non-list sequence, non-literal
+fillvalue) rolls back and falls through to the old generic path unchanged.
+
+**End-to-end verification (beyond "compiles"):**
+- `python3 mojo.py build .../cases_generator/analyzer.py` exits 0.
+- Standalone equal/unequal-length repros (struct-typed sequences,
+  `is None` padding guards, attribute writes on loop vars) produce output
+  byte-identical to python3 on both paths.
+- The compiled binary run on REAL input (`analyzer Python/bytecodes.c`)
+  produces output byte-identical to CPython's own run of the same command
+  (all 2892 lines — Uops/Instructions/Families/Pseudos), exercising
+  analyze_stack's zip_longest loop for real. (CPython itself refuses
+  interpreter_definition.md — wrong input format, same on the Python side.)
+
+**Residual (pre-existing, NOT this fix's scope):** after printing its full
+byte-identical output the process segfaults at exit; lldb attributes it to
+`assign_opcodes`'s `nonlocal next_opcode` mutable-closure site
+(analyzer.py:1066) — the boxed-mutable-capture family, untouched by and
+unreachable-from the loop lowering (which allocates nothing). Two further
+pre-existing quirks observed while isolating that: a struct-field read of
+an int64_t-boxed field in a str-concat context can stringify via
+`mojo_str_from_int` (pointer printed as decimal; reproduces with a plain
+hand-written index loop, no zip_longest involved — root family is the
+excluded HIGH-RISK unannotated-init-param/field-type doc), and bools print
+as 0/1. None affect analyzer.py's own analyzed output above.
+
+Quality gate: test_gimple.py 256/256, test_module_cache.py 76/76,
+make check-selfhost clean, from-scratch stdlib dylib rebuild with 0
+`skip <module>:` lines.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against `fix/rest-remainder9` — identical to the 2026-08-23
