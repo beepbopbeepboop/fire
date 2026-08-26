@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/umarshal.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtOpencode_genlib3): still exits 0; runtime death precisely located at loads()'s own assert on stubbed-marshal output
+
+Fresh `python3 mojo.py build` against current master (f0f6e78):
+**exits 0**, binary built in ~71s. Running it crashes with SIGTRAP and
+zero output — lldb pinpoints frame #0 at umarshal.py:304,
+`assert isinstance(data, bytes)` inside `loads()`: main()'s self-test
+calls stubbed `marshal.dumps(sample)` (compiled mode emits
+"unavailable in compiled mode" stubs for marshal/pprint), feeds its
+garbage return to `loads()`, and the function's own bytes-check trap
+fires. This confirms, with the exact instruction, that the runtime
+death is purely the documented stubbed-C-extension dependency chain —
+no codegen defect involved; every compile-side fix from the 2026-08-25
+entry below holds. Doc remains compile-RESOLVED / runtime-blocked-on-
+stubs.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — ALL 17 compile errors FIXED via a shared root cause; `mojo.py build` now EXITS 0; runtime reaches the self-test but depends on stubbed C-extension modules)
 
 Re-verified fresh: the 16 `'MojoList' has no member named 'co_*'`
