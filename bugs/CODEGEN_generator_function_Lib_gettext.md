@@ -1,5 +1,44 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; own-generator fix holds (0 isolated .cpp errors); whole-program build still fails on the transitive cascade plus 4 known non-generator own-file residuals)
+
+Re-verified both halves fresh:
+
+1. **Own generator: still fully clean.** Fresh isolated
+   `compile_to_gimple_with_cpp(do_imports=False)` +
+   `g++-mp-15 -std=c++20 -fsyntax-only` on the real gettext.py:
+   **0 errors** — the 2026-08-24 local-`import re` fix
+   (`gimple_cpp_core.py` registering function-scoped imports into
+   `gen._cpp_early_global_names`) holds; `_tokenize`'s coroutine unit
+   compiles completely clean.
+2. **Whole-program build: still exits 1**, safety-wrapped per the
+   standing RAM rule. 311 errors, dominated by transitively-imported
+   files (argparse.py 55, codecs.py 33, typing.py 22, copy.py 21,
+   enum.py 20, ...) — none implicating `_tokenize`/`_expand_lang`.
+   gettext.py itself now accounts for only **4** raw error lines, all
+   pre-documented, all non-generator, all outside this doc's subject:
+   - 208/217 (`mojo_strlen`/`_mojo_at_char` pointer-from-integer): root
+     cause #3 below — no tuple-return-type inference for ordinary
+     multi-return-path functions (`result, nexttok = _parse(...)`),
+     still feature-sized, unchanged.
+   - 472 (`invalid types for 'trunc_mod_expr'`) / 474 (`invalid
+     operands to binary %`): `self.CONTEXT % (context, msgid1)` where
+     `CONTEXT` is a non-literal (class-attribute) format-string LHS —
+     `_lower_percent` handles only a StringLiteral LHS, and the
+     `char *`-LHS tail fallback emits plain concatenation (itself
+     semantically wrong for formatting, a separate latent hazard), so
+     this shape falls through to numeric modulo against the
+     tuple-RHS's `MojoList *`. Real fix needs runtime dynamic
+     %-formatting (a `mojo_percent_format(fmt, args_list)` engine),
+     deliberately deferred since 2026-08-09; not attempted.
+
+No code change; no gate run (nothing touched). Doc stays open — the
+file does not build end-to-end — but this doc's own subject (the
+generator-codegen concern) remains fully resolved as of 2026-08-24;
+every remaining error belongs to separately-tracked non-generator
+families.
+
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder2 — the LAST remaining error (`'re' was not declared`) FIXED; own generator now ZERO errors, isolated; whole-program build still fails on unrelated transitive-dependency errors)
 
 Root-caused precisely: `_tokenize`'s `import re` (the module-level `re`

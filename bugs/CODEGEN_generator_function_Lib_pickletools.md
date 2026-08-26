@@ -1,5 +1,33 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; refusal unchanged, and confirmed deeper than `getpos`: the whole function body is dynamically-receiver territory)
+
+Re-ran a fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` on the real
+pickletools.py: `_genops` refuses on EXACTLY the 2026-08-24 entry's
+shape — "a call to unresolved callee 'getpos(...)' is not supported in
+a compiled generator/coroutine body" — unchanged by any of the
+campaign fixes landed since (including `d0ecc2b`'s builtin-container-
+methods-as-first-class-values, which covers dict/list/set receivers,
+not opaque ones).
+
+Re-assessed tractability once more before standing down, reading the
+full coroutine-body call emitter (`_cpp_expr`'s CallExpr handling):
+the `getpos = data.tell` branch is the FIRST unsupported shape, but it
+is not plausibly the LAST even if a runtime bound-method-off-opaque-
+receiver representation existed for it — the SAME function body also
+needs `isinstance(data, bytes_types)` + `data = io.BytesIO(data)`
+(no BytesIO model exists anywhere in this codegen), `data.read(1)` and
+`opcode.arg.reader(data)` (calls through an entirely dynamically-
+typed chain), and a `%`-format against non-literal pieces. Every one
+of those is the same "the receiver's real type is only known at
+runtime" family; a narrow `getpos`-only patch would trade today's one
+honest refusal for the next one (or worse, silent stub values feeding
+`pos` into every yielded opcode tuple). Confirmed feature-sized,
+consistent with every prior assessment in this file. Doc stays open;
+no code change; no gate run.
+
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — the 2026-08-23 "`_genops` now compiles" claim was stale; `_genops` refuses again, honestly, on a real remaining gap)
 
 Re-verified from scratch (a real `python3 mojo.py build .../Lib/

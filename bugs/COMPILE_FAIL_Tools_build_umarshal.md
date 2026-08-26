@@ -4,6 +4,59 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/umarshal.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — ALL 17 compile errors FIXED via a shared root cause; `mojo.py build` now EXITS 0; runtime reaches the self-test but depends on stubbed C-extension modules)
+
+Re-verified fresh: the 16 `'MojoList' has no member named 'co_*'`
+errors AND the `'main' undeclared here` error are all GONE —
+`python3 mojo.py build .../Tools/build/umarshal.py` now **exits 0**
+(verified twice, second run after clearing stale CAS entries). Two
+real fixes in shared compiler source (commit `cb85bf6`), both narrower
+than the "per-branch retyping vs dynamic-dispatch routing" dilemma this
+doc's 2026-08-09 entry posed — because option (b) turned out to have an
+existing, general mechanism to plug into:
+
+1. **Missing-member writes now route through dynamic dispatch.**
+   `_gen_stmt_AssignStmt`'s member-write tail emitted `ov->member = val`
+   unconditionally for any struct-pointer receiver, hard-erroring
+   whenever the declared type lost a cross-branch unification (exactly
+   this doc's retval/MojoList* case). It now checks: if the receiver's
+   struct is KNOWN but lacks the member, or the receiver is a
+   container/opaque pointer that is no user struct at all (`MojoList *`
+   etc.), emit `_mojo_dispatch_setattr(obj, "member", val)` instead —
+   the SAME runtime dispatch the fully-opaque-receiver branch right
+   above already uses. At runtime the dispatch reads the object's REAL
+   type tag, so when the Type.CODE branch executes with retval actually
+   holding a tagged `Code` instance, every `co_*` write lands in Code's
+   real storage; on any other branch's runtime type it degrades exactly
+   like Python attribute assignment on an arbitrary object. This is the
+   2026-08-09 entry's own option (b), realized through the existing
+   machinery rather than new per-branch variable machinery — and it is
+   fully general for every future "one local, many branch shapes"
+   function.
+2. **The `'main' undeclared here` error**: umarshal's `def main()` is
+   renamed `_gimple_main` (entry-point convention), so the funcptr-table
+   initializer `(void *)main` (from `sample2 = main.__code__`) referenced
+   the generated C entrypoint with NO prior declaration. The funcptr
+   emitter now declares `int main(int, const char **);` up front when
+   its target set contains the entrypoint name.
+
+**Runtime status, verified honestly**: the built binary starts and runs
+into main()'s own self-test, then dies — because the self-test
+(`marshal.dumps(sample)` round-tripped through `loads()`) depends on
+CPython's `marshal` and `pprint` C modules, which compiled mode only
+stubs ("unavailable in compiled mode"). That is not a compile-stage gap
+and not reachable by compiler codegen: real marshal data would come from
+the CPython build process, and `loads()` itself (this file's actual
+purpose) compiles fully. Full mandatory gate for both fixes:
+test_gimple.py 256/256, test_module_cache.py 76/76, generator runner
+53/53, async runner 38/38, make check-selfhost clean, from-scratch
+stdlib dylib rebuild EXIT=0 / 0 skips.
+
+See the deepfreeze doc's matching 2026-08-25 entry for how this changes
+THAT file's picture (build exits 0 there too, but link mode still
+treats the non-stdlib sibling `import umarshal` as an empty module).
+
+
 ## Status (re-verified 2026-08-09): still genuinely broken, root cause now fully traced — confirmed structural
 
 Re-ran fresh against current master (`python3 mojo.py build

@@ -1,5 +1,37 @@
 # CODEGEN_generator_function: Lib/turtle.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; isolated own-code error count now ZERO (both .ci and .cpp), improvement landed via concurrent campaign work; whole-program build still fails on the tkinter cascade + documented non-generator families)
+
+Fresh verification, both halves:
+
+1. **Isolated (`do_imports=False`) own-code errors: 5 → 0.** The
+   2026-08-24 entry's five residual lines (189 `eval()` dynamic
+   retype, 3078/3314/3379 `Vec2D` tuple-subclass arithmetic, 4170
+   dead-code `write`) no longer reproduce in EITHER the `-fgimple`
+   (.ci) or the C++20-coroutine (.cpp) side of a fresh isolated
+   compile of the real turtle.py — confirmed identical at this
+   session's pre-session commit (`4220964`, via a separate
+   `git worktree add`), i.e. resolved by concurrently-merged campaign
+   work before this session started, not by anything landed today.
+   The doc's stale claim corrected accordingly.
+2. **Whole-program build: still exits 1** (safety-wrapped run): 784
+   errors, dominated by the transitively-imported tkinter cascade
+   (`tkinter/__init__.py` 540, `tkinter/simpledialog.py` 50) plus
+   argparse/_collections_abc/typing. The 47 turtle.py-ATTRIBUTED
+   lines re-bucket as: the same documented `Vec2D(tuple)` builtin-
+   subclass operator-overload family (3078/3314/3379, feature-sized,
+   per the 2026-08-20 analysis below), dynamic-metaprogramming shapes
+   (`_default_root`, synthesized at runtime by turtle's own `_make_
+   global_funcs` machinery), cross-module operator-symbol resolution
+   (`operator_lt_1ce6ce`/`operator_mojo_abs_0c85c9` implicit
+   declarations — the bare-name/suffix collision family), and the
+   dead-code `if __name__ == "__main__":` demo block (4170) — all
+   non-generator, all previously classified.
+
+All 3 of turtle.py's own generator sites remain clean. No code change;
+no gate run (nothing touched). Doc stays open.
+
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, unaffected by this session's fixes)
 
 Re-ran the isolated coroutine-path compile fresh, post-`fd909e9`

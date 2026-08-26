@@ -3736,6 +3736,20 @@ def gen_module_impl(self, stmts):
             elif (isinstance(_value.func, MemberExpr)
                     and _value.func.member == 'readlines'):
                 return 'MojoList *'
+            elif (isinstance(_value.func, MemberExpr)
+                    and _value.func.member in ('encode', 'decode', 'format')):
+                # str.encode()/str.decode()/str.format() all lower to a
+                # real `char *` everywhere else in this codegen (see
+                # gimple_gen_methods.py's char*-method table, which
+                # stubs all three as identity passthroughs of the
+                # receiver). Without this case the global got declared
+                # int64_t against a char*-producing RHS — a hard
+                # "assignment to 'int64_t' from 'char *'" in
+                # whole-program mode (real: Lib/mailbox.py:32,
+                # `linesep = os.linesep.encode('ascii')`), and a
+                # pointer-stored-as-int64 (garbage on every later read,
+                # e.g. `len(linesep)`) where coercion happened silently.
+                return 'char *'
             else:
                 return 'int64_t'
         elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
@@ -4847,21 +4861,32 @@ def gen_module_impl(self, stmts):
                     global_decls.append(f"int64_t {gname};")
                     self._global_var_types[gname] = 'int64_t'
                     self._global_c_decl_types[gname] = 'int64_t'
-            elif (isinstance(value.func, MemberExpr)
-                    and value.func.member in ('read', 'readline')
-                    and not value.args):
-                global_decls.append(f"char * {gname};")
-                self._global_var_types[gname] = 'char *'
-                self._global_c_decl_types[gname] = 'char *'
-            elif (isinstance(value.func, MemberExpr)
-                    and value.func.member == 'readlines'):
-                global_decls.append(f"int64_t {gname};  /* MojoList * */")
-                self._global_var_types[gname] = 'MojoList *'
-                self._global_c_decl_types[gname] = 'int64_t'
-            else:
-                global_decls.append(f"int64_t {gname};")
-                self._global_var_types[gname] = 'int64_t'
-                self._global_c_decl_types[gname] = 'int64_t'
+            elif isinstance(value.func, MemberExpr):
+                # Consolidated with Phase 1.7's own RHS-type table
+                # (`_phase17_value_type`) instead of maintaining a third
+                # drifting copy of the same method-call rows: that table
+                # already maps read/readline -> char *, readlines ->
+                # MojoList *, encode/decode/format -> char * (added when
+                # Lib/mailbox.py:32's `linesep = os.linesep.encode(
+                # 'ascii')` decl'd int64_t against a char*-producing RHS
+                # — a hard whole-program "assignment to 'int64_t' from
+                # 'char *'" plus a pointer-stored-as-int64 on every
+                # later read), int64_t otherwise. Emission/cdecl side
+                # effects here mirror the read/readline and readlines
+                # rows verbatim.
+                _mvt = _phase17_value_type(value)
+                if _mvt in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    global_decls.append(f"int64_t {gname};  /* {_mvt} */")
+                    self._global_var_types[gname] = _mvt
+                    self._global_c_decl_types[gname] = 'int64_t'
+                elif _mvt.endswith(' *') or _mvt == 'char *':
+                    global_decls.append(f"{_mvt} {gname};")
+                    self._global_var_types[gname] = _mvt
+                    self._global_c_decl_types[gname] = _mvt
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+                    self._global_c_decl_types[gname] = 'int64_t'
         elif (isinstance(value, MemberExpr) and isinstance(value.obj, IdentExpr)
                 and value.obj.name in self.imported_symbols
                 and self.imported_symbols[value.obj.name].get('module')
@@ -5780,6 +5805,22 @@ def gen_module_impl(self, stmts):
                     continue
             return c_name
         if _new_names:
+            # A target whose bare csym is the program ENTRY-POINT name
+            # (`main`) references the generated `int main(int, const
+            # char **)` — which is only DEFINED at the very end of this
+            # translation unit and never forward-declared (the user's
+            # own `def main` was renamed `_gimple_main`; see gimple_gen_
+            # funcs.py). A file-scope `(void *)main` initializer there-
+            # fore died with "'main' undeclared here (not in a
+            # function)" — real: Tools/build/umarshal.py, whose own
+            # `def main()` body does `sample2 = main.__code__`.
+            # Declare the entrypoint up front so the initializer has a
+            # declared identifier; every other funcptr target already
+            # gets its ordinary forward declaration from the per-function
+            # pass above.
+            if 'main' in _new_names:
+                parts.append("int main (int argc, const char **argv);")
+                parts.append('')
             for c_name in _new_names:
                 if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
                     parts.append(f"static void * _funcptr_{c_name} = (void *){_funcptr_target(c_name)};")
@@ -5992,6 +6033,14 @@ def gen_module_impl(self, stmts):
                 if _td:
                     cpp_parts.append(_td.replace('_Bool', 'bool'))
                     cpp_parts.append('')
+            # Remember which struct typedefs this preamble now defines, so
+            # the module-globals mirror block below can tell a nameable
+            # type from one it must box.
+            _cpp_preamble_typedef_structs = set(
+                _sn2 for _sn2 in _gm_struct_names_seen
+                if _gm_typedef_text(_sn2) is not None)
+        else:
+            _cpp_preamble_typedef_structs = set()
         if self._cpp_module_global_refs or self._cpp_module_func_refs:
             cpp_parts.append('/* Extern declarations for module-level symbols')
             cpp_parts.append('   referenced by this module\'s compiled generator')
@@ -6004,6 +6053,66 @@ def gen_module_impl(self, stmts):
             for _mref_safe_mod in sorted(_mref_modules):
                 _mt = f"_{_mref_safe_mod}_toplev"
                 _mg = f"_{_mref_safe_mod}_globals"
+                # A mirror field typed `SomeStruct *` is only emittable if
+                # g++ can NAME SomeStruct in this translation unit. The
+                # typedef BFS above only pulls structs generator bodies
+                # actually reach (self/params/ctors/yields), so a global
+                # whose inferred type is a struct pointer NO generator
+                # touches (real: Lib/typing.py's `ByteString`/
+                # `_lazy_annotationlib`/`_sentinel`, typed
+                # `_DeprecatedGenericAlias *` etc. by the ordinary
+                # constructor-call rule) used to be copied verbatim into
+                # this mirror — "'_DeprecatedGenericAlias' does not name
+                # a type", 5 hard g++ errors. Fix: (a) when SomeStruct's
+                # fully-resolved layout is available in
+                # struct_field_types, emit its forward decl + full
+                # typedef here too (deduped against what the BFS block
+                # already emitted); (b) when it is NOT available, box
+                # THIS mirror's field to int64_t — layout-identical on
+                # every supported ABI (both 8 bytes / 8-aligned), and
+                # this TU never dereferences such a field anyway (the
+                # .ci side owns the real typed accesses).
+                _mirror_extra_structs: list = []
+                for _gl in self._module_globals.get(
+                        'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):
+                    _mdm = re.match(r'^(\w+) \*$', _gl[1])
+                    if not _mdm:
+                        continue
+                    _msn = _mdm.group(1)
+                    if (_msn in _cpp_preamble_typedef_structs
+                            or _msn not in self.struct_field_types
+                            or _msn in _mirror_extra_structs):
+                        continue
+                    _mirror_extra_structs.append(_msn)
+                # Transitive closure over field-typed struct pointers,
+                # same as the generator-body BFS above: a typedef emitted
+                # here may itself reference further struct-pointer fields,
+                # each of which needs at least a forward declaration by
+                # the time its referrer is parsed.
+                _mirror_frontier = list(_mirror_extra_structs)
+                while _mirror_frontier:
+                    _mf_cur = _mirror_frontier.pop()
+                    for _mf_fct in self.struct_field_types.get(_mf_cur, {}).values():
+                        if isinstance(_mf_fct, str) and _mf_fct.endswith(' *'):
+                            _mf_sn = _mf_fct[:-2]
+                            if (_mf_sn in self.struct_field_types
+                                    and _mf_sn not in _cpp_preamble_typedef_structs
+                                    and _mf_sn not in _mirror_extra_structs):
+                                _mirror_extra_structs.append(_mf_sn)
+                                _mirror_frontier.append(_mf_sn)
+                if _mirror_extra_structs:
+                    cpp_parts.append('/* Struct layouts needed only by the')
+                    cpp_parts.append('   module-globals mirror below. */')
+                    for _me_sn in sorted(_mirror_extra_structs):
+                        cpp_parts.append(f'struct {_me_sn};')
+                    cpp_parts.append('')
+                    for _me_sn in sorted(_mirror_extra_structs):
+                        _me_flds = self.struct_field_types.get(_me_sn, {})
+                        _me_td = '\n'.join(
+                            _render_struct_typedef_body(_me_sn, _me_flds))
+                        cpp_parts.append(_me_td.replace('_Bool', 'bool'))
+                        cpp_parts.append('')
+                    _cpp_preamble_typedef_structs.update(_mirror_extra_structs)
                 cpp_parts.append(f'typedef struct {_mt} {{')
                 for _gl in self._module_globals.get(
                         'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):

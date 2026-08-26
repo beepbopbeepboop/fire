@@ -838,10 +838,28 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             gen._emit(f"  {t} = 0;  /* os.path module marker */")
             return 'int', t
 
-        # os.sep / os.pathsep — this platform is always POSIX ('/').
-        if module_name == 'os' and node.member in ('sep', 'pathsep'):
-            sep = '/' if node.member == 'sep' else ':'
-            t = gen._new_val('char *', gen._intern_string(sep))
+        # os.sep / os.pathsep / os.curdir / os.pardir / os.linesep —
+        # this platform is always POSIX ('/'), so all five are genuine
+        # compile-time constants straight out of os.py's own module body
+        # (sep='/'; pathsep=':'; curdir='.'; pardir='..'; linesep='\n').
+        # `sep`/`pathsep` were always handled here; the other three fell
+        # through to the generic unresolved-module-attribute paths below
+        # — a silent `(int)0` stub where one was reachable, else a fatal
+        # runtime `AttributeError: curdir`/`AttributeError: linesep`
+        # from the generic dynamic-dispatch fallback (real:
+        # Lib/mailbox.py:32's `linesep = os.linesep.encode('ascii')`,
+        # whose global then also mis-typed against the mismatched RHS).
+        if module_name == 'os' and node.member in ('sep', 'pathsep',
+                                                   'curdir', 'pardir',
+                                                   'linesep'):
+            val = {'sep': '/', 'pathsep': ':', 'curdir': '.',
+                   'pardir': '..', 'linesep': '\n'}[node.member]
+            # _intern_string wants an already-C-escaped literal body —
+            # linesep's raw newline must go through _c_escape (the same
+            # shared helper every other string-emission site uses) or it
+            # splices a literal line break into the .ci string pool.
+            t = gen._new_val('char *',
+                             gen._intern_string(gimple_ctypes._c_escape(val)))
             return 'char *', t
 
         # Class attribute access: ClassName.ATTR

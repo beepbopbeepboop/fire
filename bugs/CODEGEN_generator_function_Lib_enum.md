@@ -1,5 +1,56 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; unchanged refusal, still feature-sized, one prior sub-gap now closed upstream)
+
+Re-ran a fresh, safety-wrapped `python3 mojo.py build
+.../Lib/enum.py` on current master (`4220964`): the module still refuses
+on exactly 3 named generator functions — `_iter_member_`,
+`_iter_member_by_def_`, `_iter_member_by_value_` (the body-level alias
+mechanism from commit `6e92df8` correctly gives `_iter_member_` its own
+refusal now, so it is listed as its own function rather than hiding
+behind the other two) — all for the same reason as the 2026-08-21
+entry: "a @classmethod generator that references `cls` in its body in
+an unsupported way".
+
+What changed since that entry, checked directly:
+
+1. **Upstream progress, currently unreachable**: the
+   `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` mechanism
+   now covers single-parameter lambdas plus real
+   `sorted(..., key=lambda m: ...)` support in the coroutine emitter,
+   explicitly motivated by this file's `_iter_member_by_def_`. That
+   removes what used to be `_iter_member_by_def_`'s second independent
+   refusal (the `key=` lambda) — but only for bodies that get past the
+   cls gate, which enum.py's own three never do.
+2. **The remaining root cause is unchanged and confirmed
+   feature-sized**: `_iter_member_by_value_`'s body needs
+   `cls._flag_mask_` (line 1432) and `cls._value2member_map_.get(val)`
+   (1433); both attributes exist ONLY through `EnumMeta.__new__`'s
+   dynamic `classdict['_value2member_map_'] = {}` /
+   `classdict['_flag_mask_'] = 0` writes (enum.py:531/544) plus
+   post-construction mutation (`enum_class._flag_mask_ |= value`,
+   enum.py:277) — never as literal class-body AssignStmts, so
+   `_class_attrs['Flag']` has no entry and `_cls_refs_supported`
+   correctly refuses rather than stubbing. Stubbing would be a silent
+   miscompile, not a fix: `_flag_mask_ = 0` makes
+   `_iter_bits_lsb(value & 0)` yield nothing, so every Flag iteration
+   would silently produce zero members.
+3. **Even full compile-side support would not make enum.py work**:
+   runtime-correct behavior additionally needs (a)
+   `cls._iter_member_by_value_(value)` — a GENERATOR-method call via
+   `cls`, needing coroutine-construction convention at that call site
+   (still excluded by `_cls_refs_supported`, correctly); and (b) the
+   whole `EnumType` metaclass pipeline (dynamic class construction,
+   `classdict` manipulation, `_missing_`/`__new__` interplay) to run
+   correctly in the compiled model, which is far outside any narrow
+   fix's reach.
+
+Conclusion unchanged from the 2026-08-21/24 entries, now re-confirmed
+against today's tree: not tractable without a feature-sized
+metaclass-attribute-modeling project; doc stays open. No code change;
+no gate run (nothing touched).
+
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder3 — the `_iter_member_` "1-arg-only" symptom re-investigated; NOT an arity bug, root cause is deeper)
 
 Re-verified the `Flag__iter_member_(self, self->_value_)` call the prior

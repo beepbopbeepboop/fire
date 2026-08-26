@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; both refusals unchanged AND confirmed to sit on top of additional unmodelable dependencies, not just the two named shapes)
+
+Re-ran a fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)`: identical pair of
+honest refusals as the 2026-08-24 entry —
+`_generate_tokens_from_c_tokenizer`: "a call to unresolved callee
+'type(...)'" and `tokenize`: "a call to unresolved callee
+'TokenInfo(...)'" — unchanged by any campaign fix since.
+
+Deeper look at what each would REALLY take, re-confirmed from source:
+
+1. `TokenInfo` (line 47) is `class TokenInfo(collections.namedtuple(
+   'TokenInfo', 'type string start end line')):` — its BASE CLASS is
+   created by a runtime call, so no `class` statement ever declares the
+   5 fields statically. Closing this needs compile-time namedtuple
+   synthesis (evaluate the `namedtuple(...)` call, synthesize an
+   equivalent struct with tuple protocol + attribute reads), plus
+   consumers that read `.type`/`.string`/`.start`/... off yielded
+   values and unpack them as tuples. Genuine feature project.
+2. `_generate_tokens_from_c_tokenizer` additionally ITERATES
+   `_tokenize.TokenizerIter(...)` — a CPython C-extension accelerator
+   type (`import _tokenize`) this codegen has no representation for at
+   all — before it even reaches its `type(e) != SyntaxError` dynamic
+   type-tag comparison in the except handler. Both shapes are beyond
+   any narrow fix; the named `type(...)` refusal is just the first one
+   the eligibility scan hits.
+
+No code change; no gate run (nothing touched). Doc stays open.
+
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — "own error count now ZERO" was stale; two own generators refuse honestly on real remaining gaps)
 
 Same `fd909e9`-timing issue as this cluster's `pickletools.py`/

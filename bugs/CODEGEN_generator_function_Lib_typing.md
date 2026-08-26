@@ -1,5 +1,48 @@
 # CODEGEN_generator_function: Lib/typing.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — the 08-24 "isolated clean" claim was stale; 2 real .cpp-emitter bugs found + FIXED; typing's own generator now honestly refused on a genuinely-unrepresentable shape)
+
+Re-ran the isolated coroutine-path compile fresh:
+**6 g++ errors**, NOT clean — confirmed identical at this session's
+pre-session commit (`4220964`, separate `git worktree add`), so the
+2026-08-24 entry's "still succeeds cleanly" was stale. Root-caused
+into two real .cpp-emitter bugs, BOTH FIXED in shared source
+(commit `34f9b94`):
+
+1. **The .cpp preamble's module-globals mirror copied global C types
+   verbatim, including user-struct pointers whose typedefs no
+   generator body reaches** (`_DeprecatedGenericAlias * ByteString`,
+   `_CallableType * Callable`, `_TupleType * Tuple`,
+   `_LazyAnnotationLib * _lazy_annotationlib`, `_Sentinel * _sentinel`
+   → "'X' does not name a type" ×5 — the typedef BFS only pulled
+   structs generator bodies actually touch). Fix: the mirror now emits
+   forward decls + full typedefs for every struct its fields name
+   (transitive-field BFS, deduped against already-emitted ones),
+   falling back to layout-identical int64_t boxing when no resolved
+   layout exists.
+2. **`yield Unpack[self]` (`_BaseGenericAlias.__iter__`) lowered to
+   garbage**: `Unpack` is an `@_SpecialForm`-decorated def IN THIS
+   MODULE, but the SubscriptExpr string-slice fallback emitted
+   `mojo_cstr_slice((char *)(_root_globals.Unpack), self, self+1)` —
+   against a name that isn't even a member of the emitted globals
+   struct ("has no member named 'Unpack'"), and semantically nonsense
+   (slicing a function value's bytes) had it linked. Fix: subscripting
+   a bare identifier that names a real function now refuses honestly.
+
+Net state change for typing.py itself: the compiled path now refuses
+at the ELIGIBILITY gate (`__iter__`: "subscript base resolves to a
+function/special-form value") instead of emitting a broken .cpp unit —
+the project's standard honest-refusal convention, strictly safer.
+Closing the refusal for real needs runtime dynamic dispatch on
+special-form/callable objects (`Unpack[self]` constructs an
+`_UnpackGenericAlias` through `_SpecialForm.__getitem__`) — same
+dynamic-receiver family as pickletools' `getpos`; feature-sized, not
+attempted. Full gate for both fixes: test_gimple.py 256/256,
+test_module_cache.py 76/76, generator runner 53/53, check-selfhost
+clean, from-scratch stdlib dylib rebuild EXIT=0 / 0 skips. Doc stays
+open.
+
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, isolated coroutine-path compile still clean)
 
 Re-ran the isolated coroutine-path compile fresh, post-`fd909e9`

@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/tempfile.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — the 08-24 "isolated compile clean" claim was stale; 2 REAL own-generator bugs found + FIXED (C++-keyword `delete` field, scalar-field range-for); isolated .cpp unit now genuinely 0 errors)
+
+Re-ran the doc's own isolated methodology fresh
+(`compile_to_gimple_with_cpp(do_imports=False)` +
+`g++-mp-15 -std=c++20 -fsyntax-only`): **3 errors**, NOT clean —
+confirmed identical at this session's pre-session commit (`4220964`
+via a separate `git worktree add`), so the 2026-08-24 entry's "still
+succeeds cleanly" verdict was stale (same fd909e9-era pattern as
+several sibling docs). Both root causes found and fixed in shared
+compiler source (commit `997f3b1`):
+
+1. **`_TemporaryFileCloser.delete` — a C++ keyword as a struct field
+   name.** The .ci side compiled fine (`delete` is a valid C
+   identifier), but the compiled-generator .cpp preamble re-emits the
+   same struct typedef verbatim, and g++ rejects `bool delete;`
+   ("expected unqualified-id before 'delete'"). Fix:
+   `_safe_field` (gimple_ctypes.py) — THE chokepoint every field
+   emission AND access site on both sides already routes through — now
+   also renames `_CPP_KEYWORD_FIELDS`, exactly like it long has for C
+   keywords/macros. Verified end-to-end with a standalone repro (struct
+   with a `delete` field + a generator method reading it): compiles,
+   links, RUNS, prints the right value.
+2. **`for line in self.file:` emitted `for (auto line : self->file)`
+   over a plain int64_t** ("'begin' was not declared in this scope").
+   `self.file` is an unannotated-init param (the HIGH-RISK family —
+   root NOT touched per standing scope rule), so the field's resolved
+   ctype is int64_t: genuinely not a container under this codegen's own
+   boxing convention, hence uniterable in this body model. Fix:
+   `_cpp_for_stmt` now takes that scalar-typed-self-field case down the
+   SAME zero-iteration stub path the `iter_expr == '0'` case already
+   uses (bind target to 0, run zero iterations) instead of emitting
+   invalid C++. Repro compiles+runs; iteration honestly yields nothing
+   with the runtime's existing "unsupported iterable ... runs zero
+   times" note.
+
+After both fixes: tempfile.py's isolated .cpp unit is **0 errors**
+(re-verified). Whole-program build still blocked by the transitively-
+imported operator.py attrgetter/itemgetter closure-of-callables shape
+(unchanged, below); the file's known >1hr whole-program perf issue
+makes a full-build confirmation impractical within a watchdog budget,
+matching the 08-24 entry's methodology. Full mandatory gate for the two
+fixes: test_gimple.py 256/256, test_module_cache.py 76/76, generator
+runner 53/53, async runner 38/38, make check-selfhost clean, from-
+scratch stdlib dylib rebuild EXIT=0 / 0 skip lines. Doc stays open.
+
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder6 — the chained-getattr `request for member 'name'` bug from the entry below is root-caused and FIXED for real; it was never a "no static type" gap, it was a WRONG static type)
 
 The entry below this one framed tempfile.py's 3 remaining own-file

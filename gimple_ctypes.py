@@ -813,8 +813,16 @@ def _safe_field(name: str) -> str:
     macro gets silently text-substituted before GCC/G++ parses it, exactly
     the same failure mode _c_field_name already guards for module globals
     and gimple_gen_infra.py's local-variable declarator already guards for
-    locals; this is that same chokepoint for struct fields/parameters)."""
-    if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES:
+    locals; this is that same chokepoint for struct fields/parameters).
+    Also covers C++-ONLY keywords (_CPP_KEYWORD_FIELDS): a field named
+    `delete` (real: Lib/tempfile.py's `_TemporaryFileCloser.delete`) is a
+    valid C identifier, so the .ci side compiles clean, but the compiled-
+    generator .cpp preamble re-emits the same typedef and g++ rejects
+    `bool delete;` outright ("expected unqualified-id before 'delete'").
+    Every field emission AND every field access goes through this one
+    function on both sides, so the rename is applied uniformly."""
+    if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES \
+            or name in _CPP_KEYWORD_FIELDS:
         return f'_kw_{name}'
     return name
 
