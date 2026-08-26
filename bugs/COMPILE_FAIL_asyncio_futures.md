@@ -1,6 +1,53 @@
 # COMPILE_FAIL: asyncio/futures.py
 
-## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — RESOLVED at the
+## compile/link level: the build now EXITS 0 and produces a binary; both
+## `Future.__await__` and `Future.__iter__` compile as real C++20 coroutines)
+
+The long-standing blocker — a value-carrying `return self.result()`
+inside a generator body — is FIXED this session. Design (deliberately
+NOT the "promise return_value(v) method" this doc's earlier entries
+assumed was required): the C++20 rule makes return_void XOR
+return_value mandatory per promise (this promise needs return_void for
+every ordinary generator), and this project's GCC 15 has a documented
+coroutine-frame-layout bug with extra promise FIELDS — so instead each
+ELIGIBLE generator unit now emits its own `extern "C" <T>
+{base}_return_slot = 0;` global; the body's valued `return <expr>`
+stores `(T)(expr)` into it right before co_return. Python's
+StopIteration(value) semantics are thereby materialized without
+touching the shared promise shape at all. Eligibility is conservative
+(at least one valued return; NO bare return anywhere; body's LAST
+top-level statement is the valued return so no path completes without
+storing); anything else keeps the honest refusal.
+
+Two supporting inference fixes were needed:
+- `_generator_yield_ctype(..., include_returns=False)` for the
+  GENERATOR translation path: the walk's ReturnStmt branch (built for
+  async functions) was poisoning yield-type unification whenever a
+  generator's return expression didn't resolve (`return self.result()`
+  → None → whole-generator refusal).
+- bare `yield self` in a generator METHOD now types as the receiver's
+  own struct pointer (`_infer_simple_expr_ctype`'s new
+  `self_struct_ctype` param), composing with the existing
+  struct-pointer-yield support instead of defaulting to int64_t and
+  then failing g++ on `co_yield self`.
+
+Verified end-to-end: fresh `python3 mojo.py build .../Lib/asyncio/
+futures.py` **exits 0** ("Built: futures", 0 compiler errors); the
+companion .cpp passes `g++ -std=c++20 -fsyntax-only` clean. Full
+mandatory gate: `test_gimple.py` 256/256, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+EXIT=0 with **0 skip lines**.
+
+Runtime residual (NOT a compile gap): the binary's top-level init hits
+module-API gaps of transitively-imported real-CPython modules
+(consistent with pathlib/zipfile._path's documented residuals) —
+await-composition (a compiled Task consuming __await__'s return slot)
+remains future async-runtime work, but the file itself compiles,
+links, and produces a binary, which is what this COMPILE_FAIL doc
+tracks.
+
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, superseded above)
 
 Re-ran an isolated `compile_to_gimple` check fresh (post this session's
 4 coroutine-emitter fixes landed for COMPILE_FAIL_Apple___main__.md:
