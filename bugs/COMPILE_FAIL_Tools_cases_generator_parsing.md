@@ -4,6 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): unchanged, same 12 own-file errors
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/
+cases_generator/parsing.py` against this worktree (fast-forwarded to
+master `e60b9cd`): exit 1, exactly 12 own-file `parsing_gen.cpp`
+errors, same polymorphic `yield from self.<field>.tokens()`
+static-dispatch class (`request for member 'tokens' in
+'self->IfStmt::body'`/`ForStmt::body`/`WhileStmt::body` etc.). Still
+squarely the excluded hard-doc polymorphic-dispatch cluster; per this
+session's mandate, not attempted.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — unchanged, same 12 own-file errors)
 
 Fresh safety-wrapped `python3 mojo.py build .../parsing.py` against

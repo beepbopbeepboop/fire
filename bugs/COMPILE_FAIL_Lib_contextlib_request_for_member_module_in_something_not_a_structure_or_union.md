@@ -1,5 +1,18 @@
 # COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): unchanged, byte-for-byte identical failure
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
+against this worktree (fast-forwarded to master `e60b9cd`): exit 1,
+byte-for-byte the same `RuntimeError` naming the same 11 async
+functions (`__aenter__` x3, `__aexit__` x4, `_exit_wrapper`, `aclose`,
+`enter_async_context`, `inner`), same "every `return` must carry a
+scalar value" / "*args/**kwargs parameters not supported for compiled
+async functions" reasons. Still the same genuinely large, out-of-scope
+feature (non-scalar `__aenter__`-return boxing/type-erasure + variadic
+`__aexit__`-parameter support in the C++20 coroutine codegen) — per
+this session's mandate, not attempted. DOCUMENTED-NOT-FIXED.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): unchanged, byte-for-byte identical failure
 
 Fresh safety-wrapped `python3 mojo.py build .../Lib/contextlib.py`

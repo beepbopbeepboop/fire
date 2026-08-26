@@ -2,6 +2,20 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): identical 17-generator refusal, unchanged
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Modules/
+_decimal/tests/randdec.py` against this worktree (fast-forwarded to
+master `e60b9cd`): byte-identical refusal list to the same-day entries
+below — all 17 generators, same per-generator causes (8 x unresolved
+`sample`/`randrange` callees from `from random import ...`, 6 x
+function-valued loop-variable calls (`func`/`func1`), `un_incr_digits_
+tuple`'s masked mixed scalar/tuple shape, 3 x consumption-ordering-
+derived refusals). Both remaining root causes (arbitrary CPython Lib
+module inlining; callable-value-from-container support in coroutine
+bodies) are campaign-sized features, not narrow fixes. Not attempted;
+no code change.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): identical 17-generator refusal, unchanged
 
 Fresh safety-wrapped `python3 mojo.py build .../randdec.py` against

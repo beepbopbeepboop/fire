@@ -1,5 +1,35 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): still does not build; error count 136 → 171, same already-catalogued grab-bag categories, no new failure class
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
+against this worktree (fast-forwarded to master `e60b9cd`): exit 1, 171
+`error:` lines (was 136 at the prior entry). Bucketed by normalized
+shape (`sed`-collapsed identifier/quote-strip + `sort | uniq -c`):
+`non-trivial conversion in 'X'` (39), `expected expression before 'X'`
+(19, operator.py's `partial`/lambda lowering), `'X' undeclared here
+(not in a function)` (11, the still-open task #141 bare-name-collision
+class), `'X' has no member named 'X'` (9, posixpath/ntpath struct-shape
+mismatch), `expected '=' before '*' token` (8), `assignment ... from
+'MojoDict *'/'MojoBoundMethod *' makes integer from pointer` (8+5),
+`'X' undeclared (first use in this function); did you mean 'X'?` (7),
+`passing argument N of 'X' makes integer/pointer from
+pointer/integer` (4+5), `invalid types for 'X'` (3),
+`implicit declaration of function 'X'` (3), plus smaller categories
+(`redefinition of 'X'` x2, `invalid operands to binary %`/`+` x2 —
+enum.py's struct/dict `%`/the Mac build-installer FW_VERSION_PREFIX
+family). Every top category matches ones already catalogued in this
+doc's history; no new failure mode found. Consistent with the
+established finding that this file's error count oscillates with
+whole-program compile-order shifts from unrelated upstream fixes
+(landing e1e12bb's dict-format primitive changed which functions
+type-check as coroutine bodies, shifting which module "wins" bare-name
+races elsewhere) — not a regression. Task #141 (general struct-field-
+table qualification) remains explicitly out of scope per this round's
+guidance; operator.py partial/lambda lowering, posixpath/ntpath
+collision, and the dict-shaped `%` cases outside argparse remain
+unaddressed. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): error count 248 → 136; the dict-keyed `%`-format class (12 argparse sites + downstream) FIXED by this session's `mojo_str_format_dict` landing; still not a build
 
 Fresh safety-wrapped `python3 mojo.py build .../Lib/socket.py` against

@@ -4,6 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): unchanged — sole remaining blocker still the `nonlocal` gap
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/wasm/
+wasi/__main__.py` against this worktree (fast-forwarded to master
+`e60b9cd`): exactly ONE own-file error, unchanged:
+`__main__.py:104:30: invalid call to non-function before ';' token`
+(`working_dir = working_dir(context)` gated on a `nonlocal
+working_dir` this parser cannot see — no `NonlocalStmt` AST node, no
+parser support). Feature-sized shared-parser + closure machinery; per
+this session's mandate, not attempted.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): unchanged — sole remaining blocker still the `nonlocal` gap
 
 Fresh safety-wrapped `python3 mojo.py build .../Tools/wasm/wasi/

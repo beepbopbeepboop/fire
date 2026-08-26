@@ -1,5 +1,17 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): memoryview refusal confirmed unchanged
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` on the
+file against this worktree (fast-forwarded to master `e60b9cd`):
+byte-for-byte the same up-front refusal — `split` (the `_Extra.split`
+classmethod generator) refused for `memoryview(...)` being an
+unresolved callee in a compiled generator/coroutine body. The {ptr,len}
+view type remains genuinely feature-sized across both code paths;
+`pwd=None` stays on the excluded unannotated-init-param family;
+genexp-held-in-local stays feature-sized. Per this session's mandate,
+not attempted; no code change.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): memoryview refusal confirmed unchanged
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` on the
