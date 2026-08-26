@@ -4,6 +4,45 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26 — blocker has SHIFTED past the 2026-08-25 pm eligibility refusals; new failure mode)
+
+Fresh repro against this session's tree (`fix/rest-remainder18`): the
+build no longer aborts at the `_parse`/`parse` coroutine-eligibility
+refusals the 2026-08-25 pm entry documents — it now gets past that gate
+entirely and reaches the ordinary compiled-C/g++ stage, where it fails
+with two independent error groups:
+
+1. The SAME `c_parser/info.py` `_fix_filename` caller/callee
+   signature-race family already root-caused in
+   `bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` (identical
+   `:179:38/:179:43/:247:38/:247:43` "passing argument N ... makes
+   pointer from integer" errors against `__info__fix_filename_5c8044`)
+   — same shared root cause, same out-of-scope conclusion (would need a
+   forward-declaration-only signature-resolution prepass).
+2. A NEW, distinct error not previously seen on this file:
+   ```
+   c_parser/parser/_global.py:72:3: error: implicit declaration of
+   function '__common_log_match_c52cbf'; did you mean
+   '__common_log_match_7a6366'? [-Wimplicit-function-declaration]
+   ```
+   `log_match` (`c_parser/parser/_common.py`, `def log_match(group, m,
+   depth_before=None, depth_after=None)`) is called from several sibling
+   modules (`_global.py`, `_func_body.py`, `_compound_decl_body.py`) with
+   varying argument counts (2, 3, or 4 positional args, including at
+   least one call passing `m=None` literally) — different call sites
+   plausibly infer/commit different candidate signatures for the same
+   cross-module free function, and only ONE mangled-suffix definition
+   ends up actually emitted, leaving other call sites referencing a
+   suffix that was never defined. This has the same shape as the
+   info.py signature-race family above (a caller committing to a
+   signature that doesn't match what the callee's OWN later inference
+   settles on) but for the mangled SYMBOL NAME itself rather than just
+   argument coercion — plausibly the same underlying two-pass-model gap,
+   not independently root-caused further given the scope/time budget of
+   this pass. Not attempted — same class of "forward-declaration-
+   ordering" fix the info.py doc already assessed as out of scope for a
+   narrow per-doc pass. Doc kept open; blocker documented as shifted.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: identical three-function refusal set with identical

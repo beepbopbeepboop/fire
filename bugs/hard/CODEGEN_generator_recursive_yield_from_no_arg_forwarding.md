@@ -1,6 +1,24 @@
 # HARD BUG: recursive `yield from` generator with extra/keyword-only parameters miscompiles in the C++ coroutine codegen
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-26)
+
+**Re-verified 2026-08-26** (fresh repro, independent of the 2026-08-23 note
+below): rebuilt this doc's own minimal `iter_files` repro from scratch via
+`python3 mojo.py build` — exit 0, clean build, no trace of either originally-
+documented error. Then actually ran the produced binary against
+`iter_files(["a.txt", "b.txt"])` (the 2026-08-23 note recorded the wrong-
+output symptom but this session re-confirmed it independently): output is
+a single garbage integer (`4361461520` this run, value differs run to run —
+consistent with the previously-noted uninitialized/miscomputed value,
+e.g. `43637542464` on 2026-08-23), not `a.txt`/`b.txt`. So: build-level fix
+still holds exactly as documented; the runtime-correctness gap for this
+specific shape (string values through a self-recursive `yield from` with
+defaulted params) is also still exactly as documented, unfixed, and
+untouched this session. Doc kept (not git rm'd) because it is not resolved
+end-to-end — the arg-forwarding/type-mismatch fix this doc primarily
+tracks is confirmed still good, but the doc's own final paragraph already
+flags the runtime bug as a distinct, un-fixed issue worth separate
+tracking, so nothing here is stale.
 
 **Re-verified FIXED 2026-08-23**: this doc's own minimal repro
 (`iter_files` with keyword-only `get_files`) builds clean via `python3

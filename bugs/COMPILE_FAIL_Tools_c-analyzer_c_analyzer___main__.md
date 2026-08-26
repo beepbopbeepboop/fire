@@ -4,6 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26)
+
+Fresh repro against this session's tree (`fix/rest-remainder18`) reproduces
+the identical two-function refusal, byte-for-byte the same as the
+2026-08-25 pm entry below (`fmt_full`: `sorted(..., key=...)` list-typed-
+iterable-only limitation; `fmt_summary`: unresolved `list(...)` — same
+loop-as-expression coroutine-emitter gap tracked in the `c_analyzer/
+__init__.py` doc). Same shared root cause as doc #1 in this pass; same
+conclusion — large speculative feature work, not attempted. No code
+change; doc re-verified only.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: identical refusal set to the entry below — `fmt_full`:

@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26)
+
+Fresh repro against this session's tree (`fix/rest-remainder18`)
+reproduces the identical five errors byte-for-byte (`c_parser/info.py`
+:179:45/:179:50/:247:45/:247:50 `_fix_filename` pointer-from-integer, plus
+`c_analyzer/info.py:18:25` `int64_t`-from-`char*`). Confirmed still the
+same caller/callee signature-race (stale placeholder param types raced
+against later body-usage inference) documented in the 2026-08-25 entry
+below. A general fix requires a forward-declaration-only type-resolution
+prepass across the whole two-pass compilation model — correctly assessed
+as out of scope for a narrow per-doc pass; not attempted. No code change;
+doc re-verified only.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: same failure family as the 2026-08-25 entry below — the

@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/datafiles.p
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26)
+
+Fresh repro against this session's tree confirms the exact same sole
+blocker, byte-for-byte: `read_decls: unsupported for-loop iterable type:
+CallExpr` (`read_all, _ = _get_format_handlers('decls', fmt)` then
+`for decl, _ in read_all(infile):` — a dynamic, tuple-unpack-derived
+callee). The generator-consumption-ordering fix (which this doc's
+`iter_decls_tsv` blocker was an instance of, per the 2026-08-25 entries
+below) is confirmed to have genuinely resolved that shape — this file's
+remaining blocker is a DIFFERENT, unrelated dynamic-callee-consumption
+gap that ordering fixes don't touch. No tractable narrow fix found;
+resolving it would need flow-sensitive callable-value tracking through
+tuple-unpacking assignment, out of scope. No code change; doc
+re-verified only.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: unchanged single blocker — `read_decls:

@@ -4,6 +4,24 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26)
+
+Fresh repro against this session's tree (`fix/rest-remainder18`, based on
+integrated master) reproduces the EXACT same three-function refusal
+verbatim (`analyze_decls`: unresolved `list(...)`; `check_all`: for-loop
+iterable `CallExpr`; `iter_decls`: unresolved `set(...)`) — byte-identical
+error text to the 2026-08-25 pm entry below. None of this campaign's
+recently-landed shared fixes (str.split/rsplit/splitlines in coroutine
+bodies, real isinstance() semantics, C++-keyword field escaping, scalar
+self-field range-for, next() on cross-module generators, self-host
+bootstrap fix) touch loop-as-expression codegen, so no change was
+expected and none was found. Confirmed still genuinely blocked on the
+same large structural gap (`_cpp_expr`'s `Comprehension` case is a hard
+stub; no `list()`/`set()`/comprehension-as-value codegen in the
+coroutine-body emitter). Not attempted — this is exactly the kind of
+"large speculative feature project" this round's instructions say not to
+take on. No code change; doc left as-is below.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro reproduces the EXACT three-function refusal set documented

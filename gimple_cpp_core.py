@@ -3137,22 +3137,51 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # target, socket ops, ...), so no separate check is needed
             # in this branch.
             return [f"{indent}{gen._cpp_expr(s.value)};"]
-        # Bare `print()` with NO arguments — real Python's "just emit a
-        # newline" shape (Apple/__main__.py's `group()` contextmanager
-        # generator: `else: print()` in its teardown half, mirroring the
-        # single-arg `print("::endgroup::")` in its GITHUB_ACTIONS
-        # branch). Handled as its own case ahead of the one-scalar-arg
-        # case below (which requires `len(args) == 1` and so never
-        # matches a zero-arg call) — previously fell through everything
-        # in this function to the generic bare-call dispatch further
-        # down, and from there to _cpp_expr's CallExpr handling, whose
-        # only outcome for an unrecognized callee is an honest refusal
-        # ("a call to unresolved callee 'print(...)'"), even though a
-        # zero-arg `print()` is exactly as printable as the one-arg case.
+        # `print(...)`'s `end=`/`flush=` keyword arguments — real Python
+        # tools commonly write `print(x, end='')` (suppress the trailing
+        # newline) or `print(x, flush=True)` (force an unbuffered write,
+        # e.g. progress indicators: c-analyzer's scriptutil.py's
+        # `track_progress_compact`/`track_progress_flat`). Only a
+        # LITERAL `end=<string literal>` and/or LITERAL `flush=True/False`
+        # are recognized (both are almost always literals at real call
+        # sites); anything else (a non-literal value, or `sep=` — never
+        # needed since these cases below only ever take 0/1 positional
+        # args) falls through to the honest "unrecognized kwargs" refusal
+        # rather than guessing.
+        def _print_end_flush(kwargs):
+            end_str, flush = '\\n', False
+            for kw_name, kw_val in (kwargs or []):
+                if kw_name == 'end' and isinstance(kw_val, StringLiteral):
+                    end_str = (kw_val.value.replace('\\', '\\\\').replace('"', '\\"')
+                               .replace('\n', '\\n').replace('\t', '\\t'))
+                elif kw_name == 'flush' and isinstance(kw_val, BoolLiteral):
+                    flush = bool(kw_val.value)
+                else:
+                    return None
+            return end_str, flush
+        # Bare `print()` with NO positional arguments — real Python's
+        # "just emit a newline" shape (Apple/__main__.py's `group()`
+        # contextmanager generator: `else: print()` in its teardown half,
+        # mirroring the single-arg `print("::endgroup::")` in its
+        # GITHUB_ACTIONS branch). Handled as its own case ahead of the
+        # one-scalar-arg case below (which requires `len(args) == 1` and
+        # so never matches a zero-arg call) — previously fell through
+        # everything in this function to the generic bare-call dispatch
+        # further down, and from there to _cpp_expr's CallExpr handling,
+        # whose only outcome for an unrecognized callee is an honest
+        # refusal ("a call to unresolved callee 'print(...)'"), even
+        # though a zero-arg `print()` is exactly as printable as the
+        # one-arg case. Also accepts a recognized `end=`/`flush=` kwarg
+        # pair (see `_print_end_flush` above).
         if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
-                and s.value.func.name == 'print' and len(s.value.args) == 0
-                and not getattr(s.value, 'kwargs', None)):
-            return [f'{indent}printf("\\n");']
+                and s.value.func.name == 'print' and len(s.value.args) == 0):
+            parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
+            if parsed is not None:
+                end_str, flush = parsed
+                out = [f'{indent}printf("{end_str}");']
+                if flush:
+                    out.append(f'{indent}fflush(stdout);')
+                return out
         # `print(<one scalar arg>)` — a small, deliberate addition (not
         # part of the original Milestone B generator whitelist, which
         # has never needed a body-internal side effect since a
@@ -3164,23 +3193,32 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # coroutine is actually scheduled/run, never at bare
         # construction time. Available to generator bodies too (no
         # reason to special-case it out), just not yet exercised there.
+        # Also accepts a recognized `end=`/`flush=` kwarg pair (see
+        # `_print_end_flush` above) — real tools frequently write
+        # `print(x, end='')`/`print(x, flush=True)`.
         if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
-                and s.value.func.name == 'print' and len(s.value.args) == 1
-                and not getattr(s.value, 'kwargs', None)):
-            self_fields = getattr(gen, '_cpp_gen_self_fields', None)
-            arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(s.value.args[0], declared, self_fields)
-            if arg_ctype not in ('int64_t', 'double', '_Bool', 'char *'):
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    "print() argument must be a scalar int64_t/double/"
-                    "_Bool/char* expression")
-            arg_expr = gen._cpp_expr(s.value.args[0])
-            fmt = {'int64_t': '"%lld\\n"', 'double': '"%g\\n"',
-                   '_Bool': '"%s\\n"', 'char *': '"%s\\n"'}[arg_ctype]
-            if arg_ctype == 'int64_t':
-                return [f"{indent}printf({fmt}, (long long){arg_expr});"]
-            if arg_ctype == '_Bool':
-                return [f'{indent}printf({fmt}, ({arg_expr}) ? "True" : "False");']
-            return [f"{indent}printf({fmt}, {arg_expr});"]
+                and s.value.func.name == 'print' and len(s.value.args) == 1):
+            parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
+            if parsed is not None:
+                end_str, flush = parsed
+                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+                arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(s.value.args[0], declared, self_fields)
+                if arg_ctype not in ('int64_t', 'double', '_Bool', 'char *'):
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        "print() argument must be a scalar int64_t/double/"
+                        "_Bool/char* expression")
+                arg_expr = gen._cpp_expr(s.value.args[0])
+                fmt = {'int64_t': f'"%lld{end_str}"', 'double': f'"%g{end_str}"',
+                       '_Bool': f'"%s{end_str}"', 'char *': f'"%s{end_str}"'}[arg_ctype]
+                if arg_ctype == 'int64_t':
+                    out = [f"{indent}printf({fmt}, (long long){arg_expr});"]
+                elif arg_ctype == '_Bool':
+                    out = [f'{indent}printf({fmt}, ({arg_expr}) ? "True" : "False");']
+                else:
+                    out = [f"{indent}printf({fmt}, {arg_expr});"]
+                if flush:
+                    out.append(f'{indent}fflush(stdout);')
+                return out
         # A bare call to a captured (or scalar-parameter) function-type
         # value — device_context.mojo's `async def wrapper(...)
         # capturing -> None: func()`/`func(idx)`, the ENTIRE body of
