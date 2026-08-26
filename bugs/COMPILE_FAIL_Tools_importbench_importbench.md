@@ -4,6 +4,35 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical two-function refusal; both gaps re-assessed as genuinely out-of-reach
+
+Re-ran fresh under this session's safety-wrapped watcher: identical
+refusal naming exactly `benchmark_wo_bytecode` (unresolved callee
+`cache_from_source(...)`) and `from_cache` (non-plain assignment
+target). Deeper assessment of why NEITHER is tractable:
+
+1. **`cache_from_source`**: resolution would require the compiler to
+   follow `from importlib.util import cache_from_source` INTO
+   `Lib/importlib/util.py`, whose own header does
+   `from ._bootstrap_external import cache_from_source` — i.e.
+   inline-compiling CPython's FROZEN BOOTSTRAP modules
+   (`_bootstrap.py`/`_bootstrap_external.py`, ~2600 lines of
+   import-machinery code written against interpreter internals this
+   codegen does not model: `sys.modules` manipulation, `_imp`,
+   `_setup()` C-module wiring, path-finder metaprogramming). Even
+   granting a heroic re-export-chain tracer, `_bootstrap_external`
+   itself would not compile, so the callee never gains a real
+   signature. And independently:
+2. **`from_cache`'s `module.__file__ = ...`** remains the tracked
+   hard-bug family (`CODEGEN_generator_non_plain_assignment_target_
+   refused.md`): attribute writes on a real heap object need an object
+   model this scalar body model doesn't have; correctly still refused
+   rather than silently elided.
+
+Fixing #1 alone leaves #2 refusing the same module, so there is no
+partial-fix outcome worth the risk surface. No code change; doc stays
+open on the two structural gaps above.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against `fix/rest-remainder9`. `from_cache` is unchanged

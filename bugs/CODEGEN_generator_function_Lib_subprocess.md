@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (re-verified 2026-08-25, wtOpencode_group3): unchanged — zero own-source errors, transitive cascade remains the only blocker
+
+Fresh safety-wrapped `mojo.py build`: rc=1 with **138 total `error:`
+lines, ZERO attributed to subprocess.py's own source** (`grep
+'subprocess\.py.*error:'` empty). Matches the 2026-08-24 finding
+exactly; this session's shared fixes elsewhere (coroutine-body
+isinstance semantics, str split-family in generator bodies,
+statement-level fnptr-call guard) don't touch and aren't touched by
+this file's situation. The file remains blocked purely by the
+already-documented transitive cascade in other modules. Doc stays open
+per convention; no code change.
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder6 — the `signal.SIGTERM` bug from the entry below is FIXED for real; subprocess.py's own source now contributes ZERO errors)
 
 The entry immediately below this one root-caused `self.send_signal(
