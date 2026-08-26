@@ -4,6 +4,53 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, post print()/flush= fix e49a9fb)
+
+Re-ran fresh against this session's tree (`fix/rest-remainder18`) AFTER
+landing this session's `end=`/`flush=` print()-in-coroutine-body fix
+(commit `e49a9fb`, `gimple_cpp_core.py`). Real, verified progress: the
+refusal set is now down from 5 functions to 3 —
+**`track_progress_compact` and `track_progress_flat` no longer appear
+in the refusal list at all**, both now compiling past the
+generator-eligibility gate:
+
+```
+Error building: cannot compile module: function(s) _iter_filenames,
+filter_filenames, main_for_filenames (generator function(s), contain a
+`yield`/`yield from`) ...
+Unsupported shape(s): _iter_filenames: a call to unresolved callee
+'Exception(...)' is not supported in a compiled generator/coroutine body
+(...); filter_filenames: `for ... in _iter_filenames(...)` does not
+consume a generator this compile has itself already translated via the
+C++20-coroutine path (...); main_for_filenames: `for ... in
+_iter_filenames(...)` does not consume a generator this compile has
+itself already translated via the C++20-coroutine path (...).
+```
+
+`track_progress_flat`'s blocker was exactly `print(fmt.format(item),
+flush=True)` — now handled directly by the fix. `track_progress_compact`
+also cleared: its own `print(last, end='', flush=True)` was evidently
+the reason it surfaced in the refusal set too (the 2026-08-25 pm entry's
+"`**mark_kwargs` spread forwarded to a known GENERATOR callee" framing
+for this function is superseded — with print() no longer refusing
+first, `iter_marks(groups=groups, **mark_kwargs)` plus `next(marks)`
+now compile through cleanly as well, so that framing was either stale
+or masked by the print() refusal firing first at the time it was
+written).
+
+**File still does not build** — the remaining 3-function refusal set is
+unrelated to print()/flush and squarely the same already-tracked,
+genuinely structural families documented elsewhere in this campaign:
+`_iter_filenames`'s `Exception(...)` builtin-instance construction as a
+value inside a coroutine body (no lowering for constructing a builtin
+exception object as a value, distinct from `raise`), and
+`filter_filenames`/`main_for_filenames`'s moot-ordering consumption of
+the never-eligible `_iter_filenames`. Not attempted — large,
+speculative feature work (would need a real value representation for a
+constructed-but-not-yet-raised exception object). No further code
+change this pass beyond the print()/flush= fix already committed; doc
+updated to reflect real, partial, verified progress.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: the SAME five-function refusal set with the SAME
