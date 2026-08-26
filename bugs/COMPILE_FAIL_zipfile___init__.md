@@ -1,5 +1,23 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c): memoryview refusal confirmed as the first blocker, unchanged; other documented aspects re-checked and still accurate
+
+Fresh `compile_to_gimple_with_cpp(do_imports=False)` on the file alone
+reproduces byte-for-byte: `split: a call to unresolved callee
+'memoryview(...)' is not supported in a compiled generator/coroutine
+body`. Per this round's scope, deliberately did NOT attempt the
+excluded `pwd=None` unannotated-init-param mechanism. Re-checked that
+the other three documented groups (memoryview, genexp-held-in-local,
+pwd=None) are still accurately described relative to current source —
+they are; nothing in this campaign's very recent landings
+(super()/self.__class__ construction lowering, generator value-
+carrying return-slot, str-method families) touches memoryview support,
+which remains genuinely absent from both the plain GIMPLE path and the
+C++ coroutine path (grepped both `gimple_codegen.py` and
+`gimple_cpp_core.py` for `memoryview` — zero real implementations,
+only the refusal-message string literal). Not attempted; feature-sized.
+No code change.
+
 ## Status (re-verified 2026-08-25, wtOpencode_group3): memoryview refusal confirmed as the first blocker, unchanged
 
 Fresh isolated generation (`compile_to_gimple_with_cpp` on the file

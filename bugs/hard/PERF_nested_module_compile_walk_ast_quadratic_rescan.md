@@ -1,5 +1,25 @@
 # HARD BUG (performance): `_walk_ast` re-scan blowup for large transitive-import graphs
 
+## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c — no new phase attempted; Phase 5's "Remaining work" list re-read, none newly safe)
+
+Re-read the "Remaining work" section fresh with today's assignment's
+explicit instruction not to force a risky change here. All three listed
+candidates are unchanged and still correctly assessed as unfavorable:
+`_class_attr_ctype`'s Pass 1.1 caller loop remains entangled with
+time-dependent `struct_field_types` state and adjacent inheritance-merge
+logic (the same reasoning since 08-18); the Pass 2c residual scan cache
+idea is proven unsafe by Phase 5's own writeup (`_return_elem_types`
+feedback through `_quick_container_elem` breaks any whole-run cache);
+`_collect_self_assigns`/`_collect_self_reads` still mutate struct ASTs
+directly, ruling out a naive memoization the same way Phase 2 originally
+had to work around for its own sibling consumer. No new profiling done
+this pass (none of this campaign's other 9 docs touch `gen_module`'s
+hot paths in a way that would shift the profile shape), and this doc's
+own established verification bar (byte-identical generated C on a large
+succeeding whole-program case) means any attempted fix would need the
+same rigor as Phases 1-5 to be trustworthy — not undertaken here given
+none of the three candidates cleared the safety bar. No code change.
+
 ## Status
 
 Root cause CONFIRMED (2026-08-06, exact lines identified — not just inferred

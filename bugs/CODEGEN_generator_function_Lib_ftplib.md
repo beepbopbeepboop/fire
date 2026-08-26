@@ -1,5 +1,45 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-26 — gap #2 re-checked against the new generator-value-return-slot machinery; confirmed still not tractable narrowly; gaps #2-4 otherwise unchanged)
+
+Re-ran `scripts/repro_ftplib_isolated_group3.py` fresh: `.ci` still 0
+errors, `.cpp` still exactly the same 2 errors as the prior entry
+(`lines.append` member-access-on-pointer at the `FTP_retrlines(self, cmd,
+(int64_t)(lines.append))` call, and the downstream
+`(void)(0.partition(" "))` gap-#4 symptom).
+
+Specifically investigated whether the VERY recent generator-value-carrying
+return-slot work (asyncio/futures.py's per-unit extern-C return slot for
+values crossing a coroutine's suspend/return boundary) is relevant here, as
+directed. It is not: that machinery widens what a C++20 coroutine can
+*return* through `co_return`/the promise type; gap #2 is not a return-value
+problem at all; it is `FTP.retrlines` (compiled through gimple_codegen.py's
+**plain, non-coroutine** path — `retrlines` itself is not a generator) whose
+`callback` parameter is consumed via `mojo_fnptr_call_1(callback, line)` —
+`runtime/mojo_runtime.h`'s `int64_t (*)(int64_t)` raw function-pointer
+convention with NO slot for a receiver/context. Traced all four sibling
+callback params (`retrbinary`/`retrlines`/`storbinary`/`storlines`) — all
+four use the identical bare `mojo_fnptr_call_1` convention, confirmed via
+`grep -n "mojo_fnptr_call\b" ftplib.ci` (4 call sites, one per method).
+
+Also checked whether the EXISTING `MojoBoundMethod`/`mojo_bound_method_call_N`
+machinery (`{ void *fn; void *self; }`, already used for user-struct bound
+methods referenced as values, `runtime/mojo_runtime.h:75-94`) could be
+reused here. It can't apply narrowly: `lines` is a built-in `MojoList *`,
+not a user-defined struct, so `_lower_bound_method_value` (which resolves a
+struct's real method C symbol) has no entry point for a container's
+`.append`. And even if a `MojoList`-append-as-bound-method special case were
+added, `FTP_retrlines`'s *default* callback argument is `print_line`, a
+plain 1-arg free function with no `self` at all — unifying the whole
+`callback` parameter onto the bound-method ABI would require calling free
+functions through it too (`self=nullptr`, but `mojo_bound_method_call_1`
+supplies `self` as the callee's first argument, which `print_line(line)`
+does not expect) — exactly the ABI-wide, every-plain-path-callee-affecting
+change the doc already correctly flagged, not a self-contained fix.
+
+Classification unchanged: gap #2 remains genuinely ABI-broad, not narrow.
+Not attempted, per campaign rules. Doc stays open, gaps #2-4 unchanged.
+
 ## Status (updated 2026-08-25, wtOpencode_group3 — gap #3 (`facts_found[:-1].split(";")` as a loop iterable) FIXED; gaps #2/#4 remain)
 
 Re-verified fresh via this doc's isolated methodology

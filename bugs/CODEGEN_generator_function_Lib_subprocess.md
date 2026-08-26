@@ -1,5 +1,55 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c — ONE real own-source error now present, at the already-documented `with self._on_error_fd_closer() as err_close_fds:` gap; not attempted, genuine feature-sized blocker)
+
+Fresh safety-wrapped `mojo.py build`: rc=1, 124 total `error:` lines,
+exactly ONE attributed to `subprocess.py`'s own source (down from many
+more transitively-caused errors in unrelated files, which have shrunk
+since the last check):
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/subprocess.py:1731:8: error: assignment
+to 'int64_t' {aka 'long long int'} from 'MojoList *' makes integer from
+pointer without a cast [-Wint-conversion]
+```
+
+Line 1731 is `with self._on_error_fd_closer() as err_close_fds:` inside
+`Popen._get_handles`. This is EXACTLY the already-diagnosed, still-open
+gap this doc's 2026-08-20 entry documented in detail: `_gen_stmt_WithStmt`
+has no case for a context-manager expression whose lowered type is
+`MojoGenerator *` (a compiled generator-method call), so it falls
+through to generic `__enter__`/`__exit__` struct-method lookup, finds
+neither, and the `as`-bound local (`err_close_fds`) defaults to
+`int64_t` instead of the real yielded type (`MojoList *`, from
+`_on_error_fd_closer`'s `to_close = []; yield to_close`). Previously
+that entry predicted this would show up as either silently wrong
+runtime behavior OR a downstream type-mismatch compile error — it is
+now confirmed to be the latter, and it is now this file's ONLY own-
+source blocker (the transitive cascade elsewhere has shrunk enough that
+this is the single remaining thing standing between subprocess.py and
+a clean build of its own code).
+
+Re-confirmed the real fix is feature-sized, not narrow: `_on_error_fd_
+closer`'s body wraps its `yield to_close` in `try: ... except: <cleanup
+using to_close>; raise`, i.e. real `@contextlib.contextmanager`
+semantics — on exceptional exit from the `with` block, Python re-enters
+the generator via `throw()` so its `except:` clause runs. The compiled
+generator coroutine API (`_gen_cpp_generator_unit`'s `_start/_resume/
+_value/_destroy` surface) has no exception-injection entry point at
+all, so even a narrow fix that correctly types `err_close_fds` as
+`MojoList *` and calls `_start`/first `_resume` for entry would still
+silently skip the `except:`-block fd-cleanup path on exceptional exit —
+a real correctness gap, not just a compile error, so a narrow type-only
+patch would trade a hard error for silent wrong behavior on the error
+path. Declining to attempt either the narrow mistyped-local patch or
+the full feature per campaign guidance (large speculative feature
+project, not a bounded bug). Left for whoever picks up real
+`@contextlib.contextmanager`-over-generator support (would also fix the
+sibling instance this doc's own 2026-08-20 entry left as a "flagged,
+not yet a dedicated doc" note).
+
+subprocess.py still does not build end-to-end. Doc stays open.
+
 ## Status (re-verified 2026-08-25, wtOpencode_group3): unchanged — zero own-source errors, transitive cascade remains the only blocker
 
 Fresh safety-wrapped `mojo.py build`: rc=1 with **138 total `error:`

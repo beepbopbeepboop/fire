@@ -4,6 +4,18 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c): byte-identical errors, both root causes unchanged
+
+Fresh `mojo.py build`: exact same three diagnostics
+(`704:17` char*+MojoList*; `1447:17`/`1456:17` int64_t % MojoDict*),
+zero new own-file errors. Root cause 1 (Phase-1.7 global prescan blind
+to cross-function `global` reassignment) is explicitly high-risk shared
+machinery per the analysis below; root cause 2 needs a genuinely new
+runtime dict-keyed `%`-format primitive. Neither touched by any of this
+campaign's recent landings (generator-return-slot, super()/
+self.__class__, str-method families, etc. — none affect global-type
+prescan or `%`-formatting). Not attempted. No code change.
+
 ## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical errors, both root causes unchanged
 
 Fresh safety-wrapped `mojo.py build`: rc=1 with exactly the same
