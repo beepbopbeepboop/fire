@@ -1,5 +1,43 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged, root cause pinned down precisely)
+
+Re-ran an isolated `compile_to_gimple_with_cpp` check fresh (post this
+session's coroutine-emitter fixes for COMPILE_FAIL_Apple___main__.md
+— none relevant to this file's shape). The refusal message is more
+detailed than the 2026-08-23 entry recorded (this file was evidently
+last checked before `fd909e9`'s per-function refusal-reason reporting
+landed), and pins down the exact mechanism:
+
+```
+Unsupported shape(s): _candidate_paths: _candidate_paths: a
+@classmethod generator that references `cls` in its body in an
+unsupported way is not supported (only a class-level-attribute read,
+or a call to a real compiled classmethod/static method of the
+enclosing class, are supported for `cls.<...>` access in a compiled
+generator); _resolve_zip_path: unsupported for-loop iterable type:
+CallExpr.
+```
+
+Read `gimple_cpp_core.py`'s `_cls_refs_supported` (the check that
+produces this message): its own docstring/inline comment explicitly
+and deliberately excludes a `cls.<method>(...)` call when `<method>`
+is ANOTHER COMPILED GENERATOR (checked via `gen.
+_struct_generator_method_names`) — exactly `_candidate_paths`' own
+`yield from cls._resolve_zip_path(path_str)` shape (`_resolve_zip_path`
+is itself a generator, a `@staticmethod`). The comment states plainly
+this needs "its own coroutine-construction call convention this fix
+does not add" — i.e. composing/delegating into another already-
+compiled coroutine from inside a coroutine body is a real, separate,
+not-yet-built mechanism, not a missing case in an existing dispatcher.
+Separately, `_resolve_zip_path` itself additionally fails the for-loop
+iterable check (`for match in reversed(list(re.finditer(...))):` —
+`reversed(list(...))` as a for-target has no coroutine-body for-loop
+lowering). Even fixing the for-loop gap alone would leave
+`_candidate_paths` still refused by the `yield from`-into-another-
+generator gap. Both genuinely feature-sized (coroutine-to-coroutine
+delegation, a new call convention); not attempted. Doc kept open.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C4 cluster. The blocker (`_candidate_paths`: a plain `yield` of a foreign-module constructor followed by `yield from` delegating to another classmethod generator) is unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still structural; untouched.

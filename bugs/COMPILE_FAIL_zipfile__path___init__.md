@@ -4,6 +4,49 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder12 — isolated generator/coroutine TU still compiles clean (unaffected by this session's 4 fixes elsewhere); a real end-to-end build now goes further before failing, but still fails, on both a new link-time gap and the previously-documented unrelated transitive-import failures)
+
+Re-ran an isolated `compile_to_gimple_with_cpp(do_imports=False)`
+check fresh, after this session's 4 coroutine-emitter fixes landed
+for COMPILE_FAIL_Apple___main__.md (`mojo_c_getenv`/platform/
+subprocess whitelist, zero-arg `print()`, string-repeat `*`, f-string
+interpolation in `_cpp_expr`'s `StringLiteral` case): still `OK`, zero
+exceptions — consistent with the 2026-08-24 entry below (this file's
+own `_ancestry`/`_parents` generator TU was already clean; none of
+this session's 4 fixes touch the still-unfixed `path`-param-type-
+inference gap that keeps that generator's body dead code).
+
+A real `python3 mojo.py build` (with imports, safety-bounded) now
+gets further than before it fails — it reaches actual LINKING, not
+just compilation — but still does not produce a binary:
+
+```
+link failed: Undefined symbols for architecture arm64:
+  "_InitializedState_getinfo", referenced from:
+      _CompleteDirs_getinfo in ...
+  "_InitializedState_namelist", referenced from:
+      _CompleteDirs_namelist in ...
+  "_Path___class__", referenced from:
+      _Path__next in ...
+```
+
+NOT investigated further this pass (this is a new-looking symptom —
+worth a future session tracing whether `InitializedState`/`__class__`
+resolve to real emitted symbols with a different mangled name, or are
+genuinely unimplemented). The build then also still hits the
+previously-documented unrelated transitive-import failures verbatim
+(`collections`'s `Counter[...] = ...` subscript-store gap, `inspect`'s
+same `OrderedDict[...] = ...` gap, PLUS a newly-surfaced third:
+`glob.py`'s `self.select_exists` — a compiled GENERATOR method
+referenced as a plain, uncalled value, which this codegen's
+`MojoBoundMethod*` single-call scalar-return representation can't
+express (a real generator's callable surface is its `<base>_start/
+_resume/_value/_destroy` C++20-coroutine API, not a bound-method
+value) — all three cause their respective modules to fall back to
+source-interpretation, independent of this file's own code). None
+attempted this pass (all in other files' scope). Doc kept open — this
+file still does not build end-to-end.
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder, 2nd entry — the `'posixpath' was not declared` gap ALSO fixed; isolated coroutine TU for this file's own generators now compiles with ZERO g++ errors; still blocked overall by the pre-existing param-type-inference gap + unrelated transitive-dependency failures)
 
 This session's `_cpp_expr` MemberExpr fix (see `bugs/CODEGEN_generator_

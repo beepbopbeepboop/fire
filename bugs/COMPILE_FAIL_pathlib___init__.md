@@ -2,6 +2,41 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py`
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder12 — this file's OWN generator/coroutine stage now compiles clean end-to-end; the file still fails to `mojo.py build` overall, but ONLY due to unrelated transitive-dependency modules)
+
+Re-ran an isolated `compile_to_gimple_with_cpp(do_imports=False)`
+check fresh (this session's 4 coroutine-emitter fixes landed for
+COMPILE_FAIL_Apple___main__.md — `mojo_c_getenv`/platform/subprocess
+whitelist, zero-arg `print()`, string-repeat `*`, f-string
+interpolation in `_cpp_expr`'s `StringLiteral` case): it now returns
+successfully with NO exception at all (`OK`, ~1MB GIMPLE + ~11KB
+generated `.cpp`) — every one of the 2026-08-24 entry's listed
+residuals (`self->parser.sep` field-typed-`int` access, the
+`std::function<int64_t()>`-to-`int64_t` invalid cast for `anchor_len`,
+the `path_str` tuple-target redeclaration conflict) is GONE from this
+file's own generator translation unit. Not independently isolated
+which of this session's 4 fixes closed which residual (plausibly the
+f-string fix, since `Path.walk`'s body has f-string-heavy diagnostic/
+path-building code near those sites) — not investigated further since
+the net effect (this file's own coroutine stage is clean) is what
+matters.
+
+**A real `python3 mojo.py build` of this file (with imports) still
+fails** — but now ONLY on unrelated, already-out-of-scope transitive
+dependencies, not this file's own code:
+`/Users/mrs/net/Python-3.14.6/Lib/_collections_abc.py` (multiple
+`variable or field declared void` / `expected expression before ';'`
+GIMPLE errors — a separate, undocumented-here bug in that file's own
+compilation, not pathlib's) and `/Users/mrs/net/Python-3.14.6/Lib/
+pathlib/_os.py` (`glob_escape_0c85c9' undeclared`, `implicit
+declaration of function 'stat_S_IMODE_0c85c9'` — a link/declaration-
+ordering issue in that sibling module). Neither investigated this
+pass — they're bugs in OTHER files pulled in transitively, out of this
+doc's scope (pathlib/__init__.py's own compilation is what this doc
+tracks), and fixing them belongs in their own bug docs if not already
+tracked. Doc kept open — `pathlib/__init__.py` does not build
+end-to-end yet, but the blocker has moved entirely outside this file.
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder — the `'os' was not declared` coroutine-body error (from the 2026-08-23 entry below) is ALSO fixed by this session's module-attribute-value fix; several OTHER, unrelated .cpp errors remain in the same generators)
 
 This session's `_cpp_expr` MemberExpr fix (see `bugs/CODEGEN_generator_

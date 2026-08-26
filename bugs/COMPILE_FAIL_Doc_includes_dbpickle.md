@@ -2,6 +2,22 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py`
 
+## Status (re-verified 2026-08-25, worktree fix/rest-remainder12 — DOCUMENTED-NOT-FIXED, unchanged)
+
+Re-ran an isolated `compile_to_gimple` check fresh against this
+session's other landed fixes (coroutine-body `mojo_c_getenv`/print/
+string-repeat/f-string fixes — see COMPILE_FAIL_Apple___main__.md);
+none are relevant here (this file has no generator/coroutine bodies at
+all — it's a plain-function `io.BytesIO`/`pickle.Pickler` gap). Still
+zero references to `BytesIO`/`StringIO`/`Pickler`/`Unpickler` anywhere
+in gimple_codegen.py or the runtime. Assessment unchanged from
+2026-08-23: two separate missing runtime subsystems (a real
+`io.BytesIO` byte-buffer type, and a subclassable `pickle.Pickler`/
+`Unpickler` honoring `persistent_id`/`persistent_load` overrides),
+each comparable in scope to the existing sqlite3 binding. Not
+attempted — genuinely feature-sized, and this is Doc/includes/ example
+code, not real library source. Doc kept open.
+
 ## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — DOCUMENTED-NOT-FIXED, assessment reconfirmed)
 
 Re-ran the repro (same `dbpickle.py:80:3: error: cannot convert to a

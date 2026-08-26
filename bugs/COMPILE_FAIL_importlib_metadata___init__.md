@@ -1,5 +1,23 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged)
+
+Re-ran an isolated `compile_to_gimple_with_cpp` check fresh, after
+this session's 4 coroutine-emitter fixes landed for
+COMPILE_FAIL_Apple___main__.md (`mojo_c_getenv`/platform/subprocess
+runtime-call whitelist, zero-arg `print()`, string-repeat `*`,
+f-string interpolation in `_cpp_expr`'s `StringLiteral` case — none of
+which are the shapes this file's remaining blocker needs). Confirmed
+byte-for-byte identical refusal: `_convert_egg_info_reqs_to_simple_
+reqs, read (generator function(s)...)`, `Unsupported shape(s):
+_convert_egg_info_reqs_to_simple_reqs: a call to unresolved callee
+'url_req_space(...)'...`. The three remaining feature-sized gaps
+(nested-def/closure compilation inside coroutine bodies; `map`/
+`filter`/callable-valued builtins; foreign-module struct construction
+for `Pair(...)`) are unchanged and still not attempted — each is a
+real subsystem addition to the scalar coroutine-body emitter, not a
+narrow fix. Doc kept open.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C4 cluster. The three remaining feature-sized gaps (nested-def/closure compilation inside coroutine bodies; map/filter and other first-class-callable builtins; foreign-module struct construction) are unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies -- this file's own blockers are a different shape). Still feature-sized; untouched.
