@@ -250,7 +250,24 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     all_pairs = [(ot, ov)] + list(arg_pairs)
     if ret_type == 'void':
         gen._emit_call('void', '', mangled, all_pairs)
-        return 'void', ''
+        if method == '__setitem__':
+            # Statement-context store: the callers (AssignStmt/AugAssign
+            # subscript-target branches) discard the pair wholesale.
+            return 'void', ''
+        # A subscript READ always yields a value in real Python — but a
+        # raise-only `__getitem__` body (e.g. _collections_abc.Mapping's
+        # abstract `raise KeyError`, whose inferred C signature correctly
+        # collapses to `void`) gives this call no result to hand back.
+        # Emitting `('void', '')` here made every value-consuming context
+        # synthesize garbage C: a `void _tN;` temp plus an empty-RHS
+        # assignment (`_tN = ;`) — "variable or field '_tN' declared
+        # void" / "expected expression before ';' token", 22 errors in
+        # _collections_abc.py alone (Mapping.get's `return self[key]`
+        # inside try/except, MutableMapping.update, Sequence indices...).
+        # Return a typed zero placeholder instead: unreachable at runtime
+        # (the callee raises first), valid C everywhere.
+        zero = gen._new_val('int64_t', '0')
+        return 'int64_t', zero
     t = gen._call_expr(ret_type, mangled, all_pairs)
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]
