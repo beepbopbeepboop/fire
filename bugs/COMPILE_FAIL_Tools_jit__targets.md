@@ -4,6 +4,16 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9`: byte-identical refusal to
+2026-08-23 (`_build_stencils`/`_compile`/`_parse`, `with tempfile.
+TemporaryDirectory() as tempdir` inside an async body, "not CallExpr").
+No movement; still structural (needs real `mkdtemp`/`rmtree`-backed
+runtime plumbing plus a new path-value representation, not a narrow
+widening of the no-op-guard allowlist) — same conclusion as the
+2026-08-09 root-cause below. Not attempted, per this round's guidance.
+
 ## Status (2026-08-23): re-verified — STILL-OPEN, byte-identical refusal.
 
 Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`): same honest

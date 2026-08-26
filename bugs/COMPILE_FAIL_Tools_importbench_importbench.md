@@ -4,6 +4,47 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9`. `from_cache` is unchanged
+(still the documented non-plain-assignment-target structural refusal —
+see the 2026-08-23 entry below). A SECOND function, `benchmark_wo_
+bytecode`, is now also refused (previously masked/not separately listed):
+
+```
+Error building: cannot compile module: function(s) benchmark_wo_bytecode,
+from_cache (generator function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): benchmark_wo_bytecode: a call to unresolved callee
+'cache_from_source(...)' is not supported in a compiled generator/
+coroutine body (...); from_cache: only a plain identifier assignment
+target is supported.
+```
+
+`benchmark_wo_bytecode` calls `cache_from_source` (`from importlib.util
+import cache_from_source` at module scope) inside its generator body.
+`cache_from_source` is not actually DEFINED in `importlib/util.py` —
+real CPython re-exports it from `importlib/_bootstrap_external.py`
+(`def cache_from_source(path, debug_override=None, *, optimization=None)`,
+line 239). The coroutine-body call-expression emitter's "known module-
+level/imported function" recognition (`gimple_cpp_core.py`'s `_cpp_expr`
+CallExpr case, the branch that already resolves other real cross-module
+calls like `os.py`'s `fspath`) evidently doesn't trace through this
+particular re-export chain (`importlib.util` → `importlib._bootstrap_
+external`), so `cache_from_source` never lands in `gen.func_param_types`/
+`gen._cpp_early_global_names` for this compile and falls to the generic
+"unresolved callee" refusal. Not investigated to the bottom (whether the
+gap is in this project's cross-module import-following generally, or
+specific to the coroutine-body emitter's narrower symbol-recognition
+subset used elsewhere in today's session) — plausibly a real, scoped fix
+(mirroring however `os.fspath` gets resolved), but re-export-chain
+tracing for stdlib modules is exactly the kind of shared, regression-
+sensitive import-resolution machinery this round's guidance says to
+avoid touching speculatively without deeper investigation time. Left
+untouched. Net: this file is now blocked by TWO independent gaps
+(`from_cache`'s already-known non-plain-assignment-target refusal, and
+this new `cache_from_source` cross-module-import-resolution gap in the
+coroutine body specifically) rather than one; no code change.
+
 ## Status (2026-08-23): refusal list shrank 6 → 1; the one survivor is the
 ## already-documented non-plain-assignment-target gap. Still open.
 

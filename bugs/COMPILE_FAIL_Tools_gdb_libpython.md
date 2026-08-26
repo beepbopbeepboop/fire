@@ -4,6 +4,66 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25 — `iteritems`'s own remaining refusal FIXED;
+## a genuinely different, deeper GCC ICE now blocks the file)
+
+Re-ran fresh against `fix/rest-remainder9`. The 2026-08-23 entry below's
+`.cpp`-stage error list (`PyObjectPtr` undeclared, `begin`/`end` clashes,
+etc.) is GONE — this file no longer even reaches that stage. Instead, the
+build now refuses earlier and more narrowly:
+
+```
+Error building: cannot compile module: function(s) iteritems (generator
+function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): iteritems: a call to unresolved callee 'int(...)'
+is not supported in a compiled generator/coroutine body (...).
+```
+
+`PyDictObjectPtr.iteritems` does `has_values = int(values)` (line 789) —
+the coroutine-body expression emitter (`gimple_cpp_core.py`'s `_cpp_expr`
+CallExpr case) had NO handling at all for the `int(x)`/`float(x)`
+builtins, unlike the ordinary (non-coroutine) call path (`_lower_named_
+call`'s own `int(x)`/`float(x)` direct-cast special cases). FIXED: added
+matching `int(x)`/`float(x)` handling to the coroutine emitter, mirroring
+the ordinary path's dispatch — a `char *`-declared argument is a real
+string parsed via `mojo_make_int`/`mojo_make_float` (this codegen's
+existing runtime helpers, already declared in `runtime/mojo_runtime.h`),
+any other declared (or untracked — this emitter has no `_actual_types`
+boxed-value-kind tracking) type gets a direct numeric cast
+(`(int64_t)(...)`/`(double)(...)`), unlike list()/set()/comprehension
+(which need real loop-as-expression codegen this emitter still lacks —
+see the sibling `c_analyzer/__init__.py`/`__main__.py` docs), int()/
+float() need no loop at all, so this was a safe, narrow, mechanical
+addition.
+
+Confirmed: `iteritems`'s own `int(...)`-unresolved-callee refusal is
+gone; the generator now clears the eligibility gate entirely. The file
+still does not build — it now reaches g++/`-fgimple` compilation of a
+DIFFERENT, unrelated function, `TruncatedStringIO.mojo_write`, and hits a
+genuine GCC internal compiler error (not a graceful diagnostic):
+
+```
+TruncatedStringIO_mojo_write: internal compiler error: in build2, at
+tree.cc:5208
+    self._val += data[0:self.maxlen - len(self._val)]
+```
+
+— the same general class of `-fgimple` frontend crash (as opposed to an
+ordinary type-mismatch diagnostic) already seen and left un-investigated
+in `cases_generator/cwriter.py`'s history (`internal compiler error: in
+build2, at tree.cc:5204`, a different line/shape but the same GCC
+internals entry point). Root-causing an ICE typically means bisecting the
+exact emitted GIMPLE shape that GCC's frontend cannot build a tree for —
+a materially different, deeper investigation than an honest-refusal gap,
+and not attempted in the time remaining this session. Doc kept open;
+`iteritems`'s blocker is genuinely resolved, but the file as a whole
+still fails, on a new and different bug.
+
+Quality gate after the `int()`/`float()` coroutine-emitter fix:
+`test_gimple.py` 253/253, `test_module_cache.py` 76/76 (see the session's
+top-level report for `make check-selfhost`/stdlib-dylib results, run once
+for the whole day's change set).
+
 ## Status (2026-08-23): the up-front generator refusal is GONE entirely (all 4
 ## tuple-yield generators, `iteritems` included, now pass the gate); new
 ## blockers are .cpp-stage hard errors. Still open.

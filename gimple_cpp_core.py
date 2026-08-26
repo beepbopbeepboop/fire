@@ -1667,6 +1667,42 @@ def _cpp_expr(gen, e) -> str:
             if (fname == 'str' and len(e.args) == 1
                     and not gen._locally_binds_name('str')):
                 return f"mojo_str((void *)({args[0]}))"
+            if (fname == 'int' and len(e.args) == 1
+                    and not gen._locally_binds_name('int')):
+                # int(x) — mirrors the ordinary GIMPLE path's own
+                # `int(x)` special case (`_lower_named_call`): a
+                # char*-declared argument is a real STRING to be
+                # PARSED (`mojo_make_int`), not bit-reinterpreted; any
+                # other declared type (int64_t/int/_Bool/double, or —
+                # this emitter has no `_actual_types` boxed-value
+                # tracking, see `len`'s own comment just above — an
+                # UNTRACKED local) is a numeric value, safe to cast
+                # directly (matches Python's int(float) truncate-
+                # toward-zero via C's own double->int64_t cast). Before
+                # this, `int(...)` inside a generator/coroutine body
+                # fell through to the generic bare-name-call fallback
+                # below, an undeclared C++ identifier — a hard g++
+                # error (Tools/gdb/libpython.py's `PyDictObjectPtr.
+                # iteritems`: `has_values = int(values)`).
+                _int_arg = e.args[0]
+                _ict = (gen._cpp_declared.get(_int_arg.name)
+                        if gen._cpp_declared is not None
+                        and isinstance(_int_arg, gimple_ctypes.IdentExpr) else None)
+                if _ict == 'char *':
+                    return f"mojo_make_int((char *)({args[0]}))"
+                return f"((int64_t)({args[0]}))"
+            if (fname == 'float' and len(e.args) == 1
+                    and not gen._locally_binds_name('float')):
+                # float(x) — same shape as int(x) just above, mirroring
+                # the ordinary path's analogous `float(x)` direct-cast
+                # special case.
+                _flt_arg = e.args[0]
+                _fct = (gen._cpp_declared.get(_flt_arg.name)
+                        if gen._cpp_declared is not None
+                        and isinstance(_flt_arg, gimple_ctypes.IdentExpr) else None)
+                if _fct == 'char *':
+                    return f"mojo_make_float((char *)({args[0]}))"
+                return f"((double)({args[0]}))"
             if (fname == 'repr' and len(e.args) == 1
                     and not gen._locally_binds_name('repr')):
                 return f"mojo_repr_str((char *)({args[0]}))"
