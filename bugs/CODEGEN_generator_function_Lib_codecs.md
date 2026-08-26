@@ -1,5 +1,123 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-26 — implemented real loop-as-expression codegen in the coroutine-body C++ emitter; UNAFFECTED for this file specifically (its own blocker is `**kwargs`-to-dynamic-callee), but the mechanism itself is a genuine widening — see the cross-references below for where it DID move the needle)
+
+A prior session's triage of this cluster found the single widest
+recurring blocker: `gimple_cpp_core.py`'s `_cpp_expr` (the compiled-
+generator/coroutine-body C++ expression emitter) had NO codegen for
+loop-as-expression constructs — `list(<iterable-expr>)`,
+`set(<iterable-expr>)`, and comprehensions (`[x for x in y]`/
+`{x for x in y}`) all either hit the generic "unresolved callee" honest
+refusal (for the `list()`/`set()` spellings) or silently lowered to an
+honest-but-always-EMPTY `mojo_list_new ()` stub (for a bare
+`Comprehension` node used as a value) — because every other call site in
+this emitter expects `_cpp_expr` to return one inline C++ expression
+string, and a real loop needs statements, which an expression slot can't
+directly hold.
+
+**Implemented this session** (`gimple_cpp_core.py`):
+- `_cpp_build_container_from_iterable(gen, kind, iter_node, target_name,
+  elem_node, cond_nodes)` — builds a real `MojoList *`/`MojoSet *` as an
+  immediately-invoked C++ lambda (`[&]() -> T { T *acc = ...; <loop>;
+  return acc; }()`) wrapping a genuine loop. The loop itself is built by
+  handing a SYNTHETIC `ForStmt` (target/iterable from the comprehension,
+  body = an `<acc>.append(<elem>)`/`<acc>.add(<elem>)` call, wrapped in
+  `IfStmt`s for any `if` clauses) to the EXISTING `_cpp_for_stmt` — this
+  reuses that function's already-broad iterable-shape dispatch (range/
+  reversed-range/a declared `MojoList *`/`MojoSet *` local or
+  `self.<field>`/a `MojoDict *`'s `.keys()`/`.values()`/`.items()`/a
+  sibling already-compiled generator's call/itertools.repeat/...) rather
+  than re-implementing iteration a third, narrower time. Any iterable
+  shape `_cpp_for_stmt` doesn't recognize propagates its existing
+  `_UnsupportedGeneratorShape` refusal unchanged.
+- `_cpp_rename_ident`/`_cpp_rename_ident_container` — a generic
+  dataclass-field-walking deep-copy-and-rename helper, used to give a
+  comprehension's own loop variable a FRESH, collision-proof C++ name
+  before building the synthetic `ForStmt` (a comprehension has its own
+  scope in real Python; this emitter's `declared` dict is function-
+  scoped, so reusing an outer variable's bare name would silently
+  alias/clobber it).
+- Wired into `_cpp_expr`'s `Comprehension` case (list/set kinds, single
+  `for`-clause only — dict/generator kinds and multi-clause
+  comprehensions still fall back to the old empty-stub behavior, no
+  confirmed real occurrence needing them) and a new `CallExpr`
+  `fname in ('list', 'set')` single-arg case (synthesizes the equivalent
+  `{x for x in <arg>}`/`[x for x in <arg>]` shape, mirroring the
+  ordinary non-coroutine GIMPLE path's own `_lower_ctor_from_iterable`,
+  `gimple_gen_calls.py`).
+- `gimple_exprtypes.py`'s `_infer_simple_expr_ctype` (the separate
+  type-estimator used to declare a first-assigned local's C++ type)
+  widened to match: `list(x)`/`set(x)` single-arg calls now infer
+  `MojoList *`/`MojoSet *` (previously fell through to the `int64_t`
+  default, so `_cpp_stmt`'s `AssignStmt` case declared the wrong C++
+  type — "invalid conversion ... to int64_t"), and a `set`-kind
+  `Comprehension` now infers `MojoSet *` (previously ALL comprehension
+  kinds inferred `MojoList *`, harmless while the codegen only ever
+  produced an empty `MojoList *` stub regardless of kind, but a real
+  mismatch now that a set comprehension genuinely builds a `MojoSet *`).
+- `_cpp_for_stmt` gained a new dedicated single-name `for x in
+  <MojoSet*-typed expr>:` case (`mojo_set_iter_new`/`_next`/`_val_int`/
+  `_free`, mirroring the ordinary GIMPLE path's own `_gen_for_set`,
+  `gimple_gen_loops.py`) — needed so `list(<a declared set local>)`
+  round-trips through the new mechanism (previously only a declared
+  `MojoList *` local had an indexed-loop iteration case here; a bare
+  `MojoSet *` fell to the generic `for (auto x : ...)` range-for, which
+  can't compile against a raw pointer with no ADL `begin`/`end`).
+
+**Verification**: hand-written repros (`list(range(n))`, `[i*2 for i in
+range(n)]`, `set(range(n))`, `[v for v in <declared list> if v > k]`,
+`{v for v in <declared list> if v > k}`, `list(<dict>.keys())`,
+`set(<dict>.values())`, `list(<declared set local>)`,
+`list(<declared list local>)`) all g++-fsyntax-only-clean, added as a
+new `test_gimple.py` regression case
+(`generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_
+cpp_path`).
+
+Re-verified the 9 docs the prior triage flagged as hitting this
+mechanism, each via a fresh isolated `compile_to_gimple_with_cpp
+(do_imports=False)` strict-mode repro AND a relaxed-mode `.cpp`
+syntax-check, both `git stash`-A/B'd against the pre-fix tree:
+
+- **ADVANCED** (real, concrete progress, not closed): `bugs/CODEGEN_
+  generator_function_Lib_ipaddress.md` (`_collapse_addresses_internal`'s
+  `list(...)` refusal fully eliminated, strict refused-generator count
+  4→3; a deeper `.pop()` gap now blocks it), `bugs/COMPILE_FAIL_Tools_
+  c-analyzer_c_analyzer___init__.md` (`analyze_decls`'s `list(...)` and
+  `iter_decls`'s `set(...)` refusals both eliminated, each now blocked
+  by a different, deeper, separately-tracked gap), `bugs/COMPILE_FAIL_
+  Tools_c-analyzer_c_analyzer___main__.md` (`fmt_summary`'s `list(...)`
+  refusal fully eliminated, strict refused-generator count 2→1).
+- **UNAFFECTED** (confirmed byte-identical before/after, blocker is a
+  genuinely different shape — `map()`/`getattr`/`reversed()`/a
+  callable-parameter for-loop/`**kwargs`-to-dynamic-callee, all
+  deliberately out of this fix's scope): `bugs/CODEGEN_generator_
+  function_Lib_pkgutil.md`, `bugs/COMPILE_FAIL_Tools_c-analyzer_
+  c_common_tables.md`, `bugs/COMPILE_FAIL_importlib_metadata___init__.md`,
+  `bugs/COMPILE_FAIL_collections___init__.md`, and this file (`iterdecode`/
+  `iterencode`'s own blocker is a `**kwargs`-to-dynamic-callee spread —
+  `getincrementalencoder(encoding)(errors, **kwargs)` — not a `list()`/
+  `set()`/comprehension shape at all).
+- **Bonus correctness fix, no doc of its own blocker was closed**:
+  `bugs/CODEGEN_generator_function_Lib_dis.md` — a DIFFERENT generator
+  in the same file (`_find_imports`) previously silently compiled a
+  real comprehension-over-a-sub-generator-with-a-filter shape to an
+  honest-but-WRONG always-empty-list stub (a real correctness bug, not a
+  compile failure); now compiles to the correct loop. See that doc's own
+  entry for detail.
+
+None of the 9 fully CLOSE (each file has additional, separately-tracked
+gaps stacked behind or alongside its `list()`/`set()`/comprehension
+blocker), but 3 of them show genuine, verifiable forward movement from
+this specific fix, plus one confirmed real correctness improvement in a
+tenth generator outside the original 9. Full mandatory gate: `test_
+gimple.py` 264/264 (263 + 1 new regression test), `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild 0
+skip lines (unchanged from baseline).
+
+This file's OWN blocker (`iterdecode`/`iterencode`'s `**kwargs`-to-
+dynamic-callee spread) remains exactly as documented below — genuinely
+structural, not attempted. Doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

@@ -1,5 +1,26 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
+
+This session implemented real loop-as-expression codegen for `list(x)`/
+`set(x)`/comprehension-as-value inside a compiled generator/coroutine
+body (`gimple_cpp_core.py`'s `_cpp_build_container_from_iterable`; see
+`bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the same date
+for the implementation writeup). Re-checked this file specifically since
+it was flagged as a candidate. `iter_importers`/`iter_modules`/
+`walk_packages`'s refusals are `getattr(obj, name)` (non-static name) and
+`map(...)` — neither is a `list()`/`set()`/comprehension shape, so no
+change was expected.
+
+A/B'd via `git stash` (strict-mode `compile_to_gimple_with_cpp`
+refusal AND the relaxed-mode `.cpp` syntax-check on the surviving
+generators): byte-identical before/after in both — same three refused
+generators, same reasons; the relaxed `.cpp`'s 2 pre-existing errors
+(`iter_zipimport_modules`'s `dirlist = sorted(os.listdir(...))`/
+`str.split` type-tracking gap, unrelated to this session's fix) are also
+byte-identical. Confirmed unaffected. No code change to this doc's own
+analysis; doc stays open.
+
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): byte-identical refusal, unchanged
 
 Fresh real `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

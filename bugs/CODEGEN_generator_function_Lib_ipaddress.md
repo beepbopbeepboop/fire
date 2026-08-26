@@ -1,5 +1,48 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-26 — loop-as-expression codegen landed; ADVANCED, not closed: `_collapse_addresses_internal`'s `list(...)` refusal is FIXED, a deeper `.pop()` gap now blocks it)
+
+Implemented real loop-as-expression codegen in the compiled-generator/
+coroutine C++ emitter this session (`gimple_cpp_core.py`'s new
+`_cpp_build_container_from_iterable`/`_cpp_rename_ident`, wired into
+`_cpp_expr`'s `Comprehension` case and a new `list(x)`/`set(x)`
+single-arg `CallExpr` case; matching `_infer_simple_expr_ctype` widening
+in `gimple_exprtypes.py`) — see `bugs/CODEGEN_generator_function_Lib_
+codecs.md`'s entry of the same date for the full implementation writeup
+(this doc's own repro was one of the two confirmed real-world targets).
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` (strict)
+repro, A/B'd against the pre-fix tree via `git stash`: the strict-mode
+refused-generator list shrank from **4 to 3** —
+`_collapse_addresses_internal` (blocked by `list(addresses)`, "a call to
+unresolved callee 'list(...)'") no longer appears in the refusal at all.
+`_find_address_range` (`next(it)` on a plain iterator — unrelated,
+untouched), `subnets`, and `summarize_address_range` (`min(...)` —
+unrelated) remain refused, byte-identical reasons to before.
+
+Relaxed-mode (`GimpleGen(do_imports=False, relaxed_imports=True)`, this
+doc's own established methodology) `.cpp` syntax-check went from 23 to
+**24** errors (A/B'd via the same stash): `_collapse_addresses_internal`
+now compiles far enough to reach the next real gap the 2026-08-25
+"rest-remainder14" entry below already flagged as separate and deeper —
+`to_merge.pop(0)` (a `.pop()` call on a `MojoList *`, "request for
+member 'pop' in 'to_merge', which is of pointer type 'MojoList*'") — no
+`.pop()` support anywhere in this coroutine-body emitter. The other 23
+errors are byte-identical to the prior entry's 4 families (`IPv4Network`/
+`IPv6Network` name resolution, `@property`-as-bound-method leaving a raw
+`std::function`, `_address_class` too-many-arguments, the unannotated-
+param pointer/int comparison) — confirmed unaffected.
+
+**Net effect for this file**: real, concrete progress (one whole
+generator's primary blocker eliminated), but the file's other three
+refused generators and `_collapse_addresses_internal`'s own new `.pop()`
+gap are untouched — still does not build. `min()`/`.pop()`/struct-keyed-
+dict/property-as-value/the unannotated-param family remain feature-sized,
+not attempted here. Quality gate: `test_gimple.py` 264/264 (263 + 1 new
+regression test for this shape), `test_module_cache.py` 76/76, `make
+check-selfhost` clean, from-scratch stdlib dylib rebuild 0 skip lines.
+Doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

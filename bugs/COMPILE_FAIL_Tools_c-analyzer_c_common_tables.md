@@ -4,6 +4,31 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
+
+This session implemented real loop-as-expression codegen for `list(x)`/
+`set(x)`/comprehension-as-value inside a compiled generator/coroutine
+body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
+same date for the implementation writeup). `read_table`'s own blocker is
+`for row in _get_reader(lines, delimiter=sep or '\t'):` — a for-loop
+whose iterable is a call through a callable PARAMETER (`_get_reader`
+defaults to `csv.reader`), not a `list()`/`set()`/comprehension shape —
+so no change was expected.
+
+A/B'd via `git stash` (isolated `compile_to_gimple_with_cpp(do_imports=
+False)`, strict mode): byte-identical refusal before/after —
+`read_table: a call to unresolved callee 'next(...)'`. (Note: this
+differs in WORDING from this doc's own 2026-08-26 entry above, which
+records `"unsupported for-loop iterable type: CallExpr"` as the current
+blocker — that's a pre-existing methodology difference between a plain
+`do_imports=False` strict repro (what this verification and this doc's
+`fix/rest-remainder9`-era entries used) and whatever exact invocation
+produced today's `fix/rest-remainder18` entry; both are confirmed
+UNCHANGED by this session's own before/after A/B on this exact
+methodology, so this file is unaffected by this session's fix either
+way. Not investigated further — out of scope for this pass.) Confirmed
+unaffected; doc stays open.
+
 ## Status (re-verified 2026-08-26)
 
 Fresh repro against this session's tree (`fix/rest-remainder18`)

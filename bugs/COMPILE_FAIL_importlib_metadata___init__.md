@@ -1,5 +1,25 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
+
+This session implemented real loop-as-expression codegen for `list(x)`/
+`set(x)`/comprehension-as-value inside a compiled generator/coroutine
+body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
+same date for the implementation writeup). This file's own two refusals
+are `_convert_egg_info_reqs_to_simple_reqs` (nested-`def`-as-callee,
+`url_req_space(...)`) and `Sectioned.read` (`map(...)`, categorically
+unsupported — out of this session's scope per the task's own framing:
+"if map()/filter() with a genuinely dynamic/runtime callable value turns
+out to need a different, harder mechanism ... it's fine to leave those
+refused") — neither is a `list()`/`set()`/comprehension shape.
+
+A/B'd via `git stash`: strict-mode `compile_to_gimple_with_cpp(do_imports
+=False)` refusal is byte-identical (`_convert_egg_info_reqs_to_simple_
+reqs`/`read`, same reasons), and the relaxed-mode `.cpp` for the
+surviving generators is ALSO byte-identical (0 g++ syntax errors both
+before and after — this file's other generators were already clean).
+Confirmed unaffected; doc stays open.
+
 ## Status (updated 2026-08-26 — re-verified fresh against current branch head; unchanged, still three feature-sized gaps)
 
 Re-ran the isolated `compile_to_gimple_with_cpp` probe fresh. Refusal

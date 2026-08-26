@@ -4,6 +4,48 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-26 — loop-as-expression codegen landed; ADVANCED: `fmt_summary`'s `list(...)` blocker is FULLY GONE, refused-generator count 2 -> 1)
+
+Implemented real loop-as-expression codegen in the coroutine-body C++
+emitter this session (`gimple_cpp_core.py`'s new
+`_cpp_build_container_from_iterable`/`_cpp_rename_ident`; see
+`bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the same date
+for the implementation writeup, and `bugs/COMPILE_FAIL_Tools_c-analyzer_
+c_analyzer___init__.md`'s entry for the sibling repro this exact gap was
+root-caused against).
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` (strict)
+repro, A/B'd via `git stash`: the refused-generator list shrank from
+`fmt_full, fmt_summary` to **just `fmt_full`** — `fmt_summary`'s
+`list(...)` refusal (this doc's 2026-08-25 entry: "the coroutine-body
+expression emitter's `Comprehension` case is a hard-coded empty-list
+stub ... `list(x)`/`set(x)` ... have no equivalent lowering") is
+completely gone.
+
+Relaxed-mode `.cpp` (A/B'd the same way): `fmt_summary` now compiles
+much further into its own body — reaches the nested-generator-delegation
+shape (`def section(name): ...; yield from render()`) this doc's
+2026-08-25-pm entry already predicted would be the NEXT blocker if
+`list()` were fixed ("closure compilation + cross-generator
+consumption"). New errors: `_mojogen_section_start("types")` etc. —
+4 call sites passing a STRING LITERAL where the generated `section(...)`
+coroutine-start symbol's inferred parameter type is `int64_t` (the
+nested `def`'s own parameter type inference doesn't see the string
+literal call-site evidence) — a real, different, separately-structural
+gap (nested-closure-as-generator parameter typing), not attempted here.
+`fmt_full` is unaffected — its own blocker (`sorted(analysis, key=...)`
+where `analysis` is dict-shaped, not proven list-typed) is a pre-existing,
+separately-documented `sorted(key=)` limitation, not a `list()`/`set()`/
+comprehension shape.
+
+**Net effect**: `fmt_summary`'s specific blocker this doc tracked is
+fully resolved; the file as a whole still does not build (`fmt_full`
+unaffected, and `fmt_summary` now blocked by the separate nested-closure
+gap this doc's own analysis already anticipated). Quality gate:
+`test_gimple.py` 264/264, `test_module_cache.py` 76/76, `make
+check-selfhost` clean, from-scratch stdlib dylib rebuild 0 skip lines.
+Doc stays open.
+
 ## Status (re-verified 2026-08-26)
 
 Fresh repro against this session's tree (`fix/rest-remainder18`) reproduces

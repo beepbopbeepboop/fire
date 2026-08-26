@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-26 — loop-as-expression codegen landed; this file's own tracked blocker UNAFFECTED, but a real bonus CORRECTNESS fix found in a sibling generator)
+
+Implemented real loop-as-expression codegen in the coroutine-body C++
+emitter this session (`gimple_cpp_core.py`'s new
+`_cpp_build_container_from_iterable`/`_cpp_rename_ident`, wired into
+`_cpp_expr`'s `Comprehension` case and a new `list(x)`/`set(x)`
+single-arg `CallExpr` case; matching `_infer_simple_expr_ctype` widening
+in `gimple_exprtypes.py`; plus a new dedicated `MojoSet *` single-name
+for-loop iteration case in `_cpp_for_stmt`). This file was one of the 9
+candidates re-verified against it.
+
+**This file's own tracked blocker is unaffected**: strict-mode
+`compile_to_gimple_with_cpp(do_imports=False)` refusal is byte-identical
+before/after (`git stash`-A/B'd) — `_get_instructions_bytes`'s own
+`*`/`**`-unpack call-argument refusal, not a `list()`/`set()`/
+comprehension shape.
+
+**Bonus finding, not this doc's own blocker**: A/B'ing the relaxed-mode
+`.cpp` for the file's OTHER (already-surviving) generators turned up a
+real difference in `_find_imports` (dis.py's `_find_imports`, source:
+`opargs = [(op, arg) for op, arg in _unpack_opargs(code) if op !=
+EXTENDED_ARG]`). BEFORE this session's fix, this comprehension silently
+compiled to the honest-but-WRONG always-empty-list stub
+(`opargs = mojo_list_new ()`) that this doc's own family of bugs is
+about — not a compile error, a SILENT WRONG-ANSWER bug (the subsequent
+`for i, (op, oparg) in enumerate(opargs):` loop then ran zero iterations
+forever). AFTER this session's fix, it compiles to a real loop
+delegating to the `_unpack_opargs` sub-generator with the `if` filter
+correctly applied
+(`opargs = [&]() -> MojoList * { ...; while (_mojogen__unpack_opargs_
+resume(...)) { ...; if ((op != EXTENDED_ARG)) { mojo_list_append_int(...);
+} } return _mg_acc; }();`). This is a genuine correctness improvement in
+a generator this doc's own blocker never even lets the file's build
+reach today, but worth recording here since it's the closest concrete
+evidence this session has that the new mechanism handles a real,
+non-synthetic comprehension-over-a-sub-generator-with-a-filter shape
+correctly, not just the hand-written test cases.
+
+Full `.cpp` error count for the surviving generators is otherwise
+byte-identical before/after (15 errors, all pre-existing `opmap`/
+`EXTENDED_ARG` module-global and `char*`/`int64_t` conversion gaps,
+unrelated to this fix). Quality gate: `test_gimple.py` 264/264,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skip lines. Doc stays open (this file's own
+blocker unaffected).
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

@@ -4,6 +4,60 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-26 — the loop-as-expression codegen this doc's own history called for is now implemented; ADVANCED, not closed)
+
+This doc's 2026-08-25 entry root-caused all three of this file's refused
+generators to one shared gap and explicitly scoped a real fix: "giving
+the coroutine-body expression emitter genuine loop-as-expression
+codegen ... a materially new codegen capability". Implemented this
+session: `gimple_cpp_core.py` gained `_cpp_build_container_from_iterable`
+(a new helper building a real `MojoList *`/`MojoSet *` via an
+immediately-invoked C++ lambda wrapping a genuine loop, reusing
+`_cpp_for_stmt`'s existing iterable-shape dispatch) plus
+`_cpp_rename_ident` (gives a comprehension's own loop variable a fresh
+C++ name so its scope can't alias an outer same-named local), wired into
+`_cpp_expr`'s `Comprehension` case (previously a hard-coded always-empty
+stub) and a new `list(x)`/`set(x)` single-arg `CallExpr` case (mirroring
+the ordinary GIMPLE path's own `_lower_ctor_from_iterable`). Matching
+`_infer_simple_expr_ctype` widening in `gimple_exprtypes.py` so a
+first-assigned local's declared C++ type agrees with what the new
+codegen actually produces. Also added: dedicated `MojoSet *` single-name
+for-loop iteration in `_cpp_for_stmt` (via `mojo_set_iter_new/_next/
+_val_int/_free`, mirroring the ordinary GIMPLE path's `_gen_for_set`) —
+needed so `list(<a set local>)` round-trips through the new mechanism.
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` (strict)
+repro, A/B'd via `git stash`: **2 of the 3 refused generators' blocking
+reason changed** —
+- `analyze_decls`: was `"a call to unresolved callee 'list(...)'"`
+  (from `decls = list(decls)`). Now compiles past that entirely and
+  refuses on `"a call to unresolved callee 'group_by_kinds(...)'"` — a
+  DIFFERENT, deeper gap this doc's own 2026-08-25 entry already
+  predicted lay behind it ("`group_by_kinds`/dict-comprehension/
+  nested-`def` shapes in `analyze_decls`'s body").
+- `iter_decls`: was `"a call to unresolved callee 'set(...)'"` (from
+  `KIND.DECLS & set(kinds)`). Now compiles past that and refuses on
+  `"a `*`/`**`-unpack call argument is not supported"` — this is
+  `iter_decls`'s OWN already-documented, separately-tracked blocker
+  (the 2026-08-14 entry: `parse_files(filenames, **kwargs)` forwarded to
+  a dynamically-obtained parameter-valued callee, genuinely structural,
+  not attempted) — i.e. the `set()` fix genuinely unblocked the function
+  far enough to reach the frontier this doc had already mapped out.
+- `check_all`: byte-identical, `"unsupported for-loop iterable type:
+  CallExpr"` (`for data, failure in check(analysis):`, a for-loop over a
+  call through a loop-variable callable — not a `list()`/`set()`/
+  comprehension shape, correctly untouched by this fix, matching the
+  task's explicit scoping decision to leave dynamic-callable iteration
+  out of scope).
+
+**Net effect**: real progress on 2 of 3 functions (their `list()`/
+`set()` blockers are fully eliminated), but each now sits behind a
+different, separately-structural gap (`group_by_kinds` call resolution;
+`**kwargs`-to-dynamic-callee), and `check_all` is unaffected — module
+still does not build. Quality gate: `test_gimple.py` 264/264,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skip lines. Doc stays open.
+
 ## Status (re-verified 2026-08-26)
 
 Fresh repro against this session's tree (`fix/rest-remainder18`, based on

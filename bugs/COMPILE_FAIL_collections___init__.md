@@ -2,6 +2,27 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
+
+This session implemented real loop-as-expression codegen for `list(x)`/
+`set(x)`/comprehension-as-value inside a compiled generator/coroutine
+body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
+same date for the implementation writeup). This file's three
+`__reversed__` refusals are all `reversed(...)` used as a plain builtin
+CALL (producing a value), not a `list()`/`set()`/comprehension shape —
+`reversed()` itself still has no codegen anywhere in this emitter except
+the narrow `for i in reversed(range(...)):` for-loop-iterable special
+case, unaffected by this session's work — so no change was expected.
+
+A/B'd via `git stash`: strict-mode `compile_to_gimple_with_cpp(do_imports
+=False)` refusal is byte-identical (`__reversed__` x3, same `reversed
+(...)` reason each). The relaxed-mode/direct `gen_module` path (this
+doc's own established methodology) hits an unrelated, EARLIER hard
+refusal before reaching generator-eligibility at all — `Counter[...] =
+...` subscript-store on the `Counter` struct having no `__setitem__`/
+backing container field — also byte-identical before/after. Confirmed
+unaffected; doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — BOTH stacked blockers confirmed live, from two independent build modes)
 
 Fresh verification from both directions, no compiler change:
