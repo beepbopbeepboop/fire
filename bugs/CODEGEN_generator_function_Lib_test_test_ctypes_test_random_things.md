@@ -1,5 +1,40 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — same outcome as the 2026-08-25 attempt: still cannot personally complete a fresh whole-program build within the 300s safety budget, but nothing found contradicts RESOLVED)
+
+Independent re-verification attempt, same conclusion as the entry
+immediately below. `commit b46fd5d` is an ancestor of this worktree's
+branch point (`1e0f3f2`, confirmed via `git merge-base --is-ancestor`).
+Rebuilt `build/libmojostdlib.dylib` from scratch first (0 `skip
+<module>:` lines) — this DOES make most other files' whole-program
+builds fast (seconds, warm CAS), confirmed directly on 2 other docs this
+session (`test_finalization.py`, `collections/__init__.py` both finished
+in well under 300s with the dylib warm). This file is different: THREE
+separate `python3 mojo.py build .../test_random_things.py` attempts this
+session — one with 4 other builds contending on the machine, one with 1
+other build contending, one running alone — each hit the 300s wall-clock
+cap and were killed by the watcher; RSS stayed flat and safe (~330MB-
+1.1GB, nowhere near the 6GB kill threshold) every time, so this is
+consistently NOT the faulthandler-style runaway-RAM hazard — it's a
+genuinely slow transitive `unittest`/`test.support` import-closure walk
+for this specific file (its collections/inspect imports fall back to
+SOURCE INTERPRETATION, per the `Counter[...] = ...`/`OrderedDict[...] =
+...` refusals visible in every attempt's own output — interpreting those
+two large modules from source is apparently slow enough on its own to
+consistently exceed 300s for this file's full import graph, independent
+of machine contention).
+
+Did not find any different approach this session to get a real exit-0
+confirmation without exceeding the safety budget (isolated `do_imports=
+False` compile + syntax-check was already the 2026-08-25 entry's own
+method, and adds nothing new here). Not marking this doc resolved-and-
+removed on my own authority, same reasoning as the entry below — the
+RESOLVED entry's own detailed, independently-reproducible verification
+stands; whoever next has a machine free of the collections/inspect
+interpretation-fallback slowness (or extends the safety budget for this
+one known-slow-but-safe file) should get the confirming run and `git rm`
+this doc.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder13 — independent re-verification attempted; could not personally complete a fresh whole-program build within the safety budget this session, but found nothing contradicting the RESOLVED claim below)
 
 Attempted an independent, from-scratch re-verification of the RESOLVED

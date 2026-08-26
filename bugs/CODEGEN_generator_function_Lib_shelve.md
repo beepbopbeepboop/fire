@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
+
+Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+shelve.py` against this worktree (branched from master `1e0f3f2`,
+`build/libmojostdlib.dylib` freshly rebuilt, 0 skips — with the dylib
+warm this build completes in seconds rather than timing out). 153
+`error:` lines total, same count and same dominant clusters
+(`argparse.py`/`pickle.py`/`typing.py`/`_collections_abc.py`) as the
+2026-08-25 entry — none attributable to `shelve.py`'s own code or its
+one generator (`Shelf.__iter__`). This session's own fixes (dynamic
+exception-value re-raise; MemberExpr-receiver `.append()`/`.clear()`/
+`.add()`, see `CODEGEN_generator_function_Lib_test_test_finalization.
+md`) don't touch this cascade at all — confirmed no change in the error
+count or composition. Still NOT a generator-codegen-cluster failure;
+the transitive `argparse`/`pickle`/`typing` cascade remains large,
+multi-file, unrelated-to-generators scope, not attempted. Doc stays
+open only because the file's full transitive build doesn't exit clean.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
 
 Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/shelve.py`

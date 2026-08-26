@@ -1,5 +1,27 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified, unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` +
+`gcc-mp-15 -fgimple -fsyntax-only` / `g++-mp-15 -std=c++20 -fsyntax-only`
+against this worktree (branched from master `1e0f3f2`, after this
+session's own `SubscriptExpr`-reraise + MemberExpr-receiver
+container-method fixes, see `CODEGEN_generator_function_Lib_test_test_
+finalization.md`): `.ci` side 0 errors (warnings only); `.cpp` side
+identical single error to the 2026-08-25 entry below, verbatim —
+`OSEINTRTest_subprocess(self, code, mojo_str((void *)(wr)))`: "cannot
+convert 'char*' to 'MojoList*'" (argument 2), because `subprocess(self,
+*args, **kw)`'s call site only forwards `code` as the sole positional
+payload and drops `str(wr)`/`pass_fds=[wr]`, instead of packing them
+into the `(MojoList *, MojoDict *)` pair the extern declaration expects.
+Not touched by either of this session's fixes (dynamic-value re-raise;
+MemberExpr-receiver `.append()`/`.clear()`/`.add()`) — neither is
+call-argument/vararg-packing machinery. Per this doc's own established
+reasoning (this is exactly the CLAUDE.md-flagged high-risk "_tuplegetter
+incidents" category — narrow-looking edits to shared call-argument
+packing have caused broad regressions before), not attempted this
+session either. `_test_eintr.py` still does not build. Doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder13 — item 3's list/tuple-literal-as-call-argument gap FIXED; a DIFFERENT, deeper vararg-forwarding mismatch now surfaces on the same statement)
 
 Fixed the item-3 gap this doc's 2026-08-24 entry flagged: a literal
