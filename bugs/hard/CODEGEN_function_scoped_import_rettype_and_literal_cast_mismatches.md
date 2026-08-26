@@ -1,5 +1,38 @@
 # HARD BUG (4 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls, (4) imported-class name mistaken for a zero-arg accessor function in `X.ATTR` member access
 
+## Re-verified 2026-08-26 (fresh pass, worktree fix/opencode-group4, no code change to THIS doc's mechanisms)
+
+All four fix sites confirmed present and intact: Mechanism 1
+`ret = sig[0] if sig else 'int64_t'` at `gimple_gen_funcs.py:414`;
+Mechanism 2's `ctype in ('int64_t', '_Bool')` guard at
+`gimple_gen_resolve.py:964`; Mechanism 3's derived-to-base cast at
+`gimple_gen_methods.py:585ff`; Mechanism 4's PascalCase-import guard at
+`gimple_gen_exprs.py:891-900`.
+
+Fresh full `python3 mojo.py build .../Lib/subprocess.py` (safety-watched):
+**139 total `error:` lines** (down from 486 at the 2026-08-23 pass, and
+from 720 at this doc's original fix session — the improvement comes from
+other sessions' unrelated fixes landing since). Both of this doc's own
+previously-documented residuals are now GONE from the build entirely:
+- **0** `invalid conversion in gimple call` occurrences (the
+  2026-08-23 pass still had 2, attributed to `enum.py:918`/`:1918`;
+  Mechanism 1's territory is now fully clean);
+- **0** `expected expression before 'Parameter'` occurrences —
+  Mechanism 4's deliberately-deferred `Parameter(...)` constructor-call
+  residual (8 occurrences on 2026-08-23) no longer reproduces at all.
+  (Not investigated which intervening change resolved it — plausibly the
+  cross-module struct-registration work other docs describe — but the
+  shape this doc deferred as too risky to fix is empirically gone.)
+
+The remaining 139 errors are all items this doc already explicitly
+scopes OUT, unchanged in character: argparse's dynamic `%`-format
+(`invalid operands to binary %` ×12, `trunc_mod_expr` ×11 — the
+documented runtime-%-engine feature gap), `**kwargs` dict-subscript
+(`_kw_default` member access ×4 — the excluded args/kwargs family),
+MojoBoundMethod*-valued assignments (×5), plus assorted other clusters
+outside this doc's four mechanisms. Nothing in this doc's scope
+regressed.
+
 ## Re-verified 2026-08-23 (fresh pass, no code change)
 
 All four fix sites confirmed present and intact after the Wave-2 file
