@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree. `walk`/`_fwalk`/`fwalk` still
+refuse for the already-nailed-down reason: their control flow depends on
+runtime type discrimination over a heterogeneously-typed `stack` list
+(`isinstance(top, tuple)` on elements that are sometimes `str`, sometimes
+3-tuples) — this codegen's statically-typed container/value model has no
+representation for that at all. A tagged-union/variant redesign, not a
+narrow fix; genuinely out of scope for this cluster, confirmed again.
+None of the recently landed shared mechanisms bear on runtime type
+discrimination. No change; doc stays open, honestly triaged as out of
+scope.
+
 ## Status (updated 2026-08-24 — re-verified; tagged-union conclusion stands, out of scope for this cluster)
 
 Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=

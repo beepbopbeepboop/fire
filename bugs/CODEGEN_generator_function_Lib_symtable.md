@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree: `compile_to_gimple_with_cpp
+(do_imports=False)` on symtable.py still succeeds cleanly, its own
+generator (`yield flagname`) unaffected. A real full build still fails
+100% inside transitively-imported files (dominant: `Lib/enum.py`, 407
+errors, tracked separately; plus smaller clusters in argparse.py/
+codecs.py/pickle.py/inspect.py/... none inside symtable.py's own source,
+none generator-codegen-shaped). Classification unchanged: NOT a
+generator-codegen-cluster failure; doc stays open per convention (only
+files that 100% compile clean end-to-end get removed).
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, unchanged; unaffected by this session's fixes)
 
 Re-ran the isolated coroutine-path compile fresh, post-`fd909e9`

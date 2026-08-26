@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree. `_GlobberBase.selector`'s
+`return self.select_exists` still hits the honest "compiled GENERATOR
+method referenced as a plain value (not called)" refusal — a
+bound-generator-value calling-convention gap (would need a new
+bound-method-value variant carrying the 4-function coroutine API through
+to a later call site, a real feature addition). The `translate_584a43`
+kwarg-arity issue (same-bare-name cross-module collision family,
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`)
+remains behind it, unreached. Neither is touched by any recently-landed
+shared mechanism. No change; doc stays open.
+
 ## Status (updated 2026-08-24 — re-verified unchanged)
 
 Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=

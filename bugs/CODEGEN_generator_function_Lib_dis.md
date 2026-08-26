@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree. `_get_instructions_bytes` still
+refuses on `Positions(*next(co_positions, ()))` (line 799) — a spread
+CALL ARGUMENT into a statically-known-arity struct constructor. This is
+the same `*`/`**`-unpack-call-argument gap as codecs.py's blocker
+(`bugs/CODEGEN_generator_function_Lib_codecs.md`), just against a known
+struct constructor instead of a dynamic callee — still needs either a
+general unpack-argument feature or a narrow `KnownStruct(*expr)` special
+case, neither of which any of this session's or recent sessions' shared
+fixes (struct-method extern-decl param typing, generator-consumption
+ordering, `**kwargs`-forward slot alignment, `int()`/`float()` builtin
+support, weak variadic stubs, `cls.attr` writes, classmethod-generator
+receiver passing, mixed-yield refusal, chained-assignment type-hint
+propagation) touch. Not attempted (feature-sized for this pass's scope).
+Doc stays open.
+
 ## Status (updated 2026-08-24 — re-verified unchanged; confirmed via `MOJO_DEBUG=1 mojo.py build`)
 
 Re-confirmed the 2026-08-23 entry exactly: `_get_instructions_bytes` is

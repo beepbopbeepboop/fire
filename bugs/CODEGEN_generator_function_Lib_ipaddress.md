@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree (the 2026-08-24 `%`-format fix
+is present/holding). ipaddress.py's own isolated `.cpp` still has exactly
+the 1 remaining error: `if ((other == self))` — an ISO C++ pointer/int
+comparison, the same unannotated-parameter-defaults-to-int64_t hard bug
+(`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`)
+extended to ordinary function params. Not this pass's to fix (same
+high-regression-risk shared machinery that doc's own history documents).
+Whole-program build still separately blocked by transitively-imported-
+file errors, unrelated to ipaddress.py's own code. No change; doc stays
+open.
+
 ## Status (updated 2026-08-24 — the `%`-format tuple/scalar RHS crash FIXED; own-.cpp errors 15 -> 1)
 
 Re-verified via a fresh isolated compile (`GimpleGen(do_imports=False,

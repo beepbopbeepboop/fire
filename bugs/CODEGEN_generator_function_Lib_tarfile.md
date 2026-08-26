@@ -1,5 +1,78 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — root-caused the 2026-08-24 isolated-compile symptom; a real, generic partial fix landed; tarfile.py's own instance still not resolved)
+
+Root-caused the 3 new `.cpp` errors the 2026-08-24 entry flagged
+(`TarFile.__iter__`'s `yield from self.members` reading elements via
+`mojo_list_get_str` while the sibling `yield tarinfo` sites are
+`int64_t`). Confirmed via a direct isolated-compile repro
+(`compile_to_gimple_with_cpp(do_imports=False)` + inspecting the
+generated `.cpp`): `_generator_yield_ctype`'s `YieldFromExpr` branch
+(`gimple_exprtypes.py`) delegates to `_yield_from_delegate_ctype`, whose
+final fallback treats ANY `yield from <expr>` that isn't a plain
+list/tuple literal, a `range()`/`repeat()`/`sorted()` call, or a call to
+another already-compiled generator as unconditionally string-valued
+(`return 'char *'`) — including `yield from self.<field>`, even when the
+field demonstrably holds pointer-boxed objects (here, `TarInfo`
+instances). Since `_generator_yield_ctype`'s merge rule always lets
+`char *` win over a disagreeing `int64_t` site (the long-standing
+"stringy fallback" reconciliation), this generic default silently
+clobbers the WHOLE promise to `char *`, and `_cpp_yield_from`'s matching
+emission-side fallback compounds it by unconditionally reading every
+"plain collection" `yield from` element back via `mojo_list_get_str`
+regardless of the field's real element type — producing exactly the
+`invalid conversion from int64_t to char*` class of error.
+
+**Fixed generically** (not tarfile.py-specific): both
+`gimple_exprtypes.py`'s `_yield_from_delegate_ctype`/
+`_generator_yield_ctype` and `gimple_cpp_core.py`'s `_cpp_yield_from`
+now consult `gen._field_elem_types`/`gen._cpp_list_local_elem_types` —
+the same per-struct-field / per-local element-type registries
+`_cpp_for_stmt`'s existing plain `for x in self.<field>:` case already
+uses — to resolve a `yield from self.<field>`/`yield from <local list>`
+site's real element type (int64_t/double/char*) instead of always
+defaulting to char*, and to pick the matching `mojo_list_get_int/
+_double/_str` accessor at emission time instead of hardcoding
+`mojo_list_get_str`. Purely additive (new optional params, all default
+to the exact prior behavior when the registries have no entry), so this
+cannot regress any currently-working `yield from` shape.
+
+**However, this does NOT fix tarfile.py's own instance** — traced one
+level further, precisely, and NOT fixed (out of narrow-fix scope):
+`_field_elem_types` is only populated by the FULL GIMPLE lowering of a
+real `.append()` call site (`gimple_gen_methods.py`'s struct-method-call
+codegen), which happens during Phase 2a's ordinary-struct-method body
+compile (`_gen_struct_method`) — but generator METHODS' own `.cpp` units
+are compiled in an EARLIER, dedicated pass (`gimple_module_gen.py`'s
+async/generator-method loop, well before Phase 2a starts), so
+`_field_elem_types` is always still empty at the point `TarFile.__iter__`
+itself compiles, regardless of this fix. A bounded pre-scan (walking
+every struct method's AST for `self.<field>.append(<expr>)` sites before
+the generator-.cpp pass, seeded from Pass 2b's already-available
+lightweight return-type inference) was attempted and then deliberately
+reverted: tarfile.py's actual 3 real append sites (lines ~1841, ~2402,
+~2909) all route the appended value through `self.tarinfo.fromtarfile
+(self)` — a class-attribute-mediated classmethod call this codegen has
+no return-type inference for at all — so the narrow 2-shape pre-scan
+attempted couldn't even resolve THIS file's own case, and a broader
+heuristic (e.g. "any non-literal-looking append argument defaults to
+int64_t") was judged too likely to flip currently-correct char*-element
+fields wrong elsewhere in the corpus without much wider testing than
+this pass's budget allows. Left as a precisely-diagnosed, genuine
+pass-ordering gap for a future dedicated session.
+
+Verified no regression: `test_gimple.py` 256/256, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild —
+0 `skip <module>:` lines (unchanged from baseline). Commit: see this
+session's `gimple_exprtypes.py`/`gimple_cpp_core.py`/
+`gimple_cpp_async.py` changes.
+
+**tarfile.py itself still does not build end-to-end** — both this fresh
+element-type-unification gap AND the previously-documented 5
+whole-program-build residuals (SpecialFileError.tarinfo, bz2/lzma
+function-scoped-import implicit-declaration cluster) remain. Doc stays
+open.
+
 ## Status (updated 2026-08-24 — re-verified; the 5 whole-program-build residuals unchanged; a DIFFERENT isolated-compile symptom noted, not reconciled)
 
 Re-verified the whole-program-build-owned 5-error residual set this doc

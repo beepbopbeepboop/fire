@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree. `scan_opcodes` still refuses
+with "every `yield` must carry a value, and all values must agree on one
+scalar type" — the 3-stacked-gap analysis from 2026-08-11 stands
+(nested-tuple element boxing with variable inner arity; consumer-through-
+local-variable aliasing; tag-discriminated variable unpack arity). None
+of the recently landed shared mechanisms touch any of the three. Not
+attempted (deliberately out of narrow-fix scope, same conclusion as
+every prior pass). Doc stays open.
+
 ## Status (updated 2026-08-24 — re-verified unchanged)
 
 Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=

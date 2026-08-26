@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree (the 2026-08-24 `_ClosedDict`
+chained-dunder-alias fix, commit `6e92df8`, is present/holding — its own
+isolated coroutine-path compile still succeeds). A real `mojo.py build`
+still shows the same ~146-error residual, dominated by `argparse.py`/
+`_collections_abc.py`/`pickle.py` (already-documented, out-of-scope
+transitive cascades) plus the 12 misattributed `#line`-directive-filename
+lines from the `Shelf`/`MutableMapping` mixin-flattening gap (diagnostics-
+only, high-risk shared machinery, not re-attempted per the existing
+doc's own reasoning). `Shelf.__iter__` remains unaffected either way —
+still not a generator-codegen-cluster failure. No change; doc stays
+open.
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — `_ClosedDict`'s own real blocker FIXED; cascade + a separate line-attribution artifact remain)
 
 Fresh re-verification found this doc's "0 own-code errors" claim was

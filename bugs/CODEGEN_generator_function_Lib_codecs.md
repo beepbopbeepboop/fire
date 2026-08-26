@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree (branched from master post-integration,
+c46bf5d). `iterdecode`/`iterencode` still refuse at the exact same
+`*`/`**`-unpack-call-argument guard (`getincrementalencoder(encoding)
+(errors, **kwargs)`, a dynamically-obtained callee). None of the
+mechanisms landed since the 2026-08-24 pass (struct-method extern-decl
+param typing, generator-consumption ordering, `**kwargs`-forward slot
+alignment, `int()`/`float()` in coroutine bodies, weak variadic stubs,
+`cls.attr` writes, classmethod-generator receiver passing, mixed-yield
+refusal, chained-assignment type-hint propagation) touch this shape —
+none of them address dynamic-callee kwargs-spread. Genuinely unfixable
+without the same large dynamic-kwargs-dispatch feature already assessed
+repeatedly. No change; doc stays open.
+
 ## Status (updated 2026-08-24 — re-verified unchanged)
 
 `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/codecs.py` still
