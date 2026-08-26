@@ -2,6 +2,31 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
+## Status (re-verified 2026-08-26, wtOpencode_genlib3): consistent with the entry below; still not closed — whole-program build still watcher-bound, zero util.py-attributed errors
+
+Fresh safety-wrapped attempt against current master (f0f6e78): two runs
+(300s and 900s wall caps, RSS tripwire 6GB). First run killed at the
+300s cap at only **819MB**; second run processed the closure further
+than ever recorded here (collections → inspect → glob → shutil all
+soft-fallbacked to source interpretation) before being killed at the
+**900s** cap at 4.6GB RSS — same monotonic late-closure RAM growth,
+slower onset than the 6.26GB@16min of the entry below, likely machine
+contention (5 concurrent agent builds). `grep 'error:'` over both full
+partial logs: only 4 lines, ALL soft structural fallbacks in OTHER
+modules (`collections` Counter-subscript-store, `inspect`
+OrderedDict-subscript-store, `glob` generator-method-as-value,
+`shutil` ambiguous sibling `open`) — **zero** mentions of
+`ctypes/util`. The doc's two remaining items are unchanged: (a) no
+exit-0 whole-program build within any safety budget (memory/time-bound
+by design, `_module_stmts` retention + interpreted fallbacks), and
+(b) compiled-mode `cdll.load(...)` needs the callable/class-object
+VALUE representation (`return self._dlltype(name)` through a stored
+class ref still lowers to `(int64_t)0` + `mojo_fnptr_call_N(NULL,...)`
+in gimple_gen_exprs.py's documented placeholder branch) — feature-
+sized, deliberately NOT attempted per the entry below. Note the
+failing lines remain dead test-only code guarded by
+`os.name == "nt"`. No code change. Doc kept open.
+
 ## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): gaps #2/#3 fixes re-verified fresh; gap #3's routing found DEAD and FIXED (phantom-field minting); remaining blocker narrowed to class-ref-as-value + a whole-program RSS runaway
 
 Re-verified against current master past d3e758a (both of this doc's

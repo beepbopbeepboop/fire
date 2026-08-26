@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (re-verified 2026-08-26, wtOpencode_genlib3): byte-identical refusal, unchanged
+
+Fresh real `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+pkgutil.py` against current master (f0f6e78): dies with the identical
+`RuntimeError: cannot compile module: function(s) iter_importers,
+iter_modules, walk_packages ...` — the same three independent gaps as
+the 2026-08-26/08-25 entries (non-static `getattr(obj, name)`; `map()`
+with no coroutine-body lowering; consumption of a never-translated
+generator). None of the recently landed shared mechanisms bear on
+these. A map()-only narrowing still would not unblock the file
+(iter_importers + walk_packages' five further stacked constructs
+remain), per the 2026-08-24 analysis below — feature-sized, out of
+scope. No code change; doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, unchanged)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:

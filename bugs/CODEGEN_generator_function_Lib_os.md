@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical refusal, tagged-union diagnosis stands
+
+Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
+against current master (f0f6e78): dies with the byte-identical
+`RuntimeError: cannot compile module: function(s) __iter__, _fwalk,
+fwalk, walk (generator function(s), contain a yield/yield from)...`
+(gimple_module_gen.py's honest-refusal path; zero GCC `error:` lines —
+the refusal is raised at module-lowering time). Note the refusal now
+surfaces only after the closure pass soft-fallbacks collections/inspect
+(rather than at os.py's own first compile as in the 2026-08-09 entry) —
+cosmetic ordering only, same four functions, same reason. The
+heterogeneous-stack + `isinstance(top, tuple)` runtime-discrimination
+diagnosis (2026-08-11 entry below) remains the precise root cause;
+tagged-union/variant value representation remains the prerequisite.
+Not attempted, out of scope. No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
