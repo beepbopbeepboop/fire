@@ -4,8 +4,104 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-08-25): os.listdir iteration gap FIXED + verified;
-## doc still OPEN on two NEWLY-DIAGNOSED downstream runtime gaps.
+## Status (2026-08-25 later): both diagnosed gaps FIXED; output files are
+## now PRODUCED. Doc re-scoped onto the newly-reached %-formatting/marshal
+## gaps inside the generated content.
+
+Both 2026-08-25 gaps landed on `fix/opencode-gencodec2`, each gated clean
+(test_gimple.py 256/256, test_module_cache.py 76/76, `make check-selfhost`
+clean, from-scratch stdlib dylib rebuild with 0 `skip <module>:` lines —
+baseline 0 held after EACH of the three commits):
+
+1. **String-literal-default params — FIXED** (`da93b2d`).
+   `_param_ctype` (gimple_gen_funcs.py) now resolves an unannotated param
+   whose declared default is a `StringLiteral` to `char *`, when nothing
+   more specific resolved (annotations, usage inference and the cross-call
+   scalar contract keep precedence). Matches `_default_expr_to_pair`,
+   which already lowers such defaults to real C strings at padded call
+   sites; both pre-existing "respect default-value inference" skip-guards
+   in gimple_module_gen.py's scalar-observation passes had anticipated this
+   exact rule. Verified: the convertdir print is now byte-identical to
+   real CPython (`converting readme.md to readme.py and readme.mapping`;
+   was `43713230804...readme.py`). Note the free-function path was the one
+   gencodec.py needs; a METHOD with a string-literal default still pads
+   omitted args with NULL at its call sites (method-call padding doesn't
+   consult `_func_param_defaults`) — out of scope here, gencodec.py has no
+   such method.
+2. **`append = l.append` bound builtin-container method — FIXED**
+   (`d0ecc2b`). Container methods have no per-method C symbol for a
+   MojoBoundMethod* fn pointer to point at (they lower inline per call
+   site), so the binding is RECORDED instead: `_lower_builtin_method_value`
+   captures the receiver into a hidden void* local (rebind-safe: an
+   already-taken bound method keeps pointing at the original list),
+   boxes the handle exactly as the old getattr path did (no ABI change),
+   and `_builtin_method_values` carries `(receiver ctype, receiver local,
+   method name)` through assignments via the same side-table propagation
+   pattern as `_bound_method_ret_types`. Calls through such a value
+   dispatch in BOTH call paths (`_lower_named_call` AND
+   `_gen_stmt_ExprStmt`'s statement-level twin, checked before the fnptr
+   guard that would otherwise call through the opaque box) into
+   `_lower_list_method`/`_lower_dict_method`/`_lower_set_method` VERBATIM
+   — identical behavior to the direct `l.append(x)` spelling, including
+   per-site int/str element typing. Verified: doc's minimal repro prints
+   2; string-append + join, rebinding semantics, and dict.get aliases all
+   match real Python.
+3. **Bonus root cause found while verifying #2 end-to-end — FIXED**
+   (`bec9f96`): `map.items()` never reached the statically-typed dict
+   lowering because `_infer_param_types`' member-access struct match
+   treated the CALLED method name as FIELD evidence and matched the single
+   registered struct having an `items` field — `WithStmt` (an unrelated
+   internal AST node, `WithStmt.items: list`; exactly the "why does map
+   infer to WithStmt*" mystery flagged unresolved in the 2026-08-09 note
+   below). Called builtin-container method names are now excluded from
+   struct-field evidence, and a dict-only method call (items/keys/values/
+   setdefault) with no better signal infers `MojoDict *`. marshalmap/
+   python_mapdef_code/codegen all resolve their `map` params correctly,
+   the nested `for e,(u,c) in map.items():` pair loop genuinely iterates,
+   and convertdir completes for every entry in the test directory.
+
+### Where the file stands now
+
+Running the built binary on `/tmp/genc_test/dir` exits 0, prints both
+`converting ...` lines identically to real CPython, and WRITES all four
+output files (readme.py/test_a.py + .mapping). The .py outputs have the
+correct overall skeleton (header docstring, codecs imports, Codec/
+Incremental classes, decoding_map entries from the real parsed mappings)
+but still differ from `python3 gencodec.py` output:
+
+1. **Header line prints pointer digits**: `Codec 4354047104 generated from
+   '36524001536'` plus a stray leading `\` line (real: `Codec readme
+   generated from '/tmp/genc_test/dir/readme.md'`). Root cause: codegen's
+   giant header template does `% (encodingname, name, ...)`, but those
+   strings arrive typed int64_t through the pymap→codegen forwarding
+   chain (pymap's own unannotated params get no string signal — no
+   concat/subscript/str-method in its body — and Pass 1.3d's plain
+   observation can't see through `os.path.join(...)` results or string-op
+   locals at convertdir's call site either). Same class as fixed gap (a),
+   but the fix needs call-site argument typing to see through more
+   expression shapes (or forwarding-chain propagation) — left open.
+2. **Entry lines are raw/unformatted**: mapping entries emit literally
+   `    (): (0x%0*X, 0x%0*X),` — hexrepr's `'%0*X' % (precision, t)`
+   against runtime-boxed values doesn't lower (the `%`-format machinery
+   only handles cases where operands are statically strings), and tuple
+   keys repr as `()`. This is the `%a`/`%`-formatting-of-runtime-values
+   gap predicted below, now precisely located.
+3. **decoding_table section missing / encoding_map empty**:
+   python_tabledef_code produces nothing (so suffix takes the 'map'
+   branch) and `codecs.make_encoding_map(map)` returns an empty dict —
+   both unmodeled builtins/shapes, as predicted below.
+4. **`.mapping` files are 0 bytes**: `marshal.dump(d, f)` ('wb' mode) is
+   an honest stub — predicted below, unchanged.
+
+Items 1–4 are all INSIDE the generated file content; the compile itself
+and the whole convertdir control flow are correct. Given each remaining
+item is another layer of the shared %-format/marshal/builtin modeling
+work (not this doc's originally-diagnosed gaps), re-scoped here and left
+for dedicated follow-ups rather than force-fixed.
+
+### Why the doc stays open: first divergences from real CPython (both DOWNSTREAM of the fixed loop)
+
+[2026-08-25 earlier analysis — gaps 1+2 above since FIXED]
 
 The 2026-08-23 iteration gap is fixed for real. Branch
 `fix/opencode-gencodec`, commits `6dce849` + `bdabb8a`. Four separate
@@ -61,7 +157,7 @@ provably executes end-to-end. Quality gates all clean at commits
 `make check-selfhost` clean, from-scratch stdlib dylib rebuild with
 0 `skip <module>:` lines (baseline 0).
 
-### Why the doc stays open: first divergences from real CPython (both DOWNSTREAM of the fixed loop)
+### (Historical 2026-08-25 gap list, both since FIXED — kept for context)
 
 Running `./gencodec /tmp/genc_test/dir` (one mapping file, one README,
 one subdirectory) vs real `python3 gencodec.py` on the same dir:
@@ -96,6 +192,9 @@ one subdirectory) vs real `python3 gencodec.py` on the same dir:
 Not yet reached (unverified, likely further gaps once 1+2 land):
 `marshal.dump(d, f)` ('wb' mode), `codecs.make_encoding_map`,
 `sorted(map.items())`, `%a` formatting in python_tabledef_code.
+[2026-08-25 later: confirmed — see the re-scoped list in the current
+status block above; `sorted(map.items())` itself works once map is
+MoDict-typed, but %-formatting of runtime values does not.]
 
 No-arg invocation divergence (minor, noted for completeness): real Python
 raises TypeError (missing `dir`); the compiled binary now unpacks an empty
