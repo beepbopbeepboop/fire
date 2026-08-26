@@ -708,6 +708,12 @@ class GimpleGen:
         # own compile attempt so a stale prior generator's value can never
         # leak into this one's registration on any early-exception path.
         self._cpp_last_tuple_slot_ctypes: list | None = None
+        # Side channel from _gen_cpp_generator_unit (same stash pattern
+        # as _cpp_last_tuple_slot_ctypes): whether THIS unit's body had
+        # an eligible value-carrying `return <expr>` — read back into
+        # the api dict gen_module registers, so `yield from` consumers
+        # know `{base}_value` carries the return value post-completion.
+        self._cpp_last_has_return_value: bool = False
         # Pre-body-emission companion of the stash above: a generator
         # unit's OWN preliminary `_generator_tuple_yield_slot_ctypes`
         # result (computed from just its params' types, before body

@@ -4008,6 +4008,19 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "required")
             return [f"{indent}co_return {gen._cpp_expr(s.value)};"]
         if s.value is not None:
+            # Value-carrying `return` in an ELIGIBLE generator (see
+            # _gen_cpp_generator_unit's eligibility computation): store
+            # the value into this unit's extern "C" `{base}_return_slot`
+            # global right before co_return — Python's StopIteration(
+            # value) semantics, materialized without touching the shared
+            # promise shape. Consumers read the slot after the generator
+            # reports done.
+            _ret_store = getattr(gen, '_cpp_pending_return_store', None)
+            if _ret_store:
+                _slot, _rct = _ret_store
+                _rct_cpp = gimple_exprtypes._c_to_cpp_scalar_type(_rct)
+                return [f"{indent}{_slot} = ({_rct_cpp})({gen._cpp_expr(s.value)});",
+                        f"{indent}co_return;"]
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "`return <value>` inside a generator is not supported "
                 "(a generator's `return` ends iteration with no value, "
