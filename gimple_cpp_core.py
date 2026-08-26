@@ -1792,6 +1792,58 @@ def _cpp_expr(gen, e) -> str:
                     if _avct == 'char *':
                         return f"(mojo_set_add_str({_cont_name}, (char *)({_a})), 0)"
                     return f"(mojo_set_add_int({_cont_name}, (int64_t)({_a})), 0)"
+            # `self.<field>.append(v)`/`cls.<attr>.append(v)`/`.clear()`/
+            # `.add(v)` — the MemberExpr-receiver sibling of the plain-
+            # local-container case immediately above (real: Lib/test/
+            # test_finalization.py's `self.errors.append(e)`, `cls.
+            # del_calls.clear()`). `e.func.obj` there is itself a
+            # MemberExpr (`self.field`/`cls.attr`, not a bare declared
+            # local), so the IdentExpr-keyed `gen._cpp_declared` lookup
+            # above never matches it, and this call falls all the way
+            # through to the generic `{obj}.{member}(...)` emission
+            # below — invalid C++ on a `MojoList *`/`MojoSet *` value
+            # (no `operator.`/member functions on these runtime pointer
+            # types; confirmed via a direct repro: "request for member
+            # 'clear' in ..., which is of pointer type 'MojoList*'").
+            # `_cpp_receiver_ctype` already resolves both `self.field`
+            # and `cls.attr` receivers to their real declared ctype
+            # (struct_field_types / _class_attrs + _global_var_types
+            # respectively); when it's a real container pointer, lower
+            # through the same runtime primitives as the local case,
+            # keyed off the object's OWN `_cpp_expr` text (a `self.
+            # field`/`cls.attr` read already resolves to a valid C++
+            # lvalue expression) rather than a bare local name.
+            if isinstance(e.func.obj, gimple_ctypes.MemberExpr):
+                _mcont_ct = _cpp_receiver_ctype(gen, e.func.obj)
+                if _mcont_ct in ('MojoList *', 'MojoSet *', 'MojoDict *'):
+                    _mobj = gen._cpp_expr(e.func.obj)
+                    if _mcont_ct == 'MojoList *' and e.func.member == 'append' and len(e.args) == 1:
+                        _avct = gimple_exprtypes._infer_simple_expr_ctype(
+                            e.args[0], gen._cpp_declared,
+                            getattr(gen, '_cpp_gen_self_fields', None),
+                            gen._async_api) or 'int64_t'
+                        _a = gen._cpp_expr(e.args[0])
+                        if _avct == 'char *':
+                            return f"(mojo_list_append_str((MojoList *)({_mobj}), (char *)({_a})), 0)"
+                        if _avct == 'double':
+                            return f"(mojo_list_append_double((MojoList *)({_mobj}), (double)({_a})), 0)"
+                        return f"(mojo_list_append_int((MojoList *)({_mobj}), (int64_t)({_a})), 0)"
+                    if _mcont_ct == 'MojoSet *' and e.func.member == 'add' and len(e.args) == 1:
+                        _avct = gimple_exprtypes._infer_simple_expr_ctype(
+                            e.args[0], gen._cpp_declared,
+                            getattr(gen, '_cpp_gen_self_fields', None),
+                            gen._async_api) or 'int64_t'
+                        _a = gen._cpp_expr(e.args[0])
+                        if _avct == 'char *':
+                            return f"(mojo_set_add_str((MojoSet *)({_mobj}), (char *)({_a})), 0)"
+                        return f"(mojo_set_add_int((MojoSet *)({_mobj}), (int64_t)({_a})), 0)"
+                    if e.func.member == 'clear' and not e.args:
+                        if _mcont_ct == 'MojoList *':
+                            return f"(mojo_list_clear((MojoList *)({_mobj})), 0)"
+                        if _mcont_ct == 'MojoSet *':
+                            return f"(mojo_set_clear((MojoSet *)({_mobj})), 0)"
+                        if _mcont_ct == 'MojoDict *':
+                            return f"(mojo_dict_clear((MojoDict *)({_mobj})), 0)"
             if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'self' \
                     and _cpp_self_struct:
                 args = [gen._cpp_expr(a) for a in e.args]
@@ -5408,6 +5460,28 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         # refusing the whole generator.
         if isinstance(val, gimple_ctypes.IdentExpr):
             msg_cpp = gen._cpp_expr(val)
+            return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
+                    f"(void *){msg_cpp} }};"]
+        # `raise cls.errors[0]` / `raise self.<field>[<idx>]` — a
+        # previously-caught exception VALUE pulled back out of a list
+        # (real: Lib/test/test_finalization.py's `raise cls.errors[0]`,
+        # `errors` a class-attribute list that caught-exception values —
+        # already char*-message-typed by the IdentExpr case just above —
+        # get appended to). Same "don't statically know the exact class"
+        # situation as the bare-IdentExpr case above. Deliberately does
+        # NOT delegate to the generic `_cpp_expr` SubscriptExpr lowering:
+        # that path has no element-type tracking for a MemberExpr-rooted
+        # (class-attribute) list object and falls all the way through to
+        # a raw C++ `(obj)[idx]`, which isn't valid on a `MojoList *` (no
+        # `operator[]` overload anywhere in mojo_runtime.h) — instead,
+        # build the read directly via `mojo_list_get_str`, matching the
+        # char*-message convention this narrow model already established
+        # for every other "caught exception value" representation.
+        if isinstance(val, gimple_ctypes.SubscriptExpr):
+            obj_cpp = gen._cpp_expr(val.obj)
+            idx_cpp = gen._cpp_expr(val.index)
+            msg_cpp = (f"mojo_list_get_str((MojoList *)({obj_cpp}), "
+                       f"(int64_t)({idx_cpp}))")
             return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
                     f"(void *){msg_cpp} }};"]
         # `raise <MemberExpr>(...)` / bare `raise <MemberExpr>` — a

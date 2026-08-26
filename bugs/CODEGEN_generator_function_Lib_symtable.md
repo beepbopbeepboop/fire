@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
+
+Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+symtable.py` against this worktree (branched from master `1e0f3f2`,
+`build/libmojostdlib.dylib` freshly rebuilt, 0 skips): 246 `error:`
+lines total (previously 245, within normal noise), **0 errors
+attributable to symtable.py's own source** (confirmed via `grep
+"symtable.py:" ... | grep error:` — zero matches); its own generator
+(`yield flagname`) still compiles clean. Dominant clusters unchanged:
+`argparse.py`/`typing.py`/`enum.py`/`pickle.py`/`_collections_abc.py`/
+`traceback.py`/`threading.py`. This session's own fixes (dynamic
+exception-value re-raise; MemberExpr-receiver `.append()`/`.clear()`/
+`.add()`) don't touch this cascade. Classification unchanged: NOT a
+generator-codegen-cluster failure; doc stays open per convention (only
+files that 100% compile clean end-to-end get removed).
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
 
 Fresh re-verify against this worktree (branched from master `f65502d`):

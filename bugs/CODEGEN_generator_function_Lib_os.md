@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` re-run
+against this worktree (branched from master `1e0f3f2`): identical
+verbatim refusal — `function(s) __iter__, _fwalk, fwalk, walk (generator
+function(s)...)`. This session's other fixes (dynamic exception-value
+re-raise for `raise cls.errors[0]`-shaped `SubscriptExpr` values) don't
+touch runtime type discrimination or heterogeneous-container
+representation. The tagged-union/variant-value-representation diagnosis
+stands unchanged (`stack`'s runtime-heterogeneous str/tuple elements +
+`isinstance(top, tuple)` discrimination). Not attempted, genuinely out
+of scope. No change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
 
 Fresh re-verify against this worktree (branched from master `f65502d`).
