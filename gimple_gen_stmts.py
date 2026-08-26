@@ -917,7 +917,42 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             op = '->' if '*' in ot else '.'
             struct_name = gimple_exprtypes._struct_name_of(ot)
-            field_type = gen.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
+            known_fields = gen.struct_field_types.get(struct_name, {})
+            _is_user_struct = struct_name in gen.struct_field_types
+            if (( _is_user_struct and node.target.member not in known_fields)
+                    or (not _is_user_struct and '*' in ot)):
+                # A member write on a receiver whose DECLARED type has no
+                # such field — either a KNOWN user struct genuinely
+                # lacking the member, or a container/opaque pointer type
+                # (MojoList *, MojoDict *, ...) that is not a user struct
+                # at all. The old unconditional `ov->member = val`
+                # emission was a hard GCC error ("'X' has no member named
+                # 'Y'") whenever the declaration lost a cross-branch type
+                # unification — real: Tools/build/umarshal.py's
+                # `_r_object`, whose single `retval` local is declared
+                # from the FIRST branch's list shape (`MojoList *`) but
+                # is written with 16 `co_*` Code fields in the Type.CODE
+                # branch (where it really does hold a tagged `Code`
+                # instance at runtime). Route through the same
+                # dynamic-attribute dispatch the fully-opaque branch
+                # above uses: `_mojo_dispatch_setattr` reads the object's
+                # RUNTIME type tag, so when this path executes with a
+                # receiver whose actual type does have the field (Code
+                # here), the write lands correctly; on any other runtime
+                # type it degrades to per-object dynamic storage / no-op
+                # exactly like Python-level attribute assignment on an
+                # arbitrary object would.
+                member_str = node.target.member
+                key_slit = gen._intern_string(gimple_ctypes._c_escape(member_str))
+                key_tmp = gen._new_val('char *', f"{key_slit}")
+                v64 = gen._new_temp('int64_t')
+                gen._safe_coerce_emit(vtype, 'int64_t', v, v64)
+                obj64 = gen._to_int64(ot, ov)
+                vp_tmp = gen._new_val('void *', f"(void *){obj64}")
+                gen._emit_call('void', '', '_mojo_dispatch_setattr',
+                                [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+                return
+            field_type = known_fields.get(node.target.member, vtype)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the

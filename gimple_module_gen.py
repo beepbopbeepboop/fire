@@ -5561,6 +5561,22 @@ def gen_module_impl(self, stmts):
                     continue
             return c_name
         if _new_names:
+            # A target whose bare csym is the program ENTRY-POINT name
+            # (`main`) references the generated `int main(int, const
+            # char **)` — which is only DEFINED at the very end of this
+            # translation unit and never forward-declared (the user's
+            # own `def main` was renamed `_gimple_main`; see gimple_gen_
+            # funcs.py). A file-scope `(void *)main` initializer there-
+            # fore died with "'main' undeclared here (not in a
+            # function)" — real: Tools/build/umarshal.py, whose own
+            # `def main()` body does `sample2 = main.__code__`.
+            # Declare the entrypoint up front so the initializer has a
+            # declared identifier; every other funcptr target already
+            # gets its ordinary forward declaration from the per-function
+            # pass above.
+            if 'main' in _new_names:
+                parts.append("int main (int argc, const char **argv);")
+                parts.append('')
             for c_name in _new_names:
                 if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
                     parts.append(f"static void * _funcptr_{c_name} = (void *){_funcptr_target(c_name)};")
