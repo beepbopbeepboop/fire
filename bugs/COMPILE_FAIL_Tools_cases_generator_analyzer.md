@@ -4,6 +4,90 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-26, branch fix/opencode-analyzer2 — the documented segfault residual is ROOT-CAUSED AND FIXED in shared source; doc stays OPEN on the now-precisely-root-caused next blocker: link-mode sibling-module resolution stubs every `parser.*`/`lexer.*` access)
+
+**The residual (2026-08-25 entry below) is fixed.** Root cause was NOT
+exit-time cleanup and not coroutine machinery at all:
+
+- lldb on the produced binary: `EXC_BAD_ACCESS (code=1, address=0x0)` — a
+  WRITE to NULL in `assign_opcodes_…` at analyzer.py:1066 (`next_opcode = 1`),
+  called `analyze_forest → analyze_files → _toplevel`. Since `dump_analysis`
+  only runs AFTER `analyze_files` returns, the earlier session's "full
+  byte-identical output, THEN segfault at exit" was undefined behavior, not
+  a second crash site: the boxed cell for `next_opcode` was never allocated,
+  so every `*next_opcode = …` wrote through an UNINITIALIZED `int64_t *`
+  local — with a writable stack-garbage value the run "worked" (output
+  appeared; some later write or teardown hit bad memory), with NULL it
+  crashed instantly before any output. Same bug, nondeterministic symptom.
+- Mechanism: a local captured BY REFERENCE by a nested closure
+  (`ClosureInfo.mut_names`, the `{mut}`/nonlocal family) is pre-declared as
+  a heap-boxed pointer (`{ctype} * name;`) by `_seed_mut_captured_local_
+  types`, but its cell was malloc'd ONLY by `_gen_stmt_VarDecl` — i.e. only
+  when the first binding is a Mojo-style `var x = …`. Real PYTHON source's
+  first binding is a plain `AssignStmt` (`next_opcode = 1`), which never
+  reaches that handler, while every read/write still dereferences the
+  pointer (`*name`). Every existing test used Mojo-source `var` shapes;
+  the Python shape had zero coverage.
+- Fix (shared compiler source): new `_emit_mut_local_box_allocs`
+  (gimple_gen_infra.py) allocates EVERY boxed local's cell ONCE in the
+  function prologue; called from both plain-function generation
+  (gimple_gen_funcs.py gen_func) and struct-method generation immediately
+  after seeding. `_gen_stmt_VarDecl`'s boxed branch now only stores the
+  initial value through the already-allocated cell. This gives exactly-once,
+  call-scoped cells (Python's own per-call cell model) and also fixes two
+  latent hazards of the per-statement scheme: a VarDecl re-executed by its
+  loop re-malloc'd a FRESH cell per iteration while the nested closure's env
+  kept the stale one (splitting the nonlocal binding), and a first binding
+  lexically inside one branch left the box unallocated on other paths.
+- Causality proven BOTH ways: the same minimal repro built from the pre-fix
+  tree SEGFAULTS (exit 139); with the fix it prints the CPython-verified
+  result on both compiled paths (link mode AND the inline
+  `build_executable` pipeline), exit 0. New regression suite
+  `test_python_source_mut_capture.py` (3 tests, expectations verified
+  against real CPython 3.14) fails with a deterministic SIGSEGV without the
+  fix and passes with it.
+
+Quality gate: test_gimple.py 256/256, test_module_cache.py 76/76,
+make check-selfhost clean, from-scratch stdlib dylib rebuild with 0
+`skip <module>:` lines. All pre-existing closure suites re-run green:
+test_general_mutable_closure_capture 6/6, test_transitive_closure_capture
+2/2, test_closure_capture_comptime_func_params 4/4,
+test_mutable_async_capture 2/2.
+
+**End-to-end state after the fix:** `python3 mojo.py build …/analyzer.py`
+exits 0; the binary runs deterministically with exit 0 (3/3 runs, no crash
+under repeated runs or lldb). Output is currently the four section headers
+only — because of the separate, precisely-root-caused gap below (NOT a
+regression of this fix; verified present at the previously-"verified"
+8dfd12f as well).
+
+**Next blocker, root-caused (architectural; deliberately not forced here):
+link-mode resolution does nothing for plain project-sibling modules.**
+In link mode (driver.compile_program — `mojo.py build`'s primary path),
+`import parser` registers the module ALIAS but nothing registers parser.py's
+functions (`parse_files` never enters `func_return_types`; the reflection/
+dylib resolver finds no dylib for a bare sibling .py), so every
+module-qualified access lowers against the `(int64_t)0` module-marker
+global: `parser.parse_files(filenames)` emits
+`_t7 = _t2; /* int64_t.parse_files() stubbed */` (returns receiver garbage),
+and analyze_files consequently iterates a garbage "list" → empty forest →
+empty sections. Minimal repro (two-file sibling project):
+`import helper; print(helper.f())` builds clean and silently prints `0`;
+the `from helper import f` form at least degrades LOUDLY (`f: unavailable
+in compiled mode (imported from an unresolved external/relative module)`
+then 0). The INLINE pipeline (`compile_to_gimple(do_imports=True)` /
+mojo.py's build_executable fallback) fully inlines sibling sources and
+resolves everything correctly — which is how the 2026-08-25 entry's
+byte-identical 2892-line run must have been produced (link mode failing
+loudly back then, triggering the inline fallback; today link mode
+"succeeds" while silently stubbing, so no fallback fires). Closing this
+needs real link-mode sibling support (on-demand sibling dylibs, or
+registering sibling exports into `_register_link_imports`, or a driver
+policy that falls back to inline compilation whenever unresolved LOCAL
+siblings exist) — squarely the shared import-seam machinery with this
+campaign's documented regression history; recorded here with repros rather
+than forced.
+
 ## Status (updated 2026-08-25, branch fix/opencode-group1 — FIXED: the zip_longest blocker is resolved; build exits 0 and real-input output is byte-identical to CPython's; one unrelated pre-existing exit-time crash documented below)
 
 The `itertools.zip_longest` gap root-caused in the 2026-08-25 entry below is

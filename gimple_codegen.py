@@ -3294,6 +3294,8 @@ class GimpleGen:
         return ginf._write_dest(self, name)
     def _seed_mut_captured_local_types(self, func_name: str):
         return ginf._seed_mut_captured_local_types(self, func_name)
+    def _emit_mut_local_box_allocs(self):
+        return ginf._emit_mut_local_box_allocs(self)
     def _new_jbp_temp(self) -> str:
         return ginf._new_jbp_temp(self)
     def _closure_info_for_ident(self, name: str):

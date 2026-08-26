@@ -174,27 +174,18 @@ def _gen_stmt_VarDecl(gen, node):
     # closure captures it BY REFERENCE -- see _seed_mut_captured_
     # local_types's docstring): `_declare_var` already emitted the
     # POINTER declaration (`{ctype} * name;`) before this statement
-    # ever runs. Allocate the box, then store the (coerced) initial
-    # value through it -- mirrors the env-struct allocator's own
-    # `_vp = malloc (...); _e = (T *) _vp;` two-step pattern (`-fgimple`
-    # requires the malloc/cast split; a direct `name = (T *) malloc
-    # (...)` in one statement is invalid GIMPLE).
+    # ever runs, and the box ITSELF is allocated once in the function
+    # prologue (see _emit_mut_local_box_allocs -- allocating here made
+    # the box per-statement-execution instead of per-call, which both
+    # missed plain-AssignStmt first bindings entirely (real Python
+    # source: analyzer.py's `nonlocal next_opcode`) and re-malloc'd a
+    # fresh cell on every loop iteration, silently splitting the
+    # nonlocal binding). Just store the (coerced) initial value through
+    # the already-allocated box's dereference.
     if (isinstance(node.name, str) and node.name in gen._boxed_mut_locals
             and node.value is not None):
         ctype = gen._boxed_mut_locals[node.name]
         cname = gen._cname(node.name)
-        # A literal byte count, not `sizeof({ctype})`: confirmed via a
-        # hand-reduced repro that `-fgimple` rejects `sizeof(int64_t)`
-        # as an inline expression ("expected expression before
-        # 'sizeof'") even though `sizeof(SomeStructTypedef)` (the
-        # env-struct allocator's own identical-looking pattern) is
-        # accepted -- gimple's expression grammar apparently only
-        # recognizes `sizeof` applied to an aggregate/struct type name,
-        # not a scalar typedef. `_SCALAR_CTYPE_SIZE` covers every ctype
-        # `ClosureInfo.captures`/`_quick_type` can actually produce for
-        # a `{mut}`-captured local (see _seed_mut_captured_local_types).
-        vp = gen._new_val('void *', f"malloc ({gimple_codegen._SCALAR_CTYPE_SIZE.get(ctype, 8)})")
-        gen._emit(f"  {cname} = ({ctype} *) {vp};")
         vtype, v = gen.lower_expr(node.value)
         gen._safe_coerce_emit(vtype, ctype, v, f'*{cname}')
         return

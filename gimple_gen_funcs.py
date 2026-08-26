@@ -1553,6 +1553,14 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._emit('  _mojo_classattr_init ();')
 
     gen._seed_mut_captured_local_types(node.name)
+    # Allocate each heap-boxed ({mut}-captured) local's box once, here in
+    # the prologue -- NOT lazily at its first-binding statement (the old
+    # VarDecl-time scheme): real Python source's first binding is a plain
+    # AssignStmt that never reaches _gen_stmt_VarDecl, leaving the box
+    # unallocated while every access dereferenced the pointer (a
+    # mid-function segfault on Tools/cases_generator/analyzer.py's
+    # `nonlocal next_opcode` closure). See _emit_mut_local_box_allocs.
+    gen._emit_mut_local_box_allocs()
 
     # Don't emit bb_2 label at function start - let statements flow directly
     for stmt in node.body:
@@ -2967,6 +2975,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     mangled    = gen._struct_method_csym(struct_name, node.name, overload_id)
 
     gen._seed_mut_captured_local_types(gen.current_func_name)
+    # Same prologue box-allocation contract as the plain-function path
+    # above (see _emit_mut_local_box_allocs's docstring).
+    gen._emit_mut_local_box_allocs()
 
     gen._emit_label("bb_2")
     for stmt in node.body:
