@@ -715,6 +715,174 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._dataclass_fields_vars.discard(var)
 
 
+def _gen_for_zip_longest(gen, node):
+    """Handle: for (a, b) in itertools.zip_longest(seq_a, seq_b
+    [, fillvalue=v]): ...
+
+    Real zip_longest semantics as a plain index loop: iterate
+    max(len_a, len_b) times; each tuple-target slot is assigned from its
+    OWN sequence's element i (read with that sequence's own tracked
+    element-type accessor), or the fill value once the index runs past
+    that sequence's length. The default fill is 0 — this scalar C model's
+    representation of None — so the common `if x is None:` guards after a
+    padded iteration test a genuine 0/NULL, exactly like real Python's
+    None sentinel.
+
+    Before this, `itertools.zip_longest(...)` hit _gen_for_iter's generic
+    boxed-iterable fallback, where `itertools` is an opaque module global:
+    the call itself stubbed to a bare int64_t and the loop targets fell to
+    untyped int64_t slots — so `for input, output in
+    itertools.zip_longest(inputs, outputs): input.peek = output.peek =
+    True` (Tools/cases_generator/analyzer.py's analyze_stack) emitted raw
+    struct member writes into a non-struct (hard g++ "request for member
+    'peek' in something not a structure" errors), AND first-decl-wins
+    locked those names to int64_t for every LATER loop over them too.
+    Element types propagate per-slot from each sequence's own
+    gen._elem_types entry, so struct-typed sequences (analyzer.py's
+    list[StackItem] inputs/outputs) give genuinely struct-typed loop
+    variables.
+
+    Any shape this narrow handler can't prove supported (non-2-arity call,
+    non-tuple target, non-list sequence, non-literal fillvalue) raises;
+    the caller (_gen_stmt_ForStmt) rolls back partial output transactionally
+    and falls through to the pre-existing generic path unchanged.
+    """
+    it = node.iterable
+    args = list(it.args)
+    fill_node = None
+    for kwn, kwv in (it.kwargs or []):
+        if kwn == 'fillvalue' and fill_node is None:
+            fill_node = kwv
+        else:
+            raise ValueError(f"unsupported zip_longest argument {kwn}=...")
+    if len(args) != 2:
+        raise ValueError("only the 2-sequence zip_longest shape is supported")
+    target = node.target
+    if not (isinstance(target, str) and target.startswith('(') and target.endswith(')')):
+        raise ValueError("zip_longest lowering needs a tuple loop target")
+    tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
+    if len(tgt_names) != 2:
+        raise ValueError("zip_longest lowering needs a 2-slot loop target")
+    seqs = []
+    for arg in args:
+        st, sv = gen.lower_expr(arg)
+        st = gen._get_actual_type(st, sv)
+        if st != 'MojoList *':
+            raise ValueError(f"zip_longest over {st} is unsupported here")
+        ptr = sv
+        if ptr in gen.var_types and gen.var_types[ptr] == 'int64_t':
+            ptr = gen._new_val('MojoList *', f"(MojoList *){sv}")
+        seqs.append((ptr, gen._elem_of(sv)))
+
+    # Per-slot read + fill expressions, all selected through ONE int64_t
+    # (or double) select so the fill/element type mismatch never reaches
+    # GIMPLE as differing ternary operand types. The final assignment to
+    # the declared target coerces back to its real declared ctype (the
+    # same box/unbox dance _gen_for_list's tuple branch uses).
+    fills = []
+    slot_reads = []  # (raw_ctype, expr_with_{i} placeholder fn)
+    for ptr, elem in seqs:
+        suf = gimple_ctypes.TypeLattice.list_suffix(elem)
+        if suf == 'double':
+            slot_reads.append(('double', lambda p=ptr: f"mojo_list_get_double ({p}, {gen._ziptmp})"))
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                if ft != 'double':
+                    raise ValueError("fillvalue must be float-typed to fill a float sequence")
+                fills.append(fv)
+            else:
+                fills.append(None)  # patched below with a 0.0 temp
+        elif suf == 'str':
+            slot_reads.append(('str', lambda p=ptr: f"mojo_list_get_str ({p}, {gen._ziptmp})"))
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                if ft != 'char *' and not isinstance(fill_node, gimple_ctypes.StringLiteral):
+                    raise ValueError("fillvalue must be string-typed to fill a string sequence")
+                fills.append(f"(int64_t)(char *)({fv})")
+            else:
+                fills.append('(int64_t)0')
+        else:
+            slot_reads.append(('int', lambda p=ptr: f"mojo_list_get_int ({p}, {gen._ziptmp})"))
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                fills.append(f"(int64_t)({fv})")
+            else:
+                fills.append('(int64_t)0')
+
+    # Declare each target by its own slot's element type BEFORE the loop
+    # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
+    # wins semantics preserved — later loops over the same names reuse
+    # these real types instead of inheriting an int64_t lock-in).
+    for vn, (_ptr, elem) in zip(tgt_names, seqs):
+        gen._declare_var(vn, elem)
+
+    len_ts = []
+    for ptr, _elem in seqs:
+        lt = gen._new_temp('int64_t')
+        gen._emit(f"  {lt} = mojo_list_len ({ptr});")
+        len_ts.append(lt)
+    gt_t = gen._new_val('_Bool', f"{len_ts[0]} > {len_ts[1]}")
+    n_t = gen._new_val('int64_t', f"{gt_t} ? {len_ts[0]} : {len_ts[1]}")
+    idx_t = gen._new_temp('int64_t')
+    gen._emit(f"  {idx_t} = (int64_t)0;")
+
+    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
+    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond_t = gen._new_val('_Bool', f"{idx_t} < {n_t}")
+    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    gen.loop_stack.append((bb_post, bb_after))
+    gen._ziptmp = idx_t
+    try:
+        for si, vn in enumerate(tgt_names):
+            raw_ct, read_fn = slot_reads[si]
+            elem = seqs[si][1]
+            cvn = gen._cname(vn)
+            in_t = gen._new_val('_Bool', f"{idx_t} < {len_ts[si]}")
+            raw = gen._new_val(
+                'double' if raw_ct == 'double' else ('char *' if raw_ct == 'str' else 'int64_t'),
+                read_fn())
+            if raw_ct == 'double':
+                fill_v = fills[si] if fills[si] is not None else "(double)0"
+                sel = gen._new_val('double', f"{in_t} ? {raw} : {fill_v}")
+            elif raw_ct == 'str':
+                sel = gen._new_val('int64_t', f"{in_t} ? (int64_t){raw} : {fills[si]}")
+            else:
+                sel = gen._new_val('int64_t', f"{in_t} ? {raw} : {fills[si]}")
+            vt = gen.var_types.get(vn, elem)
+            if vt == 'double' and raw_ct == 'double':
+                gen._emit(f"  {cvn} = {sel};")
+            elif vt == 'char *':
+                cs = gen._new_val('char *', f"(char *){sel}")
+                gen._emit(f"  {cvn} = {cs};")
+            elif vt == 'int64_t':
+                gen._emit(f"  {cvn} = {sel};")
+            else:
+                # struct pointer / other declared ctype: unbox via a cast
+                # initializer temp, then plain same-type assignment.
+                cp = gen._new_val(vt, f"({vt}){sel}")
+                gen._emit(f"  {cvn} = {cp};")
+    finally:
+        del gen._ziptmp
+
+    for s in node.body:
+        gen.gen_stmt(s)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    one = gen._new_val('int64_t', "(int64_t)1")
+    st = gen._new_val('int64_t', f"{idx_t} + {one}")
+    gen._emit(f"  {idx_t} = {st};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+
+
 def _gen_for_enumerate(gen, node):
     """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
     lst_arg = node.iterable.args[0]

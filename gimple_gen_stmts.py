@@ -1994,6 +1994,25 @@ def _gen_stmt_ForStmt(gen, node):
             isinstance(node.iterable.func, gimple_ctypes.IdentExpr) and
             node.iterable.func.name == 'enumerate'):
         gen._gen_for_enumerate(node)
+    elif (isinstance(node.iterable, gimple_ctypes.CallExpr) and
+            isinstance(node.iterable.func, gimple_ctypes.MemberExpr) and
+            node.iterable.func.member == 'zip_longest' and
+            isinstance(node.iterable.func.obj, gimple_ctypes.IdentExpr) and
+            node.iterable.func.obj.name == 'itertools' and
+            not gen._locally_binds_name('itertools')):
+        # Transactional: roll back any partially-emitted lines/decls if the
+        # shape turns out unsupported partway, then fall through to the
+        # pre-existing generic path unchanged (same pattern as
+        # _gen_for_iter's regex-finditer attempt above).
+        body_mark, decls_mark = len(gen.body_lines), len(gen.decls)
+        try:
+            gen._gen_for_zip_longest(node)
+            return
+        except Exception as e:
+            del gen.body_lines[body_mark:]
+            del gen.decls[decls_mark:]
+            gimple_ctypes._debug_note('zip_longest lowering failed, falling back', e)
+        gen._gen_for_iter(node)
     else:
         gen._gen_for_iter(node)
 
