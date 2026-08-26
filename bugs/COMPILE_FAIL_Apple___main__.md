@@ -4,6 +4,72 @@ Source file: `/Users/mrs/net/Python-3.14.6/Apple/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-26, branch fix/opencode-importlib — RUNTIME crash chain root-caused via lldb; three of four links FIXED for real; final remaining link is the fully-stubbed argparse subsystem, feature-sized)
+
+Reproduced the runtime crash fresh (`/tmp/apple_main --help` →
+`Unhandled exception: AttributeError: name`, exit 1) and root-caused
+it under lldb (`break set -n mojo_raise; run; bt`) — which showed the
+doc's 2026-08-25 guess ("argparse subparser setup") was WRONG about
+the location: the crash fired at MODULE LEVEL, line 59
+(`SCRIPT_NAME = Path(__file__).name`), long before argparse. Walking
+the crash chain link by link (rebuild → rerun → lldb each time),
+four distinct links were found; the first three are now genuinely
+fixed (commit 78bf853), the fourth is a real feature gap:
+
+1. **FIXED — `Path(x).name` crashed as `AttributeError: name`.**
+   `_lower_opaque_ctor` passed its single string argument through as
+   the "constructed object" but re-boxed it to untyped int64_t, so the
+   `.name` member read fell to `_mojo_dispatch_getattr` on a bare
+   char*, which `mojo_obj_getattr` cannot serve → fatal. Fix:
+   one-positional-arg/zero-kwargs/char*-arg opaque ctors now pass the
+   arg through WITH its `char *` static type; `.name`/`.parent` on a
+   char*-typed receiver lower to the existing os.path runtime helpers;
+   `.resolve()` lowers to a new `int64_t_realpath` (POSIX realpath(3),
+   strict=False); `_quick_type` mirrors all of it so global/local
+   variable typing agrees with lowering (SCRIPT_NAME/PYTHON_DIR are
+   now declared and printed as real strings). Verified end-to-end with
+   a minimal repro printing the basename correctly.
+
+2. **FIXED — `AttributeError: stdout` at the entry tail.**
+   `for stream in [sys.stdout, sys.stderr]: stream.reconfigure(...)` —
+   `sys` binds to a NULL module marker, so `sys.stdout` fell to
+   dynamic getattr on obj=NULL. Fixed: `sys.stdout`/`sys.stderr`/
+   `sys.stdin` value reads now lower to their POSIX fds (0/1/2) as
+   opaque handles; the unknown-method scalar stub makes `.reconfigure`
+   an honest no-op (this runtime's printf output is already
+   unbuffered).
+
+3. **FIXED — `AttributeError: SIGTERM` in main().**
+   `signal.signal(signal.SIGTERM, signal_handler)` — `signal.SIG*`
+   reads on the module marker crashed identically. Fixed: the eleven
+   ABI-fixed portable POSIX signal numbers lower to their real values
+   (BSD/Linux-only members deliberately still refuse rather than risk
+   a wrong number).
+
+4. **NOT FIXED (feature-sized) — `context.cross_build_dir`, i.e.
+   compiled argparse itself.** With 1-3 landed the program reaches
+   main() → parse_args(), and the generated .ci shows argparse was
+   NEVER compiled: `argparse.ArgumentParser(...)` is the opaque-ctor
+   passthrough of the `argparse` module marker (int64_t 0), every
+   method (`add_subparsers`/`add_parser`/`add_argument`/
+   `parse_args`) is an `int64_t.X() stubbed` passthrough returning its
+   receiver, so parse_args() returns 0 and `context.cross_build_dir`
+   getattr-crashes. There is no embedded-interpreter escape hatch that
+   helps: runtime/mojo_python.c's CPython bridge is extern-declared
+   but has no codegen path, and bridging OO usage (parser instances,
+   method chains, Namespace attribute reads) would require building a
+   foreign-object model first. Real compiled-argparse semantics
+   (usage/help text generation, option/subcommand parsing, error
+   handling) are a whole subsystem — same size class as the pickle
+   engine judged out-of-scope in dbpickle.md. Doc kept open: compiles
+   + links clean, starts correctly through module level + signal
+   setup + argparse stub construction, crashes at the first genuine
+   use of the stubbed parse result.
+
+Quality gate after the fixes: test_gimple.py 256/256,
+test_module_cache.py 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild exit 0 with 0 `skip <module>:` lines.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder12 — COMPILE stage now fully fixed end-to-end; RUNTIME crash found, separate gap, NOT fixed)
 
 `python3 mojo.py build .../Apple/__main__.py` now exits 0 and produces a
