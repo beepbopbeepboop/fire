@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical single own-source error confirmed
+
+Fresh safety-wrapped `mojo.py build` against current master (f0f6e78):
+rc=1, **115** total `error:` lines (down from 124), still EXACTLY ONE
+attributed to subprocess.py itself — byte-identical:
+`subprocess.py:1731:8: error: assignment to 'int64_t' from 'MojoList *'
+makes integer from pointer without a cast` at `with self._
+on_error_fd_closer() as err_close_fds:`. Everything in the 2026-08-26
+(rest-remainder19c) entry below stands: correct support needs
+`@contextlib.contextmanager` semantics over the compiled coroutine API
+(resume-to-completion on normal exit + real exception injection
+(`gen.throw()`) on exceptional exit so the body's `except:`-cleanup
+runs) — a 5th coroutine API entry point + new WithStmt codegen,
+feature-sized, deliberately not attempted (a type-only patch would
+trade this hard error for silently-skipped fd cleanup on the error
+path). Doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c — ONE real own-source error now present, at the already-documented `with self._on_error_fd_closer() as err_close_fds:` gap; not attempted, genuine feature-sized blocker)
 
 Fresh safety-wrapped `mojo.py build`: rc=1, 124 total `error:` lines,
