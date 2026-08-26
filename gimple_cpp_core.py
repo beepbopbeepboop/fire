@@ -2065,6 +2065,73 @@ def _cpp_expr(gen, e) -> str:
                         f"{_obj_struct}_{gimple_ctypes._safe_name(e.func.member)}",
                         args)
                     return f"{_sym}({e.func.obj.name}{', ' + ', '.join(args) if args else ''})"
+            # `SomeStruct.<method>(...)` — a CLASS-QUALIFIED method call,
+            # where the receiver name is a known STRUCT NAME rather than a
+            # value. The ordinary (non-coroutine) GIMPLE path has handled
+            # this shape for a long time (`_lower_method_call`'s
+            # `is_class_ref` logic: no implicit receiver for a
+            # @staticmethod — `PyObjectPtr.from_pyobject_ptr(v)`, libpython.py;
+            # the explicit first argument becomes the receiver for an
+            # ordinary method's unbound form), but this coroutine emitter
+            # only handled `self.`/`cls.`/struct-pointer-local receivers and
+            # fell through to the raw `{obj}.{member}(...)` echo for a bare
+            # struct name — emitting invalid C++
+            # `(void)(PyDictObjectPtr._get_entries(keys));` ("expected
+            # primary-expression before '.'") and leaving
+            # `PyObjectPtr.from_pyobject_ptr` "undeclared". Mirrors that
+            # ordinary-path resolution by NAME: `_struct_method_names`
+            # decides both "is the receiver a struct" and "is this member a
+            # real method of it"; a declared LOCAL of the same name wins
+            # (real Python scoping — checked first via _cpp_declared);
+            # compiled GENERATOR methods are excluded exactly like the
+            # cls-branch above (a generator method needs coroutine-
+            # construction handling, not an ordinary C call); classmethods
+            # called through ANOTHER class's name are refused honestly (a
+            # cross-class classmethod call needs a receiver-class VALUE
+            # this scalar body model has no representation for).
+            if isinstance(e.func.obj, gimple_ctypes.IdentExpr) \
+                    and not getattr(e, 'kwargs', None) \
+                    and e.func.obj.name not in (gen._cpp_declared or ()) \
+                    and e.func.member in gen._struct_method_names.get(
+                        e.func.obj.name, ()):
+                _cls_struct = e.func.obj.name
+                _cls_mangled = f"{_cls_struct}_{e.func.member}"
+                if e.func.member in gen._struct_generator_method_names.get(
+                        _cls_struct, ()):
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"{_cls_struct}.{e.func.member}(...): calls to a "
+                        "compiled generator method through its class name "
+                        "are not supported in a compiled generator/"
+                        "coroutine body (they need coroutine-construction "
+                        "handling)")
+                if _cls_mangled in gen._classmethod_names:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"{_cls_struct}.{e.func.member}(...): a "
+                        "@classmethod called through its class name is not "
+                        "supported in a compiled generator/coroutine body")
+                args = [gen._cpp_expr(a) for a in e.args]
+                if _cls_mangled not in gen._static_methods:
+                    # Ordinary method in unbound form: the FIRST argument is
+                    # the instance (real Python `Cls.method(inst, ...)`
+                    # semantics); with no argument there is no receiver to
+                    # pass — refuse rather than invent one.
+                    if not args:
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            f"{_cls_struct}.{e.func.member}(): an ordinary "
+                            "method called through its class name needs the "
+                            "instance as its first argument")
+                    _recv = args[0]
+                    args = args[1:]
+                else:
+                    _recv = None
+                _sym = gen._struct_method_csym(_cls_struct, e.func.member, '')
+                gen._cpp_struct_method_refs.add((_cls_struct, e.func.member))
+                args = _cpp_pad_struct_method_call_args(
+                    gen, _sym,
+                    f"{_cls_mangled}",
+                    args)
+                return f"{_sym}({_recv}{', ' + ', '.join(args) if args else ''})" \
+                    if _recv is not None else f"{_sym}({', '.join(args)})"
             # A member call on a MODULE-GLOBAL object whose member isn't a
             # statically-known function (os.py's `sys.audit(...)`,
             # compileall.py's `os.fspath(...)`, mimetypes.py's

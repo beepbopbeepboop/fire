@@ -479,6 +479,24 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
             c_params = info.get('c_parameters') or []
             ptypes = [' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
                       for cp in c_params]
+            # A name in _NEEDS_SELF_EXTERN has ONE true C prototype, pinned in
+            # _LIBC_SIGS. The export-derived signature (module_loader maps the
+            # exporting Mojo wrapper's Int64-level types to int64_t text) can
+            # disagree with that pin — e.g. std.sys._libc's `def dup(oldfd:
+            # c_int)` exports `int64_t dup (int64_t oldfd)`, while every bare-
+            # call site records the pinned `extern int dup (int);` into
+            # _external_protos via _ensure_libc_self_extern — leaving TWO
+            # conflicting declarations of the same libc symbol in one TU (hard
+            # gcc "conflicting types for 'dup'/'pipe'" in the stdlib dylib's
+            # std_io_io/std_os_process units). Pin the recorded + emitted
+            # signature to the same libc truth so every declaration path for
+            # these names agrees.
+            if sym in gen._NEEDS_SELF_EXTERN:
+                _pin = gen._LIBC_SIGS.get(sym)
+                if _pin:
+                    ret = _pin[0]
+                    ptypes = list(_pin[1])
+                    sig = f"{ret} {name} ({', '.join(ptypes)})"
             gen.func_return_types[sym] = ret
             gen.func_param_types[sym] = ptypes
             gen.imported_symbols[sym] = {
