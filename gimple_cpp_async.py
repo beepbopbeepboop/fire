@@ -659,11 +659,15 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 _vt = gen._global_dict_val_types.get(_gname)
                 if _vt is not None:
                     _dict_val_types[f"cls.{_aname}"] = _vt
+        _field_elem_types = (gen._field_elem_types.get(struct_name, {})
+                             if struct_name is not None else {})
         value_ctype = gimple_exprtypes._generator_yield_ctype(
             fn, declared, gen._generator_api, self_fields,
             known_structs=_known_structs, dict_val_types=_dict_val_types,
             method_return_types=gen.func_return_types,
-            fn_return_types=gcc_._cpp_trusted_fn_return_types(gen))
+            fn_return_types=gcc_._cpp_trusted_fn_return_types(gen),
+            field_elem_types=_field_elem_types,
+            local_elem_types=getattr(gen, '_cpp_list_local_elem_types', None))
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-

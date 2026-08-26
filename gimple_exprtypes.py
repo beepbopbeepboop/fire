@@ -851,7 +851,9 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
     return ctype
 
 
-def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -> str | None:
+def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None,
+                                field_elem_types: dict | None = None,
+                                local_elem_types: dict | None = None) -> str | None:
     """The C type a `yield from <expr>` site contributes to its enclosing
     generator's overall yield-value type, for _generator_yield_ctype's
     same-type-everywhere check — None if `<expr>` isn't a bare call to a
@@ -930,6 +932,30 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
         api = generator_api.get(call.func.name)
         if api is not None:
             return api.get('value_ctype')
+    # yield from self.<field> / yield from <local var>, where the
+    # referenced list's element type is already known via this
+    # codegen's own struct-field / local-variable element-type
+    # tracking (`field_elem_types`/`local_elem_types` — the same
+    # registries `_cpp_for_stmt`'s plain `for x in self.<field>:` case
+    # already consults; see that call site's own comments). Checked
+    # before the generic char* default just below: without this, a
+    # `yield from self.<field>` where the field genuinely holds
+    # int64_t/struct-pointer elements (not strings) was always
+    # defaulted to char*, silently corrupting the WHOLE generator's
+    # promise type whenever another yield site in the same body
+    # correctly inferred int64_t (the char*-preference merge rule in
+    # `_generator_yield_ctype` then FORCES the mismatched, wrong type
+    # to win). Real: Lib/tarfile.py's `TarFile.__iter__`: `yield from
+    # self.members` (a `list[TarInfo]` field) alongside sibling `yield
+    # tarinfo` sites.
+    if isinstance(call, MemberExpr) and isinstance(call.obj, IdentExpr) and call.obj.name == 'self':
+        et = (field_elem_types or {}).get(call.member)
+        if et is not None:
+            return et if et in ('char *', 'double') else 'int64_t'
+    elif isinstance(call, IdentExpr):
+        et = (local_elem_types or {}).get(call.name)
+        if et is not None:
+            return et if et in ('char *', 'double') else 'int64_t'
     # yield from over anything else (a method call, a bare name, a
     # non-generator function call returning a collection): the yielded
     # values are strings (char*).
@@ -1115,7 +1141,9 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                             known_structs: frozenset | None = None,
                             dict_val_types: dict | None = None,
                             method_return_types: dict | None = None,
-                            fn_return_types: dict | None = None) -> str | None:
+                            fn_return_types: dict | None = None,
+                            field_elem_types: dict | None = None,
+                            local_elem_types: dict | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1141,7 +1169,13 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
     see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update) are
     threaded straight through to every `_infer_simple_expr_ctype` call
     below unchanged — see that function's own docstring for what each
-    widens."""
+    widens. `field_elem_types`/`local_elem_types` (struct_name-scoped
+    `self.<field>` -> elem-ctype / local-name -> elem-ctype maps, the
+    same registries `_cpp_for_stmt`'s plain `for x in self.<field>:`
+    case already consults) let a `yield from self.<field>`/`yield from
+    <local list>` site resolve its REAL element type instead of always
+    defaulting to char* — see `_yield_from_delegate_ctype`'s matching
+    case. Real: Lib/tarfile.py's `TarFile.__iter__`."""
     ctype = None
     # Walk only this function's own body — do NOT descend into nested
     # FunctionDef/LambdaExpr bodies (a nested def's `return <value>` is its
@@ -1270,7 +1304,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
                     and n.value.func.name == fn.name):
                 continue
-            t = _yield_from_delegate_ctype(n, generator_api)
+            t = _yield_from_delegate_ctype(n, generator_api, field_elem_types, local_elem_types)
             if t is None:
                 return None
             if ctype is None:

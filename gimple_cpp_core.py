@@ -5001,10 +5001,50 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         # Lib/test/libregrtest/runtests.py's `RunTests.iter_tests`:
         # `yield from self.tests` (a MojoList* field). See
         # CODEGEN_generator_function_Lib_test_libregrtest_runtests.md.
+        #
+        # Element accessor: the above cast handles the CONTAINER's own
+        # pointer type, but the elements inside it aren't always
+        # strings either — `self.<field>` was previously ALWAYS read
+        # back via `mojo_list_get_str` regardless of the field's real
+        # element type, which segfaults (garbage char* deref) whenever
+        # the list actually holds boxed-int64_t scalars or struct
+        # pointers (this codegen's established "store a pointer as a
+        # boxed int64_t, cast back on read" convention — see the
+        # `sorted(...)` case above, which already gets this right via
+        # `mojo_list_get_int`). Real: Lib/tarfile.py's `TarFile.
+        # __iter__`: `yield from self.members` (a `list[TarInfo]`
+        # field) alongside sibling `yield tarinfo` sites in the same
+        # method — those agree with each other (both real TarInfo
+        # pointers) but disagreed with this hardcoded char* accessor.
+        # `gen._field_elem_types`/`_cpp_list_local_elem_types` are the
+        # same per-struct-field / per-local element-type registries
+        # `_cpp_for_stmt`'s plain `for x in self.<field>:` case already
+        # consults (see this file's own `_field_elem_types` comments) —
+        # reused here, not reinvented. Only 'char *'/'double' get their
+        # own accessor; anything else (including an unresolved/unknown
+        # element type, matching this branch's prior unconditional
+        # default) reads back as the int64_t boxed-pointer/scalar
+        # convention via `mojo_list_get_int`.
+        _yf_struct = getattr(gen, '_cpp_gen_self_struct', None)
+        _yf_elem_ctype = None
+        if (isinstance(call, gimple_ctypes.MemberExpr)
+                and isinstance(call.obj, gimple_ctypes.IdentExpr)
+                and call.obj.name == 'self' and _yf_struct):
+            _yf_elem_ctype = gen._field_elem_types.get(_yf_struct, {}).get(call.member)
+        elif isinstance(call, gimple_ctypes.IdentExpr):
+            _yf_elem_ctype = getattr(gen, '_cpp_list_local_elem_types', {}).get(call.name)
+        if _yf_elem_ctype == 'double':
+            _yf_accessor = 'mojo_list_get_double'
+        elif _yf_elem_ctype == 'char *':
+            _yf_accessor = 'mojo_list_get_str'
+        elif _yf_elem_ctype is not None:
+            _yf_accessor = 'mojo_list_get_int'
+        else:
+            _yf_accessor = 'mojo_list_get_str'
         result_init = f"(MojoList *)({coll_expr})"
         return [f"{indent}auto {result_var} = {result_init};",
                 f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
-                f"{indent}    co_yield mojo_list_get_str({result_var}, _i);",
+                f"{indent}    co_yield {_yf_accessor}({result_var}, _i);",
                 f"{indent}}}"]
     if call.kwargs:
         # Append keyword arguments as positional args at the end.
