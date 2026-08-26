@@ -4,6 +4,60 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-26, wtOpencode_canalyzer2 — one of two blockers FIXED
+## in shared source; the four c_parser/info.py errors are gone; remaining
+## errors are the previously-masked generator-body type-inference family)
+
+Fresh bounded build reproduced a REDUCED failure set vs the entries
+below: only ONE error remained — `_toplevel`'s `UNKNOWN =
+_misc.Labeled('UNKNOWN')` emitting `(char *)` coercion into the
+root-globals struct's `int64_t UNKNOWN` field (the four c_parser/info.py
+`:179/:247` `_fix_filename` pointer-from-integer errors from the
+2026-08-25 signature-race analysis no longer reproduce).
+
+Root-caused and FIXED this session (commit `4b24623`, shared source):
+a cross-module same-bare-name GLOBAL homonym. `c_common/tables.py`
+declares its own string global `UNKNOWN = '???'`; both modules compile
+into one whole-program unit sharing `_global_c_decl_types`. Empirically
+(instrumented): root's globals-struct fields freeze from a CLEAN cdecl
+(`int64_t UNKNOWN`), then the imported modules' compiles land tables'
+`char *` into the SHARED cdecl dict, then root's body emission consults
+`_global_dst_ctype` — whose pointer-shaped-cdecl exception (added for
+the compiler's own dispatch tables) let the FOREIGN `char *` beat root's
+own scalar Phase-1.7 conclusion → RHS coerced to `char *` against an
+`int64_t` field. Fix: new `GimpleGen._own_overlay_global_ctype()` is now
+the single type resolution used by BOTH the assignment sites
+(`_global_dst_ctype`) and gen_module_impl's field-decl loop — container-
+pointer cdecls (`MojoDict *`/`MojoList *`/`MojoSet *`, the dispatch-
+table/boxing family) still outrank scalar own-freezes; every other
+foreign non-container pointer cdecl no longer beats this module's own
+scalar conclusion; the two sides can therefore never disagree regardless
+of cross-module compile ordering.
+
+Full mandatory gate after the change: `test_gimple.py` 256/256,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with **0 skip lines** (baseline held).
+
+The fix exposed (rather than left masked) the NEXT blocker — exactly the
+generator-body type-inference family this doc's 2026-08-23 entry already
+documented, now reached again:
+
+```
+info_gen.cpp:138: request for member 'render' in 'self->Analyzed::item',
+                  which is of non-class type 'int64_t'
+info_gen.cpp:146: void value not ignored as it ought to be
+info_gen.cpp:236: invalid conversion from 'int64_t' to 'char*'
+```
+
+`Analyzed.render`/`_render_extra` are generators; `self.item = item`
+(unannotated init param → int64_t default) makes `.render(fmt)` a
+member call on int64_t, etc. The `self.item` half is squarely the
+HIGH-RISK unannotated-init-param-type family
+(bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md)
+this session is instructed NOT to attempt; the rest is the same
+coroutine-path inference-parity gap tracked below. Doc stays open on
+that family.
+
 ## Status (re-verified 2026-08-26)
 
 Fresh repro against this session's tree (`fix/rest-remainder18`)
