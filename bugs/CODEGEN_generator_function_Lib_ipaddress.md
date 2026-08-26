@@ -1,5 +1,55 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified; picture is WORSE/more complex than the "1 remaining error" the last pass recorded)
+
+Fresh re-verify against this worktree (branched from master `f65502d`).
+A strict isolated compile (`compile_to_gimple_with_cpp(...,
+do_imports=False)`, no `relaxed_imports`) now hard-refuses the WHOLE
+module up front — 3 generators, none of which is the previously-cited
+`other == self` blocker: `_collapse_addresses_internal` ("a call to
+unresolved callee 'list(...)'"), `_find_address_range` ("...'next(...)'"
+— the already-tracked plain-iterator-cursor gap (a)), and
+`summarize_address_range` ("...'min(...)'"). Re-ran with
+`GimpleGen(do_imports=False, relaxed_imports=True)` (matching this doc's
+own established methodology, since the current `compile_to_gimple_with_
+cpp` wrapper doesn't plumb `relaxed_imports` through at all — confirmed
+by reading `_run_pipeline`, `gimple_codegen.py`) to skip those 3 and let
+the rest of the module still emit a `.cpp`: `g++-mp-15 -std=c++20
+-fsyntax-only` on the result now reports **19 errors**, not 1 — the
+2026-08-24 "15 -> 1" count evidently only reflected the errors reachable
+in that particular pass's set of eligible generators, not the true
+current count once these newly-surfaced unresolved-builtin refusals are
+accounted for.
+
+New findings, none previously documented for this file:
+- `summarize_address_range` (ipaddress.py:200) uses 2-arg `min(a, b)` —
+  no `min()`/`max()` builtin support anywhere in the coroutine-body
+  emitter (`gimple_cpp_core.py` has `len`/`str`/`int`/`float`/`sorted`
+  cases only, confirmed via direct grep — no `min`/`max`/`list`).
+- `_collapse_addresses_internal` (ipaddress.py:255) uses `list(addresses)`
+  (copy-construct), then goes considerably further than a narrow `list()`
+  gap would fix: `subnets = {}` keyed by NETWORK-OBJECT instances
+  (`subnets[supernet] = net`, `subnets.get(supernet)`,
+  `del subnets[supernet]`), `sorted(subnets.values())` over struct
+  pointers, and `>=`/`!=` struct-instance comparisons via dunder methods
+  — a dict-keyed-by-struct-object representation this coroutine model has
+  no support for at all. Fixing just `list()` would not make this
+  function compile; the real gap here is struct-object dict keys/values
+  iteration inside a coroutine body, itself feature-sized.
+- The 19 g++ errors in the surviving `.cpp` are dominated by a
+  `@property`-as-bound-method pattern (`_address_class` accessed as
+  `self.address_class` inside another method, leaving a raw
+  `std::function<int64_t()>` instead of invoking it — 3 occurrences) plus
+  the already-documented `other == self` pointer/int comparison
+  (unannotated ordinary-function-parameter family).
+
+None of this is addressed by any recently-landed shared mechanism (none
+add `min`/`list` builtin support or struct-keyed-dict/property-as-value
+handling to the coroutine path). Given the added scope found here, this
+file's real remaining gap is larger than "1 pointer/int comparison" —
+correcting the record. Not attempted (feature-sized in aggregate). Doc
+stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree (the 2026-08-24 `%`-format fix
