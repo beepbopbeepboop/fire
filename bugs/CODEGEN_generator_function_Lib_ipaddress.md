@@ -1,5 +1,25 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — exactly the 19d entry's 23 errors, same families)
+
+Fresh relaxed isolated compile (`GimpleGen(do_imports=False,
+relaxed_imports=True)`, matching this doc's own methodology) +
+`g++-mp-15 -std=c++20 -fsyntax-only`: **23 errors**, byte-consistent
+with the 2026-08-26 rest-remainder19d entry — same four families:
+the `IPv4Network`-not-declared cluster at its `subnets`-adjacent sites
+(IPv4Network's typedef/methods absent while IPv6Network's are present,
+consistent with IPv4Network.subnets being one of the relaxed-skipped
+generators), 3× `invalid cast from type 'std::function<long long int()>'
+to int64_t` + "void value not ignored" (`@property`-as-bound-method:
+`self.address_class` leaving a raw callable value where a value is
+needed), 3× `_address_class` too-many-arguments/void-use, and 1× ISO C++
+pointer/int comparison (the excluded unannotated-param family). The
+strict-mode refusal list (`_collapse_addresses_internal` on `list(...)`,
+`_find_address_range` on `next(...)`, `summarize_address_range` on
+`min(...)`, `subnets`) was not re-derived separately this pass; nothing
+landed touches any of these families. Aggregate remains feature-sized;
+not attempted. No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
 
 Fresh isolated `GimpleGen(do_imports=False, relaxed_imports=True)` repro

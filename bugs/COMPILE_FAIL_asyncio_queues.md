@@ -1,5 +1,22 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — fresh bounded build confirms unchanged: entire 300s budget spent in transitive source-fallbacks, own refusal unreached)
+
+Fresh safety-watched `python3 mojo.py build .../Lib/asyncio/queues.py`
+(own watcher, killed at 302s): identical behavior to the canalyzer2
+entry below — the run emits only two honest transitive-import fallback
+lines (`collections`: `Counter[...] = ...` subscript store; `inspect`:
+`OrderedDict[...] = ...` subscript store) and then spends its WHOLE
+budget silently interpreting those modules from source, never reaching
+queues.py's own module-level refusal. RSS stayed well under the kill
+thresholds. queues.py's OWN blocker is untouched by anything landed:
+`get`/`join`/`put`'s `await <local Future>` / `await <bound-method
+call>` shapes remain outside `_async_quick_eligible`'s whitelist;
+closing them still needs the real Awaitable protocol (allocatable
+Future/Event handles + waiter queues + cross-coroutine wakeup) — a
+feature-sized asyncio-runtime project, explicitly out of scope. Doc kept
+open.
+
 ## Status (updated 2026-08-26, wtOpencode_canalyzer2 — re-verified fresh; own
 ## blocker unchanged, build now can't even REACH the module refusal in 300s)
 

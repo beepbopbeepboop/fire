@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — own-generator fix holds: isolated compile completely clean)
+
+Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)` +
+`gcc-mp-15 -fgimple -fsyntax-only` / `g++-mp-15 -std=c++20
+-fsyntax-only` (with the runtime include dir on the include path): **0
+errors on BOTH the .ci and the companion .cpp** — the 2026-08-24 local-
+`import re` fix (`gimple_cpp_core.py` registering function-scoped
+imports into `gen._cpp_early_global_names`) holds; `_tokenize`'s
+coroutine unit still compiles completely clean. This doc's own subject
+(the generator-codegen concern) remains fully resolved; the file's only
+remaining build failures belong to the separately-tracked transitive
+cascade plus the 4 pre-documented non-generator own-file residuals from
+the 2026-08-25 entry below. No code change; no gate run (nothing
+touched). Doc stays open per convention.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; own-generator fix holds (0 isolated .cpp errors); whole-program build still fails on the transitive cascade plus 4 known non-generator own-file residuals)
 
 Re-verified both halves fresh:

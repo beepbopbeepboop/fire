@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2): unchanged — same 3-function `cls`-access refusal set
+
+Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+byte-for-byte identical refusal set — `_iter_member_`,
+`_iter_member_by_def_`, `_iter_member_by_value_` all refused with "a
+@classmethod generator that references `cls` in its body in an
+unsupported way is not supported" (matches the wtRest19b entry,
+including `_iter_member_` being listed as its own function via the
+body-level alias mechanism). Root cause unchanged and re-confirmed:
+`cls._flag_mask_`/`cls._value2member_map_` exist only through
+`EnumMeta.__new__`'s dynamic classdict machinery, never as literal
+class-body AssignStmts, so `_cls_refs_supported` correctly has no
+redirect target — and stubbing them would silently miscompile (e.g.
+`_flag_mask_ = 0` makes every Flag iteration yield nothing). Still a
+feature-sized dynamic-metaclass-attribute-modeling gap, with the
+`_iter_member_by_def_` lambda/generator-via-cls stack behind it. No code
+change; doc stays open.
+
 ## Status (re-verified 2026-08-26, wtRest19b): unchanged — same 6 `cls`-access refusal lines
 
 Fresh `MOJO_DEBUG=1 python3 mojo.py build .../Lib/enum.py` against

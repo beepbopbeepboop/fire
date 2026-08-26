@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-26, worktree fix/opencode-genlib2 — re-verified fresh; refusal byte-identical, both feature-stack legs re-confirmed post-backend-split)
+
+Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+byte-for-byte identical single refusal — `_get_instructions_bytes` on
+"a `*`/`**`-unpack call argument is not supported in a compiled
+generator/coroutine body" at `Positions(*next(co_positions, ()))`.
+Re-confirmed both legs of the feature stack directly against the current
+tree: (a) a fresh grep for `namedtuple` across ALL `gimple_*.py` files
+(the backend has since been split from the monolith) still returns zero
+hits — no representation for dynamically-constructed namedtuples exists
+anywhere; and (b) even without the spread/namedtuple, the call needs
+`co.co_positions()` — native code-object introspection, which this
+codegen has no model for at all (same dependency as `findlinestarts`'s
+`code.co_lines()`). Two-feature stack on top of a third absent feature;
+feature-sized, unchanged. No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, unchanged)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
