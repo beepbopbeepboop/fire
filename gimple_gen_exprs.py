@@ -401,7 +401,22 @@ def _lower_IdentExpr(gen, node) -> tuple[str, str]:
         # `lst = [3.5, 2.5]; print(lst)` printing garbage/segfaulting.
         if name in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[name]
-        c_decl_type = gen._global_c_decl_types.get(name, ctype)
+        # Resolve the C decl type through the same own-overlay helper the
+        # module-globals struct field freeze (gen_module_impl's
+        # `_declared_globals` loop) and the assignment-site coercion
+        # (`_global_dst_ctype`) already use — a cross-module same-bare-name
+        # homonym that overwrites the SHARED `_global_c_decl_types` between
+        # this module's field-freeze and its body emission must not make
+        # THIS read load a pointer-shaped field into an int64_t temp without
+        # the boxed-pointer cast (the observed encodings/__init__.py
+        # `_aliases` failure: field frozen `MojoDict *`, then codecs.py's
+        # own `{}`-initialized `_aliases` cdecl'd 'int64_t' into the shared
+        # dict, then every `aliased_encoding = _aliases.get(...)` receiver
+        # load emitted a bare `int64_t t = MojoDict * field;`
+        # -Wint-conversion error).
+        c_decl_type = gen._own_overlay_global_ctype(name)
+        if c_decl_type is None:
+            c_decl_type = gen._global_c_decl_types.get(name, ctype)
         # Access global from module struct (use which module the global belongs to)
         global_module = getattr(gen, '_global_to_module', {}).get(name, gen._current_module_ctx or "root")
         safe_module = gimple_ctypes._c_field_name(global_module) if global_module else "root"
@@ -792,7 +807,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 gen._dict_val_types[t] = gen._dict_val_types[node.member]
             if node.member in gen._elem_types:
                 gen._elem_types[t] = gen._elem_types[node.member]
-            c_decl_type = gen._global_c_decl_types.get(node.member, ctype)
+            # Same own-overlay-first resolution as the bare-name global-read
+            # branch above — the submod.GLOBAL field load must agree with the
+            # struct-field freeze for the exact same homonym reason.
+            c_decl_type = gen._own_overlay_global_ctype(node.member)
+            if c_decl_type is None:
+                c_decl_type = gen._global_c_decl_types.get(node.member, ctype)
             safe_module = gimple_ctypes._c_field_name(_bound_mod) if _bound_mod else "root"
             field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(node.member)}"
             if ctype == 'int64_t' and c_decl_type.endswith(' *'):
