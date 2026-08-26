@@ -1,5 +1,33 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged; whole-program build attempt inconclusive due to a 300s safety-budget timeout, isolated verification confirms no regression)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` re-run
+against this worktree (branched from master `1e0f3f2`, after this
+session's `SubscriptExpr`-reraise + MemberExpr-receiver container-method
+fixes landed elsewhere — see `CODEGEN_generator_function_Lib_test_test_
+finalization.md`): identical success, cpp emitted, no refusal — matches
+the 2026-08-25 entry's own diagnosis exactly (the generic yield-from
+element-type-unification fix holds; tarfile.py's own instance is still
+blocked purely on the documented Phase-2a-vs-generator-pass ordering gap
+for `self.tarinfo.fromtarfile(self)`-mediated `.append()` sites, not
+attempted here for the same reasons as before — a broad heuristic risked
+flipping other, currently-correct char*-element fields wrong elsewhere
+in the corpus).
+
+A fresh full `python3 mojo.py build .../Lib/tarfile.py` (with
+`build/libmojostdlib.dylib` freshly rebuilt, 0 skips) was attempted to
+confirm the whole-program-build residual set is unchanged, but hit the
+300s safety-budget wall-clock cap before finishing (RSS stayed flat and
+safe throughout, same "genuinely slow transitive import walk, not a
+runaway" pattern documented on `CODEGEN_generator_function_Lib_test_
+test_ctypes_test_random_things.md` for `collections`/`inspect`'s
+source-interpretation fallback, which tarfile.py's own import graph also
+reaches) — inconclusive on the whole-program-build error set this pass,
+but the isolated re-verification above already confirms the actual
+codegen path this doc tracks is unaffected by anything landed since the
+last pass. Doc stays open; not re-classified.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — root-caused the 2026-08-24 isolated-compile symptom; a real, generic partial fix landed; tarfile.py's own instance still not resolved)
 
 Root-caused the 3 new `.cpp` errors the 2026-08-24 entry flagged
