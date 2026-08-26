@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/save_env.py
 
+## Status (updated 2026-08-26 -- re-verified, unchanged)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Ran a direct isolated `compile_to_gimple_with_cpp(..., do_imports=
+False)` call (avoids the whole-program build's large transitive
+`test.libregrtest`/`compression` import graph, same rationale the
+2026-08-25 entry used, but completes cleanly rather than timing out):
+byte-for-byte identical refusal — `resource_info` refused on
+`getattr(obj, name) with a non-static attribute name is not supported
+in a compiled generator/coroutine body (no runtime attribute-reflection
+table exists in this codegen)`. Gap 3 (runtime name->member reflection)
+is unaffected by anything landed since the last pass. Still structural;
+untouched.
+
 ## Status (updated 2026-08-25 -- re-verified, unchanged)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

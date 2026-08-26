@@ -1,5 +1,28 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified; blocker text shifted slightly, same classification)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Isolated compile (`compile_to_gimple_with_cpp(..., do_imports=False)`):
+same 5-generator refusal set as 2026-08-25
+(`_iglob`/`_iterdir`/`select_recursive`/`select_recursive_step`/
+`select_wildcard`), with one wording difference worth recording
+precisely: `select_recursive`/`select_recursive_step`/
+`select_wildcard` now report an unresolved callee `match(...)` rather
+than `select_next(...)`. Traced: this is NOT a new/different gap — both
+`select_next` (`self.selector(parts)`, holds a reference to one of
+several possible generator functions chosen dynamically) and `match`
+(a local bound to `self._compile_pattern(...)`'s `.match`/similar
+method, also chosen dynamically) are separate instances of the exact
+same "opaque callable-value dispatch" family this doc already
+classifies as the dominant blocker — the refusal machinery just surfaces
+whichever unresolved-callee site it walks into first inside each
+function body; both are real, unrelated to any recently-landed
+mechanism. `_iglob`'s "unsupported for-loop iterable type: CallExpr"
+and `_iterdir`'s `bytes(...)` gap are unchanged verbatim. Classification
+unchanged: dominated by the out-of-scope opaque-callable-value/
+dynamic-generator-dispatch feature gap. No change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified; blocker set is BROADER than previously characterized, same underlying feature gap)
 
 Fresh re-verify against this worktree (branched from master `f65502d`;

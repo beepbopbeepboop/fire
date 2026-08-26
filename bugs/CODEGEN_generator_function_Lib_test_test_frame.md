@@ -1,5 +1,28 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (updated 2026-08-26 -- re-verified, unchanged; full refusal set recorded for completeness)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Isolated compile (`do_imports=False`) surfaces the FULL refusal set in
+one message (not just `g`, which the last few status entries quoted in
+isolation): `g` (BinaryOp `1/0` bare-statement, no runtime int-div-by-
+zero trapping — the tracked blocker), plus `gen` (`yield nested()`,
+where `nested` is a function nested inside `t0`'s own body — an
+unresolved-callee/nested-function-value gap, same "opaque callable
+value" family as `glob.py`'s blocker, not previously called out by name
+in this doc but consistent with the "same whole-module fallback naming
+`g`... and `t3`" note already on file since 2026-08-09), and `t3`
+(`async def t3(): ... return frame.f_generator` — cross-return-type
+unification, `frame.f_generator`'s inferred type disagreeing with the
+promise's unified scalar type). None of these three are new discoveries
+— they were already implicitly present in every prior pass's "whole-
+module fallback" escalation, just not enumerated together before. All
+three are independently feature-sized (runtime division trapping,
+nested-function-value calls, cross-path return-type unification) and
+none is touched by anything landed since 2026-08-25. Classification and
+recommendation (real int-div-by-zero trapping is a legitimate standalone
+feature project, not scoped to this file) unchanged. Untouched.
+
 ## Status (updated 2026-08-25 -- re-verified, unchanged)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

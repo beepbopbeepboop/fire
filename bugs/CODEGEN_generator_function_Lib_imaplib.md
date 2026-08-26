@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Isolated compile (`compile_to_gimple_with_cpp(..., do_imports=False)`)
++ `g++-mp-15 -std=c++20 -fsyntax-only` on the resulting `Idler_burst`
+coroutine `.cpp`: byte-for-byte identical pair of errors to the
+2026-08-25 entry — `request for member 'sock' in 'self->Idler::_imap',
+which is of non-class type 'int64_t'` and `invalid conversion from
+'MojoList*' to 'int64_t' [-fpermissive]` at `co_yield Idler___next__
+(self)`. This assignment explicitly excludes attempting the
+HIGH-RISK unannotated-init-param-type family blocker (1) is filed
+under. Blocker (2) (cross-method yield-type unification) remains
+unowned/unattempted, still feature-sized. No change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged, root cause of blocker (1) pinned down precisely)
 
 Fresh re-verify against this worktree (branched from master `f65502d`;

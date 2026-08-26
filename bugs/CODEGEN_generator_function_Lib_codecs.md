@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`,
+post self-host-bootstrap-divergence fix). Ran a direct isolated
+`gimple_codegen.compile_to_gimple_with_cpp(..., do_imports=False)` call
+(equivalent to, but faster/safer than, a full `mojo.py build`) under the
+RAM-safety watcher. Byte-for-byte identical refusal to the 2026-08-25
+entry: `iterdecode, iterencode` refused for "a `*`/`**`-unpack call
+argument is not supported in a compiled generator/coroutine body" at
+`getincrementalencoder(encoding)(errors, **kwargs)`. No shared mechanism
+landed since the last pass (self-host bootstrap divergence fix touches
+flow-insensitive field inference + boxed-handle typing, unrelated to
+dynamic-callee kwargs-spread). Genuinely unfixable without the same
+large dynamic-kwargs-dispatch feature already assessed repeatedly. No
+change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
 
 Fresh re-verify against this worktree (branched from master at `f65502d`,

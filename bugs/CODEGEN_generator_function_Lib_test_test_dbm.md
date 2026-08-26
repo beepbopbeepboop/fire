@@ -1,5 +1,29 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Isolated compile (`do_imports=False`) of `test_dbm.py` succeeds with no
+`RuntimeError` (matches the 2026-08-24 fix); pulled the generated
+`dbm_iterator` coroutine `.cpp` and confirmed via `g++-mp-15 -std=c++20
+-fsyntax-only`: zero errors. Directly inspected the emitted C++ body:
+it is literally `co_return;` with nothing else — confirms the
+"iterable not statically list/dict-typed" fallback still silently
+compiles the whole `for name in dbm._names:` loop (and everything
+inside it, including the `__import__(name, fromlist=['open'])` call) as
+dead code, exactly as the 2026-08-24 entry documented. The `.ci` (plain
+part) has zero occurrences of `__import__` or `dbm.` symbol references
+needing resolution, consistent with the loop body never actually being
+emitted. So the `__import__` blocker is not "fixed" — it's simply never
+reached because the loop around it compiles to nothing; this generator
+will not iterate correctly at runtime once linked, matching the doc's
+own honest caveat. No shared mechanism since 2026-08-24 changes this.
+`test_dbm.py` as a whole (transitive `do_imports=True` build) still not
+independently re-verified this pass (would require the full-build RAM/
+time budget for a file with a large `test.support` import graph);
+nothing suggests its unrelated transitive-dependency errors have
+changed. No change; doc stays open.
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder — the `'dbm' was not declared` gap FIXED; isolated coroutine TU now compiles with ZERO errors)
 
 Root-caused the "outer-scope module-name resolution" family precisely

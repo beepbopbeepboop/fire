@@ -1,5 +1,14 @@
 # CODEGEN_generator_function: Lib/test/_code_definitions.py
 
+## Status (updated 2026-08-26 -- re-verified, unchanged)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Isolated compile: byte-for-byte identical refusal — `asyncgen_spam:
+*args/**kwargs parameters not supported for compiled async generators`.
+No shared mechanism landed since the 2026-08-25 pass touches
+async-generator varargs eligibility or the deeper "bare construction
+without consumption" gap. Still feature-sized; untouched.
+
 ## Status (updated 2026-08-25 -- re-verified, unchanged)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

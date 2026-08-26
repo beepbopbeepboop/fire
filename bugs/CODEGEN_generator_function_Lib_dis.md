@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Direct isolated `gimple_codegen.compile_to_gimple_with_cpp(...,
+do_imports=False)` call: byte-for-byte identical single refusal —
+`_get_instructions_bytes` on "a `*`/`**`-unpack call argument is not
+supported in a compiled generator/coroutine body" (`Positions(*next(
+co_positions, ()))`). No shared mechanism landed since the 2026-08-25
+pass touches unpack-call-arguments or `collections.namedtuple`
+representation. Still a two-feature stack (namedtuple-as-struct support
++ unpack-call-argument support), genuinely feature-sized. No change;
+doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged; deeper gap found)
 
 Fresh re-verify against this worktree (branched from master `f65502d`).

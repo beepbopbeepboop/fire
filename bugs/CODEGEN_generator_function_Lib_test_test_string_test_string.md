@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (updated 2026-08-26 -- re-verified, no evidence of change)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Isolated compile (`do_imports=False`, completes cleanly rather than
+needing the whole-program build the 2026-08-25 entry's time budget
+couldn't finish): identical whole-module fallback naming `parse` with
+no per-function eligibility note, confirming `BarFormatter` (and its
+generator method `parse`) still never reaches struct registration
+(`gen_module`'s `all_struct_defs = stmts + ...` only walks top-level
+statements — unchanged). Root cause and classification (function-body-
+local class discovery, feature-sized, out of scope) unchanged. No
+change; doc stays open.
+
 ## Status (updated 2026-08-25 -- re-verified, no evidence of change)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

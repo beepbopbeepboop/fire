@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (updated 2026-08-26 -- re-verified, unchanged)
+
+Fresh re-verify against this worktree (branched from master `a913ab8`).
+Isolated compile (`do_imports=False`): byte-for-byte identical refusal
+— `fake_pip: unsupported statement in generator body: StructDef`. The
+3-piece design scoped in the 2026-08-12 entry (struct discovery never
+walks generator bodies; class-attribute seeding only understands
+module-globals RHS, not enclosing-generator locals; construction
+requires an explicit `__init__`) is still the accurate accounting of
+what a real fix needs — nothing landed since touches any of the three.
+Still feature-sized; untouched.
+
 ## Status (updated 2026-08-25 -- re-verified, unchanged)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
