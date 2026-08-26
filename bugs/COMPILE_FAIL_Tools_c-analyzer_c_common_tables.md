@@ -20,6 +20,13 @@ the still-undiagnosed `fix_row = _normalize_fix_read(fix)` nested-
 function-factory-as-value shape right behind it. Not attempted — large
 feature-sized work. No code change; doc re-verified only.
 
+Re-verified again 2026-08-26, wtOpencode_canalyzer2 (fresh-cut worktree):
+with imports resolved, identical single refusal verbatim
+(`read_table: unsupported for-loop iterable type: CallExpr`); without
+imports the same function refuses one step earlier on unresolved
+`next(...)` (the foreign strutil generator handle can't resolve) —
+consistent with the entry below, no change in either direction.
+
 ## Status (updated 2026-08-25 — `next()` on a foreign generator FIXED (commit c4c88fa, verified end-to-end); read_table now reaches the NEXT unsupported shape: `for row in _get_reader(...)`)
 
 The doc's tracked blocker — `read_table`'s
