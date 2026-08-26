@@ -4,6 +4,44 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c — build still exits 0 with 0 errors; both remaining gaps re-investigated, neither newly tractable)
+
+Fresh `mojo.py build .../Tools/build/deepfreeze.py`: still exits 0, 0
+error lines, binary runs. Re-checked both open items:
+
+1. **Link-mode sibling-import degradation** (item 1 below) — unchanged,
+   still a real feature-sized gap (link mode's import loader has no
+   support for arbitrary non-stdlib sibling files at all).
+
+2. **Argparse-runtime `AttributeError: verbose`** (item 2 below) —
+   traced one step further than before. Confirmed `setattr(self, name,
+   kwargs[name])`-shaped dynamic-name writes DO lower to a real
+   runtime call (`gimple_codegen.py`'s `BUILTIN_FUNCS['setattr'] =
+   'mojo_setattr'`, calling `runtime/mojo_runtime.c`'s real per-object
+   dynamic-attribute store, `mojo_setattr`/`mojo_obj_getattr` — this
+   machinery already exists and IS exercised, per the 2026-08-25
+   umarshal `Code.__dict__`-adjacent fix). The crash is NOT simply
+   "dynamic getattr unimplemented" — `args.verbose` reads through this
+   same real dispatch and gets a genuine "not found" (a correctly-
+   raised `AttributeError`, not a segfault/garbage read), meaning the
+   value is never actually written to the `Namespace` instance at
+   runtime. `args.verbose` originates from an `action="store_true"`
+   argparse option (`parser.add_argument("-v", "--verbose",
+   action="store_true", ...)`), whose default-population path lives
+   deep in `argparse.ArgumentParser.parse_known_args`/`_get_values`
+   (iterating `self._actions`, calling `setattr(namespace, action.dest,
+   action.default)` for every action not explicitly supplied on the
+   command line) — real argparse runtime-fidelity territory, not a
+   contained bug in the dynamic-attribute primitive itself. Tracing
+   why THIS specific default-population call doesn't reach `Namespace`
+   would mean auditing argparse's own compiled control flow (multiple
+   nested loops/conditionals across `_actions`/`_get_values`), a real
+   investigation into a large already-compiled stdlib file, not a
+   narrow fix — still correctly out of scope for this compile-fail
+   doc. Not attempted further.
+
+Doc stays open, reclassified status unchanged from the entry below.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — build exits 0 with 0 errors; the shared umarshal root cause is FIXED; remaining gaps are link-mode sibling-import degradation + argparse runtime, both outside this compile-fail doc's subject)
 
 Re-verified fresh: `python3 mojo.py build .../Tools/build/deepfreeze.py`
