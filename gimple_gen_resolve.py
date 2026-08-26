@@ -370,6 +370,27 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             emitted_structs_before = set(gen._emitted_structs)
             inline_defs_before = set(gen._global_inline_defs)
             emitted_allocs_before = set(gen._emitted_allocs)
+            # Same rollback rationale for the builtin-as-value funcptr pair:
+            # a module whose gen_module raises mid-compile (e.g. the
+            # "cannot compile module: `Counter[...] = ...` subscript store"
+            # fallback for collections/inspect) has usually ALREADY run its
+            # preamble-assembly pass, which marks every funcptr name it
+            # discovered into the SHARED `_emitted_funcptr_builtins` — but
+            # its generated text (containing those `static void *
+            # _funcptr_X` declarations) is discarded by this very except
+            # handler. Without rolling the marks back, every LATER module
+            # that references the same name computes
+            # `needed - emitted == {}`, emits no declaration of its own,
+            # and the whole translation unit dies with "'_funcptr_mojo_len'
+            # undeclared (first use in this function)" at the surviving
+            # reference sites (real: re/_compiler.py's `_len = len`,
+            # re/_parser.py:520, textwrap.py's `sum(map(len, ...))` in any
+            # whole-program build whose closure contains collections or
+            # inspect). Rolling `needed` back too keeps the pair symmetric:
+            # names discovered ONLY by the failed subtree have no surviving
+            # reference (their referencing text was discarded with it).
+            funcptr_needed_before = set(gen._funcptr_builtins_needed)
+            funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
             gen._compiling_file_paths.add(_abspath)
             try:
                 with open(path, 'r') as f:
@@ -635,6 +656,10 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._global_inline_defs.discard(_d)
                 for _a in list(gen._emitted_allocs - emitted_allocs_before):
                     gen._emitted_allocs.discard(_a)
+                for _n in list(gen._funcptr_builtins_needed - funcptr_needed_before):
+                    gen._funcptr_builtins_needed.discard(_n)
+                for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
+                    gen._emitted_funcptr_builtins.discard(_e)
                 # Note: _module_globals / _module_global_inits are intentionally NOT
                 # rolled back. Partial data from a failed compilation (e.g. build_stdlib_dylib
                 # failing but having populated its globals) is still needed so that the
