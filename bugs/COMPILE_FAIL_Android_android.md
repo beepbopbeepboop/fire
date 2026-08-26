@@ -4,6 +4,20 @@ Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25, worktree fix/rest-remainder14 — DOCUMENTED-NOT-FIXED, unchanged)
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
+against this worktree (branched from master `f65502d`), run under the
+safety-rule watcher. Byte-for-byte identical refusal to every prior
+pass: the same 10 `async def` functions + `async_process` async
+generator, refused before any per-function eligibility attempt because
+their `await` targets (`create_subprocess_exec(...)`,
+`process.communicate()`/`.wait()`, `stream.readexactly(...)`, a local
+`wait_for` helper) are all outside `_async_quick_eligible`'s whitelist.
+This is exactly the "real async-subprocess I/O" feature-sized case this
+session's own mandate explicitly flags as out of scope. Not attempted.
+No change.
+
 ## Status (re-verified 2026-08-25, worktree fix/rest-remainder12 — DOCUMENTED-NOT-FIXED, unchanged)
 
 Re-ran an isolated `compile_to_gimple` check fresh, after this

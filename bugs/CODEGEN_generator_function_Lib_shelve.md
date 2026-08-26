@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
+
+Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/shelve.py`
+against this worktree (branched from master `f65502d`), run under the
+safety-rule watcher. 153 `error:` lines total (previously ~146; within
+normal noise for an unrelated, still-open transitive cascade), dominated
+by `argparse.py`/`pickle.py`/`typing.py`/`_collections_abc.py` —
+none attributable to shelve.py's own code or its one generator
+(`Shelf.__iter__`). Confirmed the same 12 misattributed `#line`-filename
+lines (457/795/836/935/952/966/988/1006, all out of shelve.py's real
+250-line range, plus 113/142 in-range) reproduce identically — the
+already-root-caused `Shelf`/`MutableMapping` mixin-flattening `#line`
+artifact, deliberately not re-attempted (high-regression-risk shared
+machinery per that doc's own history). No change; still NOT a
+generator-codegen-cluster failure; doc stays open only because the
+file's full transitive build doesn't exit clean.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree (the 2026-08-24 `_ClosedDict`

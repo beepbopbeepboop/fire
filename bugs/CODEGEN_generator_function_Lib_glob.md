@@ -1,5 +1,66 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified; blocker set is BROADER than previously characterized, same underlying feature gap)
+
+Fresh re-verify against this worktree (branched from master `f65502d`;
+note the whole codegen backend has since been split from the old
+monolithic `gimple_codegen.py` into `gimple_cpp_core.py`/
+`gimple_gen_calls.py`/etc. — this is a refactor, not a behavior change,
+confirmed by re-deriving the mechanism below directly from the current
+files rather than trusting old line-number references). The refusal
+surfaced is now DIFFERENT from what the last several passes recorded
+(`self.select_exists` returned as a plain value is no longer the first
+thing reached — five generators refuse together):
+
+```
+_iglob: unsupported for-loop iterable type: CallExpr
+_iterdir: a call to unresolved callee 'bytes(...)' is not supported ...
+select_recursive, select_recursive_step, select_wildcard:
+    a call to unresolved callee 'select_next(...)' is not supported ...
+```
+
+Traced each:
+- `select_recursive`/`select_recursive_step`/`select_wildcard` (all
+  nested inside `_GlobberBase` methods) all do `select_next =
+  self.selector(parts)` then later `yield from select_next(...)`.
+  `select_next` holds a reference to one of several possible GENERATOR
+  functions chosen dynamically at runtime (`select_wildcard`/
+  `select_recursive`/`select_exists`, picked inside `selector()`) — this
+  is the exact same "bound-generator-value calling convention" gap the
+  doc already tracked for `return self.select_exists`, just reached via
+  a local variable assignment instead of a `return` statement. Confirmed
+  the existing "declared callable-value local" support
+  (`_CPP_CALLABLE_CTYPE`/`_CPP_CALLABLE_CTYPE_1ARG`, `gimple_cpp_core.py`
+  ~2539-2551) can't cover this: those are fixed `std::function<int64_t()>`
+  / `std::function<int64_t(int64_t)>` scalar signatures for calling an
+  ordinary function value, with no representation for "the referenced
+  value is itself a 4-function coroutine API" at all.
+- `_iglob`'s `for name in glob_in_dir(...)` where `glob_in_dir = _glob2`
+  (a generator) or `_glob1`/`_glob0` (ordinary functions), picked
+  dynamically — the SAME opaque-callable-value-that-might-be-a-generator
+  dispatch problem from the for-loop-iterable side instead of the
+  yield-from side.
+- `_iterdir`'s `bytes(os.curdir, 'ASCII')` is a genuinely separate,
+  narrower gap: grepped all of `gimple_cpp_core.py`/`gimple_gen_calls.py`/
+  `gimple_gen_exprs.py`/`gimple_exprtypes.py` — the `bytes(...)` builtin
+  has ZERO codegen support anywhere (plain or coroutine path), consistent
+  with this project representing strings as `char *` with no separate
+  bytes/bytearray value representation at all. Also affects `Lib/os.py`
+  (`bytes(curdir, 'ASCII')`, line 232) and `Lib/imaplib.py` (three call
+  sites) — real but itself feature-sized (would need an actual bytes
+  value representation, not just a narrow builtin-dispatch case), and
+  wouldn't unblock this file's other, larger callable-value-dispatch
+  gap even if added.
+
+**Conclusion**: this file's blocker set is dominated by the
+opaque-callable-value / dynamic-generator-dispatch feature gap this
+session's mandate explicitly flags as out of scope (large speculative
+feature: a real tagged/opaque callable-value representation spanning
+both ordinary functions and generators). Not attempted. The doc's
+previous characterization ("just `self.select_exists`") undersold the
+scope — updating here so a future pass doesn't underestimate it again.
+Doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree. `_GlobberBase.selector`'s

@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `f65502d`):
+isolated `compile_to_gimple_with_cpp(do_imports=False)` still succeeds
+cleanly (its own generator, `yield flagname`, unaffected). A full
+`python3 mojo.py build .../Lib/symtable.py`, run under the safety-rule
+watcher, still fails 100% inside transitively-imported files (245
+`error:` lines; `grep symtable.py ... | grep error:` returns ZERO —
+confirmed 0 errors attributable to symtable.py's own source). Dominant
+clusters this pass: `argparse.py`/`typing.py`/`enum.py`/`pickle.py`/
+`_collections_abc.py`/`traceback.py`/`threading.py` — none
+generator-codegen-shaped, none owned by this doc. Classification
+unchanged: NOT a generator-codegen-cluster failure; doc stays open per
+convention (only files that 100% compile clean end-to-end get removed).
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree: `compile_to_gimple_with_cpp

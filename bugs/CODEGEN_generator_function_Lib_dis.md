@@ -1,5 +1,29 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged; deeper gap found)
+
+Fresh re-verify against this worktree (branched from master `f65502d`).
+Same single refusal, same site: `_get_instructions_bytes` refused for
+"a `*`/`**`-unpack call argument is not supported in a compiled
+generator/coroutine body" at `positions = Positions(*next(co_positions,
+()))` (dis.py line 780). None of the fixes that have landed since the
+last pass touch unpack-call-arguments.
+
+Also checked whether the narrower "`KnownStruct(*expr)` special case"
+previously proposed as a possible scoped-down fix is actually tractable:
+it is not, for a reason not previously called out. `Positions` (line 284)
+is `collections.namedtuple('Positions', (...))` — a DYNAMICALLY
+constructed type, not a `struct`/`class` this codegen has any static
+declaration for. `grep -n namedtuple gimple_codegen.py` returns zero
+hits: this codegen has no representation for `collections.namedtuple`
+at all, anywhere, so even a hypothetical `*`-unpack-into-known-arity-
+constructor special case would have nothing to dispatch to here — the
+"constructor" isn't a struct constructor in this codegen's model to
+begin with. This makes the real gap strictly larger than "the same
+`*`/`**`-unpack gap as codecs.py", closer to a two-feature stack
+(namedtuple-as-struct support, PLUS unpack-call-argument support).
+Genuinely feature-sized, not attempted. Doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree. `_get_instructions_bytes` still

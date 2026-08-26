@@ -1,5 +1,59 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged, root cause of blocker (1) pinned down precisely)
+
+Fresh re-verify against this worktree (branched from master `f65502d`;
+note the codegen backend has since been split from the monolithic
+`gimple_codegen.py` into several files — `gimple_module_gen.py` now
+carries the ctor-param scalar-inference passes referenced below). Ran
+an isolated compile (`gimple_codegen.compile_to_gimple_with_cpp(...,
+do_imports=False)`, matching this doc's own established methodology)
+and fed the resulting `.cpp` through `g++-mp-15 -std=c++20
+-fsyntax-only`. Both previously-documented blockers reproduce
+byte-for-byte unchanged:
+```
+error: request for member 'sock' in 'self->Idler::_imap', which is of non-class type 'int64_t'
+error: invalid conversion from 'MojoList*' to 'int64_t' [-fpermissive]  (co_yield Idler___next__(self))
+```
+
+Went further than prior passes and checked WHY blocker (1) still isn't
+covered by the (meanwhile-landed) IdentExpr-argument extension to
+`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+(2026-08-18): the one real-source call site, `Idler(self, duration)`
+(imaplib.py:685, inside `IMAP4.idle`), passes `self` — an `IdentExpr` —
+as the constructor argument. Traced `gimple_module_gen.py`'s ctor
+reconciliation pass (`_arg_scalar_type`, ~line 2241, feeding the
+`_ctor_scalar_obs`/resolution loop ~line 2608): for an `IdentExpr`
+argument it only ever consults `_inferred_var_types`/
+`_inferred_param_types`, neither of which records an entry for the bare
+name `self` (the "1.3e" struct-method receiver-resolution pass a few
+hundred lines above does special-case `recv.name == 'self'`, but that
+machinery is for `receiver.method(...)` call sites, not constructor
+arguments — a structurally different pass with no shared code path).
+So `imap`'s parameter gets ZERO type evidence from this call site at
+all, independent of the second, larger problem: even if `self` WERE
+recognized as `IMAP4 *`, the resolution loop right below only accepts
+a unanimous `{'double'}` or `{'char *'}` observation set (line ~2634:
+`if types not in ({'double'}, {'char *'}): continue`) — it has no
+representation for "resolve to an arbitrary struct-pointer type" at
+all, so a `self`-as-struct-pointer observation wouldn't be actionable
+without also widening that acceptance check. Both steps together match
+the scope this hard-bug doc's own history has repeatedly and explicitly
+declined to extend into (its "Risk" section documents real regressions
+from broader attempts) — not attempted here, consistent with that
+doc's precedent and this session's mandate to avoid large speculative
+widenings of shared inference machinery.
+
+Blocker (2) (`__next__`'s `MojoList *` return vs. `burst`'s
+`int64_t`-unified coroutine promise) is unowned by any doc and remains
+a real, separate, cross-method yield-type-unification gap in the
+coroutine promise-type inference — not attempted (feature-sized: would
+need the promise's `yield_value` to become type-polymorphic or the
+unification pass to widen the promise to a boxed/tagged representation
+whenever cross-method yield sources disagree).
+
+No change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree. `Idler.burst`'s generated .cpp

@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `f65502d`).
+`compile_to_gimple_with_cpp(..., do_imports=False)` on the real file
+still raises the identical refusal verbatim: `scan_opcodes: every
+'yield' must carry a value, and all values must agree on one scalar
+type`. The well-documented 3-stacked-gap analysis (variable-arity
+nested-tuple element boxing; consumer-through-local-variable aliasing
+`scanner = self.scan_opcodes`; tag-discriminated variable unpack arity)
+still applies exactly as described — none of it is touched by anything
+landed since the last pass. Not attempted (same reasoning as every
+prior pass: three independently non-trivial extensions to shared
+tuple-yield/consumption machinery, high regression risk to already-
+fixed sibling files). No change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree. `scan_opcodes` still refuses
