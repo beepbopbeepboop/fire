@@ -2,6 +2,46 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified; a DIFFERENT, EARLIER blocker now surfaces first, Counter's dict-subclass gap not re-reached this pass)
+
+Fresh full `python3 mojo.py build .../Lib/collections/__init__.py` against
+this worktree (branched from master `1e0f3f2`, `build/libmojostdlib.dylib`
+freshly rebuilt, 0 skips). The build now fails EARLIER than the Counter
+subscript-store refusal this doc has tracked since 2026-08-23: three
+`__reversed__` generator methods (`OrderedDict.__reversed__` and 2
+others) are refused up front — `a call to unresolved callee
+'reversed(...)' is not supported in a compiled generator/coroutine
+body`. This is a genuinely different, NEW-to-this-doc gap: `reversed()`
+isn't in this coroutine-body emitter's builtin-call allowlist at all
+(distinct from `sorted()`, which is supported). Per this session's
+explicit instruction for this doc, **NOT attempted** — the assignment
+was to re-verify the dict-subclass/`Counter[...]=...` mechanism
+honestly, not to fix new gaps found along the way; adding `reversed()`
+support is its own separate, non-trivial scope (would need to decide a
+representation — reverse-iterate the same accessor the forward-iteration
+codegen uses — and isn't guaranteed to even reach Counter's issue next).
+
+The previously-documented Counter/`Counter[...] = ...` dict-subclass
+gap (issue **explicitly out of scope for this pass** per this session's
+own instructions — "do NOT attempt a fix for this specific mechanism")
+was not re-reached this pass because the `reversed()` refusal now fires
+first and aborts the whole module before Counter's own body is ever
+reached. Its status is therefore unverified this pass (may or may not
+still reproduce verbatim once `reversed()` is dealt with) — the doc's
+2026-08-23 diagnosis of that mechanism (no backing MojoDict storage,
+methods misregistered as int fields, no `__getitem__`/`__setitem__`) is
+architecturally unchanged (nothing landed touches dict-subclass storage
+representation), so there is no reason to believe it's actually
+resolved — just that it's currently masked. Doc stays open, status
+updated honestly; do not `git rm`.
+
+Quality gate (no compiler-source change made for this doc): unaffected
+by this session's OTHER changes (`gimple_cpp_core.py`'s dynamic
+exception-value re-raise + MemberExpr-receiver container-method fixes,
+see `CODEGEN_generator_function_Lib_test_test_finalization.md`) —
+`test_gimple.py` 256/256, `test_module_cache.py` 76/76 both still pass
+after those changes.
+
 ## Status (updated 2026-08-23, wt09 fix/stdlib-mods `945af88` — UserDict error FIXED; Counter blocked by builtin-dict subclassing, now refused honestly)
 
 Two of the three 2026-08-06 issues below are gone (other agents'
