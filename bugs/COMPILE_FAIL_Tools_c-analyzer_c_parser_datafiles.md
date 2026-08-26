@@ -19,6 +19,10 @@ resolving it would need flow-sensitive callable-value tracking through
 tuple-unpacking assignment, out of scope. No code change; doc
 re-verified only.
 
+Re-verified again 2026-08-26, wtOpencode_canalyzer2 (fresh-cut worktree):
+identical single refusal verbatim (`read_decls: unsupported for-loop
+iterable type: CallExpr`); unchanged conclusions.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: unchanged single blocker — `read_decls:
