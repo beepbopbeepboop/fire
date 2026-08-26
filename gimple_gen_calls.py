@@ -2199,6 +2199,23 @@ def _pack_vararg_trailing_params(gen, fname, fname_raw, arg_pairs, kwarg_dict,
     return arg_pairs, kwarg_dict
 
 
+def _ensure_libc_self_extern(gen, fname_raw: str) -> None:
+    """Record a self-emitted prototype for a plain (unrenamed) libc call
+    whose declaring header is NOT in this compile's prelude — the shared
+    half of `_lower_named_call`'s and `_gen_stmt_ExprStmt's general-call
+    path's identical needs (a bare `mkdir(name, mode)` reaches BOTH,
+    depending on whether its result is consumed). No-op for every name
+    outside `_NEEDS_SELF_EXTERN` and when something already recorded the
+    symbol; see the call-site comment there for the full rationale."""
+    if fname_raw not in gen._external_protos \
+            and fname_raw in gen._NEEDS_SELF_EXTERN:
+        _self_extern_sig = gen._LIBC_SIGS.get(fname_raw) \
+            or gen._KNOWN_SIGS.get(fname_raw)
+        if _self_extern_sig:
+            gen._external_protos[fname_raw] = (
+                _self_extern_sig[0], list(_self_extern_sig[1]))
+
+
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
@@ -2265,6 +2282,25 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # 'int(int, const char **)'" otherwise. Mirrors _C_RESERVED_
         # FUNCS's own definition/call-site rename chokepoint pattern.
         fname = '_unresolved_import_main'
+    # Plain (unrenamed) libc call whose declaring header is NOT in this
+    # compile's prelude (<unistd.h>/<sys/stat.h>/<sys/wait.h>/<stdlib.h>'s
+    # unsetenv): nothing else records a prototype for it — the
+    # `_external_protos` recording at the external_call FFI path only
+    # covers `external_call["..."]( ... )` shapes, and most stdlib code
+    # reaches these through QUALIFIED `os.unlink(...)`-style member calls
+    # whose own path handles declaration — so os.py's own BARE wrappers
+    # (`mkdir(name, mode)`, `rmdir(name)`, `execv(file, args)`,
+    # `execve(...)`, `fork()`, `unsetenv(key)`) emitted raw calls with no
+    # visible declaration: "implicit declaration of function 'mkdir'"
+    # plus pointer-coercion mismatches against GCC's builtin knowledge,
+    # 9 errors in Lib/os.py in any whole-program build whose closure
+    # includes it. Register the pinned signature into `_external_protos`
+    # so gen_module's existing preamble pass emits `extern int mkdir
+    # (char *, int);` exactly once per translation unit (its
+    # _LIBC_DECLARED/_NEEDS_SELF_EXTERN gate is precisely what routes
+    # these self-emitted prototypes through), and every later call site
+    # sees a real prototype.
+    _ensure_libc_self_extern(gen, fname_raw)
     ret_type = gen.func_return_types.get(fname_raw, 'int64_t')
 
     # Auto-stub completely unknown names (e.g. bracket params like `cmp_fn: fn(T,T)->Bool`
