@@ -1986,6 +1986,43 @@ def _seed_mut_captured_local_types(gen, func_name: str):
                 gen._declare_var(mn, f"{ctype} *")
 
 
+def _emit_mut_local_box_allocs(gen):
+    """Allocate the heap box for every heap-boxed mutable local (see
+    _seed_mut_captured_local_types) ONCE, in the function's prologue.
+
+    History: the box used to be allocated by _gen_stmt_VarDecl at the
+    local's `var x = ...` statement, which silently assumed the first
+    binding of any `{mut}`-captured local is always a Mojo-style VarDecl.
+    Real Python source (the compiler's other first-class input -- e.g.
+    Tools/cases_generator/analyzer.py's `nonlocal next_opcode` closure,
+    whose first binding is a PLAIN `next_opcode = 1` AssignStmt) never
+    goes through _gen_stmt_VarDecl at all, so the box was never
+    allocated while every read/write still dereferenced the pointer --
+    a write through an uninitialized pointer local (observed as a NULL
+    or garbage-address segfault mid-function). Allocating unconditionally
+    here also fixes two latent identity hazards of the per-statement
+    scheme: a VarDecl re-executed by its enclosing loop re-malloc'd a
+    fresh box each iteration (the nested closure's env kept pointing at
+    the stale one, so nonlocal updates after rebinding silently split
+    into two cells), and a first binding lexically inside one branch but
+    executed via another path left the box unallocated on that path.
+    Prologue allocation gives the box exactly-once, call-scoped
+    semantics -- matching Python's own per-call cell model. Must run
+    AFTER _seed_mut_captured_local_types (which emitted the `{ctype} *
+    name` declarations) and BEFORE any body statement; both plain-
+    function and struct-method generation call it immediately after
+    seeding for exactly that reason. The malloc/cast two-step mirrors
+    the env-struct allocator's pattern (`-fgimple` rejects a direct
+    `name = ({ctype} *) malloc (...)` single statement, and needs a
+    literal byte count rather than `sizeof(scalar)` -- see
+    _SCALAR_CTYPE_SIZE's docstring)."""
+    for mn in sorted(gen._boxed_mut_locals):
+        ctype = gen._boxed_mut_locals[mn]
+        cname = gen._cname(mn)
+        vp = gen._new_val('void *', f"malloc ({gimple_codegen._SCALAR_CTYPE_SIZE.get(ctype, 8)})")
+        gen._emit(f"  {cname} = ({ctype} *) {vp};")
+
+
 def _new_jbp_temp(gen) -> str:
     gen.temp_counter += 1
     name = f"_jbp{gen.temp_counter}"
