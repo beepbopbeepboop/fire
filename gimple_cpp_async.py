@@ -625,6 +625,24 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     gen._cpp_list_local_elem_types = {}
     gcc_._cpp_reset_unit_state(gen)
+    # Seed param list-ELEMENT types into the coroutine-body emitter's local
+    # elem registry BEFORE body emission: a MojoList*-typed param whose
+    # element type is known from a caller's collection-literal contract
+    # (_xmod_gen_elem_hints, merged into _param_list_elem_types by
+    # gen_module) makes `for line in <param>:` declare the loop variable
+    # with the REAL element type (char *) and read through the matching
+    # accessor — which in turn types every `yield <loop-var>` (and so this
+    # unit's whole promise/value ctype) correctly, instead of the boxed
+    # int64_t default that made foreign string generators unusable via
+    # next()/for consumption. Same registry the AssignStmt/list-literal
+    # tracking below already populates for LOCAL lists; params just had no
+    # seeding site before.
+    _pl_elem_hints = getattr(gen, '_param_list_elem_types', None) or {}
+    _fn_elem_hints = _pl_elem_hints.get(fn.name) or {}
+    if _fn_elem_hints:
+        for _spn, _sct in param_ctypes:
+            if _sct == 'MojoList *' and _fn_elem_hints.get(_spn):
+                gen._cpp_list_local_elem_types[_spn] = _fn_elem_hints[_spn]
     try:
         body_lines: list[str] = []
         for s in fn.body:

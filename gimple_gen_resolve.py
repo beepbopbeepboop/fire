@@ -169,6 +169,54 @@ def _module_candidate_paths(gen, module_name: str) -> list:
     _importer = getattr(gen, '_current_filename', None)
     if _importer:
         importer_dir = gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(_importer))
+    # RELATIVE imports (`from . import sibling` / `from ..pkg import mod`):
+    # the parser keeps the leading dots in `module_name` (find_imports'
+    # synthesized per-name candidates too: `from . import strutil` yields
+    # both '.' and '.strutil'), and every candidate path below is built
+    # by joining `module_name` into a search dir VERBATIM — so a
+    # leading-dot name produced literal `<dir>/..strutil.py` filenames
+    # that never exist. Relative imports therefore never resolved on the
+    # compiled path at all (the INTERPRETER side has always handled them
+    # — myinterpreter.py's execute_FromImportStmt level-based walk — so
+    # any real-world Python package using intra-package imports silently
+    # fell back from compilation to interpretation). Mirror the
+    # interpreter's exact rule here: strip the dots to get the remaining
+    # dotted suffix, count them as the level, anchor at the IMPORTING
+    # FILE's own directory (the package directory containing it), and
+    # walk up (level - 1) more parents; then resolve the remaining
+    # suffix under that base exactly like an absolute name (flat file,
+    # package __init__, and — for a genuinely dotted suffix — the
+    # dotted-path forms below). A bare '.' (level 1, no suffix) names
+    # the current package itself, i.e. its own __init__ source.
+    # Names NOT starting with '.' are untouched — this only ever fires
+    # for names that previously resolved to nothing, so no existing
+    # resolution can change.
+    _rel_level = 0
+    if module_name.startswith('.'):
+        _rel_suffix = module_name.lstrip('.')
+        _rel_level = len(module_name) - len(_rel_suffix)
+        if not _rel_suffix:
+            # Bare package self-reference (`from . import X`): the names
+            # live in the current package's own __init__ source.
+            _rel_candidates = [('__init__', True)]
+        else:
+            _rel_candidates = [(_rel_suffix, False)]
+        if importer_dir is None:
+            return []
+        _base_dir = importer_dir
+        for _ in range(max(0, _rel_level - 1)):
+            _base_dir = gimple_ctypes.os.path.dirname(_base_dir)
+        rel_mojo_paths = []
+        for _suffix, _is_pkg_self in _rel_candidates:
+            _parts = _suffix.split('.')
+            _flat = gimple_ctypes.os.sep.join(_parts)
+            for ext in extensions:
+                rel_mojo_paths.append(gimple_ctypes.os.path.join(_base_dir, f"{_flat}{ext}"))
+            rel_mojo_paths.append(gimple_ctypes.os.path.join(
+                _base_dir, _flat, f"__init__.py"))
+            rel_mojo_paths.append(gimple_ctypes.os.path.join(
+                _base_dir, _flat, f"__init__.mojo"))
+        return rel_mojo_paths
     # Explicit `sys.path.insert(...)` directories win outright — the user
     # said "look here first" (see _record_sys_path_inserts) — then the
     # importing file's own directory, then ITS ANCESTOR directories
@@ -476,6 +524,13 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # caller's real char */double instead of int64_t defaults.
                 if getattr(gen, '_xmod_gen_param_hints', None):
                     temp_gen._xmod_gen_param_hints = gen._xmod_gen_param_hints
+                # Companion list-ELEMENT hints (see _xmod_gen_elem_hints's
+                # docstring) — shared identically; the temp_gen merges the
+                # entries matching its own module_name into
+                # _param_list_elem_types, which _gen_cpp_generator_unit seeds
+                # into the coroutine-body emitter's local-elem registry.
+                if getattr(gen, '_xmod_gen_elem_hints', None):
+                    temp_gen._xmod_gen_elem_hints = gen._xmod_gen_elem_hints
                 code = temp_gen.gen_module(stmts)
 
                 # Link mode's 4th coroutine-code source: a PLAIN (non-
