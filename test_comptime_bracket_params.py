@@ -117,6 +117,91 @@ def main() raises:
           out == "15\n10\n", detail=repr(out))
 
 
+def test_keyword_bound_function_typed_bracket_param_on_method():
+    """A struct method with a KEYWORD-bound function-typed comptime bracket
+    parameter (`self.body[f_key=show_k]()`), called directly in the method
+    body — dict.mojo/counter.mojo's exact binding form. Two stacked bugs used
+    to break this shape:
+    1. the call-site pre-scan only mapped POSITIONAL bracket arguments, so a
+       keyword-bound function name was never forwarded; _lower_struct_method_
+       call's arity padder then filled the threaded trailing C parameter with
+       a literal 0 → "call through NULL pointer" segfault;
+    2. the parser's generic-param capture counted only bracket depth, not
+       parens, so annotations with commas inside `(...)` leaked phantom
+       parameter names.
+    Real semantics: prints 1."""
+    src = """\
+def show_k(k: Int) -> None:
+    print(k)
+
+struct P:
+    var k: Int
+
+    def __init__(out self, k: Int):
+        self.k = k
+
+    def body[f_key: def(Int) -> None thin](self):
+        f_key(self.k)
+
+    def write_to(self):
+        self.body[f_key=show_k]()
+
+def main():
+    P(1).write_to()
+"""
+    out = _build_and_run(src)
+    check("keyword-bound f_key=show_k calls through (prints 1)",
+          out == "1\n", detail=repr(out))
+
+
+def test_two_function_typed_bracket_params_with_nested_bracket_annotations():
+    """The full dict.mojo `_write_dict_body` shape: TWO function-typed
+    comptime bracket parameters whose type annotations contain their own
+    brackets AND parenthesized comma-bearing argument lists
+    (`f_key: def(Int, List[Int]) -> None thin`). Before the fix,
+    _bracket_param_type_annotations' head regex truncated the bracket list at
+    the FIRST inner `]` (inside `List[Int]`), so every parameter after f_key
+    was invisible: f_val was dropped from the threaded signature, its body
+    call degraded to the weak "unavailable in compiled mode" stub (whose
+    exported symbol then collided across stdlib modules — the
+    "localize 1 dup symbol(s) in std_collections_dict" stopgap), and the
+    parser's paren-blind comma split additionally injected a phantom `List`
+    parameter that mis-aritized every call site.
+    Real semantics: prints 1 then 70."""
+    src = """\
+def show_k(k: Int, extra: List[Int]) -> None:
+    print(k)
+
+def show_v(v: Int) -> None:
+    print(v * 10)
+
+struct P:
+    var k: Int
+    var v: Int
+
+    def __init__(out self, k: Int, v: Int):
+        self.k = k
+        self.v = v
+
+    def body[
+        f_key: def(Int, List[Int]) -> None thin,
+        f_val: def(Int) -> None thin,
+    ](self):
+        var scratch = List[Int](0)
+        f_key(self.k, scratch)
+        f_val(self.v)
+
+    def write_to(self):
+        self.body[f_key=show_k, f_val=show_v]()
+
+def main():
+    P(1, 7).write_to()
+"""
+    out = _build_and_run(src)
+    check("both keyword-bound fn params thread through (prints 1, 70)",
+          out == "1\n70\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):
