@@ -4,6 +4,36 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified + next blockers sharpened, 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — mut-capture fix confirmed present in this tree; link-mode stubbing reproduced; NEW: the inline fallback is itself blocked, by parsing.py's BlockStmt.tokens dangling generator references at LINK time)
+
+Fresh `python3 mojo.py build .../analyzer.py` (safety-wrapped): exits
+0; binary runs, exit 0, but prints ONLY the four section headers —
+reproducing the previous entry's end-to-end state exactly (the
+`_emit_mut_local_box_allocs` fix, commit `46a7a91`, IS in this worktree;
+`git merge-base --is-ancestor` verified). Re-investigation this pass:
+
+1. **Link-mode sibling stubbing re-confirmed**: `parser.parse_files(...)`
+   lowers as `_t7 = _t2; /* int64_t.parse_files() stubbed */`; the built
+   binary contains no real parser/lexer symbols.
+2. **NEW finding — the "inline pipeline resolves everything correctly"
+   assumption below is no longer true on this tree.** Forcing the inline
+   path (`build_executable`, do_imports=True) FAILS AT LINK TIME:
+   `Undefined symbols: __mojogen_BlockStmt_tokens_{start,resume,value,
+   destroy}` — all four generator ABI functions for parsing.py's
+   `BlockStmt.tokens` are REFERENCED (by consuming sites in the closure)
+   but never DEFINED, because BlockStmt.tokens is one of parsing.py's
+   polymorphic-`yield from self.body.tokens()` generators that the C++
+   coroutine emitter refuses/rolls back (the excluded hard-doc cluster
+   documented in bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md).
+   So analyzer.py currently has NO working end-to-end path: link mode
+   silently stubs siblings; inline mode dies on parsing.py's refused
+   generator shapes.
+
+Closing either gap remains architectural: link-mode sibling support /
+driver fallback policy (option (c) below), or the polymorphic-dispatch
+feature. Neither attempted. Doc stays open with the two-blocker state
+now precisely recorded.
+
 ## Status (updated 2026-08-26, branch fix/opencode-analyzer2 — the documented segfault residual is ROOT-CAUSED AND FIXED in shared source; doc stays OPEN on the now-precisely-root-caused next blocker: link-mode sibling-module resolution stubs every `parser.*`/`lexer.*` access)
 
 **The residual (2026-08-25 entry below) is fixed.** Root cause was NOT

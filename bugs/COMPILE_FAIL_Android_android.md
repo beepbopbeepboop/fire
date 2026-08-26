@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — DOCUMENTED-NOT-FIXED, unchanged)
+
+Fresh safety-wrapped `python3 mojo.py build .../Android/android.py`
+against this worktree (includes this session's dict-keyed %-formatting
+landing, commit `e1e12bb`): byte-for-byte identical refusal to every
+prior pass — the same 10 `async def` functions + `async_process` async
+generator, refused before any per-function eligibility attempt because
+their `await` targets (`create_subprocess_exec(...)`,
+`process.communicate()`/`.wait()`, `stream.readexactly(...)`, a local
+`wait_for` helper) are all outside `_async_quick_eligible`'s whitelist.
+Real async-subprocess/stream I/O composition remains feature-sized; not
+attempted. No change.
+
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder17 — DOCUMENTED-NOT-FIXED, unchanged)
 
 Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Android/

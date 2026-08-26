@@ -1,5 +1,30 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): error count 248 → 136; the dict-keyed `%`-format class (12 argparse sites + downstream) FIXED by this session's `mojo_str_format_dict` landing; still not a build
+
+Fresh safety-wrapped `python3 mojo.py build .../Lib/socket.py` against
+this worktree: exit 1, **136 `error:` lines (was 248 at this doc's
+previous entry)**. The drop is attributable to THIS session's shared
+fix (commit `e1e12bb`, see
+`bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md`): runtime
+dict-keyed `%`-formatting (`mojo_str_format_dict`) plus its codegen
+routing in `_lower_percent`. All **12** of this closure's
+`invalid operands to binary % (have 'int64_t' and 'MojoDict *')`
+errors — every `argparse_HelpFormatter_*__format_usage/__format_text`
+site (`usage % {"prog": ...}`, `text % dict(prog=...)`) — are gone,
+plus ~13 downstream errors in the same functions (`invalid operands to
+binary +` ×5, `invalid types for 'X'` ×8) that existed only because the
+mistyped `%` results poisoned subsequent statement typing. Verified via
+normalized-shape bucket diff of the before/after error sets: REDUCED
+classes only, ZERO new failure classes. The remaining 136 errors are
+the same already-catalogued grab-bag (operator.py partial/lambda,
+posixpath/ntpath `_varsubb`/`_alloc_expandvars_repl_env` bare-name
+family, task #141 bare-name collisions, gettext/locale's LIST-RHS
+positional `%` — the sibling of the now-fixed dict shape, which needs
+per-element kind tags on MojoList and was deliberately NOT attempted
+this pass). socket.py still does not build; still not a narrow
+single-cause fix. Doc kept open.
+
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15): still does not build; error count 213 → 248, same already-catalogued grab-bag categories, no new failure class
 
 Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`

@@ -4,6 +4,24 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — unchanged, same 12 own-file errors)
+
+Fresh safety-wrapped `python3 mojo.py build .../parsing.py` against
+this worktree (includes this session's dict-keyed %-formatting landing,
+commit `e1e12bb` — unrelated): exit 1 with exactly 12 own-file
+parsing_gen.cpp errors, byte-equivalent to the entries below — the
+polymorphic `yield from self.<field>.tokens()` static-dispatch class
+(`request for member 'tokens' in 'self->IfStmt::body'` etc., plus the
+matching int64_t→char* conversion errors), at fresh line numbers
+(179/184/189/192/254/259/...). Cross-cutting confirmation from this
+session: these refused generator shapes also dangle REFERENCES when
+parsing.py is inline-compiled into a larger whole-program closure
+(analyzer.py's forced-inline build fails at LINK time on undefined
+`__mojogen_BlockStmt_tokens_*`, see analyzer.py's doc 2026-08-26
+entry) — same excluded hard-doc cluster, one mechanism, two visible
+symptoms. Real vtable/type-tag dispatch in the coroutine path remains
+a genuine feature project; not attempted. No code change.
+
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825, 02:24) and generator-value-return-slot fix (326db78, 02:57); both landed AFTER this doc's most recent entry (00:27) — neither applies, unchanged)
 
 Fresh `compile_to_gimple_with_cpp(do_imports=False)` repro against this
