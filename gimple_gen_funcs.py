@@ -718,6 +718,26 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
             ctype = gen._resolve_type(ptype)
     else:
         ctype = gen._resolve_type(ptype)
+    # An UNANNOTATED parameter whose declared default value is a string
+    # literal IS a string parameter. The default expression is type
+    # evidence exactly as strong as an annotation for the omitted-
+    # argument case: every call site that omits this param gets the
+    # literal padded in via _default_expr_to_pair, which lowers a
+    # StringLiteral default to a real ('char *', '"..."') C string —
+    # previously coerced INTO the int64_t box this resolver produced,
+    # so the callee then did int-arithmetic/str-from-int on a genuine
+    # char* pointer (`convertdir(dir, dirprefix='', nameprefix='')` in
+    # Tools/unicode/gencodec.py printing the pointer's decimal digits
+    # instead of the prefix text for `dirprefix + name`). Only fires on
+    # the unresolved generic int64_t box: explicit annotations, usage-
+    # based inference results, and the cross-call scalar contract all
+    # keep their existing precedence. param_defaults is keyed by the
+    # bare declared name (the parser stores no star prefixes there),
+    # matching how dup_def_signature_key looks the same table up.
+    if (ptype is None and ctype == 'int64_t'
+            and isinstance((getattr(node, 'param_defaults', None) or {}).get(
+                pname.lstrip('*')), StringLiteral)):
+        ctype = 'char *'
     # Compile-time string types (StaticString, StringLiteral, StringRef,
     # StringSlice) are REAL strings in this codegen — a NUL-terminated
     # `char *`. The general resolver boxes them as opaque int64_t handles
