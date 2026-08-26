@@ -275,6 +275,53 @@ def _gen_stmt_FromImportStmt(gen, node):
                 gen._emit(f"  {gen._cname(symbol_name)} = (int64_t)0;  "
                            f"/* module marker (from-import submodule) */")
             continue
+        # A module-level VALUE imported from a module that is inline-compiled
+        # into this same whole-program unit (`def test(): from ctypes import
+        # cdll` where ctypes/__init__.py's `cdll = LibraryLoader(CDLL)` ran in
+        # this closure): bind the alias to the OWNING module's globals-struct
+        # field — the exact same `_{module}_globals.<field>` read the
+        # `submod.GLOBAL` MemberExpr branch in _lower_MemberExpr emits for
+        # qualified reads, including the pointer-boxing dance for globals
+        # whose declared C type is a pointer but which are boxed int64_t at
+        # the statement level. Without this, the alias fell through to the
+        # bare no-signature registration below, every use compiled against a
+        # weak variadic stub ("unavailable in compiled mode") or an
+        # undeclared-identifier placeholder, and `cdll` never reached the
+        # real LibraryLoader instance its defining module constructs.
+        # `_global_to_module`/`_global_var_types` are whole-transitive-tree
+        # tables populated when Phase 0 inline-compiles the owner module,
+        # which strictly precedes any function-body walk that could contain
+        # this statement. Owner must match EXACTLY (`_global_to_module` is
+        # first-writer-wins across the tree — mirrors the identical caveat on
+        # the MemberExpr branch). Aliases rename only the LOCAL symbol; the
+        # field name stays the DEFINING module's own. A same-named genuine
+        # local shadows nothing here: `symbol_name not in gen.var_types`
+        # defers to it exactly like the submodule branch above.
+        _gv_owner = getattr(gen, '_global_to_module', {}).get(name)
+        if (not getattr(node, 'wildcard', False)
+                and _gv_owner is not None
+                and _gv_owner == node.module
+                and name in gen._global_var_types
+                and symbol_name not in gen.var_types):
+            _gv_type = gen._global_var_types[name]
+            _gv_ctype = ('int64_t'
+                         if _gv_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                         else _gv_type)
+            gen._declare_var(symbol_name, _gv_ctype)
+            safe_owner = gimple_ctypes._c_field_name(_gv_owner) if _gv_owner else "root"
+            _gv_field = f"_{safe_owner}_globals.{gimple_ctypes._c_field_name(name)}"
+            _gv_decl = gen._global_c_decl_types.get(name, _gv_ctype)
+            if _gv_ctype == 'int64_t' and _gv_decl.endswith(' *'):
+                # Declared pointer C type boxed as int64_t: load through the
+                # matching pointer type first, then cast via void * (the same
+                # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
+                # branch and the submod.GLOBAL branch both emit).
+                raw_ptr = gen._new_val(_gv_decl, f'{_gv_field}')
+                vp = gen._new_val('void *', f'(void *){raw_ptr}')
+                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t){vp};")
+            else:
+                gen._emit(f"  {gen._cname(symbol_name)} = {_gv_field};")
+            continue
         # BUG-2026-021: resolve the name for real when the module is
         # resolvable — a function-scoped `from sibling import f` used to fall
         # straight to the bare no-signature registration below, so the

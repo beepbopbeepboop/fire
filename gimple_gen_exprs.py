@@ -1419,6 +1419,44 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         t = gen._new_val(gtype, f'{gname}')
         return gtype, t
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
+        # The struct defines its own `__getattr__` (compiled body ⇒ bare
+        # `{Struct}___getattr__` key in func_return_types, or an overload
+        # registered under the (struct, method) signature table): real
+        # Python semantics route ANY attribute miss through it — this is
+        # the whole point of ctypes's LibraryLoader (`cdll.msvcrt` = load
+        # that DLL; any attribute is meaningful precisely because
+        # __getattr__ says so), typing's _LazyAnnotationLib, and every
+        # other delegation idiom. Call the compiled method directly with
+        # (receiver, attr-name) and return its boxed int64_t — the same
+        # value shape _mojo_dispatch_getattr below would produce, so all
+        # downstream consumers behave identically. Only fires on a genuine
+        # COMPILED `__getattr__`; structs without one keep the existing
+        # runtime-dispatch behavior unchanged, and dunder reads
+        # (`obj.__class__`-style) are excluded — Python only consults
+        # __getattr__ after normal lookup fails, and dunder lookups hit
+        # the type first, so intercepting them here would change more
+        # existing behavior than it fixes. Scope note: this covers MEMBER
+        # READS as values; a CALL through a dynamically-resolved attribute
+        # (`cdll.some_factory(args)`) where `some_factory` is not itself a
+        # compiled method still routes to the runtime dispatch paths.
+        if (not (node.member.startswith('__') and node.member.endswith('__'))
+                and ((f"{struct_name}_{gimple_ctypes._safe_name('__getattr__')}"
+                      in gen.func_return_types)
+                     or (struct_name, '__getattr__') in gen._struct_method_signatures)):
+            _ga_csym = gen._struct_method_csym(struct_name, '__getattr__', '')
+            # The method's own Pass-2a-inferred return type (the bare
+            # `{Struct}___getattr__` key) — NOT a hardcoded boxed int64_t.
+            # LibraryLoader.__getattr__ returns whatever `self._dlltype
+            # (name)` yields (a char * here), and hardcoding int64_t made
+            # print() pick its integer formatting for what is really a C
+            # string ("4370922960" instead of the loaded library's name).
+            _ga_ret = gen.func_return_types.get(
+                f"{struct_name}_{gimple_ctypes._safe_name('__getattr__')}",
+                'int64_t')
+            _ga_attr = gen._new_val('char *', f'"{node.member}"')
+            raw = gen._call_expr(_ga_ret, _ga_csym,
+                                  [(ot, ov), ('char *', _ga_attr)])
+            return _ga_ret, raw
         # Known struct type but unknown field. `ot` here can be WRONG:
         # whole-function return-type inference unifies to ONE dominant
         # concrete type even for a variable that legitimately holds many

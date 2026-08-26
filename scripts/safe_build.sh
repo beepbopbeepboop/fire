@@ -12,7 +12,7 @@ try:
 except (ValueError, OSError):
     pass  # macOS may refuse RLIMIT_AS changes; RSS watcher below still guards
 argv = sys.argv[1:]
-if not os.path.dirname(argv[0]):
+if os.sep in argv[0] and not os.path.isabs(argv[0]):
     argv[0] = os.path.join(os.getcwd(), argv[0])
 os.execvp(argv[0], argv)
 " "$@" ) > "$LOG" 2>&1 &
