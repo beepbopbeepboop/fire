@@ -1,5 +1,63 @@
 # HARD BUG: recursive `yield from` generator with extra/keyword-only parameters miscompiles in the C++ coroutine codegen
 
+## Status (updated 2026-08-25, wtOpencode_group3): the wrong-output shape's CONTROL-FLOW half root-caused + FIXED (commit `b4aa602`); the remaining half is consumer-side opaque-box element typing, documented below
+
+Re-produced the 2026-08-23 observation fresh (`iter_files(files)` with
+`files = ["a.txt", "b.txt"]`): still built clean, still printed wrong —
+but the mechanism is now precisely diagnosed, and it is NOT in the
+recursive-yield-from machinery this doc's fix (task #138) landed; that
+machinery works correctly. Two stacked causes:
+
+1. **FIXED (`b4aa602`, shared compiler source): the coroutine-body
+   `isinstance` lowering was `(x != 0)` — truthiness posing as a type
+   test** (gimple_cpp_core.py's `_cpp_expr` CallExpr case). So
+   `not isinstance(root, str)` evaluated "root is null": the top call
+   passed a non-null MojoList* → guard said "it IS a str" → the
+   RECURSION branch was skipped entirely and the base case yielded the
+   raw list POINTER as an int64_t (the single garbage integer
+   `43637542464`-style value previously observed). The new lowering
+   mirrors the plain path's `_isinstance_one_type`: static operand
+   ctype resolves the verdict compile-time; user-struct type args
+   compare `__mojo_type_id`; ambiguous boxed operands get REAL runtime
+   discrimination (list → `mojo_is_registered_list`, str → new
+   `mojo_boxed_is_str` runtime helper: pointer-shaped and not a
+   registered list — the same convention `mojo_str()`/repr dispatch
+   already use). Verified end-to-end on the iter_files repro: control
+   flow is now correct (recursion branch taken for the list, base case
+   per string element), the consumer sees exactly 2 yields carrying the
+   correct char* pointer values; `countdown` still prints `5\n3\n1\n`
+   and a statically-typed-str isinstance generator prints `hi!`.
+   Full gate clean (test_gimple 256/256, test_module_cache 76/76,
+   check-selfhost clean, dylib rebuild 0 skips).
+
+2. **STILL OPEN (consumer-side typing, feature-sized): the yielded
+   strings surface as int64_t at the consumption site**, so `print(f)`
+   emits their raw pointer bits as decimal integers (`4299415576`,
+   distinct and stable across runs = the two correct char*
+   addresses). Mechanism: `root` is genuinely polymorphic (str at the
+   recursive call, list-of-str at the top call), so Pass-1.3d-style
+   inference CORRECTLY keeps it int64_t, the promise's
+   `yield_value(int64_t)` is the only statically-defensible signature,
+   and the .ci consumer loop declares its loop var from that registered
+   value_ctype. Fixing the LAST mile needs either union-typed generator
+   params or a tagged promise/consumer protocol (e.g. a
+   `{base}_value_is_str` companion ABI + runtime-typed append/print at
+   consumption) — a real feature project touching the compiled-generator
+   ABI every consumer shares, not a narrow fix; deliberately not
+   attempted this pass. Note the model DOES have all the runtime pieces
+   (`_mojo_generic_elem_repr`'s registry-based dispatch proves the
+   discrimination works) — what's missing is threading that into
+   consumer-side local/elem typing decisions without destabilizing
+   print/append typing for genuinely-int values everywhere else.
+
+Net: the fixed-state bar this doc documented ("clean build for
+iter_files; runtime correctness verified on countdown") still holds,
+plus the previously-wrong-output repro now executes the correct
+yield STRUCTURE with correct values. A dedicated doc for the
+consumer-typing gap (shape: "compiled-generator yields of ambiguously-
+typed params consumed as ints") should be opened when someone picks up
+the generator-ABI work.
+
 ## Status (updated 2026-08-07)
 
 **Re-verified FIXED 2026-08-23**: this doc's own minimal repro
