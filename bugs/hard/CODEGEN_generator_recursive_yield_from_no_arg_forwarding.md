@@ -1,5 +1,21 @@
 # HARD BUG: recursive `yield from` generator with extra/keyword-only parameters miscompiles in the C++ coroutine codegen
 
+## Status (updated 2026-08-26, second independent check against current master `e60b9cd`): unchanged from the entry immediately below
+
+Second independent re-verify this session, against current master
+`e60b9cd` (122 commits past the `a913ab8` branch point the entry
+immediately below was checked against). Confirmed via direct source
+read that the `b4aa602` `isinstance` fix (real runtime discrimination
+via `mojo_is_registered_list`/`mojo_boxed_is_str` in
+`gimple_cpp_core.py`'s `_cpp_expr` CallExpr case, ~line 2675-2682) is
+still present unchanged. Nothing in the 122 intervening commits adds
+union-typed generator params or a tagged promise/consumer protocol, so
+the still-open half (yielded strings surfacing as raw int64_t pointer
+bits at the consumption site, a real generator-ABI feature project) is
+unaffected. Per this task's explicit instruction to give hard-bug docs
+a fresh look: confirmed this remains correctly classified as
+feature-sized, not a narrow fix. Not attempted. No code change.
+
 ## Status (updated 2026-08-26): independent re-verification confirms the state below is still accurate
 
 **Re-verified 2026-08-26** (fresh repro, run independently of and after the

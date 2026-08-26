@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, unchanged)
+
+Independent fresh re-verify, this session, against current master
+`e60b9cd` (122 commits past the `a913ab8` branch point the entry
+immediately below was checked against). Ran
+`compile_to_gimple_with_cpp(do_imports=False)` directly: byte-for-byte
+identical `RuntimeError` — `fake_pip: unsupported statement in
+generator body: StructDef`. The 3-piece design already scoped (struct
+discovery never walks generator bodies; class-attribute seeding only
+understands module-globals RHS; construction requires an explicit
+`__init__`) still accurately describes what a real fix needs — nothing
+in the 122 intervening commits touches any of the three. Still
+feature-sized; untouched.
+
 ## Status (updated 2026-08-26 -- re-verified, unchanged)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).

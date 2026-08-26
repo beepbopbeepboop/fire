@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/save_env.py
 
+## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, unchanged)
+
+Independent fresh re-verify, this session, against current master
+`e60b9cd` (122 commits past the `a913ab8` branch point the entry
+immediately below was checked against). Ran
+`compile_to_gimple_with_cpp(do_imports=False)` directly: byte-for-byte
+identical `RuntimeError` — `resource_info` refused on `getattr(obj,
+name) with a non-static attribute name is not supported in a compiled
+generator/coroutine body`. Gap 3 (runtime name->member reflection) is
+unaffected by anything in the 122 intervening commits. Still
+structural; untouched.
+
 ## Status (updated 2026-08-26 -- re-verified, unchanged)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).

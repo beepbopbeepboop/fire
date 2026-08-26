@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, unchanged)
+
+Independent fresh re-verify, this session, against current master
+`e60b9cd` (122 commits past the `a913ab8` branch point the entry
+immediately below was checked against). Ran
+`compile_to_gimple_with_cpp(do_imports=False)` directly: byte-for-byte
+identical 3-part `RuntimeError` — `g` (`unsupported expression
+statement in generator body (BinaryOp)`, the `1/0` shape), `gen`
+(`a call to unresolved callee 'nested(...)' is not supported...`), and
+`t3` (`every return must carry a scalar value ... and all of them must
+agree on one consistent type`). All three are independently
+feature-sized (runtime int-div-by-zero trapping, nested-function-value
+calls, cross-path return-type unification); none touched by anything
+in the 122 intervening commits. Untouched.
+
 ## Status (updated 2026-08-26 -- re-verified, unchanged; full refusal set recorded for completeness)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).

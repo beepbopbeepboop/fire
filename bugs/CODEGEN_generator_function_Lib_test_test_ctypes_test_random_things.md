@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (updated 2026-08-26, independent re-verify against current master `e60b9cd`)
+
+Independent re-verify, this session, against current master `e60b9cd`
+(122 commits past the `a913ab8`/`b46fd5d` branch points the entries
+below were checked against). An isolated `compile_to_gimple_with_cpp(
+do_imports=False)` call (bypassing the large transitive `unittest`/
+`test.support` import-closure walk the entries below document as
+consistently exceeding the 300s safety budget for a real whole-program
+build) succeeds cleanly — no `RuntimeError` — consistent with, and not
+contradicting, the RESOLVED claim's own detailed verification. Did not
+attempt another full whole-program build this session (same safety
+budget applies; nothing suggests a different outcome from the repeated
+attempts documented below). Doc left as-is per the standing note: a
+session with a machine free of the collections/inspect
+interpretation-fallback slowness should get the confirming whole-program
+run and `git rm` this doc.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — same outcome as the 2026-08-25 attempt: still cannot personally complete a fresh whole-program build within the 300s safety budget, but nothing found contradicts RESOLVED)
 
 Independent re-verification attempt, same conclusion as the entry

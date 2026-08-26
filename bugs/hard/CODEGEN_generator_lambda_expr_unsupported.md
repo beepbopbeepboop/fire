@@ -1,5 +1,25 @@
 # HARD BUG: `lambda` expressions are entirely unsupported inside a compiled generator body
 
+## Status (re-verified 2026-08-26, independent check against current master `e60b9cd` — unchanged)
+
+Direct source re-check of `gimple_cpp_core.py`'s `LambdaExpr` case
+(now at ~line 1454-1533 after the codegen-backend file split) against
+current master `e60b9cd`: the guard is byte-for-byte the same as the
+entry immediately below describes — `_CPP_CALLABLE_CTYPE` (0-arg) and
+`_CPP_CALLABLE_CTYPE_1ARG` (1 plain param) are still the only two
+supported shapes, `len(e.params) > 1 or (e.params and (starts-with-*
+or has-default))` still refuses everything wider honestly. No shared
+fix from any of the 122 commits landed since the `a913ab8` branch
+point touches callable-value representation. Per this task's explicit
+instruction (treat hard-bug docs to a genuinely fresh look, given how
+much shared machinery has landed): confirmed this remains a real,
+deliberate design-level gap — a general parameterized/variadic
+callable-value representation (signature-carrying, runtime args/kwargs
+packing, named-slot call-site binding) is feature-sized work touching
+shared call-argument/lowering machinery this project's history
+(CLAUDE.md's own "_tuplegetter incidents") explicitly warns against
+attempting narrowly. Not attempted. No code change.
+
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
 
 Direct source re-check of `gimple_cpp_core.py`'s `LambdaExpr` case

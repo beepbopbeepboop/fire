@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, no evidence of change)
+
+Independent fresh re-verify, this session, against current master
+`e60b9cd` (122 commits past the `a913ab8` branch point the entry
+immediately below was checked against). Ran
+`compile_to_gimple_with_cpp(do_imports=False)` directly: byte-for-byte
+identical `RuntimeError` naming `parse` with no per-function
+eligibility note — consistent with `BarFormatter` (defined inside
+`test_override_parse`'s function body) still never reaching struct
+registration. Root cause and classification (function-body-local class
+discovery, feature-sized, out of scope) unchanged by anything in the
+122 intervening commits.
+
 ## Status (updated 2026-08-26 -- re-verified, no evidence of change)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).

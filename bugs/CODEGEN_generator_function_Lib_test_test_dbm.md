@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
+## Status (updated 2026-08-26, independent re-verify against current master `e60b9cd`)
+
+Independent re-verify, this session, against current master `e60b9cd`
+(122 commits past the `a913ab8` branch point the entry immediately
+below was checked against). `compile_to_gimple_with_cpp(do_imports=
+False)` still succeeds with no `RuntimeError`, matching the entry
+below. Not re-confirmed via a fresh g++ syntax-check of the emitted
+`dbm_iterator` body this pass, but nothing in the 122 intervening
+commits touches loop-iterable static list/dict-type inference or
+`__import__` handling, so no reason to expect the "loop compiles to
+dead code" caveat has changed. No change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).

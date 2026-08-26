@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/_code_definitions.py
 
+## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, unchanged)
+
+Independent fresh re-verify, this session, against current master
+`e60b9cd` (122 commits past the `a913ab8` branch point the entry
+immediately below was checked against — includes the codegen-backend
+file split into `gimple_cpp_core.py`/`gimple_gen_*.py`/etc). Ran
+`compile_to_gimple_with_cpp(do_imports=False)` directly: byte-for-byte
+identical `RuntimeError` — `asyncgen_spam: *args/**kwargs parameters not
+supported for compiled async generators`. None of the 122 intervening
+commits touch async-generator varargs eligibility or the deeper "bare
+construction without consumption" gap. Still feature-sized; untouched.
+
 ## Status (updated 2026-08-26 -- re-verified, unchanged)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).
