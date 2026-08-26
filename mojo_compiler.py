@@ -1355,6 +1355,28 @@ def _detect_generator(body: list):
     return True, frozenset(out_ids)
 
 
+def _as_ident_node(e: object) -> IdentExpr:
+    """Static narrowing view of a boxed AST-side expression handle.
+
+    The compiled backend refines neither chained expressions nor plain
+    locals through isinstance() — after `isinstance(_s.value, IdentExpr)`
+    passes, a subsequent `_s.value.name` still lowers to a
+    `_mojo_dispatch_getattr` call whose boxed int64_t result is then
+    mis-coerced at the use site (observed: `mojo_str_from_int` of the raw
+    pointer before `mojo_dict_get_str`, and `(char)` truncation in `==`
+    comparisons), so every lookup missed and whole parser passes silently
+    no-op'd under stage2/mojo while working identically under CPython.
+    Call sites guard with isinstance() first (runtime-accurate via type
+    tags), then route the value through this annotated identity function
+    so subsequent attribute reads compile to direct struct field loads."""
+    return e
+
+
+def _as_funcdef_node(e: object) -> FunctionDef:
+    """See _as_ident_node: static FunctionDef view of a boxed handle."""
+    return e
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
@@ -2757,21 +2779,55 @@ class Parser:
         # the new name (small code duplication, no shared codegen state,
         # same low-risk shape the conditional-def hoisting just above
         # already uses for a different `methods`-population gap).
-        _alias_by_name = {m.name: m for m in methods}
+        # Build the name map with an explicit loop, not a comprehension:
+        # `m` inside `{m.name: m for m in methods}` is an unknown-typed list
+        # element, so `m.name` lowered through runtime dispatch and its
+        # boxed result was mistyped at the use site (see _as_ident_node).
+        # `_mf` is statically FunctionDef via the annotated helper, so
+        # `.name` is a direct field load on both backends.
+        _alias_by_name = {}
+        for _m in methods:
+            _mf = _as_funcdef_node(_m)
+            _alias_by_name[_mf.name] = _m
         for _s in body:
             if not isinstance(_s, MultiAssignStmt):
                 continue
             if not isinstance(_s.value, IdentExpr):
                 continue
-            _src = _alias_by_name.get(_s.value.name)
+            _ma_value = _as_ident_node(_s.value)
+            _src = _alias_by_name.get(_ma_value.name)
             if _src is None:
                 continue
+            _sf = _as_funcdef_node(_src)
             for _tgt in _s.targets:
-                if not isinstance(_tgt, IdentExpr) or _tgt.name in _alias_by_name:
+                if not isinstance(_tgt, IdentExpr):
                     continue
-                _alias = dataclasses.replace(_src, name=_tgt.name)
+                _ta = _as_ident_node(_tgt)
+                if _ta.name in _alias_by_name:
+                    continue
+                # dataclasses.replace() lowers to identity in the compiled
+                # backend (gimple_gen_methods' documented approximation), so
+                # build the renamed shallow copy explicitly. Field-by-field
+                # construction produces exactly what replace() would.
+                _alias = FunctionDef(
+                    name=_ta.name,
+                    params=_sf.params,
+                    return_type=_sf.return_type,
+                    body=_sf.body,
+                    decorators=_sf.decorators,
+                    param_convs=_sf.param_convs,
+                    param_has_default=_sf.param_has_default,
+                    param_defaults=_sf.param_defaults,
+                    kwonly=_sf.kwonly,
+                    comptime_params=_sf.comptime_params,
+                    is_generator=_sf.is_generator,
+                    yield_bearing_node_ids=_sf.yield_bearing_node_ids,
+                    is_async=_sf.is_async,
+                    line=_sf.line,
+                    col=_sf.col,
+                )
                 methods.append(_alias)
-                _alias_by_name[_tgt.name] = _alias
+                _alias_by_name[_ta.name] = _alias
         # Same idiom, single-target form (`__copy__ = copy` /
         # `__iter__ = keys` — Lib/weakref.py's WeakValueDictionary/
         # WeakKeyDictionary; `__call__ = _idfunc` /
@@ -2792,14 +2848,38 @@ class Parser:
                 continue
             if not (isinstance(_s.target, IdentExpr) and isinstance(_s.value, IdentExpr)):
                 continue
-            if _s.target.name in _alias_by_name:
+            # See the MultiAssign block above: route both handles through
+            # the annotated helpers so `.name` compiles to direct field
+            # loads instead of mistyped runtime-dispatch results.
+            _alias_target = _as_ident_node(_s.target)
+            _alias_value = _as_ident_node(_s.value)
+            if _alias_target.name in _alias_by_name:
                 continue
-            _src = _alias_by_name.get(_s.value.name)
+            _src = _alias_by_name.get(_alias_value.name)
             if _src is None:
                 continue
-            _alias = dataclasses.replace(_src, name=_s.target.name)
+            _sf = _as_funcdef_node(_src)
+            # Explicit renamed shallow copy — dataclasses.replace() is an
+            # identity approximation in the compiled backend.
+            _alias = FunctionDef(
+                name=_alias_target.name,
+                params=_sf.params,
+                return_type=_sf.return_type,
+                body=_sf.body,
+                decorators=_sf.decorators,
+                param_convs=_sf.param_convs,
+                param_has_default=_sf.param_has_default,
+                param_defaults=_sf.param_defaults,
+                kwonly=_sf.kwonly,
+                comptime_params=_sf.comptime_params,
+                is_generator=_sf.is_generator,
+                yield_bearing_node_ids=_sf.yield_bearing_node_ids,
+                is_async=_sf.is_async,
+                line=_sf.line,
+                col=_sf.col,
+            )
             methods.append(_alias)
-            _alias_by_name[_s.target.name] = _alias
+            _alias_by_name[_alias_target.name] = _alias
             _alias_assigns.append(_s)
         if _alias_assigns:
             _alias_assign_ids = {id(f) for f in _alias_assigns}

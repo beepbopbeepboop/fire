@@ -1506,12 +1506,32 @@ def gen_module_impl(self, stmts):
         return cands
 
     def _scan_body_for_local_field_access(body, own_struct_name):
-        local_types = {}
+        # Collect EVERY struct type each local name is ever bound to, then
+        # keep only unambiguous names. The candidate scan is flow-insensitive
+        # (it unions assignments across the whole body), so a name rebound to
+        # different node types in one function — `_parse_expr`'s `left` holds
+        # UnaryOp/CompareChain/BinaryOp/WalrusExpr/TernaryExpr as the loop
+        # refines the expression — must not mint fields on ANY of them: a
+        # member access guarded by `isinstance(left, CompareChain)` at runtime
+        # (`left.operands`, mojo_compiler.py:3292) otherwise registered
+        # phantom `operands`/`ops`/`name` fields on TernaryExpr/UnaryOp,
+        # growing their C structs (typed `int`) and making compiled repr() of
+        # every such node print extra "operands=0, ops=0, name=0" tail fields
+        # Python's dataclass repr never emits — a verify-visible
+        # stage1-vs-stage2 .ast divergence.
+        local_type_sets = {}
         for stmt in body:
             for name, ann in _scan_stmt_var_candidates(stmt):
                 if (ann in self.struct_field_types and ann != own_struct_name
                         and ann not in self._selfhost_hardcoded_struct_names):
-                    local_types[name] = ann
+                    local_type_sets.setdefault(name, {})[ann] = True
+        # Plain dicts throughout (no set()/next()): this file is itself
+        # compiled by the self-host backend, which lowers neither.
+        local_types = {}
+        for name, ts in local_type_sets.items():
+            if len(ts) == 1:
+                for only_type in ts:
+                    local_types[name] = only_type
         if not local_types:
             return
         for stmt in body:
