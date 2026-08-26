@@ -2201,11 +2201,115 @@ def _cpp_expr(gen, e) -> str:
                     return f"mojo_range({args[0]}, {args[1]})"
                 if len(e.args) == 3:
                     return f"mojo_range3({args[0]}, {args[1]}, {args[2]})"
-            if fname == 'isinstance' and len(e.args) == 2:
-                # isinstance(x, T): emit the C++ type-id comparison the
-                # GIMPLE path uses (type ids are the boxed __mojo_type_id
-                # of a struct pointer or a literal 0/1/2... tag).
-                return f"(({args[0]}) != 0)"
+            if (fname == 'isinstance' and len(e.args) == 2
+                    and not gen._locally_binds_name('isinstance')):
+                # isinstance(x, T) — real semantics, mirroring the plain
+                # GIMPLE path's `_isinstance_one_type` (gimple_gen_calls.py):
+                # a STATICALLY-known operand type resolves the verdict at
+                # compile time (a char* IS str, a MojoList* IS list, ...);
+                # a user-defined struct type arg compares the operand's
+                # leading __mojo_type_id tag; only an AMBIGUOUS boxed
+                # int64_t operand falls to runtime discrimination. The old
+                # lowering here was `(x != 0)` — plain truthiness posing as
+                # a type test, which silently inverted every
+                # `if not isinstance(root, str):`-style polymorphic guard
+                # whenever the value happened to be non-null (real bug:
+                # the recursive-yield-from iter_files repro took the base
+                # case for a list argument and yielded the raw MojoList*
+                # pointer as an int; see bugs/hard/
+                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
+                _tnames = None
+                if isinstance(e.args[1], gimple_ctypes.IdentExpr):
+                    _tnames = [e.args[1].name]
+                elif isinstance(e.args[1], gimple_ctypes.TupleExpr):
+                    _tnames = [t.name for t in e.args[1].elements
+                               if isinstance(t, gimple_ctypes.IdentExpr)]
+                if _tnames is None:
+                    # Complex/dynamic type arg: same honest stub as the
+                    # plain path's `_lower_builtin_isinstance` fallback.
+                    return '0'
+                _obj = e.args[0]
+                _obj_e = gen._cpp_expr(_obj)
+                _obj_ct = _cpp_expr_static_ctype(gen, _obj)
+                # Each check is formatted from the operand expression text;
+                # when several alternatives must share ONE evaluation of a
+                # non-trivial operand, the whole OR-chain re-formats against
+                # a cached local instead (IIFE, same convention this emitter
+                # already uses for cached call results).
+                def _mk(fmt):
+                    return fmt.format(v=_obj_e)
+                _SCALAR_TYPE_MATCH = {
+                    'str':   ('char *', 'MojoStr *'),
+                    'int':   ('int', 'int64_t', 'uint64_t', 'int8_t',
+                              'int16_t', 'int32_t', 'uint8_t', 'uint16_t',
+                              'uint32_t', 'long', 'short', 'size_t', '_Bool'),
+                    'float': ('double', 'float', '__fp16'),
+                    'bool':  ('_Bool',),
+                    'list':  ('MojoList *',),
+                    'dict':  ('MojoDict *',),
+                    'set':   ('MojoSet *',),
+                }
+                _fmts = []
+                for _tn in _tnames:
+                    if _tn == 'type':
+                        _fmts.append(None)  # constant-false alternative
+                        continue
+                    if _tn in gen.struct_field_types:
+                        # User struct: compare the runtime tag (same
+                        # deterministic hash both sides agree on).
+                        _tid = gimple_exprtypes._struct_type_id(_tn)
+                        _fmts.append(
+                            "(mojo_read_type_tag((int64_t)({v})) "
+                            "== (int64_t)%d)" % (_tid,))
+                        continue
+                    if _tn not in _SCALAR_TYPE_MATCH:
+                        # Unknown type name: plain-path parity (its
+                        # mojo_isinstance runtime stub always says false).
+                        _fmts.append(None)
+                        continue
+                    if _obj_ct in _SCALAR_TYPE_MATCH[_tn]:
+                        if _obj_ct.endswith(' *'):
+                            # Pointer-shaped static match still must not
+                            # call NULL (None) an instance.
+                            _fmts.append("(({v}) != 0)")
+                        else:
+                            _fmts.append('1')
+                    elif (_obj_ct is not None
+                          and _obj_ct not in ('int64_t', 'void *')):
+                        _fmts.append('0')
+                    elif _obj_ct in ('char *', 'MojoStr *', 'MojoList *'):
+                        # Static pointer ctype that does NOT match the
+                        # requested builtin: definitively not it.
+                        _fmts.append('0')
+                    else:
+                        # Ambiguous box (declared int64_t / untracked):
+                        # runtime discrimination. list → exactly the live
+                        # registered MojoList* set; str → this model's own
+                        # pointer-shaped-not-a-container convention (the
+                        # SAME verdicts repr() dispatch already uses via
+                        # mojo_is_registered_list / mojo_str). Other
+                        # builtins have no runtime marker on a bare box —
+                        # honest always-false, matching the plain path's
+                        # mojo_isinstance stub rather than guessing.
+                        if _tn == 'list':
+                            _fmts.append("mojo_is_registered_list((int64_t)({v}))")
+                        elif _tn == 'str':
+                            _fmts.append("mojo_boxed_is_str((int64_t)({v}))")
+                        else:
+                            _fmts.append('0')
+                _cache_iife = (len(_fmts) > 1
+                               and any(f is not None and '{v}' in f for f in _fmts)
+                               and not isinstance(_obj, (gimple_ctypes.IdentExpr,
+                                                         gimple_ctypes.StringLiteral)))
+                if _cache_iife:
+                    _vname = gen._cpp_fresh_name("_mg_isi")
+                    _parts = [(f if f is not None else '0').format(v=_vname)
+                              for f in _fmts]
+                    return (f"[&]() {{ const int64_t {_vname} = "
+                            f"(int64_t)({_obj_e}); return "
+                            f"({' || '.join(_parts)}); }}()")
+                return '(' + ' || '.join(_mk(f) if f is not None else '0'
+                                         for f in _fmts) + ')'
             if fname == 'enumerate' and not gen._locally_binds_name('enumerate'):
                 # enumerate(iterable) → pair each element with its index.
                 # Emit the underlying iterable; the consumer's loop

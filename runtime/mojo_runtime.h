@@ -176,6 +176,7 @@ typedef struct {
 
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
+int mojo_boxed_is_str(int64_t v);
 int mojo_is_registered_dict(int64_t addr);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
