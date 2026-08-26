@@ -1,5 +1,27 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (re-verified 2026-08-26, wtRest19b — both remaining gaps confirmed unchanged, fresh checks)
+
+Re-ran `test_gimple_generator_runner.py` fresh: **53/53 pass** (grown
+from 42/42 as of 2026-08-23, from other landings in the interim; no
+regression). Re-checked both still-open shapes directly against
+current source, not just re-read:
+- **Bounded/stepped slice-assign**: `grep -n "operator\[\]\|mojo_list_
+  slice\|mojo_list_splice\|mojo_list_set_slice" runtime/mojo_runtime.h`
+  still finds only the existing read-only `mojo_list_slice(l, start,
+  stop)` copy helper — no element-shifting splice-write facility of any
+  kind exists. Unchanged.
+- **Non-self/non-sys MemberExpr targets** (e.g.
+  `bugs/COMPILE_FAIL_Tools_importbench_importbench.md`'s `from_cache`:
+  `module.__file__ = '<test>'` on a real `types.ModuleType` local):
+  still has no backing-storage representation — this codegen has no
+  general heap-object attribute model for a non-`self`, non-struct
+  local at all (the same class of gap as `bugs/hard/CODEGEN_dynamic_
+  attribute_on_generic_object.md`). Unchanged, still correctly refused
+  rather than silently elided.
+
+Both remain genuinely out of narrow-fix reach. No code change.
+
 ## Status (re-verified 2026-08-23 — no new work)
 
 Re-ran `test_gimple_generator_runner.py`: **42/42 pass** — every shape

@@ -1,5 +1,39 @@
 # HARD BUG (4 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls, (4) imported-class name mistaken for a zero-arg accessor function in `X.ATTR` member access
 
+## Re-verified 2026-08-26, wtRest19b (fresh pass, no code change; full-corpus repro not completed due to heavy concurrent system load)
+
+Confirmed all four fix sites still present and unchanged in current
+source (`gimple_gen_funcs.py:414`'s `ret = sig[0] if sig else
+'int64_t'`; `gimple_gen_resolve.py:964`'s `ctype in ('int64_t',
+'_Bool')` guard; `gimple_gen_methods.py:561`'s `fake_obj_type =
+f"{base_name} *"` derived-to-base cast; `gimple_gen_exprs.py:909`'s
+PascalCase-import guard). Attempted a fresh full `subprocess.py`/
+`enum.py` isolated-compile re-run to reproduce the doc's own
+error-count methodology, but this session's system is running 5+
+concurrent `mojo.py build` processes from other campaign agents
+(opencode groups on ctypes/dyld/analyzer/util, other worktrees) —
+every attempted repro (both the full `mojo.py build subprocess.py` and
+a standalone `compile_to_gimple(enum.py)` isolated-compile) exceeded
+the mandated wall-clock safety bound (~300s, RSS stayed low so this is
+contention, not a runaway) before reaching GCC or a result, and was
+killed per the safety rule rather than left running unbounded. A
+minimal standalone repro of the `Parameter(...)` constructor-call shape
+(`from inspect import Parameter; Parameter('values', Parameter.
+VAR_POSITIONAL)` in an isolated single-file module) built and ran
+clean, but doesn't reproduce the doc's actual failure mode — that
+needs the intra-module ordering race in a module the size of
+`enum.py`/`inspect.py` where `Parameter` is a same-module class defined
+earlier, not a cross-module import stub, which this minimal repro
+doesn't exercise. Given source-level confirmation that nothing has
+regressed the four landed fixes, and the already-documented,
+already-assessed architectural risk of touching the class-registration-
+ordering machinery for Mechanism 4's residual (this doc's own
+2026-08-07 section: a comparable ordering fix elsewhere in this
+campaign passed the full quality gate and still had to be reverted
+after a corpus-wide regression), status is carried forward unchanged
+rather than force a resource-contended repro. Not attempted; no code
+change.
+
 ## Re-verified 2026-08-23 (fresh pass, no code change)
 
 All four fix sites confirmed present and intact after the Wave-2 file

@@ -2,6 +2,16 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (re-verified 2026-08-26, wtRest19b — second independent re-check same day)
+
+Independent fresh repro (own safety-wrapped build, this worktree)
+confirms byte-identical output to the same-day entry immediately
+below: same 17-generator refusal list, same per-generator causes
+(`sample`/`func`/`func1` unresolved-callee refusals for the random-
+import and callable-value-loop-variable groups, consumption-ordering
+derivation for `all_binary`/`all_ternary`/`all_unary`). No new
+tractable angle found. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26)
 
 Fresh repro against this session's tree (`fix/rest-remainder18`)

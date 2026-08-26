@@ -4,6 +4,18 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtRest19b): byte-identical refusal, unchanged
+
+Fresh repro against current tree (fix/rest-remainder19b): identical
+up-front refusal, byte-for-byte same as 2026-08-25 — `_build_stencils`/
+`_compile`/`_parse`, `with tempfile.TemporaryDirectory() as tempdir`
+inside an async body, "not CallExpr". Root cause and required fix
+(real mkdtemp/rmtree-backed runtime plumbing + a new path-value
+representation threaded through declared/`_cpp_expr`, plus further
+downstream async-method gaps) unchanged from the 2026-08-09 analysis.
+Genuinely structural, part of the separate async-codegen project.
+Not attempted; no code change.
+
 ## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical refusal, unchanged
 
 Fresh safety-wrapped `mojo.py build`: identical up-front refusal of

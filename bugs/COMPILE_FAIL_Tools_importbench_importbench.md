@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtRest19b): byte-identical, unchanged
+
+Fresh repro against current tree: identical two-function refusal,
+byte-for-byte the same as 2026-08-25 (`benchmark_wo_bytecode` on
+`cache_from_source(...)`, `from_cache` on the non-plain-assignment-
+target `module.__file__ = ...`). Cross-checked against
+`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+own fresh 2026-08-26 re-verification: that doc's non-self/non-sys
+MemberExpr-target gap (exactly `from_cache`'s shape) is confirmed still
+structurally unfixed (no heap-object attribute model exists). No
+partial-fix outcome available even if `cache_from_source` were
+resolved. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical two-function refusal; both gaps re-assessed as genuinely out-of-reach
 
 Re-ran fresh under this session's safety-wrapped watcher: identical

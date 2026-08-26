@@ -4,6 +4,24 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtRest19b): unchanged — sole remaining blocker still `nonlocal` gap
+
+Fresh safety-wrapped `mojo.py build` against current tree
+(fix/rest-remainder19b): `step(context)` (build_steps) confirmed still
+fixed — no longer appears in the error output. The build now fails
+with exactly one error, unchanged from 2026-08-25: `__main__.py:104:30:
+error: invalid call to non-function before ';' token`
+(`working_dir = working_dir(context)` inside `subdir`'s `wrapper`,
+gated on a `nonlocal working_dir` this parser cannot see at all). Root
+cause confirmed as documented below (no `NonlocalStmt` AST node, no
+parser support, closure-capture pass therefore treats `working_dir` as
+plain assigned-local and misses it as captured). This remains
+feature-sized (new parser statement + capture-analysis semantics +
+by-reference cell write-back across mojo_compiler.py/gimple_codegen.py/
+myinterpreter.py/this compiler's own self-hosting source) — not
+attempted, per campaign guidance to avoid large speculative features.
+No code change this round.
+
 ## Status (updated 2026-08-25, wtOpencode_group3): `step(context)` half FIXED (commit `1dcbcf9`); `working_dir(context)` half root-caused DEEPER than previously documented — the parser has no `nonlocal` support at all
 
 Fresh reproduction confirms issue 2's two errors, but investigation
