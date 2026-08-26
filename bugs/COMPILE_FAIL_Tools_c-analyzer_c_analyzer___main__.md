@@ -15,6 +15,10 @@ __init__.py` doc). Same shared root cause as doc #1 in this pass; same
 conclusion — large speculative feature work, not attempted. No code
 change; doc re-verified only.
 
+Re-verified again 2026-08-26, wtOpencode_canalyzer2 (fresh-cut worktree):
+identical two-shape refusal set verbatim via isolated
+compile_to_gimple_with_cpp(do_imports=False); unchanged conclusions.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: identical refusal set to the entry below — `fmt_full`:
