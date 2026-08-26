@@ -1,5 +1,54 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder13 — item 3's list/tuple-literal-as-call-argument gap FIXED; a DIFFERENT, deeper vararg-forwarding mismatch now surfaces on the same statement)
+
+Fixed the item-3 gap this doc's 2026-08-24 entry flagged: a literal
+list/tuple used directly as a call ARGUMENT (as opposed to an assignment
+RHS, which `_cpp_container_literal_init` already covered) had no valid
+C++ lowering — `_cpp_expr` emits a raw brace-init-list for a `ListExpr`/
+`TupleExpr`, and casting that to `MojoList *` is invalid C++
+(`expected ';' before '}' token` / `cannot convert 'char*' to
+'MojoList*'`). Generalized the existing `_cpp_list_literal_arg_expr`
+helper (previously only used at a compiled-generator call-argument
+position) to also cover `TupleExpr` (identical `.elements` shape to
+`ListExpr`, both box down to `MojoList *`) and wired it into the
+`.join()` call-argument lowering in `gimple_cpp_core.py`'s `_cpp_expr`:
+when `.join()`'s sole argument is a list/tuple literal, it's now built
+via the same immediately-invoked-lambda convention
+(`[&]() -> MojoList * { ...; return tmp; }()`) instead of going through
+the generic (invalid-for-this-position) literal lowering. Verified via
+a fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: the
+`'\n'.join((...))` sites (lines ~136/174/218/260/313) now emit real
+`mojo_list_new()`/`mojo_list_append_str(...)` construction and the
+statement itself is gone from the g++ error list.
+
+**New blocker surfaces on the SAME statement, one level deeper — NOT
+fixed, out of scope for a narrow fix**: `proc = self.subprocess(code,
+str(wr), pass_fds=[wr])` (line 149 and siblings), where `subprocess(self,
+*args, **kw)` is the test class's OWN method (not an inherited/
+unresolved-base method — a different mechanism from item 4's weak-stub
+fix). The struct-method extern declaration packs `*args`/`**kw` into a
+`(MojoList *, MojoDict *)` pair, but the call-SITE emission from inside
+this generator body only forwards `code` as the sole positional payload
+and drops `str(wr)`/`pass_fds=[wr]` entirely — `OSEINTRTest_subprocess
+(self, code, mojo_str((void *)(wr)))`: 2 arguments where 3 (self +
+packed-args-list + packed-kwargs-dict) are expected, and the 2nd
+argument is `wr` cast to a bare string rather than a `MojoList*`
+containing both `code` and `str(wr)`. This is a genuinely different gap
+from every previously-documented item on this file (positional+keyword
+call-site packing into a `*args`/`**kw`-shaped struct-method callee, from
+a generator body) — investigated only far enough to classify it as
+call-argument/vararg-packing machinery, which CLAUDE.md's own history
+(the "_tuplegetter incidents") flags as high-risk to touch narrowly; not
+attempted this session.
+
+Gate for the join-literal-arg fix: `test_gimple.py` 256/256,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with 0 skip lines.
+
+`_test_eintr.py` still does not build. Doc stays open.
+
+
 ## Status (updated 2026-08-25, worktree fix/opencode-arity — item 4, the inherited-method arity family (`assertEqual`/`assertIsInstance`/`addCleanup`), is FIXED by commit `b46fd5d`; file still does not build — remaining blocker is the list-literal-as-call-argument gap)
 
 The arity-mismatch family this doc's 2026-08-24 entries investigated and

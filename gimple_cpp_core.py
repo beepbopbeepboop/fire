@@ -953,13 +953,20 @@ def _cpp_emit_generator_start_expr(gen, call, api):
 
 
 def _cpp_list_literal_arg_expr(gen, lit):
-    """A list LITERAL at a compiled-generator call-argument position, as ONE
-    MojoList*-valued C++ expression: `mojo_list_new ()` for the empty literal,
+    """A list/tuple LITERAL at a call-argument position, as ONE MojoList*-
+    valued C++ expression: `mojo_list_new ()` for the empty literal,
     otherwise an immediately-invoked lambda that constructs the list and
     appends every element through its scalar accessor (append_str/_int/
     _double). All elements must agree on one scalar type — anything else
     refuses (the caller's contract collection already hints nothing for
-    mixed literals)."""
+    mixed literals). Works for both ListExpr and TupleExpr (same `.elements`
+    shape, both box down to the one MojoList* runtime representation this
+    body model uses for both Python lists and tuples) — used both at a
+    compiled-generator call-argument position and at an ordinary runtime-
+    helper call-argument position (e.g. `sep.join((...))`) whenever
+    `_cpp_expr`'s own raw brace-init-list lowering would be invalid C++
+    at that position (any position that isn't a container-typed local's
+    own assignment RHS, which _cpp_container_literal_init already covers)."""
     elems = lit.elements
     if not elems:
         return 'mojo_list_new ()'
@@ -1948,7 +1955,19 @@ def _cpp_expr(gen, e) -> str:
                     _str_obj_ctype == 'char *'
                     or isinstance(e.func.obj, gimple_ctypes.StringLiteral)):
                 _obj_expr = gen._cpp_expr(e.func.obj)
-                _a0 = gen._cpp_expr(e.args[0])
+                # A literal list/tuple used directly as the .join() argument
+                # (`'\n'.join((a, b, c))`) has no valid C++ text via the
+                # generic `_cpp_expr` path — that lowers a List/TupleExpr to
+                # a bare brace-init-list, which isn't a valid MojoList*
+                # (`expected ';' before '}' token` / a downstream `cannot
+                # convert 'char*' to 'MojoList*'`, Lib/test/_test_eintr.py's
+                # own shape). Build a real MojoList* via the same
+                # immediately-invoked-lambda convention already used for a
+                # literal at a compiled-generator call-argument position.
+                if isinstance(e.args[0], (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+                    _a0 = _cpp_list_literal_arg_expr(gen, e.args[0])
+                else:
+                    _a0 = gen._cpp_expr(e.args[0])
                 return (f"(char *)mojo_str_join((char *)({_obj_expr}), "
                         f"(MojoList *)({_a0}))")
             # `<dict-typed obj>.get(key)` / `.get(key, default)` — a real
