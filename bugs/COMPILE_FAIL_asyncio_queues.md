@@ -1,5 +1,23 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged)
+
+Re-ran an isolated `compile_to_gimple` check fresh (post this session's
+4 coroutine-emitter fixes landed for COMPILE_FAIL_Apple___main__.md:
+`mojo_c_getenv`/platform/subprocess runtime-call whitelist, zero-arg
+`print()`, `char* * int` string-repeat lowering, f-string interpolation
+in `_cpp_expr`'s `StringLiteral` case — none touch `_async_quick_
+eligible`'s await-shape pre-filter). Confirmed byte-for-byte identical
+refusal: `function(s) get, join, put (async function(s), declared
+async def)`. See COMPILE_FAIL_asyncio_futures.md's updated entry for
+why this file and that one, despite sharing the same async-codegen
+subsystem, do NOT share one narrow fix (different mechanisms: this
+file is rejected by the pre-filter before ever reaching the promise/
+suspension machinery futures.py's gap lives in). Widening
+`_async_quick_eligible` to the real `Awaitable` protocol (arbitrary
+`await <local Future>` / `await <bound-method call>`) remains
+feature-sized; not attempted. Doc kept open.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C4 cluster. The blocker (`get`/`join`/`put`'s `await <local Future>` / `await <bound-method call>` shapes, outside `_async_quick_eligible`'s narrow whitelist) is unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still structural; untouched.

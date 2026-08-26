@@ -1,5 +1,26 @@
 # COMPILE_FAIL: asyncio/futures.py
 
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged)
+
+Re-ran an isolated `compile_to_gimple` check fresh (post this session's
+4 coroutine-emitter fixes landed for COMPILE_FAIL_Apple___main__.md:
+`mojo_c_getenv`/platform/subprocess runtime-call whitelist, zero-arg
+`print()`, `char* * int` string-repeat lowering, f-string interpolation
+in `_cpp_expr`'s `StringLiteral` case). None of those touch this file's
+blocker — confirmed byte-for-byte identical refusal: `function(s)
+__await__, __iter__ (generator function(s), contain a yield/yield
+from)`. `Future.__await__`'s `return self.result()` still has no
+promise `return_value(v)` channel to lower into (see the 2026-08-09
+analysis below, still accurate). Also confirmed: this and
+COMPILE_FAIL_asyncio_queues.md do NOT share a narrowly-fixable root
+cause despite both being in the same async-codegen-eligibility/
+promise-design gap family — this file's gap is the coroutine PROMISE's
+missing value-return channel (reached only after a function/method IS
+accepted as coroutine-eligible); queues.py's gap is the earlier
+`_async_quick_eligible` AWAIT-SHAPE whitelist rejecting it before that
+promise machinery is ever reached. Two different mechanisms in the
+same subsystem, not one fix. Structural, not attempted; doc kept open.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C4 cluster. The blocker (`Future.__await__`'s value-carrying `return self.result()` inside a generator -- the coroutine promise has no `return_value(v)` channel) is unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still a promise-design-level gap; untouched.

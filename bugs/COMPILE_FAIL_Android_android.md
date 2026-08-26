@@ -4,6 +4,22 @@ Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25, worktree fix/rest-remainder12 — DOCUMENTED-NOT-FIXED, unchanged)
+
+Re-ran an isolated `compile_to_gimple` check fresh, after this
+session's 4 coroutine-emitter fixes landed elsewhere (see
+COMPILE_FAIL_Apple___main__.md: `mojo_c_getenv`/platform/subprocess
+runtime-call whitelist, zero-arg `print()`, string-repeat `*`, f-string
+interpolation in `_cpp_expr`). None touch `_async_quick_eligible`'s
+await-shape pre-filter, which is this file's actual blocker. Confirmed
+byte-for-byte identical refusal to the 2026-08-23 entry below (same 10
+async functions + `async_process` async-generator, same reason: their
+`await` targets — `create_subprocess_exec(...)`, `process.communicate()`
+/`.wait()`, `stream.readexactly(...)`, a local `wait_for` helper — are
+all outside the whitelist). Real async-subprocess/stream I/O
+composition remains feature-sized (same family as
+COMPILE_FAIL_asyncio_queues.md's await-shape gap); not attempted.
+
 ## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — DOCUMENTED-NOT-FIXED)
 
 Re-ran the repro; byte-for-byte the same honest refusal as the 2026-08-09
