@@ -51,6 +51,17 @@ constructed-but-not-yet-raised exception object). No further code
 change this pass beyond the print()/flush= fix already committed; doc
 updated to reflect real, partial, verified progress.
 
+Re-verified again 2026-08-26, wtOpencode_canalyzer2 (fresh-cut worktree):
+identical 3-function refusal set verbatim via isolated
+compile_to_gimple_with_cpp(do_imports=False). Also re-checked the
+`Exception(...)`-as-value shape for tractability: the constructed value
+flows into `raise onempty` (same function) AND
+`iterutil.iter_many(items, onempty)` (a FOREIGN-module generator consumed
+with a tuple target behind it) — even a message-string representation
+for the exception object would immediately hit the foreign-generator
+consumption + module-member shapes, all feature-sized in the same
+coroutine emitter. Still no single tractable fix flips the file.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: the SAME five-function refusal set with the SAME
