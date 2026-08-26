@@ -4,6 +4,38 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825, 02:24) and generator-value-return-slot fix (326db78, 02:57); both landed AFTER this doc's most recent entry (00:27) — neither applies, unchanged)
+
+Fresh `compile_to_gimple_with_cpp(do_imports=False)` repro against this
+worktree (both of today's landed fixes included) reproduces the IDENTICAL
+error class as every prior entry: `request for member 'tokens' in
+'self->IfStmt::body'` (`Stmt*`), same for `ForStmt::body`/`WhileStmt::
+body`/`IfStmt::else_body` (`MojoList*`), plus the matching int64_t<->char*/
+Stmt* conversion errors at every sibling `co_yield`/`yield from` site
+(`IfStmt.tokens`/`ForStmt.tokens`/`WhileStmt.tokens`/`MacroIfStmt.tokens`/
+`BlockStmt.tokens`). Confirmed this is genuinely the same static-symbol-
+resolution mechanism as always: `self.body.tokens()` where `body: Stmt` is
+a base-typed field holding a concrete subclass (`IfStmt`, `ForStmt`, ...)
+at runtime — the coroutine emitter's `_struct_method_csym` still resolves
+purely by the field's STATICALLY DECLARED struct name, with no vtable/
+runtime-type-tag dispatch anywhere in this path.
+
+Checked specifically whether either of today's two fixes helps, per this
+run's assignment: neither does, and for a clean structural reason — both
+`bdfb825` and `326db78` are about resolving WHICH CONCRETE METHOD BODY a
+call site should statically bind to when the receiver's STATIC type is
+already known (`super()`: pick the first base in MRO that defines the
+method; `self.__class__(...)`: construct the RUNTIME type). Neither adds
+or touches any RUNTIME dispatch mechanism for a call through a
+statically-base-typed field/variable holding a subclass instance — that is
+precisely what this file's blocker needs (`self.body.tokens()` where
+`self.body`'s declared type is `Stmt` but its runtime type varies). Still
+squarely the excluded polymorphic-dispatch hard-doc cluster
+(`bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`/
+`CODEGEN_generator_classmethod_first_param_must_be_self.md`). Not
+attempted — real vtable/type-tag dispatch in the coroutine codegen path is
+a genuine feature project, not a narrow fix. No code change.
+
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
 
 Direct source re-check confirms this is still structural, not narrow:

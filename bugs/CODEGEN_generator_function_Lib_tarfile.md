@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — re-checked against today's super()/self.__class__ fix (bdfb825, 02:24) and generator-value-return-slot fix (326db78, 02:57); both landed AFTER this doc's most recent entry (01:11) — neither applies, confirmed via a fresh isolated repro)
+
+Fresh `compile_to_gimple_with_cpp(do_imports=False)` repro against this
+worktree (both of today's landed fixes included) reproduces the IDENTICAL
+error signature as the 2026-08-25 entry below: `TarFile.__iter__`'s local
+`tarinfo` is declared `int64_t` (from the `co_yield tarinfo;` sites at
+lines 161/178, unified against `char*` from the earlier `yield from
+self.members` element-type default), then hard-fails converting FROM a
+`MojoList` at `tarinfo = (self->members)[index];` (line 165) — `g++`:
+"invalid conversion from 'int64_t' to 'char*'" (x2) plus "cannot convert
+'MojoList' to 'int64_t' in assignment". This is exactly the already-
+diagnosed `_field_elem_types`-populated-too-late gap: `self.members`'s
+real element type (`TarInfo*`, boxed via `self.tarinfo.fromtarfile(self)`
+at the 3 real `.append()` sites) is still unknown at generator-.cpp-pass
+time.
+
+Checked specifically whether either of today's two fixes helps, per this
+run's assignment:
+- `bdfb825` (`super()`/`self.__class__` resolution) does not apply —
+  `self.tarinfo.fromtarfile(self)` is a **class-attribute-mediated
+  classmethod call** (`tarinfo = TarInfo` is a plain class-level
+  attribute at `tarfile.py:1751`, overridable per-instance via
+  `self.tarinfo = tarinfo` in `__init__`), a structurally different
+  dispatch shape from both `super().method()` (explicit base-class
+  resolution) and `self.__class__(args)` (construct-the-runtime-type).
+  There is still no lowering anywhere in `gimple_codegen.py`/
+  `gimple_cpp_core.py`/`gimple_gen_methods.py` that resolves a
+  `self.<field>.classmethod(...)` call's return type when `<field>`
+  holds a class reference — grepped for any such mechanism, found none.
+- `326db78` (generator value-carrying return slot) does not apply either
+  — `TarFile.__iter__` has no value-carrying `return <expr>` inside the
+  generator body; its gap is a `yield`/`co_yield` VALUE-TYPE unification
+  problem (a plain-vs-yield-from element-type mismatch), an entirely
+  different mechanism from the return-slot machinery.
+
+No shared root cause with any of today's landed work. Not attempted here
+(same reasoning as the 2026-08-25 entry: a narrow pre-scan fix couldn't
+even resolve THIS file's own case since `fromtarfile`'s return type is
+unknown, and a broader heuristic risked regressing other, currently-
+correct char*-element fields elsewhere in the corpus). Doc stays open, not
+re-classified. Full whole-program `mojo.py build` re-run not attempted
+this pass (isolated repro is conclusive for the question this run was
+asked to check, and a full run risks the same 300s-timeout inconclusive
+result the prior entry hit under build-resource contention from other
+concurrent worktree sessions).
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged; whole-program build attempt inconclusive due to a 300s safety-budget timeout, isolated verification confirms no regression)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` re-run

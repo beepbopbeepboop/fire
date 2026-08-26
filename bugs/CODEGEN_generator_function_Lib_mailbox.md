@@ -1,5 +1,36 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, no change)
+
+Per this run's assignment, specifically re-checked whether the just-landed
+`super()`-resolves-to-first-defining-base fix (`bdfb825`) changes anything
+for this doc's own KNOWN prior blocker (`mailbox.py`'s `Message` class
+inheriting `__setitem__` from external `email.message.Message`). It does
+not, for a simple reason: `grep -n "super(" Lib/mailbox.py` finds **zero**
+matches — mailbox.py's `Message(email.message.Message)` subclass never
+calls `super()` anywhere; the inherited-`__setitem__`-resolves-correctly
+finding already recorded in the 2026-08-25 entry below works through the
+pre-existing (older, non-`super()`-specific) `_merge_struct_inheritance`
+struct-method-splicing mechanism, which was already confirmed working for
+this file before today's fix landed. `bdfb825`'s change (first-base-that-
+DEFINES-the-method resolution specifically for explicit `super().foo()`
+call sites) is simply never exercised by this file. The generator-value-
+return-slot fix (`326db78`, asyncio/futures-motivated) is also inapplicable
+here — mailbox.py's own generator sites are plain iteration generators with
+no value-carrying `return <expr>` inside a generator body.
+
+Re-confirmed via a fresh isolated `compile_to_gimple_with_cpp(do_imports=
+False)`: mailbox.py's own generator bodies (5 `yield`/`yield from` sites)
+still compile with zero own-source errors, matching the 2026-08-25 entry.
+Did not re-run the full ~13-minute whole-program `mojo.py build` this pass
+(no mechanism exists that would change its outcome — nothing touched by
+today's two landed fixes is reachable from this file's own source, and the
+remaining 291 errors are entirely the already-itemized transitive cascade
+in unrelated files/docs). No code change. Doc stays open per convention
+(file still does not build end-to-end due to the transitive cascade), but
+this doc's own generator-codegen concern remains fully resolved since
+2026-08-23/25 as already recorded below.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — whole-program build no longer refuses at the Python stage; mailbox's OWN source now contributes ZERO real errors; the last "own" error line (32) fixed via a shared root cause)
 
 Re-verified fresh with a safety-wrapped, RSS/watchdog-guarded
