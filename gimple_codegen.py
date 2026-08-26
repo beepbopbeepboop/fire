@@ -2943,33 +2943,70 @@ class GimpleGen:
         return gfn._collect_body_import_bindings(self, node_list, scope)
     def _func_qualifier(self, bare_name: str) -> str:
         return gfn._func_qualifier(self, bare_name)
+    def _own_overlay_global_ctype(self, name: str) -> str | None:
+        """Resolve global `name`'s C type from THIS instance's own overlay
+        (`_own_global_var_types`), or return None when this instance never
+        recorded a conclusion for it. Shared helper for BOTH global-type
+        consumers that must agree with each other — the assignment-site
+        destination coercion (`_global_dst_ctype`) and the module-globals
+        struct field declaration (gen_module_impl's `_declared_globals`
+        loop) — so a cross-module same-bare-name homonym can never make
+        one side coerce/store with a different type than the other side
+        declared (the observed c_analyzer/info.py failure: root's
+        `UNKNOWN = _misc.Labeled('UNKNOWN')` frozen int64_t by its own
+        scan, then c_common/tables.py's string `UNKNOWN = '???'` landed
+        'char *' in the SHARED `_global_c_decl_types` between root's
+        field-freeze step and root's body-emission step, and the
+        assignment coerced its RHS to `char *` against the already
+        frozen `int64_t UNKNOWN` field).
+
+        Resolution rules, in order:
+        1. A CONTAINER-pointer entry in the shared cdecl dict
+           (`MojoDict *`/`MojoList *`/`MojoSet *` — the
+           `_EARLY_DISPATCH_DICTS`/`_EARLY_DISPATCH_SETS` dispatch-table
+           registrations and boxed containers) still wins over a scalar
+           own-conclusion exactly as before: those name compiler-internal
+           tables whose real boxed pointer representation this codegen
+           must preserve even when the owning module's own scan froze an
+           int64_t placeholder.
+        2. Otherwise a SCALAR own-conclusion (`int64_t`, `double`,
+           `_Bool`, `char *`) wins unconditionally — including over a
+           foreign homonym's NON-container pointer cdecl ('char *',
+           struct pointers). This is the narrowing that fixes the
+           homonym class: the old code deferred to ANY pointer-shaped
+           cdecl, so a foreign module's string global silently
+           re-typed this module's own assignment.
+        3. A non-scalar own-conclusion (a real pointer the overlay
+           recorded itself — e.g. gen_module_impl's late reconcile loop
+           mirrors widened callee-return pointer types into the overlay)
+           defers to the shared cdecl when one exists, else uses its own
+           value — byte-for-byte the prior behavior."""
+        own = self._own_global_var_types.get(name)
+        if own is None:
+            return None
+        cdecl = self._global_c_decl_types.get(name)
+        if (cdecl is not None and cdecl.endswith(' *')
+                and cdecl in ('MojoDict *', 'MojoList *', 'MojoSet *')):
+            return cdecl
+        if own in ('int64_t', 'double', '_Bool', 'char *'):
+            return own
+        return cdecl if cdecl is not None else own
+
     def _global_dst_ctype(self, name: str) -> str:
         """The destination C type for an assignment to a bare-name module
-        global — the same lookup the four global-assignment emission sites
-        in gimple_gen_stmts.py used to inline as
-        `_global_c_decl_types.get(name, _global_var_types[name])`, plus one
-        override: when THIS instance's own Phase 1.7 scan concluded a SCALAR
-        type for this name (recorded in `_own_global_var_types` at write
-        time), trust it over both shared dicts. The shared dicts are keyed
-        by bare name across every module compiled together, so a
-        later-scanned module declaring the same bare name (tokenize.py vs
-        io.py/inspect.py's `__author__`, tarfile.py vs token.py's
-        `ENCODING`) would otherwise make this module's own assignment
-        coerce its RHS to the OTHER module's type (the observed "assignment
-        to 'char *' from 'int64_t'" family). Two things keep prior behavior
-        otherwise intact: a genuine POINTER entry in `_global_c_decl_types`
-        (e.g. the `_EARLY_DISPATCH_DICTS`/`_EARLY_DISPATCH_SETS` overrides
-        for this compiler's own dispatch tables) still wins unconditionally,
-        and a CONTAINER-typed own conclusion still defers to
-        `_global_c_decl_types`'s int64_t boxing exactly as before."""
-        own = self._own_global_var_types.get(name)
-        if own is not None:
-            cdecl = self._global_c_decl_types.get(name)
-            if cdecl is not None and cdecl.endswith(' *'):
-                return cdecl
-            if own in ('int64_t', 'double', '_Bool', 'char *'):
-                return own
-            return cdecl if cdecl is not None else own
+        global: THIS instance's own-overlay conclusion when it has one
+        (see `_own_overlay_global_ctype`), else the shared-dict chain the
+        four global-assignment emission sites in gimple_gen_stmts.py used
+        to inline as `_global_c_decl_types.get(name, _global_var_types[
+        name])`. The shared dicts are keyed by bare name across every
+        module compiled together, so a later-scanned module declaring the
+        same bare name (tokenize.py vs io.py/inspect.py's `__author__`,
+        tarfile.py vs token.py's `ENCODING`) would otherwise make this
+        module's own assignment coerce its RHS to the OTHER module's type
+        (the observed "assignment to 'char *' from 'int64_t'" family)."""
+        own_t = self._own_overlay_global_ctype(name)
+        if own_t is not None:
+            return own_t
         return self._global_c_decl_types.get(name, self._global_var_types.get(name, 'int64_t'))
     def _locally_binds_name(self, bare_name: str) -> bool:
         return gfn._locally_binds_name(self, bare_name)
