@@ -4325,6 +4325,95 @@ class Slot:
                 print(f"PASS  {name2}")
                 _PASS += 1
 
+    # ── Runtime dict-keyed %-formatting (`text % dict(...)`) ──────────────
+    # Real Python's `"...%(key)s..." % mapping` with a NON-literal template
+    # previously had no lowering at all: it fell through to the generic
+    # numeric-modulo path and emitted invalid GIMPLE `%` against a
+    # MojoDict* operand — the "invalid operands to binary % (have
+    # 'int64_t' and 'MojoDict *')" hard-error class in real argparse.py /
+    # Mac/BuildScript/build-installer.py closures (see
+    # bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md root cause 2).
+    # Now routed to runtime/mojo_runtime.c's mojo_str_format_dict, which
+    # resolves %(key)... specs against the dict AT RUNTIME.
+    _dictfmt_src = """\
+def main():
+    textvars = dict(VER="3.14", FULLVER="3.14.6")
+    tmpl = "Python %(VER)s full %(FULLVER)s"
+    print(tmpl % textvars)
+"""
+    name = "percent_format_dict_variable_rhs_lowered_to_runtime_formatter"
+    ok, c_src, stderr = gimple_compiles(_dictfmt_src)
+    if not ok:
+        print(f"FAIL  {name}: did not compile\n{stderr}")
+        _FAIL += 1
+    elif 'mojo_str_format_dict' not in c_src:
+        print(f"FAIL  {name}: compiled but the `tmpl % textvars` site did "
+              "not route through mojo_str_format_dict")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _dictlit_src = """\
+def main():
+    print("prog=%(prog)s n=%(n)d" % dict(prog="p", n=7))
+    print("%(a)x-%(b)5.1f" % {"a": 255, "b": 2.5})
+"""
+    name = "percent_format_dict_call_and_literal_rhs_lowered_to_runtime_formatter"
+    ok, c_src, stderr = gimple_compiles(_dictlit_src)
+    if not ok:
+        print(f"FAIL  {name}: did not compile\n{stderr}")
+        _FAIL += 1
+    elif c_src.count('mojo_str_format_dict') < 2:
+        print(f"FAIL  {name}: expected BOTH `%`-with-dict sites to route "
+              f"through mojo_str_format_dict, found "
+              f"{c_src.count('mojo_str_format_dict')} references")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    # The numeric-modulo fallthrough must be untouched: a plain int/float
+    # `%` whose RHS is NOT dict-typed still lowers to ordinary GIMPLE
+    # modulo (colorsys.py's `h % 1.0` class), never the string formatter.
+    _modsrc = """\
+def m(a: Int, b: Int) -> Int:
+    return a % b
+
+def mf(a: Float64, b: Float64) -> Float64:
+    return a % b
+"""
+    name = "percent_numeric_modulo_untouched_by_dict_format_path"
+    ok, c_src, stderr = gimple_compiles(_modsrc)
+    if not ok:
+        print(f"FAIL  {name}: did not compile\n{stderr}")
+        _FAIL += 1
+    elif 'mojo_str_format_dict' in c_src:
+        print(f"FAIL  {name}: numeric modulo was wrongly routed through "
+              "the dict formatter")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    # Runtime-side: the formatter must exist and maintain per-slot value
+    # kinds (the untagged int64 dict slots can't otherwise distinguish an
+    # int from a bit-cast double or char*), mirroring the
+    # dynamic_attribute_runtime check's structure above.
+    name = "runtime_str_format_dict_present_with_kind_tracking"
+    _runtime_c = open(os.path.join(_RUNTIME_INC, 'mojo_runtime.c')).read()
+    if 'mojo_str_format_dict' not in _runtime_c:
+        print(f"FAIL  {name}: mojo_str_format_dict missing from "
+              "runtime/mojo_runtime.c")
+        _FAIL += 1
+    elif '_dict_set_raw_seq_kind' not in _runtime_c:
+        print(f"FAIL  {name}: dict setters no longer record per-slot "
+              "value kinds (_dict_set_raw_seq_kind missing)")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

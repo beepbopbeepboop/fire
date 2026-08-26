@@ -2411,18 +2411,64 @@ def _lower_percent(gen, node: gimple_ctypes.BinaryOp):
     working; re/_constants.py's `'%s (line %d, column %d)' % (msg,
     self.lineno, self.colno)` is the string case that didn't).
 
-    Only a *literal* format string on the LHS is handled specially here
-    (the overwhelming majority of real `%`-formatting -- format
+    Only a *literal* format string on the LHS used to be handled specially
+    here (the overwhelming majority of real `%`-formatting -- format
     templates are almost always written as literals, never built up at
-    runtime). Anything else -- including a `char *` variable holding a
-    dynamic template -- falls through to the ordinary numeric-modulo
-    path below (pre-existing behavior, not made worse).
-    """
+    runtime). Anything else fell through to the ordinary numeric-modulo
+    path.
+
+    ONE dynamic-template shape now has a real lowering instead of that
+    fallthrough: a DICT-keyed RHS (`text % dict(prog=...)`, `readme %
+    textvars`, or `"%(x)s" % {..}` where the template happens to be a
+    literal but the mapping is keyed). Positional compile-time splitting
+    can't apply (there are no positional operands to map specs onto), and
+    emitting raw GIMPLE `%` against a MojoDict* operand is exactly the
+    "invalid operands to binary % (have 'int64_t' and 'MojoDict *')" hard
+    error class seen in real argparse.py/build-installer.py closures.
+    These lower to the new runtime primitive `mojo_str_format_dict`
+    (runtime/mojo_runtime.c), which parses %(key)[flags][width][.prec]conv
+    specs and looks up each key AT RUNTIME -- honest Python semantics for
+    a dynamic template, including real catchable KeyError on a miss.
+    Detection is deliberately AST/type-based BEFORE anything is emitted,
+    so every non-dict shape still returns None and falls through to the
+    generic modulo path with zero double-lowering of operands."""
+    if isinstance(node.right, gimple_ctypes.DictExpr):
+        return _lower_percent_dict(gen, node)
+    if (isinstance(node.right, gimple_ctypes.CallExpr)
+            and isinstance(node.right.func, gimple_ctypes.IdentExpr)
+            and node.right.func.name == 'dict'
+            and not gen._locally_binds_name('dict')):
+        return _lower_percent_dict(gen, node)
+    # A dict-typed RHS under any other expression shape (typically an
+    # IdentExpr/MemberExpr holding a mapping built earlier, build-installer
+    # .py's `readme % textvars`) — same lowering. Checked BEFORE the
+    # literal-LHS branch so `"%(k)s" % mapping_var` doesn't get mis-mapped
+    # positionally by _lower_percent_format.
+    if gen._quick_type(node.right) == 'MojoDict *':
+        return _lower_percent_dict(gen, node)
     if isinstance(node.left, gimple_ctypes.StringLiteral):
         fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value)
         if not is_fstring:
             return gen._lower_percent_format(node, fmt_text)
     return None  # sentinel: caller falls through to generic numeric `%`
+
+
+def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
+    """Lower `<template> % <dict>` to the runtime dict-keyed formatter.
+
+    Both operands are lowered normally (side effects preserved), then the
+    LHS is coerced to `char *`: for a genuinely char*-typed template that
+    is a no-op cast, and for an int64_t-mistyped template (the pervasive
+    unknown-call-return fallback typing) the cast is still semantically
+    safe because `% dict` on a non-string LHS is a TypeError in real
+    Python — no VALID program ever reaches this call with a real integer
+    in the slot. The alternative (refusing / falling through) keeps
+    emitting invalid GIMPLE `%` on MojoDict*, which cannot link."""
+    lt, lv = gen.lower_expr(node.left)
+    rt, rv = gen.lower_expr(node.right)
+    lvs = lv if lt == 'char *' else gen._new_val('char *', f"(char *){lv}")
+    t = gen._new_val('char *', f"mojo_str_format_dict ({lvs}, {rv})")
+    return 'char *', t
 
 
 def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> tuple[str, str]:
@@ -3004,56 +3050,68 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
         else:
             gen._dict_val_types[t] = 'int64_t'
     for key_expr, val_expr in node.pairs:
-        kt, kv = gen.lower_expr(key_expr)
-        vt, vv = gen.lower_expr(val_expr)
-        # Load global string literals into temps before passing to dict functions
-        if kv.startswith('_slit_'):
-            kv_tmp = gen._new_val('char *', f"{kv}")
-            kv = kv_tmp
-        elif kt in ('int', 'int64_t', '_Bool'):
-            # Runtime dict keys are always char *; convert non-string keys
-            # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
-            # of C-casting the int to char* which produces NULL for 0.
-            kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
-        elif kt != 'char *':
-            # A non-scalar key (tuple, list, or other struct/pointer type
-            # — e.g. `{('a', 'b'): ...}`, real Python code found in the
-            # stdlib's own _compat_pickle.py) used to fall into the SAME
-            # mojo_str_from_int(kv) call above unconditionally: `kt !=
-            # 'char *'` is true for ANY non-string key, not just an int,
-            # so a tuple key's MojoList* pointer got passed to a
-            # function expecting int64_t — "makes integer from pointer
-            # without a cast", a hard GCC error, so the file never
-            # compiled at all. Use the general-purpose repr-based
-            # stringification instead: it already dispatches correctly
-            # per-type (MojoList*/MojoDict*/other struct/float), giving
-            # a value-based string distinct tuple/list contents won't
-            # collide on — close enough to Python's own structural
-            # hashing for this string-keyed runtime, and at least
-            # compiles and round-trips consistently. Deliberately NOT
-            # used for the plain int/bool case above: _repr_value's
-            # int path (mojo_repr_int) returns a shared static buffer,
-            # safe only because mojo_dict_set_str's callee immediately
-            # strdup()s it — mojo_str_from_int's own heap-allocated
-            # buffer is the already-proven-safe, unchanged behavior for
-            # by far the most common dict-key type.
-            kv = gen._repr_value(kt, kv)
-        if vt in gimple_ctypes._FLOAT_TYPES:
-            gen._emit(f"  mojo_dict_set_double ({t}, {kv}, {vv});")
-        elif vt == 'char *':
-            if vv.startswith('_slit_'):
-                vv_tmp = gen._new_val('char *', f"{vv}")
-                vv = vv_tmp
-            gen._emit(f"  mojo_dict_set_str ({t}, {kv}, {vv});")
-        else:
-            # _lower_BoolLiteral returns ctype 'int' (not '_Bool'), same
-            # as any other int — vt alone can't distinguish a real bool
-            # literal from a genuine int, so check the AST node itself.
-            if isinstance(val_expr, gimple_ctypes.BoolLiteral):
-                gen._emit(f"  mojo_mark_dict_bool_values ({t});")
-            vv64 = gen._to_int64(vt, vv)
-            gen._emit(f"  mojo_dict_set_int ({t}, {kv}, {vv64});")
+        _emit_dict_pair_store(gen, t, key_expr, val_expr)
     return 'MojoDict *', t
+
+
+def _emit_dict_pair_store(gen, t, key_expr, val_expr) -> None:
+    """Emit one `mojo_dict_set_*` store of (key_expr → val_expr) into the
+    dict temp `t`, shared by the dict-LITERAL lowering (`{k: v}` pairs)
+    and the `dict(k=v, ...)` builtin's kwarg pairs — previously only the
+    literal shape existed and `_lower_builtin_dict` silently DROPPED
+    kwargs (`dict(prog="x")` built an empty dict), which surfaced as a
+    runtime KeyError the moment the new dict-keyed `%`-formatting routed
+    argparse.py's real `text % dict(prog=self._prog)` shape through it.
+    Single source of truth for key coercion + per-type setter dispatch."""
+    kt, kv = gen.lower_expr(key_expr)
+    vt, vv = gen.lower_expr(val_expr)
+    # Load global string literals into temps before passing to dict functions
+    if kv.startswith('_slit_'):
+        kv_tmp = gen._new_val('char *', f"{kv}")
+        kv = kv_tmp
+    elif kt in ('int', 'int64_t', '_Bool'):
+        # Runtime dict keys are always char *; convert non-string keys
+        # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
+        # of C-casting the int to char* which produces NULL for 0.
+        kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
+    elif kt != 'char *':
+        # A non-scalar key (tuple, list, or other struct/pointer type
+        # — e.g. `{('a', 'b'): ...}`, real Python code found in the
+        # stdlib's own _compat_pickle.py) used to fall into the SAME
+        # mojo_str_from_int(kv) call above unconditionally: `kt !=
+        # 'char *'` is true for ANY non-string key, not just an int,
+        # so a tuple key's MojoList* pointer got passed to a
+        # function expecting int64_t — "makes integer from pointer
+        # without a cast", a hard GCC error, so the file never
+        # compiled at all. Use the general-purpose repr-based
+        # stringification instead: it already dispatches correctly
+        # per-type (MojoList*/MojoDict*/other struct/float), giving
+        # a value-based string distinct tuple/list contents won't
+        # collide on — close enough to Python's own structural
+        # hashing for this string-keyed runtime, and at least
+        # compiles and round-trips consistently. Deliberately NOT
+        # used for the plain int/bool case above: _repr_value's
+        # int path (mojo_repr_int) returns a shared static buffer,
+        # safe only because mojo_dict_set_str's callee immediately
+        # strdup()s it — mojo_str_from_int's own heap-allocated
+        # buffer is the already-proven-safe, unchanged behavior for
+        # by far the most common dict-key type.
+        kv = gen._repr_value(kt, kv)
+    if vt in gimple_ctypes._FLOAT_TYPES:
+        gen._emit(f"  mojo_dict_set_double ({t}, {kv}, {vv});")
+    elif vt == 'char *':
+        if vv.startswith('_slit_'):
+            vv_tmp = gen._new_val('char *', f"{vv}")
+            vv = vv_tmp
+        gen._emit(f"  mojo_dict_set_str ({t}, {kv}, {vv});")
+    else:
+        # _lower_BoolLiteral returns ctype 'int' (not '_Bool'), same
+        # as any other int — vt alone can't distinguish a real bool
+        # literal from a genuine int, so check the AST node itself.
+        if isinstance(val_expr, gimple_ctypes.BoolLiteral):
+            gen._emit(f"  mojo_mark_dict_bool_values ({t});")
+        vv64 = gen._to_int64(vt, vv)
+        gen._emit(f"  mojo_dict_set_int ({t}, {kv}, {vv64});")
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:

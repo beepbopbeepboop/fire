@@ -302,7 +302,15 @@ typedef struct {
                      * order; see mojo_dict_order_indices(). Real iteration
                      * (MojoDictIter, .keys()/.values()/.items()) is
                      * unaffected and still walks slots in hash order. */
+    int64_t  kind;  /* what `val` actually holds, needed by consumers that
+                     * must re-interpret the untagged slot (runtime dict-keyed
+                     * %-formatting): 0 = plain int64_t, 1 = double bit-cast,
+                     * 2 = char * pointer. Maintained by the typed setters
+                     * below; zero-defaulted everywhere else. */
 } _DictSlot;
+
+/* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
+ * never needs them — only runtime internals read/write kind today. */
 
 typedef struct {
     _DictSlot *slots;
@@ -359,6 +367,26 @@ int64_t     mojo_obj_getattr(void *obj, char *attr);
  * mojo_obj_getattr on a miss; also usable directly by any other runtime
  * helper that needs to raise the same typed exception. */
 void        mojo_raise_attribute_error(char *attr);
+/* Raises a real, catchable KeyError for `key` — same mechanism as
+ * mojo_raise_attribute_error above (typed via the class-name CRC32 tag),
+ * used by runtime dict-keyed %-formatting (mojo_str_format_dict) on a
+ * missing key, matching real Python's `"...%(k)s..." % {}` behavior. */
+void        mojo_raise_key_error(char *key);
+/* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
+ *
+ *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
+ *
+ * `fmt` may mix literal text, '%%', and %(key)[flags][width][.prec]conv
+ * specs; each spec's value is looked up in `vals` by key at RUNTIME and
+ * formatted per the spec, using the slot's kind tag to interpret its
+ * untagged int64 storage correctly (%s of an int value prints the decimal
+ * number like real Python's str()-conversion, %d of a double truncates,
+ * etc.). Missing keys raise a real catchable KeyError. Returns a heap
+ * string. The compile-time counterpart (_lower_percent_format) only ever
+ * fires when the template is a string LITERAL in the source; this covers
+ * the real-world remainder — templates read from data/parameters
+ * (`text % dict(prog=...)`, `readme % textvars`). */
+char       *mojo_str_format_dict(char *fmt, MojoDict *vals);
 void        mojo_unsupported_iter(const char *type_name);
 
 /* Real `hash(x)` builtin -- see mojo_runtime.c's docstring above their

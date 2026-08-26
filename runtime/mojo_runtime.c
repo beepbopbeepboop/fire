@@ -1455,7 +1455,7 @@ static void _dict_grow(MojoDict *d);
 /* seq >= 0 preserves an already-assigned insertion sequence number (used
  * only by _dict_grow's rehash, so a key's original insertion order survives
  * moving to a new, bigger slot array); seq < 0 assigns a fresh one. */
-static void _dict_set_raw_seq(MojoDict *d, char *key, int64_t val, int64_t seq)
+static void _dict_set_raw_seq_kind(MojoDict *d, char *key, int64_t val, int64_t seq, int64_t kind)
 {
     if (d->used * 2 >= d->cap) _dict_grow(d);
     _DictSlot *sl = _dict_find(d, key);
@@ -1466,11 +1466,19 @@ static void _dict_set_raw_seq(MojoDict *d, char *key, int64_t val, int64_t seq)
         d->used++;
     }
     sl->val = val;
+    sl->kind = kind;   /* a value re-set under an existing key replaces the
+                        * old value AND its type, like real Python's
+                        * dict.__setitem__ */
 }
 
-static void _dict_set_raw(MojoDict *d, char *key, int64_t val)
+static void _dict_set_raw_seq(MojoDict *d, char *key, int64_t val, int64_t seq)
 {
-    _dict_set_raw_seq(d, key, val, -1);
+    _dict_set_raw_seq_kind(d, key, val, seq, 0 /* int */);
+}
+
+static void _dict_set_raw(MojoDict *d, char *key, int64_t val, int64_t kind)
+{
+    _dict_set_raw_seq_kind(d, key, val, -1, kind);
 }
 
 static void _dict_grow(MojoDict *d)
@@ -1481,7 +1489,7 @@ static void _dict_grow(MojoDict *d)
     d->used  = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
     for (int64_t i = 0; i < old_cap; i++)
-        if (old[i].key) _dict_set_raw_seq(d, old[i].key, old[i].val, old[i].seq);
+        if (old[i].key) _dict_set_raw_seq_kind(d, old[i].key, old[i].val, old[i].seq, old[i].kind);
     for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
     free(old);
 }
@@ -1515,19 +1523,19 @@ int64_t *mojo_dict_order_indices(MojoDict *d)
 
 void mojo_dict_set_int(MojoDict *d, char *key, int64_t v)
 {
-    _dict_set_raw(d, key, v);
+    _dict_set_raw(d, key, v, 0);
 }
 
 void mojo_dict_set_double(MojoDict *d, char *key, double v)
 {
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
-    _dict_set_raw(d, key, bits);
+    _dict_set_raw(d, key, bits, 1);
 }
 
 void mojo_dict_set_str(MojoDict *d, char *key, char *v)
 {
-    _dict_set_raw(d, key, (int64_t)(uintptr_t)v);
+    _dict_set_raw(d, key, (int64_t)(uintptr_t)v, 2);
 }
 
 static _DictSlot *_dict_lookup(MojoDict *d, char *key)
@@ -1583,6 +1591,189 @@ void mojo_dict_print(MojoDict *d)
 }
 
 int64_t mojo_dict_len(MojoDict *d) { return d ? d->used : 0; }
+
+/* ── Runtime dict-keyed %-formatting ────────────────────────────────────*/
+/* A small growable output buffer for assembling the formatted result. */
+typedef struct { char *buf; size_t len, cap; } _FmtBuf;
+
+static void _fmtbuf_reserve(_FmtBuf *b, size_t extra)
+{
+    if (b->len + extra + 1 <= b->cap) return;
+    size_t nc = b->cap ? b->cap * 2 : 128;
+    while (nc < b->len + extra + 1) nc *= 2;
+    b->buf = realloc(b->buf, nc);
+    b->cap = nc;
+}
+
+static void _fmtbuf_putn(_FmtBuf *b, const char *s, size_t n)
+{
+    _fmtbuf_reserve(b, n);
+    memcpy(b->buf + b->len, s, n);
+    b->len += n;
+    b->buf[b->len] = '\0';
+}
+
+static void _fmtbuf_puts(_FmtBuf *b, const char *s) { _fmtbuf_putn(b, s, strlen(s)); }
+
+/* Materialize one %(key)... spec's value as display text for the s/r/a
+ * conversions (Python's str()/repr() coercion), honoring the slot's kind
+ * tag. Returns a pointer to a heap or static-ish string the caller must
+ * treat as short-lived: int values use mojo_str_from_int's own heap
+ * buffer (leaked, consistent with this runtime's no-free model); doubles
+ * are formatted into a caller-provided buffer; strings pass through. */
+static char *_fmt_dict_val_str(int64_t v, int64_t kind, char *dblbuf, size_t dblcap)
+{
+    if (kind == 2) return (char *)(uintptr_t)v;
+    if (kind == 1) {
+        double dv;
+        memcpy(&dv, &v, sizeof(dv));
+        snprintf(dblbuf, dblcap, "%.17g", dv);
+        /* Trim like Python str(float): %.17g of 3.5 is "3.5" already;
+         * nothing further needed for common values. */
+        return dblbuf;
+    }
+    return mojo_str_from_int(v);
+}
+
+char *mojo_str_format_dict(char *fmt, MojoDict *vals)
+{
+    if (!fmt) return NULL;
+    _FmtBuf out = {0};
+    const char *p = fmt;
+    while (*p) {
+        if (*p != '%') {
+            const char *start = p;
+            while (*p && *p != '%') p++;
+            _fmtbuf_putn(&out, start, (size_t)(p - start));
+            continue;
+        }
+        /* At a '%'. */
+        if (p[1] == '%') { _fmtbuf_putn(&out, "%", 1); p += 2; continue; }
+        /* Dict-keyed form: %(key)[flags][width][.prec]conv */
+        if (p[1] != '(') {
+            /* Not a keyed spec — a stray '%' in a dynamic template. Real
+             * Python would fail with "unsupported format character" /
+             * ValueError only when a conversion follows; a lone trailing
+             * '%' raises ValueError too. Copy verbatim and keep going:
+             * matches _lower_percent_format's established lenient
+             * degradation for templates that weren't really format
+             * strings, and never crashes. */
+            _fmtbuf_putn(&out, p, 1);
+            p++;
+            continue;
+        }
+        const char *key_start = p + 2;
+        const char *key_end = key_start;
+        while (*key_end && *key_end != ')') key_end++;
+        if (!*key_end) { /* unterminated %( — copy rest verbatim */
+            _fmtbuf_puts(&out, p);
+            break;
+        }
+        size_t keylen = (size_t)(key_end - key_start);
+        char key[256];
+        if (keylen >= sizeof(key)) keylen = sizeof(key) - 1;
+        memcpy(key, key_start, keylen);
+        key[keylen] = '\0';
+
+        /* Flags/width/precision run after the key. */
+        const char *s = key_end + 1;
+        char fwp[32];
+        size_t fwplen = 0;
+        while (*s && strchr("-+ #.0123456789", *s) && fwplen + 1 < sizeof(fwp)) {
+            fwp[fwplen++] = *s;
+            s++;
+        }
+        fwp[fwplen] = '\0';
+        char conv = *s;
+        if (conv) s++;
+
+        _DictSlot *sl = vals ? _dict_lookup(vals, key) : NULL;
+        if (!sl) {
+            free(out.buf);
+            mojo_raise_key_error(key);
+            return NULL;  /* unreached */
+        }
+        int64_t v = sl->val, kind = sl->kind;
+
+        if (conv == 's' || conv == 'r' || conv == 'a') {
+            char dblbuf[40];
+            char *sv = _fmt_dict_val_str(v, kind, dblbuf, sizeof dblbuf);
+            if ((conv == 'r' || conv == 'a') && kind == 2) {
+                /* repr() of a string value adds the quotes. */
+                char *q = mojo_repr_str(sv);
+                _fmtbuf_puts(&out, q);
+            } else {
+                /* Width/precision apply to the string too ("%10.3s"). */
+                char pspec[48];
+                snprintf(pspec, sizeof pspec, "%%%.*ss", (int)fwplen, fwp);
+                char piece[512];
+                snprintf(piece, sizeof piece, pspec, sv);
+                _fmtbuf_puts(&out, piece);
+            }
+            p = s;
+            continue;
+        }
+
+        /* Numeric / char conversions. */
+        char cconv[4];
+        int is_int_conv =
+            (conv == 'd' || conv == 'i' || conv == 'u' ||
+             conv == 'o' || conv == 'x' || conv == 'X');
+        int is_flt_conv =
+            (conv == 'e' || conv == 'E' || conv == 'f' || conv == 'F' ||
+             conv == 'g' || conv == 'G');
+        if (is_int_conv) {
+            long long iv;
+            if (kind == 2) goto lenient;      /* %d of a string: TypeError in Python */
+            if (kind == 1) {
+                double dv; memcpy(&dv, &v, sizeof dv);
+                iv = (long long)dv;           /* real Python truncates %d of float */
+            } else {
+                iv = (long long)v;
+            }
+            cconv[0] = 'l'; cconv[1] = 'l';
+            cconv[2] = (conv == 'i') ? 'd' : conv;   /* C has no %lli/%llu-as-i */
+            cconv[3] = '\0';
+            char pspec[48];
+            snprintf(pspec, sizeof pspec, "%%%.*s%s", (int)fwplen, fwp, cconv);
+            char piece[512];
+            snprintf(piece, sizeof piece, pspec, iv);
+            _fmtbuf_puts(&out, piece);
+        } else if (is_flt_conv) {
+            double dv;
+            if (kind == 2) goto lenient;      /* %f of a string: TypeError in Python */
+            if (kind == 1) memcpy(&dv, &v, sizeof dv);
+            else dv = (double)v;              /* ints widen, like real Python */
+            char pspec[48];
+            snprintf(pspec, sizeof pspec, "%%%.*s%c", (int)fwplen, fwp, conv);
+            char piece[512];
+            snprintf(piece, sizeof piece, pspec, dv);
+            _fmtbuf_puts(&out, piece);
+        } else if (conv == 'c') {
+            if (kind == 2) goto lenient;
+            long long cv;
+            if (kind == 1) { double tmp; memcpy(&tmp, &v, sizeof tmp); cv = (long long)tmp; }
+            else cv = (long long)v;
+            char piece[8];
+            snprintf(piece, sizeof piece, "%c", (int)cv);
+            _fmtbuf_puts(&out, piece);
+        } else {
+            goto lenient;
+        }
+        p = s;
+        continue;
+lenient:
+        /* Unsupported/invalid combination: copy the whole original spec
+         * text through unchanged (never crash, never silently misprint a
+         * wrong-typed value). Mirrors _lower_percent_format's own
+         * mismatched-arity degradation convention. */
+        _fmtbuf_putn(&out, p, (size_t)(s - p));
+        p = s;
+        continue;
+    }
+    if (!out.buf) return strdup("");
+    return out.buf;
+}
 
 /* ── MojoDictIter ─────────────────────────────────────────────────────────*/
 
@@ -2654,6 +2845,23 @@ void mojo_raise_attribute_error(char *attr) {
     mojo_raise();
 }
 
+/* Real `KeyError: 'k'` — same typed-exception mechanism as
+ * mojo_raise_attribute_error just above (the tag is `(zlib.crc32(b"KeyError")
+ * & 0x7fffffff) or 1`, computed once in Python and hardcoded here for the
+ * same documented stability reason). Raised by mojo_str_format_dict on a
+ * missing key, matching real Python's dict-keyed %-formatting. */
+#define _MOJO_EXC_TAG_KEYERROR 1044929265
+
+void mojo_raise_key_error(char *key) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "KeyError: %s", key ? key : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_KEYERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
 /* Reads a dynamically-set attribute from `obj`'s own per-object dict (see
  * above). No matching struct-field tag AND no dynamic attribute of this
  * name ever set on this exact object -> a real AttributeError, matching
@@ -2908,7 +3116,7 @@ int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
     d->used = 0;
     for (int64_t i = 0; i < old_cap; i++) {
         if (old[i].key && strcmp(old[i].key, key) != 0)
-            _dict_set_raw_seq(d, old[i].key, old[i].val, old[i].seq);
+            _dict_set_raw_seq_kind(d, old[i].key, old[i].val, old[i].seq, old[i].kind);
     }
     for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
     free(old);
