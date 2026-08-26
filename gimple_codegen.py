@@ -3238,8 +3238,9 @@ class GimpleGen:
         return ginf._char_to_cstr(self, typ, val)
     def _resolve_type(self, ann: str | None) -> str:
         return ginf._resolve_type(self, ann)
-    def _infer_param_types(self, func: FunctionDef) -> dict[str, str]:
-        return ginf._infer_param_types(self, func)
+    def _infer_param_types(self, func: FunctionDef,
+                           owner_struct: str | None = None) -> dict[str, str]:
+        return ginf._infer_param_types(self, func, owner_struct)
     def _declare_var(self, name: str, ctype: str, elem: str | None=None, force: bool=False):
         return ginf._declare_var(self, name, ctype, elem, force)
     def _write_dest(self, name: str) -> str:
