@@ -1229,6 +1229,13 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.IdentExpr):
         if node.name in gen.var_types:
             return gen.var_types[node.name]
+        if node.name == '__file__':
+            # Mirrors _lower_IdentExpr's own '__file__' case, which always
+            # yields a char* interned literal ("<bootstrap>") — without
+            # this, the estimator guessed int64_t and mis-typed consumers
+            # that consult it BEFORE lowering (e.g.
+            # _lower_opaque_ctor's single-char*-arg identity passthrough).
+            return 'char *'
         # A nested-function (closure) name referenced as a VALUE
         # (`return add`, `var f = add`, `foo(add)`) — a capturing
         # closure bundles its env with the lifted function pointer as a
@@ -1362,6 +1369,20 @@ def _quick_type(gen, node) -> str:
         # types to the same opaque MojoGenerator* a local definition would.
         if fname in getattr(gen, '_imported_generator_bindings', ()):
             return 'MojoGenerator *'
+        # Single-char*-argument OPAQUE-constructor passthrough (`Path(x)`
+        # where `Path` is an imported class this compile never inlined):
+        # _lower_opaque_ctor returns its single string argument UNCHANGED
+        # for this exact shape (the strings-as-path-values convention `/`
+        # on a char* receiver already relies on), so the estimator must
+        # mirror that or every consumer of this pre-pass (global/local
+        # variable typing, return-type inference) mis-declares the result
+        # int64_t against a body that produces a real char*.
+        if (fname[:1].isupper() and fname not in gen.func_return_types
+                and fname not in gen.imported_symbols
+                and not gen._locally_binds_name(fname)
+                and len(node.args) == 1 and not getattr(node, 'kwargs', None)
+                and gen._quick_type(node.args[0]) == 'char *'):
+            return 'char *'
         return gen.func_return_types.get(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):
         # .read()/.readline()/.readlines() on ANY receiver shape (not just
@@ -1373,6 +1394,14 @@ def _quick_type(gen, node) -> str:
             return 'char *'
         if node.func.member == 'readlines':
             return 'MojoList *'
+        # `Path(x).resolve()` (no-arg) on a path-shaped char* receiver —
+        # real char* result (POSIX realpath via int64_t_realpath, see
+        # _lower_str_method's 'resolve' case); quick-type mirrors it so
+        # chained shapes like `Path(f).resolve().parent` type the whole
+        # chain correctly.
+        if (node.func.member == 'resolve' and not node.args
+                and gen._quick_type(node.func.obj) == 'char *'):
+            return 'char *'
         # Module method calls: re.sub → char *, str.join → char *, etc.
         if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             mod: str
@@ -1532,6 +1561,11 @@ def _quick_type(gen, node) -> str:
             mangled = gen._struct_method_csym(sn, node.member, overload_id)
             return gen.func_return_types.get(
                 mangled, gen.func_return_types.get(f"{sn}_{node.member}", 'int64_t'))
+        # pathlib.Path attribute reads on a path-shaped char* value —
+        # `.name` is basename and `.parent` is dirname, both real char*
+        # results (see _lower_MemberExpr's matching char*-receiver case).
+        if ot == 'char *' and node.member in ('name', 'parent'):
+            return 'char *'
         return 'int64_t'
     if isinstance(node, gimple_ctypes.ListExpr):  return 'MojoList *'
     if isinstance(node, gimple_ctypes.DictExpr):  return 'MojoDict *'

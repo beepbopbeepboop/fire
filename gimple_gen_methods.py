@@ -2415,6 +2415,18 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
     # symlink-rewriting helper) hit the generic 'int' stub, producing a
     # hard "invalid operands to binary / (have 'char *' and 'int')"
     # compile error instead of just an honestly-approximate stub value.
+    if method == 'resolve':
+        # pathlib.Path.resolve() (strict=False) on a path-shaped char*
+        # value — real runtime support via POSIX realpath(3), mirroring
+        # the os.path helper family this table already dispatches to
+        # (int64_t_basename/int_dirname/...). Python's strict=False
+        # convention (unresolvable tail returned as-is, never raised) is
+        # implemented inside int64_t_realpath itself. Without this,
+        # `Path(x).resolve()` fell to the scalar-stub passthrough (the
+        # receiver typed int64_t), which silently kept a RELATIVE path
+        # where real Python returns an absolute one.
+        return 'char *', gen._call_expr('char *', 'int64_t_realpath',
+                                        [('char *', cstr_ov)])
     if method in ('encode', 'decode', 'format', 'readlink'):
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub
