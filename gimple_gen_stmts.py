@@ -2218,7 +2218,22 @@ def _gen_stmt_ExprStmt(gen, node):
             # bundled env/receiver instead of being silently dropped.
             gen._lower_bound_method_call(raw_name, node.value, _var_ctype)
             return
-        if _var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
+        # Statement-level twin of _lower_call's own membership half of
+        # the fnptr guard (`fname_raw in gen.var_types`): ANY name that
+        # is a local VARIABLE here — not just one whose declared type is
+        # already one of the four scalar boxes — must be called through
+        # mojo_fnptr_call_N, never as a bare C function named after the
+        # variable. Real: Tools/wasm/wasi/__main__.py's build_steps —
+        # `for step in steps: step(context)` where the generic for-iter
+        # arm declared the loop var `char *` (its dict-key convention),
+        # so only the ctype-list check was consulted, missed, and the
+        # call fell through to a literal `step (context);` C call on a
+        # char* ("invalid call to non-function before ';' token"). In
+        # any VALID Python a locally-bound name called as a function IS
+        # a callable value, so the indirection is semantics-preserving;
+        # see _lower_call's own comment for why a misleading
+        # first-decl-wins `char *` decl can't disqualify it.
+        if _var_ctype in ('int', 'int64_t', 'void *', '_Bool') or raw_name in gen.var_types:
             gen._lower_fnptr_call(raw_name, _var_ctype, node.value)
             return
         # Same guard as _lower_CallExpr: don't redirect an *imported*
