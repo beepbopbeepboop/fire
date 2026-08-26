@@ -1178,6 +1178,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `cls` placeholder in its receiver slot, so the raw int64_t pair is
     # what must be passed for it (see the branch's own comment).
     _recv_ot_raw, _recv_ov_raw = ot, ov
+    # A receiver that lowers to a DEFERRED, uncalled bound-method value
+    # (`self.name.rfind('.')` where `name` is a bare @property read —
+    # pathlib/__init__.py's `PurePath.stem`) must be AUTO-INVOKED before
+    # method dispatch: real Python evaluates `self.name` to its value,
+    # then calls `.rfind(...)` on THAT. Left alone, the call fell through
+    # to the generic unknown-receiver fallback which mangled
+    # `{ot}_{method}` into a never-defined extern symbol
+    # (`MojoBoundMethod_rfind`) — an undefined-symbol LINK failure.
+    # Mirrors this file's own `_auto_invoke_bound_method_value`, already
+    # used by the subscript/binary-operand/chained-member consumer paths
+    # for the identical deferred-value shape; a stored local
+    # (`f = self.b; f()`) is unaffected — it calls through the var path
+    # (_lower_bound_method_call), never reaching this MemberExpr branch.
+    if ot == 'MojoBoundMethod *':
+        ot, ov = _auto_invoke_bound_method_value(gen, ov)
     method = func.member
 
     # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct

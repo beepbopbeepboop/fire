@@ -2,7 +2,85 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py`
 
-## Status (updated 2026-08-25, worktree fix/rest-remainder12 — this file's OWN generator/coroutine stage now compiles clean end-to-end; the file still fails to `mojo.py build` overall, but ONLY due to unrelated transitive-dependency modules)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — RESOLVED at the
+## compile/link level: `python3 mojo.py build` now EXITS 0 and produces a binary;
+## remaining residual is a RUNTIME module-API gap, not a compile gap)
+
+Re-verified fresh this session, per the task mandate not to trust stale
+status text. The 2026-08-25 entry's claim ("own generator/coroutine TU
+compiles clean") was WRONG in an important way: that pass only checked
+that `compile_to_gimple_with_cpp(do_imports=False)` returned without a
+Python exception — it never ran g++ over the generated `.cpp`. A fresh
+`g++ -std=c++20 -fsyntax-only` on the ACTUAL build-path artifact
+(`client_async.cpp`) still failed with the four residuals the
+2026-08-24 entry had documented (all believed gone).
+
+Root-caused and FIXED all of them in the shared coroutine-body emitter /
+ordinary path this session (commit series on fix/opencode-group4):
+
+1. **`len(self.anchor)` → invalid `(int64_t)(std::function<int64_t()>)`
+   cast** (`_filter_trailing_slash`): `_cpp_expr`'s MemberExpr case now
+   distinguishes @property getters (new `_struct_property_names`
+   registry, populated alongside `_struct_method_names`) from ordinary
+   methods. A property read auto-INVOKEs — emitting the direct
+   `{sym}(self)` call real Python semantics require — instead of the
+   bound-method-as-callable wrapper; `_cpp_is_callable_value_expr`
+   excludes properties to stay in sync, and `len()`'s builtin branch
+   plus `_cpp_expr_static_ctype` (new self-property case) route a
+   known char*-valued property read to mojo_strlen.
+2. **`self.parser.sep` → "request for member 'sep' in non-class type
+   int"**: two-level `self.<field>.<member>` chains where the field's
+   registered ctype is a scalar (an opaque module-object handle,
+   `parser = os.path`) are stubbed to diagnosed `0` via the emitter's
+   existing opaque-scalar-read convention, mirroring the ordinary
+   path's dynamic-getattr fallback for the same shape.
+3. **`for path_str, dirnames, filenames in results:` conflicting
+   declaration** (`Path.walk`): the indexed-loop fallback declared the
+   whole comma-joined target as one C++ declarator list
+   (`int64_t path_str, dirnames, filenames;`) while walk's body had
+   already hoisted `char * path_str` from its `[2:]` slice use — and
+   the "unpack" was the comma-expression no-op `a, b, c =
+   mojo_list_get_int(...)`. Tuple targets now unpack per-slot through
+   a cached boxed sub-list pointer (`mojo_mark_as_tuple` convention),
+   declaring only names not already declared, reading each slot
+   through the accessor matching its declared type.
+4. **`path_str[-1] == sep` / slice-assign type mismatches**: loop
+   targets whose iterable's element type is unknown are now typed
+   `char *` up front when the loop BODY provides string evidence
+   (subscript/slice/str-method uses of the target — new
+   `_cpp_body_str_evidence` scan), so every later use agrees with the
+   single C++ declaration; mixed pointer/scalar comparisons get a
+   cast-to-char* guard in BOTH CompareChain and BinaryOp lowering;
+   and struct-method calls now cast each argument to its positional
+   parameter's registered ctype (`_cpp_pad_struct_method_call_args`),
+   fixing `Path__from_parsed_string(self, path_str)` char*-into-
+   int64_t.
+5. **(Ordinary-path fix, needed for LINK) `PurePath.stem` et al.:
+   undefined symbol `_MojoBoundMethod_rfind`**: a method CALL on a
+   deferred bound-method receiver (`name.rfind('.')` where `name =
+   self.name` is an uncalled property read) fell through to the
+   generic unknown-receiver fallback which mangled `{ot}_{method}`
+   into a never-defined extern — a link failure, not a compile error.
+   `_lower_method_call` now auto-invokes a MojoBoundMethod* receiver
+   first (same mechanism the subscript/binary/chained-member paths
+   already used), then dispatches the method on the getter's result.
+
+Verified end-to-end: fresh `python3 mojo.py build .../Lib/pathlib/
+__init__.py` **exits 0** ("Built: __init__", 0 gcc/g++ errors in the
+whole log) where every prior session failed. Full mandatory gate after
+the compiler changes: `test_gimple.py` 256/256, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+EXIT=0 with **0 skip lines**.
+
+Honest runtime residual (NOT a compile gap): running the produced
+binary raises `AttributeError: PathLike` during pathlib's own top-level
+initialization — `os.PathLike.register(PurePath)` (source line 598)
+needs a real module-attribute object model (os.PathLike is an ABC on
+the un-stubbed `os` module). That is module-API/ABC runtime support, a
+separate feature-sized area this compile-fail doc never tracked; this
+doc's blocker (the file does not COMPILE/BUILD) is resolved.
+
+## Status (updated 2026-08-25, worktree fix/rest-remainder12 — superseded above)
 
 Re-ran an isolated `compile_to_gimple_with_cpp(do_imports=False)`
 check fresh (this session's 4 coroutine-emitter fixes landed for
