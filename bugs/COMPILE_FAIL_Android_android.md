@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — DOCUMENTED-NOT-FIXED, unchanged)
+
+Fresh safety-wrapped `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
+against this worktree (fast-forwarded to master `e60b9cd`, the current
+integration tip). Byte-for-byte identical refusal to every prior pass:
+the same 10 `async def` functions + `async_process` async generator,
+refused for the same reason (`await` targets outside
+`_async_quick_eligible`'s whitelist: `create_subprocess_exec(...)`,
+`process.communicate()`/`.wait()`, `stream.readexactly(...)`, a local
+`wait_for` helper). Real async-subprocess/stream I/O composition
+remains feature-sized; per this session's mandate (do not attempt the
+tracked async-codegen feature project), not attempted. No change.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — DOCUMENTED-NOT-FIXED, unchanged)
 
 Fresh safety-wrapped `python3 mojo.py build .../Android/android.py`

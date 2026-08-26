@@ -4,6 +4,20 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — unchanged, only root cause 1 remains)
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Mac/
+BuildScript/build-installer.py` against this worktree (fast-forwarded
+to master `e60b9cd`, which already includes the `e1e12bb` dict-format
+fix below): exit 1, exactly one `error:` line remaining —
+`704:17: invalid operands to binary + (have 'char *' and 'MojoList *')`
+— root cause 2 (dict-keyed `%`-format) stays fixed, confirmed gone.
+Root cause 1 (Phase 1.7 global prescan blind to cross-function `global`
+reassignment) is unchanged and remains explicitly high-risk shared
+machinery per the analysis below; per this session's mandate (do not
+attempt broad, high-risk changes to shared lowering machinery), not
+attempted. Doc stays open on root cause 1 alone.
+
 ## Status (updated 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — ROOT CAUSE 2 FIXED in shared source; only the excluded high-risk root cause 1 remains)
 
 Fresh safety-wrapped `mojo.py build`: of the three long-standing

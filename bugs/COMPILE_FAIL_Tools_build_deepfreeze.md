@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): build still exits 0, 0 error lines, both open items unchanged
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/build/
+deepfreeze.py` against this worktree (fast-forwarded to master
+`e60b9cd`): `Built: .../deepfreeze`, exit 0, 0 `error:` lines —
+byte-identical outcome to the entry directly below. Both open items
+(link-mode sibling-import degradation; argparse-runtime
+`AttributeError: verbose` from a Namespace default never actually
+populated, root-caused as argparse never being compiled into the
+binary at all) are unchanged and remain outside this compile-fail
+doc's scope (runtime-fidelity/import-resolution features, not a
+narrow compile bug). Not attempted; no code change.
+
 ## Status (re-verified + root cause CORRECTED, 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — build still exits 0; the "argparse runtime AttributeError" blocker re-root-caused: argparse is never compiled into the binary at all, in EITHER mode)
 
 Fresh `mojo.py build` (safety-wrapped): still exits 0 with 0 own-file
