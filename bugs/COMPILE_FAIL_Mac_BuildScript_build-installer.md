@@ -4,6 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical errors, both root causes unchanged
+
+Fresh safety-wrapped `mojo.py build`: rc=1 with exactly the same
+three diagnostics (`704:17` char*+MojoList*; `1447:17`/`1456:17`
+int64_t % MojoDict*) and zero new own-file errors. Root cause 1
+(Phase-1.7 global prescan blind to cross-function `global`
+reassignment) remains explicitly high-risk shared machinery per the
+analysis below — untouched. Root cause 2 (dict-keyed runtime
+%-formatting needs a new C runtime primitive) remains a feature
+project — untouched. No code change; doc stays open.
+
 ## Status (2026-08-25, worktree fix/rest-remainder12): re-verified — STILL-OPEN, byte-identical errors.
 
 Re-ran `python3 mojo.py build .../Mac/BuildScript/build-installer.py`

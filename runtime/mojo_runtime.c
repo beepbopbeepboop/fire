@@ -383,6 +383,23 @@ int mojo_is_registered_list(int64_t addr) {
     return mojo_set_contains_int(_mojo_list_registry, addr);
 }
 
+/* Runtime str-vs-container discriminator for an AMBIGUOUSLY-typed (boxed
+ * int64_t) value — the `isinstance(x, str)` counterpart of
+ * mojo_is_registered_list above, sharing its registry so the two verdicts
+ * are mutually consistent by construction. In this compiler's scalar body
+ * model a char* string and a MojoList* container are BOTH pointer-shaped
+ * int64_t values with no header/tag on the string side, so a polymorphic
+ * parameter (e.g. fsutil.py's iter_files `root`, which is a str at the
+ * recursive call and a list of strs at the top call) cannot be resolved
+ * statically. The model's own established convention (mojo_str()'s
+ * "high address ⇒ string", and _mojo_repr_list's registered-list probe)
+ * already discriminates these two shapes everywhere else at runtime:
+ * pointer-shaped AND NOT a live registered MojoList ⇒ treat as string.
+ * Small values (<65536: None/small ints/bools) are not strings. */
+int mojo_boxed_is_str(int64_t v) {
+    return v > 65536 && !mojo_is_registered_list(v);
+}
+
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
  * (see _lower_tuple_literal in gimple_codegen.py) — there is no runtime
  * distinction between the two, so generic repr() always printed a tuple's

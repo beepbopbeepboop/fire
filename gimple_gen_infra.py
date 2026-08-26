@@ -1430,11 +1430,32 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                         if isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == param_name:
                             function_calls.append((func_name, i))
                 elif isinstance(expr.func, gimple_ctypes.MemberExpr):
+                    # Method-call evidence is recognized through a SLICE or
+                    # SUBSCRIPT of the param too (`s[:-1].split(",")`,
+                    # ftplib.py's mlsd): Python str methods return strs, so
+                    # calling one on any slice/subscript chain rooted at the
+                    # param proves the root is a string exactly as strongly
+                    # as a direct call — previously only the DIRECT
+                    # `param.method(...)` shape was recognized, so a param
+                    # whose only string evidence was indirect fell through
+                    # to the subscript/slice default below and got inferred
+                    # MojoList*.
+                    _meth_recv = expr.func.obj
+                    while isinstance(_meth_recv, (gimple_ctypes.SubscriptExpr,
+                                                  gimple_ctypes.SliceExpr)):
+                        _meth_recv = _meth_recv.obj
                     # param.<str-only-method>(...) — see STRING_ONLY_METHODS
                     # comment above: unambiguous evidence param is a string,
                     # even if it's also subscripted elsewhere.
                     if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
                             and expr.func.obj.name == param_name
+                            and expr.func.member in STRING_ONLY_METHODS):
+                        is_string_method = True
+                    # <slice/subscript-of-param>.<str-only-method>(...) —
+                    # the indirect twin just above.
+                    if (_meth_recv is not expr.func.obj
+                            and isinstance(_meth_recv, gimple_ctypes.IdentExpr)
+                            and _meth_recv.name == param_name
                             and expr.func.member in STRING_ONLY_METHODS):
                         is_string_method = True
                     # param.<dict-only-method>(...) — same unambiguous

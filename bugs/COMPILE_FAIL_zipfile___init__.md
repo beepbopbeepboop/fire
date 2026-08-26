@@ -1,5 +1,21 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (re-verified 2026-08-25, wtOpencode_group3): memoryview refusal confirmed as the first blocker, unchanged
+
+Fresh isolated generation (`compile_to_gimple_with_cpp` on the file
+alone) reproduces the documented up-front refusal byte-for-byte:
+`split: a call to unresolved callee 'memoryview(...)' is not supported
+in a compiled generator/coroutine body`. A full safety-wrapped
+`mojo.py build` was also attempted but got watcher-killed at the 300s
+wall-clock cap during transitive-import processing (machine heavily
+contended by concurrent agents' builds this session; zero zipfile-
+attributed gcc errors in the partial log before the kill — consistent,
+not a new data point). The doc's classification stands: memoryview
+needs a real {ptr,len} view type across both code paths (feature-sized;
+NUL-termination hazard noted below still applies); `pwd=None` stays on
+the excluded unannotated-init-param family; genexp-held-in-local stays
+feature-sized. No code change.
+
 ## Status (updated 2026-08-25, wtOpencode_zipfile / fix/opencode-zipfile -- TWO of the four groups FIXED, error set shifted again)
 
 Re-ran fresh. The error set has SHIFTED again since the 2026-08-24

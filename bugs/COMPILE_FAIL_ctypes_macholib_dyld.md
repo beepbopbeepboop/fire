@@ -2,6 +2,18 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`
 
+## Status (re-verified 2026-08-25, wtOpencode_group3): unchanged — dyld.py's own compile unit still contributes ZERO errors
+
+Fresh safety-wrapped `mojo.py build`: rc=1 with **183 total `error:`
+lines, ZERO matching `macholib/dyld.py`** — the file's own compile
+unit remains clean (this session's shared fixes — coroutine-body
+isinstance semantics, str split-family, statement-level fnptr-call
+guard, generator-body isinstance runtime discrimination — are all in
+areas dyld.py already compiled clean). All remaining errors are the
+same transitively-imported modules' own documented failure classes.
+Doc kept open per convention; nothing further to do against THIS
+doc's scope.
+
 ## Status (re-verified 2026-08-25): unchanged; dyld.py's own compile unit still clean
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

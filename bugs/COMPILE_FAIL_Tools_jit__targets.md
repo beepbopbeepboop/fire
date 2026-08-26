@@ -4,6 +4,18 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical refusal, unchanged
+
+Fresh safety-wrapped `mojo.py build`: identical up-front refusal of
+exactly `_build_stencils`/`_compile`/`_parse`, pinned to the same
+trigger — `` `with` inside an async function body is only supported
+for a recognized no-op guard type (['BlockingScopedLock', 'Trace']),
+not CallExpr `` (the `tempfile.TemporaryDirectory()` guard). The
+assessment below stands: real support needs mkdtemp/rmtree-backed
+runtime plumbing plus a path-value representation (a new value
+category), and further downstream gaps in the same three methods would
+remain regardless. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against `fix/rest-remainder9`: byte-identical refusal to

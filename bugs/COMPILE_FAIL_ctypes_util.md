@@ -2,6 +2,17 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
+## Status (re-verified 2026-08-25, wtOpencode_group3): consistent with the entry below — no util.py-attributed errors; full build again exceeded this session's watcher budget
+
+Fresh safety-wrapped `mojo.py build` attempt: watcher-killed at the
+300s cap during transitive-import processing (machine contended by
+concurrent agents' builds), but `grep 'ctypes/util.py:.*error:'` over
+the partial log is **0** throughout — same picture as the 2026-08-25
+entry below. Gaps #2/#3 (from-import binding of module-level VALUES;
+`LibraryLoader`'s dynamic attribute surface) remain genuinely unfixed,
+unattempted, and are only reachable once the other modules' unrelated
+errors stop masking them. No code change. Doc kept open.
+
 ## Status (re-verified 2026-08-25): unchanged; gap #1's fix still holds, still no `ctypes/util.py`-specific errors
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

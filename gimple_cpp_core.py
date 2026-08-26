@@ -394,6 +394,24 @@ def _cpp_receiver_ctype(gen, e):
     declared = getattr(gen, '_cpp_declared', None)
     if isinstance(e, gimple_ctypes.IdentExpr):
         return declared.get(e.name) if declared is not None else None
+    if isinstance(e, (gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
+        # `<char*-typed root>[...]` / `[a:b]` — a string subscript/slice is
+        # itself a char* (`mojo_cstr_slice`), so a method call chained off
+        # it (`facts_found[:-1].split(";")`, ftplib.py's mlsd) dispatches
+        # through the char* method family. Gated on the ROOT being a
+        # known-char* local/field (or an untracked root, where Python
+        # semantics of the chained str-method already imply a string) — a
+        # container element subscript keeps whatever type its own lookup
+        # rules give, never guessed char* here.
+        _root = e.obj
+        _root_ct = None
+        if isinstance(_root, gimple_ctypes.IdentExpr) and declared is not None:
+            _root_ct = declared.get(_root.name)
+        elif isinstance(_root, gimple_ctypes.MemberExpr):
+            _root_ct = _cpp_receiver_ctype(gen, _root)
+        if _root_ct in ('char *', 'int64_t', None):
+            return 'char *'
+        return None
     if isinstance(e, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         if (_self_struct and isinstance(e.obj, gimple_ctypes.IdentExpr)
@@ -1978,6 +1996,35 @@ def _cpp_expr(gen, e) -> str:
                     _a0 = gen._cpp_expr(e.args[0])
                 return (f"(char *)mojo_str_join((char *)({_obj_expr}), "
                         f"(MojoList *)({_a0}))")
+            # `<char*-typed obj>.split([sep])` / `.rsplit([sep])` /
+            # `.splitlines()` — the split family, the same
+            # receiver-ctype-gated mechanism as every string method above,
+            # routed through the SAME `mojo_str_split`/`mojo_str_rsplit`/
+            # `mojo_str_splitlines` runtime helpers the ordinary GIMPLE
+            # path's char*-method dispatch already uses (reused, not
+            # reinvented; mojo_str_split's NULL-sep form IS Python's
+            # whitespace `s.split()`, and mojo_str_rsplit's negative
+            # maxsplit is unlimited — exactly Python's one-arg default).
+            # Returns a real MojoList* of strings, consumable as a
+            # for-loop iterable (the `_cpp_for_stmt` list-iterable branch
+            # recognizes this call shape) or any other list context.
+            # Real: ftplib.py's mlsd (`facts_found[:-1].split(";")` iterated
+            # directly by a for loop — before this, the generic
+            # `{obj}.{member}(...)` fallback emitted invalid C++ member-call
+            # syntax on a raw char*).
+            if (_str_obj_ctype == 'char *'
+                    and e.func.member in ('split', 'rsplit', 'splitlines')
+                    and len(e.args) <= 1):
+                _obj_expr = gen._cpp_expr(e.func.obj)
+                _sep_e = gen._cpp_expr(e.args[0]) if e.args else '0'
+                if e.func.member == 'splitlines':
+                    return (f"(MojoList *)mojo_str_splitlines"
+                            f"((char *)({_obj_expr}))")
+                if e.func.member == 'split':
+                    return (f"(MojoList *)mojo_str_split((char *)({_obj_expr}), "
+                            f"(char *)({_sep_e}))")
+                return (f"(MojoList *)mojo_str_rsplit((char *)({_obj_expr}), "
+                        f"(char *)({_sep_e}), (int64_t)(-1))")
             # `<dict-typed obj>.get(key)` / `.get(key, default)` — a real
             # dict method call on a local/self-field this narrow body
             # model already knows is `MojoDict *`, which (like `.replace`
@@ -2261,11 +2308,115 @@ def _cpp_expr(gen, e) -> str:
                     return f"mojo_range({args[0]}, {args[1]})"
                 if len(e.args) == 3:
                     return f"mojo_range3({args[0]}, {args[1]}, {args[2]})"
-            if fname == 'isinstance' and len(e.args) == 2:
-                # isinstance(x, T): emit the C++ type-id comparison the
-                # GIMPLE path uses (type ids are the boxed __mojo_type_id
-                # of a struct pointer or a literal 0/1/2... tag).
-                return f"(({args[0]}) != 0)"
+            if (fname == 'isinstance' and len(e.args) == 2
+                    and not gen._locally_binds_name('isinstance')):
+                # isinstance(x, T) — real semantics, mirroring the plain
+                # GIMPLE path's `_isinstance_one_type` (gimple_gen_calls.py):
+                # a STATICALLY-known operand type resolves the verdict at
+                # compile time (a char* IS str, a MojoList* IS list, ...);
+                # a user-defined struct type arg compares the operand's
+                # leading __mojo_type_id tag; only an AMBIGUOUS boxed
+                # int64_t operand falls to runtime discrimination. The old
+                # lowering here was `(x != 0)` — plain truthiness posing as
+                # a type test, which silently inverted every
+                # `if not isinstance(root, str):`-style polymorphic guard
+                # whenever the value happened to be non-null (real bug:
+                # the recursive-yield-from iter_files repro took the base
+                # case for a list argument and yielded the raw MojoList*
+                # pointer as an int; see bugs/hard/
+                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
+                _tnames = None
+                if isinstance(e.args[1], gimple_ctypes.IdentExpr):
+                    _tnames = [e.args[1].name]
+                elif isinstance(e.args[1], gimple_ctypes.TupleExpr):
+                    _tnames = [t.name for t in e.args[1].elements
+                               if isinstance(t, gimple_ctypes.IdentExpr)]
+                if _tnames is None:
+                    # Complex/dynamic type arg: same honest stub as the
+                    # plain path's `_lower_builtin_isinstance` fallback.
+                    return '0'
+                _obj = e.args[0]
+                _obj_e = gen._cpp_expr(_obj)
+                _obj_ct = _cpp_expr_static_ctype(gen, _obj)
+                # Each check is formatted from the operand expression text;
+                # when several alternatives must share ONE evaluation of a
+                # non-trivial operand, the whole OR-chain re-formats against
+                # a cached local instead (IIFE, same convention this emitter
+                # already uses for cached call results).
+                def _mk(fmt):
+                    return fmt.format(v=_obj_e)
+                _SCALAR_TYPE_MATCH = {
+                    'str':   ('char *', 'MojoStr *'),
+                    'int':   ('int', 'int64_t', 'uint64_t', 'int8_t',
+                              'int16_t', 'int32_t', 'uint8_t', 'uint16_t',
+                              'uint32_t', 'long', 'short', 'size_t', '_Bool'),
+                    'float': ('double', 'float', '__fp16'),
+                    'bool':  ('_Bool',),
+                    'list':  ('MojoList *',),
+                    'dict':  ('MojoDict *',),
+                    'set':   ('MojoSet *',),
+                }
+                _fmts = []
+                for _tn in _tnames:
+                    if _tn == 'type':
+                        _fmts.append(None)  # constant-false alternative
+                        continue
+                    if _tn in gen.struct_field_types:
+                        # User struct: compare the runtime tag (same
+                        # deterministic hash both sides agree on).
+                        _tid = gimple_exprtypes._struct_type_id(_tn)
+                        _fmts.append(
+                            "(mojo_read_type_tag((int64_t)({v})) "
+                            "== (int64_t)%d)" % (_tid,))
+                        continue
+                    if _tn not in _SCALAR_TYPE_MATCH:
+                        # Unknown type name: plain-path parity (its
+                        # mojo_isinstance runtime stub always says false).
+                        _fmts.append(None)
+                        continue
+                    if _obj_ct in _SCALAR_TYPE_MATCH[_tn]:
+                        if _obj_ct.endswith(' *'):
+                            # Pointer-shaped static match still must not
+                            # call NULL (None) an instance.
+                            _fmts.append("(({v}) != 0)")
+                        else:
+                            _fmts.append('1')
+                    elif (_obj_ct is not None
+                          and _obj_ct not in ('int64_t', 'void *')):
+                        _fmts.append('0')
+                    elif _obj_ct in ('char *', 'MojoStr *', 'MojoList *'):
+                        # Static pointer ctype that does NOT match the
+                        # requested builtin: definitively not it.
+                        _fmts.append('0')
+                    else:
+                        # Ambiguous box (declared int64_t / untracked):
+                        # runtime discrimination. list → exactly the live
+                        # registered MojoList* set; str → this model's own
+                        # pointer-shaped-not-a-container convention (the
+                        # SAME verdicts repr() dispatch already uses via
+                        # mojo_is_registered_list / mojo_str). Other
+                        # builtins have no runtime marker on a bare box —
+                        # honest always-false, matching the plain path's
+                        # mojo_isinstance stub rather than guessing.
+                        if _tn == 'list':
+                            _fmts.append("mojo_is_registered_list((int64_t)({v}))")
+                        elif _tn == 'str':
+                            _fmts.append("mojo_boxed_is_str((int64_t)({v}))")
+                        else:
+                            _fmts.append('0')
+                _cache_iife = (len(_fmts) > 1
+                               and any(f is not None and '{v}' in f for f in _fmts)
+                               and not isinstance(_obj, (gimple_ctypes.IdentExpr,
+                                                         gimple_ctypes.StringLiteral)))
+                if _cache_iife:
+                    _vname = gen._cpp_fresh_name("_mg_isi")
+                    _parts = [(f if f is not None else '0').format(v=_vname)
+                              for f in _fmts]
+                    return (f"[&]() {{ const int64_t {_vname} = "
+                            f"(int64_t)({_obj_e}); return "
+                            f"({' || '.join(_parts)}); }}()")
+                return '(' + ' || '.join(_mk(f) if f is not None else '0'
+                                         for f in _fmts) + ')'
             if fname == 'enumerate' and not gen._locally_binds_name('enumerate'):
                 # enumerate(iterable) → pair each element with its index.
                 # Emit the underlying iterable; the consumer's loop
@@ -5009,6 +5160,24 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if gen.func_return_types.get(_callee) == 'MojoList *':
                     _iter_list_expr = f"(MojoList *)({gen._cpp_expr(s.iterable)})"
                     _iter_elem = gen._return_elem_types.get(_callee)
+            elif (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                    and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
+                    and s.iterable.func.member in ('split', 'rsplit', 'splitlines')
+                    and len(s.iterable.args) <= 1
+                    and _cpp_receiver_ctype(gen, s.iterable.func.obj) == 'char *'):
+                # `for fact in <char*-expr>.split(sep):` — a str.split-family
+                # call used DIRECTLY as the loop iterable. `_cpp_expr`'s own
+                # split-family case lowers the call to a real MojoList* of
+                # strings (`mojo_str_split` family); this branch just routes
+                # it through the same cached-local + indexed-loop lowering
+                # every other list-iteration shape here uses, with element
+                # type char* (a string split always yields strings). Before
+                # this, the iterable fell to the generic range-for over the
+                # raw pointer expression ("'begin' was not declared in this
+                # scope" / invalid member-call on char*, depending on which
+                # fallback caught it first). Real: ftplib.py's mlsd.
+                _iter_list_expr = f"(MojoList *)({gen._cpp_expr(s.iterable)})"
+                _iter_elem = 'char *'
             elif isinstance(s.iterable, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared is not None \
                     and s.iterable.name not in gen._cpp_declared \
