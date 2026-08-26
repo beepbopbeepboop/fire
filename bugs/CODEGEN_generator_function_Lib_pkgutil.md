@@ -1,6 +1,17 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
-## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged, all 3 gaps confirmed genuinely feature-sized)
+## Status (re-verified 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
+byte-identical refusal — `iter_importers, iter_modules, walk_packages`,
+same three independent gaps as every prior entry (`getattr(obj, name)`
+non-static name; `map()` has no coroutine-body lowering; consumption of
+`iter_modules` moot until its own `map()` gap resolves). Neither of
+today's two landed fixes is relevant: `bdfb825` is about `super()`/
+`self.__class__` call resolution (this file uses neither), and `326db78`
+is about value-carrying `return` inside a generator (none of this file's
+3 refused generators have one — all refuse earlier, on `map()`/`getattr`
+shape). No code change; doc stays open.
 
 Fresh `MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/
 Lib/pkgutil.py` against current tree (`a913ab8`, includes the self-host

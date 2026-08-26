@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
+byte-identical single refusal — `_get_instructions_bytes` on the same
+`*`/`**`-unpack call-argument guard (`Positions(*next(co_positions,
+()))`, a spread argument into a dynamically-constructed
+`collections.namedtuple` type this codegen has no static representation
+for). Neither of today's two landed fixes is relevant (unpack-call-
+argument/namedtuple representation, unrelated to `super()`/
+`self.__class__` or generator value-carrying `return`). No code change;
+doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).

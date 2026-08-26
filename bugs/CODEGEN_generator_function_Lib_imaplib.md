@@ -1,6 +1,31 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
-## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro of
+`Idler.burst`'s companion `.cpp`. Blocker (2) (cross-method yield-type
+unification: `co_yield Idler___next__(self);` — `MojoList*` vs the
+promise's unified `int64_t`) reproduces unchanged, byte-identical to
+every prior entry. Neither of today's two landed fixes applies —
+blocker (2) is a yield-value-type-unification gap, unrelated to
+`super()`/`self.__class__` resolution or to a generator's own
+value-carrying `return`.
+
+Blocker (1) (`self._imap.sock`, the excluded HIGH-RISK unannotated-
+init-param-type family) is explicitly out of scope for this run and not
+touched. Noting one observation for whoever next works this file's
+excluded blocker: the g++ error text for blocker (1) that every prior
+entry quoted (`request for member 'sock' in 'self->Idler::_imap', which
+is of non-class type 'int64_t'`) no longer appears in this fresh repro —
+the `if not self._imap.sock:` condition now silently constant-folds to
+`if ((!0))` in the generated `.cpp` (no g++ error, but a silently-wrong
+always-false condition) rather than a hard member-access compile error.
+This is still squarely inside the excluded unannotated-init-param-type
+family (not investigated or touched, per this run's explicit exclusion)
+but is a real behavior shift worth flagging: blocker (1) may have moved
+from "hard compile error" to "silent miscompile" at some point in the
+recent history, which would need re-confirming before anyone attempts
+that hard-bug doc's family. No code change; doc stays open.
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).
 Isolated compile (`compile_to_gimple_with_cpp(..., do_imports=False)`)

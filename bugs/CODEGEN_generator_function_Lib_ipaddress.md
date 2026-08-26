@@ -1,5 +1,32 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
+
+Fresh isolated `GimpleGen(do_imports=False, relaxed_imports=True)` repro
+(matching this doc's own established methodology) + `g++-mp-15 -std=c++20
+-fsyntax-only`: **23 errors** now (vs 19 in the 2026-08-25 entry), and
+the strict (non-relaxed) refusal list grew from 3 to 4 generators —
+`subnets` now also refuses, alongside `_collapse_addresses_internal`/
+`_find_address_range`/`summarize_address_range`. Spot-checked that this
+isn't a regression from today's two fixes: none of the new/changed error
+lines involve `super()`, `self.__class__`, or a generator's own value-
+carrying `return` — they're the same already-documented families
+(`@property`-as-bound-method leaving a raw `std::function<...>` instead
+of invoking it, `IPv4Network`/`IPv6Network` name resolution inside a
+coroutine body, `_address_class` too-many-arguments, unannotated-param
+pointer/int comparisons — all pre-existing shapes this doc's history
+already attributes to `min()`/`list()`/struct-keyed-dict/property-as-
+value gaps, none touched by either of today's landed fixes). Given the
+excluded HIGH-RISK unannotated-init-param-type family underlies several
+of these, and the remainder (min/list builtins, struct-dict keys,
+property-as-bound-method) is genuinely feature-sized in aggregate, not
+attempted here — consistent with every prior entry's classification. Not
+investigated further why the exact count/generator-set shifted slightly
+(23 vs 19, +1 refused generator) — plausibly just more of the module
+being reachable now due to unrelated upstream fixes changing which
+functions get far enough to reach these g++-stage errors, not a
+regression in anything this run touched. No code change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified; picture is WORSE/more complex than the "1 remaining error" the last pass recorded)
 
 Fresh re-verify against this worktree (branched from master `f65502d`).

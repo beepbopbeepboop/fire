@@ -1,5 +1,15 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
+byte-identical refusal — `iterdecode, iterencode` on the `*`/`**`-unpack
+call-argument guard at `getincrementalencoder(encoding)(errors,
+**kwargs)`. Neither of today's two landed fixes is relevant: this
+blocker is a dynamically-obtained-callee kwargs-spread shape, unrelated
+to `super()`/`self.__class__` resolution or to a generator's own
+value-carrying `return`. No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified unchanged)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`,
