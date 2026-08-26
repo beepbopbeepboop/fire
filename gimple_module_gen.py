@@ -4994,7 +4994,26 @@ def gen_module_impl(self, stmts):
             self._global_var_types[gname] = 'char *'
             self._global_c_decl_types[gname] = 'char *'
         elif isinstance(value, CallExpr):
-            if isinstance(value.func, IdentExpr) and value.func.name in self.struct_field_types:
+            if (isinstance(value.func, SubscriptExpr)
+                    and isinstance(value.func.obj, IdentExpr)
+                    and value.func.obj.name in ('list', 'List', 'dict', 'Dict', 'set', 'Set')):
+                # `g_seen: List[Int] = List[Int]()` / plain `g = Dict[K, V]()`
+                # — a SUBSCRIPTED generic constructor call. `value.func` here
+                # is a SubscriptExpr (`List[Int]`), not a bare IdentExpr, so
+                # this shape fell through every branch below to the int64_t/
+                # plain-`int` fallback further down, mis-declaring the
+                # module-global struct field as scalar `int` instead of the
+                # boxed-pointer `int64_t` every write/read site already
+                # assumes — a 64-bit pointer written through a 32-bit `int`
+                # field truncates to garbage (observed: box.3d game's
+                # DYLIB_module_global_list_scratch_segfault.md, EXC_BAD_ACCESS
+                # in mojo_list_append_int on a corrupted receiver pointer).
+                _ctype = 'MojoDict *' if value.func.obj.name in ('dict', 'Dict') else (
+                    'MojoSet *' if value.func.obj.name in ('set', 'Set') else 'MojoList *')
+                global_decls.append(f"int64_t {gname};  /* {_ctype} */")
+                self._global_var_types[gname] = _ctype
+                self._global_c_decl_types[gname] = 'int64_t'
+            elif isinstance(value.func, IdentExpr) and value.func.name in self.struct_field_types:
                 struct_name = value.func.name
                 global_decls.append(f"{struct_name} * {gname};")
                 self._global_var_types[gname] = f"{struct_name} *"
@@ -5102,7 +5121,22 @@ def gen_module_impl(self, stmts):
                     self._global_c_decl_types[gname] = _resolved
                 continue
             _gv = stmt.value
-            if (isinstance(_gv, CallExpr) and isinstance(_gv.func, IdentExpr)
+            if (isinstance(_gv, CallExpr) and isinstance(_gv.func, SubscriptExpr)
+                    and isinstance(_gv.func.obj, IdentExpr)
+                    and _gv.func.obj.name in ('list', 'List', 'dict', 'Dict', 'set', 'Set')):
+                # `var g_seen: List[Int] = List[Int]()` — same subscripted-
+                # generic-constructor gap as `_gscan_declare_global`'s
+                # identical new branch above; see that comment for the full
+                # root-cause (a 64-bit boxed pointer written through a
+                # mis-declared 32-bit `int` struct field truncates to
+                # garbage). This VarDecl path is a separate scan that
+                # doesn't share code with `_gscan_declare_global`.
+                _ctype = 'MojoDict *' if _gv.func.obj.name in ('dict', 'Dict') else (
+                    'MojoSet *' if _gv.func.obj.name in ('set', 'Set') else 'MojoList *')
+                global_decls.append(f"int64_t {gname};  /* {_ctype} */")
+                self._global_var_types[gname] = _ctype
+                self._global_c_decl_types[gname] = 'int64_t'
+            elif (isinstance(_gv, CallExpr) and isinstance(_gv.func, IdentExpr)
                     and _gv.func.name in ('list', 'List', 'dict', 'Dict', 'set', 'Set')):
                 _ctype = 'MojoDict *' if _gv.func.name in ('dict', 'Dict') else (
                     'MojoSet *' if _gv.func.name in ('set', 'Set') else 'MojoList *')
