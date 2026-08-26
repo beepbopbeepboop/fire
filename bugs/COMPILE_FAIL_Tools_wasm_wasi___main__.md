@@ -4,6 +4,59 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, wtOpencode_group3): `step(context)` half FIXED (commit `1dcbcf9`); `working_dir(context)` half root-caused DEEPER than previously documented — the parser has no `nonlocal` support at all
+
+Fresh reproduction confirms issue 2's two errors, but investigation
+showed they have DIFFERENT root causes, and one is now fixed:
+
+1. **FIXED (`1dcbcf9`, shared compiler source) — line 408,
+   `build_steps`'s `step(context)`.** Not a missing "callable contract
+   kind" in Pass 1.3d at all. The loop var `step` was declared `char *`
+   by `_gen_for_iter`'s generic arm (its dict-key convention), and
+   `_gen_stmt_ExprStmt`'s fnptr guard only checked the declared ctype
+   against the scalar-box list — unlike `_lower_call`'s expression-path
+   twin, which ALSO fires on plain local-variable MEMBERSHIP precisely
+   because a first-decl-wins `char *` decl can't disqualify a callable.
+   Adding the membership half to the statement-level guard mirrors that
+   proven pattern verbatim; in any valid Python a locally-bound name
+   called as a function IS a callable, so routing through
+   `mojo_fnptr_call_N` is semantics-preserving. Verified end-to-end
+   with a distilled repro (functions stored in a list, iterated, called
+   through the loop var): builds AND runs correctly. Full gate clean
+   (256/256, 76/76, selfhost, dylib 0 skips).
+
+2. **STILL OPEN — line 104, `wrapper`'s `working_dir = working_dir
+   (context)`: the root cause is UPSTREAM of type inference entirely:
+   this parser has NO `nonlocal` support.** `nonlocal` is not in
+   mojo_compiler.py's keyword set and has no statement parser, so
+   `nonlocal working_dir` degrades to stray EXPRESSION statements
+   (visible in the generated .ci as literal-0 reads commented
+   `/* ct param or undeclared: nonlocal */`). The closure-capture pass
+   therefore sees `working_dir` as an ASSIGNED-LOCAL of `wrapper`
+   (correct Python only because of the nonlocal declaration it never
+   saw): it is not added to `subdir_decorator_wrapper_env` (which
+   captures only `clean_ok` and `func`), its pre-assignment reads emit
+   constant 0, and the call emits on the uninitialized local. A real
+   fix needs: parser support for a NonlocalStmt (mirroring
+   GlobalStmt), capture-analysis treating nonlocal-declared names as
+   captured, and env-threading of their values (writeback semantics —
+   real Python cells mutate the enclosing scope — would additionally
+   need by-reference capture). That is shared-parser + closure-machinery
+   surgery (mojo_compiler.py AST shapes feed gimple_codegen's lowering
+   AND myinterpreter's evaluator AND this compiler's own self-hosting
+   source, which itself contains real `nonlocal`) — feature-sized,
+   deliberately not attempted per campaign rules.
+
+Also exposed while testing (separate gap, NOT part of this file's
+build): a `*args` tuple captured into a nested closure loses its
+container type (the env slot boxes it to int64_t), so a lifted inner
+function iterating it hits `mojo_unsupported_iter`. Distinct from both
+issues above; noted here because the file's `build_steps` idiom
+naturally pairs the two features.
+
+Net: down from 2 errors to 1; the remaining one is a genuine feature
+gap in closure/nonlocal machinery, not type inference.
+
 ## Status (2026-08-23): re-verified — STILL-OPEN, narrowed to issue 2 exactly.
 
 Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`): the build
