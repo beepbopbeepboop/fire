@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro: identical refusal set to the entry below — `fmt_full`:
+`sorted(..., key=...) is only supported for a list-typed iterable`;
+`fmt_summary`: unresolved `list(...)` — byte-for-byte the same reasons.
+Re-examined this round: even a `list()`/`sorted(key=)` widening of the
+coroutine emitter would not flip this file, because BOTH functions'
+bodies continue into shapes that are separately structural —
+`fmt_summary` defines a nested generator `def section(name)` capturing
+`items` and does `yield from render()` (closure compilation +
+cross-generator consumption), and `fmt_raw`/`fmt_brief` iterate
+`analysis` yielding `item.render(...)` delegations on untyped elements
+(the original generator-as-FORMS-dict-value gap below then still waits
+behind those). No code change; doc re-verified. Still open.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against `fix/rest-remainder9` (off master `3d2c6c2`, includes

@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro: identical three-function refusal set with identical
+per-function reasons to the 2026-08-25 entry below — `_iter_source`
+(unresolved `SourceInfo(...)` cross-module struct constructor in a
+coroutine body), `_parse` (`**srckwargs` spread forwarded to a known
+GENERATOR callee), `parse` (moot-ordering consumption of `_parse`).
+None of this round's newly-landed shared fixes (opaque-handle write
+mirror, cpp string escaping, WithStmt generator driving,
+zip_longest lowering) touch these shapes; kwargs-forward-to-generator
+remains the same documented gap (generator construction needs the
+_start API, and per-gap-slot runtime dict resolution against a
+generator's start signature plus holding the handle is feature-sized).
+No code change; doc re-verified. Still open.
+
 ## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering fix landed; this file's blockers are all separate and unchanged)
 
 The shared "generator-consumption ordering" machinery (this doc's

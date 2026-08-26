@@ -4,6 +4,28 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro reproduces the EXACT three-function refusal set documented
+below (`analyze_decls`: unresolved `list(...)`; `check_all`: for-loop
+iterable CallExpr; `iter_decls`: unresolved `set(...)`) — unchanged by
+any of the recent campaign fixes. Re-examined for tractability this
+round and confirmed out of reach:
+
+- Adding `list(x)`/`set(x)` construction to the coroutine-body emitter
+  would not flip this file: `analyze_decls`'s `decls` parameter is fed
+  AT ITS ONLY CALL SITE from `iter_analysis_results`'s
+  `decls = iter_decls(filenames, **kwargs)` — a compiled-GENERATOR
+  handle, which the generator-parameter type whitelist refuses outright
+  — so even a perfect `list()` lowering hits the parameter wall next.
+- Behind that sit `group_by_kinds`/dict-comprehension/nested-`def`
+  shapes in `analyze_decls`'s body, plus `check_all`'s dynamic-callee
+  loop (`check` is a loop-variable callable) — the same loop-as-
+  expression / closure-compilation families already root-caused below.
+
+No code change; doc re-verified with the parameter-typing observation
+added. Still open.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against current `fix/rest-remainder9` tip (descends from

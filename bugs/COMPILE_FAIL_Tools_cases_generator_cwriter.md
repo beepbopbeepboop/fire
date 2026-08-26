@@ -4,6 +4,56 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, branch fix/opencode-group1 — COMPILE BLOCKER FIXED: build exits 0; runtime verified via equivalent repros; two further shared bugs fixed en route; residual import-scope limit documented)
+
+The item-3 blocker below is FIXED in shared source (commit `0238c9b` on
+fix/opencode-group1): the coroutine-body expression emitter now mirrors
+the ORDINARY GIMPLE path's own file-handle dispatch for
+`<self>.<opaque int64_t field>.write(data)` / `.read()` / `.close()`
+(`int_write`/`int_read`/stub-close — exactly the lowering
+`CWriter.set_position` already compiled clean through on the .c side),
+instead of emitting raw C++ member-call syntax on a plain int64_t field.
+Only sites that were previously HARD COMPILE FAILURES reach the new
+branch, so no currently-green build's emitted code changes.
+
+`python3 mojo.py build .../cases_generator/cwriter.py` now exits 0.
+
+**Two additional shared bugs found+fixed while verifying end-to-end
+(same commit):**
+1. `_cpp_string_literal_expr` used a hand-rolled escape chain that
+   DOUBLED every C-style escape: the parser stores StringLiteral.value as
+   raw source text (`\n` = backslash + 'n'), so a generator body printing
+   `"line one\n"` emitted literal backslash-n (verified in compiled
+   output before the fix). Now uses gimple_ctypes._c_escape, the same
+   shared helper the ordinary GIMPLE path's _lower_StringLiteral uses —
+   plain strings, all-literal f-strings, and per-part lit pieces.
+2. `_gen_stmt_WithStmt` NEVER DROVE a @contextlib.contextmanager
+   generator: the context expr lowered to a real compiled-generator
+   handle but both protocol steps were placeholder comments
+   (`/* with: __enter__ */`), so the coroutine body never ran and
+   header_guard silently wrote nothing even after fix 0 above. Now a
+   context expr resolving to a known handle in `_generator_var_api`
+   emits `<base>_resume` to the bare yield (__enter__, `<base>_value`
+   bound to the `as` target) + final resume + destroy (__exit__).
+
+**Runtime verification (equivalent self-contained repros, since cwriter
+itself can't yet be exercised from a driver — see residual note):** an
+opaque-int64_t-out-field generator writing before/after a yield, driven
+via a `with w.guard(name):` contextmanager, produces file content
+byte-identical to python3 (real newlines, correct enter/exit ordering).
+
+**Residual (pre-existing, separate):** a client program that does
+`sys.path.insert(...); import cwriter` still can't exercise it — the
+import machinery refuses non-stdlib/test module paths ("load_module(
+'cwriter') failed ... Only stdlib and test imports supported") and then
+silently STUBS every cross-module method call, so the driver runs but no
+CWriter method executes. That's the general import-scope limitation,
+not specific to cwriter or to these fixes; building cwriter.py directly
+(the documented workflow for these Tools files) is unaffected.
+
+Quality gate: test_gimple.py 256/256, test_module_cache.py 76/76,
+make check-selfhost clean, from-scratch stdlib dylib rebuild 0 skips.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against `fix/rest-remainder9`: identical to 2026-08-23,

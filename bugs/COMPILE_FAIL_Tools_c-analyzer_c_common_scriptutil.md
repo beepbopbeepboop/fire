@@ -4,6 +4,24 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro: the SAME five-function refusal set with the SAME
+per-function reasons as this doc's 2026-08-25 entry above —
+`_iter_filenames` (unresolved `Exception(...)` instance construction as
+a value; `iterutil.*`/`fsutil.USE_CWD` module-member shapes behind it),
+`filter_filenames`/`main_for_filenames` (moot-ordering consumption of
+the never-eligible `_iter_filenames`), `track_progress_compact`
+(`**mark_kwargs` spread forwarded to a known GENERATOR callee),
+`track_progress_flat` (unresolved `print(...)` in a generator body).
+Checked against this round's newly-landed shared fixes (opaque-handle
+write mirror, cpp string escaping, WithStmt generator driving): none
+touch any of these five shapes. All remain within tracked
+coroutine-codegen gap families (builtin-exception values, module-member
+calls, kwargs-forward-to-generator, print-in-generator, dynamic-callee
+consumption); no single tractable fix flips the file. No code change;
+doc re-verified. Still open.
+
 ## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering fix landed; per-function reasons refined; refusal set unchanged)
 
 The shared "generator-consumption ordering" machinery (this doc's

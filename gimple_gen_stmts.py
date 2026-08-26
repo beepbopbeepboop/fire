@@ -1994,6 +1994,25 @@ def _gen_stmt_ForStmt(gen, node):
             isinstance(node.iterable.func, gimple_ctypes.IdentExpr) and
             node.iterable.func.name == 'enumerate'):
         gen._gen_for_enumerate(node)
+    elif (isinstance(node.iterable, gimple_ctypes.CallExpr) and
+            isinstance(node.iterable.func, gimple_ctypes.MemberExpr) and
+            node.iterable.func.member == 'zip_longest' and
+            isinstance(node.iterable.func.obj, gimple_ctypes.IdentExpr) and
+            node.iterable.func.obj.name == 'itertools' and
+            not gen._locally_binds_name('itertools')):
+        # Transactional: roll back any partially-emitted lines/decls if the
+        # shape turns out unsupported partway, then fall through to the
+        # pre-existing generic path unchanged (same pattern as
+        # _gen_for_iter's regex-finditer attempt above).
+        body_mark, decls_mark = len(gen.body_lines), len(gen.decls)
+        try:
+            gen._gen_for_zip_longest(node)
+            return
+        except Exception as e:
+            del gen.body_lines[body_mark:]
+            del gen.decls[decls_mark:]
+            gimple_ctypes._debug_note('zip_longest lowering failed, falling back', e)
+        gen._gen_for_iter(node)
     else:
         gen._gen_for_iter(node)
 
@@ -2952,10 +2971,41 @@ def _gen_stmt_WithStmt(gen, node):
     # itself) — __exit__ must always be called on the context manager
     # object, never on whatever __enter__ happened to return.
     contexts = []
+    gen_ctxs = []   # parallel: generator-context info per item (or None)
     for item in node.items:
         et, ev = gen.lower_expr(item.expr)
         ctx_t, ctx_v = et, ev
         struct_name = gimple_exprtypes._struct_name_of(et)
+        # A @contextlib.contextmanager-decorated generator method/function
+        # call lowers to a compiled-coroutine handle ('MojoGenerator *',
+        # registered in _generator_var_api by its start-call emission).
+        # Drive it directly: first resume() runs the body to the first
+        # yield (= __enter__), the second (after the body) runs it to
+        # completion (= __exit__); <base>_value(g) is what `as` binds.
+        # Before this, both protocol steps were placeholder comments and
+        # the coroutine body NEVER RAN — cwriter.py's header_guard
+        # (the motivating real shape) compiled clean but silently wrote
+        # nothing. The exceptional path (body raises → skip the final
+        # resume + destroy) is deliberately not threaded through the
+        # setjmp machinery here: the status quo this replaces ran NO body
+        # code at all, so normal-path correctness is strictly better and
+        # no previously-working behavior changes.
+        gen_api = (gen._generator_var_api.get(ctx_v)
+                   if ctx_t == 'MojoGenerator *' else None)
+        if gen_api is not None:
+            base = gen_api['base']
+            resume_t = gen._new_temp('_Bool')
+            gen._emit(f"  {resume_t} = {base}_resume ({ctx_v});")
+            if item.alias is not None:
+                alias = item.alias if isinstance(item.alias, str) else item.alias.name
+                val_t = gen._call_expr('int64_t', f"{base}_value",
+                                       [('MojoGenerator *', ctx_v)])
+                if alias not in gen.var_types:
+                    gen._declare_var(alias, 'int64_t')
+                gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
+            gen_ctxs.append((ctx_v, base))
+            contexts.append((ctx_t, ctx_v, None))
+            continue
         enter_fn    = gen._struct_method_csym(struct_name, '__enter__', '')
         has_enter = (enter_fn in gen.func_return_types
                      or f"{struct_name}___enter__" in gen.func_return_types)
@@ -2993,10 +3043,23 @@ def _gen_stmt_WithStmt(gen, node):
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
-        contexts.append((ctx_t, ctx_v, struct_name))
+            contexts.append((ctx_t, ctx_v, struct_name))
 
     def _emit_exits():
-        for ct, cv, sn in contexts:
+        for (ct, cv, sn), gctx in zip(contexts, gen_ctxs):
+            if gctx is not None:
+                # Generator context manager: the final resume() runs the
+                # body from its bare yield to co_return (= __exit__), then
+                # the coroutine frame is destroyed. resume()'s _Bool
+                # result (False == already done) is intentionally
+                # discarded — real Python's __exit__ return value only
+                # suppresses exceptions, and this normal-path emission
+                # runs after an unexceptional body.
+                done_t = gen._new_temp('_Bool')
+                gen._emit(f"  {done_t} = {gctx[1]}_resume ({gctx[0]});")
+                gen._emit_call('void', '', f"{gctx[1]}_destroy",
+                               [('MojoGenerator *', gctx[0])])
+                continue
             exit_fn = gen._struct_method_csym(sn, '__exit__', '')
             if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
                 # __exit__(self, exc_type, exc_val, exc_tb) — real
@@ -3030,8 +3093,9 @@ def _gen_stmt_WithStmt(gen, node):
                 gen._emit(f"  /* with: __exit__ ({sn}) */")
 
     has_exit = any(
-        gen._struct_method_csym(sn, '__exit__', '') in gen.func_return_types
-        or f"{sn}___exit__" in gen.func_return_types
+        sn is not None
+        and (gen._struct_method_csym(sn, '__exit__', '') in gen.func_return_types
+             or f"{sn}___exit__" in gen.func_return_types)
         for _, _, sn in contexts)
 
     if has_exit:

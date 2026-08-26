@@ -4,6 +4,23 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro: same failure family as the 2026-08-25 entry below — the
+build fails in the ordinary compiled-C stage on transitively-imported
+`c_parser/info.py` (`:179:45/:179:50/:247:45/:247:50 passing argument
+1/2 of 'c_parser_info__fix_filename_5c8044' makes pointer from integer`,
+plus `c_analyzer/info.py:18:25 assignment to 'int64_t' from 'char *'`)
+— i.e. the stale-placeholder-signature-vs-inference race documented
+there, now with two ADDITIONAL call sites (:247) showing the same
+`_fix_filename` coercion mismatch. Re-examined this round per the
+doc's own analysis: the general fix is a forward-declaration-only
+prepass resolving every free function's real parameter types before
+any caller compiles — a materially larger change to the shared two-pass
+model than this round's scope, and the `cls`-parameter variant at :825
+is the same family. No code change; doc re-verified with the new call
+sites recorded. Still open.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against `fix/rest-remainder9`. The specific errors quoted by
