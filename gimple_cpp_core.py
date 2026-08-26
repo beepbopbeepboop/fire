@@ -4317,6 +4317,30 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             # local name.
             _self_field_itname = None
             _self_field_elem_ctype = None
+            # `for x in self.<field>:` where the field's resolved C type
+            # IS one of the four scalars — i.e. genuinely NOT a container
+            # per this codegen's own struct-field boxing convention (the
+            # inverse of the check just below that claims non-scalar
+            # fields as MojoList*-shaped). The field holds an opaque
+            # boxed value this body model cannot iterate (real:
+            # Lib/tempfile.py's `_TemporaryFileWrapper.__iter__`:
+            # `for line in self.file:` — `file` is an unannotated-init
+            # param, typed int64_t, holding a file object). The generic
+            # range-for fallback emitted `for (auto line : self->file)`
+            # — invalid C++ over a plain int64_t ("'begin' was not
+            # declared in this scope"). Same treatment as the
+            # `iter_expr == '0'` scalar-stub case just below: bind the
+            # target to 0 and run ZERO iterations rather than emitting
+            # broken C++.
+            _self_scalar_iter_stub = False
+            if (isinstance(s.iterable, gimple_ctypes.MemberExpr)
+                    and isinstance(s.iterable.obj, gimple_ctypes.IdentExpr)
+                    and s.iterable.obj.name == 'self'
+                    and getattr(gen, '_cpp_gen_self_struct', None)):
+                _stub_ft = gen.struct_field_types.get(
+                    gen._cpp_gen_self_struct, {}).get(s.iterable.member)
+                if _stub_ft in ('int64_t', 'double', '_Bool', 'char *'):
+                    _self_scalar_iter_stub = True
             _pre_lines: list[str] = []
             # `for x in sorted(<self.field-or-declared-list>, key=...):`
             # -- `_cpp_expr` above already lowered the WHOLE `sorted(...)`
@@ -4459,17 +4483,19 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                 lines.append(f"{indent}}}")
                 return lines
-            if iter_expr == '0':
+            if iter_expr == '0' or _self_scalar_iter_stub:
                 # The iterable lowered to the scalar stub '0' (e.g.
                 # test_exception_group.py's leaf_generator:
                 # `for e in exc.exceptions:` where `exc` is an untyped
                 # param boxed to int64_t and `.exceptions` is the
-                # diagnosed attribute-read stub). A range-for over `0`
-                # is invalid C++, and the iterable's real value is
-                # already unrepresentable here — so run ZERO
-                # iterations: bind the target to 0 and skip the body,
-                # mirroring how every other stubbed operation in this
-                # body model behaves.
+                # diagnosed attribute-read stub) — or is a self-field
+                # whose resolved C type is a plain scalar (see
+                # `_self_scalar_iter_stub` above). A range-for over `0`
+                # or any bare int64_t is invalid C++, and the iterable's
+                # real value is already unrepresentable here — so run
+                # ZERO iterations: bind the target to 0 and skip the
+                # body, mirroring how every other stubbed operation in
+                # this body model behaves.
                 lines = []
                 if not target_was_declared:
                     lines.append(f"{indent}int64_t {target} = 0;")
