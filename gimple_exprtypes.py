@@ -649,6 +649,22 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # support (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
         if e.func.name == 'sorted' and e.args:
             return 'MojoList *'
+        # `list(<iterable-expr>)` / `set(<iterable-expr>)` — the matching
+        # type-estimator sibling of `_cpp_expr`'s CallExpr/'list'/'set'
+        # loop-as-expression codegen (gimple_cpp_core.py's
+        # `_cpp_build_container_from_iterable`), which always materializes
+        # a real `MojoList *`/`MojoSet *`, never a scalar. Without this, a
+        # first-assigned local's RHS `x = list(range(5))` fell through to
+        # the int64_t default below, so `_cpp_stmt`'s AssignStmt declared
+        # `int64_t x;` while actually assigning it the real pointer value
+        # — the same "invalid conversion .../int64_t[int] subscript" class
+        # of g++ error the ListExpr/Comprehension cases above already
+        # guard against, now extended to the constructor-call spelling.
+        # (A zero-arg `list()`/`set()` — no iterable — isn't handled by
+        # that codegen case, so isn't claimed here either; falls through
+        # to whatever this function already did for it.)
+        if e.func.name in ('list', 'set') and len(e.args) == 1 and not e.kwargs:
+            return 'MojoList *' if e.func.name == 'list' else 'MojoSet *'
         if known is not None and e.func.name in known:
             # A call through a declared CALLABLE-VALUE local (`getpos()`,
             # where `getpos`'s own storage type is `_CPP_CALLABLE_CTYPE` —
@@ -850,7 +866,17 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # (task #145, bugs/hard/CODEGEN_comprehension_return_type_
         # defaults_int64.md) — this is the same root cause recurring in
         # this file's OTHER, narrower type estimator.
-        return 'MojoList *'
+        #
+        # A `set` comprehension now (since `_cpp_expr`'s Comprehension
+        # case grew real loop-as-expression support alongside `list(...)`/
+        # `set(...)`) genuinely builds a `MojoSet *`, not a `MojoList *` —
+        # must match, or `_cpp_stmt`'s AssignStmt declares the local with
+        # the wrong container pointer type ("invalid conversion from
+        # 'MojoSet*' to 'MojoList*'"). `dict`/`generator`-kind
+        # comprehensions still fall back to the pre-existing `MojoList *`
+        # default (an always-empty stub for `dict`; `generator` isn't a
+        # real container at all) — unchanged.
+        return 'MojoSet *' if e.kind == 'set' else 'MojoList *'
     if isinstance(e, SliceExpr):
         return 'char *'  # string slice produces a string
     if isinstance(e, SubscriptExpr):

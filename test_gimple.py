@@ -3689,6 +3689,96 @@ def f():
     # (needs its own __enter__/__exit__ codegen story) — confirms adding
     # try/except support didn't accidentally also let `with` through
     # _generator_quick_eligible's pre-filter.
+    #
+    # Loop-as-expression codegen: `list(<iterable>)`/`set(<iterable>)`/a
+    # real `[<elem> for <target> in <iterable> if <cond>]`/`{...}`
+    # comprehension used as a VALUE inside a compiled generator body,
+    # over a variety of iterable shapes this emitter's `_cpp_for_stmt`
+    # already knows how to drive (range/a declared list/set local/a
+    # dict's .keys()/.values()/self.field/another already-built list) —
+    # previously this whole family had NO codegen at all in the
+    # coroutine-body expression emitter (`_cpp_expr`'s Comprehension case
+    # was an honest always-empty-list stub, and a bare `list(...)`/
+    # `set(...)` CallExpr over anything but a trivial already-typed
+    # container fell to the generic "unresolved callee" refusal of the
+    # WHOLE generator). See gimple_cpp_core.py's
+    # `_cpp_build_container_from_iterable`/`_cpp_rename_ident` and
+    # gimple_exprtypes.py's matching `_infer_simple_expr_ctype` widening.
+    def test_generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def gen1():
+    x = list(range(5))
+    yield len(x)
+    y = [i * 2 for i in range(4)]
+    yield y[1]
+    s = set(range(3))
+    yield 1 if 2 in s else 0
+    lst = [1, 2, 3, 4]
+    z = [v for v in lst if v > 2]
+    yield z[0]
+    yield len(list(lst))
+    ss = {v for v in lst if v > 1}
+    yield len(list(ss))
+
+def gen2(d):
+    ks = list(d.keys())
+    yield len(ks)
+    vs = set(d.values())
+    yield len(list(vs))
+
+def gen3():
+    a = [1, 2, 3]
+    b = list(a)
+    yield len(b)
+"""
+        name = "generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        for _needle in ('_mojogen_gen1_start', '_mojogen_gen2_start', '_mojogen_gen3_start'):
+            if _needle not in c_src:
+                print(f"FAIL  {name}: .c/.ci output missing {_needle} (fell back to source instead of compiling via cpp)")
+                _FAIL += 1
+                return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_cpp_path()
     test("generator_with", """""")
 
     # ── Step B (compiled-path async/await codegen project) ─────────────────

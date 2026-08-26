@@ -6,6 +6,7 @@ the class; cross-module references are qualified.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 
@@ -1144,6 +1145,121 @@ def _cpp_next_on_generator_expr(gen, handle_expr, api):
     )
 
 
+def _cpp_rename_ident_container(v, old: str, new: str):
+    """Helper for `_cpp_rename_ident`: recurse into a list/tuple field or
+    a nested AST-node field, rewriting every bare `IdentExpr(name=old)`
+    reachable from it to `new`. Non-node/non-container values (str/int/
+    None/...) pass through unchanged."""
+    if isinstance(v, list):
+        nv = [_cpp_rename_ident_container(x, old, new) for x in v]
+        return nv if any(a is not b for a, b in zip(nv, v)) else v
+    if isinstance(v, tuple):
+        nv = tuple(_cpp_rename_ident_container(x, old, new) for x in v)
+        return nv if nv != v else v
+    if dataclasses.is_dataclass(v):
+        return _cpp_rename_ident(v, old, new)
+    return v
+
+
+def _cpp_rename_ident(node, old: str, new: str):
+    """Deep-copy `node`, renaming every bare `IdentExpr(name=old)` inside
+    it to `new`. Used by `_cpp_build_container_from_iterable` to give a
+    comprehension's loop variable (and any `if`-clause/element expression
+    referencing it) a fresh, collision-proof C++ name: a comprehension has
+    its OWN scope in real Python, but this emitter's `declared` dict is
+    function-scoped (shared with the enclosing generator body), so
+    reusing an outer variable's bare name here would silently alias/
+    clobber it (or pick up a stale/wrong C++ type from an unrelated outer
+    binding of the same name) instead of getting its own fresh slot."""
+    if node is None:
+        return None
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        return (gimple_ctypes.IdentExpr(new, node.line, node.col)
+                if node.name == old else node)
+    if dataclasses.is_dataclass(node):
+        changes = {}
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name)
+            nv = _cpp_rename_ident_container(v, old, new)
+            if nv is not v:
+                changes[f.name] = nv
+        return dataclasses.replace(node, **changes) if changes else node
+    return node
+
+
+def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: str,
+                                        elem_node, cond_nodes: list) -> str:
+    """Build a `MojoList *`/`MojoSet *` from a general iterable, as a
+    single inline C++ VALUE expression, inside a compiled generator/
+    coroutine body. This is the coroutine-body emitter's counterpart of
+    the ordinary (non-coroutine) GIMPLE path's `_lower_ctor_from_iterable`
+    / `_lower_comprehension` (gimple_gen_calls.py / gimple_gen_exprs.py),
+    which lower the identical shape (`list(<iterable>)`, `set(<iterable>)`,
+    `[<elem> for <target> in <iterable> if <cond> ...]`, `{<elem> for
+    <target> in <iterable> if <cond> ...}`) as a sequence of GIMPLE
+    statements assigning into a pre-declared temp -- a shape this
+    emitter's `_cpp_expr` can't use directly, since every call site here
+    (assignment RHS, yield value, function argument, ...) expects ONE
+    inline expression string back, never a statement list.
+
+    Lowered as an immediately-invoked C++ lambda (`[&]() -> T { ...; return
+    acc; }()`) wrapping a REAL loop, built by handing a synthetic `ForStmt`
+    (whose body appends each element into a fresh accumulator, guarded by
+    any `if` clauses) to `_cpp_for_stmt` -- reusing that function's
+    EXISTING, already broad iterable-shape dispatch (range/reversed-range/
+    a declared `MojoList *`/`MojoSet *` local or `self.<field>`/a
+    `MojoDict *`'s `.keys()`/`.values()`/`.items()`/a sibling already-
+    compiled generator's call/itertools.repeat/...) rather than
+    re-implementing iteration a third, narrower time. Any iterable shape
+    `_cpp_for_stmt` doesn't recognize propagates its own
+    `_UnsupportedGeneratorShape` refusal unchanged -- this function adds
+    no additional iterable-shape restrictions of its own.
+
+    `target_name`/`elem_node`/`cond_nodes` are always renamed to a fresh
+    loop variable first (see `_cpp_rename_ident`'s docstring) so a
+    comprehension's own scope can never alias an outer same-named local.
+    """
+    if kind not in ('list', 'set'):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"{kind}(...) over a general iterable is not supported in a "
+            "compiled generator/coroutine body")
+    declared = gen._cpp_declared
+    if declared is None:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"{kind}(...) over a general iterable requires a scoped "
+            "generator/coroutine body")
+    res_ctype = 'MojoList *' if kind == 'list' else 'MojoSet *'
+    new_fn = 'mojo_list_new' if kind == 'list' else 'mojo_set_new'
+    append_member = 'append' if kind == 'list' else 'add'
+    fresh_target = gen._cpp_fresh_name('_mg_it')
+    elem_node = _cpp_rename_ident(elem_node, target_name, fresh_target)
+    cond_nodes = [_cpp_rename_ident(c, target_name, fresh_target)
+                  for c in (cond_nodes or [])]
+    acc = gen._cpp_fresh_name('_mg_acc')
+    append_call = gimple_ctypes.CallExpr(
+        func=gimple_ctypes.MemberExpr(
+            obj=gimple_ctypes.IdentExpr(acc, iter_node.line, iter_node.col),
+            member=append_member, line=iter_node.line, col=iter_node.col),
+        args=[elem_node], kwargs=[], line=iter_node.line, col=iter_node.col)
+    body = [gimple_ctypes.ExprStmt(value=append_call, line=iter_node.line, col=iter_node.col)]
+    for cond in reversed(cond_nodes):
+        body = [gimple_ctypes.IfStmt(condition=cond, then_body=body, elifs=[],
+                                      else_body=None, line=iter_node.line, col=iter_node.col)]
+    for_stmt = gimple_ctypes.ForStmt(target=fresh_target, iterable=iter_node, body=body,
+                                      else_body=None, is_async=False,
+                                      line=iter_node.line, col=iter_node.col)
+    # `declared` IS `gen._cpp_declared` (same dict object, not a copy) --
+    # `_cpp_for_stmt`'s own recursive `_cpp_stmt`/`_cpp_expr` calls read
+    # types back through `gen._cpp_declared`, so the accumulator's type
+    # must be visible there (not just in a local copy) before the append
+    # call inside the loop body is lowered.
+    declared[acc] = res_ctype
+    lines = gen._cpp_for_stmt(for_stmt, declared, '    ')
+    body_text = ' '.join(l.strip() for l in lines)
+    return (f"[&]() -> {res_ctype} {{ {res_ctype} {acc} = {new_fn} (); "
+            f"{body_text} return {acc}; }}()")
+
+
 def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.IntLiteral):
         return str(e.value)
@@ -1701,10 +1817,28 @@ def _cpp_expr(gen, e) -> str:
         pairs = [f"{{{gen._cpp_expr(k)}, {gen._cpp_expr(v)}}}" for k, v in e.pairs]
         return '{' + ', '.join(pairs) + '}'
     if isinstance(e, gimple_ctypes.Comprehension):
-        # Comprehension as a value: build an empty MojoList. The generator
-        # body's statements still compile; the comprehension result is an
-        # honest empty-collection stub (real comprehension lowering needs
-        # a loop, which an expression slot can't hold).
+        # `[<elem> for <target> in <iterable> if <cond> ...]` / `{<elem>
+        # for <target> in <iterable> if <cond> ...}` as a value, with
+        # exactly ONE `for` clause (nested/multi-clause comprehensions --
+        # `for a in x for b in y`, `for a in x for b in a`, both real but
+        # rarer -- aren't attempted here, same "only the confirmed shape"
+        # narrowing this emitter uses throughout). Previously an honest
+        # empty-MojoList stub (a loop-as-expression had no representation
+        # at all in this emitter); now a real loop via
+        # `_cpp_build_container_from_iterable`, which also backs the
+        # `list(<iterable>)`/`set(<iterable>)` CallExpr cases below.
+        # `dict`/`generator`-kind Comprehensions still fall through to
+        # the refusal after this (a dict comprehension needs a MojoDict*
+        # accumulator this helper doesn't build yet; a bare generator
+        # expression used as a plain value is the same `list(...)`-like
+        # shape but not yet worth widening this helper for, no confirmed
+        # real occurrence).
+        if e.kind in ('list', 'set') and len(e.generators) == 1:
+            g0 = e.generators[0]
+            return gen._cpp_build_container_from_iterable(
+                e.kind, g0.iterable, g0.target, e.element, g0.conditions)
+        gimple_ctypes._debug_note('stubbed operation',
+                                   f'generator-body {e.kind} comprehension (unsupported shape)')
         return "mojo_list_new ()"
     if isinstance(e, gimple_ctypes.SetExpr):
         return '{' + ', '.join(gen._cpp_expr(el) for el in e.elements) + '}'
@@ -2766,6 +2900,34 @@ def _cpp_expr(gen, e) -> str:
                     _sym = gen._struct_method_csym(_next_struct, '__next__', '')
                     gen._cpp_struct_method_refs.add((_next_struct, '__next__'))
                     return f"{_sym}({args[0]})"
+            if (fname in ('list', 'set') and len(e.args) == 1 and not e.kwargs
+                    and not gen._locally_binds_name(fname)):
+                # `list(<iterable-expr>)` / `set(<iterable-expr>)` where
+                # the iterable isn't already a plain declared list/dict/
+                # set local -- e.g. `list(range(n))`, `list(self.items)`,
+                # `set(d.keys())`, `list(sub_generator())`. Previously
+                # entirely unhandled: fell through to this function's
+                # generic bare-name-call refusal below (an "unresolved
+                # callee 'list(...)'" honest refusal of the WHOLE
+                # generator -- confirmed the single most common blocker
+                # across the real-world corpus this codegen targets, see
+                # e.g. bugs/CODEGEN_generator_function_Lib_ipaddress.md's
+                # `_collapse_addresses_internal`). Mirrors the ordinary
+                # (non-coroutine) GIMPLE path's own `_lower_ctor_from_
+                # iterable` (gimple_gen_calls.py): synthesize the
+                # equivalent `{x for x in <arg>}`/`[x for x in <arg>]`
+                # comprehension shape and hand it to the SAME
+                # `_cpp_build_container_from_iterable` helper the real
+                # Comprehension case above uses, so both spellings share
+                # one implementation. A zero-arg call falls through
+                # unchanged to the struct-constructor/bare-name-call
+                # cases below (list()/set() with no iterable already work
+                # via the plain literal-container path elsewhere in this
+                # emitter).
+                _ctor_var = gen._cpp_fresh_name('_ctor_elem')
+                return gen._cpp_build_container_from_iterable(
+                    fname, e.args[0], _ctor_var,
+                    gimple_ctypes.IdentExpr(_ctor_var, e.line, e.col), [])
             if (fname == 'sorted' and e.args
                     and not gen._locally_binds_name('sorted')):
                 # `sorted(iterable)` / `sorted(iterable, key=..., reverse=
@@ -5318,6 +5480,39 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
+            return lines
+        # `for x in <set-typed expr>:` — a single-name target over a
+        # `MojoSet *` (a declared local/param, `self.<field>`, or a bare
+        # zero-arg `.copy()` chain over one, via `_cpp_receiver_ctype`).
+        # The generic range-for fallback below cannot iterate a raw
+        # `MojoSet *` pointer (no ADL `begin`/`end`, same class of error
+        # the dict-iteration branch just above exists to avoid) — lower
+        # through the same `mojo_set_iter_new`/`_next`/`_val_int`/`_free`
+        # protocol the ordinary (non-coroutine) GIMPLE path's own
+        # `_gen_for_set` (gimple_gen_loops.py) already uses, freeing the
+        # iterator after the loop. Only int64_t set elements are
+        # supported (this codegen has no char*-element set anywhere, in
+        # or outside a coroutine body — `mojo_set_add_str` exists but
+        # this narrow model never types a LOCAL set as string-valued;
+        # matches `_gen_for_set`'s own int64_t-only assumption).
+        if (not s.else_body and isinstance(target, str) and ',' not in target
+                and _cpp_receiver_ctype(gen, s.iterable) == 'MojoSet *'):
+            _sexpr = gen._cpp_expr(s.iterable)
+            _sit = gen._cpp_fresh_name("_mg_sit")
+            _smore = gen._cpp_fresh_name("_mg_smore")
+            lines = []
+            if not target_was_declared:
+                declared[target] = 'int64_t'
+                lines.append(f"{indent}int64_t {target};")
+            lines.append(f"{indent}MojoSetIter *{_sit} = "
+                         f"mojo_set_iter_new((MojoSet *)({_sexpr}));")
+            lines.append(f"{indent}for (int {_smore} = mojo_set_iter_next({_sit}); "
+                         f"{_smore}; {_smore} = mojo_set_iter_next({_sit})) {{")
+            lines.append(f"{indent}    {target} = mojo_set_iter_val_int({_sit});")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            lines.append(f"{indent}mojo_set_iter_free({_sit});")
             return lines
         try:
             iter_expr = gen._cpp_expr(s.iterable)

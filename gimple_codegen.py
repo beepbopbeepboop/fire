@@ -3278,6 +3278,8 @@ class GimpleGen:
         return gcc_._cpp_for_generator_delegate(self, target, call, body, declared, indent, index_var, index_start_expr)
     def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_for_stmt(self, s, declared, indent)
+    def _cpp_build_container_from_iterable(self, kind: str, iter_node, target_name: str, elem_node, cond_nodes: list) -> str:
+        return gcc_._cpp_build_container_from_iterable(self, kind, iter_node, target_name, elem_node, cond_nodes)
     def _cpp_async_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         return gcc_._cpp_async_for_stmt(self, s, declared, indent)
     def _cpp_raise_stmt(self, s, indent: str) -> list[str]:
