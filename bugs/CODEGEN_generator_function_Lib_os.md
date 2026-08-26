@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `f65502d`).
+Isolated `compile_to_gimple_with_cpp(..., do_imports=False)` on the real
+file still refuses `__iter__`/`_fwalk`/`fwalk`/`walk` — same shallower
+symptom set the 2026-08-24 entry already noted (unresolved-callee
+refusals for `list`/`close`/`fspath`, artifacts of the narrow isolated
+harness not wiring up those module-level functions under
+`do_imports=False`), which doesn't change the underlying diagnosis: this
+is squarely the "tagged-union/variant value representation" category the
+current session's own mandate explicitly flags as out of scope (`stack`'s
+runtime-heterogeneous str/tuple elements + `isinstance(top, tuple)`
+discrimination has no representation in this codegen's statically-typed
+container model, root-caused precisely in the 2026-08-11 entry below).
+No new mechanism landed since touches runtime type discrimination or
+heterogeneous-container representation. Not attempted. No change; doc
+stays open, honestly triaged as out of scope.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree. `walk`/`_fwalk`/`fwalk` still
