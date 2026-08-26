@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master at `f65502d`,
+post-integration of the opencode-ctables/perf5/gdb merges). Ran
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/codecs.py` under
+the safety-rule watcher (finished in well under a minute, no runaway).
+Identical refusal, byte-for-byte the same shape as every prior pass:
+`iterdecode, iterencode` refused with "a `*`/`**`-unpack call argument is
+not supported in a compiled generator/coroutine body" — the
+`getincrementalencoder(encoding)(errors, **kwargs)` dynamically-obtained-
+callee kwargs-spread shape. None of the mechanisms that landed in the
+interim (module-cache/link-mode fixes, opencode-ctables/perf5/gdb merges)
+touch dynamic-callee kwargs-spread lowering. Still genuinely unfixable
+without the same large dynamic-kwargs-dispatch feature already assessed
+repeatedly across many prior passes. No change; doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
 
 Re-verified fresh against this worktree (branched from master post-integration,
