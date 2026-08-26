@@ -3492,6 +3492,20 @@ def gen_module_impl(self, stmts):
             elif (isinstance(_value.func, MemberExpr)
                     and _value.func.member == 'readlines'):
                 return 'MojoList *'
+            elif (isinstance(_value.func, MemberExpr)
+                    and _value.func.member in ('encode', 'decode', 'format')):
+                # str.encode()/str.decode()/str.format() all lower to a
+                # real `char *` everywhere else in this codegen (see
+                # gimple_gen_methods.py's char*-method table, which
+                # stubs all three as identity passthroughs of the
+                # receiver). Without this case the global got declared
+                # int64_t against a char*-producing RHS — a hard
+                # "assignment to 'int64_t' from 'char *'" in
+                # whole-program mode (real: Lib/mailbox.py:32,
+                # `linesep = os.linesep.encode('ascii')`), and a
+                # pointer-stored-as-int64 (garbage on every later read,
+                # e.g. `len(linesep)`) where coercion happened silently.
+                return 'char *'
             else:
                 return 'int64_t'
         elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
@@ -4603,21 +4617,32 @@ def gen_module_impl(self, stmts):
                     global_decls.append(f"int64_t {gname};")
                     self._global_var_types[gname] = 'int64_t'
                     self._global_c_decl_types[gname] = 'int64_t'
-            elif (isinstance(value.func, MemberExpr)
-                    and value.func.member in ('read', 'readline')
-                    and not value.args):
-                global_decls.append(f"char * {gname};")
-                self._global_var_types[gname] = 'char *'
-                self._global_c_decl_types[gname] = 'char *'
-            elif (isinstance(value.func, MemberExpr)
-                    and value.func.member == 'readlines'):
-                global_decls.append(f"int64_t {gname};  /* MojoList * */")
-                self._global_var_types[gname] = 'MojoList *'
-                self._global_c_decl_types[gname] = 'int64_t'
-            else:
-                global_decls.append(f"int64_t {gname};")
-                self._global_var_types[gname] = 'int64_t'
-                self._global_c_decl_types[gname] = 'int64_t'
+            elif isinstance(value.func, MemberExpr):
+                # Consolidated with Phase 1.7's own RHS-type table
+                # (`_phase17_value_type`) instead of maintaining a third
+                # drifting copy of the same method-call rows: that table
+                # already maps read/readline -> char *, readlines ->
+                # MojoList *, encode/decode/format -> char * (added when
+                # Lib/mailbox.py:32's `linesep = os.linesep.encode(
+                # 'ascii')` decl'd int64_t against a char*-producing RHS
+                # — a hard whole-program "assignment to 'int64_t' from
+                # 'char *'" plus a pointer-stored-as-int64 on every
+                # later read), int64_t otherwise. Emission/cdecl side
+                # effects here mirror the read/readline and readlines
+                # rows verbatim.
+                _mvt = _phase17_value_type(value)
+                if _mvt in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    global_decls.append(f"int64_t {gname};  /* {_mvt} */")
+                    self._global_var_types[gname] = _mvt
+                    self._global_c_decl_types[gname] = 'int64_t'
+                elif _mvt.endswith(' *') or _mvt == 'char *':
+                    global_decls.append(f"{_mvt} {gname};")
+                    self._global_var_types[gname] = _mvt
+                    self._global_c_decl_types[gname] = _mvt
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+                    self._global_c_decl_types[gname] = 'int64_t'
         elif (isinstance(value, MemberExpr) and isinstance(value.obj, IdentExpr)
                 and value.obj.name in self.imported_symbols
                 and self.imported_symbols[value.obj.name].get('module')
