@@ -22,6 +22,12 @@ coroutine-body emitter). Not attempted — this is exactly the kind of
 "large speculative feature project" this round's instructions say not to
 take on. No code change; doc left as-is below.
 
+Re-verified again 2026-08-26, wtOpencode_canalyzer2 (fresh-cut worktree):
+isolated compile_to_gimple_with_cpp(do_imports=False) gives the identical
+three-shape refusal set verbatim; still out of reach for the same reasons
+(opaque-param list()/set() materialization → generator-handle parameter
+wall → nested-def closure + loop-variable-callee call shapes behind it).
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro reproduces the EXACT three-function refusal set documented
