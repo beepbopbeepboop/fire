@@ -1371,6 +1371,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             f"{struct_name}_{node.member}" in gen.func_return_types
             or (struct_name, node.member) in gen._struct_method_signatures):
         return gen._lower_bound_method_value(struct_name, node.member, ot, ov)
+    # A BUILTIN-container method referenced as a plain VALUE (`append =
+    # l.append`) — the container twin of the user-struct case just above.
+    # MojoList*/MojoDict*/MojoSet* have no per-method C symbol for a
+    # MojoBoundMethod*'s fn pointer to point at (their methods are
+    # lowered inline per call site), so the binding is recorded instead
+    # and calls through it lower as direct container-method calls — see
+    # _lower_builtin_method_value. Without this, the read fell through
+    # to the generic runtime getattr below (_mojo_dispatch_getattr),
+    # which raises AttributeError at runtime for every registered
+    # container (gencodec.py's python_mapdef_code/python_tabledef_code
+    # never produced any output).
+    if ot in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        return gen._lower_builtin_method_value(ot, ov, node.member)
     # Struct-level comptime alias (e.g. BitSet._words_size): not a physical
     # field — expand its defining expression with `Self`/the struct name
     # rebound to the accessed object, then lower that.

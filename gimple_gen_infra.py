@@ -171,6 +171,22 @@ def _reset_func(gen, body: list = None, params: list = None):
     # Reset per function for the same reason _actual_types is: temp
     # names (_tN) recycle across functions. See _lower_bound_method_value.
     gen._bound_method_ret_types: dict[str, str] = {}
+    # Builtin-container method bound as a first-class VALUE (`append =
+    # l.append`, the classic accumulator-aliasing idiom) — key: the C
+    # name of the temp/var holding the boxed value; value: (receiver
+    # ctype, receiver hidden-local C name, method name). A later call
+    # through the stored value (_lower_named_call / _gen_stmt_ExprStmt's
+    # statement-level twin) lowers as a DIRECT container-method call on
+    # the recorded hidden receiver local, reusing _lower_list_method/
+    # _lower_dict_method/_lower_set_method verbatim — so per-call-site
+    # int/str element dispatch behaves exactly like the direct
+    # `l.append(x)` spelling. The receiver is captured into its own
+    # void* hidden local at the reference site, so rebinding the source
+    # variable afterwards can't redirect an already-taken bound method.
+    # Reset per function for the same reason _bound_method_ret_types is:
+    # temp names (_tN) recycle across functions. See
+    # _lower_builtin_method_value.
+    gen._builtin_method_values: dict[str, tuple] = {}
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -1176,12 +1192,42 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
         'partition', 'rpartition', 'swapcase', 'expandtabs', 'casefold',
     }
 
+    # Methods that exist ONLY on Python dict (never on list/set), so a
+    # `param.method(...)` call using one of these unambiguously identifies
+    # the param as a dict — same reasoning as STRING_ONLY_METHODS above.
+    # Found via Tools/unicode/gencodec.py's `marshalmap(name, map,
+    # marshalfile)`: the param's ONLY use is `for e,(u,c) in map.items():`,
+    # and the bare member-access struct inference below matched the single
+    # registered struct that happens to have an `items` FIELD — WithStmt,
+    # an unrelated internal AST node (`WithStmt.items: list`) — typing the
+    # param `WithStmt *`. Every real dict argument then flowed through a
+    # wrong-struct signature, `.items()` fell to opaque runtime dispatch,
+    # and the pair loop ran zero times (mojo_unsupported_iter).
+    DICT_ONLY_METHODS = {'items', 'keys', 'values', 'setdefault'}
+
+    # Method names shared across the builtin containers. When one of these
+    # is CALLED on the param, it is method-dispatch evidence, NOT evidence
+    # of a struct whose FIELD happens to share the name — excluded from the
+    # accessed-field struct match below for exactly the WithStmt.items
+    # reason documented at DICT_ONLY_METHODS.
+    BUILTIN_CONTAINER_METHODS = {
+        'append', 'extend', 'insert', 'remove', 'pop', 'clear', 'sort',
+        'reverse', 'copy', 'index', 'count', 'keys', 'values', 'items',
+        'get', 'update', 'setdefault', 'add', 'discard',
+    }
+
     def analyze_param_usage(nodes: list, param_name: str):
         """Analyze how a parameter is used in a list of statements."""
         accessed_fields = set()
+        # Members CALLED as methods on the param (`param.items(...)`) —
+        # method dispatch, distinct from bare field reads. Consulted to
+        # keep builtin-container method names out of the struct-field
+        # match (see BUILTIN_CONTAINER_METHODS above).
+        called_methods: set = set()
         function_calls = []  # List of (function_name, arg_index)
         is_subscripted = False  # Track if parameter is used with [...]
         is_string_method = False  # Track if param.<str-only-method>(...) is called
+        is_dict_method = False  # Track if param.<dict-only-method>(...) is called
         is_iterated = False  # Track if parameter is used as for-loop iterable
         # Track if a single-character subscript of the param (`param[i]`,
         # directly or via a local it was assigned to, e.g. `c = param[i]`)
@@ -1243,6 +1289,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
             """Recursively scan an expression."""
             nonlocal is_subscripted, is_string_method, is_char_compared, is_iterated
             nonlocal is_str_key_subscripted, is_nondict_key_subscripted
+            nonlocal is_dict_method
             if isinstance(expr, gimple_ctypes.Comprehension):
                 # A list/set/dict/generator comprehension embedded inside
                 # an expression (`sum(x**2 for x in values)`,
@@ -1351,6 +1398,14 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                             and expr.func.obj.name == param_name
                             and expr.func.member in STRING_ONLY_METHODS):
                         is_string_method = True
+                    # param.<dict-only-method>(...) — same unambiguous
+                    # "param is a dict" evidence (see DICT_ONLY_METHODS).
+                    if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
+                            and expr.func.obj.name == param_name):
+                        if expr.func.member in DICT_ONLY_METHODS:
+                            is_dict_method = True
+                        if expr.func.member in BUILTIN_CONTAINER_METHODS:
+                            called_methods.add(expr.func.member)
                     # Handle re.sub(pattern, fn, src) → src (index 2) is char*
                     if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
                             and expr.func.obj.name == 're'
@@ -1493,7 +1548,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
         scan_nodes(nodes)
         return (accessed_fields, function_calls, is_subscripted, is_string_method,
                 is_iterated, is_char_compared, is_str_key_subscripted,
-                is_nondict_key_subscripted)
+                is_nondict_key_subscripted, called_methods, is_dict_method)
 
     # For each parameter without a type annotation, infer from usage
     for pname, ptype in func.params:
@@ -1517,15 +1572,16 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
             if _pu_cached is not None:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
-                 is_nondict_key_subscripted) = _pu_cached
+                 is_nondict_key_subscripted, called_methods, is_dict_method) = _pu_cached
             else:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
-                 is_nondict_key_subscripted) = analyze_param_usage(func.body, pname)
+                 is_nondict_key_subscripted, called_methods, is_dict_method
+                 ) = analyze_param_usage(func.body, pname)
                 _g._param_usage_scan_cache[_pu_key] = (
                     fields_accessed, function_calls, is_subscripted, is_string_method,
                     is_iterated, is_char_compared, is_str_key_subscripted,
-                    is_nondict_key_subscripted)
+                    is_nondict_key_subscripted, called_methods, is_dict_method)
 
             # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
             is_polymorphic = any(
@@ -1588,12 +1644,24 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
             # If no type inferred from functions, try from struct member accesses
             # Only infer struct type if exactly one struct matches (avoid ambiguity)
             if pname not in inferred and fields_accessed:
+                # A member CALLED as a builtin-container method on the param
+                # (`map.items()`) is method dispatch, not field evidence —
+                # without this exclusion the single registered struct with a
+                # same-named FIELD won (WithStmt.items → `WithStmt *` for
+                # gencodec.py's marshalmap/python_mapdef_code `map` params).
+                struct_evidence = fields_accessed - (
+                    called_methods & BUILTIN_CONTAINER_METHODS)
                 matches = [
                     sname for sname, sfields in _g.struct_field_types.items()
-                    if all(f in sfields for f in fields_accessed)
+                    if struct_evidence
+                    and all(f in sfields for f in struct_evidence)
                 ]
                 if len(matches) == 1:
                     inferred[pname] = f"{matches[0]} *"
+            # A dict-only method call with no better signal: the param is a
+            # dict (see DICT_ONLY_METHODS above).
+            if pname not in inferred and is_dict_method:
+                inferred[pname] = 'MojoDict *'
 
             # Last resort: string-only evidence (a str-only method call or
             # string concatenation, with no field access suggesting a
