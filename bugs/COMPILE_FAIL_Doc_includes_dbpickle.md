@@ -2,24 +2,54 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py`
 
-## Status (re-verified 2026-08-26, branch fix/opencode-importlib — DOCUMENTED-NOT-FIXED, unchanged)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — RESOLVED at the
+## compile/link level: the driver build now produces a binary that runs to
+## completion; the actual blocker was NOT the two runtime subsystems this doc
+## had assumed)
 
-Re-ran the full `python3 mojo.py build` repro fresh under the memory/
-time watcher: fails at 76s with the IDENTICAL single error signature
-(`dbpickle.py:80:3: error: cannot convert to a pointer type` at
-`DBUnpickler(file, conn).load()`). Also re-checked the tree directly:
-still zero references to `BytesIO`/`StringIO`/`Pickler`/`Unpickler`
-anywhere in gimple_codegen.py or runtime/. None of the recent shared
-mechanism landings touch this file's shape (it has no generators; its
-needs are two from-scratch runtime subsystems). Assessment unchanged:
-a real growable byte-buffer `io.BytesIO` plus a subclassable pickle
-engine honoring `persistent_id`/`persistent_load` overrides — each
-comparable in scope to the existing sqlite3 binding, and the pickle
-engine additionally needs real user-subclass virtual dispatch.
-Doc/includes/ example code, low value relative to effort; not
-attempted.
+Re-verified fresh, per the mandate not to trust stale status text — and
+the fresh verification OVERTURNED this doc's long-standing assessment.
+The file's GIMPLE stage has been compiling clean for a while (the
+2026-08-23 entry's `cannot convert to a pointer type` repro no longer
+matched the isolated pipeline), and a full `driver.compile_program`
+build failed on exactly ONE error: `_gimple_main` at source line 80,
+`memos = DBUnpickler(file, conn).load()`.
 
-## Status (re-verified 2026-08-25, worktree fix/rest-remainder12 — DOCUMENTED-NOT-FIXED, unchanged)
+Root cause (narrow, shared-machinery): `.load()` on a USER-STRUCT
+receiver (`DBUnpickler *`, whose base `pickle.Unpickler` is an
+unmodeled external class) was routed by `_lower_method_call` into
+`_lower_pointer_method` — the raw Mojo UnsafePointer protocol — because
+`load` is in `_RAW_PTR_METHODS` and the guard only excluded
+runtime-container pointers. That emitted `_t = *recv;` (a whole-struct
+BY-VALUE copy) cast to the assignment target's type → GCC "cannot
+convert to a pointer type". The struct-method path would have handled
+it correctly all along via its existing unresolved-base weak-stub
+machinery.
+
+Fix: the raw-pointer dispatch now excludes receivers whose struct has
+an unresolvable base class (`_structs_with_unresolved_base`) — an
+inherited-method call on such a Python class can never be
+UnsafePointer semantics, while genuine Mojo `UnsafePointer[T]`
+receivers (whose T has no unresolvable inheritance) keep raw-pointer
+semantics unchanged.
+
+Verified end-to-end: build exits 0 ("Built"); the binary RUNS to
+completion with exit 0, printing its progress messages and honest
+"unavailable in compiled mode" diagnostics for the genuinely
+unmodelable pieces (`namedtuple` import, `DBPickler.dump`/
+`DBUnpickler.load` inherited from the unmodeled pickle bases). The
+program's own logic (sqlite3-cursor stubs, control flow, print
+output) executes. Full mandatory gate after the compiler change:
+`test_gimple.py` 256/256, `test_module_cache.py` 76/76, `make
+check-selfhost` clean, from-scratch stdlib dylib rebuild EXIT=0 with
+**0 skip lines**.
+
+The 2026-08-23 assessment below ("needs io.BytesIO + a real pickler
+engine") described what FULL RUNTIME FIDELITY would take — still true,
+still out of scope — but it was never the compile blocker. Compile-fail
+resolved.
+
+## Status (re-verified 2026-08-25, worktree fix/rest-remainder12 — superseded above)
 
 Re-ran an isolated `compile_to_gimple` check fresh against this
 session's other landed fixes (coroutine-body `mojo_c_getenv`/print/

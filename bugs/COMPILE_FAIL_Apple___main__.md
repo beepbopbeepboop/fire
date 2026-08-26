@@ -4,7 +4,61 @@ Source file: `/Users/mrs/net/Python-3.14.6/Apple/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-25, worktree fix/rest-remainder12 — COMPILE stage now fully fixed end-to-end; RUNTIME crash found, separate gap, NOT fixed)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — runtime crash ROOT-CAUSED
+## to the cross-tree import gap; fix is feature-sized, not attempted)
+
+Investigated the `AttributeError: name` crash fresh with lldb
+(breakpoint on `mojo_raise_attribute_error`, full backtrace):
+
+```
+frame #2 apple_main`_mojo_dispatch_getattr(obj=0x10000d2e8, attr="name") at __main__.py:453
+frame #3 apple_main`_toplevel at __main__.py:59
+```
+
+Source line 59 is the FIRST module-level statement: `SCRIPT_NAME =
+Path(__file__).name`. The generated code for it (verified in the
+link-mode .ci) is:
+
+```c
+_t25 = _slit_10229;                          /* "<bootstrap>" — the __file__ stub */
+_t27 = (void *)_t26;
+_t28 = _mojo_dispatch_getattr(_t27, "name"); /* getattr on the RAW STRING */
+_root_globals.SCRIPT_NAME = ...;
+```
+
+There is NO `Path(...)` construction call at all. Root cause chain:
+
+1. `from pathlib import Path`: `pathlib` does not resolve as an
+   inlinable sibling module (`_parsed_import` walks up from
+   `Apple/`; the package lives at `../Lib/pathlib`, one level OVER,
+   which no candidate-path rule covers), and it is not in the stdlib
+   dylib either (that builds from the Mojo stdlib tree, not CPython
+   Lib). The import degrades to an extern `_pathlib_toplev` globals
+   struct — `Path` itself never registers as a known struct.
+2. `Path(__file__)` therefore lowers through
+   `_lower_imported_struct_ctor`'s box-first-argument stub: it emits
+   the boxed `"<bootstrap>"` string AS the "instance".
+3. `.name` on that opaque value goes dynamic
+   (`_mojo_dispatch_getattr`) → `mojo_obj_getattr` on a plain C
+   string → AttributeError("name"), uncaught at top level → exit 1
+   before any output.
+
+Fixing it needs the imported-class path to work across this layout:
+either cross-tree import resolution (finding `../Lib/<pkg>` relative
+to the entry file) plus link-mode struct materialization
+(`_register_imported_structs` deliberately returns early when
+`gen.do_imports` is set — see its gate — and nothing else registers
+the class when inlining didn't happen), or teaching the reflection/
+dylib route to serve CPython-Lib classes. Both are the same
+"foreign-module class construction" feature family already documented
+as out-of-scope in bugs/COMPILE_FAIL_importlib_metadata___init__.md
+(`Pair(...)`) and bugs/COMPILE_FAIL_importlib_resources_readers.md
+(`yield pathlib.Path(...)`); per those docs' assessment and this
+campaign's scope rules, not attempted here. Compile stage remains
+fully green (build exits 0); doc stays open for the runtime gap with
+its root cause now pinned down precisely.
+
+## Status (updated 2026-08-25, worktree fix/rest-remainder12 — COMPILE stage fully fixed end-to-end; RUNTIME crash found, separate gap — root cause NOW KNOWN, see 2026-08-26 entry above)
 
 `python3 mojo.py build .../Apple/__main__.py` now exits 0 and produces a
 working executable. Four root-cause fixes landed in the coroutine/
