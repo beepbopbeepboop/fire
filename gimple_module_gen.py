@@ -5773,6 +5773,14 @@ def gen_module_impl(self, stmts):
                 if _td:
                     cpp_parts.append(_td.replace('_Bool', 'bool'))
                     cpp_parts.append('')
+            # Remember which struct typedefs this preamble now defines, so
+            # the module-globals mirror block below can tell a nameable
+            # type from one it must box.
+            _cpp_preamble_typedef_structs = set(
+                _sn2 for _sn2 in _gm_struct_names_seen
+                if _gm_typedef_text(_sn2) is not None)
+        else:
+            _cpp_preamble_typedef_structs = set()
         if self._cpp_module_global_refs or self._cpp_module_func_refs:
             cpp_parts.append('/* Extern declarations for module-level symbols')
             cpp_parts.append('   referenced by this module\'s compiled generator')
@@ -5785,6 +5793,66 @@ def gen_module_impl(self, stmts):
             for _mref_safe_mod in sorted(_mref_modules):
                 _mt = f"_{_mref_safe_mod}_toplev"
                 _mg = f"_{_mref_safe_mod}_globals"
+                # A mirror field typed `SomeStruct *` is only emittable if
+                # g++ can NAME SomeStruct in this translation unit. The
+                # typedef BFS above only pulls structs generator bodies
+                # actually reach (self/params/ctors/yields), so a global
+                # whose inferred type is a struct pointer NO generator
+                # touches (real: Lib/typing.py's `ByteString`/
+                # `_lazy_annotationlib`/`_sentinel`, typed
+                # `_DeprecatedGenericAlias *` etc. by the ordinary
+                # constructor-call rule) used to be copied verbatim into
+                # this mirror — "'_DeprecatedGenericAlias' does not name
+                # a type", 5 hard g++ errors. Fix: (a) when SomeStruct's
+                # fully-resolved layout is available in
+                # struct_field_types, emit its forward decl + full
+                # typedef here too (deduped against what the BFS block
+                # already emitted); (b) when it is NOT available, box
+                # THIS mirror's field to int64_t — layout-identical on
+                # every supported ABI (both 8 bytes / 8-aligned), and
+                # this TU never dereferences such a field anyway (the
+                # .ci side owns the real typed accesses).
+                _mirror_extra_structs: list = []
+                for _gl in self._module_globals.get(
+                        'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):
+                    _mdm = re.match(r'^(\w+) \*$', _gl[1])
+                    if not _mdm:
+                        continue
+                    _msn = _mdm.group(1)
+                    if (_msn in _cpp_preamble_typedef_structs
+                            or _msn not in self.struct_field_types
+                            or _msn in _mirror_extra_structs):
+                        continue
+                    _mirror_extra_structs.append(_msn)
+                # Transitive closure over field-typed struct pointers,
+                # same as the generator-body BFS above: a typedef emitted
+                # here may itself reference further struct-pointer fields,
+                # each of which needs at least a forward declaration by
+                # the time its referrer is parsed.
+                _mirror_frontier = list(_mirror_extra_structs)
+                while _mirror_frontier:
+                    _mf_cur = _mirror_frontier.pop()
+                    for _mf_fct in self.struct_field_types.get(_mf_cur, {}).values():
+                        if isinstance(_mf_fct, str) and _mf_fct.endswith(' *'):
+                            _mf_sn = _mf_fct[:-2]
+                            if (_mf_sn in self.struct_field_types
+                                    and _mf_sn not in _cpp_preamble_typedef_structs
+                                    and _mf_sn not in _mirror_extra_structs):
+                                _mirror_extra_structs.append(_mf_sn)
+                                _mirror_frontier.append(_mf_sn)
+                if _mirror_extra_structs:
+                    cpp_parts.append('/* Struct layouts needed only by the')
+                    cpp_parts.append('   module-globals mirror below. */')
+                    for _me_sn in sorted(_mirror_extra_structs):
+                        cpp_parts.append(f'struct {_me_sn};')
+                    cpp_parts.append('')
+                    for _me_sn in sorted(_mirror_extra_structs):
+                        _me_flds = self.struct_field_types.get(_me_sn, {})
+                        _me_td = '\n'.join(
+                            _render_struct_typedef_body(_me_sn, _me_flds))
+                        cpp_parts.append(_me_td.replace('_Bool', 'bool'))
+                        cpp_parts.append('')
+                    _cpp_preamble_typedef_structs.update(_mirror_extra_structs)
                 cpp_parts.append(f'typedef struct {_mt} {{')
                 for _gl in self._module_globals.get(
                         'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):

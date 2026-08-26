@@ -2324,6 +2324,25 @@ def _cpp_expr(gen, e) -> str:
                     and gen._cpp_declared.get(e.obj.name) == 'MojoDict *':
                 key_expr = gen._cpp_dict_key_expr(e.index, idx)
                 return f"mojo_dict_get_int((MojoDict *)({obj}), {key_expr})"
+            # A bare identifier that names a real module-level FUNCTION
+            # is never a string/container: `Unpack[self]` (typing.py's
+            # `_BaseGenericAlias.__iter__`, `Unpack` being an
+            # @_SpecialForm-decorated def IN THIS SAME MODULE) means
+            # "dynamic __getitem__ dispatch on a callable object" —
+            # genuinely unrepresentable in this scalar model. The
+            # generic cstr_slice fallback below would have emitted a
+            # garbage `mojo_cstr_slice((char *)(_root_globals.Unpack),
+            # ...)` against a name that isn't even a member of the
+            # emitted globals struct (functions aren't globals here) —
+            # a hard g++ error AND, had it linked, nonsense
+            # bytes-as-string output. Refuse honestly instead.
+            if isinstance(e.obj, gimple_ctypes.IdentExpr) \
+                    and e.obj.name in gen.func_return_types:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"{e.obj.name}[...] is not supported in a compiled "
+                    "generator/coroutine body (subscript base resolves "
+                    "to a function/special-form value, not a string or "
+                    "container)")
             return f"mojo_cstr_slice((char *)({obj}), {idx}, ({idx}) + 1)"
         # Subscripting a CALL RESULT whose declared return type is a
         # container pointer: `detect_encoding(readline)[0]` where
