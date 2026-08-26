@@ -2,6 +2,42 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (updated 2026-08-26, wtOpencode_canalyzer2 — re-verified fresh; both
+## stacked blockers confirmed live, neither tractable within scope)
+
+Isolated `compile_to_gimple_with_cpp(do_imports=False)` fresh: the
+`reversed(self._mapping)` refusal is byte-identical to the 2026-08-26
+entries below. Probed past it by experimentally neutralizing ONLY the
+three view `__reversed__` bodies in the source text (no compiler
+change): the module's NEXT blocker is then exactly the long-tracked
+`Counter[...] = ...` subscript-store honest refusal — so even a
+complete `reversed()` fix would NOT make this file compile; Counter
+still aborts the whole module.
+
+Also probed whether either gap got cheaper:
+
+- **`reversed()`**: `_mapping`'s inferred field type in all three view
+  structs is scalar (`'int'`), so the sibling `__iter__` methods
+  already compile as zero-iteration scalar-stubs per this emitter's
+  established convention; a new `reversed(<expr>)` case for THIS file
+  would lower to the same zero-iteration stubs — no runtime-behavior
+  gain, and the file still refuses on Counter afterward. A "real"
+  reversed-over-MojoDict lowering exists as a template (the
+  coroutine-body `sorted()` case already composes
+  `mojo_reversed(mojo_dict_sorted_keys(...))`), but no file in this
+  session's doc group reaches it, and the general delegation-receiver
+  generalization remains the flagged high-risk shape. Not attempted.
+- **Counter**: still `{values: int, items: int, get: int}` — its three
+  inherited-dict method names STILL land as int FIELDS from the
+  self-attr scan, with zero method signatures and NO backing MojoDict
+  field (unlike OrderedDict, whose own `__init__`'s literal
+  `self.__map = {}` gives it a real one). Real support needs builtin-
+  dict-subclass storage synthesis + inherited container-method
+  dispatch + `__missing__` — feature-sized, unchanged since the
+  2026-08-23 analysis. Not attempted.
+
+Doc stays open on both blockers.
+
 ## Status (re-verified 2026-08-26, wtRest19b — same `reversed()` blocker; investigated feasibility, confirmed feature-sized)
 
 Fresh `MOJO_DEBUG=1` build against current tree: byte-identical to the

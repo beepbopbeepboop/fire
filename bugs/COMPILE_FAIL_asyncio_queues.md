@@ -1,7 +1,23 @@
 # COMPILE_FAIL: asyncio/queues.py
 
-## Status (updated 2026-08-26, worktree fix/opencode-group4 — re-verified fresh,
-## unchanged; confirmed out of scope as a feature-sized runtime project)
+## Status (updated 2026-08-26, wtOpencode_canalyzer2 — re-verified fresh; own
+## blocker unchanged, build now can't even REACH the module refusal in 300s)
+
+Fresh bounded `python3 mojo.py build .../Lib/asyncio/queues.py`
+(watcher-killed at 300s): the run never reaches queues.py's own
+module-level refusal anymore — it spends the entire budget inside the
+documented >300s inline source-fallback for its TRANSITIVE imports,
+which now fail as `collections`'s `Counter[...] = ...` and `inspect`'s
+`OrderedDict[...] = ...` subscript-store refusals (both honest
+fallbacks; see COMPILE_FAIL_collections___init__.md). queues.py's OWN
+blocker is untouched by anything landed: `get`/`join`/`put`'s
+`await <local Future>` / `await <bound-method call>` shapes remain
+outside `_async_quick_eligible`'s whitelist, and closing them needs the
+real Awaitable protocol (allocatable Future/Event handles + waiter
+queues + cross-coroutine wakeup) — a feature-sized asyncio-runtime
+project, still explicitly out of scope. Doc kept open.
+
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — superseded above)
 
 Re-verified fresh. Identical refusal: `function(s) get, join, put (async
 function(s), declared async def)` with an EMPTY per-function
