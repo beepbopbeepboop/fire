@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/datafiles.p
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro: unchanged single blocker — `read_decls:
+unsupported for-loop iterable type: CallExpr` — i.e. `read_all, _ =
+_get_format_handlers('decls', fmt)` followed by
+`for decl, _ in read_all(infile):`, a loop whose iterable is a call
+through a RUNTIME-SELECTED callback value. Re-examined this round:
+resolving that callee would require threading "this local holds one of
+these known function values" through tuple-unpacking assignment — a
+callable-value tracking capability the scalar coroutine-body model
+doesn't have (same family as the declared-callable-local case, but
+flow-derived rather than directly assigned). Even past it, the
+transitively-imported `c_parser/info.py` signature-race family (see
+that doc) waits behind. No code change; doc re-verified. Still open.
+
 ## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering fix landed; this file's remaining blockers are different and unchanged)
 
 The shared "generator-consumption ordering" machinery this doc's

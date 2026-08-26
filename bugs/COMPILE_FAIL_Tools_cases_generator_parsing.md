@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro: same structural class as both entries below — the
+generated `parsing_gen.cpp` still fails on polymorphic
+`yield from self.<field>.tokens()` dispatch (`request for member
+'tokens' in 'self->IfStmt::body'` where body is `Stmt *`,
+`'self->IfStmt::else_body'`/`'self->ForStmt::body'` where MojoList*,
+plus the int64_t→char*/Stmt* conversions), at fresh line numbers
+(179/184/189/192/254/259/320/325/386/397/461/470). None of this
+round's landed shared fixes (zip_longest per-slot typing, opaque-
+handle write mirror, WithStmt generator driving, cpp string escaping)
+touch runtime-polymorphic receiver dispatch on base-typed struct
+fields — still squarely the excluded hard-doc cluster below. No code
+change; doc re-verified with current line numbers. Still open.
+
 ## Status (re-verified 2026-08-25)
 
 Re-ran fresh against `fix/rest-remainder9`: same structural class of

@@ -4,6 +4,34 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1 — blocker SHIFTED again: the refusal set narrowed to the two nested-function-callee generators)
+
+Fresh repro: the module now refuses at the eligibility gate on only
+TWO functions, both on unresolved NESTED-function callees:
+
+```
+iter_optimization_tables: a call to unresolved callee
+  'calc_histogram_table(...)' is not supported in a compiled
+  generator/coroutine body ...
+iter_specialization_tables: a call to unresolved callee
+  'calc_specialization_table(...)' is not supported ...
+```
+
+Both `calc_*` helpers are sibling `def`s NESTED inside the same
+enclosing function (`pre_succ_pairs_section()`) as the generators that
+call them — so this is now precisely the "nested `def` local to the
+generator body" closure-compilation family `_cpp_expr`'s own refusal
+comment already names (importlib/metadata's identical shape), NOT any
+of the previously-documented shapes: the LambdaExpr refusal (2026-08-09),
+the Section___init__ extern-typing / bare-continue /
+declaration-ordering C++ error set (2026-08-23) are all no longer
+reached. Supporting it needs real closure compilation for nested
+functions referenced as callees inside coroutine bodies (they capture
+enclosing-scope locals: `pred_rows`/`succ_rows`/`part_iter`) — feature-
+sized work on shared machinery with this project's documented
+regression history. No code change; doc re-verified with the shifted
+blocker precisely identified. Still open.
+
 ## Status (2026-08-23): error set SHIFTED twice over; old blockers all gone, new
 ## blocker is a fresh frontier of .cpp coroutine-stage mislowering. Still open.
 
