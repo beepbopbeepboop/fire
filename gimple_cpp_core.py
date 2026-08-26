@@ -495,13 +495,22 @@ def _cpp_string_literal_expr(gen, val: str) -> str:
     unchanged (single C string literal, no parsing)."""
     text, is_fstring = gen._decode_str_literal_text(val)
     if not is_fstring:
-        escaped = text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
-        return f'"{escaped}"'
+        # gimple_ctypes._c_escape, NOT a hand-rolled replace chain: the
+        # parser stores a StringLiteral's value as RAW SOURCE TEXT
+        # (`"a\n"` → backslash + 'n', never decoded), and _c_escape is
+        # the shared helper (used by the ordinary GIMPLE path's
+        # _lower_StringLiteral) that passes C-style escapes through
+        # unchanged. The old inline `replace('\\', '\\\\')` first doubled
+        # every valid escape — a generator body printing "line one\n"
+        # emitted the literal characters `\n` (verified end-to-end:
+        # compiled output contained `line one\n` as 11 chars). Same fix
+        # for the all-literal f-string fast path and the per-part lit
+        # pieces below.
+        return f'"{gimple_ctypes._c_escape(text)}"'
     parts = gen._parse_fstring_parts(text)
     if not parts or all(k == 'lit' for k, _v, _s, _c in parts):
         plain = ''.join(v for k, v, _s, _c in parts)
-        escaped = plain.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
-        return f'"{escaped}"'
+        return f'"{gimple_ctypes._c_escape(plain)}"'
     self_fields = getattr(gen, '_cpp_gen_self_fields', None)
     fn_ret = _cpp_trusted_fn_return_types(gen)
     acc = None
@@ -509,8 +518,7 @@ def _cpp_string_literal_expr(gen, val: str) -> str:
         if kind == 'lit':
             if not part_text:
                 continue
-            escaped = part_text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
-            piece = f'"{escaped}"'
+            piece = f'"{gimple_ctypes._c_escape(part_text)}"'
         else:
             try:
                 from mojo_compiler import Parser as _P, py_tokenize as _tok
@@ -1744,6 +1752,39 @@ def _cpp_expr(gen, e) -> str:
                             f'generator-body method call on opaque scalar '
                             f'local {e.func.obj.name}.{e.func.member}()')
                 return '0'
+            # `<self>.<opaque-field>.write(data)` / `.read()` / `.close()`
+            # on a receiver whose resolved ctype is this model's opaque
+            # int64_t box — mirror the ORDINARY GIMPLE path's own
+            # file-handle dispatch (gimple_gen_methods.py's int64_t-
+            # receiver branch: int_read/int_write/stub close), which
+            # already made exactly this choice for non-generator methods
+            # (cwriter.py's CWriter.set_position compiles clean through
+            # it; header_guard's @contextlib.contextmanager companion is
+            # the generator-body sibling of the same shape). Both runtime
+            # helpers are declared via the wholesale <mojo_runtime.h>
+            # every generated .cpp includes, so no new extern plumbing.
+            # Before this, the generic fallback below emitted raw C++
+            # member-call syntax on a plain int64_t field — a hard g++
+            # error ("request for member 'write' in 'self->CWriter::out',
+            # which is of non-class type 'int64_t'"). Deliberately placed
+            # AFTER the typed-receiver cases above and keyed on
+            # `_cpp_receiver_ctype` (not the IdentExpr-local stub just
+            # above, which keeps its established stub-0 convention):
+            # every site that reaches this branch today was previously a
+            # hard compile failure, so no currently-green build's behavior
+            # can change.
+            _fh_rc = _cpp_receiver_ctype(gen, e.func.obj)
+            if _fh_rc in ('int64_t', 'int') and e.func.member in ('write', 'read', 'close'):
+                _fh_obj = gen._cpp_expr(e.func.obj)
+                if e.func.member == 'write' and len(e.args) == 1:
+                    return (f"int_write((int64_t)({_fh_obj}), "
+                            f"(char *)({gen._cpp_expr(e.args[0])}))")
+                if e.func.member == 'read' and not e.args:
+                    return f"int_read((int64_t)({_fh_obj}))"
+                if e.func.member == 'close' and not e.args:
+                    gimple_ctypes._debug_note('stubbed operation',
+                                'generator-body .close() on opaque handle')
+                    return '0'
             obj = gen._cpp_expr(e.func.obj)
             args = ', '.join(gen._cpp_expr(a) for a in e.args)
             return f"{obj}.{e.func.member}({args})"
