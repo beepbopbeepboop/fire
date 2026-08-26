@@ -1,5 +1,34 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — isolated probes match documented behavior; bounded full build spent entire 15-min budget in transitive fallbacks without implicating mailbox)
+
+Two fresh probes, no compiler change:
+
+1. Strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+   reproduces the 2026-08-24 entry's refusal VERBATIM —
+   "`Message[...] = ...` subscript store on user-defined struct 'Message'
+   (no `__setitem__` method and no backing container field)" — the
+   known do_imports=False probe artifact (`email.message.Message`
+   external base invisible; BabylMessage.__setitem__'s
+   `self._visible[header] = self[header]`). Consistent with the
+   2026-08-25 entry's finding that this refusal does NOT fire on the
+   real whole-program path.
+2. A fresh safety-watched full `python3 mojo.py build .../Lib/mailbox.py`
+   (own watcher, killed at my 905s budget): did NOT reach GCC stage
+   within the budget under today's heavy concurrent-build load — it
+   spent the entire time inline-interpreting refused transitive imports
+   (`collections` Counter, `inspect` OrderedDict, `urllib.parse`
+   _Quoter — all the same subscript-store fallback family), with ZERO
+   error lines implicating mailbox.py's own source. This neither
+   repeats nor contradicts the 2026-08-25 entry's ~13-minute full-run
+   result (291 errors, all transitive); it just means the full-run
+   claim was not independently re-timed this pass.
+
+Net unchanged: mailbox.py's own generator-codegen concern remains fully
+resolved (own generators clean per isolated compile); the file's failure
+to build end-to-end is entirely the separately-tracked transitive
+cascade. No code change; doc stays open per convention.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, no change)
 
 Per this run's assignment, specifically re-checked whether the just-landed

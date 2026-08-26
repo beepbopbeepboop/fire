@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-26, worktree fix/opencode-genlib2 — re-verified fresh; refusal byte-identical, classification re-confirmed from the current guard code)
+
+Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+byte-for-byte identical refusal — `iterdecode, iterencode` on
+"a `*`/`**`-unpack call argument is not supported in a compiled
+generator/coroutine body" at `getincrementalencoder(encoding)(errors,
+**kwargs)`. Also re-derived the classification directly from the CURRENT
+guard site (`gimple_cpp_core.py`'s coroutine-body CallExpr case): the one
+narrow kwargs-spread exception that exists (`_cpp_try_kwargs_forward_call`)
+requires a STATICALLY-KNOWN `IdentExpr` callee whose real parameter
+names/defaults are compile-time visible — this shape's callee is the
+dynamically-obtained class returned by `getincrementalencoder(encoding)`,
+which that helper provably returns None for, falling through to the
+honest refusal. Nothing landed since the last pass touches dynamic-callee
+dispatch; genuinely unfixable without the large dynamic-kwargs-dispatch
+feature already assessed repeatedly. No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies, unchanged)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:

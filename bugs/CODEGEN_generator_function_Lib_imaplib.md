@@ -1,5 +1,36 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — exactly ONE .cpp error left (blocker 2); blocker 1's silent constant-fold confirmed in the generated text; inference/emitter asymmetry pinned down)
+
+Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)` +
+`g++-mp-15 -std=c++20 -fsyntax-only`: the companion `.cpp` is down to
+exactly ONE error — `invalid conversion from 'MojoList*' to 'int64_t'`
+at `co_yield Idler___next__(self);` (blocker (2)). Direct inspection of
+the generated text confirms the 19d entry's observation about blocker
+(1): `if not self._imap.sock:` now emits `if ((!0)) {` — a silently
+always-false constant-fold, no g++ error — still squarely inside the
+excluded HIGH-RISK unannotated-init-param-type family, untouched.
+
+New precision on blocker (2)'s mechanism, derived fresh: `Idler.__next__`
+returns `typ, data` (a real 2-tuple), and its compiled return type IS
+correctly known (`MojoList *` via `func_return_types['Idler___next__']`)
+— but only the EXPRESSION EMITTER consults that registry when lowering
+`next(self)` to `Idler___next__(self)`; the YIELD-SITE TYPE INFERENCE
+side never resolves the `next(<self/struct-ptr>)` shape, so it types
+that yield `int64_t` (its default) and unifies the promise to `int64_t`,
+while emission then produces the raw `MojoList *` expression — hence the
+conversion error. The symmetric fix (teach yield-site inference the same
+`next(x)` -> `func_return_types[f"{struct}___next__"]` lookup the walrus
+hoist already uses for self-method calls) would flip this site to
+`MojoList *`, at which point burst's OTHER yield (`yield response` from
+`self._pop(...)`) still disagrees (`_pop` returns `_idle_responses.pop(0)`
+tuples / the `('', None)` default across multiple return paths — no
+tuple-return-type representation exists for ordinary functions, the same
+gap gettext.py's doc tracks as root cause #3), producing an honest
+mixed-yield refusal instead of a working file. So blocker (2) genuinely
+needs cross-method tuple-return coherence — feature-sized, unchanged.
+Not attempted; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro of

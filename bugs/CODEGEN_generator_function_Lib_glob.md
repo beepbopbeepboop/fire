@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-26, worktree fix/opencode-genlib2 — re-verified fresh; refusal set byte-identical, `bytes()` absence re-confirmed post-split)
+
+Fresh strict isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+byte-for-byte identical 5-generator refusal set — `_iglob` ("unsupported
+for-loop iterable type: CallExpr"), `_iterdir` ("a call to unresolved
+callee 'bytes(...)' ..."), and `select_recursive`/`select_recursive_step`
+/`select_wildcard` (all "a call to unresolved callee 'match(...)' ..." —
+the same opaque-callable-value dispatch family as the older
+`select_next(...)` wording, exactly as the 2026-08-26 rest-remainder16
+entry traced). Also re-confirmed via a fresh grep that the `bytes`
+builtin still has ZERO support anywhere in the (now split)
+`gimple_*.py` backend. Classification unchanged: dominated by the
+out-of-scope opaque-callable-value / dynamic-generator-dispatch feature
+gap (`selector()`/`glob_in_dir()` holding dynamically-chosen generator
+references); `bytes()` would need a real bytes value representation.
+No code change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder16 — re-verified; blocker text shifted slightly, same classification)
 
 Fresh re-verify against this worktree (branched from master `a913ab8`).

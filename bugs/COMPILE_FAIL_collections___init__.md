@@ -2,6 +2,35 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — BOTH stacked blockers confirmed live, from two independent build modes)
+
+Fresh verification from both directions, no compiler change:
+
+1. **As BUILD ROOT** (`python3 mojo.py build .../Lib/collections/
+   __init__.py`, safety-wrapped; fails in ~5s, no runaway): the module
+   refuses up front on the three `__reversed__` generator methods —
+   "a call to unresolved callee 'reversed(...)' is not supported in a
+   compiled generator/coroutine body" ×3. Byte-consistent with the
+   wtRest19b/canalyzer2 entries.
+2. **As an IMPORTED dependency** (observed fresh inside a bounded
+   `mojo.py build` of `Lib/asyncio/queues.py`, which imports this
+   module): the nested compile surfaces the DEEPER blocker instead —
+   "cannot compile module: \`Counter[...] = ...\` subscript store on
+   user-defined struct 'Counter' (no `__setitem__` method and no
+   backing container field) ... falling back to interpreting this
+   module from source". This independently corroborates canalyzer2's
+   probe conclusion (neutralize the three `__reversed__` bodies →
+   Counter aborts the module anyway): the imported path evidently
+   retries past skipped generators (relaxed handling) and reaches
+   Counter's own refusal directly.
+
+Both mechanisms remain exactly as previously assessed: fixing
+`reversed()` for this file would only lower to zero-iteration
+scalar-stubs (`_mapping` is int-typed via the excluded unannotated-
+param family) with zero runtime-behavior gain, and Counter needs
+builtin-dict-subclass storage synthesis + inherited container-method
+dispatch + `__missing__` — feature-sized. Doc stays open on both.
+
 ## Status (updated 2026-08-26, wtOpencode_canalyzer2 — re-verified fresh; both
 ## stacked blockers confirmed live, neither tractable within scope)
 
