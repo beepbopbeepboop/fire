@@ -1,6 +1,34 @@
 # COMPILE_FAIL: asyncio/queues.py
 
-## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — re-verified fresh,
+## unchanged; confirmed out of scope as a feature-sized runtime project)
+
+Re-verified fresh. Identical refusal: `function(s) get, join, put (async
+function(s), declared async def)` with an EMPTY per-function
+"Unsupported shape(s)" suffix — confirming all three are rejected by
+`_async_quick_eligible`'s await-shape pre-filter BEFORE any translation
+is attempted, exactly as this doc's analysis below describes. The three
+bodies await:
+- `await putter` / `await getter` — a bare local Future OBJECT
+  (`self._get_loop().create_future()`), not any recognized call shape;
+- `await self._finished.wait()` — an Event.wait() bound-method call.
+
+Making these eligible requires the real Awaitable protocol in the
+compiled async runtime: allocatable Future/Event handles with waiter
+queues and cross-coroutine wakeup (`set_result`/`Event.set` resuming a
+suspended coroutine) — i.e., a new scheduler primitive alongside the
+existing timer queue. That is a feature-sized asyncio-runtime project,
+not a compiler-side narrow fix; per this campaign's scope rules it is
+explicitly NOT attempted here. Note for a future session: the
+generator-side machinery this doc's sibling futures.py needed landed
+2026-08-26 (value-carrying generator returns via per-unit extern "C"
+`{base}_return_slot` globals — see that doc's 2026-08-26 entry) and is
+reusable context for the eventual Task/Future design, but does not
+change this file's blocker.
+
+Doc kept open.
+
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, superseded above)
 
 Re-ran an isolated `compile_to_gimple` check fresh (post this session's
 4 coroutine-emitter fixes landed for COMPILE_FAIL_Apple___main__.md:
