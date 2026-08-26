@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
+byte-identical verbatim refusal — `__iter__, _fwalk, fwalk, walk`. This
+is the tagged-union/variant value-representation gap (`stack`'s runtime-
+heterogeneous str/tuple elements + `isinstance(top, tuple)`
+discrimination) — neither of today's two landed fixes touches runtime
+type discrimination or heterogeneous-container representation; both are
+about static call-target resolution (`super()`/`self.__class__`) or a
+generator's own value-carrying `return`, unrelated mechanisms. Not
+attempted, genuinely out of scope (tagged-union redesign). No code
+change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` re-run

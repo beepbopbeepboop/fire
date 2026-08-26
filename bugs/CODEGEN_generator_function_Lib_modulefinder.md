@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
+byte-identical verbatim refusal — `scan_opcodes: every 'yield' must
+carry a value, and all values must agree on one scalar type`. Neither of
+today's two landed fixes is relevant to any of the 3 stacked gaps this
+doc documents (variable-arity nested-tuple element boxing; consumer-
+through-local-variable aliasing `scanner = self.scan_opcodes`; tag-
+discriminated variable unpack arity) — none involve `super()`,
+`self.__class__`, or a generator's own value-carrying `return`. No code
+change; doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` re-run
