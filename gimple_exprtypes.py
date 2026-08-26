@@ -535,7 +535,8 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
                               known_structs: frozenset | None = None,
                               dict_val_types: dict | None = None,
                               method_return_types: dict | None = None,
-                              fn_return_types: dict | None = None) -> str | None:
+                              fn_return_types: dict | None = None,
+                              self_struct_ctype: str | None = None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -592,7 +593,14 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         if e.name in ('None', 'True', 'False'):
             return 'int64_t'
         if self_fields is not None and e.name == 'self':
-            return None
+            # A generator METHOD yielding/returning bare `self` — the
+            # receiver's own struct pointer type IS statically known
+            # (asyncio/futures.py's `__await__`: `yield self`), and the
+            # struct-pointer-yield support treats a known-struct pointer
+            # as a legitimate promise value. Callers that don't supply
+            # the receiver type keep the historical None ("never a
+            # scalar").
+            return self_struct_ctype
         if known is not None and e.name in known:
             return known[e.name]
         return 'int64_t'
@@ -1195,7 +1203,9 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                             method_return_types: dict | None = None,
                             fn_return_types: dict | None = None,
                             field_elem_types: dict | None = None,
-                            local_elem_types: dict | None = None) -> str | None:
+                            local_elem_types: dict | None = None,
+                            include_returns: bool = True,
+                            self_struct_ctype: str | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1305,7 +1315,8 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             else:
                 t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api,
                                              known_structs, dict_val_types, method_return_types,
-                                             fn_return_types)
+                                             fn_return_types,
+                                             self_struct_ctype=self_struct_ctype)
                 if t is None:
                     t = 'int64_t'  # default when type can't be inferred
             if ctype is None:
@@ -1385,11 +1396,17 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             # every-site walk for an async function's `return <expr>` sites
             # instead of a second, parallel "_async_return_ctype" helper
             # that would just duplicate this exact logic under a different
-            # name. Unreachable in generator-translation mode: _cpp_stmt's
-            # ReturnStmt case already raises _UnsupportedGeneratorShape for
-            # any value-carrying `return` inside a generator body before
-            # this function is ever called for that body, so this branch
-            # only actually fires while translating an async function.
+            # name. `include_returns=False` (the GENERATOR translation
+            # path) skips this branch entirely: a generator's valued
+            # `return` no longer refuses (see _gen_cpp_generator_unit's
+            # eligible-return support — the value rides the existing
+            # promise slot), and its type is the RETURN's own business,
+            # not the yield-promise's — letting it vote here poisoned the
+            # unification whenever the return expression's type didn't
+            # resolve (asyncio/futures.py's `return self.result()`) and
+            # wrongly refused the whole generator.
+            if not include_returns:
+                continue
             if n.value is None:
                 continue
             t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api,

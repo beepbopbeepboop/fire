@@ -116,13 +116,20 @@ def _cpp_is_callable_value_expr(gen, node) -> bool:
         # this check alone — with no field-absence requirement — is
         # both necessary and sufficient, matching `_cpp_expr`'s own
         # method-name-checked-first ordering.
+        # A @property getter is EXCLUDED here (mirroring `_cpp_expr`'s
+        # own property carve-out): real Python auto-invokes a property
+        # on every bare read, so `x = self.<prop>` binds the getter's
+        # RESULT, not a callable — the local must get that value's
+        # ordinary inferred ctype, not `_CPP_CALLABLE_CTYPE`.
         struct_name = getattr(gen, '_cpp_gen_self_struct', None)
         if struct_name and isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == 'self':
-            return node.member in gen._struct_method_names.get(struct_name, ())
+            return (node.member in gen._struct_method_names.get(struct_name, ())
+                    and node.member not in gen._struct_property_names.get(struct_name, ()))
         if isinstance(node.obj, gimple_ctypes.IdentExpr):
             ptr_struct = gen._cpp_struct_ptr_local(node.obj.name)
             if ptr_struct:
-                return node.member in gen._struct_method_names.get(ptr_struct, ())
+                return (node.member in gen._struct_method_names.get(ptr_struct, ())
+                        and node.member not in gen._struct_property_names.get(ptr_struct, ()))
     return False
 
 
@@ -363,6 +370,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # compile attempt can never leave a PRIOR generator's leftover
     # slot-types list around for some later, unrelated read to pick up.
     gen._cpp_last_tuple_slot_ctypes = None
+    # Same reset convention for the value-carrying-return side channel
+    # (see the eligibility computation below).
+    gen._cpp_last_has_return_value = False
     # Parameters: only plain scalar (int64_t/double/_Bool) positional
     # params are supported this step. *args/**kwargs and any param whose
     # resolved C type isn't one of those three are refused — string/
@@ -623,6 +633,50 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         fn, declared, self_fields, gen._async_api,
         generator_api=gen._generator_api)
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
+    # Value-carrying `return <expr>` support (real CPython 3.14
+    # asyncio/futures.py's `Future.__await__`: `yield self` ... `return
+    # self.result()`). Python delivers a generator's return value via
+    # StopIteration(value); this codegen now materializes that channel
+    # as a per-unit extern "C" global `{base}_return_slot` typed by the
+    # return expression(s)'s own inference: an ELIGIBLE generator
+    # stores its final value into the slot immediately before
+    # co_return, so anything reading the slot after the generator
+    # reports done gets exactly the Python return value. Deliberately
+    # NOT a promise field/method: the C++20 rule makes return_void XOR
+    # return_value mandatory (this promise needs return_void for every
+    # ordinary generator), and this project's GCC 15 has a DOCUMENTED
+    # coroutine-frame-layout bug with extra promise FIELDS (see the
+    # unhandled_exception comment below) — a plain translation-unit
+    # global touches neither. Eligibility is deliberately conservative
+    # — ALL of:
+    #   - at least one value-carrying `return`,
+    #   - NO bare `return` anywhere in the body, and
+    #   - the body's LAST top-level statement is a valued return (so
+    #     no control path completes without storing).
+    # Anything else keeps the honest refusal.
+    _ret_stmts = [n for n in gimple_exprtypes._walk_own_body(fn.body)
+                  if isinstance(n, gimple_ctypes.ReturnStmt)]
+    _valued_rets = [n for n in _ret_stmts if n.value is not None]
+    _bare_rets = [n for n in _ret_stmts if n.value is None]
+    _ends_with_valued_ret = (bool(fn.body)
+                             and isinstance(fn.body[-1], gimple_ctypes.ReturnStmt)
+                             and fn.body[-1].value is not None)
+    _has_return_value = bool(_valued_rets) and not _bare_rets and _ends_with_valued_ret
+    gen._cpp_pending_return_store = None
+    if _has_return_value:
+        _ret_ct = None
+        for _r in _valued_rets:
+            _t = gimple_exprtypes._infer_simple_expr_ctype(
+                _r.value, declared, self_fields, gen._async_api,
+                None, frozenset(gen.struct_field_types.keys()),
+                method_return_types=gen.func_return_types)
+            if _t is not None and _t.endswith(' *') is False and _t in (
+                    'int', 'int64_t', 'double', '_Bool', 'char *'):
+                _ret_ct = _t if _ret_ct is None else (_t if _t == _ret_ct else 'int64_t')
+        _ret_ct = _ret_ct or 'int64_t'
+        _ret_base = (f"{base}_return_slot")
+        gen._cpp_pending_return_store = (_ret_base, _ret_ct)
+    gen._cpp_last_has_return_value = _has_return_value
     gen._cpp_list_local_elem_types = {}
     gcc_._cpp_reset_unit_state(gen)
     # Seed param list-ELEMENT types into the coroutine-body emitter's local
@@ -685,7 +739,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             method_return_types=gen.func_return_types,
             fn_return_types=gcc_._cpp_trusted_fn_return_types(gen),
             field_elem_types=_field_elem_types,
-            local_elem_types=getattr(gen, '_cpp_list_local_elem_types', None))
+            local_elem_types=getattr(gen, '_cpp_list_local_elem_types', None),
+            include_returns=False,
+            self_struct_ctype=(f"{struct_name} *" if struct_name else None))
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-
@@ -707,6 +763,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         self_recursed = gen._cpp_gen_self_recursed
     finally:
         gen._cpp_pending_tuple_slots = None
+        gen._cpp_pending_return_store = None
         gen._cpp_emit_kind = 'generator'
         gen._cpp_gen_self_struct = None
         gen._cpp_gen_self_fields = None
@@ -826,6 +883,14 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
            f"extern \"C\" {cpp_value_ctype} {base}_value (MojoGenerator *g);",
            f"extern \"C\" void {base}_destroy (MojoGenerator *g);"]
           if self_recursed else []),
+        # Value-carrying `return` channel (see the eligibility
+        # computation above): one extern "C" global per unit, written by
+        # the body's valued `return` right before co_return and read by
+        # consumers after the generator reports done. C-linkage spelling
+        # so cross-unit consumers can declare it by name. (The
+        # initializer makes this a definition, not just a declaration.)
+        *( [f"extern \"C\" {gimple_exprtypes._c_to_cpp_scalar_type(_ret_ct)} {_ret_base} = 0;"]
+           if _has_return_value else [] ),
         f"static {task} {impl} ({cpp_sig}) {{",
         *(f"    {d}" for d in func_decls),
         *body_lines,

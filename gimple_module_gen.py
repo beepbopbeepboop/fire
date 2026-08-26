@@ -2005,6 +2005,8 @@ def gen_module_impl(self, stmts):
             if isinstance(s, StructDef):
                 for m in s.methods:
                     self._struct_method_names.setdefault(s.name, set()).add(m.name)
+                    if 'property' in (getattr(m, 'decorators', None) or []):
+                        self._struct_property_names.setdefault(s.name, set()).add(m.name)
                     if m.name == '__init__':
                         self._struct_has_init.add(s.name)
                         self._struct_init_params[s.name] = [
@@ -2749,6 +2751,12 @@ def gen_module_impl(self, stmts):
         self._generator_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+            # Value-carrying `return` support (asyncio/futures.py's
+            # `__await__`): True when this unit stored its return value
+            # into the promise slot before co_return, so a `yield from`
+            # consumer reading `{base}_value` AFTER the sub-generator
+            # reports done gets that return value.
+            'has_return_value': self._cpp_last_has_return_value,
         }
         _gq = self._func_qualifier(s.name)
         if _gq:

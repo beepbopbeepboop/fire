@@ -539,21 +539,45 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and func.obj.func.name == 'super' and not func.obj.args):
         base_name = None
         cur_struct = getattr(gen, '_current_struct_name', None)
+        method = func.member
+        # Walk the bases IN DECLARATION ORDER (Python MRO order for the
+        # non-diamond hierarchies this codegen models) and pick the first
+        # base that BOTH has a resolvable StructDef AND actually DEFINES
+        # the called method (`{Base}_{method}` registered as a compiled
+        # function, or a known method-signature entry). The old behavior
+        # stopped at the FIRST struct-typed base regardless of what it
+        # defines: zipfile/_path's `CompleteDirs(InitializedState,
+        # zipfile.ZipFile)` then resolved `super().getinfo(...)`/
+        # `super().namelist()` to `{InitializedState}_getinfo`/`_namelist`
+        # — symbols NOTHING defines (the mix-in doesn't have those
+        # methods; they live on the SECOND base) — satisfying -fgimple
+        # against a weak stub declaration but failing the final LINK with
+        # "Undefined symbols". A base whose own merged view carries the
+        # method via inheritance still counts: its `{Base}_{method}`
+        # C symbol may not exist, so ONLY bases with a direct definition
+        # are eligible; if NO base directly defines the method there is
+        # nothing to call — degrade to the same evaluate-args-and-no-op
+        # convention the no-resolvable-base case below already uses
+        # rather than emitting an unresolvable symbol.
+        def _base_defines_method(b):
+            return (f"{b}_{gimple_ctypes._safe_name(method)}" in gen.func_return_types
+                    or (b, method) in gen._struct_method_signatures)
         for b in (gen._struct_bases.get(cur_struct) or []) if cur_struct else ():
             # Only a base with an actual known definition (fields/methods
             # registered in struct_field_types) has a real C function to
             # call into. A base we never resolved a StructDef for — e.g.
             # an external/unmodeled class like html.parser.HTMLParser —
             # has no native method to link against.
-            if b in gen.struct_field_types:
+            if b in gen.struct_field_types and _base_defines_method(b):
                 base_name = b
                 break
         if base_name is None:
-            # No resolvable base: there is nothing to call. Still evaluate
-            # the arguments for side effects, then no-op — the same
-            # "can't fully support this construct, degrade gracefully"
-            # convention _stub_only_modules below uses for symbols with
-            # no native definition, rather than emitting an unresolvable call.
+            # No resolvable base DEFINES the method: there is nothing to
+            # call. Still evaluate the arguments for side effects, then
+            # no-op — the same "can't fully support this construct,
+            # degrade gracefully" convention _stub_only_modules below
+            # uses for symbols with no native definition, rather than
+            # emitting an unresolvable call.
             for a in node.args:
                 gen.lower_expr(a)
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
@@ -583,6 +607,29 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if self_type != fake_obj_type:
             self_val = gen._new_val(fake_obj_type, f"({fake_obj_type}){self_val}")
         return gen._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
+
+    # `self.__class__(args)` / `<known struct instance>.__class__(args)` —
+    # real Python CONSTRUCTS A NEW INSTANCE of the object's runtime class
+    # (zipfile/_path's `Path._next`: `return self.__class__(self.root,
+    # at)`). This codegen has no runtime class objects — `x.__class__`
+    # read as a plain VALUE lowers to a runtime type-tag int64_t (see
+    # gimple_gen_exprs.py's `_lower_MemberExpr` `__class__` case) — so
+    # this call shape used to fall through to the unknown-struct-method
+    # fallback and emit a call to the never-defined `{Struct}___class__`
+    # symbol (`_Path___class__`), satisfying -fgimple against nothing at
+    # all and failing the final LINK ("Undefined symbols"). When the
+    # receiver's static struct type is known, lower as an ordinary struct
+    # construction of THAT struct — the exact-type approximation this
+    # static codegen makes for non-__class__-mutated instances.
+    if func.member == '__class__':
+        ot_cls, ov_cls = gen.lower_expr(func.obj)
+        sn_cls = gimple_exprtypes._struct_name_of(ot_cls)
+        if sn_cls in gen.struct_field_types:
+            return gen._lower_struct_constructor(
+                sn_cls, list(node.args), getattr(node, 'kwargs', None) or [])
+        for a in node.args:
+            gen.lower_expr(a)
+        return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
 
     # `coro._set_noop_callback()` / `coro^._take_handle()` — the two
     # std.builtin.coroutine.Coroutine methods device_context.mojo's
@@ -1178,6 +1225,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `cls` placeholder in its receiver slot, so the raw int64_t pair is
     # what must be passed for it (see the branch's own comment).
     _recv_ot_raw, _recv_ov_raw = ot, ov
+    # A receiver that lowers to a DEFERRED, uncalled bound-method value
+    # (`self.name.rfind('.')` where `name` is a bare @property read —
+    # pathlib/__init__.py's `PurePath.stem`) must be AUTO-INVOKED before
+    # method dispatch: real Python evaluates `self.name` to its value,
+    # then calls `.rfind(...)` on THAT. Left alone, the call fell through
+    # to the generic unknown-receiver fallback which mangled
+    # `{ot}_{method}` into a never-defined extern symbol
+    # (`MojoBoundMethod_rfind`) — an undefined-symbol LINK failure.
+    # Mirrors this file's own `_auto_invoke_bound_method_value`, already
+    # used by the subscript/binary-operand/chained-member consumer paths
+    # for the identical deferred-value shape; a stored local
+    # (`f = self.b; f()`) is unaffected — it calls through the var path
+    # (_lower_bound_method_call), never reaching this MemberExpr branch.
+    if ot == 'MojoBoundMethod *':
+        ot, ov = _auto_invoke_bound_method_value(gen, ov)
     method = func.member
 
     # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct

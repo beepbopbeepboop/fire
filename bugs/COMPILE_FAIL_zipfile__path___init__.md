@@ -4,7 +4,57 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-25, worktree fix/rest-remainder12 — isolated generator/coroutine TU still compiles clean (unaffected by this session's 4 fixes elsewhere); a real end-to-end build now goes further before failing, but still fails, on both a new link-time gap and the previously-documented unrelated transitive-import failures)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — RESOLVED at the
+## compile/link level: the driver build path now produces a binary ("Built:",
+## exit 0); remaining residual is RUNTIME module-API support, not compilation)
+
+Re-verified fresh this session. The three documented link-time undefined
+symbols are all FIXED by two shared-mechanism changes in
+`gimple_gen_methods.py`:
+
+1. **`_InitializedState_getinfo`/`_InitializedState_namelist`**
+   (`CompleteDirs(InitializedState, zipfile.ZipFile)` calling
+   `super().getinfo(...)`/`super().namelist()`): `super()` resolution
+   stopped at the FIRST struct-typed base regardless of what it defines —
+   the mix-in doesn't have those methods, so it emitted calls to symbols
+   nothing defines (weak-stub declarations satisfy -fgimple; the final
+   link fails). The walk now picks the first base that both resolves to
+   a real StructDef AND actually DEFINES the called method
+   (`{Base}_{method}` in func_return_types / a method-signature entry);
+   when NO base defines it, the call degrades to the existing
+   evaluate-args-and-no-op stub instead of an unresolvable symbol.
+2. **`_Path___class__`** (`Path._next`: `return self.__class__(
+   self.root, at)`): a CALL through `x.__class__` used to fall into the
+   unknown-struct-method fallback and emit a call to the never-defined
+   `{Struct}___class__`. It now lowers as an ordinary struct CONSTRUCTION
+   of the receiver's statically-known struct (`_alloc_Path()` +
+   `Path___init__`) — this codegen's exact-type approximation for
+   runtime-class construction.
+
+Verified end-to-end via `driver.compile_program(...)` (the exact pipeline
+`mojo.py build` drives): **"Built: ...zfpath_bin", exit 0** — compile,
+per-module dylibs, coroutine unit, and final link all succeed. Full
+mandatory gate after the compiler changes: `test_gimple.py` 256/256,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with **0 skip lines**.
+
+Honest runtime residual (NOT a compile gap): running the produced binary
+raises `AttributeError: fromkeys` during top-level initialization —
+module-level API surface of the transitively-imported real-CPython
+modules (`collections.OrderedDict.fromkeys` et al.) has no runtime
+model. Same class of residual as pathlib's `os.PathLike` (see that doc's
+2026-08-26 entry): module-API/ABC runtime support is a separate,
+feature-sized area outside this compile-fail doc's scope. Note also that
+`mojo.py build`'s post-link-failure INLINE fallback path is extremely
+slow (>300 s watcher kill) when a transitive module falls back to source;
+with the link fixed, the driver path succeeds before any fallback runs.
+
+The previously-documented transitive import failures (`collections`/
+`inspect` subscript-store gaps, glob's generator-as-value refusal) remain
+graceful source-fallbacks in other files' scope — they do not block this
+module's own compile/link anymore.
+
+## Status (updated 2026-08-25, worktree fix/rest-remainder12 — superseded above)
 
 Re-ran an isolated `compile_to_gimple_with_cpp(do_imports=False)`
 check fresh, after this session's 4 coroutine-emitter fixes landed
