@@ -2343,6 +2343,13 @@ def _gen_stmt_ExprStmt(gen, node):
                 # bugs/hard/CODEGEN_aliased_external_import_no_backing_
                 # symbol.md.
                 fname = '_unresolved_import_main'
+        # Statement-level twin of _lower_named_call's identical libc
+        # self-extern registration: a bare `mkdir(name, mode)` /
+        # `rmdir(name)` / `execv(file, args)` statement (os.py's own
+        # wrappers are exactly that) never reaches _lower_named_call at
+        # all, so without this its prototype was never recorded and the
+        # call stayed an implicit declaration.
+        ggc._ensure_libc_self_extern(gen, raw_name)
         arg_pairs = [gen.lower_expr(a) for a in node.value.args]
 
         # exit(msg)/quit(msg) as a bare statement — see _lower_named_

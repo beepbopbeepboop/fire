@@ -2443,6 +2443,16 @@ class GimpleGen:
         # so _emit_stdlib_import_externs must not skip them (the new
         # _LIBC_DECLARED check would otherwise suppress them).
         'fork', 'waitpid', 'execv',
+        # execve: same class, found via Lib/os.py's own body — execl/execle
+        # call this BARE name (real Python gets it from the C posix module),
+        # and with no visible prototype every call site was an implicit
+        # declaration plus pointer-coercion mismatches against GCC's builtin
+        # knowledge. Deliberately NOT 'unsetenv': <stdlib.h> IS in the
+        # prelude and already declares it — a self-emitted
+        # `int unsetenv(char *)` there conflicts with the header's
+        # `int unsetenv(const char *)`; unsetenv needed only the pinned
+        # _LIBC_SIGS entry (argument coercion), not a prototype.
+        'execve',
     })
     _LIBC_DECLARED = {
         'printf', 'fprintf', 'snprintf', 'sprintf', 'puts', 'putchar', 'fputs',
@@ -2583,6 +2593,14 @@ class GimpleGen:
         'dup2': ('int', ['int', 'int']),
         'pipe': ('int', ['int *']),
         'fcntl': ('int', ['int', 'int', 'int64_t']),
+        # POSIX file/env calls whose headers our prelude lacks (see
+        # _NEEDS_SELF_EXTERN): pin the signatures so bare calls (Lib/os.py's
+        # own wrappers) both coerce their int64_t-lowered args and get a
+        # self-emitted extern instead of an implicit declaration.
+        'mkdir': ('int', ['char *', 'int']),
+        'rmdir': ('int', ['char *']),
+        'execve': ('int', ['char *', 'char *', 'char *']),
+        'unsetenv': ('int', ['char *']),
     }
 
     # ── _lower_call sub-handlers ──────────────────────────────────────────

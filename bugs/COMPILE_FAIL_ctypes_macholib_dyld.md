@@ -2,6 +2,115 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`
 
+## Status (2026-08-26, wtOpencode_dyld): FOUR shared codegen fixes landed — total closure errors 167 → 102; dyld.py's own unit still ZERO errors; end-to-end rc=1 remains, now blocked ONLY by other docs' tracked hard-bug classes
+
+Re-verified fresh under the safety-wrapped watcher (build completes in
+~2 min, well within budget). dyld.py's own compile unit still
+contributes zero `error:` lines (only the harmless unused-variable/
+unused-label warnings). The super()/self.__class__ and other
+recently-landed shared mechanisms were already sufficient for dyld.py
+itself — no regression there. What this session DID fix is four
+genuine shared-mechanism bugs hit by the transitive closure, each with
+a standalone minimized repro:
+
+1. **Cross-module same-bare-name homonym poisoning of call-site arity
+   padding** (commits 55ac8f9 + follow-ups). re/_compiler.py's three
+   recursive `_compile(code, pattern, flags)` statement calls were
+   padded to FIVE arguments with **codeop.py's** unrelated homonym's
+   trailing defaults (`incomplete_input=True, *, flags=0`): GCC "too
+   many arguments to function '__compiler__compile_132aaf'; expected 3,
+   have 5" ×20 whenever both modules share a whole-program closure —
+   i.e. always, for any ctypes build. Two coupled root causes: (a) the
+   ExprStmt-level general-call path read expected_params from the
+   oscillating shared bare-name `func_param_types` slot directly,
+   missing BUG-2026-024's tiered `_effective_param_types` lookup that
+   `_lower_named_call` already had; (b) gen_module's all-functions
+   registration loop keyed `_func_param_defaults`/`_func_kwargs_slot`
+   by `_func_csym(s.name)` which resolves by BARE name, so a foreign
+   homonym registered its defaults under THIS unit's own def's mangled
+   key. Fixed by (a) tiering the twin identically and (b) guarding
+   registration by identity against `_local_def_nodes`. NOTE for future
+   sessions: a tier-SHAPE probe at that registration point was tried
+   and REVERTED — consulting `_effective_param_types` there freezes
+   `_local_def_pts`' lazy memo at unsettled pre-Pass-1.x inference
+   shapes and regresses `_emit_call` coercion across typing.py's
+   `_type_check` callers ("makes pointer from integer"); identity check
+   only.
+
+2. **Shared funcptr marks leak out of aborted module compiles**
+   (cf39248). A module whose gen_module raises mid-compile
+   (collections/inspect's deliberate subscript-store fallback) has
+   usually already run its preamble-assembly pass, marking every
+   builtin-as-value funcptr name into the SHARED
+   `_emitted_funcptr_builtins`, while its generated text is discarded.
+   Later modules referencing the same name then compute
+   `needed − emitted == ∅` and emit no declaration:
+   "'_funcptr_mojo_len' undeclared" at re/_compiler.py:42 (`_len =
+   len`), re/_parser.py:520, textwrap.py:303 (`sum(map(len, ...))`).
+   Fixed by adding the funcptr pair to `_compile_imported_module`'s
+   existing rollback-on-failure block.
+
+3. **Struct `__getitem__` on a void-typed method returned ('void', '')**
+   (e3be51f). A raise-only `__getitem__` body (_collections_abc.
+   Mapping's abstract `raise KeyError`) correctly infers a void C
+   signature, but the subscript-read dispatch handed back an empty
+   pair, so value-consuming contexts synthesized `void _tN;` +
+   `_tN = ;` — "variable or field declared void"/"expected expression
+   before ';'" ×22 in _collections_abc.py alone (Mapping.get,
+   MutableMapping.update, Sequence index paths). Reads now yield a
+   typed zero placeholder (unreachable at runtime); `__setitem__`
+   stores keep the discarded pair. _collections_abc.py now compiles
+   with ZERO errors.
+
+4. **Bare POSIX calls had no prototype source** (85b4ed5). os.py's own
+   wrappers call `mkdir/rmdir/execv/execve/fork/unsetenv` as BARE names;
+   nothing recorded prototypes for plain unrenamed libc calls →
+   "implicit declaration" + pointer-coercion mismatches, 9 errors.
+   Added `_ensure_libc_self_extern` (shared by `_lower_named_call` AND
+   the ExprStmt twin), pinned `_LIBC_SIGS` entries, and `execve` in
+   `_NEEDS_SELF_EXTERN`. NOTE: do NOT add 'unsetenv' to
+   _NEEDS_SELF_EXTERN — <stdlib.h> IS in the prelude and a self-emitted
+   `int unsetenv(char *)` conflicts with its `int unsetenv(const char
+   *)`, spreading "conflicting types" across every preamble section
+   (observed +15 errors before revert). os.py now compiles clean.
+
+Per-module error counts vs the 167-error baseline this session started
+from: argparse 29 (=29, see below), _collections_abc 22→**0**,
+framework.py 11 (=11), posixpath 9 (=9), os.py 9→**0**, typing
+17→8, pickle 9→8, re/_parser 8→7, gettext 4 (=4), functools 3 (=3),
+re/_compiler 21→**0**, threading 2 (=2), locale 2 (=2), copyreg
+3→2, traceback 1 (=1), subprocess 1 (=1), re/_constants 1 (=1),
+annotationlib 1 (=1), _colorize 1 (=1), textwrap 1→**0**, plus
+codeop/ast/dataclasses/warnings/tracemalloc/fnmatch/pprint/linecache/
+struct/_compat_pickle/__future__/dylib.py all at **0**.
+
+Quality gate after EACH fix (all clean): test_gimple.py 256/256,
+test_module_cache.py 76/76, make check-selfhost clean, from-scratch
+stdlib dylib rebuild 0 skips / 0 errors.
+
+### Remaining blockers — all OTHER docs' tracked classes, not new gaps
+
+- framework.py ×11 and posixpath×9: the ALREADY-DOCUMENTED hard
+  bare-name-collision class
+  (`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`)
+  — `reprlib_Repr_repr*` undeclared in framework.py's unit; ntpath.py
+  and posixpath.py BOTH lift same-named closures from their duplicated
+  `expandvars` implementations (`expandvars_repl`,
+  `_alloc_expandvars_repl_env`, struct `expandvars_repl_env`,
+  globals `_varsub`/`_varsubb`) into colliding TU symbols. Same shared
+  naming machinery; not attempted here per that doc's ownership and
+  the standing warning about broad changes to it.
+- argparse.py ×29: Python %-formatting whose operand is a DICT
+  (`'%(prog)s: error: %(message)s\n' % args`) — `_lower_percent_format`
+  handles literal-LHS tuple/single operands but not named-dict specs,
+  and several sites have a non-literal LHS (the `_()` gettext call)
+  boxed to int64_t besides, which needs a runtime percent-format
+  helper rather than static lowering. Genuine feature gap, medium
+  size, not forced this session.
+- typing ×8 / pickle ×8 / re/_parser ×7: assorted pre-existing
+  funcptr-dispatch-table and coercion residue, unchanged by this
+  session's fixes.
+
 ## Status (re-verified 2026-08-25, wtOpencode_group3): unchanged — dyld.py's own compile unit still contributes ZERO errors
 
 Fresh safety-wrapped `mojo.py build`: rc=1 with **183 total `error:`
