@@ -45,6 +45,32 @@ re-collected every caller body 4x per level). Behavior-identity is
 proven by BYTE-IDENTICAL generated C on the largest succeeding
 whole-program case (`Lib/socket.py`, 20,168,554 bytes, `cmp` clean).
 
+**Phase 5 implemented and verified 2026-08-25** (see "Phase 5
+implementation notes" below). The doc's previously suggested Phase 5
+(a within-Pass-2c-run result cache keyed on `(id(func), _prepass_struct)`)
+was evaluated FIRST and found **UNSAFE as stated** — the scan's inputs are
+NOT frozen for one Pass-2c run: `_quick_container_elem` resolves call
+elements through `gen._return_elem_types`
+(gimple_gen_infra.py:_quick_container_elem, `.get(key)` on the very dict
+Pass 2c's fixpoint loop writes), which is precisely how callee elem types
+propagate to callers across iterations ("so the fixpoint propagates callee
+elem types to their callers", its own docstring). Freezing iteration-1
+results would change the fixpoint outcome whenever propagation needs >1
+iteration — i.e. exactly the cases the loop exists for. Instead, a FRESH
+cProfile re-ranked the remaining consumers again and gave a different,
+safer winner: `_walk_ast` ITSELF — the shared whole-program traversal
+utility this bug is named after — was spending ~29s of its 71.8s
+cumulative time re-doing `dataclasses.is_dataclass` + `dataclasses.fields`
+reflection for EVERY node visit (56.5M + 16.1M calls in one profiled run)
+plus per-subtree list extend-churn. Fixed centrally (per-class field-name
+cache computed once via the real `dataclasses.fields()`, accumulator-style
+walk helper): traversal order/content proven IDENTICAL (differential check
+node-by-node over parsed ASTs of contextlib.py/socket.py plus synthetic
+try/finally/fstring/lambda shapes; identical 66,607,301 visit counts in
+before/after profiles), `Lib/socket.py` generated C BYTE-IDENTICAL
+(`cmp` clean, same md5), socket.py wall 106.4s→97.3s, contextlib.py
+interleaved A/B 78-79s→71s.
+
 ### Phase 4 implementation notes (2026-08-23)
 
 A fresh baseline `cProfile` of `Lib/contextlib.py` on the then-current
@@ -438,32 +464,139 @@ its own documented default of `os.cpu_count()`, not hardcoded to `-j8`):
 5. `python3 compile_stdlib.py` (default jobs) — 664/664 passed, 0
    unexpected failures (unchanged from baseline).
 
+### Phase 5 implementation notes (2026-08-25)
+
+**Why the previously suggested Phase 5 was rejected (negative result,
+verified by code reading).** The 08-23 "Remaining work" entry proposed
+halving the ~5.5s Pass-2c residual scan walks "by a within-Pass-2c-run
+result cache keyed on `(id(func), _prepass_struct)` since all their
+inputs are provably frozen for one run". That premise is FALSE. The
+scan's result depends on `gen._return_elem_types`: `_infer_return_elem_
+type`'s helpers (`_collect_local_container_elems` →
+`_quick_container_elem`, gimple_gen_infra.py) resolve a `CallExpr`
+return value's element type via `gen._return_elem_types.get(key)` — the
+SAME dict the Pass-2c fixpoint loop itself writes after every function.
+That lookup is not incidental; it is the propagation mechanism ("call
+elements resolve through _return_elem_types so the fixpoint propagates
+callee elem types to their callers", the function's own docstring).
+Within one run, iteration k+1 legitimately sees different
+`_return_elem_types` than iteration k did (both intra-iteration, as
+writes happen per-function while the loop advances, and inter-
+iteration), so any whole-run result cache freezes iteration-1 values
+and can change which entries land in `_return_elem_types` — and with
+them the generated C — whenever elem-type propagation takes ≥2
+iterations. Rejected as unsafe; only a write-invalidation or dependency-
+graph scheme could be correct, and both are materially more complex and
+higher-risk than the win justifies (the whole residual is ~3% of the
+run). This is also why Phase 4's seeding hoist was safe while this is
+not: `func_return_types` is genuinely frozen during one Pass-2c run
+(nothing reachable from the scan writes it — verified then);
+`_return_elem_types` is written BY the loop that surrounds the scan.
+
+**What was done instead: make `_walk_ast` itself cheaper.** A fresh
+cProfile of `Lib/contextlib.py` on this branch's tree (post-Phases-1..4;
+shape had shifted again) ranked, among non-`isinstance` consumers:
+
+| rank | function | cumtime | ncalls | note |
+|---|---|---|---|---|
+| 1 | `_walk_ast` | 71.77s | 66.6M node visits | the shared traversal utility — of which ~29s was `dataclasses.is_dataclass` (56.5M calls) + `dataclasses.fields` (16.1M calls) re-reflection performed for EVERY visited node, plus `list.extend` churn (67.3M calls, 4.74s) from building/discarding a fresh list per subtree |
+| 2 | `_scan_body_for_local_field_access` chain | 66.91s | 114 | Phase 2's memoized consumer — residual cost is its own first-visit-per-statement `_walk_ast` work through rank 1 (2345 distinct statements tree-wide, properly hitting the shared id-keyed caches) |
+| 3 | `_class_attr_ctype` | 39.42s | 101.4M | Pass 1.1 caller loop in gen_module_impl's frame — unchanged analysis (time-dependent `struct_field_types` + adjacent inheritance-merge entanglement); NOT touched |
+| 4 | `_collect_self_assigns` | 8.33s | 50842 | mutates struct ASTs; NOT touched |
+| 5 | `_infer_return_elem_type` (Pass 2c residual) | 10.13s | 485494 | see rejection above |
+
+Rank 1 subsumes rank 2 and part of everything else that walks ASTs, so
+the fix was applied centrally to `_walk_ast` itself
+(gimple_exprtypes.py), touching NO consumer logic:
+
+- New module-level `_WALK_FIELD_NAMES_CACHE: dict[type, tuple]`. On
+  first sight of each node class, its field-name tuple is computed ONCE
+  with exactly the original semantics — `hasattr(cls,
+  '__dataclass_fields__')` (== `dataclasses.is_dataclass` for an
+  instance) and the REAL `dataclasses.fields(cls)` (which accepts the
+  class and returns the same Field sequence as for an instance,
+  including its ClassVar exclusion) mapped over `.name`. Negative
+  results (non-dataclasses) are cached as `()` too. Keyed by class, not
+  node: a class's dataclass field set is static for the process
+  lifetime, so entries cannot go stale.
+- New `_walk_ast_into(node, out)` accumulator helper reproduces the old
+  traversal exactly — same None skip, same list/tuple flattening
+  without emitting the container, same pre-order [node, children in
+  fields() declaration order] sequence, same `not isinstance(node,
+  type)` guard making a dataclass CLASS object a leaf — just appending
+  into one output list instead of extend-copying a fresh list per
+  subtree. `_walk_ast(node)` keeps its exact signature and returns a
+  fresh flat list as before; all ~48 call sites across gimple_*.py are
+  untouched.
+
+Equivalence evidence beyond the gate: a differential harness compared
+old-walk vs new-walk output node-by-node (`is` identity, order, count)
+over every top-level statement of parsed contextlib.py (29 stmts),
+socket.py (38 stmts), synthetic struct/try/finally/f-string/lambda/
+nested-container source (2 stmts), plus direct edge values (None,
+empty/odd lists, functions, classes, dicts, sets, bools); before/after
+profiles show IDENTICAL total visit counts (66,607,301 both sides).
+
+### Validation (2026-08-25, Phase 5)
+
+Byte-identity anchor (this doc's standard): `Lib/socket.py` generated C
+via `compile_to_gimple(..., do_imports=True)` — **BYTE-IDENTICAL**
+before/after (`cmp` clean, 17,905,426 chars, identical md5
+0e947172570668cad46065520cb994ce both sides). Pure performance change.
+
+Wall clock (heavily contended machine throughout — concurrent agent
+builds; reported as measured):
+
+| file | before | after |
+|---|---|---|
+| `Lib/socket.py` (SUCCEEDS) | 106.45s | 97.32s |
+| `Lib/contextlib.py` (fails at the same documented async-codegen point both sides; interleaved A/B, file temporarily reverted for "before") | 79.49s / 78.19s | 71.53s / 71.28s |
+
+cProfile diff, contextlib.py, same method as prior phases:
+
+| metric | before | after |
+|---|---|---|
+| `_walk_ast` cumtime | 71.77s / 66.6M visits | 38.98s / 66.6M visits (−46%, SAME visit count) |
+| `dataclasses.is_dataclass` calls | 56.5M / 14.95s | gone from top-45 |
+| `dataclasses.fields` calls | 16.1M / 13.84s | gone from top-45 |
+| `list.extend` | 67.3M / 4.74s | 61.7M append + no per-subtree copies |
+| total profiled time | 334.9s | 281.4s |
+| total function calls | 3.030B | 2.823B |
+
+Full quality gate (2026-08-25):
+1. `python3 test_gimple.py` — 256 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean (`✓ self-host compiles + links clean`).
+4. From-scratch stdlib dylib rebuild — exit 0, 0 `skip <module>:` lines
+   (baseline 0 — no increase).
+
 ### Remaining work (not attempted)
 
-Updated 2026-08-23 after Phase 4 (fresh profile in the Phase 4 notes
-above). The single dominant consumer is now fixed; what remains, in
-order:
+Updated 2026-08-25 after Phase 5 (fresh post-change profile in
+`ctx_after.stats`, contextlib.py). No single remaining line dominates;
+the raw top consumer is now the `isinstance` builtin itself (74.4s /
+2.10B calls) — spread across every consumer's per-node type dispatch,
+not attributable to one fixable site:
 
 - `_class_attr_ctype`'s Pass 1.1 caller loop (`all_struct_defs`,
-  ~4.80s post-Phase-4) — still entangled with time-dependent
-  `struct_field_types` state and adjacent inheritance-merge logic;
-  unchanged from the 08-18 analysis.
-- `_collect_self_assigns`' Pass 1.2 caller loop
-  (`all_structs_for_methods`, ~4.92s) — still mutates the struct AST
-  directly and depends on three separately-evolving pieces of state;
-  unchanged from the 08-18 analysis.
-- `_dedup_variadic_externs` (~5.7s) — NOT an `imported_stmts` AST
+  ~36.0s profiled / 101.4M calls from gen_module_impl's own frame) —
+  still entangled with time-dependent `struct_field_types` state and
+  adjacent inheritance-merge logic; unchanged analysis since 08-18.
+  Now the largest named non-builtin consumer.
+- The Pass 2c residual scan walks (~9.3s profiled / 485k calls of
+  `_infer_return_elem_type`) — the previously suggested whole-run
+  result cache keyed on `(id(func), _prepass_struct)` is UNSAFE as
+  stated; see "Phase 5 implementation notes" for the proof
+  (`_return_elem_types` feedback through `_quick_container_elem`).
+  Any correct variant needs write-invalidations or a caller→callee
+  dependency graph over the fixpoint; complexity/risk outweighs the
+  ~3%-of-run win. Not recommended without new evidence.
+- `_collect_self_assigns`/`_collect_self_reads` (Pass 1.2, ~5.2s) —
+  still mutates struct ASTs directly (`s.fields.append(...)`); the
+  same 08-18 analysis holds.
+- `_dedup_variadic_externs` (~4.4s) — NOT an `imported_stmts` AST
   consumer (post-hoc string dedup of generated C text); out of this
   bug's scope, as classified on 08-18.
-- The remaining smaller consumers (`_infer_local_var_types` Pass 1.3b,
-  ~1.17s post-Phase-4 — would need the Phase-3-style pure-scan/
-  time-dependent-filter split since it calls state-dependent
-  `_quick_type` per assignment; the Pass 2c residual scan walks
-  themselves, ~5.5s, which could be halved by a within-Pass-2c-run
-  result cache keyed on `(id(func), _prepass_struct)` since all their
-  inputs are provably frozen for one run — not attempted, following
-  this doc's one-consumer-at-a-time discipline now that no single
-  remaining line dominates).
 
 
 ## Symptom
