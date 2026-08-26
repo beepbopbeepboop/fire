@@ -1832,7 +1832,22 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._actual_types[tname] = gen._actual_types[v]
                 continue
             if tname not in gen.var_types:
-                gen._declare_var(tname, vtype)
+                # Same whole-body-type hint _assign_target already consults
+                # for a single-target assignment's first declaration: this
+                # function-wide pre-pass joins the types of EVERY assignment
+                # to this name, so a chained `CRC = compress_size =
+                # file_size = 0` whose later statements reassign a wider
+                # value (`file_size = 0xffffffff`, ZipInfo.FileHeader)
+                # declares the locals int64_t instead of the bare RHS
+                # literal's C `int` -- which -fgimple then rejects outright
+                # ("non-trivial conversion in 'integer_cst'") at the wider
+                # reassignment rather than silently truncating. Declaring
+                # from the raw RHS type here (ignoring the hint) was exactly
+                # the drift bugs/hard/CODEGEN_multi_assign_local_var_type_
+                # not_inferred.md's single-target fix predated.
+                hint = gen._inferred_var_types.get(gen.current_func_name, {}).get(tname) \
+                    if hasattr(gen, '_inferred_var_types') else None
+                gen._declare_var(tname, hint or vtype)
             dst = gen.var_types[tname]
             gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(tname))
         elif isinstance(target, gimple_ctypes.MemberExpr):
