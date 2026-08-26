@@ -2,6 +2,74 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
+## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): gaps #2/#3 fixes re-verified fresh; gap #3's routing found DEAD and FIXED (phantom-field minting); remaining blocker narrowed to class-ref-as-value + a whole-program RSS runaway
+
+Re-verified against current master past d3e758a (both of this doc's
+remaining gaps' fixes). Three findings this pass:
+
+1. **Full build still does not complete — now MEMORY-bound, not
+   error-bound.** Four safety-wrapped attempts (wall caps 450s/600s/900s;
+   final run 1500s cap) all processed the transitive closure further than
+   ever recorded here — os, ctypes/__init__, collections, inspect, glob,
+   shutil all lowered/fell back WITHOUT A SINGLE hard `error:` line in any
+   partial log (grep 'error:' == 0 throughout; vs **265** hard errors on
+   2026-08-24) — and every run was then watcher-killed before gcc. The
+   last run was killed by the **6GB RSS tripwire itself** (6.26GB at
+   ~16min, growth accelerating during late-closure processing after
+   shutil's fallback), not by the wall clock: RAM now grows monotonically
+   with closure size (per-module parse trees are retained whole-build by
+   design in `_module_stmts`, plus fallback modules execute interpreted).
+   Note for future agents: `ulimit -v` is a NO-OP on this macOS
+   (`cannot modify limit`); the RSS watcher is the only real guard. No
+   util.py-attributed error was ever observed. Not marked resolved (no
+   exit-0).
+
+2. **Gap #3's fix (d3e758a's unknown-member→`__getattr__` routing) was
+   DEAD CODE as landed — root-caused and FIXED this session**
+   (commit `61bff2c`). Minimal single-file repros of exactly the
+   LibraryLoader shape showed: the two READ-side field-minting passes in
+   gimple_module_gen.py (`_collect_self_reads`, and
+   `_scan_body_for_local_field_access`'s typed-local scan — which walks
+   into function bodies and mints from top-level constructor assignments
+   like `cdll = LibraryLoader(CDLL)`) registered every literally-spelled
+   unknown member as a phantom `int` field BEFORE body lowering, so
+   `cdll.msvcrt` took the plain known-field branch (uninitialized
+   `_t1->msvcrt` scalar read; the generated struct even grew
+   `int msvcrt;` + dead dispatch/repr entries). The commit adds:
+   never mint phantom fields for member READS on a struct whose methods
+   include `__getattr__` (write-side `self.X = ...` minting untouched —
+   genuinely-assigned members still resolve statically). Verified
+   END-TO-END with a class-ref-free repro (`Cfg.__getattr__` returning
+   `prefix + name`; built binary prints `cfg:anything`/`cfg:other`,
+   byte-identical to real CPython, exit 0). Gate: test_gimple 256/256,
+   test_module_cache 76/76, check-selfhost clean, stdlib dylib rebuild
+   EXIT=0 / 0 skips.
+
+3. **Gap #2's fix verified working mechanically; the LAST runtime blocker
+   is a pre-existing structural hole, precisely located.** With the
+   phantom-mint fix in place, `from lib import cdll` lowers to real
+   `_root_globals.cdll` reads and `cdll.load_library("zlib")` emits a
+   direct call — the cross-module VALUE binding genuinely works.
+   But `LibraryLoader.__getattr__` bodies do `return self._dlltype(name)`
+   — a CALL THROUGH A STORED CLASS REFERENCE, and a bare class name used
+   as a value still lowers to `(int64_t)0 /* class ref CDLL as value */`
+   (gimple_gen_exprs.py's documented zero-placeholder branch), so
+   `mojo_fnptr_call_1(NULL, ...)` segfaults at runtime. Same
+   "callable/class-object value representation" family as the tracked
+   LambdaExpr-as-value docs — feature-sized, deliberately NOT attempted.
+   Until that exists, `print(cdll.msvcrt)` / `cdll.load("msvcrt")` cannot
+   run correctly in compiled mode EVEN THOUGH they now lower cleanly.
+   (Secondary observation, unattempted: unannotated forwarding params
+   like `load_library(self, name)` infer `int64_t` where the call site
+   provably passes char * — adjacent to the tracked param-inference
+   families.)
+
+Doc kept open: file still has no verified end-to-end build (RSS-bound)
+and compiled-mode `cdll` usage still needs the callable-class-value
+machinery. But the picture is materially better than the entry below:
+zero attributed errors anywhere in the closure, gap #2 confirmed live,
+gap #3's read path now genuinely functional.
+
 ## Status (re-verified 2026-08-25, wtOpencode_group3): consistent with the entry below — no util.py-attributed errors; full build again exceeded this session's watcher budget
 
 Fresh safety-wrapped `mojo.py build` attempt: watcher-killed at the
