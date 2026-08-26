@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (updated 2026-08-25 -- re-verified, unchanged)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+test/test_ensurepip.py` fresh against current master (past the
+struct-method cross-call scalar contract "Pass 1.3e",
+generator-consumption-ordering fixed-point retry + defaults-aware arg
+padding, `**kwargs`-forward slot-alignment fix, and coroutine-body
+`int()`/`float()` builtin support landed since the 2026-08-24 entry
+below). The whole-program build didn't finish within this session's
+safety-wrapped time budget (large transitive import graph), but the
+per-function debug log shows the identical refusal byte-for-byte before
+the watcher killed it: `generator 'fake_pip' not eligible for C++
+coroutine path, falling back to honest refusal: unsupported statement
+in generator body: StructDef` (confirmed at both pass 1 and the pass-2
+retry). None of the intervening fixes touch nested-class-definition
+discovery/hoisting inside a generator body. Still feature-sized;
+untouched.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C3 cluster. The blocker (`class FakePip(): ...` defined INSIDE a generator body -- nested-struct-definition discovery/hoisting, a 3-piece design change already scoped in the 2026-08-12 update below) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still feature-sized; untouched.

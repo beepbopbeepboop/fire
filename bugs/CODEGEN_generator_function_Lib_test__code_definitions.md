@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/test/_code_definitions.py
 
+## Status (updated 2026-08-25 -- re-verified, unchanged)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+test/_code_definitions.py` fresh against current master (past the
+struct-method cross-call scalar contract "Pass 1.3e",
+generator-consumption-ordering fixed-point retry + defaults-aware arg
+padding, `**kwargs`-forward slot-alignment fix, and coroutine-body
+`int()`/`float()` builtin support — all landed since the 2026-08-24
+entry below). Byte-for-byte identical refusal: `asyncgen_spam: *args/
+**kwargs parameters not supported for compiled async generators`. None
+of the intervening fixes touch async-generator varargs eligibility or
+the deeper "bare construction without consumption" gap documented
+below. Still feature-sized; untouched.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C3 cluster (no rebuild re-run -- classification already re-confirmed 2026-08-23 with a clean gate, and this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies) touch neither the async-generator varargs refusal nor the bare-construction-without-consumption gap this file is blocked on. Still feature-sized; untouched.

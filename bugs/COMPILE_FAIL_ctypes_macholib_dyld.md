@@ -2,6 +2,28 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`
 
+## Status (re-verified 2026-08-25): unchanged; dyld.py's own compile unit still clean
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+ctypes/macholib/dyld.py` fresh (full run, under this session's
+safety-wrapped watcher, completed within budget) against current
+master (past the struct-method cross-call scalar contract "Pass 1.3e",
+generator-consumption-ordering fixed-point retry + defaults-aware arg
+padding, `**kwargs`-forward slot-alignment fix, and coroutine-body
+`int()`/`float()` builtin support landed since the 2026-08-24 entry
+below). `python3 mojo.py build` still exits 1 overall (315 `error:`
+lines, up from ~300, same noise-level shift as `socket.py`'s doc), but
+`grep "macholib/dyld.py:" | grep error` returns ZERO hits — the ONLY
+line matching this file's own path is a harmless `warning: variable
+'error' set but not used`. Confirms the 5-bullet generator-codegen
+cluster this doc tracked remains fully fixed; the file's own compile
+unit has no errors. All 315 remaining errors are in other,
+transitively-imported modules with their own separate, already-tracked
+failure classes (same as noted below). Doc kept open (file still
+doesn't build end-to-end as a whole program), but nothing further to
+do against THIS doc's own scope — whoever next touches this file
+should look at the OTHER modules' failures.
+
 ## Status (2026-08-24): the whole 5-bullet generator-codegen cluster below is FIXED; file still doesn't build end-to-end, but only due to unrelated pre-existing gaps elsewhere in its dependency closure
 
 Landed the `_cpp_trusted_fn_return_types`/`_cpp_fn_container_shape`

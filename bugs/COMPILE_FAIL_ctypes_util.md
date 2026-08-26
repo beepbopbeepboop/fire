@@ -2,6 +2,28 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
+## Status (re-verified 2026-08-25): unchanged; gap #1's fix still holds, still no `ctypes/util.py`-specific errors
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+ctypes/util.py` fresh against current master (past the struct-method
+cross-call scalar contract "Pass 1.3e", generator-consumption-ordering
+fixed-point retry + defaults-aware arg padding, `**kwargs`-forward
+slot-alignment fix, and coroutine-body `int()`/`float()` builtin
+support landed since the 2026-08-24 entry below — none of these target
+this doc's remaining gaps #2/#3, module-value from-import binding and
+`LibraryLoader`'s dynamic attribute surface). Two full-build attempts
+under this session's safety-wrapped watcher (300s then 450s wall-clock
+cap, RSS stayed low/no runaway both times — this machine was also
+running several other concurrent agents' builds) both got killed by the
+watcher before the whole-program build finished or failed on its own;
+however, in both partial runs `grep -c "ctypes/util.py:.*error:"` was 0
+throughout, consistent with the 2026-08-24 finding that `ctypes/
+util.py`'s own compile unit has zero errors now. Not re-confirmed to a
+final exit code this pass (environment too slow/contended within the
+safety budget to let the full transitive build finish); no evidence of
+regression. Gaps #2/#3 remain genuinely unfixed and unattempted — same
+assessment as below. Doc kept open.
+
 ## Status (2026-08-24): gap #1 (bare package-import resolution) FIXED; util.py's own documented error is GONE; file still does not build end-to-end (gaps #2/#3 below remain, plus unrelated errors in other transitively-imported modules)
 
 The commit landed this session (see `bugs/COMPILE_FAIL_ctypes_
