@@ -4,6 +4,84 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9`. The specific errors quoted by
+the 2026-08-23 entry (`info_gen.cpp` coroutine-path errors) no longer
+occur — this file no longer routes through the C++20-coroutine generator
+path at all for its current blocker. Fresh repro instead fails during the
+ordinary compiled-C build, pulling in a SIBLING file this module imports
+(`Tools/c-analyzer/c_parser/info.py`, not `c_analyzer/info.py` itself):
+
+```
+c_parser/info.py:179:45: error: passing argument 1 of
+  'c_parser_info__fix_filename_5c8044' makes pointer from integer without
+  a cast
+c_parser/info.py:179:50: error: passing argument 2 of
+  'c_parser_info__fix_filename_5c8044' makes pointer from integer without
+  a cast
+c_parser/info.py:825:1: error: non-trivial conversion in 'parm_decl'
+c_analyzer/info.py:18:25: error: assignment to 'int64_t' from 'char *'
+  makes integer from pointer without a cast
+```
+
+Root-caused the FIRST of these two independent bugs precisely (found via
+targeted debug instrumentation of `_lower_named_call`'s kwargs-padding
+loop, gimple_gen_calls.py): `c_parser/info.py`'s `FileInfo.fix_filename`
+calls `_fix_filename(self.filename, relroot, **kwargs)`, forwarding a
+`**kwargs` SPREAD (not literal kwargs) to a callee, `_fix_filename(filename,
+relroot, *, formatted=True, **kwargs)`, that has a keyword-only parameter
+(`formatted`) BETWEEN the last fixed positional and its own trailing
+`**kwargs` slot. The forwarded dict landed in `arg_pairs` as the LAST
+lowered argument (`_lower_UnaryOp`'s `**` spread pass-through), but the
+missing-argument padding loop treated it as filling the NEXT missing
+positional slot (silently binding the real forwarded dict to `formatted`
+instead of `kwargs`) and then fabricated a brand-new EMPTY dict for the
+real `**kwargs` slot — losing every forwarded override and shifting the
+whole argument tail by one. FIXED in `gimple_gen_calls.py`'s
+`_lower_named_call` (~line 2469): when a `**`-spread call's forwarded
+dict already sits in `arg_pairs` at a position strictly before its real
+`_func_kwargs_slot` index (i.e. there's a real keyword-only param with a
+default in between), the dict is now popped aside and re-inserted at its
+correct slot once the loop reaches it, instead of a fresh empty dict.
+Verified via targeted debug output that this fix engages correctly on
+this exact repro (`_fwd_kw_pair` now correctly re-lands at index 3).
+
+This fix did NOT, however, make the file build clean — it exposed
+(rather than caused) a SEPARATE, deeper, genuinely structural bug it sits
+in front of: `_fix_filename`'s `func_param_types` entry, as seen by THIS
+particular caller, is still `[int64_t, int64_t, int64_t, MojoDict *]` — a
+PLACEHOLDER signature registered before `_fix_filename`'s own body-usage
+type inference (which later concludes `char *, char *, _Bool, MojoDict *`
+from its `fix(filename, relroot=relroot, **kwargs)` forwarding into
+`fsutil.format_filename`/`fsutil.fix_filename`) has run. Because
+`FileInfo.fix_filename` is compiled and its call site's C args committed
+BEFORE `_fix_filename`'s real signature is finalized, the caller coerces
+its arguments down to the STALE int64_t placeholder types, while the
+callee's own `-fgimple` definition (compiled later, using the resolved
+`char *` types) ends up with a different, incompatible real C signature —
+exactly the class of two-pass "sentinel gets overwritten... every OTHER
+call site compiled afterwards sees the concrete signature" hazard this
+codegen's own comments already document elsewhere (see
+`_emit_call`/`_pack_vararg_trailing_params`'s docstrings), but here it's
+the SIGNATURE ITSELF racing its own inference, not just the varargs-
+packing sentinel. Fixing this class of ordering bug in general (e.g. a
+forward-declaration-only prepass that always resolves every free
+function's real parameter types before any CALLER is compiled) is a
+materially larger, riskier change to the shared two-pass compilation
+model than this round's per-doc scope — not attempted further. The
+second independent blocker (`_parse_data`/`_format_data` classmethods'
+`cls` parameter inferred as `struct KIND *` in one spot vs `int64_t` in
+another — likely the same class of caller/callee signature-race, for a
+`cls` param rather than an ordinary one) was also root-caused to the same
+family but not fixed, for the same reason. Neither is the coroutine-path
+generator/async gap the earlier updates below focused on — doc's
+blocker has moved twice now; kept open with today's precise findings.
+Quality gate after the `_lower_named_call` fix: `test_gimple.py` 253/253,
+`test_module_cache.py` 76/76 (see the top-level session report for
+`make check-selfhost`/stdlib-dylib results, run once for the whole
+day's change set).
+
 ## Status (re-verified 2026-08-23)
 
 Re-ran against current master tip (`626f3f0`): still fails, still in the

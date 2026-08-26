@@ -4,6 +4,42 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9` (off master `3d2c6c2`, includes
+all fixes through the generator-consumption-ordering round). Blocker has
+shifted again — no longer `fmt_full` alone:
+
+```
+Error building: cannot compile module: function(s) fmt_full, fmt_summary
+(generator function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): fmt_full: sorted(..., key=...) is only supported for
+a list-typed iterable in a compiled generator/coroutine body; fmt_summary:
+a call to unresolved callee 'list(...)' is not supported in a compiled
+generator/coroutine body (...).
+```
+
+`fmt_summary`'s `list(...)` call is THE SAME root-level structural gap
+root-caused for `bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md`
+today: the coroutine-body expression emitter's `Comprehension` case is a
+hard-coded empty-list stub with no real loop-as-expression codegen, so
+`list(x)`/`set(x)` (which the ordinary call path desugars into a
+comprehension) have no equivalent lowering inside a generator/coroutine
+body. `fmt_full`'s `sorted(analysis, key=lambda v: v.key)` is a
+pre-existing, separately-documented limitation (list-typed-iterable-only
+`sorted(..., key=...)` support) — `analysis` here is dict-shaped at the
+real call site, not proven list-typed, so it correctly refuses rather than
+mis-lowering.
+
+Both are genuine instances of the already-tracked structural gaps (loop-
+as-expression codegen missing from the coroutine emitter; `sorted(key=)`
+needing static list-shape proof) — not attempted, per this round's
+instructions on large speculative feature work. The underlying
+"generator function referenced as a bare value in FORMATS dict" gap this
+doc originally centered on is STILL not reached (eligibility refusal fires
+first, same as the 2026-08-23 note below observed) — its status is
+unchanged and unconfirmed either way. No code change; doc re-triaged.
+
 ## Status (updated 2026-08-23 — the generator-as-value blocker is no longer FIRST; a new, different refusal surfaces)
 
 Re-ran against current master tip (`626f3f0`). The build no longer fails

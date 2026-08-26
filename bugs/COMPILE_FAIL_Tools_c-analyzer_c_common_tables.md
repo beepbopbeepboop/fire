@@ -4,6 +4,47 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25 — down to ONE blocker: `next()` on a cross-module generator handle)
+
+Re-ran fresh against `fix/rest-remainder9`. Real progress since 2026-08-23:
+`parse_table` and `_fix_write_default` no longer appear in the refusal at
+all — both now compile past the generator-eligibility pre-pass cleanly.
+Only ONE ineligible generator remains:
+
+```
+Error building: cannot compile module: function(s) read_table (generator
+function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): read_table: a call to unresolved callee 'next(...)'
+is not supported in a compiled generator/coroutine body (...).
+```
+
+Root-caused: `read_table`'s `lines = strutil._iter_significant_lines(infile)`
+binds a generator object obtained from a FOREIGN module (`c_common/
+strutil.py`, imported), then later does `actualheader = next(lines).strip()`.
+The coroutine-body emitter's `next(x)` support (gimple_cpp_core.py, ~line
+1736) only handles the case where `x` is a same-module STRUCT implementing
+`__next__` (real object-based iterator protocol) — it has no notion of a
+generator-typed local holding a coroutine handle at all, whether from this
+module or another. The nearby `yield from <call>` delegation machinery
+(`gen._generator_api`/`{base}_start/_resume/_value/_destroy`) is the
+closest existing analogue, but it only tracks SAME-MODULE generators the
+current compile has itself already translated via the C++20-coroutine
+path — `strutil._iter_significant_lines` is both foreign-module (no
+cross-module coroutine-handle linking exists yet) and manually driven via
+bare `next()` rather than a `for`/`yield from` consumption shape this
+emitter already understands. Making `next()` work on an arbitrary
+generator-typed local would need a new `_generator_var_api`-style
+tracking mechanism (mirroring `_async_var_api`/`_taskgroup_var_api`'s
+existing "value -> api" side-tables) PLUS cross-module coroutine-handle
+resolution for the `strutil` case specifically — a materially new codegen
+capability, not a local fix. Left untouched, per this round's guidance
+against large speculative feature work. Doc kept open; every one of the
+smaller, narrower gaps this doc previously tracked (tuple-yield, keyword-
+parameter escaping, `?:` type coercion, bare-module-reference lowering,
+bound-method-as-value) has now either been fixed or become moot as
+`parse_table`/`_fix_write_default` cleared the eligibility gate — `next()`
+on a foreign generator is now the sole, and genuinely structural, blocker.
+
 ## Status (updated 2026-08-23 — real progress: coroutine units now EMIT C++ and reach g++; 13 new, precisely-diagnosed C++ errors remain)
 
 Re-ran against current master tip (`626f3f0`). For the first time this

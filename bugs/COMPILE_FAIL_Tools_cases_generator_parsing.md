@@ -4,6 +4,20 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9`: same structural class of
+error as 2026-08-23 (polymorphic `self.<field>.tokens()` dispatch in the
+C++ coroutine path — `request for member 'tokens' in 'self->IfStmt::body'`
+etc., plus `int64_t`→`char*`/`Stmt*` conversions), though the specific
+line numbers in `parsing_gen.cpp` shifted slightly (179/184/189/192/254/
+259/320/325/386/397/461/470 vs the previous 159/164/.../366/367). No
+regression, no fix — same deliberately-excluded polymorphic-dispatch gap
+(`bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`/
+`CODEGEN_generator_classmethod_first_param_must_be_self.md` cluster). Not
+attempted, per this round's guidance against speculative changes to this
+shared, regression-prone machinery.
+
 ## Status (2026-08-23): re-verified — STILL-OPEN on the same documented blocker.
 
 Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`; parser.py, the

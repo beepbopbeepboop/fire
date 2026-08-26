@@ -4,6 +4,39 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9` — identical to the 2026-08-23
+finding below, byte-for-byte (`analyzer.py:386:8` "request for member
+'peek'"/"'used' in something not a structure or union", 3 diagnostics).
+Confirmed via source inspection (`inputs`/`outputs` are `list[StackItem]`,
+populated via a `[convert_stack_item(i, ...) for i in ...]` comprehension
+that DOES carry real `StackItem*` element typing) that the gap is
+specifically `itertools.zip_longest`: unlike `zip()` (mapped to a
+`mojo_zip` runtime call, itself only genuinely typed for the common
+2-list case) and `itertools.repeat`'s already-modeled finite 2-arg form
+(`gimple_exprtypes._is_itertools_repeat2_call`), `itertools.zip_longest`
+has NO model anywhere in this codegen — no entry in `_KNOWN_SIGS`, no
+special-cased for-loop-iterable dispatch (`_gen_stmt_ForStmt` only
+special-cases `range`/`enumerate`, falling through to the generic
+`_gen_for_iter` for everything else, including `zip`/`zip_longest`
+alike). Its call therefore lowers as an unresolved/opaque call, so the
+for-loop's `input, output` tuple-unpack targets default to opaque
+`int64_t`, and the later chained `input.peek = output.peek = True`
+attribute-assignment emits raw struct-member writes into a non-struct.
+
+A real fix needs a new stdlib-call element-type PASS-THROUGH model for
+`itertools.zip_longest(a, b)`'s for-loop tuple targets (propagate `a`'s
+and `b`'s own list element types onto the two loop variables, same as a
+correctly-modeled `zip()` would), which touches the same general
+"element-typing contracts for unmodeled stdlib calls" machinery flagged
+below as having a documented regression history (Pass-1.3d). Given this
+round's guidance to avoid large/speculative feature work and the explicit
+regression-risk note already on record for this exact machinery, left
+untouched. No code change; doc re-verified with the precise gap
+identified (previously only "not previously tracked" — now root-caused
+to `itertools.zip_longest` specifically, distinct from bare `zip()`).
+
 ## Status (2026-08-23): no longer blocked by cwriter.py at all; now blocked by
 ## analyzer.py's OWN new-shape error. Still open, root-caused.
 

@@ -2469,9 +2469,32 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _kw_slot = gen._func_kwargs_slot.get(fname)
         if _kw_slot is None:
             _kw_slot = gen._func_kwargs_slot.get(fname_raw, -1)
+        # `f(a, b, **fwd)` forwarding shape: `fwd` already landed as the
+        # LAST arg_pairs entry (a real MojoDict*, not literal kwargs --
+        # `_lower_UnaryOp`'s spread pass-through), but when the callee has
+        # one or more keyword-only params (with defaults) between the
+        # last fixed positional and its own trailing `**kwargs` slot
+        # (e.g. c_parser/info.py's `_fix_filename(filename, relroot, *,
+        # formatted=True, **kwargs)`), `len(arg_pairs) < _kw_slot` here --
+        # the loop below used to treat the forwarded dict as filling the
+        # NEXT missing slot positionally (silently binding the real
+        # kwargs dict to `formatted` instead of `kwargs`) and then
+        # fabricate a brand new EMPTY dict for the real `**kwargs` slot,
+        # losing every forwarded override and shifting the tail of the
+        # signature by one (GCC: "makes pointer from integer without a
+        # cast" on `formatted`/whatever else came after). Set the real
+        # forwarded dict aside here so it lands at its own slot below
+        # instead of a freshly-packed empty one.
+        _fwd_kw_pair = None
+        if (_call_has_spread and arg_pairs and arg_pairs[-1][0] == 'MojoDict *'
+                and node.args and isinstance(node.args[-1], gimple_ctypes.UnaryOp)
+                and node.args[-1].op == '**'
+                and 0 <= len(arg_pairs) - 1 < _kw_slot):
+            _fwd_kw_pair = arg_pairs.pop()
         while len(arg_pairs) < len(expected_params):
             if _kw_slot >= 0 and len(arg_pairs) == _kw_slot:
-                arg_pairs.append(('MojoDict *', gen._pack_kwargs_dict(kwarg_dict)))
+                arg_pairs.append(_fwd_kw_pair if _fwd_kw_pair is not None
+                                  else ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict)))
                 kwarg_values = []
                 continue
             if kwarg_values:

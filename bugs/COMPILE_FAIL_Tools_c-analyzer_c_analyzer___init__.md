@@ -4,6 +4,67 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against current `fix/rest-remainder9` tip (descends from
+master's `3d2c6c2`, which already includes the `_cpp_try_kwargs_forward_call`
+fix this doc's 2026-08-14 entry describes, and the later generator-
+consumption-ordering fix). The blocker has SHIFTED — it is no longer
+`iter_decls`'s dynamic-callee `**kwargs` forward (that shape is still
+correctly, safely refused, but it's no longer the first thing hit). Fresh
+repro (`python3 mojo.py build .../c_analyzer/__init__.py`) now reports
+THREE separate ineligible generators, none of which are the kwargs-forward
+case:
+
+```
+Error building: cannot compile module: function(s) analyze_decls, check_all,
+iter_decls (generator function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): analyze_decls: a call to unresolved callee 'list(...)'
+is not supported in a compiled generator/coroutine body (...); check_all:
+unsupported for-loop iterable type: CallExpr; iter_decls: a call to
+unresolved callee 'set(...)' is not supported in a compiled generator/
+coroutine body (...).
+```
+
+Root-caused all three to the SAME underlying structural gap, confirmed by
+reading `gimple_cpp_core.py`'s coroutine-body expression emitter directly:
+
+- `analyze_decls`: `decls = list(decls)` (line 59 of the source) — `list(x)`
+  builtin.
+- `iter_decls`: `KIND.DECLS & set(kinds)` (line 38) — `set(x)` builtin.
+- `check_all`: `for data, failure in check(analysis):` (line 94) — a
+  for-loop whose iterable is itself a call through a parameter-valued
+  callable (`check` is a loop variable bound from `checks`).
+
+The ordinary (non-coroutine) call path lowers `list(x)`/`set(x)` via
+`_lower_ctor_from_iterable` (gimple_gen_calls.py:1457), which desugars them
+into a synthetic comprehension and hands it to `_lower_comprehension` — a
+real STATEMENT-level loop emission. The coroutine-body expression emitter
+(`_cpp_expr` in gimple_cpp_core.py) has no equivalent: its own
+`Comprehension` case (line 1122) is a hard-coded stub that returns an empty
+`mojo_list_new ()` with a comment stating plainly that "real comprehension
+lowering needs a loop, which an expression slot can't hold" — this coroutine
+emitter's call-expression-tree model has no support for loops appearing in
+expression position at all, distinct from generator suspend/resume itself.
+Confirming this: the `for data, failure in check(analysis):` shape isn't a
+`**kwargs` issue either — it's a for-loop whose iterable is a bare `CallExpr`
+result, which the emitter's for-loop-iterable dispatcher (line ~4334) simply
+has no case for since it isn't one of the fixed shapes (range/MojoList*/
+MojoStr*/MojoDict*/MojoSet*) it statically recognizes.
+
+Fixing this properly would mean giving the coroutine-body expression
+emitter genuine loop-as-expression codegen (effectively re-deriving
+`_lower_comprehension`'s statement-emission logic inside the very different
+"single C++ function body, values only" model `_cpp_expr` uses) — this is
+a materially new codegen capability, not a local bugfix, and squarely the
+kind of "large speculative feature project" this round's instructions say
+not to attempt. Left untouched; no code change. Because the whole module
+still refuses to compile (any one ineligible generator is enough),
+`iter_decls`'s previously-identified dynamic-callee `**kwargs` blocker is
+now moot until/unless these other two surface first — genuinely structural,
+same conclusion as before, just via different trigger sites. Doc stays
+open; no regression, no fix.
+
 ## Status (re-verified 2026-08-23)
 
 Re-ran against current master tip (`fix/c-analyzer` fast-forwarded to

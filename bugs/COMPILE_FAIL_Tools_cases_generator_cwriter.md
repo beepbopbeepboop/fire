@@ -4,6 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9`: identical to 2026-08-23,
+byte-for-byte (`cwriter_gen.cpp:124/126: error: request for member
+'write' in 'self->CWriter::out', which is of non-class type 'int64_t'`).
+Same structural item 3 (self.out's opaque `TextIO` type inside a
+`@contextlib.contextmanager` bare-`yield` generator's C++20-coroutine
+companion, out of scope per `bugs/hard/
+CODEGEN_generator_struct_typed_param_refused.md`). No regression, no
+fix; doc re-verified only.
+
 ## Status (2026-08-23): re-verified — STILL-OPEN, unchanged, on item 3 only.
 
 Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`). The build
