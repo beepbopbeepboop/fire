@@ -4,7 +4,73 @@ Source file: `/Users/mrs/net/Python-3.14.6/Apple/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-24, worktree fix/rest-remainder2 — re-triaged, blocker SHIFTED since the 2026-08-23 entry; the documented string-repeat/`print()` gap is no longer what's reached first)
+## Status (updated 2026-08-25, worktree fix/rest-remainder12 — COMPILE stage now fully fixed end-to-end; RUNTIME crash found, separate gap, NOT fixed)
+
+`python3 mojo.py build .../Apple/__main__.py` now exits 0 and produces a
+working executable. Four root-cause fixes landed in the coroutine/
+generator-body C++ emitter (`gimple_cpp_core.py`), each found by walking
+this file's blocker one step at a time:
+
+1. **`mojo_c_getenv`/platform/subprocess runtime-wrapper calls refused
+   as "unresolved callee"**: `ast_rewriter.py`'s idiom-rewrite rules
+   (`os.environ` get/`[]`/`in`, `platform.system()`/`machine()`,
+   `subprocess.run(...)` + `.returncode`/`.stdout`/`.stderr`, `sys.stdin.
+   read()`) all lower to a direct `CallExpr(IdentExpr('mojo_<...>'), ...)`
+   — bypassing every MemberExpr-keyed case this emitter's `_cpp_expr`
+   CallExpr dispatch has, so it always fell to the generic "unresolved
+   callee" refusal even though these names are fixed `extern "C"`
+   wrappers unconditionally declared in `<mojo_runtime.h>` (already
+   `#include`d by every generated `.cpp`). Root cause of the `group()`
+   generator's `if "GITHUB_ACTIONS" in os.environ:` guard refusing.
+   Fixed: whitelist these 8 names for a direct call in `_cpp_expr`.
+2. **Bare zero-arg `print()`**: the existing single-scalar-arg `print()`
+   special case in `_cpp_stmt` required `len(args) == 1`, so `group()`'s
+   teardown-half `else: print()` (line 239, no args) fell all the way
+   through to the same generic "unresolved callee 'print(...)'"
+   refusal. Fixed: added a zero-arg case emitting `printf("\n");`.
+3. **String repetition (`"=" * (70 - len(text))`) had no `_cpp_expr`
+   `*`-operator lowering** (the ordinary non-coroutine GIMPLE path's
+   `mojo_cstr_repeat` case was never mirrored into the coroutine-body
+   emitter) — g++ error `invalid operands ... 'const char [2]' and
+   'int64_t' to binary operator*`. Fixed: added a char*/int64_t (both
+   operand orders) case dispatching to `mojo_cstr_repeat`, mirroring
+   `gimple_gen_exprs.py`'s existing GIMPLE-path lowering.
+4. **F-strings inside a generator/coroutine body were a SILENT
+   MISCOMPILE, not a refusal**: `_cpp_expr`'s `StringLiteral` case just
+   C-escaped `node.value` verbatim with no f-string decode/interpolation
+   step at all — so `f"===== {text} "` compiled to the literal C string
+   `"f\"===== {text} \""` (the `f"`/`"` source delimiters included,
+   `{text}` never substituted) instead of interpolating `text`. Found
+   via g++ rejecting the resulting nonsense expression
+   (`"=" * (70 - ...)` against a string constant), not by CI passing
+   silently — but a case reached without the `*` error right behind it
+   would have compiled and RUN with wrong output. Fixed: added
+   `_cpp_string_literal_expr` (mirrors `_lower_StringLiteral`'s
+   decode/parse-parts/interpolate/`mojo_str_cat`-chain logic, adapted
+   to this emitter's single-expression-string return convention, incl.
+   a `_cpp_apply_fstring_spec` counterpart of `_apply_fstring_spec` for
+   `{x:04d}`-style specs) and wired it into the `StringLiteral` case.
+
+With all four landed, the ENTIRE file (GIMPLE .ci stage — already clean
+per the 2026-08-23 entry below — AND the C++20-coroutine `.cpp` stage)
+compiles clean, links, and produces `/tmp/apple_main` (133KB, exit 0).
+
+**Residual, NOT fixed — separate runtime gap**: running the built
+binary (`apple_main --help`, mirroring real CPython's own working
+`python3 Apple/__main__.py --help`) immediately raises an uncaught
+`AttributeError: name` and exits nonzero, before printing anything.
+Traced to the runtime's own `AttributeError: %s` formatting (`attr`
+= `"name"`, `runtime/mojo_runtime.c` ~line 2632) — some object's
+`.name` attribute lookup fails via the dynamic-dispatch getattr path
+(`_mojo_dispatch_getattr`), most likely inside this file's `argparse`
+subcommand-parser setup (`ArgumentParser`/subparsers construction, the
+first thing `main()` does before any of the four fixes above's code
+paths run). NOT investigated further this pass — this is a genuinely
+separate bug from the compile-stage gaps this session fixed, and
+tracing which specific object/attribute shape argparse's subparser
+machinery hits here is real, undirected work, not a narrow one-spot
+fix. Doc kept open (not deleted) — this file compiles clean now but
+does not run correctly yet.
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` check:
 the module-level refusal now names `group` (the same generator the

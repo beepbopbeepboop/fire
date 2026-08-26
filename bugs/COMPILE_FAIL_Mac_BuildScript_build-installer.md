@@ -4,6 +4,23 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-08-25, worktree fix/rest-remainder12): re-verified — STILL-OPEN, byte-identical errors.
+
+Re-ran `python3 mojo.py build .../Mac/BuildScript/build-installer.py`
+fresh (safety-bounded per this session's memory-hazard protocol),
+after this session's coroutine-body emitter fixes landed elsewhere
+(see COMPILE_FAIL_Apple___main__.md) — none relevant here, this file
+has no generator/coroutine bodies reaching either blocker. All three
+diagnostics reproduce byte-for-byte identical to the 2026-08-23 entry
+below (`build-installer.py:704:17: invalid operands to binary + (have
+'char *' and 'MojoList *')`; `1447:17`/`1456:17: invalid operands to
+binary % (have 'int64_t' and 'MojoDict *')`). Both root causes remain
+exactly as analyzed below (global-type-reconciliation-across-function-
+reassignment for #1; a genuinely unimplemented dict-keyed dynamic-
+format-string runtime primitive for #2) — both explicitly flagged
+high-risk/feature-sized in the existing writeup, and this session
+found nothing to change that assessment. Not attempted. Doc kept open.
+
 ## Status (2026-08-23): re-verified — STILL-OPEN, byte-identical errors.
 
 Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`): the same

@@ -448,6 +448,111 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     return trusted
 
 
+def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
+    """`_cpp_expr` counterpart of `gimple_gen_infra.py`'s
+    `_apply_fstring_spec` — same fill/align/width parsing (mirrors
+    myinterpreter._apply_fstring_format_spec so all three paths agree),
+    but returns a plain nested C++ expression string (`part_val` is
+    already a C++ expression, not a GIMPLE temp name) instead of using
+    `gen._call_expr`, which emits GIMPLE statements this expression-only
+    emitter has no side channel for."""
+    fill = ' '
+    align = None
+    i = 0
+    if len(spec) >= 2 and spec[1] in ('<', '>', '^'):
+        fill = spec[0]; align = spec[1]; i = 2
+    elif len(spec) >= 1 and spec[0] in ('<', '>', '^'):
+        align = spec[0]; i = 1
+    elif len(spec) >= 1 and spec[0] == '0':
+        fill = '0'; align = '>'; i = 1
+    width_digits = ''
+    while i < len(spec) and spec[i].isdigit():
+        width_digits += spec[i]; i += 1
+    if not width_digits:
+        return part_val
+    width = int(width_digits)
+    fn = {'<': 'mojo_str_ljust', '^': 'mojo_str_center'}.get(align, 'mojo_str_rjust')
+    return f'{fn}((char *)({part_val}), (int64_t){width}, "{fill}")'
+
+
+def _cpp_string_literal_expr(gen, val: str) -> str:
+    """`_cpp_expr`'s counterpart of the ordinary GIMPLE path's
+    `_lower_StringLiteral` (gimple_gen_exprs.py) — decodes an f-string
+    and interpolates its `{expr}` fields, instead of the naive "just
+    C-escape the raw token text" this case used to do. That previous
+    behavior was a genuine SILENT MISCOMPILE, not an honest refusal: an
+    f-string StringLiteral's `.value` (e.g. `f"===== {text} "`,
+    including the `f"`/`"` source delimiters) was emitted verbatim as a
+    C string literal's contents, so the compiled generator printed the
+    literal text `f"===== {text} "` instead of interpolating `text` —
+    found via Apple/__main__.py's `group()` `@contextmanager` generator
+    (bugs/COMPILE_FAIL_Apple___main__.md). Builds a nested
+    `mojo_str_cat(...)` expression tree exactly like `_cpp_percent_format`
+    does for `%`-formatting, since this expression-only emitter has no
+    statement side channel to build the value up incrementally in
+    (unlike `_lower_StringLiteral`, which emits a GIMPLE statement per
+    part). Non-f-string plain strings take the previous fast path
+    unchanged (single C string literal, no parsing)."""
+    text, is_fstring = gen._decode_str_literal_text(val)
+    if not is_fstring:
+        escaped = text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
+        return f'"{escaped}"'
+    parts = gen._parse_fstring_parts(text)
+    if not parts or all(k == 'lit' for k, _v, _s, _c in parts):
+        plain = ''.join(v for k, v, _s, _c in parts)
+        escaped = plain.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
+        return f'"{escaped}"'
+    self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+    fn_ret = _cpp_trusted_fn_return_types(gen)
+    acc = None
+    for kind, part_text, spec, conv in parts:
+        if kind == 'lit':
+            if not part_text:
+                continue
+            escaped = part_text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
+            piece = f'"{escaped}"'
+        else:
+            try:
+                from mojo_compiler import Parser as _P, py_tokenize as _tok
+                expr_node = _P(_tok(part_text))._parse_expr(0)
+                # Parsed fresh from raw source text (this expression never
+                # went through the module's own ast_rewriter.rewrite()
+                # pass) — same as _lower_StringLiteral's identical need.
+                expr_node = gimple_ctypes.ast_rewriter.rewrite_node(expr_node)
+            except Exception as ex:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"f-string interpolation '{{{part_text}}}' could not "
+                    "be parsed in a compiled generator/coroutine body "
+                    f"({type(ex).__name__}: {ex})")
+            v = gen._cpp_expr(expr_node)
+            try:
+                ectype = gimple_exprtypes._infer_simple_expr_ctype(
+                    expr_node, gen._cpp_declared, self_fields, gen._async_api,
+                    fn_return_types=fn_ret) or 'int64_t'
+            except Exception:
+                ectype = 'int64_t'
+            if conv == 'r':
+                if ectype == 'char *':
+                    piece = f"mojo_repr_str((char *)({v}))"
+                elif ectype == 'double':
+                    piece = f"mojo_repr_float(({v}))"
+                else:
+                    piece = f"mojo_str((void *)({v}))"
+            elif ectype == 'char *':
+                piece = v
+            elif ectype == 'double':
+                piece = f"mojo_repr_float(({v}))"
+            elif ectype == '_Bool':
+                piece = f'(({v}) ? "True" : "False")'
+            else:
+                piece = f"mojo_str((void *)({v}))"
+            if spec:
+                piece = _cpp_apply_fstring_spec(piece, spec)
+        acc = piece if acc is None else (
+            f"mojo_str_cat((char *)({acc}), (char *)({piece}))")
+    return acc if acc is not None else '""'
+
+
 def _cpp_percent_format(gen, node) -> str | None:
     """Coroutine-body counterpart of the ordinary GIMPLE path's
     `_lower_percent_format` (gimple_gen_exprs.py) — Python `%`-style
@@ -692,9 +797,7 @@ def _cpp_expr(gen, e) -> str:
         val = e.value
         if val.startswith('`') and val.endswith('`') and len(val) > 2:
             return val  # backtick-quoted identifier (mojo keyword escape)
-        # C++ string literal
-        escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
-        return f'"{escaped}"'
+        return _cpp_string_literal_expr(gen, val)
     if isinstance(e, gimple_ctypes.IdentExpr):
         if e.name == 'None':
             return '0'  # None → null pointer / zero (matches _lower_IdentExpr)
@@ -1083,6 +1186,35 @@ def _cpp_expr(gen, e) -> str:
             if _is_str_operand(e.left) and _is_str_operand(e.right):
                 return (f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
                         f"(char *)({gen._cpp_expr(e.right)}))")
+        if e.op == '*':
+            # String repetition (`"=" * (70 - len(text))`, Apple/
+            # __main__.py's `group()` generator) → mojo_cstr_repeat,
+            # mirroring the ordinary GIMPLE path's char*/int lowering
+            # (gimple_gen_exprs.py's `mojo_cstr_repeat` case, both
+            # operand orders). Real Python's `str * int` (and `int *
+            # str`) is always string repetition — never overloaded to
+            # mean anything else — so this only needs to tell "is one
+            # side string-typed", not inspect both sides' exact types.
+            # Falls through to the plain `*` below for a genuinely
+            # all-numeric multiply (the overwhelmingly common case).
+            def _cpp_is_str(node):
+                if isinstance(node, gimple_ctypes.StringLiteral):
+                    return True
+                try:
+                    return gimple_exprtypes._infer_simple_expr_ctype(
+                        node, gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api,
+                        fn_return_types=_cpp_trusted_fn_return_types(gen),
+                    ) == 'char *'
+                except Exception:
+                    return False
+            if _cpp_is_str(e.left) and not _cpp_is_str(e.right):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
+                        f"(int64_t)({gen._cpp_expr(e.right)}))")
+            if _cpp_is_str(e.right) and not _cpp_is_str(e.left):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
+                        f"(int64_t)({gen._cpp_expr(e.left)}))")
         if e.op == '%':
             _pf = _cpp_percent_format(gen, e)
             if _pf is not None:
@@ -2066,6 +2198,32 @@ def _cpp_expr(gen, e) -> str:
                         gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)):
                 cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
                 return f"{cpp_fname}({', '.join(args)})"
+            # `ast_rewriter.py`'s idiom-rewrite rules (os.environ.get/[]/
+            # `in`, platform.system()/machine(), subprocess.run(...) and
+            # its .returncode/.stdout/.stderr, sys.stdin.read()) all lower
+            # to a DIRECT CallExpr(IdentExpr(name='mojo_<...>'), ...) —
+            # bypassing the MemberExpr-based dispatch this emitter's other
+            # cases key on — long before this scalar coroutine-body
+            # emitter ever sees the expression. Every one of these names
+            # is a fixed `extern "C"` wrapper unconditionally declared in
+            # <mojo_runtime.h> (which every generated .cpp already
+            # #includes wholesale, same as the len()/ord() dispatch
+            # above), with the exact param/return C types the rewrite
+            # rules already produce arguments for — so, unlike the
+            # general "unresolved callee" case below, calling them
+            # directly by name here is exactly as safe as the ordinary
+            # (non-coroutine) GIMPLE path calling them. Found via Apple/
+            # __main__.py's `if "GITHUB_ACTIONS" in os.environ:` guard
+            # inside a `@contextmanager` generator (`group`), which
+            # rewrites to `not not mojo_c_getenv("GITHUB_ACTIONS")` and
+            # hit this function's generic refusal below before this case
+            # was added.
+            if fname in (
+                    'mojo_c_getenv', 'mojo_platform_system',
+                    'mojo_platform_machine', 'mojo_stdin_read',
+                    'mojo_subprocess_run', 'mojo_subprocess_returncode',
+                    'mojo_subprocess_stdout', 'mojo_subprocess_stderr'):
+                return f"{fname}({', '.join(args)})"
             # Everything else reaching this point would be emitted as a
             # bare, undeclared C++ identifier call — which g++ always
             # rejects ("'X' was not declared in this scope") or, worse,
@@ -2556,6 +2714,22 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # target, socket ops, ...), so no separate check is needed
             # in this branch.
             return [f"{indent}{gen._cpp_expr(s.value)};"]
+        # Bare `print()` with NO arguments — real Python's "just emit a
+        # newline" shape (Apple/__main__.py's `group()` contextmanager
+        # generator: `else: print()` in its teardown half, mirroring the
+        # single-arg `print("::endgroup::")` in its GITHUB_ACTIONS
+        # branch). Handled as its own case ahead of the one-scalar-arg
+        # case below (which requires `len(args) == 1` and so never
+        # matches a zero-arg call) — previously fell through everything
+        # in this function to the generic bare-call dispatch further
+        # down, and from there to _cpp_expr's CallExpr handling, whose
+        # only outcome for an unrecognized callee is an honest refusal
+        # ("a call to unresolved callee 'print(...)'"), even though a
+        # zero-arg `print()` is exactly as printable as the one-arg case.
+        if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                and s.value.func.name == 'print' and len(s.value.args) == 0
+                and not getattr(s.value, 'kwargs', None)):
+            return [f'{indent}printf("\\n");']
         # `print(<one scalar arg>)` — a small, deliberate addition (not
         # part of the original Milestone B generator whitelist, which
         # has never needed a body-internal side effect since a
