@@ -1,5 +1,56 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — whole-program build no longer refuses at the Python stage; mailbox's OWN source now contributes ZERO real errors; the last "own" error line (32) fixed via a shared root cause)
+
+Re-verified fresh with a safety-wrapped, RSS/watchdog-guarded
+`python3 mojo.py build .../Lib/mailbox.py` (full ~13-min run, EXIT=1):
+
+1. **The 2026-08-24 entry's `Message[...] = ...` subscript-store refusal
+   does NOT fire on the real build path** — it reproduces ONLY under the
+   isolated `do_imports=False` probe (confirmed again this session),
+   where external base class `email.message.Message` is invisible. In
+   the real whole-program inline compile, `email.message` IS present,
+   `Message.__setitem__` resolves through inheritance, and the build
+   proceeds all the way to GCC-stage codegen.
+2. **mailbox.py's last genuinely-own error (line 32) is FIXED** via two
+   narrow shared-mechanism changes landed this session
+   (`gimple_gen_exprs.py` + `gimple_module_gen.py`, commit `2ddcf37`):
+   - `os.curdir`/`os.pardir`/`os.linesep` joined the existing POSIX
+     constant table (`sep`/`pathsep`) as compile-time `char *`
+     constants — previously an unresolved-module-attr stub or a fatal
+     runtime AttributeError;
+   - Phase 1.7 global-type inference gained
+     `str.encode()/decode()/format() -> char *` (mirroring its existing
+     `read`/`readlines` rows), and `_gscan_declare_global`'s duplicate
+     member-call rows were consolidated onto `_phase17_value_type` so
+     the C decl can no longer disagree with the scan's conclusion.
+     `linesep = os.linesep.encode('ascii')`'s global was declared
+     int64_t against a char*-producing RHS ("assignment to 'int64_t'
+     from 'char *'", plus pointer-as-int64 garbage on every later
+     read). Verified end-to-end beyond mailbox: five standalone repros
+     (`print(os.linesep)`, `len(os.linesep)`, module-global assigned
+     from `.encode()`, `os.curdir`, `os.pardir`) all compile AND run
+     correctly; gate: test_gimple 256/256, module-cache 76/76,
+     check-selfhost clean, stdlib dylib rebuild 0 skips.
+3. **The 3 remaining "Lib/mailbox.py"-attributed error lines (392/404/
+   407) are NOT mailbox's**: they name `email_charset_Charset_body_
+   encode` and a `cte` local — neither symbol exists anywhere in
+   mailbox.py; the identical line numbers are `charset.body_encode(...)`
+   calls inside Lib/email/message.py:392/407 (and message.py's own
+   direct attribution shows 33 more), i.e. the documented stale-#line
+   mis-attribution family. Not mailbox's bugs.
+
+Net: mailbox.py itself is no longer implicated in ANY current build
+error. The file still does not build end-to-end — the remaining 291
+errors are entirely the transitive cascade (argparse.py 61,
+email/message.py 33, email/generator.py 25, typing.py 22, socket.py 19,
+ast.py 15, statistics.py 13, ...), each belonging to separately-tracked
+non-generator families. Doc stays open per convention, but this doc's
+original subject (the generator-codegen concern: tuple-yield in
+`iteritems`, default-arg padding on `self._lookup()`/`self.readline()`,
+etc.) has been fully resolved since 2026-08-23.
+
+
 ## Status (updated 2026-08-24 — re-verified; an EARLIER-stage, unrelated refusal now surfaces first, not previously documented)
 
 Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=
