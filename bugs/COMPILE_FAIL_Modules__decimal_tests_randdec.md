@@ -2,6 +2,28 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (re-verified 2026-08-26)
+
+Fresh repro against this session's tree (`fix/rest-remainder18`)
+reproduces the identical 17-generator refusal set named in the
+2026-08-25 entry below, byte-for-byte the same function list
+(`all_binary`, `all_ternary`, `all_unary`, `bin_close_numbers`,
+`bin_close_to_pow10`, `bin_incr_digits`, `bin_random_mixed_op`,
+`logical_bin_incr_digits`, `logical_un_incr_digits`,
+`tern_close_numbers`, `tern_incr_digits`, `tern_random_mixed_op`,
+`un_close_numbers`, `un_close_to_pow10`, `un_incr_digits`,
+`un_incr_digits_tuple`, `un_random_mixed_op`). Given the 2026-08-25
+session's own detailed per-generator classification (8 unresolvable
+`random`-module imports, 6 function-valued loop-variable calls, 1
+mixed-scalar/tuple structural case, 3 consumption-ordering-derived) was
+produced from a fresh, skeptical re-diagnosis that session and matches
+what this session independently observes, no further reclassification
+was needed — the categories hold. The one shared-mechanism fix that
+session landed (commit `3dcd224`, the char*/MojoList* cross-unification
+honesty fix) is present in this tree (verified via `git log --oneline
+-- gimple_exprtypes.py` showing it in history) and unaffected by
+anything since. No code change this pass; doc re-verified only.
+
 ## Status (updated 2026-08-25, wtOpencode_randdec — doc's headline blocker is OBSOLETE (varying-arity tuple yields already fixed by later work); true remaining causes re-diagnosed per-generator; one real latent honesty bug found on this file's exact mixed-yield shape FIXED (commit 3dcd224); whole file still does not build)
 
 Fresh repro on this branch tip (`python3 mojo.py build .../randdec.py`,

@@ -4,6 +4,22 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26)
+
+Fresh repro against this session's tree (`fix/rest-remainder18`)
+reproduces the identical single blocker, byte-for-byte: `read_table:
+unsupported for-loop iterable type: CallExpr` (`for row in
+_get_reader(lines, delimiter=sep or '\t'):`, where `_get_reader` is a
+callable PARAMETER defaulting to `csv.reader`). Same family as
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_datafiles.md`'s
+`read_decls` blocker (a for-loop iterable resolved through a callable
+value rather than a statically-known generator/function) — confirmed
+genuinely still the same structural gap (no callable-parameter-value
+tracking into for-loop iteration in the coroutine-body emitter), plus
+the still-undiagnosed `fix_row = _normalize_fix_read(fix)` nested-
+function-factory-as-value shape right behind it. Not attempted — large
+feature-sized work. No code change; doc re-verified only.
+
 ## Status (updated 2026-08-25 — `next()` on a foreign generator FIXED (commit c4c88fa, verified end-to-end); read_table now reaches the NEXT unsupported shape: `for row in _get_reader(...)`)
 
 The doc's tracked blocker — `read_table`'s
