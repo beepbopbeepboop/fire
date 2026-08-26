@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (re-verified 2026-08-26, wtRest19b): unchanged — same 6 `cls`-access refusal lines
+
+Fresh `MOJO_DEBUG=1 python3 mojo.py build .../Lib/enum.py` against
+current tree (fix/rest-remainder19b, heavy concurrent build load from
+other campaign agents noted but debug-mode run completed): identical
+refusal set, byte-for-byte the same message text as 2026-08-25 —
+`Flag`/`IntFlag` × `_iter_member_by_value_`/`_iter_member_by_def_`/
+`_iter_member_` all refused with "a @classmethod generator that
+references `cls` in its body in an unsupported way is not supported".
+Root cause confirmed unchanged: `cls._flag_mask_`/`cls._value2
+member_map_` are populated only via `EnumMeta.__new__`'s dynamic
+`classdict[...] = ...` metaclass machinery, never as literal
+class-body AssignStmts, so `_cls_refs_supported`'s class-attribute
+redirect correctly has no entry to redirect through. This remains a
+feature-sized dynamic-metaclass-attribute-modeling gap, not a narrow
+fix. Not attempted; no code change.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; unchanged refusal, still feature-sized, one prior sub-gap now closed upstream)
 
 Re-ran a fresh, safety-wrapped `python3 mojo.py build

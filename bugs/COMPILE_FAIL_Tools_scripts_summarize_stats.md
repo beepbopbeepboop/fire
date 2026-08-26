@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtRest19b): byte-identical, unchanged
+
+Fresh repro against current tree: identical refusal, byte-for-byte the
+same as 2026-08-25 — `iter_optimization_tables`/`iter_specialization_
+tables` refused on unresolved callees `calc_histogram_table(...)`/
+`calc_specialization_table(...)`, both nested `def`s local to the
+enclosing `pre_succ_pairs_section()` capturing enclosing-scope locals.
+Root cause and required fix (real closure compilation for nested
+functions referenced as callees inside coroutine bodies) unchanged
+from the prior analysis — genuinely feature-sized, shared scope with
+this project's documented closure-machinery regression history. Not
+attempted; no code change.
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1 — blocker SHIFTED again: the refusal set narrowed to the two nested-function-callee generators)
 
 Fresh repro: the module now refuses at the eligibility gate on only

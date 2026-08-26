@@ -2,6 +2,38 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (re-verified 2026-08-26, wtRest19b — same `reversed()` blocker; investigated feasibility, confirmed feature-sized)
+
+Fresh `MOJO_DEBUG=1` build against current tree: byte-identical to the
+prior 2026-08-26 entry below — same 3 refusals (`_OrderedDictKeysView`/
+`_OrderedDictItemsView`/`_OrderedDictValuesView`'s `__reversed__`, all
+on `reversed(self._mapping)`), Counter's dict-subclass gap still masked
+behind it, unreached.
+
+Investigated whether `reversed(x)` -> `x.__reversed__()` delegation
+(where `x` is `self._mapping`, an `OrderedDict`, whose own
+`__reversed__` is itself a compiled generator over its internal linked
+list) is a tractable narrow fix, per this round's instruction to check.
+It is not: the existing sub-generator delegation machinery
+(`_cpp_for_generator_delegate`/`_cpp_iterable_is_delegatable_generator_
+call` in gimple_cpp_async.py/gimple_cpp_core.py) only recognizes a bare
+`name(...)` free-function generator call or a literal `self.method(...)`
+call — its own docstring states this explicitly: "a generator method
+can only ever be consumed via `self.<method>()` in this scalar body
+model, never through an arbitrary struct-typed local". Supporting
+`reversed(<arbitrary expr>)` would need: (1) recognizing the `reversed`
+builtin as a dunder-dispatch rewrite to `<expr>.__reversed__()`, (2)
+generalizing the delegation receiver from the hardcoded `self` literal
+to an arbitrary evaluated expression (with its own type resolved to
+find the right struct's `_generator_method_api` entry), and (3) for
+the tuple-target/`for key in reversed(...)` for-statement shape
+specifically, wiring that same generalized receiver through
+`_cpp_iterable_is_delegatable_generator_call`'s CallExpr-shape checks
+too. This is real extension work on the same call-argument/lowering
+machinery this project's history already flags as high-risk for
+narrow-looking edits (the "_tuplegetter incidents") — feature-sized,
+not attempted. No code change.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified; a DIFFERENT, EARLIER blocker now surfaces first, Counter's dict-subclass gap not re-reached this pass)
 
 Fresh full `python3 mojo.py build .../Lib/collections/__init__.py` against
