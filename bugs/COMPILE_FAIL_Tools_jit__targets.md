@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical refusal, unchanged
+
+Fresh safety-wrapped repro against current tree past d3e758a (includes
+this session's phantom-field/__getattr__ fixes — unrelated to async
+bodies): identical up-front refusal of exactly `_build_stencils`,
+`_compile`, `_parse`, pinned to the same `` `with` inside an async
+function body is only supported for a recognized no-op guard type
+(['BlockingScopedLock', 'Trace']), not CallExpr `` trigger
+(`tempfile.TemporaryDirectory()`). The 2026-08-09 analysis stands:
+real support needs mkdtemp/rmtree-backed runtime plumbing plus a new
+path-value representation threaded through declared/`_cpp_expr`, with
+further downstream async-method gaps in the same three methods.
+Part of the separate compiled-generator/async-codegen project. Not
+attempted; no code change.
+
 ## Status (re-verified 2026-08-26, wtRest19b): byte-identical refusal, unchanged
 
 Fresh repro against current tree (fix/rest-remainder19b): identical

@@ -1454,6 +1454,15 @@ def gen_module_impl(self, stmts):
                             already.add(fn)
             if s.name in self._selfhost_hardcoded_struct_names:
                 continue
+            # Same __getattr__ rule as _scan_body_for_local_field_access
+            # below: a read of a member this struct never ASSIGNS is a
+            # dynamic-attribute read on a __getattr__ struct — it must
+            # reach the compiled `__getattr__` at runtime, not be minted
+            # into an uninitialized phantom `int` field first. (Fields the
+            # methods DO assign were already registered by the write pass
+            # just above, so those reads keep resolving statically.)
+            if any(m.name == '__getattr__' for m in s.methods):
+                continue
             for method in s.methods:
                 read_fields = {}
                 _collect_self_reads(method.body, read_fields)
@@ -1541,8 +1550,24 @@ def gen_module_impl(self, stmts):
                     continue
                 if fn in self.struct_field_types[target_struct]:
                     continue
-                self.struct_field_types[target_struct][fn] = 'int'
+                # A struct that defines its own `__getattr__` resolves every
+                # unknown member dynamically (ctypes's LibraryLoader:
+                # `cdll.msvcrt` = load that DLL). Minting a phantom `int`
+                # field here would make the member-read lowering take the
+                # plain known-field branch (`->msvcrt`, an uninitialized
+                # scalar) instead of routing through the compiled
+                # `__getattr__` — silently wrong at runtime, and it also
+                # polluted this struct's generated getattr/setattr dispatch
+                # tables and repr() with dead fields. Reads of members that
+                # are genuinely ASSIGNED elsewhere still register via the
+                # `self.X = ...` write pass above; only read-only unknowns
+                # were minted here, and for a __getattr__ struct those have
+                # a real resolution story that must win.
                 target_def = _struct_by_name.get(target_struct)
+                if target_def is not None and any(
+                        m.name == '__getattr__' for m in target_def.methods):
+                    continue
+                self.struct_field_types[target_struct][fn] = 'int'
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))

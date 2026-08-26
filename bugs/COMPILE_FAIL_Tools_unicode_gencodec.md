@@ -4,6 +4,25 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): build exit 0; runtime content gaps byte-identical to the 2026-08-26 diagnosis
+
+Fresh end-to-end rebuild (exit 0, ~75s) + run against current tree past
+d3e758a on a fresh 2-file test dir, side-by-side with real CPython:
+`converting readme.md to readme.py and readme.mapping` line still
+byte-identical; header still prints pointer digits plus a stray leading
+`\` (`Codec 4383170576 generated from '4383170464'`; real: `Codec
+readme generated from '/tmp/genc_ref/readme.md'`); mapping entry lines
+still emit literally `    (): (0x%0*X, 0x%0*X),`; decoding_table
+section still absent; `.mapping` still 0 bytes (marshal.dump honest
+stub). Source-confirmed both remaining roots are unchanged and
+untouched by any of this campaign's landings: zero marshal.dump/load
+runtime implementation exists anywhere (real CPython marshal binary
+format — a large standalone feature), and `_lower_percent_format`
+(gimple_exprtypes.py) still only lowers %-formatting whose operands are
+statically strings (the `%0*X`-against-runtime-boxed-values shape has
+no lowering). Neither attempted — genuinely missing feature machinery,
+not narrow gaps. No code change. Doc stays open.
+
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged, both remaining gaps confirmed genuinely missing runtime/codegen machinery)
 
 Fresh end-to-end rebuild + run against current tree (`a913ab8`):

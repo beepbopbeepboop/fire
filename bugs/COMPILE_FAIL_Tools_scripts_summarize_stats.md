@@ -4,6 +4,18 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical refusal, unchanged
+
+Fresh safety-wrapped repro against current tree past d3e758a: identical
+refusal naming exactly `iter_optimization_tables`
+(`calc_histogram_table(...)`) and `iter_specialization_tables`
+(`calc_specialization_table(...)`) — both unresolved NESTED-function
+callees local to the enclosing `pre_succ_pairs_section()`, capturing
+enclosing-scope locals. Supporting them needs real closure compilation
+for nested functions referenced as callees inside coroutine bodies —
+feature-sized work on shared machinery with this project's documented
+closure-machinery regression history. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26, wtRest19b): byte-identical, unchanged
 
 Fresh repro against current tree: identical refusal, byte-for-byte the

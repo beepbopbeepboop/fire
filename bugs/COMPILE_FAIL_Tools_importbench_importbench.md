@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical two-function refusal, unchanged
+
+Fresh safety-wrapped repro against current tree past d3e758a: identical
+refusal naming exactly `benchmark_wo_bytecode` (unresolved callee
+`cache_from_source(...)`) and `from_cache` (non-plain assignment target
+`module.__file__ = ...`). Cross-checked against
+`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+own fresh 2026-08-26 re-verification: that family is still structurally
+unfixed (no heap-object attribute model), so no partial-fix outcome is
+available even if `cache_from_source` were resolvable (it would require
+inlining CPython's frozen `_bootstrap_external`, which cannot compile).
+Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26, wtRest19b): byte-identical, unchanged
 
 Fresh repro against current tree: identical two-function refusal,

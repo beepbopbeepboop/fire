@@ -4,6 +4,26 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical .cpp-stage error family, unchanged
+
+Fresh safety-wrapped repro against current tree past d3e758a: exit 1 at
+the `libpython_gen.cpp` coroutine-companion stage with EXACTLY the
+2026-08-26 entry's error list, same counts — `expected primary-
+expression before '.'` (class-qualified method call), `begin`/`end`
+undeclared ×4, `PyObjectPtr` undeclared ×4 ("did you mean
+'PySetObjectPtr'"), 10× `invalid conversion from 'const char*' to
+'int64_t'` (dict-subscript misrouted to string-slice codegen in
+gimple_cpp_core.py's `_cpp_expr`), `PyDictObjectPtr* -> MojoDict*`,
+`operator""pointer` unresolved-receiver shape, int64_t→MojoList* /
+char→char* conversions. 28 hard errors total. None of this session's
+landings (unknown-member `__getattr__` routing + phantom-field-mint
+guard; function-scoped from-import VALUE binding) touch struct
+declaration coverage in standalone coroutine TUs, unresolved-receiver
+method dispatch, or dict-vs-slice subscript disambiguation in the
+coroutine expression emitter. Genuinely deep compiled-generator/
+cpp-emission project scope, not attempted. No code change. Doc stays
+open.
+
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
 
 Fresh `MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/
