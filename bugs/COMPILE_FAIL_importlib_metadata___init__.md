@@ -1,5 +1,52 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (updated 2026-08-26 — re-verified fresh against current branch head; unchanged, still three feature-sized gaps)
+
+Re-ran the isolated `compile_to_gimple_with_cpp` probe fresh. Refusal
+byte-for-byte identical to the 2026-08-25 entry: `_convert_egg_info_
+reqs_to_simple_reqs` refuses on unresolved callee `url_req_space(...)`
+(nested def called from its loop), `Sectioned.read` on unresolved
+callee `map(...)`. None of the very recent shared machinery
+(generator return slots, cls-receiver work, etc.) touches these
+shapes. Re-assessed each of the three documented gaps against today's
+tree before concluding:
+
+1. **Nested-def/closures in coroutine bodies** (`make_condition`/
+   `quoted_marker`/`url_req_space`) — still no lifting mechanism. Note
+   the individual scalar ingredients the nested bodies need have been
+   landing one by one (f-string interpolation, str.partition, str.join,
+   string-repeat `*`), so the remaining work really is just the
+   lift-to-capturing-lambda/static-local-function step — but that step
+   itself is the subsystem addition (parameter passing, recursion into
+   `_gen_cpp_generator_unit`-style shape checks per nested body), still
+   not a narrow fix. Also worth recording: `quoted_marker`'s own body
+   contains `list(filter(None, [markers, make_condition(extra)]))` — a
+   filter-with-None-predicate AND a call to a sibling nested def — so
+   gaps 1 and 2 are coupled inside one function; closing either alone
+   leaves `_convert_egg_info_reqs_to_simple_reqs` refused.
+2. **map/filter/callable-valued builtins** — `Sectioned.read`'s
+   `filter(filter_, map(str.strip, text.splitlines()))` needs BOTH a
+   lazy-iterable representation AND calling an arbitrary runtime value
+   (`filter_` is a plain parameter that may be None or any callable).
+   No boxed-callable convention exists in the scalar coroutine model;
+   a fused/special-case lowering cannot be honest here precisely
+   because `filter_` is not statically known. Unchanged.
+3. **Foreign-module struct construction** (`Pair(name, value)`) —
+   re-verified what ACTUALLY happens today with the closest analogous
+   shape: an isolated probe of `yield pathlib.Path(path_str)` in a
+   generator body now COMPILES — but only because the module-stub
+   convention lowers the whole constructor call to literal `0`
+   (verified in the emitted C++: `co_yield 0;`). That is the documented
+   silent-degrade path, not support: wiring `Pair` through it would
+   compile while yielding garbage, exactly what this campaign's
+   end-to-end standard forbids counting as resolution. Real support
+   still needs imported structs registered into `struct_field_types`/
+   `_struct_has_init` plus the foreign typedef re-emitted into the .cpp
+   preamble. Unchanged.
+
+All three remain genuine subsystem additions to the coroutine-body
+emitter; not attempted, per the no-half-landing rule. Doc kept open.
+
 ## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged)
 
 Re-ran an isolated `compile_to_gimple_with_cpp` check fresh, after
