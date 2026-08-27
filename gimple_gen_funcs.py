@@ -1602,7 +1602,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             ctype = 'MojoList *'
         else:
             ctype = gen._param_ctype(pname, ptype, node)
-        safe_bare = f'_kw_{bare}' if bare in gimple_ctypes._C_KEYWORDS or bare in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS else bare
+        safe_bare = gen._param_safe_name(bare)
         gen.var_types[bare] = ctype
         if safe_bare != bare:
             gen.var_types[safe_bare] = ctype
@@ -3044,7 +3044,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         pst = gen._param_struct_name(ptype)
         if pst:
             gen._param_struct_types[bare] = pst
-        safe_bare = f'_kw_{bare}' if bare in gimple_ctypes._C_KEYWORDS or bare in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS else bare
+        safe_bare = gen._param_safe_name(bare)
         if safe_bare != bare:
             gen._c_names[bare] = safe_bare
             gen.var_types[safe_bare] = ctype

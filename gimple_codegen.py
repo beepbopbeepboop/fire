@@ -3477,6 +3477,8 @@ class GimpleGen:
         return grsl._safe_coerce_emit(self, src, dst, val, lhs)
     def _cname(self, name: str) -> str:
         return grsl._cname(self, name)
+    def _param_safe_name(self, bare: str) -> str:
+        return grsl._param_safe_name(self, bare)
     def _closure_value_locals(self, body: list) -> dict:
         return grsl._closure_value_locals(self, body)
     def _quick_type(self, node) -> str:

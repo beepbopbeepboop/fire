@@ -1610,10 +1610,11 @@ def _gen_lifted_closure(gen, ci: gimple_solvers.ClosureInfo, outer_name: str = N
             ctype = gen._param_ctype(pname, ptype, node)
         gen.var_types[pname] = ctype
         ci.inferred_params[pname] = ctype   # cache for forward decl in Phase 2b
-        # Rename C keywords used as parameter names (e.g. 'default', 'asm')
-        safe_bare = gen._cname(bare)
-        if bare in gimple_ctypes._C_KEYWORDS or bare in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
-            safe_bare = f'_kw_{bare}'
+        # Rename C keywords / struct-typedef-colliding names used as
+        # parameter names (e.g. 'default', 'asm', or a struct-name shadow
+        # like `A` — see `_param_safe_name`'s own docstring).
+        safe_bare = gen._param_safe_name(bare)
+        if safe_bare != bare:
             gen._c_names[bare] = safe_bare
             gen.var_types[bare] = ctype
         param_strs.append(f"{ctype} {safe_bare}")

@@ -1177,6 +1177,40 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
         _simple_emit(lhs, val, src, dst)
 
 
+def _param_safe_name(gen, bare: str) -> str:
+    """The C identifier a function/method/closure PARAMETER named `bare`
+    should actually be declared under, avoiding two distinct C-level name
+    collisions real Mojo source can trigger:
+
+    1. An ordinary C keyword/reserved word (`_kw_` prefix, pre-existing).
+    2. A STRUCT TYPEDEF NAME (`_parm_` prefix, this case): every compiled
+       struct emits `typedef struct X X;`, and C keeps typedef names and
+       ordinary identifiers in ONE namespace — a parameter named `A` when
+       a struct `A` exists SHADOWS that typedef for the rest of the
+       function. Every later `A * <local>;`-shaped declaration inside the
+       function body (e.g. a local of type `A *`) is then misparsed as an
+       expression (`A * <local>` = multiply undeclared `<local>` by the
+       parameter `A`) instead of a declaration, cascading into
+       "undeclared" errors at every subsequent use of that local. Real:
+       CPython's own Tools/scripts/var_access_benchmark.py defines `def
+       read_classvar_from_instance(trials=trials, A=A):` — deliberately
+       shadowing global class `A` with a same-named parameter (to
+       benchmark local vs. global attribute access uniformly across
+       sibling functions). Renaming just the C-level parameter identifier
+       (not the struct/typedef, and not any bare-name struct/class LOOKUP
+       elsewhere in this codegen) is sufficient here: `_cname`/`_c_names`
+       already retarget every read/write of the Mojo-level name `bare`
+       inside this function's body to the renamed C identifier, so the
+       struct typedef `A` stays visible and usable throughout — nothing
+       about actual struct/class name RESOLUTION changes, only which raw
+       C token a value read from the parameter itself is stored under."""
+    if bare in gimple_ctypes._C_KEYWORDS or bare in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
+        return f'_kw_{bare}'
+    if bare in gen.struct_field_types:
+        return f'_parm_{bare}'
+    return bare
+
+
 def _cname(gen, name: str) -> str:
     """Translate a Python variable name to its C name (handles C keyword renaming)."""
     return gen._c_names.get(name, name)
