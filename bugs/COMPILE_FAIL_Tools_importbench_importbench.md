@@ -4,6 +4,18 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical two-function refusal, unchanged
+
+Fresh `python3 mojo.py build .../Tools/importbench/importbench.py`
+against this worktree (fast-forwarded to master `43fb291`): identical
+refusal naming exactly `benchmark_wo_bytecode` (unresolved callee
+`cache_from_source(...)`) and `from_cache` (non-plain assignment target
+`module.__file__ = ...`). Both remain the tracked structural gaps
+(re-export-chain tracing into CPython's frozen bootstrap modules;
+`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+unfixed heap-object attribute-write case). Not attempted; no code
+change.
+
 ## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical two-function refusal, unchanged
 
 Fresh safety-wrapped repro against current tree past d3e758a: identical

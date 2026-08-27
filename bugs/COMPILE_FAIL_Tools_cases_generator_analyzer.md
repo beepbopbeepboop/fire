@@ -4,6 +4,16 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, build still exits 0
+
+Fresh `python3 mojo.py build .../Tools/cases_generator/analyzer.py`
+against this worktree (fast-forwarded to master `43fb291`): `Built:
+.../analyzer`, exit 0, 0 `error:` lines — same outcome as every prior
+entry. Both open architectural blockers (link-mode sibling-module
+resolution stubbing parser/lexer access; the inline fallback's own
+block on parsing.py's polymorphic `BlockStmt.tokens` generator ABI)
+are unchanged; not attempted.
+
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): build still exits 0, same two-blocker state
 
 Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/

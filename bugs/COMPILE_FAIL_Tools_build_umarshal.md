@@ -4,6 +4,15 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/umarshal.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, build still exits 0
+
+Fresh `python3 mojo.py build .../Tools/build/umarshal.py` against this
+worktree (fast-forwarded to master `43fb291`): `Built: .../umarshal`,
+exit 0. All 17 prior compile errors remain fixed; the file stays
+compile-RESOLVED. Runtime death remains purely the documented stubbed
+marshal/pprint C-extension dependency chain (self-test only), not a
+codegen defect. Not attempted further; no code change.
+
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): still exits 0; runtime death precisely located at loads()'s own assert on stubbed-marshal output
 
 Fresh `python3 mojo.py build` against current master (f0f6e78):

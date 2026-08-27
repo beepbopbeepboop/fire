@@ -4,6 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical, unchanged; narrow-fix angle investigated and ruled out
+
+Fresh `python3 mojo.py build .../Tools/scripts/var_access_benchmark.py`
+against this worktree (fast-forwarded to master `43fb291`): identical
+two errors (`'_t5' undeclared ... did you mean '_t4'?`, `'a'
+undeclared`) in `read_classvar_from_instance_d4d5c5`, same root cause
+(parameter `A` shadowing the C `typedef struct A A;`).
+
+Considered whether a narrower fix than full scope-aware name resolution
+would work — specifically, renaming just the C PARAMETER when it
+collides with an existing struct typedef name, since for this file's
+actual call pattern (`A=A` default) the value bound to the parameter
+and the global class are literally the same object, so the doc's
+"deeper semantic gap" (item 2: bare-name `A.x=1`/`A()` resolving against
+the GLOBAL rather than the shadowing local) would not actually produce
+wrong output here even if left unfixed. But `grep -c 'struct_field_types'
+gimple_*.py` shows ~123 call sites doing bare-name lookups against
+`self.struct_field_types`/similar global tables with no scope-awareness
+at all — confirming the doc's own estimate ("~40 call sites") of how
+pervasively this codegen assumes globally-unique names. A safe, real
+fix still needs at minimum the same shadow-safe substitution pattern
+`monomorphize.py` already uses for elaborated generics
+(`_shadowed_spans`) ported to this codegen's param-declaration path,
+which touches shared call/attribute-lowering machinery broadly enough
+to fall outside a narrow pass. Confirmed still genuinely structural,
+not merely under-investigated; not attempted. No code change.
+
 ## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical, unchanged
 
 Fresh repro against current tree past d3e758a: identical two errors

@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical refusal, unchanged
+
+Fresh `python3 mojo.py build .../Tools/scripts/summarize_stats.py`
+against this worktree (fast-forwarded to master `43fb291`): identical
+refusal naming exactly `iter_optimization_tables`
+(`calc_histogram_table(...)`) and `iter_specialization_tables`
+(`calc_specialization_table(...)`) — both unresolved NESTED-function
+callees local to the enclosing `pre_succ_pairs_section()`, capturing
+enclosing-scope locals. Real closure compilation for nested functions
+referenced as callees inside coroutine bodies is feature-sized, shared
+machinery with a documented regression history. Not attempted; no code
+change.
+
 ## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical refusal, unchanged
 
 Fresh safety-wrapped repro against current tree past d3e758a: identical

@@ -2,6 +2,22 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical 16-generator refusal, unchanged
+
+Fresh `python3 mojo.py build .../Modules/_decimal/tests/randdec.py`
+against this worktree (fast-forwarded to master `43fb291`, which
+includes the loop-as-expression, Float64(str), and StringSlice
+char*-passthrough landings noted in this session's task brief — none
+of which touch this file's blockers): byte-identical refusal to every
+prior re-verify below — same generator list and same per-generator
+causes (unresolved `sample`/`func`/`func1` callees from `from random
+import ...` and from module-global function-list iteration, plus the
+`all_binary`/`all_ternary`/`all_unary` consumption-ordering derivatives;
+`un_incr_digits_tuple` still lists `sample(...)` as its blocking cause).
+Both remaining root causes (arbitrary CPython Lib module inlining;
+callable-value-from-container support in coroutine bodies) remain
+campaign-sized, not narrow fixes. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): identical 17-generator refusal, unchanged
 
 Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Modules/

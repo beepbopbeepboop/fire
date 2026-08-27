@@ -4,6 +4,18 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, single error, only root cause 1 remains
+
+Fresh `python3 mojo.py build .../Mac/BuildScript/build-installer.py`
+against this worktree (fast-forwarded to master `43fb291`, which
+includes this session's loop-as-expression/Float64(str)/StringSlice
+landings — none touch global-type prescan or `%`-formatting): exactly
+one `error:` line, byte-identical to every prior re-verify —
+`704:17: invalid operands to binary + (have 'char *' and 'MojoList *')`.
+Root cause 1 (Phase-1.7 global prescan blind to cross-function `global`
+reassignment) remains explicitly high-risk shared machinery per the
+analysis below; not attempted. No code change.
+
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — unchanged, only root cause 1 remains)
 
 Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Mac/
