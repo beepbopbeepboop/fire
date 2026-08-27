@@ -1,5 +1,26 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (re-verified 2026-08-26, later same day — full current blocker set precisely enumerated; all STRUCTURAL, not attempted)
+
+Fresh re-verify: `_collapse_addresses_internal`'s own `list(...)` gap
+stays fixed (see the entry below), but the function itself is still
+refused, now on `to_merge.pop(0)` — no `.pop()` support on `MojoList *`
+anywhere in the coroutine-body emitter — and the SAME function
+immediately behind that needs a struct-object-KEYED dict (`subnets[
+supernet] = net`, keyed by `IPv4Network`/`IPv6Network` instances), which
+has no representation in this codegen's dict model (keys are always
+scalar/string today). Plus 3 more independently-refused generators in
+this file: a `min(...)` call (no min-over-iterable support, unlike the
+already-landed `sorted(...)`), a `next(it)` cursor-advance pattern
+(distinct from imaplib.py's `next(self)` shape this session's `next()`
+yield-type fix targets — see `bugs/CODEGEN_generator_function_Lib_
+imaplib.md` — this one needs a real external-iterator-state
+representation, not just return-type inference), and a `@property`
+read as a bound method value. Adding `.pop(0)` alone would not unblock
+the file (the struct-keyed-dict gap sits immediately behind it), so not
+attempted in isolation — each of the 4 remaining gaps is independently
+feature-sized. Doc stays open.
+
 ## Status (updated 2026-08-26 — loop-as-expression codegen landed; ADVANCED, not closed: `_collapse_addresses_internal`'s `list(...)` refusal is FIXED, a deeper `.pop()` gap now blocks it)
 
 Implemented real loop-as-expression codegen in the compiled-generator/
