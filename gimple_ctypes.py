@@ -337,6 +337,33 @@ _RUNTIME_FUNCS: dict[str, str] = {
 
 _FLOAT_TYPES = {'double', 'float', '__fp16'}
 
+# Scalar Mojo type constructors (`Float64(x)`, `Int8(x)`, ...) and the C
+# type they actually lower to (gimple_gen_calls.py's `_lower_scalar_ctor`).
+# Shared with `_quick_type`'s pre-scan (gimple_gen_resolve.py) so a call
+# like `Float64("not a float")` — a single char*-typed argument, same
+# shape as the opaque-class-constructor passthrough (`Path(x)`) — resolves
+# to the real scalar return type instead of colliding with that unrelated
+# heuristic and mis-declaring the target `char *`.
+_SCALAR_CTORS = {
+    'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16',
+    'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t',
+    'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t',
+    'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool',
+}
+
+# Builtin stdlib string-wrapper types this codegen represents identically to
+# a plain `char *` (single-string-arg constructor passthrough, same
+# convention as `pathlib.Path(x)` — see `_lower_opaque_ctor`). Explicitly
+# `from ... import StringSlice`-ing one of these (real: test_grapheme.mojo)
+# populates `gen.imported_symbols`, which the opaque-constructor gate in
+# `_lower_call` otherwise treats as "a real resolvable imported struct, use
+# the generic imported-callable path" — but no real struct layout for these
+# exists in this codegen, so that path silently fell to an ordinary function
+# call returning a boxed int64_t, losing char* semantics entirely (observed:
+# `for _g in StringSlice(""):` then iterated via the generic runtime
+# dict/list-registry guess instead of per-character `_mojo_at_char`).
+_STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
+
 def _split_top_level_commas(s: str) -> list[str]:
     """Split `s` on commas that are not nested inside ([{ }]). Used to pull
     just the element-type segment out of a multi-arg bracket annotation like

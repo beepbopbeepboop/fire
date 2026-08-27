@@ -1375,6 +1375,19 @@ def _quick_type(gen, node) -> str:
         # types to the same opaque MojoGenerator* a local definition would.
         if fname in getattr(gen, '_imported_generator_bindings', ()):
             return 'MojoGenerator *'
+        # Scalar type constructors (Float64(x), Int8(x), etc.) — checked
+        # BEFORE the opaque single-char*-arg passthrough just below, which
+        # would otherwise wrongly claim a call like `Float64("not a
+        # float")` (same shape: one char*-typed arg, uppercase name) as an
+        # opaque-class passthrough and infer `char *` instead of the real
+        # `double` — mis-declaring the assignment target and producing an
+        # invalid `(char *)<double value>` cast downstream. Mirrors
+        # gimple_gen_calls.py's `_lower_scalar_ctor` dispatch exactly (same
+        # shared table + same not-shadowed gate), since that's what the
+        # actual lowering does for this shape.
+        if (fname in gimple_ctypes._SCALAR_CTORS and fname not in gen.func_return_types
+                and fname not in gen.imported_symbols):
+            return gimple_ctypes._SCALAR_CTORS[fname]
         # Single-char*-argument OPAQUE-constructor passthrough (`Path(x)`
         # where `Path` is an imported class this compile never inlined):
         # _lower_opaque_ctor returns its single string argument UNCHANGED

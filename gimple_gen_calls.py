@@ -1140,15 +1140,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return gen._lower_imported_struct_ctor(fname_raw, node)
 
     # Scalar type constructors (Float32, Int8, etc.) — before opaque-uppercase check
-    _SCALAR_CTORS = {
-        'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16',
-        'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t',
-        'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t',
-        'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool',
-    }
-    if (fname_raw in _SCALAR_CTORS and fname_raw not in gen.func_return_types
+    if (fname_raw in gimple_ctypes._SCALAR_CTORS and fname_raw not in gen.func_return_types
             and fname_raw not in gen.imported_symbols):
-        return gen._lower_scalar_ctor(fname_raw, _SCALAR_CTORS[fname_raw], node)
+        return gen._lower_scalar_ctor(fname_raw, gimple_ctypes._SCALAR_CTORS[fname_raw], node)
 
     # Closure / recursive self-call
     inner_name = getattr(gen, '_inner_func_name', '')
@@ -1161,11 +1155,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if outer_ci:
         return gen._lower_outer_closure_call(fname_raw, outer_ci, node)
 
-    # Opaque uppercase constructor (imported type not in any table)
+    # Opaque uppercase constructor (imported type not in any table).
+    # `fname_raw in _STR_WRAPPER_CTORS` bypasses the `imported_symbols`
+    # exclusion specifically: StringSlice/StaticString have no real struct
+    # layout in this codegen even when explicitly imported (`from
+    # std.collections.string import StringSlice`), so treating an import as
+    # proof a "real resolvable struct" exists here (like it does for actual
+    # user-defined structs) is wrong for these two — see gimple_ctypes.py's
+    # `_STR_WRAPPER_CTORS` docstring for the full failure this fixes.
     if (gen.func_return_types.get(fname_raw, 'int64_t') == 'int64_t'
             and fname_raw[0:1].isupper()
             and fname_raw not in gen.func_param_types
-            and fname_raw not in gen.imported_symbols
+            and (fname_raw not in gen.imported_symbols
+                 or fname_raw in gimple_ctypes._STR_WRAPPER_CTORS)
             and fname_raw not in gen._KNOWN_SIGS
             and fname_raw not in gimple_ctypes._C_RESERVED_FUNCS
             and fname_raw not in gen.BUILTIN_VALUE_MAP):

@@ -30,8 +30,9 @@ work in this project. Rules:
 ## Quality gate for gimple/codegen-affecting changes
 Before considering a change to `mojo_compiler.py` (the shared parser/AST),
 `gimple_codegen.py`, or `module_loader.py` (or anything else on the compiled
-path) done — including subagent work — run BOTH of the following, not just
-`test_gimple.py`/`test_module_cache.py`:
+path) done — including subagent work — run ALL of the following, not just
+`test_gimple.py`/`test_module_cache.py`. This is the full gate; nothing here
+is optional or "extra":
 
 1. `make check-selfhost` (mojo.py compiling its own source). A parser AST
    change (e.g. a new node shape for some syntax) can be invisible to the
@@ -54,8 +55,24 @@ path) done — including subagent work — run BOTH of the following, not just
    else). Compare the skip count before/after your change — it should not
    increase. If it does, bisect which specific type/symbol triggered it
    before considering the change finished.
+3. `python3 compile_stdlib.py` — a WIDER check than step 2: it also attempts
+   `test/`, `tools/`, `benchmarks/` etc. under the stdlib tree (664 files as
+   of this writing), each via a real `gcc -fsyntax-only` check on the
+   generated GIMPLE, not just the 291 modules step 2's dylib link needs.
+   Compare `FAILED: N (E expected, U unexpected)` before/after — `U`
+   (unexpected) must not increase. A file that's a genuine, currently-out-
+   of-reach gap (not a regression) belongs in `EXPECTED_FAILURES` at the top
+   of `compile_stdlib.py` with a comment explaining why, not silently
+   ignored — an unexplained "unexpected" failure is exactly what this gate
+   step exists to catch.
+4. `make bootstrap` (3-stage self-compilation byte-identity check) if the
+   change touches `mojo_compiler.py`, `gimple_codegen.py`, `module_loader.py`,
+   or any `gimple_*.py` — the fullest-coverage check available; `make
+   check-selfhost` alone is a faster subset, not a substitute.
 
 A change passing `test_gimple.py`/`test_module_cache.py`/`make check-selfhost`
-alone is NOT sufficient evidence the compiled path is unaffected — only the
-stdlib build actually exercises the huge breadth of real Mojo source this
-compiler needs to keep working.
+alone is NOT sufficient evidence the compiled path is unaffected — only
+`compile_stdlib.py` and the stdlib dylib build actually exercise the huge
+breadth of real Mojo source this compiler needs to keep working, and only
+`make bootstrap` verifies the compiler's own self-hosted output is stable
+under repeated self-compilation.
