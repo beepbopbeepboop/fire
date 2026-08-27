@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (re-verified 2026-08-26, later same day — root cause of the file's own remaining blocker precisely restated; STRUCTURAL, not attempted)
+
+Re-confirmed via fresh isolated repro: `_get_instructions_bytes` refuses
+on `Positions(*next(co_positions, ()))` — a `*`-unpack CALL ARGUMENT into
+`Positions`, a dynamically-constructed `namedtuple` class. Two stacked
+gaps, both feature-sized: (1) this codegen has no struct/layout modeling
+for a `namedtuple`-constructed class at all (it's neither a `StructDef`
+nor a known builtin container), and (2) `*`-unpacking a call argument
+into ANY dynamically-typed callee has no general support either (the
+same family as `bugs/CODEGEN_generator_function_Lib_codecs.md`'s
+`**kwargs`-to-dynamic-callee gap, the sibling `*`-unpack case). Neither
+this session's `map()`/`next()`-yield-type fixes (see the map()/next()
+entries in `bugs/CODEGEN_generator_function_Lib_pkgutil.md` and
+`bugs/CODEGEN_generator_function_Lib_imaplib.md`) nor today's loop-as-
+expression landing touch this shape. Not attempted; doc stays open.
+
 ## Status (updated 2026-08-26 — loop-as-expression codegen landed; this file's own tracked blocker UNAFFECTED, but a real bonus CORRECTNESS fix found in a sibling generator)
 
 Implemented real loop-as-expression codegen in the coroutine-body C++

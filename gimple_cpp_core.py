@@ -2928,6 +2928,31 @@ def _cpp_expr(gen, e) -> str:
                 return gen._cpp_build_container_from_iterable(
                     fname, e.args[0], _ctor_var,
                     gimple_ctypes.IdentExpr(_ctor_var, e.line, e.col), [])
+            if (fname == 'map' and len(e.args) == 2 and not e.kwargs
+                    and not gen._locally_binds_name('map')):
+                # `map(func, iterable)` — categorically unsupported before
+                # this (fell to the generic unresolved-callee refusal
+                # below; real: pkgutil.py's `iter_modules`: `importers =
+                # map(get_importer, path)`). This runtime has no lazy-
+                # iterator representation, so — mirroring the ordinary
+                # (non-coroutine) GIMPLE path's own `map()` handling —
+                # `map()` is eagerly materialized as a real `MojoList *`,
+                # reusing the SAME `_cpp_build_container_from_iterable`
+                # helper the `list()`/`set()`/comprehension case just above
+                # uses: synthesize the equivalent `[func(x) for x in
+                # iterable]` shape (`elem_node` is a fresh CallExpr of the
+                # map function over the fresh loop var) and hand it off
+                # unchanged. Any iterable/callee shape the underlying
+                # helper (or the callee call itself) doesn't support
+                # propagates its existing `_UnsupportedGeneratorShape`
+                # refusal, same as `list()`/`set()` already do.
+                _ctor_var = gen._cpp_fresh_name('_ctor_elem')
+                _elem = gimple_ctypes.CallExpr(
+                    func=e.args[0],
+                    args=[gimple_ctypes.IdentExpr(_ctor_var, e.line, e.col)],
+                    kwargs=[], line=e.line, col=e.col)
+                return gen._cpp_build_container_from_iterable(
+                    'list', e.args[1], _ctor_var, _elem, [])
             if (fname == 'sorted' and e.args
                     and not gen._locally_binds_name('sorted')):
                 # `sorted(iterable)` / `sorted(iterable, key=..., reverse=
