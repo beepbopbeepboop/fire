@@ -5055,21 +5055,37 @@ def gen_module_impl(self, stmts):
                     self._global_var_types[gname] = f"{_struct_name} *"
                     self._global_c_decl_types[gname] = f"{_struct_name} *"
                 else:
-                    # Same shared-table fallback as _gscan_declare_global's
-                    # IdentExpr-callee branch just above: the Phase 1.7
-                    # table knows the one-char*-arg opaque-constructor
-                    # passthrough (`X = Path(some_str)` → declare char *),
-                    # and returns int64_t for every shape this branch's
-                    # explicit rows already handled identically.
-                    _ivt = _phase17_value_type(_gv)
-                    if _ivt == 'char *':
-                        global_decls.append(f"char * {gname};")
-                        self._global_var_types[gname] = 'char *'
-                        self._global_c_decl_types[gname] = 'char *'
+                    # Mirror _gscan_declare_global's IdentExpr-callee
+                    # branch just above: a function whose return type is a
+                    # real C pointer (e.g. `create_world() -> World`
+                    # lowering to `World *`) must declare the global as
+                    # that pointer type. Without this, `var g_world =
+                    # create_world()` fell through to the int64_t default
+                    # below and the toplevel assignment emitted
+                    # `_root_globals.g_world = <World *>;` into a field
+                    # declared `int64_t` — "assignment to 'int64_t' from
+                    # 'World *'" (box.3d/game's engine_create_world()).
+                    _ret = self.func_return_types.get(_gv.func.name, '')
+                    if _ret.endswith(' *'):
+                        global_decls.append(f"{_ret} {gname};")
+                        self._global_var_types[gname] = _ret
+                        self._global_c_decl_types[gname] = _ret
                     else:
-                        global_decls.append(f"int64_t {gname};")
-                        self._global_var_types[gname] = 'int64_t'
-                        self._global_c_decl_types[gname] = 'int64_t'
+                        # Same shared-table fallback as _gscan_declare_global's
+                        # IdentExpr-callee branch just above: the Phase 1.7
+                        # table knows the one-char*-arg opaque-constructor
+                        # passthrough (`X = Path(some_str)` → declare char *),
+                        # and returns int64_t for every shape this branch's
+                        # explicit rows already handled identically.
+                        _ivt = _phase17_value_type(_gv)
+                        if _ivt == 'char *':
+                            global_decls.append(f"char * {gname};")
+                            self._global_var_types[gname] = 'char *'
+                            self._global_c_decl_types[gname] = 'char *'
+                        else:
+                            global_decls.append(f"int64_t {gname};")
+                            self._global_var_types[gname] = 'int64_t'
+                            self._global_c_decl_types[gname] = 'int64_t'
             elif isinstance(_gv, (IntLiteral, BoolLiteral)):
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'
