@@ -1,5 +1,49 @@
 # COMPILE_FAIL: asyncio/futures.py
 
+## Status (re-verified 2026-08-26, this session — runtime residual root-caused MORE PRECISELY, not fixed)
+
+Fresh `python3 mojo.py build .../Lib/asyncio/futures.py`: still exits
+0 ("Built: futures"). Fresh run: still `Unhandled exception:
+AttributeError: isfuture` (unchanged crash).
+
+Root-caused further this session, past the "module-API gap" framing
+below: the trigger is `from . import base_futures` (line 14) followed
+by `isfuture = base_futures.isfuture` (line 20) — a plain FUNCTION
+defined in a real sibling module, read as a VALUE (not called) and
+bound to a module-level global. Minimal 2-file repro (package
+`__init__.py` + `base.py` defining `def isfuture(x): return True` +
+`main.py` doing `from . import base; isfuture = base.isfuture`)
+reproduces the identical crash — confirms this is NOT asyncio-specific
+or CPython-specific, a general gap.
+
+Traced into `mojo.py build`'s actual pipeline: `driver.compile_program`
+(link-mode: per-import dylibs + CAS + reflection), NOT the single-TU
+`do_imports=True` inline path `gimple_module_gen.py`'s
+`modules_to_compile`/`_compile_imported_module` machinery drives (that
+inline mechanism DOES correctly register an imported module's
+functions into `func_return_types`, verified via tracing — but
+`compile_module_to_c`/`build_stdlib_dylib.py`'s harness, and by
+extension `compile_stdlib.py`'s gate check, ALSO default to
+`do_imports=False`, so neither exercises this path — this bug is
+invisible to the standard gate). `_lower_MemberExpr` (gimple_gen_exprs.py
+~line 778) DOES have a real, working branch for exactly this shape
+("module_name in gen.imported_symbols and node.member in
+gen.func_return_types" -> emit a `_funcptr_<csym>` value) — the gap is
+upstream of that check, somewhere in how `driver.compile_program`'s
+link-mode path populates (or fails to populate) `func_return_types`
+for a module bound via a bare `from . import <submodule>` (as opposed
+to `from <submodule> import <symbol>`, which likely follows a
+different, working registration route via per-import dylib reflection).
+
+NOT attempted this session: root-causing further requires
+understanding `driver.py`'s link-mode module-resolution/reflection
+system in more depth than this pass's remaining time allowed, and this
+project's own history warns against a rushed fix to shared
+call-resolution machinery. Recorded here precisely so a future pass
+doesn't have to re-discover the do_imports=False vs. link-mode
+distinction from scratch.
+
+
 ## Status (updated 2026-08-26, worktree fix/opencode-group4 — RESOLVED at the
 ## compile/link level: the build now EXITS 0 and produces a binary; both
 ## `Future.__await__` and `Future.__iter__` compile as real C++20 coroutines)
