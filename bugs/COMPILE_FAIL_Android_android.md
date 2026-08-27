@@ -4,6 +4,23 @@ Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, unchanged)
+
+Re-read `_async_quick_eligible` (`gimple_exprtypes.py:184-255`) directly
+rather than trusting prior doc conclusions, then ran a fresh isolated
+`gimple_codegen.compile_to_gimple_with_cpp(do_imports=False)` probe.
+Byte-for-byte identical refusal to every prior entry: the same 10
+`async def` functions + `async_process` async generator. Confirmed from
+the source itself that the whitelist covers only `asyncio.sleep(...)`,
+calls to already-compiled sibling `async def`s, `asyncio.sock_recv(fd)`,
+`create_task(...)`/`create_raising_task(...)`, and comptime-bracket
+nested-async calls — `create_subprocess_exec(...)`,
+`process.communicate()`/`.wait()`, `stream.readexactly(...)`, and a
+local `wait_for` helper are all genuinely outside it. Widening this to
+real subprocess/stream async I/O composition is the same feature-sized
+Awaitable-protocol gap as `COMPILE_FAIL_asyncio_queues.md`. Not
+attempted; no code change.
+
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — DOCUMENTED-NOT-FIXED, unchanged)
 
 Fresh safety-wrapped `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
