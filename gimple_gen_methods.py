@@ -352,6 +352,44 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         for a in node.args: gen.lower_expr(a)
         return 'char *', gen._intern_string('utf-8')
 
+    # `<expr>.<SomeABCClass>.register(<arg>)` — real Python's
+    # `abc.ABC.register()` virtual-subclass-registration idiom (real:
+    # `os.PathLike.register(PurePath)`, pathlib/__init__.py:598).
+    # `.register()` is a genuine behavioral no-op — it only affects
+    # `isinstance()` checks against the registering ABC, never anything
+    # this codegen's own control flow depends on — so this codegen has
+    # ALWAYS stubbed a `.register()` call to a no-op (see the generic
+    # scalar-method fallback's `_stub_result(ot, ov_local, ...)` further
+    # below in this function). The bug: reaching that stub still requires
+    # evaluating the RECEIVER first (`<expr>.<SomeABCClass>`), and for a
+    # module-level ABC class never modeled as a real compiled struct
+    # (`os.PathLike` — `os` itself is a stubbed/opaque module handle in
+    # this codegen), that receiver evaluation goes through
+    # `_mojo_dispatch_getattr`, which correctly raises a real, loud
+    # `AttributeError` for an attribute name it has no registration for —
+    # crashing the program before the (already-a-no-op) `.register()`
+    # stub is ever reached, even though the stub's result is thrown away
+    # unused either way. Skip evaluating the receiver entirely for this
+    # exact shape rather than let a discarded value's evaluation crash
+    # the program. Scoped narrowly to avoid stubbing a REAL user-defined
+    # `.register()` method: only fires when the receiver is itself a
+    # TWO-level member chain (`func.obj` a MemberExpr, e.g. `os.PathLike`,
+    # not `self.register(x)`/`registry.register(x)`'s single-level
+    # MemberExpr) whose own member name is PascalCase (the ABC/class-name
+    # convention `os.PathLike` follows, not an ordinary lowercase
+    # attribute like `self.registry.register(x)`'s `registry`) and isn't
+    # itself a struct this codegen actually compiled (a real compiled
+    # class's own `.register` classmethod, if one ever exists, still
+    # dispatches normally below).
+    if (func.member == 'register' and len(node.args) == 1
+            and not getattr(node, 'kwargs', None)
+            and isinstance(func.obj, gimple_ctypes.MemberExpr)
+            and func.obj.member[:1].isupper()
+            and func.obj.member not in gen.struct_field_types):
+        for a in node.args:
+            gen.lower_expr(a)
+        return 'int64_t', gen._new_val('int64_t', '(int64_t)0  /* ABC .register() no-op */')
+
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `task.wait()` or `task^.wait()` where `task` holds a
     # `MojoAsync *` handle produced by
