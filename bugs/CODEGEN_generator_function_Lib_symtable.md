@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch)
+
+Re-derived fresh via own isolated `compile_to_gimple_with_cpp(do_imports=
+False)` + real `g++ -fsyntax-only`: symtable.py's own generator (`yield
+flagname`) compiles clean, 0 `.cpp` errors — confirms symtable.py's own
+source remains unaffected. Concur with the already-established
+classification: the file's own code is not the blocker; the remaining
+failure is entirely the transitive `argparse`/`typing`/`enum`/`pickle`/
+`_collections_abc`/`traceback`/`threading` cascade, already reconfirmed
+same-day by a parallel session (246 errors, 0 attributable to
+symtable.py). No code change made. Doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
 
 Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

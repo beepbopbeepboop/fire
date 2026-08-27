@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, byte-identical)
+
+Re-derived fresh via own isolated `compile_to_gimple_with_cpp(do_imports=
+False)` call (not a re-read of this doc): identical `RuntimeError` —
+`scan_opcodes: every 'yield' must carry a value, and all values must
+agree on one scalar type`. Concur with the existing 3-stacked-gap
+analysis (variable-arity nested-tuple element boxing; consumer-through-
+local-variable aliasing `scanner = self.scan_opcodes`; tag-discriminated
+variable unpack arity) — each independently non-trivial, high regression
+risk to already-fixed sibling tuple-yield files if rushed together. No
+code change made. Doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
