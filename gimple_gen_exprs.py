@@ -645,6 +645,20 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
 
 
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    # Self-hosting bootstrap: strip the `gimple_ctypes` / sibling-module
+    # re-export hub from a qualified reference — `gimple_solvers.LayoutSolver
+    # .HEAP`, `gimple_ctypes.IdentExpr` used as a bare value. The qualifier
+    # is a Python-import artifact; `<Class>.<ATTR>` / `<Class>` resolves on
+    # the bare name (class-attr globals, struct typedefs) but the opaque
+    # module handle makes it fall through to a runtime `_mojo_dispatch_getattr`
+    # (→ AttributeError) or an UNRESOLVED-class-attr stub.
+    if (isinstance(node.obj, gimple_ctypes.MemberExpr)
+            and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)
+            and gmp._is_selfhost_sibling_alias(gen, node.obj.obj.name)):
+        return gen.lower_expr(gimple_ctypes.MemberExpr(
+            obj=gimple_ctypes.IdentExpr(name=node.obj.member,
+                                        line=getattr(node, 'line', 0)),
+            member=node.member))
     # `dict.fromkeys` read as a VALUE (real: zipfile/_path/__init__.py's
     # `_dedupe = dict.fromkeys`, later called as `_dedupe(iterable)`) —
     # `dict` itself already resolves to a real function-pointer VALUE
@@ -965,6 +979,17 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             aliases = gen._struct_comptime_aliases.get(module_name)
             if aliases and node.member in aliases:
                 return gen.lower_expr(aliases[node.member])
+            # A plain class-level attribute (`LayoutSolver.HEAP = 'heap'`)
+            # backed by a synthesized module global — the same redirect the
+            # instance-typed path below applies, but reached here via the
+            # bare type name. Without this a `ClassName.CONST` string/int
+            # constant stubbed to 0 (or, when the base was an opaque module
+            # handle, raised AttributeError at runtime).
+            _cattrs = gen._class_attrs.get(module_name)
+            if _cattrs and node.member in _cattrs:
+                gname = _cattrs[node.member]
+                gtype = gen._global_var_types.get(gname, 'int64_t')
+                return gtype, gen._new_val(gtype, f'{gname}')
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.

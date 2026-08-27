@@ -1373,13 +1373,26 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     return gen._new_val('_Bool', f'(_Bool){res}')
 
 
+def _isinstance_type_name(ta):
+    """Bare class name for an isinstance() type argument — `IdentExpr` name
+    directly, or the trailing attribute of a `module.Class` `MemberExpr`
+    (`gimple_ctypes.IdentExpr` → `IdentExpr`); the module qualifier is a
+    Python-import artifact with no bearing on the runtime type tag."""
+    if isinstance(ta, gimple_ctypes.IdentExpr):
+        return ta.name
+    if (isinstance(ta, gimple_ctypes.MemberExpr)
+            and isinstance(ta.obj, gimple_ctypes.IdentExpr)):
+        return ta.member
+    return None
+
+
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     obj_type, obj_val = gen.lower_expr(node.args[0])
     type_arg = node.args[1]
     t = gen._new_temp('int')
-    if isinstance(type_arg, gimple_ctypes.IdentExpr):
-        type_name = type_arg.name
-        cmp_t = gen._isinstance_one_type(obj_type, obj_val, type_name)
+    _single_tn = _isinstance_type_name(type_arg)
+    if _single_tn is not None:
+        cmp_t = gen._isinstance_one_type(obj_type, obj_val, _single_tn)
         gen._emit(f'  {t} = (int){cmp_t};')
     elif isinstance(type_arg, gimple_ctypes.TupleExpr):
         # isinstance(x, (A, B, ...)) — OR together a per-alternative check
@@ -1390,9 +1403,10 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         # always produced an empty struct field list.
         acc = None
         for alt in type_arg.elements:
-            if not isinstance(alt, gimple_ctypes.IdentExpr):
+            _alt_tn = _isinstance_type_name(alt)
+            if _alt_tn is None:
                 continue
-            one = gen._isinstance_one_type(obj_type, obj_val, alt.name)
+            one = gen._isinstance_one_type(obj_type, obj_val, _alt_tn)
             # `|` not `||`: GIMPLE rejects a raw `||` token in a plain
             # assignment RHS ("not valid in GIMPLE") — only simple binary
             # ops are allowed. Bitwise OR on two already-computed _Bool
@@ -1670,19 +1684,45 @@ def _lower_recursive_self_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr
 
 
 def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """Call an outer function's nested closure from inside a lambda body.
+    """Call a SIBLING nested closure of the same parent from inside another
+    lifted closure/lambda body (`gen_module_impl`'s `_scan_body_for_local_
+    field_access` calling `_scan_stmt_var_candidates`, both nested in
+    `gen_module_impl`, both capturing `self`).
 
-    The env pointer is not available here (it belongs to the outer function scope),
-    so pass a null env — safe at link time; will crash at runtime if the env fields
-    are actually accessed, but the selfhost test only checks compile+link.
+    The sibling's own env local belongs to the parent's scope and isn't
+    visible here — but we ARE inside a lifted closure with its OWN env
+    param, and sibling closures of one parent capture overlapping variables
+    (`self` above all). Build a fresh env for the callee, copying each of
+    its captured fields from the current env where the name matches (else
+    from local scope). Only when neither source has a capture do we fall
+    back to a NULL field. Previously this ALWAYS passed a NULL env — a
+    documented "compiles and links, segfaults at runtime" stopgap that
+    made the self-hosted `compile_to_gimple` crash the moment
+    `gen_module_impl`'s field-scan helpers actually ran.
     """
     lifted    = ci.lifted_name
     ret_type  = gen.func_return_types.get(lifted, 'int64_t')
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
-        null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
-        full_arg_pairs = [(f'{ci.env_struct} *', null_env)] + arg_pairs
+        _cur_env = getattr(gen, '_env_param', '')
+        _cur_caps = getattr(gen, '_captures', {}) or {}
+        if _cur_env and getattr(ci, 'captures', None):
+            new_env = gen._new_temp(f'{ci.env_struct} *')
+            gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
+            for vname, vtype in ci.captures:
+                fld = gimple_ctypes._c_field_name(vname)
+                if vname in _cur_caps:
+                    tmp = gen._new_val(vtype, f'{_cur_env}->{fld}')
+                    gen._emit(f'  {new_env}->{fld} = {tmp};')
+                elif vname in gen.var_types:
+                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), vtype,
+                                          gen._write_dest(vname),
+                                          f'{new_env}->{fld}')
+            full_arg_pairs = [(f'{ci.env_struct} *', new_env)] + arg_pairs
+        else:
+            null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
+            full_arg_pairs = [(f'{ci.env_struct} *', null_env)] + arg_pairs
     else:
         full_arg_pairs = arg_pairs
     if ret_type == 'void':

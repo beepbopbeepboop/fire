@@ -25,7 +25,9 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    Parser, py_tokenize,
 )
+import ast_rewriter
 import regex_compile
 import mlir
 import gimple_ctypes
@@ -615,6 +617,59 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         pass
 
 
+def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
+    """Self-hosting bootstrap only: in this compiler's OWN extracted GIMPLE
+    backend modules (`gimple_*.py`), the former `GimpleGen` methods now live
+    as module-level functions whose first parameter is the `GimpleGen`
+    instance, conventionally named `gen` (`gimple_gen_*.py` / `gimple_cpp_*.py`)
+    or `self` (`gimple_module_gen.py`'s `gen_module_impl`). Those params carry
+    no annotation, so the generic resolver boxes them to opaque `int64_t` —
+    and then EVERY `gen.<field>` / `gen.<method>(...)` inside the function
+    lowers to a stubbed no-op or a runtime `_mojo_dispatch_getattr`, gutting
+    the function body in the self-hosted binary (the compiled `compile_to_gimple`
+    silently produced an empty `.ci` for every input; see doc/architecture.html
+    §6 "roadmap to remove the shim"). Typing that first param as the real
+    `GimpleGen *` struct pointer restores static field/method resolution.
+
+    Narrow by construction: only an UNANNOTATED FIRST parameter named exactly
+    `gen`/`self`, only while compiling a `.py` file named `gimple*` under this
+    repo (the self-hosting bootstrap is always this compiler's own Python
+    source — no `.mojo` file is ever part of it), and only when `GimpleGen`
+    is actually a registered struct in this compile."""
+    if ptype is not None:
+        return None
+    bare = pname.lstrip('*')
+    if bare not in ('gen', 'self'):
+        return None
+    ps = getattr(node, 'params', None) or []
+    if not ps or ps[0][0].lstrip('*') != bare:
+        return None
+    cf = getattr(gen, '_current_filename', None)
+    if not cf or not cf.endswith('.py'):
+        return None
+    base = gimple_ctypes.os.path.basename(cf)
+    if not base.startswith('gimple'):
+        return None
+    cur_abs = gimple_ctypes.os.path.abspath(cf)
+    sd = gimple_codegen._SELFHOST_DIR
+    if not (cur_abs == sd or cur_abs.startswith(sd + '/')):
+        return None
+    # DISABLED pending the GimpleGen cross-TU signature registry (see
+    # doc/architecture.html §6). Typing `self`/`gen` as a struct pointer is
+    # correct and unblocks the native `compile_to_gimple`, but every
+    # `self.<method>()` call site in a backend `.py` file then needs the
+    # full GimpleGen method signature — concrete params, return type, AND
+    # default-argument metadata — registered identically in each nested
+    # temp_gen, or it just trades "silently stubbed" for hundreds of hard
+    # arity / pointer-vs-int conversion errors (the extracted GimpleGen
+    # methods are mostly one-line delegates whose return type must be
+    # propagated transitively). Until that registry lands this stays a
+    # no-op and the bootstrap uses the subprocess shim.
+    if not getattr(gen, '_selfhost_gimplegen_registered', False):
+        return None
+    return 'GimpleGen *'
+
+
 def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> list:
     """C param-type list for a function/method.
     - **kwargs -> 'MojoDict *' (a real trailing parameter).
@@ -641,6 +696,8 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # appear in the definition and must match the forward declaration.
         elif i == 0 and pn == 'self' and self_struct:
             out.append(f"{self_struct} *")
+        elif i == 0 and _selfhost_gen_self_param_ctype(gen, pn, pt, node):
+            out.append('GimpleGen *')
         elif (self_struct and isinstance(pt, str) and pt.split('[', 1)[0].strip() == self_struct
                 and self_struct in gen.struct_field_types):
             # A non-self param whose annotation is a bracketed generic
@@ -756,6 +813,9 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     """Resolve parameter C type, applying argument convention qualifiers."""
     if is_self:
         return f"{node.name} *"
+    _sh = _selfhost_gen_self_param_ctype(gen, pname, ptype, node)
+    if _sh is not None:
+        return _sh
     # Check inferred parameter types first (for unannotated parameters)
     if ptype is None and hasattr(gen, '_inferred_param_types'):
         func_key: str
@@ -2475,7 +2535,7 @@ def _parsed_import(gen, module: str):
             path = _imp.resolve_source(module) or gen._resolve_test_relative_module(module)
             src = open(path).read() if path else ''
             cache[module] = (path, src,
-                             gimple_ctypes.ast_rewriter.rewrite(gimple_ctypes.Parser(gimple_ctypes.py_tokenize(src)).parse_module()) if src else None)
+                             ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)
         except Exception:
             gimple_ctypes._debug_note('cannot resolve/parse module', module)
             cache[module] = (None, '', None)

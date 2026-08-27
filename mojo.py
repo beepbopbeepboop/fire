@@ -727,8 +727,10 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             try:
                 c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
             except Exception as e:
+                print(f"compile_to_gimple failed: {e}", file=sys.stderr)
                 import traceback; traceback.print_exc(file=sys.stderr)
                 c_code = ''
+                any_failed = True
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
 

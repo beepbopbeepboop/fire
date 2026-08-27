@@ -333,6 +333,8 @@ void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
 char *mojo_dict_get_str(MojoDict *d, char *key);
+int64_t     mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt);
+char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
 MojoList   *mojo_dict_values(MojoDict *d);
 MojoList   *mojo_dict_items(MojoDict *d);

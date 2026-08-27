@@ -168,6 +168,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_get_int':          'int64_t',
     'mojo_dict_get_double':       'double',
     'mojo_dict_get_str':          'char *',
+    'mojo_dict_setdefault_int':   'int64_t',
+    'mojo_dict_setdefault_str':   'char *',
     'mojo_dict_contains':         'int',
     'mojo_dict_len':              'int64_t',
     'mojo_dict_iter_new':         'MojoDictIter *',
@@ -294,6 +296,8 @@ _SELFHOST_HARDCODED_FUNCS = frozenset({
     'Interpreter___init__',
     'Interpreter_execute',
     'jit_compile_and_execute',
+    '_merge_struct_inheritance',
+    '_compute_exc_descendants',
 })
 
 
@@ -1445,6 +1449,29 @@ class GimpleGen:
         # `self.struct_field_types`, grown monotonically during
         # compilation — the same time-dependent-filter trap as Phase 2).
         self._param_usage_scan_cache: dict = {}
+        # Self-hosting bootstrap: `gen_module_impl` and its Pass-1.x helpers
+        # now live in `gimple_module_gen.py` as MODULE functions taking
+        # `self`, so the `class GimpleGen` field-type scan never sees their
+        # `self.<attr> = {}` / `[]` writes and defaults these fields to the
+        # opaque `int` — storing a real MojoDict*/MojoList* pointer into an
+        # `int` field truncates it and the next use segfaults. Seed them
+        # here with the right shape so the scan types the struct fields.
+        self._inferred_param_types: dict = {}
+        self._toplevel_dep_init_modules: list = []
+        self._struct_layout: dict = {}
+        self._layout_hint: str = ''
+        self._fn_returns_generator: dict = {}
+        self._inferred_var_types: dict = {}
+        self._param_generator_api: dict = {}
+        self._all_async_fn_names: set = set()
+        self._bound_method_ret_types: dict = {}
+        self._module_int_consts_cache: dict = {}
+        self._seen_generator_base_names: dict = {}
+        self._cpp_module_fn_asts: dict = {}
+        self._ctor_lit_param_types: dict = {}
+        self._global_literal_slot_ctypes: dict = {}
+        self._local_def_param_types: dict = {}
+        self._param_elem_types: dict = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement
         # memoization of `_calls_in_stmts`' pure CallExpr-collection walk
         # (gen_module's ctor-literal scan plus its Pass 1.3d/2c caller-body
@@ -2066,6 +2093,8 @@ class GimpleGen:
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
+        'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_setdefault_str': ('char *',  ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
         'mojo_replace_argv':   ('void',    ['MojoList *']),
         'mojo_is_registered_list': ('int',     ['int64_t']),
@@ -2677,6 +2706,15 @@ class GimpleGen:
         'main', '_toplevel', '_gimple_main', '_lib_main',
         'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'py_tokenize',
         'int_write', 'int_parse_module', 'jit_compile_and_execute', 'mojo_print',
+        # Self-hosting bootstrap: gimple_module_gen.py's `from gimple_codegen
+        # import _merge_struct_inheritance, _compute_exc_descendants` — the
+        # `gimple_codegen` `.py` sibling isn't resolvable by module_loader,
+        # so the call sites can't learn a mangled suffix that matches the
+        # definition. Both are single-definition helpers with no overloads;
+        # pinning the bare C name (plus a concrete forward decl in
+        # gen_module's `_is_selfhost_file` block) makes call and definition
+        # agree without any cross-module signature negotiation.
+        '_merge_struct_inheritance', '_compute_exc_descendants',
     })
 
     # ── Struct method generation ──────────────────────────────────────────

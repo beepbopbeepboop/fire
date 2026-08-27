@@ -55,23 +55,31 @@ def _walk_ast_into(node, out):
         return
     out.append(node)
     if isinstance(node, type):
-        # Mirrors the original `and not isinstance(node, type)` guard: a
-        # class OBJECT appearing as an attribute value is always a leaf,
+        # A class OBJECT appearing as an attribute value is always a leaf,
         # even when it is itself a dataclass class.
         return
-    cls = type(node)
-    fnames = _WALK_FIELD_NAMES_CACHE.get(cls)
+    # Only a real dataclass INSTANCE has child fields to walk. Everything
+    # else — strings, ints, None, bools, enum members — is a leaf. The
+    # gate is `dataclasses.is_dataclass(node)` rather than `type(node)` +
+    # a class-keyed cache: the self-hosted backend's `type()` yields an
+    # integer type-tag (not a hashable class), so class-keyed caching
+    # collided distinct leaf kinds under one key and then `getattr(<a
+    # string>, 'name')` off a stale field list raised `AttributeError:
+    # name`, aborting the whole self-hosted compile. `is_dataclass` maps
+    # straight to the runtime `_mojo_dispatch_is_dataclass` tag check.
+    if isinstance(node, (str, int, float, bool)) or node is None:
+        return
+    if not dataclasses.is_dataclass(node):
+        return
+    fnames = _WALK_FIELD_NAMES_CACHE.get(type(node))
     if fnames is None:
-        # First sight of this class: replicate the original
-        # `dataclasses.is_dataclass(node) and dataclasses.fields(node)`
-        # pair exactly, once, against the class (fields() accepts the
-        # class and returns the same Field sequence it would for an
-        # instance).
-        if hasattr(cls, '__dataclass_fields__'):
-            fnames = tuple(f.name for f in dataclasses.fields(cls))
-        else:
-            fnames = ()
-        _WALK_FIELD_NAMES_CACHE[cls] = fnames
+        # `dataclasses.fields()` yields `Field` objects under CPython but a
+        # plain list of field-name strings under the self-hosted runtime
+        # (`_mojo_dispatch_fields`); handle both without a `.name` access
+        # that would fault on the string form.
+        _raw = dataclasses.fields(node)
+        fnames = tuple(f if isinstance(f, str) else f.name for f in _raw)
+        _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
     for fname in fnames:
         _walk_ast_into(getattr(node, fname), out)
 

@@ -5940,6 +5940,12 @@ def gen_module_impl(self, stmts):
     if _is_selfhost_file:
         parts.append("MojoList * Parser_parse_module (Parser *);")
         parts.append("void Parser___init__ (Parser *, MojoList *);")
+        # gimple_module_gen.py's `from gimple_codegen import ...` of these two
+        # unannotated single-def helpers (see _NO_OVERLOAD_MANGLE). Their sole
+        # `all_struct_defs` param is a list — usage-inferred `MojoList *` on
+        # the definition side, and the call passes a real list too.
+        parts.append("void _merge_struct_inheritance (MojoList *);")
+        parts.append("int64_t _compute_exc_descendants (MojoList *);")
         parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
         parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
         parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
