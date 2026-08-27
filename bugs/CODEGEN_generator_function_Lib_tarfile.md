@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, byte-identical)
+
+Re-derived fresh via own isolated `compile_to_gimple_with_cpp(do_imports=
+False)` + real `g++ -std=c++20 -fsyntax-only`: identical 3-error `.cpp`
+signature — `invalid conversion from 'int64_t' to 'char*'` (x2, at the
+`co_yield tarinfo;` sites) and `cannot convert 'MojoList' to 'int64_t' in
+assignment` (at `tarinfo = (self->members)[index];`). Also independently
+checked whether the existing extensive `_classmethod_names`/`cls.method`
+machinery (`gimple_gen_methods.py`/`gimple_cpp_core.py`, dozens of
+call sites) has any entry point for `self.<field>.classmethod(...)` where
+`<field>` is a class-level attribute holding a class reference (`tarinfo
+= TarInfo` at `tarfile.py:1751`) — confirmed it does not; every existing
+classmethod path resolves `cls`/`self.__class__`/an explicit class name,
+none resolve a field read that happens to alias a class. Concur this
+remains a genuine Phase-2a-vs-generator-pass ordering gap compounded by
+an unresolvable classmethod return type, not a narrow fix — consistent
+with the prior session's own reverted attempt. No code change made. Doc
+stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — re-checked against today's super()/self.__class__ fix (bdfb825, 02:24) and generator-value-return-slot fix (326db78, 02:57); both landed AFTER this doc's most recent entry (01:11) — neither applies, confirmed via a fresh isolated repro)
 
 Fresh `compile_to_gimple_with_cpp(do_imports=False)` repro against this

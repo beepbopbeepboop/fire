@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/tempfile.py
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — commit 997f3b1's two fixes confirmed already subsumed by this branch's history)
+
+`997f3b1` (the `delete`-C++-keyword-field rename + scalar-self-field
+zero-iteration range-for stub) was a loose commit not reachable from
+this worktree's HEAD (`git merge-base --is-ancestor 997f3b1 HEAD` fails)
+— attempted `git cherry-pick 997f3b1`; both hunks conflicted against a
+strict superset already landed independently on this branch (the
+shelve.py-driven `.keys()/.values()/.items()/.copy()`-on-scalar-self-
+field generalization, and `_CPP_KEYWORD_FIELDS` already present in
+`gimple_ctypes.py`). Resolved the conflict by keeping HEAD's superset
+and discarding the now-redundant duplicate hunk; the cherry-pick then
+recorded empty (nothing left to commit) — `git cherry-pick --skip`.
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` +
+`g++-mp-15 -std=c++20 -fsyntax-only`: **0 errors**, confirming
+tempfile.py's own isolated .cpp unit is genuinely clean on this branch
+already, no code change needed. Whole-program build remains blocked by
+the transitively-imported `operator.py` attrgetter/itemgetter closure-
+of-callables gap (unchanged, feature-sized, see below). Doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — the 08-24 "isolated compile clean" claim was stale; 2 REAL own-generator bugs found + FIXED (C++-keyword `delete` field, scalar-field range-for); isolated .cpp unit now genuinely 0 errors)
 
 Re-ran the doc's own isolated methodology fresh

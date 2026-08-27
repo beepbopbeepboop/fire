@@ -2,6 +2,42 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch; both stacked blockers confirmed, no narrow fix found)
+
+Per this round's explicit instruction, tried hard to find a real narrow
+fix here given this doc's outsized value (the Counter/OrderedDict
+dict-subclass subscript-store gap blocks several other bugs
+project-wide). Fresh isolated `compile_to_gimple_with_cpp(do_imports=
+False)` probe: byte-identical to every prior entry — three
+`__reversed__` generator methods refuse first on `reversed(self.
+_mapping)`: "a call to unresolved callee 'reversed(...)' is not
+supported in a compiled generator/coroutine body". Confirmed directly
+in `gimple_cpp_core.py` (~line 5325-5345): the coroutine-body emitter
+only special-cases `reversed(range(...))`/`reversed(range(start,
+stop))` inside a `for` statement's iterable position — there is no
+general `reversed(<expr>)`-as-callee case, and no dunder-dispatch
+rewrite to `<expr>.__reversed__()`. Building that (recognizing the
+builtin, generalizing the sub-generator delegation receiver beyond the
+hardcoded `self` literal, and threading it through the for-loop
+delegate-detection path too) is real subsystem work, not a one-line
+whitelist add — matches every prior session's conclusion.
+
+Did not stop there: experimentally neutralizing the three
+`__reversed__` bodies (to look one layer deeper, as the doc's own
+established methodology does) still surfaces the Counter dict-subclass
+`Counter[...] = ...` subscript-store refusal next — `class Counter
+(dict)` has no backing MojoDict field (`Counter.__init__` never
+allocates one) and its `values`/`items`/`get` methods get misregistered
+as int fields by the self-attr scan, so `self[elem] += count` has no
+correct lowering. Fixing this specific instance narrowly (special-
+casing `Counter` by name) would be exactly the kind of parallel-
+implementation hack CLAUDE.md's Code Quality rule forbids; the honest
+fix is general builtin-dict-subclass storage synthesis (constructor
+backing-store allocation + inherited container-method dispatch +
+`__missing__`), which is the same feature-sized gap this doc has
+tracked since 2026-08-23. No narrow fix found for either blocker. No
+code change; doc stays open.
+
 ## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
 
 This session implemented real loop-as-expression codegen for `list(x)`/

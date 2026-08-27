@@ -1,5 +1,20 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, unchanged)
+
+Re-read `_async_quick_eligible` (`gimple_exprtypes.py:184-255`) directly,
+then ran a fresh isolated `gimple_codegen.compile_to_gimple_with_cpp(
+do_imports=False)` probe against this file only (bypassing the
+transitive-import fallback that ate the whole 300s budget in the prior
+`mojo.py build`-driven entry below). Byte-for-byte identical refusal:
+`function(s) get, join, put (async function(s), declared async def)`.
+Confirmed from the whitelist source itself that `await <local Future
+variable>` (`putter`/`getter`) and `await <bound-method call>`
+(`self._finished.wait()`) are genuinely unrecognized shapes — closing
+them needs the real Awaitable protocol (allocatable Future/Event
+handles, waiter queues, cross-coroutine wakeup), a feature-sized
+asyncio-runtime project. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — fresh bounded build confirms unchanged: entire 300s budget spent in transitive source-fallbacks, own refusal unreached)
 
 Fresh safety-watched `python3 mojo.py build .../Lib/asyncio/queues.py`

@@ -1,5 +1,52 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — genuine narrow-fix attempt made, confirmed still feature-sized)
+
+Independently re-derived from scratch (not just trusting the entry
+below, which is from a sibling worktree/branch not yet merged here).
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` on the
+real weakref.py reproduces the identical refusal set: `__iter__`/
+`items`/`keys`/`values` × `WeakValueDictionary`/`WeakKeyDictionary` (8
+sites) each refuse honestly on `a call to unresolved callee 'wr(...)'`.
+`grep -rn weakref gimple_codegen.py gimple_cpp_core.py gimple_gen_calls.py
+gimple_gen_stmts.py runtime/mojo_runtime.c runtime/mojo_runtime.h`
+confirms zero implementation hits in this worktree too.
+
+**Concrete narrow-fix attempt** (per this session's brief, not just
+re-stating the prior classification): considered whether `_field_dict_
+val_types` (the existing per-struct-field dict-VALUE-ctype registry,
+`gimple_gen_stmts.py:846/960`) could be extended to recognize `self.data
+[key] = KeyedRef(value, self._remove, key)` / `= ref(value)` store sites
+and carry a marker through to the `wr()` call site, mirroring the
+existing struct-pointer-dict-value mechanism `enum.py`'s `Flag.
+_iter_member_by_value_` already uses (`gimple_cpp_core.py:2440-2480`).
+This does NOT work as a narrow patch: `ref`/`KeyedRef` are themselves
+`_weakref`-import unresolved-callee stubs (`gimple_gen_calls.py`'s
+`_unresolved_import_aliases` auto-stub, confirmed via a standalone
+`from _weakref import ref` repro — `ref(x)` lowers to a stub that prints
+a diagnostic and returns int64_t 0, ignoring `x` entirely), so even if
+the store-site were recognized, the ONLY ctype available to record is
+the stub's own return type (`int64_t`) — carrying that through the two
+coroutine-body dict-unpack paths (`_cpp_for_stmt`'s tuple `.items()` and
+single-name `.keys()/.values()` cases, both currently hardcoded
+`int64_t` for the value slot) would add a marker but no REAL type
+information to dispatch `wr()` against, since the registry has nothing
+but "int64_t" to propagate — the real fix needs the store site to look
+THROUGH `KeyedRef(value, ...)`/`ref(value)` at `value`'s own real,
+already-resolved ctype (the referent, not the wrapper), which requires
+genuine `_weakref` constructor-call semantics this codegen has never had
+(finding 1 in the 2026-08-25 entry below), not just wider plumbing of an
+existing mechanism. Confirms finding 4's bill of work (new runtime value
+kind + `_weakref` constructor-call recognition + propagation through
+both coroutine-body unpack paths + marker-keyed call dispatch) is the
+real floor, not an overestimate.
+
+Classification confirmed unchanged: blocked on the structural callable-
+value gap PLUS a missing weakref/`_weakref`-extension runtime
+representation, both genuinely feature-sized — independently re-derived,
+not just trusted. No code change; no gate run (nothing on the compiled
+path touched).
+
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
 
 Source re-confirmed against current tree (`a913ab8`): `grep -rn weakref

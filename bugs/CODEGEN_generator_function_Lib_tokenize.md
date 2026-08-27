@@ -1,5 +1,37 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, same conclusion)
+
+Re-ran `compile_to_gimple_with_cpp(do_imports=False)` on the real
+tokenize.py fresh, independent of the prior session's notes. Confirmed
+the identical pair of refusals: `_generate_tokens_from_c_tokenizer`
+("a call to unresolved callee `type(...)`") and `tokenize`
+("a call to unresolved callee `TokenInfo(...)`").
+
+Checked whether `type(...)` could be added narrowly to the coroutine
+emitter by mirroring the ordinary (non-generator) path's existing
+`fname_raw == 'type'` handling (`gimple_gen_calls.py:1114`, which reads
+the struct's runtime type tag via `mojo_read_type_tag_safe`) — but this
+would not move the needle: `_generate_tokens_from_c_tokenizer`'s own
+body first does `for info in it:` over `it = _tokenize.TokenizerIter(
+source, ...)`, a real CPython C-extension iterator type this codegen
+has zero representation for anywhere (no `_tokenize` module recognition,
+no runtime struct, no iterator protocol stub) — genuinely deeper than
+the `type(e) != SyntaxError` comparison the eligibility scan happens to
+report first. Even a real `type()` fix would still leave this function
+uncompilable. Separately, `tokenize()`'s own blocker (`TokenInfo._make(
+info)` / `TokenInfo(...)`, `class TokenInfo(collections.namedtuple(
+'TokenInfo', 'type string start end line')):`) needs compile-time
+namedtuple synthesis (evaluating a runtime `namedtuple(...)` call to
+derive a struct's fields) — grep-confirmed zero `namedtuple` handling
+anywhere in `gimple_codegen.py`/`gimple_cpp_core.py`/
+`gimple_gen_calls.py`/`gimple_gen_stmts.py`/`mojo_compiler.py`.
+
+Both are genuine, independently-confirmed structural gaps (C-extension
+iterator type with no runtime representation; compile-time-invisible
+namedtuple-as-base-class), not narrow bugs. No code change; no gate run
+(nothing touched). Doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; both refusals unchanged AND confirmed to sit on top of additional unmodelable dependencies, not just the two named shapes)
 
 Re-ran a fresh isolated

@@ -1,5 +1,16 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, unchanged)
+
+Fresh isolated `gimple_codegen.compile_to_gimple_with_cpp(do_imports=
+False)` probe: byte-identical refusal to every prior entry —
+`_convert_egg_info_reqs_to_simple_reqs` on unresolved callee
+`url_req_space(...)` (a nested `def` called from its loop), `Sectioned.
+read` on unresolved callee `map(...)`. Both are genuine subsystem gaps
+(closure/nested-def lifting into the scalar coroutine-body model;
+first-class callable-value builtins like `map`/`filter`/`str.strip`),
+neither a narrow whitelist add. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
 
 This session implemented real loop-as-expression codegen for `list(x)`/

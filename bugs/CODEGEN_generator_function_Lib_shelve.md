@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch)
+
+Re-derived fresh via own isolated `compile_to_gimple_with_cpp(do_imports=
+False)` + real `g++ -fsyntax-only`: `Shelf.__iter__`'s own generator unit
+compiles clean, 0 `.cpp` errors — confirms `shelve.py`'s own code
+(including its one generator) remains unaffected. Not attempted: a real
+end-to-end `mojo.py build` re-run to re-count the transitive `argparse`/
+`pickle`/`typing`/`_collections_abc` cascade (already reconfirmed same-day
+by a parallel session at 153 errors, none in shelve.py's own source) —
+redundant with that entry and out of this doc's scope regardless. No code
+change made. Doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
 
 Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

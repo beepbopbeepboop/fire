@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, byte-identical)
+
+Re-derived fresh (own isolated `compile_to_gimple_with_cpp(do_imports=False)`
++ real `g++ -std=c++20 -fsyntax-only` run, not a re-read of this doc):
+`.cpp` still exactly 2 errors, byte-identical to the entry above —
+`request for member 'append' in 'lines', which is of pointer type
+'MojoList*'` (gap #2) and `unable to find numeric literal operator
+'operator""partition'` (gap #4, the `0.partition(" ")` symptom). Concur
+with the existing classification: gap #2 needs a context-carrying
+callback ABI change across all four plain-path callback params
+(`retrbinary`/`retrlines`/`storbinary`/`storlines`), not a self-contained
+fix; gap #4 is downstream of it. No code change made. Doc stays open.
+
 ## Status (updated 2026-08-26 — gap #2 re-checked against the new generator-value-return-slot machinery; confirmed still not tractable narrowly; gaps #2-4 otherwise unchanged)
 
 Re-ran `scripts/repro_ftplib_isolated_group3.py` fresh: `.ci` still 0

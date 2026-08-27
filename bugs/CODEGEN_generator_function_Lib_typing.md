@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/typing.py
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — commit 34f9b94's fix confirmed already present on this branch; independently re-verified)
+
+`git merge-base --is-ancestor 34f9b94 HEAD` confirms the two .cpp-emitter
+fixes from the entry below (transitive-field-BFS struct typedef mirror;
+honest refusal for subscripting a function/special-form value) are
+already part of this worktree's history — no cherry-pick needed. Fresh
+isolated `compile_to_gimple_with_cpp(do_imports=False)` reproduces
+exactly the documented post-fix state: 0 g++ errors, with `__iter__`
+refusing honestly at the eligibility gate (`Unpack[self]` — "subscript
+base resolves to a function/special-form value, not a string or
+container"). Closing this for real needs runtime dynamic dispatch on
+special-form/callable objects, the same dynamic-receiver family as
+pickletools' `getpos` — feature-sized, not attempted. No code change;
+no gate run (nothing touched). Doc stays open.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — the 08-24 "isolated clean" claim was stale; 2 real .cpp-emitter bugs found + FIXED; typing's own generator now honestly refused on a genuinely-unrepresentable shape)
 
 Re-ran the isolated coroutine-path compile fresh:
