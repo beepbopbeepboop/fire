@@ -1994,6 +1994,35 @@ def _scalar_min2(a, b):
     return b
 
 
+def _mojo_operator_index(x):
+    """Stand-in for `operator.index` — this file's own compiled form can't
+    reach CPython's operator module (`import operator` binds a placeholder
+    marker, and reading `.index` off it raises AttributeError at runtime),
+    so setup_builtins' `index` binding needs a self-contained equivalent.
+    Real operator.index raises TypeError on anything without __index__;
+    accepting plain int()/float-truncation here is looser, but every
+    in-tree caller passes values that are already integral."""
+    return int(x)
+
+
+def _mojo_isnan(x):
+    """NaN check without the math module (same compiled-binary constraint
+    as _mojo_operator_index): NaN is the only value not equal to itself."""
+    return x != x
+
+
+def _mojo_isinf(x):
+    """Inf check without math: inf - inf == NaN (not 0), while every
+    finite value minus itself is exactly 0; NaN itself is excluded by the
+    self-equality guard."""
+    return x == x and (x - x) != 0
+
+
+def _mojo_isfinite(x):
+    """Finite check without math: neither NaN nor +/-inf."""
+    return x == x and (x - x) == 0
+
+
 def _mojo_max(*args, **kwargs):
     """Mojo overloads `max` for SIMD to mean elementwise max, not "pick one
     of these two whole values" like Python's own builtin. Deliberately
@@ -2883,10 +2912,10 @@ class Interpreter:
         self.scope.define('ord', ord)
         self.scope.define('divmod', divmod)
         self.scope.define('next', next)
-        self.scope.define('index', operator.index)
-        self.scope.define('isnan', math.isnan)
-        self.scope.define('isinf', math.isinf)
-        self.scope.define('isfinite', math.isfinite)
+        self.scope.define('index', _mojo_operator_index)
+        self.scope.define('isnan', _mojo_isnan)
+        self.scope.define('isinf', _mojo_isinf)
+        self.scope.define('isfinite', _mojo_isfinite)
         # Mojo's StaticString/StringSlice are borrowed-string-view types;
         # plain Python str already behaves like their value side.
         self.scope.define('StaticString', MojoString)

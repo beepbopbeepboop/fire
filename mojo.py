@@ -155,10 +155,32 @@ def interpret_and_execute(src_code, filename=None, argv=None):
 
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(max(old_limit, 1_000_000))
-    threading.stack_size(1024 * 1024 * 1024)
-    t = threading.Thread(target=_run)
-    t.start()
-    t.join()
+    # The big-stack worker thread is a CPython-hosting workaround: deep
+    # *Mojo-level* recursion fans out into many nested Python frames per
+    # Mojo call, exhausting the OS thread's real C stack (see docstring).
+    # In the self-hosted compiled binary none of that applies — recursion
+    # is native frames — and worse, this codegen has no threading support
+    # at all: `threading.Thread(...)`/`.start()` lower to the generic
+    # int64_t module-placeholder stubs, so the target NEVER runs and the
+    # whole interpretation silently did nothing (rc 0, no output). Probe
+    # whether a spawned thread actually executes its target; if not (the
+    # compiled case), run _run() inline on the caller's stack instead.
+    def _threading_runs_target():
+        try:
+            done = []
+            probe = threading.Thread(target=lambda: done.append(1))
+            probe.start()
+            probe.join()
+            return bool(done)
+        except Exception:
+            return False
+    if _threading_runs_target():
+        threading.stack_size(1024 * 1024 * 1024)
+        t = threading.Thread(target=_run)
+        t.start()
+        t.join()
+    else:
+        _run()
     sys.setrecursionlimit(old_limit)
     if exit_code:
         sys.exit(exit_code[0])
