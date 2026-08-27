@@ -62,6 +62,18 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
  * try/except dispatch on which exception was actually raised instead of
  * always running the first handler. 0 means untyped/unknown (e.g. a bare
  * `raise` re-raising whatever is already live). */
+
+/* Deterministic exception-class tags — the same values
+ * GimpleGen._exc_type_id(name) computes (`(zlib.crc32(b"Name") &
+ * 0x7fffffff) or 1`), computed once in Python and hardcoded here so the
+ * runtime can raise REAL, typed, catchable exceptions (see
+ * mojo_raise_file_not_found / mojo_open below). Defined up here rather
+ * than next to their users: mojo_open (line ~319) needs them before the
+ * AttributeError section further down. */
+#define _MOJO_EXC_TAG_ATTRIBUTEERROR 1471495998
+#define _MOJO_EXC_TAG_FILENOTFOUND 1834506930
+#define _MOJO_EXC_TAG_OSERROR 2131477727
+
 int64_t _mojo_exc_type = 0;
 void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
 int64_t mojo_exc_type_get(void) { return _mojo_exc_type; }
@@ -319,7 +331,17 @@ char *mojo_file_read_all(char *filename) {
 MojoFileHandle mojo_open(char *filename, char *mode) {
     FILE *f = fopen(filename, mode);
     if (!f) {
-        mojo_exc_msg_set("FileNotFoundError");
+        /* Typed like real Python: a missing file is FileNotFoundError
+         * (anything else OSError) — see mojo_raise_file_not_found. */
+        FILE *probe = fopen(filename, "r");
+        mojo_exc_type_set(probe ? _MOJO_EXC_TAG_OSERROR
+                                : _MOJO_EXC_TAG_FILENOTFOUND);
+        char msg[512];
+        snprintf(msg, sizeof msg, "[Errno 2] cannot open '%s' (mode '%s')",
+                 filename ? filename : "?", mode ? mode : "?");
+        char *heap_msg = strdup(msg);
+        mojo_exc_msg_set(heap_msg);
+        mojo_exc_obj_set(heap_msg);
         mojo_raise();
     }
     return (MojoFileHandle)f;
@@ -2458,9 +2480,11 @@ int open(int path) {
 
 /* ── Non-Python file open (always available) ────────────────────────────*/
 int64_t mojo_open_file(char *path) {
-    /* Return FILE* as int64_t so int_read/int_write can cast it back */
+    /* Return FILE* as int64_t so int_read/int_write can cast it back.
+     * A missing/unreadable file RAISES (FileNotFoundError), matching
+     * real Python's builtin open() — see mojo_raise_file_not_found. */
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) mojo_raise_file_not_found(path);
     return (int64_t)(intptr_t)f;
 }
 
@@ -2828,12 +2852,29 @@ static void _mojo_dynattr_key(void *obj, char *buf, size_t buflen) {
  * lenient untagged-exception fallback. The tag is `gimple_codegen.py`'s
  * own `GimpleGen._exc_type_id('AttributeError')` — `(zlib.crc32(b"Attrib
  * uteError") & 0x7fffffff) or 1` — computed once in Python and hardcoded
- * here rather than reimplementing CRC32 in C, since _exc_type_id is a
- * pure, deterministic function of the class name string (documented on
- * its own definition: stable across processes so the CAS content-cache
- * doesn't see spurious id churn) and this runtime is compiled once,
- * separately from any particular program's own GimpleGen instance. */
-#define _MOJO_EXC_TAG_ATTRIBUTEERROR 1471495998
+* here rather than reimplementing CRC32 in C, since _exc_type_id is a
+  * pure, deterministic function of the class name string (documented on
+  * its own definition: stable across processes so the CAS content-cache
+  * doesn't see spurious id churn) and this runtime is compiled once,
+  * separately from any particular program's own GimpleGen instance. */
+
+void mojo_raise_file_not_found(char *path) {
+    /* Real Python's `open(path)` on a missing file raises
+     * FileNotFoundError (an OSError subclass), it does NOT return a
+     * falsy handle — callers' `try: ... except Exception:` guards only
+     * work if the failure actually raises. Previously this returned 0,
+     * which int_read(0) silently turned into an empty read, so e.g.
+     * mojo.py's own "Error reading {input_file}" guard never fired and
+     * every downstream step ran on empty source. */
+    char msg[512];
+    snprintf(msg, sizeof msg, "[Errno 2] No such file or directory: '%s'",
+             path ? path : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_FILENOTFOUND);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
 
 void mojo_raise_attribute_error(char *attr) {
     char msg[256];

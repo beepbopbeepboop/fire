@@ -367,6 +367,7 @@ int64_t     mojo_obj_getattr(void *obj, char *attr);
  * mojo_obj_getattr on a miss; also usable directly by any other runtime
  * helper that needs to raise the same typed exception. */
 void        mojo_raise_attribute_error(char *attr);
+void        mojo_raise_file_not_found(char *path);
 /* Raises a real, catchable KeyError for `key` — same mechanism as
  * mojo_raise_attribute_error above (typed via the class-name CRC32 tag),
  * used by runtime dict-keyed %-formatting (mojo_str_format_dict) on a
