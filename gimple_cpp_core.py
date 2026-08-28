@@ -2953,6 +2953,74 @@ def _cpp_expr(gen, e) -> str:
                     kwargs=[], line=e.line, col=e.col)
                 return gen._cpp_build_container_from_iterable(
                     'list', e.args[1], _ctor_var, _elem, [])
+            if (fname == 'filter' and len(e.args) == 2 and not e.kwargs
+                    and not gen._locally_binds_name('filter')):
+                # `filter(func, iterable)` — same eager-materialization
+                # treatment as `map()` just above (real: importlib/
+                # metadata/__init__.py's `Sectioned.read`: `lines =
+                # filter(filter_, map(str.strip, text.splitlines()))`).
+                # Reuses `_cpp_build_container_from_iterable`'s existing
+                # `cond_nodes` filtering support: synthesize the
+                # equivalent `[x for x in iterable if <predicate>(x)]`
+                # shape.
+                #
+                # `func` (`filter_` here) is a plain function PARAMETER
+                # defaulting to `None` at its real call site
+                # (`Sectioned.read(source)`, line 606 — no `filter_=`
+                # passed) — a genuinely runtime-nullable boxed callable
+                # (`std::function`), not a value statically known to be
+                # `None` or a real callable at THIS call site. Naively
+                # always calling it would throw `std::bad_function_call`
+                # on that real, common no-filter call path. Handle three
+                # shapes:
+                #   1. The callee is the literal identifier `None`
+                #      (`filter(None, xs)`) — Python keeps every truthy
+                #      element, no call at all.
+                #   2. The callee is a declared LOCAL of the callable
+                #      ctype (may be empty/`None` at runtime) — guard the
+                #      call with the callable's own `operator bool()`
+                #      (`std::function` supports contextual-bool exactly
+                #      like Python's `if filter_:`), falling back to
+                #      plain element truthiness when it's empty.
+                #   3. Anything else (a statically-known real callable,
+                #      e.g. a module-level function reference or
+                #      `str.strip`) — always call it, no guard needed.
+                # Every truthiness check reuses the UnaryOp('not') case's
+                # existing char*-vs-pointer-null-aware truthiness logic
+                # (`not not x`) rather than a raw C++ `!!ptr`, so a
+                # filtered char* (e.g. a stripped string) is judged by
+                # Python's real "non-empty string" rule, not
+                # pointer-non-null.
+                _ctor_var = gen._cpp_fresh_name('_ctor_elem')
+                _elem = gimple_ctypes.IdentExpr(_ctor_var, e.line, e.col)
+                _func_arg = e.args[0]
+
+                def _truthy(node):
+                    inner = gimple_ctypes.UnaryOp(op='not', operand=node,
+                                                   line=e.line, col=e.col)
+                    return gimple_ctypes.UnaryOp(op='not', operand=inner,
+                                                  line=e.line, col=e.col)
+
+                if isinstance(_func_arg, gimple_ctypes.IdentExpr) and _func_arg.name == 'None':
+                    _cond = _truthy(_elem)
+                else:
+                    _call = gimple_ctypes.CallExpr(
+                        func=_func_arg, args=[_elem], kwargs=[],
+                        line=e.line, col=e.col)
+                    _call_truthy = _truthy(_call)
+                    _func_ctype = None
+                    if (isinstance(_func_arg, gimple_ctypes.IdentExpr)
+                            and gen._cpp_declared is not None):
+                        _func_ctype = gen._cpp_declared.get(_func_arg.name)
+                    if _func_ctype in (gimple_ctypes._CPP_CALLABLE_CTYPE,
+                                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG):
+                        _cond = gimple_ctypes.TernaryExpr(
+                            condition=_func_arg, then_val=_call_truthy,
+                            else_val=_truthy(_elem), line=e.line, col=e.col)
+                    else:
+                        _cond = _call_truthy
+                return gen._cpp_build_container_from_iterable(
+                    'list', e.args[1], _ctor_var, _elem, [_cond])
             if (fname == 'sorted' and e.args
                     and not gen._locally_binds_name('sorted')):
                 # `sorted(iterable)` / `sorted(iterable, key=..., reverse=

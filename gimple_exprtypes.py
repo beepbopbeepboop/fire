@@ -674,6 +674,13 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # this, `x = map(f, y)` fell through to the int64_t default below.
         if e.func.name == 'map' and len(e.args) == 2 and not e.kwargs:
             return 'MojoList *'
+        # `filter(func, iterable)` — same eager-materialization simplification
+        # as `map()` just above (see `_cpp_expr`'s CallExpr/'filter' case,
+        # gimple_cpp_core.py). Without this, `lines = filter(f, y)`
+        # (importlib/metadata/__init__.py's `Sectioned.read`) fell through
+        # to the int64_t default below.
+        if e.func.name == 'filter' and len(e.args) == 2 and not e.kwargs:
+            return 'MojoList *'
         # `next(x)` where `x` resolves to a known struct pointer (`self`,
         # or a bare local/param of a known struct type) that implements
         # the iterator protocol on itself (`__next__` a real compiled
