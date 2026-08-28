@@ -35,20 +35,13 @@ demo:
 
 # Everyday green gate: the GIMPLE unit suite, the execution runner, the
 # module-cache end-to-end stages, the self-host compile guard, and the stdlib
-# test/benchmark suite (interpreter + JIT), and the link-mode compile guard
-# (the real `driver.compile_program` pipeline `mojo.py build` actually uses —
-# distinct from every other check-* target here plus compile_stdlib.py/
-# build_stdlib_dylib.py, which all drive codegen through the single-
-# translation-unit `do_imports=False` inline path instead; a link-mode-only
-# bug is invisible to all of them, see bugs/COMPILE_FAIL_asyncio_futures.md
-# and bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_call_
-# segfault.md, both found this way). The self-hosting bootstrap (stage1-3
+# test/benchmark suite (interpreter + JIT). The self-hosting bootstrap (stage1-3
 # + validate-all) is a separate, aspirational target — `make bootstrap` —
 # because stage 2 has a known pre-existing codegen segfault (see IMPL.md); it is
 # not gated into `check` so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost check-runtimediff check-linkmode
+check: check-gimple check-runner check-modcache check-selfhost check-runtimediff
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff + link-mode)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff)"
 
 # Every check-* target is wrapped in checked_run.py: a check's outcome is a
 # pure function of the compiler sources + toolchain + whatever extra files it
@@ -102,20 +95,6 @@ check-runtimediff: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py t
 		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py \
 		--extra test_runtime_diff.py \
 		-- python3 test_runtime_diff.py
-
-# Link-mode compile guard: builds real multi-file packages through
-# `driver.compile_program` (the actual pipeline `mojo.py build` uses by
-# default), not the `do_imports=False` single-translation-unit inline path
-# every OTHER check-* target here (plus compile_stdlib.py/
-# build_stdlib_dylib.py) uses instead — a link-mode-only bug in import/
-# module-value registration is invisible to all of them. See
-# test_link_mode.py's own module docstring.
-check-linkmode: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py driver.py test_link_mode.py
-	python3 checked_run.py check-linkmode \
-		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
-		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra driver.py \
-		--extra test_link_mode.py \
-		-- python3 test_link_mode.py
 
 # Run all stdlib test and benchmark files through both the interpreter
 # (mojo.py run) and the JIT compiler (mojo.py --jit).

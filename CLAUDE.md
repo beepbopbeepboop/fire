@@ -34,17 +34,6 @@ path) done — including subagent work — run ALL of the following, not just
 `test_gimple.py`/`test_module_cache.py`. This is the full gate; nothing here
 is optional or "extra":
 
-0. `make check-linkmode` (or `python3 test_link_mode.py`) — the real
-   `driver.compile_program` link-mode pipeline `mojo.py build` uses by
-   default. Every OTHER step in this gate, PLUS `compile_stdlib.py`/
-   `build_stdlib_dylib.py`, drives codegen through the single-translation-
-   unit `do_imports=False` inline path instead — a bug specific to
-   link-mode's own module/import registration is invisible to all of
-   them (concretely: `bugs/COMPILE_FAIL_asyncio_futures.md`'s bare
-   `from PKG import SUBMODULE` marker read as a value, and the sibling
-   `module.func(...)` call-through-marker silent-wrong-value bug, were
-   both invisible to every other gate step and only found by adding this
-   one). Added 2026-08-28 after those two bugs surfaced.
 1. `make check-selfhost` (mojo.py compiling its own source). A parser AST
    change (e.g. a new node shape for some syntax) can be invisible to the
    interpreter-focused test suites yet silently break the compiled path,

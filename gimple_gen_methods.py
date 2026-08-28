@@ -1271,42 +1271,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 "inside a compiled async function body -- falling "
                 "back to interpreting this module from source instead")
 
-        # Generic case: a CALL through an imported module/submodule
-        # marker to one of ITS OWN top-level functions
-        # (`base2.doubleval(21)`, real: `base_futures.isfuture(...)`-
-        # shaped calls this codegen's own imports rely on), for a module
-        # not special-cased by name above. Mirrors the exact resolution
-        # `_lower_MemberExpr`'s sibling VALUE-READ case already uses
-        # (`module_name in gen.imported_symbols and node.member in
-        # gen.func_return_types` — see that case's own long comment for
-        # why those two checks alone are safe/precise) and the exact
-        # emission the `ast_rewriter`/`mlir`/`regex_compile` hardcoded
-        # cases above already use (`gen._func_csym`/`gen._call_expr`) —
-        # this is that same mechanism, generalized to ANY imported
-        # module instead of 3 hardcoded compiler-internal names.
-        #
-        # Without this, the receiver (`base2`) lowers to an opaque
-        # `(int64_t)0` placeholder (an unresolved module marker has no
-        # struct type), so `.doubleval(...)` fell through to the
-        # generic dynamic-dispatch fallback below, which for an
-        # int64_t receiver resolves against unrelated builtin
-        # int64_t-method stubs (or a NULL/no-op dispatch) instead of
-        # ever reaching the real compiled function — a SILENT WRONG
-        # VALUE (e.g. always 0), not a compile error, exactly the class
-        # of miscompile `ast_rewriter`'s own comment above documents.
-        # Positional args only (mirrors `ast_rewriter`'s own
-        # not-yet-kwarg-aware call emission above) — a call with kwargs
-        # falls through unchanged to the pre-existing dynamic dispatch
-        # rather than risk mishandling them.
-        if (not node.kwargs
-                and module_name in gen.imported_symbols
-                and method_name in gen.func_return_types
-                and method_name not in gen.struct_field_types):
-            arg_pairs = [gen.lower_expr(a) for a in node.args]
-            _csym = gen._func_csym(method_name)
-            _ret = gen.func_return_types[method_name]
-            return _ret, gen._call_expr(_ret, _csym, arg_pairs)
-
     ot, ov = gen.lower_expr(func.obj)
     # The receiver's RAW lowered pair, before the resolution blocks below
     # may retag `ot` (the classmethod-receiver block can retag an
