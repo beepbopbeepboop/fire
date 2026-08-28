@@ -2520,13 +2520,36 @@ def gen_module_impl(self, stmts):
                         self._struct_init_defaults[s.name] = {
                             pn: dv for pn, dv in _init_defaults.items() if pn != 'self'}
                     if m.return_type is None:
+                        _mangled_key = f"{s.name}_{m.name}"
                         for i, (pname, ptype) in enumerate(m.params):
                             if pname == 'self':
+                                self.var_types[pname] = f"{s.name} *"
+                            elif (i == 0 and pname == 'cls'
+                                    and _mangled_key in self._classmethod_names):
+                                # `cls`, a real @classmethod's implicit first
+                                # param, statically names THIS enclosing
+                                # struct — mirrors the `self` seed just
+                                # above. Without this, `_quick_type`'s
+                                # return-type scan saw `cls` as an
+                                # unresolved bare identifier (falling to
+                                # the int64_t default), so a classmethod
+                                # whose body does `return cls.<method>(...)`
+                                # (Lib/tarfile.py's `TarInfo.fromtarfile`:
+                                # `return cls._fromtarfile(tarfile)`) never
+                                # got its real struct-pointer return type —
+                                # `_quick_type`'s existing
+                                # `gen.var_types.get(mod, '')`-based struct-
+                                # method-call resolution (used by ordinary
+                                # `obj.method(...)` calls) already handles
+                                # this correctly once `cls` is seeded the
+                                # same way `self` is; only the seed was
+                                # missing. See CODEGEN_generator_function_
+                                # Lib_tarfile.md.
                                 self.var_types[pname] = f"{s.name} *"
                             else:
                                 self.var_types[pname] = self._resolve_type(ptype)
                         inferred = self._infer_return_type(m.body)
-                        key = f"{s.name}_{m.name}"
+                        key = _mangled_key
                         if self.func_return_types.get(key) != inferred:
                             self.func_return_types[key] = inferred
                             _changed = True
@@ -5689,21 +5712,37 @@ def gen_module_impl(self, stmts):
                     self._global_var_types[gname] = f"{_struct_name} *"
                     self._global_c_decl_types[gname] = f"{_struct_name} *"
                 else:
-                    # Same shared-table fallback as _gscan_declare_global's
-                    # IdentExpr-callee branch just above: the Phase 1.7
-                    # table knows the one-char*-arg opaque-constructor
-                    # passthrough (`X = Path(some_str)` → declare char *),
-                    # and returns int64_t for every shape this branch's
-                    # explicit rows already handled identically.
-                    _ivt = _phase17_value_type(_gv)
-                    if _ivt == 'char *':
-                        global_decls.append(f"char * {gname};")
-                        self._global_var_types[gname] = 'char *'
-                        self._global_c_decl_types[gname] = 'char *'
+                    # Mirror _gscan_declare_global's IdentExpr-callee
+                    # branch just above: a function whose return type is a
+                    # real C pointer (e.g. `create_world() -> World`
+                    # lowering to `World *`) must declare the global as
+                    # that pointer type. Without this, `var g_world =
+                    # create_world()` fell through to the int64_t default
+                    # below and the toplevel assignment emitted
+                    # `_root_globals.g_world = <World *>;` into a field
+                    # declared `int64_t` — "assignment to 'int64_t' from
+                    # 'World *'" (box.3d/game's engine_create_world()).
+                    _ret = self.func_return_types.get(_gv.func.name, '')
+                    if _ret.endswith(' *'):
+                        global_decls.append(f"{_ret} {gname};")
+                        self._global_var_types[gname] = _ret
+                        self._global_c_decl_types[gname] = _ret
                     else:
-                        global_decls.append(f"int64_t {gname};")
-                        self._global_var_types[gname] = 'int64_t'
-                        self._global_c_decl_types[gname] = 'int64_t'
+                        # Same shared-table fallback as _gscan_declare_global's
+                        # IdentExpr-callee branch just above: the Phase 1.7
+                        # table knows the one-char*-arg opaque-constructor
+                        # passthrough (`X = Path(some_str)` → declare char *),
+                        # and returns int64_t for every shape this branch's
+                        # explicit rows already handled identically.
+                        _ivt = _phase17_value_type(_gv)
+                        if _ivt == 'char *':
+                            global_decls.append(f"char * {gname};")
+                            self._global_var_types[gname] = 'char *'
+                            self._global_c_decl_types[gname] = 'char *'
+                        else:
+                            global_decls.append(f"int64_t {gname};")
+                            self._global_var_types[gname] = 'int64_t'
+                            self._global_c_decl_types[gname] = 'int64_t'
             elif isinstance(_gv, (IntLiteral, BoolLiteral)):
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'

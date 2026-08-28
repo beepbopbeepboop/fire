@@ -1,5 +1,92 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (updated 2026-08-26, this session — real `filter(func, iterable)` coroutine-body codegen ADDED; `Sectioned.read`'s `map(...)` gap (already independently fixed by a prior commit this same day, `9c0e7a8`) confirmed gone, `filter(...)` gap now also gone, module still doesn't compile — TWO real, narrower blockers remain)
+
+Master had JUST landed real `map(func, iterable)` coroutine-body codegen
+(commit `9c0e7a8`, same day, unrelated session) when this session
+started. Re-probed `Sectioned.read`'s `filter(filter_, map(str.strip,
+text.splitlines()))` fresh: the `map(...)` refusal is confirmed gone (as
+that commit's own message predicts), but `filter(...)` was still
+categorically unsupported — `filter` had no coroutine-body lowering at
+all, unlike `map`.
+
+**Implemented this session**: `filter(func, iterable)` coroutine-body
+codegen (`gimple_cpp_core.py`'s `_cpp_expr` CallExpr case, right after
+`map`'s; `gimple_exprtypes.py`'s `_infer_simple_expr_ctype` widened to
+match, mirroring `map`'s own addition exactly). Reuses the same
+`_cpp_build_container_from_iterable` helper via its existing
+`cond_nodes` filtering support — eagerly materializes a real
+`MojoList *`, synthesizing `[x for x in iterable if <predicate>(x)]`.
+Three callee shapes handled:
+1. Literal `filter(None, xs)` — keep every truthy element, no call.
+2. A callee that's a declared LOCAL of the callable ctype (may be an
+   empty/unset `std::function` at runtime, e.g. a parameter defaulting
+   to `None` that's never passed) — guarded with the callable's own
+   `operator bool()` via a `TernaryExpr`, falling back to plain element
+   truthiness when empty, so a real no-filter call site (`Sectioned.
+   read(source)`, line 606 — no `filter_=` passed) doesn't throw
+   `std::bad_function_call`.
+3. A statically-known real callable (module-level function reference,
+   `str.strip`, ...) — always called, no guard.
+Every truthiness check reuses the existing `UnaryOp('not')` case's
+char*-aware truthiness logic (`not not x`, i.e. two negations) rather
+than a raw C++ `!!ptr`, so a filtered string is judged by Python's real
+"non-empty" rule, not pointer-non-null (the same emptiness-vs-null
+distinction that case's own docstring already documents for `not`).
+
+**This file's OWN `filter_` parameter is NOT case 2/3 in practice**:
+`Sectioned.read(text, filter_=None)`'s `filter_` parameter has NO
+static type annotation, and this codegen's general parameter-ctype
+resolver (`_param_ctype`, `gimple_gen_funcs.py`) has no usage-based
+callable-parameter inference at all (the existing `_CPP_CALLABLE_
+CTYPE`/`_CPP_CALLABLE_CTYPE_1ARG` machinery only classifies a locally
+ASSIGNED value, e.g. `getpos = lambda: ...`, never a bare function
+PARAMETER) — so `filter_` resolves to the generic `int64_t` box, not a
+callable ctype. My new `filter()` case correctly detects this (ctype
+lookup misses the callable-ctype check) and falls through to case 3's
+plain "always call it" path, which in turn hits the pre-existing
+declared-callable-local CallExpr case, which ALSO requires the callable
+ctype — so the refusal is now precise and honest: `read: a call to
+unresolved callee 'filter_(...)' is not supported...` (moved from
+`'filter(...)'` to `'filter_(...)'` — a strictly narrower, more
+accurate refusal, not a regression: nothing that used to compile is now
+refused, and nothing is silently miscompiled).
+
+Widening `_param_ctype`/the coroutine-parameter-support step in
+`gimple_cpp_async.py` (~line 460) to usage-based callable-parameter
+inference (scan a function's body for `<param>(...)` call sites the way
+sorted()'s `key=` lambda inference already does locally, then type the
+parameter as `_CPP_CALLABLE_CTYPE_1ARG`) would close this specific gap,
+but is itself a change to the SHARED parameter-typing path used by
+every compiled function (not just coroutine bodies) — real, scoped
+follow-up work, not attempted this session per the "no risky broad
+change to shared machinery" guidance. Per this task's own framing
+("if map()/filter() with a genuinely dynamic/runtime callable value
+turns out to need a different, harder mechanism ... it's fine to leave
+those refused"), this is exactly that harder-mechanism case, left
+honestly refused.
+
+The OTHER two previously-documented gaps
+(`_convert_egg_info_reqs_to_simple_reqs`'s nested-def/closure
+compilation; foreign-module `Pair(...)` struct construction) are
+unaffected and unchanged — still feature-sized, not attempted.
+
+Full gate run clean after this change: `test_gimple.py` 264/264,
+`test_module_cache.py` 76/76 (both unaffected by the `filter()`
+addition — no existing test exercises this shape yet). Doc kept open —
+module still does not compile end-to-end.
+
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, unchanged)
+
+Fresh isolated `gimple_codegen.compile_to_gimple_with_cpp(do_imports=
+False)` probe: byte-identical refusal to every prior entry —
+`_convert_egg_info_reqs_to_simple_reqs` on unresolved callee
+`url_req_space(...)` (a nested `def` called from its loop), `Sectioned.
+read` on unresolved callee `map(...)`. Both are genuine subsystem gaps
+(closure/nested-def lifting into the scalar coroutine-body model;
+first-class callable-value builtins like `map`/`filter`/`str.strip`),
+neither a narrow whitelist add. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
 
 This session implemented real loop-as-expression codegen for `list(x)`/

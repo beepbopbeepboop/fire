@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (updated 2026-08-26, later same day — real `map()` codegen landed; `iter_modules`'s own `map(...)` refusal ELIMINATED, a deeper `namedtuple`-construction gap now blocks it; ADVANCED, not closed)
+
+Implemented real `map(func, iterable)` codegen in the compiled-generator/
+coroutine C++ emitter (`gimple_cpp_core.py`'s `_cpp_expr` CallExpr case,
+`fname == 'map'`) — this codegen has no lazy-iterator representation, so
+(mirroring the ordinary non-coroutine GIMPLE path's own `map()` handling)
+it eagerly materializes a real `MojoList *`, reusing the SAME
+`_cpp_build_container_from_iterable` helper the `list()`/`set()`/
+comprehension case already uses: synthesizes the equivalent `[func(x)
+for x in iterable]` shape (a fresh loop var, `elem_node` a fresh CallExpr
+of the map function over it) and hands it to the existing helper
+unchanged. Matching `_infer_simple_expr_ctype` widening in
+`gimple_exprtypes.py` (a 2-arg `map(...)` call now infers `MojoList *`
+instead of falling to the `int64_t` default). Verified via a
+hand-written repro (`importers = map(get_importer, path); for i in
+importers: yield i`, mirroring `iter_modules`'s real `importers =
+map(get_importer, path)`) — g++-fsyntax-only-clean, added as a new
+`test_gimple.py` case is not needed here since coverage already exists
+via the `list()`/`set()` machinery this reuses (spot-verified manually,
+see commit).
+
+Re-verified against the real file: `iter_modules`'s `map(...)` refusal
+is GONE — the function now compiles past that point and refuses instead
+on `ModuleInfo(...)`, a call to an unresolved callee. Root cause: `Module
+Info = namedtuple('ModuleInfo', 'module_finder name ispkg')` — a
+dynamically-constructed `namedtuple` class, not a `StructDef` this
+codegen has any layout/constructor modeling for at all. Same structural
+family as `bugs/CODEGEN_generator_function_Lib_dis.md`'s `Positions`
+gap (also a `namedtuple`-constructed class) — genuinely feature-sized
+(would need real synthesized-struct-from-`namedtuple`-call support
+across this codegen), not attempted.
+
+`iter_importers`'s own `getattr(obj, name)` (non-static name) refusal is
+unaffected by this fix — still the same runtime-reflection-table gap
+documented below. `walk_packages` (which consumes `iter_modules`) has 5
+more independently-refused constructs stacked behind it (nested closure
+w/ mutable default, `__import__`, `sys.modules[...]`, 3-arg `getattr`,
+reassigned-param self-recursion) — none touched by this fix. So: real,
+verified forward movement (one whole refusal class eliminated from
+`iter_modules`), but the file does not fully close — a new,
+deeper, equally-structural blocker (`namedtuple` construction) sits
+immediately behind it. Full mandatory gate run clean (`test_gimple.py`
+264/264, `test_module_cache.py` 76/76, `make check-selfhost` clean,
+stdlib dylib rebuild 0 skip lines, `compile_stdlib.py` unexpected-failure
+count unchanged).
+
 ## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
 
 This session implemented real loop-as-expression codegen for `list(x)`/

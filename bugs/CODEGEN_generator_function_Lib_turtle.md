@@ -1,5 +1,45 @@
 # CODEGEN_generator_function: Lib/turtle.py
 
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch; same conclusion, generator codegen is not this file's blocker)
+
+Fresh, independent re-verification (not just trusting the 2026-08-25
+entry below):
+
+- Isolated `compile_to_gimple_with_cpp(do_imports=False)` on the real
+  turtle.py + `g++-mp-15 -std=c++20 -fsyntax-only`: **0 errors**,
+  confirming all 3 of turtle.py's own generator sites still compile
+  cleanly through the coroutine path.
+- Attempted a real whole-program `python3 mojo.py build
+  .../Lib/turtle.py` under this session's mandated wall-clock/RSS
+  watcher: RSS stayed low (<1GB, no runaway) but the build was still
+  running (working through the transitively-imported `collections`/
+  `inspect` fallback compiles, no turtle.py-attributed error lines
+  emitted yet) at the 300s safety cap — killed there, consistent with
+  this doc's own long-documented "over an hour wall-clock" perf note
+  for this file's whole-program build. No turtle.py-own error signal
+  was visible in the ~280s of output captured before the kill.
+- Checked whether the "cross-module operator-symbol resolution
+  (`operator_lt_1ce6ce`/`operator_mojo_abs_0c85c9`)" line item from the
+  entry below is actually the OLD, already-fixed
+  `CODEGEN_generator_function_symbol_not_module_qualified.md` gap
+  (confirmed deleted, i.e. fixed, back in 2026-08-07) or a genuinely
+  different remaining bare-name/suffix collision: `bugs/hard/
+  CODEGEN_generator_function_symbol_not_module_qualified.md` no longer
+  exists on disk (fixed+removed), so this is a distinct, still-open
+  collision shape — but per the 2026-08-25 entry's own framing this is
+  a non-generator, out-of-scope-for-this-doc symptom (it doesn't touch
+  turtle.py's `yield` sites at all), so not pursued further here; this
+  doc's OWN subject (generator codegen) has nothing left to fix.
+
+**Conclusion unchanged from 2026-08-25: turtle.py's generator codegen is
+fully resolved (0 isolated errors, all 3 sites clean).** The doc stays
+open only because the file's WHOLE-PROGRAM build still doesn't succeed,
+for reasons entirely outside this doc's scope (tkinter cascade, Vec2D
+tuple-subclass operator overloading, dynamic metaprogramming, a
+still-open but non-generator symbol-collision family, and one dead-code
+block) — none of which are narrow generator-codegen bugs to fix here.
+No code change; no gate run (nothing on the compiled path touched).
+
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; isolated own-code error count now ZERO (both .ci and .cpp), improvement landed via concurrent campaign work; whole-program build still fails on the tkinter cascade + documented non-generator families)
 
 Fresh verification, both halves:

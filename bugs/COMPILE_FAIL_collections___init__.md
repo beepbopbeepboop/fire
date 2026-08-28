@@ -1,6 +1,96 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (re-verified 2026-08-26, this session, master fast-forwarded to `9c0e7a8` — tried hard for a narrow fix per explicit task framing, none found; unchanged, both blockers confirmed genuinely structural)
+
+This pass was specifically asked to try hard for a narrow fix here,
+since a fix might have outsized value for other docs blocked on the
+same Counter/OrderedDict dict-subclass gap. Fresh isolated
+`compile_to_gimple_with_cpp` probe confirms the SAME first blocker as
+every prior session: the three `__reversed__` generator methods refuse
+on unresolved callee `reversed(...)`.
+
+Traced `self._mapping` (the `reversed(self._mapping)` receiver in
+`_OrderedDictItemsView`/`_OrderedDictValuesView`, and `_OrderedDictKeysView.
+__reversed__`'s `yield from reversed(self._mapping)`) to its actual
+origin: `_mapping` is never assigned anywhere in THIS file at all — it's
+set by `_collections_abc.MappingView.__init__(self, mapping): self.
+_mapping = mapping` (`Lib/_collections_abc.py:835`), a DIFFERENT module,
+inherited by `_OrderedDictKeysView(_collections_abc.KeysView)` etc. The
+`mapping` parameter has no annotation, so this codegen's cross-module
+self-attr field-type scan boxes it as the generic `int64_t` default —
+this is why `_mapping`'s inferred field type is scalar `'int'`, not a
+real `OrderedDict *`/`MojoDict *`: it isn't a same-module unannotated-
+param quirk, it's a genuinely CROSS-MODULE inherited-`__init__` field
+whose type evidence lives in a different file's AST entirely.
+
+This means even a full, general `reversed(<arbitrary-typed local>)` ->
+`<expr>.__reversed__()` delegation implementation (the mechanism
+wtRest19b's 2026-08-26 entry below already scoped out as 3 sub-steps of
+real work) would NOT fix this file: `self._mapping` would still resolve
+to a scalar `int64_t`, with no real `OrderedDict` struct pointer behind
+it to delegate onto in the first place. The actual blocking gap is one
+level deeper than `reversed()` itself — it's cross-module inherited-
+field type propagation for a base class's own `__init__`-assigned
+`self.<field>` (a distinct, unexplored gap from anything previously
+attributed to this doc's "reversed() lowering" framing). Fixing THAT
+generically (making the self-attr scan follow inheritance across module
+boundaries to find `_mapping`'s real assigned type) is itself broad,
+cross-cutting type-inference machinery — squarely the class of change
+this project's history already flags as high-regression-risk when
+attempted narrowly (the `_tuplegetter` incidents), and per this task's
+own explicit instruction NOT to force a risky broad change to shared
+subscript/type-inference machinery for this doc. Not attempted.
+
+Confirmed (via `git stash`-style A/B, matching prior sessions'
+methodology) that Counter's `Counter[...] = ...` dict-subclass
+subscript-store gap remains completely unaffected by anything landed
+this session (`filter()` coroutine-body support — see
+COMPILE_FAIL_importlib_metadata___init__.md — is unrelated to dict-
+subclass storage). Its status is unchanged from the 2026-08-23 root-
+cause writeup below (no backing MojoDict field, its own method names
+misregistered as int fields by the self-attr scan, no `__getitem__`/
+`__setitem__`) — real support needs builtin-dict-subclass storage
+synthesis + inherited container-method dispatch + `__missing__`, still
+feature-sized. Doc stays open on both blockers; no code change for this
+file specifically.
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
+
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch; both stacked blockers confirmed, no narrow fix found)
+
+Per this round's explicit instruction, tried hard to find a real narrow
+fix here given this doc's outsized value (the Counter/OrderedDict
+dict-subclass subscript-store gap blocks several other bugs
+project-wide). Fresh isolated `compile_to_gimple_with_cpp(do_imports=
+False)` probe: byte-identical to every prior entry — three
+`__reversed__` generator methods refuse first on `reversed(self.
+_mapping)`: "a call to unresolved callee 'reversed(...)' is not
+supported in a compiled generator/coroutine body". Confirmed directly
+in `gimple_cpp_core.py` (~line 5325-5345): the coroutine-body emitter
+only special-cases `reversed(range(...))`/`reversed(range(start,
+stop))` inside a `for` statement's iterable position — there is no
+general `reversed(<expr>)`-as-callee case, and no dunder-dispatch
+rewrite to `<expr>.__reversed__()`. Building that (recognizing the
+builtin, generalizing the sub-generator delegation receiver beyond the
+hardcoded `self` literal, and threading it through the for-loop
+delegate-detection path too) is real subsystem work, not a one-line
+whitelist add — matches every prior session's conclusion.
+
+Did not stop there: experimentally neutralizing the three
+`__reversed__` bodies (to look one layer deeper, as the doc's own
+established methodology does) still surfaces the Counter dict-subclass
+`Counter[...] = ...` subscript-store refusal next — `class Counter
+(dict)` has no backing MojoDict field (`Counter.__init__` never
+allocates one) and its `values`/`items`/`get` methods get misregistered
+as int fields by the self-attr scan, so `self[elem] += count` has no
+correct lowering. Fixing this specific instance narrowly (special-
+casing `Counter` by name) would be exactly the kind of parallel-
+implementation hack CLAUDE.md's Code Quality rule forbids; the honest
+fix is general builtin-dict-subclass storage synthesis (constructor
+backing-store allocation + inherited container-method dispatch +
+`__missing__`), which is the same feature-sized gap this doc has
+tracked since 2026-08-23. No narrow fix found for either blocker. No
+code change; doc stays open.
 
 ## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
 

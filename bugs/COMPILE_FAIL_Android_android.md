@@ -1,8 +1,45 @@
 # COMPILE_FAIL: Android/android.py
 
+## Status (re-verified 2026-08-26, this session, master fast-forwarded to `9c0e7a8` — DOCUMENTED-NOT-FIXED, unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp` probe (post this session's own
+`filter(func, iterable)` coroutine-body codegen addition, gimple_cpp_
+core.py/gimple_exprtypes.py — see COMPILE_FAIL_importlib_metadata___
+init__.md's 2026-08-26 entry). Byte-for-byte identical refusal: the same
+10 `async def` functions + `async_process` async generator, all rejected
+by `_async_quick_eligible`'s await-shape pre-filter before any per-
+function translation attempt (`create_subprocess_exec(...)`, `process.
+communicate()`/`.wait()`, `stream.readexactly(...)`, a local `wait_for`
+helper — none recognized). `filter()` is unrelated to this file's
+blocker (no `filter(...)` calls anywhere in android.py). Confirmed
+independently: real async-subprocess/stream I/O composition is a
+genuine, feature-sized Awaitable-protocol extension to the async
+codegen's suspension machinery, not a narrow fix — same conclusion as
+every prior session across this campaign. Not attempted (would require
+a new scheduler primitive: allocatable Future/pipe handles with waiter
+queues and cross-coroutine wakeup, the same shared-machinery scope
+`COMPILE_FAIL_asyncio_queues.md` documents in detail). No change.
+
 Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, unchanged)
+
+Re-read `_async_quick_eligible` (`gimple_exprtypes.py:184-255`) directly
+rather than trusting prior doc conclusions, then ran a fresh isolated
+`gimple_codegen.compile_to_gimple_with_cpp(do_imports=False)` probe.
+Byte-for-byte identical refusal to every prior entry: the same 10
+`async def` functions + `async_process` async generator. Confirmed from
+the source itself that the whitelist covers only `asyncio.sleep(...)`,
+calls to already-compiled sibling `async def`s, `asyncio.sock_recv(fd)`,
+`create_task(...)`/`create_raising_task(...)`, and comptime-bracket
+nested-async calls — `create_subprocess_exec(...)`,
+`process.communicate()`/`.wait()`, `stream.readexactly(...)`, and a
+local `wait_for` helper are all genuinely outside it. Widening this to
+real subprocess/stream async I/O composition is the same feature-sized
+Awaitable-protocol gap as `COMPILE_FAIL_asyncio_queues.md`. Not
+attempted; no code change.
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — DOCUMENTED-NOT-FIXED, unchanged)
 

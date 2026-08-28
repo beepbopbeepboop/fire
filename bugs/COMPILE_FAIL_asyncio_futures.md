@@ -1,5 +1,40 @@
 # COMPILE_FAIL: asyncio/futures.py
 
+## Status (updated 2026-08-27/28 — the link-mode module-value gap below is FIXED; ADVANCED, not closed: a separate, pre-existing, out-of-scope transitive gap remains)
+
+Implemented the fix this doc's own prior entry precisely specified:
+`gimple_gen_resolve.py`'s `_register_link_imports`, in the "not a
+concrete export" branch for a `from PKG import SUBMODULE`-bound name,
+now checks `gen._from_import_name_is_submodule(stmt.module, name)` and
+routes the submodule into `gen._link_inline_modules` (the SAME fallback
+mechanism nearby branches already use for a module this scan couldn't
+otherwise link against) — this inline-compiles the submodule into the
+same translation unit, which naturally populates `func_return_types`
+for all its top-level defs via the normal `imported_stmts` machinery, so
+a later bare-value read (`isfuture = base_futures.isfuture`) resolves
+through `_lower_MemberExpr`'s existing `node.member in
+gen.func_return_types` branch instead of falling through to the
+AttributeError.
+
+Verified via a minimal 2-file package repro (`pkg/base.py`: `def
+isfuture(x): return True`; `pkg/main.py`: `from . import base;
+isfuture = base.isfuture; ...; isfuture(1)`) — this exact shape
+previously reproduced the `AttributeError: isfuture` crash; with the
+fix it now builds AND runs correctly (`./main` prints `yes`, exit 0).
+
+Re-verified against the real file: `python3 mojo.py build
+.../Lib/asyncio/futures.py` no longer reaches the `isfuture` crash —
+the `from . import base_futures` / `isfuture = base_futures.isfuture`
+shape this doc tracks is resolved. The whole-program build still does
+not complete within the 300s safety window: it now spends its budget
+falling back to interpreting `collections/__init__.py` and `inspect.py`
+from source, both blocked by the separately-tracked, explicitly
+out-of-scope `Counter[...] = .../OrderedDict[...] = ...` dict-subclass
+subscript-store gap (see `bugs/COMPILE_FAIL_collections___init__.md`).
+That gap is unrelated to this doc's own tracked blocker and pre-dates
+this fix. Doc stays open (file doesn't build end-to-end within budget)
+but the LINK-MODE MODULE-VALUE GAP THIS DOC TRACKS IS CLOSED.
+
 ## Status (re-verified 2026-08-26, this session — runtime residual root-caused MORE PRECISELY, not fixed)
 
 Fresh `python3 mojo.py build .../Lib/asyncio/futures.py`: still exits

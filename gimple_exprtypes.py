@@ -673,6 +673,61 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # to whatever this function already did for it.)
         if e.func.name in ('list', 'set') and len(e.args) == 1 and not e.kwargs:
             return 'MojoList *' if e.func.name == 'list' else 'MojoSet *'
+        # `map(func, iterable)` — materialized eagerly as a real `MojoList
+        # *` by this same mechanism (see `_cpp_expr`'s CallExpr/'map' case,
+        # gimple_cpp_core.py), the same simplification the ordinary
+        # (non-coroutine) GIMPLE path's own map() handling already makes
+        # (this runtime has no lazy-iterator representation, so `map()`
+        # is only ever consumed as a fully-realized container). Without
+        # this, `x = map(f, y)` fell through to the int64_t default below.
+        if e.func.name == 'map' and len(e.args) == 2 and not e.kwargs:
+            return 'MojoList *'
+        # `filter(func, iterable)` — same eager-materialization simplification
+        # as `map()` just above (see `_cpp_expr`'s CallExpr/'filter' case,
+        # gimple_cpp_core.py). Without this, `lines = filter(f, y)`
+        # (importlib/metadata/__init__.py's `Sectioned.read`) fell through
+        # to the int64_t default below.
+        if e.func.name == 'filter' and len(e.args) == 2 and not e.kwargs:
+            return 'MojoList *'
+        # `next(x)` where `x` resolves to a known struct pointer (`self`,
+        # or a bare local/param of a known struct type) that implements
+        # the iterator protocol on itself (`__next__` a real compiled
+        # struct method) — mirrors `_cpp_expr`'s matching CallExpr/'next'
+        # case (gimple_cpp_core.py), which already lowers `next(x)` to
+        # `x.__next__()` for exactly this shape. That EMITTER case existed
+        # with no matching type-ESTIMATOR case here, so a first-assigned
+        # local/yield-value like imaplib.py's `Idler.burst`: `yield next(
+        # self)` always defaulted to the int64_t fallback below instead of
+        # the real `__next__` return type — see
+        # CODEGEN_generator_function_Lib_imaplib.md. Resolved the same way
+        # every other struct-method-call return type is here: `method_
+        # return_types` (== `self.func_return_types`), keyed
+        # `f"{struct_name}___next__"` exactly like the ordinary GIMPLE
+        # path's own `x.__next__()` call site already resolves it.
+        if (e.func.name == 'next' and len(e.args) == 1 and not e.kwargs
+                and method_return_types is not None):
+            _next_arg = e.args[0]
+            if isinstance(_next_arg, IdentExpr) and _next_arg.name == 'self':
+                recv_ctype = self_struct_ctype
+            else:
+                recv_ctype = _infer_simple_expr_ctype(
+                    _next_arg, known, self_fields, async_api, closure_api,
+                    known_structs, dict_val_types, method_return_types,
+                    fn_return_types, self_struct_ctype=self_struct_ctype)
+            if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
+                rt = method_return_types.get(f"{recv_ctype[:-2]}___next__")
+                # `__next__` returning a real container (a tuple return —
+                # e.g. imaplib.py's `Idler.__next__`: `return typ, data`,
+                # boxed as `MojoList *` the same way any other tuple
+                # return already is) is just as legitimate a promise
+                # value type as a scalar or a known struct pointer — the
+                # scalar-only check above and the struct-pointer-only
+                # `_is_known_struct_ptr_ctype` check below both miss it.
+                if rt in ('int64_t', 'double', '_Bool', 'char *',
+                          'MojoList *', 'MojoDict *', 'MojoSet *'):
+                    return rt
+                if _is_known_struct_ptr_ctype(rt, known_structs):
+                    return rt
         if known is not None and e.func.name in known:
             # A call through a declared CALLABLE-VALUE local (`getpos()`,
             # where `getpos`'s own storage type is `_CPP_CALLABLE_CTYPE` —

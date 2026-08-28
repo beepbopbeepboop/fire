@@ -1,5 +1,40 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (re-verified 2026-08-26, this session, master fast-forwarded to `9c0e7a8` — DOCUMENTED-NOT-FIXED, unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp` probe of `Lib/asyncio/
+queues.py` directly (bypassing the transitive-import path so the
+module's OWN refusal is reached, not the collections/inspect fallback
+noise the whole-tree `mojo.py build` run hits first). Byte-for-byte
+identical refusal to every prior pass: `function(s) get, join, put
+(async function(s), declared async def)` — `_async_quick_eligible`'s
+await-shape pre-filter rejects all three before any translation is
+attempted (`await <local Future variable>` for `get`/`put`, `await
+self._finished.wait()` — a bound-method call — for `join`). This
+session's own landed change (real `filter(func, iterable)` coroutine-
+body codegen, see COMPILE_FAIL_importlib_metadata___init__.md) touches
+only the generator-body CallExpr emitter, nowhere near the async
+pre-filter; confirmed unrelated. Closing this needs the real Awaitable
+protocol (allocatable Future/Event handles with waiter queues and
+cross-coroutine wakeup) — a feature-sized asyncio-runtime project,
+explicitly out of scope per this campaign's own repeated conclusion
+across a dozen+ independent sessions. Not attempted. Doc kept open.
+
+## Status (re-verified 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, unchanged)
+
+Re-read `_async_quick_eligible` (`gimple_exprtypes.py:184-255`) directly,
+then ran a fresh isolated `gimple_codegen.compile_to_gimple_with_cpp(
+do_imports=False)` probe against this file only (bypassing the
+transitive-import fallback that ate the whole 300s budget in the prior
+`mojo.py build`-driven entry below). Byte-for-byte identical refusal:
+`function(s) get, join, put (async function(s), declared async def)`.
+Confirmed from the whitelist source itself that `await <local Future
+variable>` (`putter`/`getter`) and `await <bound-method call>`
+(`self._finished.wait()`) are genuinely unrecognized shapes — closing
+them needs the real Awaitable protocol (allocatable Future/Event
+handles, waiter queues, cross-coroutine wakeup), a feature-sized
+asyncio-runtime project. Not attempted; no code change.
+
 ## Status (re-verified 2026-08-26, worktree fix/opencode-genlib2 — fresh bounded build confirms unchanged: entire 300s budget spent in transitive source-fallbacks, own refusal unreached)
 
 Fresh safety-watched `python3 mojo.py build .../Lib/asyncio/queues.py`

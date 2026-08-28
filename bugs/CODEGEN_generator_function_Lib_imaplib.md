@@ -1,5 +1,49 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-26, later same day — the exact symmetric fix this doc anticipated LANDED; blocker (2) resolved into the predicted mixed-yield refusal; ADVANCED, not closed)
+
+Implemented the fix the 2026-08-26 (opencode-genlib2) entry below already
+precisely specified: `gimple_exprtypes.py`'s `_infer_simple_expr_ctype`
+gained a `next(x)` CallExpr case (a single struct-pointer-typed arg —
+`self`, via `self_struct_ctype`, or any other known-struct-typed
+local/param) that resolves the same way the emitter's existing `next(x)`
+-> `x.__next__()` lowering already does: `method_return_types.get(
+f"{struct}___next__")`. First cut only accepted a scalar or a known
+user-struct-pointer return; had to widen it once more to also accept
+`__next__` returning a real CONTAINER (`MojoList *`/`MojoDict *`/
+`MojoSet *` — e.g. this file's own `Idler.__next__`, `return typ, data`,
+boxed as `MojoList *` the same way any tuple return already is), since
+neither the scalar list nor `_is_known_struct_ptr_ctype` (user structs
+only) covered it. Verified via 3 hand-written repros (`next(self)` on a
+`__next__` returning int, string, and a real 2-tuple respectively) —
+all g++-fsyntax-only-clean, the tuple case's promise correctly typed
+`MojoList *` instead of the old wrong `int64_t` default.
+
+Re-verified against the real file: `Idler.__next__`'s call site,
+`co_yield Idler___next__(self);`, now correctly types the promise
+`MojoList *` — **blocker (2) exactly as diagnosed is gone** (previously
+a genuine silent-miscompile risk: the promise was typed `int64_t` while
+the emitted expression was a real `MojoList*`, an invalid-pointer-to-int
+narrowing that only g++'s own `-fsyntax-only` stage caught, never this
+codegen's own Python-level checks). Exactly as the 2026-08-26 (opencode-
+genlib2) entry predicted, this immediately exposes `burst`'s OTHER yield
+site (`yield response` from `while response := self._pop(interval,
+None):`) disagreeing — `_pop` returns tuples across multiple return
+paths with no tuple-return-type representation for ordinary (non-
+generator) functions, the same structural gap `bugs/CODEGEN_generator_
+function_Lib_gettext.md` tracks as its own root cause #3 — so `burst`
+now refuses honestly ("every `yield` must carry a value, and all values
+must agree on one scalar type") instead of either the old miscompile
+risk or a clean compile. Net effect: a real correctness/safety
+improvement (miscompile -> honest refusal) plus the `next(x)`-yield-type
+mechanism itself is now generally available to any OTHER generator in
+the corpus with this shape, but `imaplib.py` itself does not newly
+compile — the cross-method tuple-return-coherence gap is feature-sized
+and not attempted. Full mandatory gate run clean (`test_gimple.py`
+264/264, `test_module_cache.py` 76/76, `make check-selfhost` clean,
+stdlib dylib rebuild 0 skip lines, `compile_stdlib.py` unexpected-failure
+count unchanged). Doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
