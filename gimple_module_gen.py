@@ -2085,13 +2085,36 @@ def gen_module_impl(self, stmts):
                         self._struct_init_defaults[s.name] = {
                             pn: dv for pn, dv in _init_defaults.items() if pn != 'self'}
                     if m.return_type is None:
+                        _mangled_key = f"{s.name}_{m.name}"
                         for i, (pname, ptype) in enumerate(m.params):
                             if pname == 'self':
+                                self.var_types[pname] = f"{s.name} *"
+                            elif (i == 0 and pname == 'cls'
+                                    and _mangled_key in self._classmethod_names):
+                                # `cls`, a real @classmethod's implicit first
+                                # param, statically names THIS enclosing
+                                # struct — mirrors the `self` seed just
+                                # above. Without this, `_quick_type`'s
+                                # return-type scan saw `cls` as an
+                                # unresolved bare identifier (falling to
+                                # the int64_t default), so a classmethod
+                                # whose body does `return cls.<method>(...)`
+                                # (Lib/tarfile.py's `TarInfo.fromtarfile`:
+                                # `return cls._fromtarfile(tarfile)`) never
+                                # got its real struct-pointer return type —
+                                # `_quick_type`'s existing
+                                # `gen.var_types.get(mod, '')`-based struct-
+                                # method-call resolution (used by ordinary
+                                # `obj.method(...)` calls) already handles
+                                # this correctly once `cls` is seeded the
+                                # same way `self` is; only the seed was
+                                # missing. See CODEGEN_generator_function_
+                                # Lib_tarfile.md.
                                 self.var_types[pname] = f"{s.name} *"
                             else:
                                 self.var_types[pname] = self._resolve_type(ptype)
                         inferred = self._infer_return_type(m.body)
-                        key = f"{s.name}_{m.name}"
+                        key = _mangled_key
                         if self.func_return_types.get(key) != inferred:
                             self.func_return_types[key] = inferred
                             _changed = True

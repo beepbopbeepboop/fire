@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-26, fresh independent re-derivation — confirmed unchanged)
+
+Re-derived from scratch: isolated `compile_to_gimple_with_cpp(do_imports=
+False)` on `Lib/shelve.py` alone compiles clean (`Shelf.__iter__`, its only
+generator, unaffected). This doc's real subject — whether the file's own
+generator code is a genuine generator-codegen-cluster failure — is
+conclusively NOT: shelve.py's own source has never contributed an error in
+any pass. The remaining blocker (whole-program `mojo.py build` failing via
+the transitively-imported `argparse.py`/`pickle.py`/`typing.py`/
+`_collections_abc.py` cascade, ~150 errors, none in shelve.py) is a large,
+unrelated, multi-file undertaking — fixing pickle.py/argparse.py's own bugs
+— genuinely out of scope for a "generator function" cluster task focused on
+shelve.py itself. Not attempted (same conclusion as every prior pass,
+independently re-confirmed rather than trusted). Doc stays open per
+convention (only a file whose full build 100% succeeds gets `git rm`'d).
+
 ## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch)
 
 Re-derived fresh via own isolated `compile_to_gimple_with_cpp(do_imports=

@@ -1,5 +1,84 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-26, fresh independent re-derivation — one real, narrow root-cause piece FIXED (`cls.method(...)` return-type inference); tarfile.py's own build still blocked by a SECOND, deeper piece of the same chain, precisely identified and NOT attempted)
+
+Re-derived this doc's own diagnosis from scratch (not just re-running the
+existing repro) via `compile_to_gimple_with_cpp(do_imports=False)` +
+`g++-mp-15 -std=c++20 -fsyntax-only`: confirmed byte-identical to the
+2026-08-26 entry below — `TarFile.__iter__`'s local `tarinfo` still unifies
+to `int64_t` (from `tarinfo = TarFile_next(self)`) against `char*` (the
+`yield from self.members` default), because `TarInfo_fromtarfile`'s real
+return type is still unresolved.
+
+Traced the chain one level deeper than any previous pass by directly
+inspecting `gen.func_return_types` for `TarInfo_fromtarfile`/
+`TarInfo__fromtarfile`/`TarFile_next` via a `_run_pipeline` script (not just
+reading the emitted `.cpp`). Found **two independent, stacked gaps**, not
+one:
+
+1. **No `cls.method(...)` return-type resolution in Pass 2b's
+   `_quick_type`-driven return-type-inference loop at all** — confirmed via
+   code reading (`gimple_module_gen.py`'s 4-round fixpoint loop, ~line
+   2087) and grep (`gen._classmethod_names`/`gen.func_return_types` have
+   zero cross-reference in `gimple_gen_resolve.py`'s `_quick_type`). The
+   loop seeds `self.var_types['self'] = f"{s.name} *"` for every method but
+   never seeds `cls` for a real `@classmethod`, so `_quick_type`'s EXISTING
+   `gen.var_types.get(mod, '')`-based struct-method-call resolution (the
+   same code an ordinary `obj.method(...)` call already uses) silently saw
+   `cls` as an untracked bare identifier and fell through to the `int64_t`
+   default for every `return cls.<method>(...)`-shaped classmethod body in
+   the corpus, not just tarfile.py.
+
+   **Fixed** (commit below): seed `self.var_types['cls'] = f"{s.name} *"`
+   in that same loop, gated on `f"{s.name}_{m.name}" in
+   self._classmethod_names` (the same set `@classmethod`/
+   `__init_subclass__`/`__class_getitem__` detection already populates) —
+   mirrors the pre-existing `self` seed exactly, adds no new resolution
+   mechanism, purely additive (only fires for a real detected classmethod's
+   literal first `cls` param). Verified via a debug trace that this now
+   correctly resolves `TarInfo.fromtarfile`'s own `return
+   cls._fromtarfile(tarfile)` to look up `TarInfo__fromtarfile` in
+   `func_return_types`, exactly like `self.foo()` already does for `foo`.
+
+2. **NOT fixed, root-caused precisely**: even with cls resolution seeded,
+   `TarInfo._fromtarfile`'s own body (`obj = cls._frombuf(...); obj.offset
+   = ...; return obj._proc_member(tarfile)`) still resolves to `int64_t`,
+   because Pass 2b's return-type scan (`_infer_return_type`/
+   `_collect_return_types`) only walks `ReturnStmt` nodes — it never
+   records the types of ordinary LOCAL VARIABLE ASSIGNMENTS
+   (`obj = cls._frombuf(...)`) into `var_types` during the same scan, so
+   `_quick_type(IdentExpr('obj'))` at the `return obj._proc_member(...)`
+   site has no entry for `obj` and falls to the `int64_t` default — this
+   is a distinct, genuinely open gap (Pass 2b has no local-variable
+   data-flow tracking at all, by design — it only ever sees a function's
+   OWN parameters plus its own return expressions). Confirmed directly:
+   `func_return_types['TarInfo__fromtarfile']` is still `'int64_t'` after
+   fix #1, across all 4 fixpoint rounds (traced with debug instrumentation,
+   removed before commit).
+
+   Extending Pass 2b to also track local-assignment types (even a narrow
+   single-hop version: "a bare `x = cls.method(...)`/`x = self.method(...)`
+   local, later returned unchanged") is a real, separate, non-trivial
+   extension to the SAME fixpoint machinery — the exact class of change
+   this project's convention flags as needing dedicated, wide verification
+   (this scan feeds `func_return_types` for every method in the whole
+   compiled program, not just TarInfo's). Not attempted here — genuinely
+   out of this pass's narrow-fix scope, left precisely diagnosed for
+   whoever picks it up next.
+
+**tarfile.py itself still does not build** — fix #1 is real, verified
+correct in isolation (a genuine, previously-entirely-missing case), and is
+kept because it fixes classmethod return-type inference broadly for the
+common `return cls.<method>(...)` idiom (not tarfile-specific), but it does
+not by itself change tarfile.py's build outcome; gap #2 above, plus the
+already-documented 5 whole-program-build residuals (SpecialFileError.tarinfo,
+bz2/lzma function-scoped-import cluster), remain.
+
+Full mandatory gate for fix #1: `test_gimple.py` 264/264, `test_module_cache.py`
+76/76; `make check-selfhost`, from-scratch stdlib dylib rebuild, and
+`compile_stdlib.py` run per this session's commit (see commit message for
+exact counts).
+
 ## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, byte-identical)
 
 Re-derived fresh via own isolated `compile_to_gimple_with_cpp(do_imports=

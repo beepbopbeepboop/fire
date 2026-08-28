@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-26, fresh independent re-derivation — confirmed unchanged, not just re-trusting the prior entry)
+
+Re-derived from scratch via a fresh `compile_to_gimple_with_cpp(do_imports=
+False)` + `g++-mp-15 -std=c++20 -fsyntax-only` repro (not the prior session's
+own script): `.ci` 0 errors; `.cpp` exactly the same 2 errors as every prior
+entry — `FTP_retrlines(self, cmd, (int64_t)(lines.append))` (gap #2,
+`lines.append` read as a bare callback VALUE, not called — `mojo_fnptr_call_1`
+has no context-pointer slot for a bound receiver, and unifying it with the
+`MojoBoundMethod`/`mojo_bound_method_call_N` ABI would need every plain-path
+callee taking a callback — including `retrlines`'s own default arg,
+`print_line`, a plain free function with no `self` — to accept the new
+convention: an ABI-wide change, not a self-contained one) and `(void)
+(0.partition(" "))` (gap #4, downstream of #2's unknown element type).
+Independently confirms this remains genuinely ABI-broad, not narrow. No code
+change made against this specific gap this pass (see this session's
+`gimple_module_gen.py` commit for an unrelated classmethod-return-type fix
+made while investigating `Lib_tarfile.md`, which does not touch ftplib.py's
+gap). Doc stays open, gaps #2-4 unchanged.
+
 ## Status (updated 2026-08-26, worktree agent-ae936147a68675d97 — independently re-derived from scratch, byte-identical)
 
 Re-derived fresh (own isolated `compile_to_gimple_with_cpp(do_imports=False)`
