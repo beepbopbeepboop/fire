@@ -3550,7 +3550,7 @@ class GimpleGen:
         return grsl._parse_fstring_parts(self, inner)
     def _repr_value(self, rat: str, rav: str) -> str:
         return grsl._repr_value(self, rat, rav)
-    def _decode_str_literal_text(self, val: str) -> tuple[str, bool]:
+    def _decode_str_literal_text(self, val: str) -> tuple[str, str]:
         return grsl._decode_str_literal_text(self, val)
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
         return grsl._stub_result(self, ctype, value, note)

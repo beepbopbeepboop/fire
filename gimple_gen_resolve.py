@@ -1961,9 +1961,23 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                             and len(node.value.elements) == len(targets)):
                         elem_types = [gen._quick_type(e) for e in node.value.elements]
                     else:
-                        # Unpacking a single iterable: per-element type is unknown
-                        # here; use the int64_t storage default, not the container.
-                        elem_types = ['int64_t'] * len(targets)
+                        # Unpacking a single iterable: per-element type is
+                        # unknown here; use the int64_t storage default.
+                        # EXCEPT `text, is_fstring = ..._decode_str_literal_
+                        # text(...)`, which returns `(char*, char*)` — the
+                        # `is_fstring` slot is genuinely a "" / "1" STRING
+                        # (see that helper's own docstring). Pre-typing it
+                        # int64_t here re-boxed the per-slot get_str result
+                        # into an int64_t local, so `if not is_fstring:`
+                        # tested pointer-non-null and an empty-string ""
+                        # pointer (non-null) read as truthy → every plain
+                        # literal took the f-string path and lost its text.
+                        _cv = node.value
+                        _is_decode = (
+                            isinstance(_cv, gimple_ctypes.CallExpr)
+                            and isinstance(_cv.func, gimple_ctypes.MemberExpr)
+                            and _cv.func.member == '_decode_str_literal_text')
+                        elem_types = [('char *' if _is_decode else 'int64_t')] * len(targets)
                 else:
                     targets = [node.target]
                     elem_types = [gen._quick_type(node.value)]
@@ -2218,7 +2232,7 @@ def _repr_value(gen, rat: str, rav: str) -> str:
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 
-def _decode_str_literal_text(gen, val: str) -> tuple[str, bool]:
+def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
     """Strip a raw StringLiteral.value's f/r/b/u/t prefix and outer quotes,
     returning (text, is_fstring). Shared by plain-string lowering, f-string
     interpolation, and `%`-style string-formatting (which needs the format
@@ -2232,35 +2246,29 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, bool]:
     while val and val[0] in 'fFrRbBuUtT':
         prefix += val[0]
         val = val[1:]
-    # If the remaining value starts with a quote, it still has quotes (f-string case)
-    # If not, the prefix-like characters were part of the string content — restore them
+    # mojo_compiler.py's Parser already strips the outer quotes from a plain
+    # (non-f/t-string) StringLiteral's value at tokenize time. So if what's
+    # left after the prefix walk does NOT start with a quote, it is a plain
+    # string whose content is final — return it verbatim (plus any
+    # prefix-like leading chars that turned out to be content, not a
+    # prefix). Do NOT re-run the quote strip below: a plain string whose
+    # CONTENT happens to start and end with a quote — this file's own
+    # `'"'` / `"'"` / `'"""'` / `"'''"` literals, and every user string
+    # like `"a "` — would otherwise be mangled ( `'"""'` → `''`, so once
+    # self-hosted `"anything".startswith(<that literal>)` matched and every
+    # user StringLiteral's text was stripped to "" in the emitted pool ).
     if not val or val[0] not in ('"', "'"):
-        val = prefix + val  # restore — these weren't string prefixes
-    else:
-        # These were actual prefixes — check for f-string/t-string marker
-        is_fstring = any(c in 'fFtT' for c in prefix)
-    # Strip outer triple or single quotes. mojo_compiler.py's Parser
-    # already strips quotes from a plain (non-triple, non-f/t-string)
-    # StringLiteral's value at tokenize time — this defensive re-strip
-    # exists for values that DIDN'T go through that (f/t-strings keep
-    # their prefix+quotes per the comment above; triple-quoted strings
-    # come back from the placeholder cache still fully quoted). The
-    # `len(val) >= 2` guard matters: a bare single-character value that
-    # happens to BE a quote character (e.g. this file's own `'"'` /
-    # `"'"` literals — a StringLiteral literally containing just a
-    # double- or single-quote) both start AND end with that same
-    # character, indistinguishable from "an already-quoted empty
-    # string" to the naive check below without a length floor — an
-    # actually-quoted value needs at least the two delimiter
-    # characters. Without the guard, `'"'` silently became the empty
-    # string, and worse, collided in the string-interning pool with
-    # `"'"` (also emptied out) — found via mojo_compiler.py's own
-    # `_strip_inline_comment`'s `c in ('"', "'", '\`')` never matching
-    # a real `"` once self-hosted, letting a `#` inside an f-string
-    # call argument get misread as a real comment start.
-    if val.startswith('"""') and val.endswith('"""'):
+        return prefix + val, ''
+    # val still carries quotes: an f/t-string (prefix has f/F/t/T) or a
+    # triple-quoted value handed back from the placeholder cache.
+    is_fstring = any(c in 'fFtT' for c in prefix)
+    # `len(val) >= 6` / `>= 2`: a value that IS just quote characters (`"""`,
+    # `"`, this file's own such literals) starts and ends with the quote but
+    # carries no delimited content — a real `"""x"""` is >= 7 chars (>= 6
+    # empty), a real `"x"` is >= 3 (>= 2 empty).
+    if len(val) >= 6 and val.startswith('"""') and val.endswith('"""'):
         val = val[3:-3]
-    elif val.startswith("'''") and val.endswith("'''"):
+    elif len(val) >= 6 and val.startswith("'''") and val.endswith("'''"):
         val = val[3:-3]
     elif len(val) >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
         val = val[1:-1]

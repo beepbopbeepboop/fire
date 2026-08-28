@@ -1505,8 +1505,17 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # boxed value] pair shape — carry the dict's value type through.
         # Look up from the ORIGINAL lowered value first (ov_c is a fresh
         # coercion temp with no value-type entry of its own).
-        gen._dict_items_val_elems[t] = (
-            gen._dict_val_types.get(ov_v) or gen._dict_val_types.get(ov_c) or 'int64_t')
+        _siv = gen._dict_val_types.get(ov_v) or gen._dict_val_types.get(ov_c)
+        if _siv is None and isinstance(arg0.func.obj, gimple_ctypes.MemberExpr) \
+                and isinstance(arg0.func.obj.obj, gimple_ctypes.IdentExpr):
+            # `sorted(self.FIELD.items())` — the dict's value type for a
+            # struct FIELD lives in _field_dict_val_types, not the local
+            # _dict_val_types map keyed by var/temp name.
+            _fsn = gimple_exprtypes._struct_name_of(
+                gen.var_types.get(arg0.func.obj.obj.name, ''))
+            if _fsn:
+                _siv = gen._field_dict_val_types.get(_fsn, {}).get(arg0.func.obj.member)
+        gen._dict_items_val_elems[t] = _siv or 'int64_t'
         return 'MojoList *', t
     at, av = gen.lower_expr(arg0)
     for a in node.args[1:]: gen.lower_expr(a)
