@@ -143,6 +143,22 @@ def _seed_selfhost_module_globals(self):
         self._global_c_decl_types.setdefault(_n, _cdecl)
 
 
+def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
+    """True if `_fn`'s body does `gen.<method> = ...` (Python monkey-patch of
+    a method on the GimpleGen param — the `_gen_stmt_TryStmt` emit-
+    interception idiom). Those functions must keep the param OPAQUE in the
+    closure pre-pass: typed as `GimpleGen *`, the nested closures capture a
+    real void method as a value and the reassignment / later calls don't
+    lower to valid C. try/except codegen already doesn't run natively, so
+    leaving it stubbed (as before) is no regression."""
+    for _n in _walk_ast(getattr(_fn, 'body', []) or []):
+        if (isinstance(_n, AssignStmt) and isinstance(_n.target, MemberExpr)
+                and isinstance(_n.target.obj, IdentExpr)
+                and _n.target.obj.name in _pnames):
+            return True
+    return False
+
+
 def _render_struct_typedef_body(struct_name, fields):
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
@@ -1446,6 +1462,17 @@ def gen_module_impl(self, stmts):
                             _dv_cls_early = self._annotation_dict_val_type(field.type_ann)
                             if _dv_cls_early is not None:
                                 self._global_dict_val_types[mangled] = _dv_cls_early
+                                # An annotated container class-attr
+                                # (`_str_pool: dict[str, str] = {}`) is ALSO
+                                # an instance field — the typed-assign loop
+                                # below skips it (already registered here),
+                                # so record its dict VALUE type for
+                                # `_lower_MemberExpr` field reads too, or
+                                # `for k, v in self._str_pool.items()`
+                                # unpacks `v` as int64 and `str()`s the
+                                # pointer (garbage `_slit_N` names).
+                                self._field_dict_val_types.setdefault(
+                                    s.name, {})[aname] = _dv_cls_early
             for field in s.fields:
                 _is_typed_assign = (isinstance(field, AssignStmt)
                                      and isinstance(field.target, IdentExpr)
@@ -1620,6 +1647,17 @@ def gen_module_impl(self, stmts):
                             else:
                                 ft = 'int'
                             found[fn] = ft
+                            # `self._str_pool: dict[str, str] = {}` in
+                            # __init__: capture the dict VALUE type from the
+                            # annotation so `for k, v in self._str_pool.
+                            # items()` unpacks `v` as `char *`, not int64
+                            # (int64 -> `str()` on the pointer -> garbage
+                            # `_slit_N` names in the emitted string pool).
+                            if ft == 'MojoDict *' and getattr(node, 'type_ann', None):
+                                _dv_sa = self._annotation_dict_val_type(node.type_ann)
+                                if _dv_sa is not None:
+                                    self._field_dict_val_types.setdefault(
+                                        s.name, {})[fn] = _dv_sa
                     elif isinstance(node, MultiAssignStmt):
                         for tgt in node.targets:
                             fn = _self_member(tgt)
@@ -3453,7 +3491,9 @@ def gen_module_impl(self, stmts):
                 continue
             _outer_scope2 = {}
             for _pname, _ptype in (_od.params or []):
-                _outer_scope2[_pname] = self._resolve_type(_ptype)
+                _sh_ct2 = (None if _selfhost_fn_reassigns_method(_od)
+                           else _ggf_dup._selfhost_gen_self_param_ctype(self, _pname, _ptype, _od))
+                _outer_scope2[_pname] = _sh_ct2 or self._resolve_type(_ptype)
             for _inner in _od.body:
                 if not (isinstance(_inner, FunctionDef) and id(_inner) in _async_fns):
                     continue
@@ -3870,11 +3910,30 @@ def gen_module_impl(self, stmts):
                 name = bstmt.target.name
                 if name not in enriched_scope:
                     t = self._quick_type(bstmt.value)
+                    # `original_emit = gen._emit` (a method taken as a value —
+                    # the `_gen_stmt_TryStmt` emit-interception idiom): the
+                    # body lowers this to a `MojoBoundMethod *` (see
+                    # `_lower_bound_method_value`), but `_quick_type` reports
+                    # the method's own return type (`void` / `int64_t`). A
+                    # mismatched — or `void` — capture makes the env-struct
+                    # field disagree with the body's local (hard C error).
+                    if (isinstance(bstmt.value, MemberExpr)
+                            and isinstance(bstmt.value.obj, IdentExpr)
+                            and self.var_types.get(bstmt.value.obj.name, '').endswith(' *')):
+                        _bmv_owner = gimple_exprtypes._struct_name_of(
+                            self.var_types[bstmt.value.obj.name])
+                        if (f"{_bmv_owner}_{bstmt.value.member}" in self.func_return_types
+                                and bstmt.value.member not in self.struct_field_types.get(_bmv_owner, {})):
+                            t = 'MojoBoundMethod *'
+                    if t == 'void':
+                        t = 'int64_t'
                     enriched_scope[name] = t
                     self.var_types[name] = t
             elif isinstance(bstmt, VarDecl):
                 if bstmt.name not in enriched_scope:
                     t = self._quick_type(bstmt.value) if bstmt.value else 'int64_t'
+                    if t == 'void':
+                        t = 'int64_t'
                     enriched_scope[bstmt.name] = t
                     self.var_types[bstmt.name] = t
         self.var_types = _saved_vt2
@@ -3978,7 +4037,9 @@ def gen_module_impl(self, stmts):
         if isinstance(s, FunctionDef):
             outer_scope: dict = {}
             for pname, ptype in s.params:
-                outer_scope[pname] = self._resolve_type(ptype)
+                _sh_ct = (None if _selfhost_fn_reassigns_method(s)
+                          else _ggf_dup._selfhost_gen_self_param_ctype(self, pname, ptype, s))
+                outer_scope[pname] = _sh_ct or self._resolve_type(ptype)
             _saved_vt = dict(self.var_types)
             self.var_types.update(outer_scope)
             for stmt in s.body:
