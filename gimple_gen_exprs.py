@@ -858,6 +858,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 raw_ptr = gen._new_val(c_decl_type, f'{field_ref}')
                 vp = gen._new_val('void *', f'(void *){raw_ptr}')
                 gen._emit(f'  {t} = (int64_t){vp};')
+            elif ctype.endswith(' *') and c_decl_type == 'int64_t':
+                # A pointer-semantic global (`char *` — e.g. a boxed path
+                # string like gimple_codegen._SELFHOST_DIR) stored in a boxed
+                # `int64_t` field: cast the load back to its real type so a
+                # later string op / `==` on `t` isn't a bare integer compare.
+                gen._emit(f'  {t} = ({ctype}){field_ref};')
             else:
                 gen._emit(f'  {t} = {field_ref};')
             return ctype, t

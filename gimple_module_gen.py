@@ -40,6 +40,109 @@ import gimple_codegen
 import gimple_gen_funcs as _ggf_dup
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _emitted_unresolved_stub_syms, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
+_SELFHOST_MODGLOBAL_CACHE: dict = {}
+
+
+def _selfhost_modglobal_is_pathcall(_v) -> bool:
+    """`os.path.<fn>(...)` (any nesting) — a char*-producing path expression."""
+    if not isinstance(_v, CallExpr):
+        return False
+    _f = _v.func
+    if (isinstance(_f, MemberExpr) and isinstance(_f.obj, MemberExpr)
+            and isinstance(_f.obj.obj, IdentExpr)
+            and _f.obj.obj.name == 'os' and _f.obj.member == 'path'):
+        return True
+    if isinstance(_f, MemberExpr) and isinstance(_f.obj, IdentExpr) and _f.obj.name == 'os':
+        return True
+    return False
+
+
+def _selfhost_module_scalar_globals(sd: str) -> dict:
+    """`{global_name: (module_name, semantic_ctype, c_decl_ctype)}` for every
+    top-level `NAME = <int|str|bool literal>` / `NAME = frozenset(...)` /
+    `NAME = {set literal}` assignment across this compiler's own sibling
+    `.py` modules.
+
+    Used as a pre-pass (see gen_module_impl's `_emit_imported_global_
+    accessors` call site) to seed `_global_to_module` / `_global_var_types`
+    BEFORE any function body is lowered. The gimple_codegen ↔ gimple_gen_*
+    import cycle otherwise lowers a `gimple_codegen.STRING_POOL_BASE`-style
+    qualified module-global read inside a dependency's body before
+    gimple_codegen's own `_gscan_declare_global` has run — the read then
+    falls to a NULL dynamic getattr (AttributeError / segfault) in the
+    compiled compile_to_gimple. Only literal / frozenset RHS shapes are
+    seeded: those are exactly what `_gscan_declare_global` itself would
+    conclude for the same assignment, so the pre-seed can never disagree
+    with the eventual per-module scan."""
+    import glob as _glob
+    _files = sorted(_glob.glob(os.path.join(sd, 'gimple_*.py'))
+                    + [os.path.join(sd, n) for n in
+                       ('mojo_compiler.py', 'module_loader.py', 'monomorphize.py',
+                        'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',
+                        'reflect.py', 'mlir.py', 'regex_compile.py', 'cas.py',
+                        'elaborate.py', 'myinterpreter.py')])
+    _files = [f for f in _files if os.path.isfile(f)]
+    _key = tuple((f, os.path.getmtime(f)) for f in _files)
+    _hit = _SELFHOST_MODGLOBAL_CACHE.get('k')
+    if _hit is not None and _hit[0] == _key:
+        return _hit[1]
+    # Home-side C-decl for a container module global is `int64_t` (boxed)
+    # UNLESS it is one of gen_module_impl's hardcoded dispatch tables (which
+    # get a bare `MojoDict *` / `MojoSet *` field). Skip those names so the
+    # pre-seed can never disagree with the home's field/accessor type.
+    _dispatch_only = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_TYPE_MAP',
+                      '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
+    _out: dict = {}
+    for _f in _files:
+        _mod = os.path.splitext(os.path.basename(_f))[0]
+        try:
+            _stmts = ast_rewriter.rewrite(
+                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
+        except Exception:
+            continue
+        for _s in _stmts:
+            if not (isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr)):
+                continue
+            _n, _v = _s.target.name, _s.value
+            if _n in _out or _n in _dispatch_only:
+                continue
+            if isinstance(_v, IntLiteral):
+                _out[_n] = (_mod, 'int', 'int64_t')
+            elif isinstance(_v, BoolLiteral):
+                _out[_n] = (_mod, '_Bool', '_Bool')
+            elif isinstance(_v, StringLiteral):
+                _out[_n] = (_mod, 'char *', 'char *')
+            elif isinstance(_v, (SetExpr,)) or (
+                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
+                    and _v.func.name in ('frozenset', 'set')):
+                _out[_n] = (_mod, 'MojoSet *', 'int64_t')
+            elif isinstance(_v, DictExpr) or (
+                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
+                    and _v.func.name in ('dict', 'Dict')):
+                _out[_n] = (_mod, 'MojoDict *', 'int64_t')
+            elif isinstance(_v, (ListExpr, TupleExpr)) or (
+                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
+                    and _v.func.name in ('list', 'List')):
+                _out[_n] = (_mod, 'MojoList *', 'int64_t')
+            elif _selfhost_modglobal_is_pathcall(_v):
+                # `_SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))`
+                # and similar — a char* path string. Home emits an int64_t
+                # (boxed) accessor.
+                _out[_n] = (_mod, 'char *', 'int64_t')
+    _SELFHOST_MODGLOBAL_CACHE['k'] = (_key, _out)
+    return _out
+
+
+def _seed_selfhost_module_globals(self):
+    """Populate the shared `_global_to_module` / `_global_var_types` /
+    `_global_c_decl_types` from `_selfhost_module_scalar_globals` — see that
+    helper's docstring."""
+    for _n, (_mod, _sem, _cdecl) in _selfhost_module_scalar_globals(_SELFHOST_DIR).items():
+        self._global_to_module.setdefault(_n, _mod)
+        self._global_var_types.setdefault(_n, _sem)
+        self._global_c_decl_types.setdefault(_n, _cdecl)
+
+
 def _render_struct_typedef_body(struct_name, fields):
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
@@ -409,6 +512,20 @@ def gen_module_impl(self, stmts):
     self._link_import_decl_list = list(self._link_import_decl_list)
     self._emit_stdlib_import_externs(stmts)
     self._emit_imported_global_accessors(stmts)
+
+    # Self-host bootstrap pre-pass: seed the shared module-global maps for
+    # every sibling `.py` compiler module BEFORE any function body lowers,
+    # so a `gimple_codegen.STRING_POOL_BASE`-style qualified read inside a
+    # cyclically-imported dependency resolves instead of falling to a NULL
+    # dynamic getattr. Gated on this compile actually being one of this
+    # compiler's own `.py` files (same DIR check `_is_selfhost_file` uses,
+    # computed inline here since that flag is set further below).
+    if (self.do_imports or self.link_imports):
+        _sg_cf = getattr(self, '_current_filename', None)
+        if _sg_cf:
+            _sg_abs = os.path.abspath(os.path.dirname(_sg_cf))
+            if _sg_abs == _SELFHOST_DIR or _sg_abs.startswith(_SELFHOST_DIR + os.sep):
+                _seed_selfhost_module_globals(self)
 
     imported_code = []
     imported_stmts = []
