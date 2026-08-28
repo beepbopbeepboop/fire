@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-26, fresh independent re-derivation — confirmed unchanged, not just re-trusting the prior entry)
+
+Re-derived from scratch (fresh `compile_to_gimple_with_cpp(do_imports=False)`
+call, not the prior script): identical verbatim refusal — `scan_opcodes:
+every 'yield' must carry a value, and all values must agree on one scalar
+type`. Re-read the 3-stacked-gap analysis against the current source
+(variable-arity nested-tuple element boxing across the 3 `yield "tag", (...)`
+sites; `scanner = self.scan_opcodes` local-variable aliasing before
+`_cpp_for_generator_delegate` ever sees the call; tag-discriminated
+variable-arity unpack at the 3 consumer sites in `scan_code`) — confirms it
+independently: none of the three gaps is touched by this session's other
+work (a `cls.method(...)` return-type-inference fix made for
+`Lib_tarfile.md`, unrelated to tuple-yield/aliasing machinery). Genuinely 3
+independent, non-trivial extensions to already-complex shared machinery;
+not attempted, consistent with every prior pass. Doc stays open.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:

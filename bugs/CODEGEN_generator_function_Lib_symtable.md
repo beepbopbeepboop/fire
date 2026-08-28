@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-26, fresh independent re-derivation — confirmed unchanged)
+
+Re-derived from scratch: isolated `compile_to_gimple_with_cpp(do_imports=
+False)` on `Lib/symtable.py` alone compiles clean (its only generator,
+`yield flagname`, unaffected — 0 errors attributable to symtable.py's own
+source in any pass to date). Same conclusion as every prior pass,
+independently re-confirmed: NOT a generator-codegen-cluster failure: the
+remaining whole-program-build blocker is the transitively-imported
+`argparse.py`/`typing.py`/`enum.py`/`pickle.py`/`_collections_abc.py`/
+`traceback.py`/`threading.py` cascade, none of it in symtable.py's own code
+and none of it generator-shaped. Genuinely out of scope for this file's own
+cluster; not attempted. Doc stays open per convention.
+
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
 
 Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
