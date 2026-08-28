@@ -654,20 +654,77 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     sd = gimple_codegen._SELFHOST_DIR
     if not (cur_abs == sd or cur_abs.startswith(sd + '/')):
         return None
-    # DISABLED pending the GimpleGen cross-TU signature registry (see
-    # doc/architecture.html §6). Typing `self`/`gen` as a struct pointer is
-    # correct and unblocks the native `compile_to_gimple`, but every
-    # `self.<method>()` call site in a backend `.py` file then needs the
-    # full GimpleGen method signature — concrete params, return type, AND
-    # default-argument metadata — registered identically in each nested
-    # temp_gen, or it just trades "silently stubbed" for hundreds of hard
-    # arity / pointer-vs-int conversion errors (the extracted GimpleGen
-    # methods are mostly one-line delegates whose return type must be
-    # propagated transitively). Until that registry lands this stays a
-    # no-op and the bootstrap uses the subprocess shim.
+    # Fires only once the GimpleGen registry pre-pass has run for this
+    # (shared) compile — see _selfhost_register_gimplegen in gimple_codegen
+    # .py, which parses `class GimpleGen`, unions in the fields the extracted
+    # backend helpers bind (`_selfhost_scan_gimplegen_extra_fields`), routes
+    # the synthetic StructDef through `_imported_typedef_structs`, and locks
+    # a frozen `GimpleGen_*` signature table via `_selfhost_locked_param_
+    # types`. Without that, typing `self` as a struct pointer just trades
+    # "silently stubbed" for hard arity / pointer-vs-int errors at every
+    # `self.<method>()` call site.
     if not getattr(gen, '_selfhost_gimplegen_registered', False):
         return None
     return 'GimpleGen *'
+
+
+_SELFHOST_EXTRA_FIELD_CACHE: dict = {}
+
+
+def _selfhost_scan_gimplegen_extra_fields() -> dict:
+    """`{attr_name: ctype}` for every GimpleGen instance attribute first
+    bound OUTSIDE `class GimpleGen`'s own body — i.e. `gen.<attr> = <literal>`
+    / `self.<attr> = <literal>` inside the ~344 extracted backend helper
+    functions (`gen.bb_counter = 2` in gimple_gen_infra.py, `gen._loop_depth
+    = ...` in gimple_gen_calls.py, ...). The `class GimpleGen` scan can't see
+    these, so they default to opaque `int` and a real pointer stored into
+    that field truncates → segfault.
+
+    Only literal RHS is trustworthy for a ctype; `gen.x = f()` gives nothing
+    and is left to `_inferred_param_types` / the frozen table. Cached on the
+    mtime set of all `gimple_*.py` under _SELFHOST_DIR."""
+    import glob as _glob
+    _sd = gimple_codegen._SELFHOST_DIR
+    _files = sorted(_glob.glob(gimple_ctypes.os.path.join(_sd, 'gimple_*.py')))
+    _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
+    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('k')
+    if _hit is not None and _hit[0] == _key:
+        return _hit[1]
+    _ctm = {DictExpr: 'MojoDict *', ListExpr: 'MojoList *', TupleExpr: 'MojoList *',
+            SetExpr: 'MojoSet *', StringLiteral: 'char *', BoolLiteral: '_Bool',
+            IntLiteral: 'int64_t'}
+    _call_ctm = {'set': 'MojoSet *', 'frozenset': 'MojoSet *',
+                 'dict': 'MojoDict *', 'list': 'MojoList *'}
+    _fields: dict = {}
+    for _f in _files:
+        try:
+            _mod = ast_rewriter.rewrite(
+                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
+        except Exception:
+            continue
+        for _fn in _mod:
+            if not (isinstance(_fn, FunctionDef) and _fn.params
+                    and _fn.params[0][0].lstrip('*') in ('gen', 'self')):
+                continue
+            _p0 = _fn.params[0][0].lstrip('*')
+            for _n in gimple_exprtypes._walk_ast(_fn.body):
+                if not (isinstance(_n, AssignStmt)
+                        and isinstance(_n.target, MemberExpr)
+                        and isinstance(_n.target.obj, IdentExpr)
+                        and _n.target.obj.name == _p0):
+                    continue
+                _ct = _ctm.get(type(_n.value))
+                if _ct is None and isinstance(_n.value, CallExpr) \
+                        and isinstance(_n.value.func, IdentExpr):
+                    _ct = _call_ctm.get(_n.value.func.name)
+                if _ct is None:
+                    continue
+                _cur = _fields.get(_n.target.member)
+                if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
+                                    and _ct.endswith(' *')):
+                    _fields[_n.target.member] = _ct
+    _SELFHOST_EXTRA_FIELD_CACHE['k'] = (_key, _fields)
+    return _fields
 
 
 def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> list:
