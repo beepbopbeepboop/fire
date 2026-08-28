@@ -1492,92 +1492,17 @@ def _struct_type_id(name: str) -> int:
         i = i + 1
     return h
 
-# libc/system symbols a Mojo *function definition* must not shadow: the library
-# itself defines e.g. `fn exit(...)` whose body calls libc `exit` via
-# external_call. Emitting that as C `exit` would self-recurse and clash with the
-# stdlib.h prototype. So a Mojo function with one of these names is mangled to
-# `mojo_<name>` (definition AND call sites, via this chokepoint), while
-# external_call keeps emitting the raw libc symbol.
-_C_RESERVED_FUNCS = frozenset({
-    # Core libc functions that Mojo stdlib may redefine.
-    # At DEFINITION sites these are always renamed (fn abs → mojo_abs).
-    # At CALL sites they are only renamed when a local definition exists
-    # (see _lower_CallExpr: the rename is gated on func_return_types).
-    'exit', 'abort', 'write', 'read', 'close',
-    'malloc', 'calloc', 'realloc', 'free',
-    'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar',
-    'memcpy', 'memmove', 'memset', 'memcmp', 'memchr',
-    'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat',
-    'strchr', 'strrchr', 'strstr', 'strtok', 'strerror',
-    'atoi', 'atol', 'atoll', 'atof',
-    'strtol', 'strtoll', 'strtod', 'strtof',
-    'setvbuf', 'setbuf',
-    'remainderf', 'remainderl',
-    'posix_spawn', 'posix_spawnp',
-    'index', 'rindex',
-    # Math functions (from <math.h>) that the Mojo stdlib may redefine
-    'cos', 'cosf', 'sin', 'sinf', 'tan', 'tanf',
-    'acos', 'acosf', 'asin', 'asinf', 'atan', 'atanf', 'atan2', 'atan2f',
-    'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf', 'trunc', 'truncf',
-    'sqrt', 'sqrtf', 'cbrt', 'cbrtf',
-    'pow', 'powf', 'exp', 'expf', 'exp2', 'exp2f', 'log', 'logf',
-    'log2', 'log2f', 'log10', 'log10f',
-    'fabs', 'fabsf', 'fmod', 'fmodf',
-    'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma',
-    'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff',
-    'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf',
-    'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf',
-    'nextafter', 'nextafterf', 'copysign', 'copysignf',
-    'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder',
-    'expm1', 'expm1f', 'log1p', 'log1pf',
-    'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf',
-    'j0', 'j1', 'y0', 'y1',
-    # Environment / system functions
-    'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath',
-    # File I/O
-    'open',
-    'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush',
-    'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr',
-    'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf',
-    'fdopen', 'popen', 'pclose',
-    'remove', 'rename',
-    # Random / stdlib math
-    'rand', 'srand', 'random', 'srandom',
-    # Process / unix
-    'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork', 'execv',
-    'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'unlink', 'rmdir',
-    'ioctl', 'fcntl', 'dup', 'dup2', 'pipe',
-    # Dynamic linking
-    'dlopen', 'dlsym', 'dlclose', 'dlerror',
-    # Other stdlib
-    'access', 'stat', 'lstat', 'fstat',
-    'qsort', 'bsearch',
-    # Integer / float math
-    'abs', 'labs', 'llabs',
-    'fabsf', 'fmodf', 'sqrtf', 'powf', 'ceilf', 'floorf', 'roundf', 'truncf',
-    # Math classification macros (<math.h>)
-    'isfinite', 'isinf', 'isnan', 'isnormal', 'signbit', 'fpclassify',
-    # ctype
-    'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower',
-    'toupper', 'tolower',
-    # POSIX/BSD extras
-    'strdup', 'strndup', 'strtok_r',
-    # Time
-    'time', 'clock', 'difftime', 'mktime', 'strftime',
-    'gmtime', 'localtime',
-    # Signal
-    'signal', 'raise',
-    # GCC GIMPLE FE keywords — calling these inside __GIMPLE triggers a parse error.
-    '_end',
-})
+# _C_RESERVED_FUNCS is imported from gimple_ctypes at the top of this
+# file (the single source of truth). A byte-identical redefinition used
+# to live here — removed: two module-level globals of the same name in
+# the self-host closure gave `_global_to_module` a "first module wins"
+# entry that broke `gimple_ctypes._C_RESERVED_FUNCS` qualified access in
+# the compiled compile_to_gimple (resolved to the wrong module struct).
 
-# Names in _C_RESERVED_FUNCS where the real libc signature is incompatible with how
-# the Mojo stdlib prelude redefines them (return type, e.g. char *, or arity, e.g.
-# atol(s, base) vs libc atol(s)) — so a call site with no local def or explicit import
-# (the common case: these are prelude symbols, and we don't model implicit prelude
-# imports) must still be treated as a Mojo call, not real libc. Always renamed to
-# mojo_X, which needs a matching variadic stub in _util_pairs below.
-_FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv', 'atol', 'frexp', 'abort'})
+# _FORCE_RENAME_RESERVED is imported from gimple_ctypes at the top of this file
+# (single source of truth). Its byte-identical redefinition here was removed for
+# the same reason as _C_RESERVED_FUNCS above (homonym module global breaks
+# `gimple_ctypes.<name>` qualified access in the compiled compile_to_gimple).
 
 def _is_concrete_type_arg(ann: str) -> bool:
     """Whether a generic type argument is a concrete type (Int64, String, a struct,

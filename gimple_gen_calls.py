@@ -986,6 +986,28 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         acast = av if at == 'void *' else gen._new_val('void *', f'(void *){av}')
         return 'int64_t', gen._call_expr('int64_t', 'mojo_sum', [('void *', acast)])
 
+    # `hasattr(obj, attr)`: the `mojo_hasattr` runtime helper is a stub that
+    # returns 1 for ANY non-null object (the typed field list lives in the
+    # generated `_mojo_dispatch_getattr`, not the runtime lib), so a compiled
+    # `if hasattr(n, 'condition'):` always took the true branch and the
+    # `getattr(n, 'condition')` inside it then RAISED AttributeError on a node
+    # that has no such field. Probe the real generated dispatch under the
+    # nothrow flag instead (same mechanism the 3-arg getattr default uses):
+    # a miss sets `_mojo_getattr_missed`, so `missed == 0` is the answer.
+    if (fname_raw == 'hasattr' and len(node.args) == 2
+            and not gen._locally_binds_name('hasattr')):
+        ot, ov = gen.lower_expr(node.args[0])
+        at, av = gen.lower_expr(node.args[1])
+        vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
+        ap = av if at == 'char *' else gen._new_val('char *', f'(char *){av}')
+        gen._emit("  _mojo_getattr_missed = 0;")
+        gen._emit("  _mojo_getattr_nothrow = 1;")
+        gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                       [('void *', vp), ('char *', ap)])
+        gen._emit("  _mojo_getattr_nothrow = 0;")
+        _missed = gen._new_val('int', '_mojo_getattr_missed')
+        return '_Bool', gen._new_val('_Bool', f'{_missed} == 0')
+
     # Trivial builtins: lower_expr all args, call runtime fn
     _SIMPLE_BUILTINS = {
         'str':       ('char *',  'mojo_str'),
@@ -1091,25 +1113,52 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if ot in ('int', 'char'):
                     ov = gen._new_val('int64_t', f'(int64_t){ov}')
                 vp = gen._new_val('void *', f'(void *){ov}')
+                _nothrow3 = len(node.args) >= 3
+                if _nothrow3:
+                    # `_mojo_dispatch_getattr` RAISES on a miss (its fallback
+                    # is `mojo_obj_getattr`), so the default below could never
+                    # win — probe under the runtime's nothrow flag, which
+                    # makes a miss set `_mojo_getattr_missed` and return 0.
+                    gen._emit("  _mojo_getattr_missed = 0;")
+                    gen._emit("  _mojo_getattr_nothrow = 1;")
                 raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                                       [('void *', vp), ('char *', f'"{_attr}"')])
-                if len(node.args) >= 3:
+                if _nothrow3:
+                    gen._emit("  _mojo_getattr_nothrow = 0;")
                     dt, dv = gen.lower_expr(node.args[2])
                     if dt != 'int64_t':
                         dv = gen._new_val('int64_t', f'(int64_t){dv}')
-                    zero = gen._new_val('int64_t', '(int64_t)0')
+                    _missed = gen._new_val('int', '_mojo_getattr_missed')
                     # GIMPLE: the ?: condition must be a _Bool temp (an
                     # inline `!=` in the selector is "bogus comparison
                     # result type" / "expected ';' before '?'").
-                    cond = gen._new_val('_Bool', f'{raw} != {zero}')
-                    raw = gen._new_val('int64_t', f'{cond} ? {raw} : {dv}')
+                    cond = gen._new_val('_Bool', f'{_missed} != 0')
+                    raw = gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')
                 if _boxed_ft.endswith(' *'):
                     t = gen._new_val(_boxed_ft, f'({_boxed_ft}){raw}')
                 else:
                     t = gen._new_temp(_boxed_ft)
                     gen._emit(f"  {t} = ({_boxed_ft}){raw};")
                 return _boxed_ft, t
-        pairs = [gen.lower_expr(a) for a in node.args[:2]]  # drop optional default
+        pairs = [gen.lower_expr(a) for a in node.args[:2]]
+        if len(node.args) >= 3:
+            # 3-arg `getattr(obj, name, default)` with a NON-literal `name`
+            # (the literal case is the A5 branch above). `_mojo_dispatch_
+            # getattr`'s fallback (`mojo_obj_getattr`) RAISES AttributeError
+            # on a miss, so the default would never win. Probe under the
+            # runtime's `_mojo_getattr_nothrow` flag — which makes a miss set
+            # `_mojo_getattr_missed` and return 0 instead of raising — then
+            # select the caller's default whenever the miss flag is set.
+            dt, dv = gen.lower_expr(node.args[2])
+            if dt != 'int64_t':
+                dv = gen._new_val('int64_t', f'(int64_t){dv}')
+            gen._emit("  _mojo_getattr_missed = 0;")
+            gen._emit("  _mojo_getattr_nothrow = 1;")
+            raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
+            gen._emit("  _mojo_getattr_nothrow = 0;")
+            _missed = gen._new_val('int', '_mojo_getattr_missed')
+            cond = gen._new_val('_Bool', f'{_missed} != 0')
+            return 'int64_t', gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
     if fname_raw == 'type'    and len(node.args) == 1:
         _, av = gen.lower_expr(node.args[0])

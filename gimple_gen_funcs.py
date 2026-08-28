@@ -337,8 +337,8 @@ def _gen_stmt_FromImportStmt(gen, node):
         _fi_exports = None
         _fi_qual = None
         try:
-            _fi_exports = gen.load_module(node.module)
             import module_loader as _mlmod_fi
+            _fi_exports = _mlmod_fi.load_module(node.module)
             _fi_path = _mlmod_fi._module_loader.resolve_module_path(node.module)
             if _fi_path and os.path.exists(_fi_path):
                 _fi_qual = _mlmod_fi.module_name_for_path(_fi_path)
@@ -671,6 +671,60 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 
 
+_SELFHOST_LITERAL_CTM = {DictExpr: 'MojoDict *', ListExpr: 'MojoList *',
+                         TupleExpr: 'MojoList *', SetExpr: 'MojoSet *',
+                         StringLiteral: 'char *', BoolLiteral: '_Bool',
+                         IntLiteral: 'int64_t'}
+_SELFHOST_CALL_CTM = {'set': 'MojoSet *', 'frozenset': 'MojoSet *',
+                      'dict': 'MojoDict *', 'list': 'MojoList *'}
+
+
+def _selfhost_literal_ctype(_val):
+    """ctype for a literal / builtin-container-call RHS, or None."""
+    _ct = _SELFHOST_LITERAL_CTM.get(type(_val))
+    if _ct is None and isinstance(_val, CallExpr) and isinstance(_val.func, IdentExpr):
+        _ct = _SELFHOST_CALL_CTM.get(_val.func.name)
+    return _ct
+
+
+_SELFHOST_ANN_CTM = {'dict': 'MojoDict *', 'Dict': 'MojoDict *',
+                     'list': 'MojoList *', 'List': 'MojoList *',
+                     'set': 'MojoSet *', 'Set': 'MojoSet *',
+                     'frozenset': 'MojoSet *',
+                     'str': 'char *', 'String': 'char *',
+                     'bool': '_Bool', 'Bool': '_Bool',
+                     'int': 'int64_t', 'Int': 'int64_t',
+                     'float': 'double', 'Float64': 'double'}
+
+
+def _selfhost_ann_ctype(_ann):
+    """ctype for a class-body / param type annotation string, or None.
+    `X | None` / `Optional[X]` → `X *` for a struct name X; builtins mapped
+    via _SELFHOST_ANN_CTM. Conservative: unknown → None (caller keeps its
+    own default)."""
+    if not isinstance(_ann, str):
+        return None
+    _s = _ann.strip()
+    for _drop in (' | None', 'None | ', 'Optional[', ']'):
+        _s = _s.replace(_drop, '')
+    _s = _s.strip()
+    if not _s:
+        return None
+    _base = _s.split('[', 1)[0].split('.')[-1].strip()
+    if _base in _SELFHOST_ANN_CTM:
+        return _SELFHOST_ANN_CTM[_base]
+    # A bare CapWord names a struct type → pointer.
+    if _base and _base[0].isupper() and _base.isidentifier():
+        return f'{_base} *'
+    return None
+
+
+def _selfhost_merge_field(_fields: dict, _name: str, _ct: str):
+    _cur = _fields.get(_name)
+    if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _ct.endswith(' *')):
+        _fields[_name] = _ct
+
+
 def _selfhost_scan_gimplegen_extra_fields() -> dict:
     """`{attr_name: ctype}` for every GimpleGen instance attribute first
     bound OUTSIDE `class GimpleGen`'s own body — i.e. `gen.<attr> = <literal>`
@@ -690,11 +744,6 @@ def _selfhost_scan_gimplegen_extra_fields() -> dict:
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('k')
     if _hit is not None and _hit[0] == _key:
         return _hit[1]
-    _ctm = {DictExpr: 'MojoDict *', ListExpr: 'MojoList *', TupleExpr: 'MojoList *',
-            SetExpr: 'MojoSet *', StringLiteral: 'char *', BoolLiteral: '_Bool',
-            IntLiteral: 'int64_t'}
-    _call_ctm = {'set': 'MojoSet *', 'frozenset': 'MojoSet *',
-                 'dict': 'MojoDict *', 'list': 'MojoList *'}
     _fields: dict = {}
     for _f in _files:
         try:
@@ -713,18 +762,190 @@ def _selfhost_scan_gimplegen_extra_fields() -> dict:
                         and isinstance(_n.target.obj, IdentExpr)
                         and _n.target.obj.name == _p0):
                     continue
-                _ct = _ctm.get(type(_n.value))
-                if _ct is None and isinstance(_n.value, CallExpr) \
-                        and isinstance(_n.value.func, IdentExpr):
-                    _ct = _call_ctm.get(_n.value.func.name)
-                if _ct is None:
-                    continue
-                _cur = _fields.get(_n.target.member)
-                if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
-                                    and _ct.endswith(' *')):
-                    _fields[_n.target.member] = _ct
+                _ct = _selfhost_literal_ctype(_n.value)
+                if _ct is not None:
+                    _selfhost_merge_field(_fields, _n.target.member, _ct)
     _SELFHOST_EXTRA_FIELD_CACHE['k'] = (_key, _fields)
     return _fields
+
+
+def _selfhost_gimplegen_field_types(gg_cls) -> dict:
+    """`{field_name: ctype}` for `class GimpleGen` — its own `__init__` /
+    method / class-body `self.X = <literal>` writes (compact literal-only
+    inference, everything else → `int64_t`, refined later by
+    `_inferred_param_types` / `_mojo_dispatch_getattr`), UNIONed with the
+    extracted-helper writes (`_selfhost_scan_gimplegen_extra_fields`).
+
+    This is what a nested temp_gen that never sees `class GimpleGen`'s
+    StructDef in its own `stmts`/`imported_stmts` registers into the shared
+    `struct_field_types['GimpleGen']` so `self`/`gen` params can be typed."""
+    _fields: dict = dict(_selfhost_scan_gimplegen_extra_fields())
+    if gg_cls is None:
+        return _fields
+    # class-body attrs (`_KNOWN_SIGS = {...}`, `_cpp_kwfwd_counter = 0`, ...)
+    for _fld in getattr(gg_cls, 'fields', []):
+        if isinstance(_fld, AssignStmt) and isinstance(_fld.target, IdentExpr):
+            _ct = (_selfhost_ann_ctype(getattr(_fld, 'type_ann', None))
+                   or _selfhost_literal_ctype(_fld.value))
+            if _ct is not None:
+                _selfhost_merge_field(_fields, _fld.target.name, _ct)
+        elif isinstance(_fld, VarDecl) and _fld.name:
+            _ct = _selfhost_ann_ctype(getattr(_fld, 'type_ann', None))
+            _selfhost_merge_field(_fields, _fld.name, _ct or 'int64_t')
+    # `self.X = <literal>` in every method body (dominated by __init__)
+    for _m in getattr(gg_cls, 'methods', []):
+        for _n in gimple_exprtypes._walk_ast(_m.body):
+            if (isinstance(_n, AssignStmt)
+                    and isinstance(_n.target, MemberExpr)
+                    and isinstance(_n.target.obj, IdentExpr)
+                    and _n.target.obj.name == 'self'):
+                _ct = (_selfhost_ann_ctype(getattr(_n, 'type_ann', None))
+                       or _selfhost_literal_ctype(_n.value) or 'int64_t')
+                _selfhost_merge_field(_fields, _n.target.member, _ct)
+    return _fields
+
+
+def _selfhost_extracted_fn_index() -> dict:
+    """`{fn_name: FunctionDef}` for every top-level `def fn(gen|self, ...)`
+    across the backend `gimple_*.py` modules — the extracted helper that a
+    `class GimpleGen` delegate method `return <alias>.<fn>(self, ...)`
+    forwards to. Cached with the field scanner's cache key."""
+    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('fnidx')
+    import glob as _glob
+    _sd = gimple_codegen._SELFHOST_DIR
+    _files = sorted(_glob.glob(gimple_ctypes.os.path.join(_sd, 'gimple_*.py')))
+    _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
+    if _hit is not None and _hit[0] == _key:
+        return _hit[1]
+    _idx: dict = {}
+    for _f in _files:
+        try:
+            _mod = ast_rewriter.rewrite(
+                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
+        except Exception:
+            continue
+        for _fn in _mod:
+            if (isinstance(_fn, FunctionDef) and _fn.params
+                    and _fn.params[0][0].lstrip('*') in ('gen', 'self')
+                    and _fn.name not in _idx):
+                _idx[_fn.name] = _fn
+    _SELFHOST_EXTRA_FIELD_CACHE['fnidx'] = (_key, _idx)
+    return _idx
+
+
+def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
+    """`{GimpleGen_<m>: (ret_ctype, [param_ctypes], [(pname, default_ast)])}` —
+    a deterministic signature for every `class GimpleGen` method, computed
+    ONCE against the root gen and shared/locked into every temp_gen so
+    forward-decl and definition agree by construction (`_infer_param_types`
+    is not pure — it reads the growing per-instance `struct_field_types`).
+
+    Return/param types: the method's own annotation if it has one; else, for
+    a one-line forwarding delegate `return <alias>.<fn>(self, ...)`, the
+    extracted helper `<fn>`'s annotation at the same position; else
+    `int64_t`. `self` → `GimpleGen *`."""
+    if gg_cls is None:
+        return {}
+    _idx = _selfhost_extracted_fn_index()
+
+    def _fn_delegate_target(_m):
+        _body = [s for s in _m.body
+                 if not (isinstance(s, ExprStmt)
+                         and isinstance(s.value, StringLiteral))]
+        if (len(_body) == 1 and isinstance(_body[0], ReturnStmt)
+                and isinstance(_body[0].value, CallExpr)
+                and isinstance(_body[0].value.func, MemberExpr)
+                and isinstance(_body[0].value.func.obj, IdentExpr)):
+            return _idx.get(_body[0].value.func.member)
+        return None
+
+    # Signal-based param inference for the extracted helpers and for a
+    # method's own body. Run against the (nearly-empty struct_field_types)
+    # root gen so the impure struct-field-shape-matching branch of
+    # `_infer_param_types` never engages — only the pure list/dict/string/
+    # iteration/`len()` signals — keeping the result identical in every
+    # temp_gen.
+    _inf_cache: dict = {}
+
+    def _inferred(_fn):
+        _k = id(_fn)
+        if _k not in _inf_cache:
+            try:
+                _inf_cache[_k] = gen._infer_param_types(_fn) or {}
+            except Exception:
+                _inf_cache[_k] = {}
+        return _inf_cache[_k]
+
+    def _param_ct(_ann, _pn, _tgt_fn, _tgt_pn, _pos, _self_fn):
+        if _ann is not None:
+            return gen._resolve_type(_ann)
+        if _tgt_fn is not None and _pos < len(_tgt_fn.params):
+            _ta = _tgt_fn.params[_pos][1]
+            if _ta is not None:
+                return gen._resolve_type(_ta)
+        _ct = _inferred(_tgt_fn).get(_tgt_pn) if _tgt_fn is not None else None
+        if _ct is None:
+            _ct = _inferred(_self_fn).get(_pn)
+        if _ct is not None:
+            return _ct
+        # A parameter's own default VALUE is type evidence (mirrors
+        # gimple_module_gen.py's method-param pass): `sentinel='...'` is
+        # `char *`, `is_self=False` is `_Bool`.
+        for _dsrc in (_self_fn, _tgt_fn):
+            if _dsrc is None:
+                continue
+            _dv = (getattr(_dsrc, 'param_defaults', None) or {}).get(
+                _self_fn is _dsrc and _pn or _tgt_pn)
+            if isinstance(_dv, StringLiteral):
+                return 'char *'
+            if isinstance(_dv, BoolLiteral):
+                return '_Bool'
+        return 'int64_t'
+
+    def _ret_ct(_m, _tgt_fn):
+        if getattr(_m, 'return_type', None) is not None:
+            return gen._resolve_type(_m.return_type)
+        if _tgt_fn is not None:
+            if getattr(_tgt_fn, 'return_type', None) is not None:
+                return gen._resolve_type(_tgt_fn.return_type)
+            try:
+                _r = gen._infer_return_type(_tgt_fn.body)
+                if _r:
+                    return _r
+            except Exception:
+                pass
+        try:
+            _r = gen._infer_return_type(_m.body)
+            if _r:
+                return _r
+        except Exception:
+            pass
+        return 'int64_t'
+
+    _out: dict = {}
+    for _m in gg_cls.methods:
+        if _m.name == '__init__':
+            continue
+        _tgt = _fn_delegate_target(_m)
+        _rc = _ret_ct(_m, _tgt)
+        _pcs = []
+        _has_star = False
+        for _i, (_pn, _pt) in enumerate(_m.params):
+            if _pn.startswith('*'):
+                _has_star = True
+                break
+            if _i == 0 and _pn == 'self':
+                _pcs.append('GimpleGen *')
+            else:
+                # delegate forwards self as its own arg 0, so target pos == _i
+                _tgt_pn = (_tgt.params[_i][0]
+                           if _tgt is not None and _i < len(_tgt.params) else _pn)
+                _pcs.append(_param_ct(_pt, _pn, _tgt, _tgt_pn, _i, _m))
+        if _has_star:
+            continue   # variadic — leave to the normal passes
+        _dflts = [(pn, dv) for pn, dv in (getattr(_m, 'param_defaults', None) or {}).items()]
+        _out[f'GimpleGen_{_m.name}'] = (_rc, _pcs, _dflts)
+    return _out
 
 
 def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> list:
@@ -3030,7 +3251,16 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             if pst:
                 gen._param_struct_types[bare] = pst
 
-    if node.return_type is not None:
+    _locked_key = f"{struct_name}_{node.name}"
+    if (_locked_key in getattr(gen, '_selfhost_locked_param_types', ())
+            and _locked_key in gen.func_return_types):
+        # Self-hosting bootstrap: the frozen GimpleGen signature table
+        # (gimple_gen_funcs._selfhost_gimplegen_frozen_sigs, applied in
+        # gen_module_impl) is authoritative for every `GimpleGen_*` symbol.
+        # Emit the definition against it so it matches the forward decl
+        # every temp_gen derived from the same table.
+        ret_type = gen.func_return_types[_locked_key]
+    elif node.return_type is not None:
         # A method returning a bracketed generic instantiation of its OWN
         # enclosing struct (e.g. UnsafePointer.as_any_origin() -> UnsafePointer[
         # Self.type, AnyOrigin[mut=Self.mut], address_space=Self.address_space])

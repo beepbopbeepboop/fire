@@ -461,6 +461,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._external_protos = gen._external_protos  # share: bubble extern protos up to root preamble
                 temp_gen._global_inline_defs = gen._global_inline_defs
                 temp_gen._emitted_allocs = gen._emitted_allocs
+                temp_gen._emitted_singletons = gen._emitted_singletons
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
                 # _module_stmts' union (see PERF_nested_module_compile_
@@ -481,6 +482,18 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._calls_in_stmts_cache = gen._calls_in_stmts_cache
                 temp_gen._extra_search_paths = gen._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                 temp_gen.func_return_types = gen.func_return_types  # share across gens
+                # share: the self-host GimpleGen registry seed (parsed
+                # `class GimpleGen` StructDef + the extracted-helper field
+                # union + the frozen-signature flag). Read-only; every nested
+                # temp_gen routes the same StructDef through its own
+                # `_imported_typedef_structs` so `self`/`gen` params type
+                # consistently. See gimple_codegen._selfhost_register_gimplegen.
+                for _sh_attr in ('_selfhost_gimplegen_stmts',
+                                 '_selfhost_gimplegen_extra_fields',
+                                 '_selfhost_gimplegen_registered',
+                                 '_selfhost_gimplegen_sigs'):
+                    if hasattr(gen, _sh_attr):
+                        setattr(temp_gen, _sh_attr, getattr(gen, _sh_attr))
                 # share: `self._compiled_modules`-based dedup (line above,
                 # `_compiled_modules`) means a module can be Pass1b-scanned
                 # exactly ONCE, in whichever temp_gen happens to compile it

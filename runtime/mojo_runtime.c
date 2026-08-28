@@ -2920,6 +2920,15 @@ void mojo_raise_key_error(char *key) {
  * "always returns 0" non-error needs updating (there was never a
  * legitimate reason to depend on it — it was an unimplemented stub, not
  * a documented feature). */
+/* When non-zero, mojo_obj_getattr returns MOJO_ATTR_MISSING for an absent
+ * attribute instead of raising — set by the compiled 3-arg getattr lowering
+ * around its dispatch call so the caller's default can be substituted. Not
+ * thread-shared state that needs a lock: the flag is set and cleared within
+ * a single straight-line lowering with no call that could re-enter getattr
+ * on another thread's behalf. */
+int _mojo_getattr_nothrow = 0;
+int _mojo_getattr_missed = 0;
+
 int64_t mojo_obj_getattr(void *obj, char *attr) {
     if (_mojo_dynattr_objects) {
         char key[32];
@@ -2930,6 +2939,10 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
             if (mojo_dict_contains(attrs, attr))
                 return mojo_dict_get_int(attrs, attr);
         }
+    }
+    if (_mojo_getattr_nothrow) {
+        _mojo_getattr_missed = 1;
+        return 0;
     }
     if (getenv("MOJO_ATTR_DBG")) {
         int64_t tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);

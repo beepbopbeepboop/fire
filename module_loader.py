@@ -489,6 +489,59 @@ class ModuleLoader:
             # Extract function definitions with full signatures
             _scan_source(content)
 
+            # Self-host `.py` compiler modules: a module-scope
+            # `NAME = frozenset({...})` / `NAME = set(...)` global is a real
+            # export the `.mojo`-only `var NAME = ...` scan above never saw,
+            # so an importer's cross-TU reference (`from gimple_codegen import
+            # _C_RESERVED_FUNCS`, itself re-exported from gimple_ctypes) fell
+            # to the codegen's "undeclared -> (int64_t)0" path — a NULL set
+            # into `mojo_set_difference` / `mojo_set_union` -> segfault in the
+            # compiled compile_to_gimple. SCOPED to frozenset/set-CALL RHS
+            # only: the compiler's Phase-1.7 global-type inference doesn't
+            # recognise `frozenset(...)` so its accessor return type is
+            # `int64_t` (boxed pointer) — matching the extern emitted here.
+            # Dict / set-LITERAL / list globals get a precise `MojoDict *` /
+            # `MojoSet *` accessor from their home compile that a blind
+            # int64_t extern here would CONFLICT with, so they are left out
+            # (they weren't the crash and their undeclared->0 fallback, while
+            # imprecise, is not a hard failure).
+            _selfhost_dir = os.path.dirname(os.path.abspath(__file__))
+            if path.endswith('.py') and os.path.dirname(os.path.abspath(path)) == _selfhost_dir:
+                import re as _re_py
+                _pydir = os.path.dirname(path)
+                _SET_GLOBAL_RE = _re_py.compile(
+                    r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:frozenset|set)\s*\(')
+                _local_set_globals = set()
+                for _line in content.split('\n'):
+                    if not _line or _line[0] in ' \t#':
+                        continue
+                    _m = _SET_GLOBAL_RE.match(_line.rstrip())
+                    if not _m or _m.group(1) in exports:
+                        continue
+                    _local_set_globals.add(_m.group(1))
+                    exports[_m.group(1)] = {
+                        'kind': 'global_var', 'c_return_type': 'int64_t',
+                        'home_module_path': path}
+                # Re-exports: `from SIBLING import (a, b)` — a set global not
+                # defined locally but surfaced through this module carries the
+                # sibling's own home accessor.
+                _reexp = _re_py.findall(
+                    r'^from\s+([A-Za-z_][\w.]*)\s+import\s+\(([^)]*)\)',
+                    content, _re_py.MULTILINE)
+                _reexp += [(m.group(1), m.group(2)) for m in _re_py.finditer(
+                    r'^from\s+([A-Za-z_][\w.]*)\s+import\s+([^\n(]+)$', content, _re_py.MULTILINE)]
+                for _srcmod, _names_blob in _reexp:
+                    _sib = os.path.join(_pydir, _srcmod.split('.')[-1] + '.py')
+                    if not os.path.isfile(_sib) or _sib == path:
+                        continue
+                    _sib_exp = self.load_module_from_path(_sib)
+                    for _nm in _re_py.findall(r'[A-Za-z_][A-Za-z0-9_]*', _names_blob):
+                        _si = _sib_exp.get(_nm)
+                        if (isinstance(_si, dict) and _si.get('kind') == 'global_var'
+                                and _si.get('c_return_type') == 'int64_t'
+                                and _nm not in exports):
+                            exports[_nm] = dict(_si)
+
             # Extract module-scope PLAIN `var NAME = EXPR` globals (not
             # `comptime` — those are handled separately, by re-parsing and
             # constant-folding the imported module's own source directly at
