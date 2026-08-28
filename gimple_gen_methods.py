@@ -2765,8 +2765,20 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # dropped kwargs since it accepts any args; now that a real,
     # concretely-typed candidate is resolved, the value must actually be
     # passed.
+    # Recorded parameter defaults for this method (gimple_module_gen.py's
+    # Pass 10 populates `_func_param_defaults[f"{struct}_{method}"]` from
+    # `m.param_defaults` — same source `_lower_named_call` uses for free
+    # functions). `[(pname, default_ast), ...]`, only params that HAVE a
+    # default, starting at the first defaulted position.
+    _method_dflts = (gen._func_param_defaults.get(mangled)
+                     or gen._func_param_defaults.get(
+                         f"{struct_name}_{method}{_method_overload_suffix}")
+                     or gen._func_param_defaults.get(f"{struct_name}_{method}")
+                     or [])
+    _method_dflt_map = {pn: dv for pn, dv in _method_dflts}
     if _chosen_method is not None:
-        arg_pairs = gen._build_call_args_for_candidate(_chosen_method, node.args, node.kwargs)
+        arg_pairs = gen._build_call_args_for_candidate(
+            _chosen_method, node.args, node.kwargs, defaults=_method_dflt_map)
     else:
         arg_pairs = [gen.lower_expr(a) for a in node.args]
         arg_pairs = gen._repack_method_call_spread_args(
@@ -2789,8 +2801,20 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         is_class_ref = True
     expected_non_self = len(full_param_list) - (0 if is_class_ref else 1)
     if full_param_list and len(arg_pairs) < expected_non_self:
+        # Pad missing trailing args with the method's OWN recorded defaults
+        # (`def _emit_label(self, label, freq_hint='')` called as
+        # `gen._emit_label(label)` must pad with `""`, not `0`), mirroring
+        # `_lower_named_call`'s free-function padding. `_method_dflts` holds
+        # only the params that have a default, starting at the first
+        # defaulted position, so it indexes from
+        # `expected_non_self - len(_method_dflts)` (BUG-2026-020 shape).
+        _first_dflt = expected_non_self - len(_method_dflts)
         while len(arg_pairs) < expected_non_self:
-            arg_pairs.append(('int', '0'))
+            _pos = len(arg_pairs)
+            _dv = (_method_dflts[_pos - _first_dflt][1]
+                   if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
+            arg_pairs.append(gen._default_expr_to_pair(_dv)
+                             if _dv is not None else ('int', '0'))
     # Auto-stub if the mangled method name has no known declaration. Check
     # both the suffixed key (this specific overload) and the bare key
     # (set for ANY overload by Pass 2b's return-type inference, which

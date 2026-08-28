@@ -2182,7 +2182,16 @@ def _default_expr_to_pair(gen, _dflt) -> tuple:
         return ('_Bool', '1' if _dflt.value else '0')
     if isinstance(_dflt, gimple_ctypes.StringLiteral):
         return ('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"')
-    if isinstance(_dflt, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
+    if isinstance(_dflt, gimple_ctypes.FloatLiteral):
+        # A float default is a `double` value — returning it typed `int`
+        # made the call-site coercion emit `(double)(int)0.5`, invalid in a
+        # `__GIMPLE` body ("expected expression before '(' token"). Mirror
+        # `_lower_FloatLiteral`.
+        _s = repr(_dflt.value)
+        if '.' not in _s and 'e' not in _s.lower():
+            _s += '.0'
+        return ('double', _s)
+    if isinstance(_dflt, gimple_ctypes.IntLiteral):
         return ('int', str(_dflt.value))
     if isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
         return ('int64_t', '0')
