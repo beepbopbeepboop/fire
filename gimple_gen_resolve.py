@@ -750,6 +750,37 @@ def _register_link_imports(gen, stmts) -> list:
                     if source:
                         gen._imported_fn_sources.setdefault(name, source)
                     if not info:
+                        # Not a concrete export — if this is a bare `from
+                        # PKG import SUBMODULE` (module marker, not a
+                        # symbol defined inside PKG's own source), the
+                        # submodule's own top-level functions/globals must
+                        # still be lowerable if later read as a plain VALUE
+                        # off the marker (`isfuture = base_futures.
+                        # isfuture` — a real function bound to a module-
+                        # level name, not called). Phase 0 registration
+                        # (gimple_module_gen.py's FromImportStmt scan)
+                        # already binds the marker itself into
+                        # `imported_symbols`, which is all a CALL through
+                        # it needs (`base_futures.isfuture(...)`, routed by
+                        # `_lower_method_call`'s import-aware path) — but a
+                        # bare-value read goes through `_lower_MemberExpr`'s
+                        # `node.member in gen.func_return_types` branch,
+                        # which stays empty for the submodule's functions
+                        # unless something actually compiles/registers
+                        # them. Route through the existing `_link_inline_
+                        # modules` fallback (same mechanism the generic-
+                        # struct/fn-not-resolved branches below already use
+                        # for a module this scan couldn't otherwise link
+                        # against) — it inline-compiles the submodule into
+                        # this same translation unit, which naturally
+                        # populates func_return_types for all its top-
+                        # level defs via the normal imported_stmts
+                        # machinery, so no separate reflection/extern-decl
+                        # bookkeeping is needed here.
+                        if gen._from_import_name_is_submodule(stmt.module, name):
+                            gen._link_inline_modules.add(
+                                gimple_ctypes._join_import_member(stmt.module, name))
+                            continue
                         # Not a concrete export — if the module source defines
                         # it as a generic (struct or fn), record it for
                         # on-demand elaboration at use sites.
