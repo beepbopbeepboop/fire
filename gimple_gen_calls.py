@@ -1540,9 +1540,20 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # char* pointer values gives a non-deterministic, non-alphabetical
     # order that diverges from `python3 mojo.py --dump` output).
     if at == 'MojoSet *':
-        return 'MojoList *', gen._call_expr('MojoList *', 'mojo_set_sorted', [(at, av)])
+        t = gen._call_expr('MojoList *', 'mojo_set_sorted', [(at, av)])
+        # sorted() only reorders — carry the set's element type onto the
+        # result list (mirrors the MojoList branch below), or a later
+        # `for x in sorted(a_set_of_str):` typed `x` int64_t and every
+        # string use of it operated on the pointer bits (`for sn in
+        # sorted(self._struct_allocs_needed):` -> `_alloc_<decimal>`).
+        _se = gen._elem_of(av)
+        if _se and _se != 'int64_t':
+            gen._elem_types[t] = _se
+        return 'MojoList *', t
     if at == 'MojoDict *':
-        return 'MojoList *', gen._call_expr('MojoList *', 'mojo_dict_sorted_keys', [(at, av)])
+        t = gen._call_expr('MojoList *', 'mojo_dict_sorted_keys', [(at, av)])
+        gen._elem_types[t] = 'char *'   # dict keys are always strings
+        return 'MojoList *', t
     if at == 'MojoList *' and gen._elem_of(av) == 'char *':
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:

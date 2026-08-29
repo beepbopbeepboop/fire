@@ -2061,7 +2061,16 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._elem_types[t] = 'char *'
         return 'MojoList *', t
     if method == 'values':
-        return 'MojoList *', gen._new_val('MojoList *', f"mojo_dict_values ({ov})")
+        t = gen._new_val('MojoList *', f"mojo_dict_values ({ov})")
+        # Carry the dict's VALUE type onto the value-list temp (mirrors
+        # `keys()` recording 'char *') so `for v in d.values():` types `v`
+        # from it instead of the int64_t default — without this a
+        # `for sd in track_best.values()` over a dict of `StructDef *`
+        # left `sd` boxed and every `sd.name` read a pointer-decimal.
+        _vt = gen._dict_val_of(ov)
+        if _vt and _vt != 'int64_t':
+            gen._elem_types[t] = _vt
+        return 'MojoList *', t
     if method == 'items':
         t = gen._new_val('MojoList *', f"mojo_dict_items ({ov})")
         # Record the dict's VALUE type on the item-list temp so the
