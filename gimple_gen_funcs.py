@@ -1162,11 +1162,47 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
 
 def overload_suffix_for(c_param_types) -> str:
     """A short stable suffix from a function's C parameter-type list. Shared by
-    the codegen and reflect (reflect.func_overload_suffix) so both agree."""
+    the codegen and reflect (reflect.func_overload_suffix) so both agree.
+
+    Uses zlib.crc32 (available in the self-hosted runtime as mojo_zlib_crc32,
+    already used by `_exc_type_id`), NOT hashlib.md5 — the compiled compiler
+    has no md5, so `md5(...).hexdigest()` was stubbed to 0 and EVERY function
+    mangled to the same `_0` suffix (`fib_0`, `add_0`) once mojoc ran its own
+    codegen. The 6 hex digits are built with `chr()` (a per-digit 1-char
+    string) rather than indexing a hex-alphabet string — compiled char*
+    subscription yields the byte's integer value, not a 1-char string."""
     if not c_param_types or any('...' in p for p in c_param_types):
         return ''
-    h = gimple_ctypes.hashlib.md5(','.join(c_param_types).encode(), usedforsecurity=False).hexdigest()[:6]
-    return f'_{h}'
+    # Hand-rolled polynomial hash over the joined string's bytes — same
+    # `while i < n` + `if isinstance(c, str): c = ord(c)` shape as
+    # `_struct_type_id`. Neither hashlib.md5 NOR zlib.crc32 is available in
+    # the self-hosted runtime (both stub to 0), so the previous md5 form
+    # mangled every function to the same `_0` suffix once mojoc ran its
+    # own codegen. 6 hex digits emitted via `chr()` (compiled char*
+    # subscription yields the byte value, not a 1-char string, so a
+    # hex-alphabet index would not work).
+    _s = ','.join(c_param_types)
+    _h = 0
+    _i = 0
+    _sn = len(_s)
+    while _i < _sn:
+        _c = _s[_i]
+        if isinstance(_c, str):
+            _c = ord(_c)
+        _h = (_h * 31 + _c) & 0x7FFFFFFF
+        _i = _i + 1
+    _h = _h & 0xFFFFFF
+    _out = ''
+    _k = 0
+    while _k < 6:
+        _d = _h % 16
+        _h = _h // 16
+        if _d < 10:
+            _out = chr(48 + _d) + _out
+        else:
+            _out = chr(87 + _d) + _out
+        _k = _k + 1
+    return '_' + _out
 
 
 def dup_def_signature_key(fn) -> tuple:
