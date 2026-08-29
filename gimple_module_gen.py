@@ -321,18 +321,32 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
-    """True if `_fn`'s body does `gen.<method> = ...` (Python monkey-patch of
-    a method on the GimpleGen param — the `_gen_stmt_TryStmt` emit-
+    """True if `_fn`'s body monkey-patches a METHOD on the `gen`/`self` param
+    (`gen._emit = intercepted_emit` — the `_gen_stmt_TryStmt` emit-
     interception idiom). Those functions must keep the param OPAQUE in the
     closure pre-pass: typed as `GimpleGen *`, the nested closures capture a
     real void method as a value and the reassignment / later calls don't
     lower to valid C. try/except codegen already doesn't run natively, so
-    leaving it stubbed (as before) is no regression."""
+    leaving it stubbed (as before) is no regression.
+
+    Only the METHOD-reassignment shape counts — the RHS is a nested `def`
+    name or a lambda. An ORDINARY `self.<datafield> = value` assignment
+    (which `gen_module_impl` and most GimpleGen methods do constantly) must
+    NOT trip this: it would wrongly force `self`/`gen` to `int64_t` in the
+    closure pre-pass, so `_scan_for_closures`'s capture of `self` typed
+    `int64_t` -> `self._mutated_free_names(...)` stubbed -> `mojo_set_union
+    (self, ...)` -> SEGV compiling any program with a nested `def`."""
+    _local_defs = {_d.name for _d in _walk_ast(getattr(_fn, 'body', []) or [])
+                   if isinstance(_d, FunctionDef)}
     for _n in _walk_ast(getattr(_fn, 'body', []) or []):
         if (isinstance(_n, AssignStmt) and isinstance(_n.target, MemberExpr)
                 and isinstance(_n.target.obj, IdentExpr)
                 and _n.target.obj.name in _pnames):
-            return True
+            _rhs = _n.value
+            if isinstance(_rhs, LambdaExpr):
+                return True
+            if isinstance(_rhs, IdentExpr) and _rhs.name in _local_defs:
+                return True
     return False
 
 
