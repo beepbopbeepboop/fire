@@ -233,7 +233,17 @@ def _lower_TstringLiteral(gen, node) -> tuple[str, str]:
     return 'char *', temp
 
 
-def _lower_IdentExpr(gen, node) -> tuple[str, str]:
+def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
+    # `node: IdentExpr` (not the bare-boxed-int64 default): once self-hosted,
+    # an unannotated `node` compiled to `int64_t`, so `node.name` went
+    # through `_mojo_dispatch_getattr` and — because `_known_field_type
+    # ('name')` is ambiguous (`ExceptHandler.name` is annotated `object`) —
+    # stayed boxed int64_t. `gen._c_names.get(name, name)` then ran
+    # `mojo_str_from_int` on that boxed char* POINTER (a decimal-string
+    # key that always missed), and the boxed-int `cname` was `append_int`'d
+    # into the `(ctype, cname)` return tuple → callers read slot 1 as 0
+    # (e.g. `print("hi", x)` emitted `x` as `(int64_t)0`). Typed
+    # `IdentExpr *`, `node.name` is a plain `node->name` char* field read.
     name = node.name
     if name == 'None':  return 'int', '0'
     if name == 'True':  return 'int', '1'

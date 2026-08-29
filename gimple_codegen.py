@@ -3249,7 +3249,7 @@ class GimpleGen:
         return gex._lower_StringLiteral(self, node)
     def _lower_TstringLiteral(self, node) -> tuple[str, str]:
         return gex._lower_TstringLiteral(self, node)
-    def _lower_IdentExpr(self, node) -> tuple[str, str]:
+    def _lower_IdentExpr(self, node: IdentExpr) -> tuple[str, str]:
         return gex._lower_IdentExpr(self, node)
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
         return gex._lower_WalrusExpr(self, node)
