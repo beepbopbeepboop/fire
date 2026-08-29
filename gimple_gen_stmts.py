@@ -2124,9 +2124,25 @@ def _gen_stmt_ForStmt(gen, node):
         gen._gen_for_iter(node)
 
 
+def _loop_continue_bb(gen) -> str:
+    """The innermost loop's continue target (basic-block label). The `->
+    str` return annotation is load-bearing for the self-hosted compiler:
+    `loop_stack`'s `(str, str)` tuple element type does not survive the
+    struct-field `.append`, so a bare `loop_stack[-1][0]` read is typed
+    int64_t and an f-string interpolation of it emits the label pointer's
+    integer value (`goto 37359235440;`). Coercing on return through this
+    declared `char *` restores it — the label really is a char* string."""
+    return gen.loop_stack[-1][0]
+
+
+def _loop_break_bb(gen) -> str:
+    """The innermost loop's break target — see `_loop_continue_bb`."""
+    return gen.loop_stack[-1][1]
+
+
 def _gen_stmt_BreakStmt(gen, node):
     if gen.loop_stack:
-        gen._emit(f"  goto {gen.loop_stack[-1][1]};")
+        gen._emit(f"  goto {gen._loop_break_bb()};")
     else:
         # Skip emitting comment to avoid GIMPLE global-passing issues
         pass
@@ -2134,7 +2150,7 @@ def _gen_stmt_BreakStmt(gen, node):
 
 def _gen_stmt_ContinueStmt(gen, node):
     if gen.loop_stack:
-        gen._emit(f"  goto {gen.loop_stack[-1][0]};")
+        gen._emit(f"  goto {gen._loop_continue_bb()};")
     else:
         # Skip emitting comment to avoid GIMPLE global-passing issues
         pass
@@ -2743,7 +2759,7 @@ def _handler_bind_name(gen, h):
     return None
 
 
-def _emit_except_handler(gen, handler, node, bb_after):
+def _emit_except_handler(gen, handler, node, bb_after: str):
     """Emit one except-handler's binding + body + finally + exit goto.
     A plain method (not a closure nested in _gen_stmt_TryStmt): this file
     self-hosts, and a large method with several nested `def`s pushed
@@ -2937,8 +2953,8 @@ def _gen_stmt_TryStmt(gen, node):
             # out of this try's protected region exactly like an early
             # return does, and leak the same way if unaccounted for.
             if gen.loop_stack and stripped in (
-                f"goto {gen.loop_stack[-1][0]};",
-                f"goto {gen.loop_stack[-1][1]};",
+                f"goto {gen._loop_continue_bb()};",
+                f"goto {gen._loop_break_bb()};",
             ):
                 original_emit("  mojo_exc_pop ();")
                 original_emit(line)
@@ -3281,8 +3297,8 @@ def _gen_stmt_WithStmt(gen, node):
             def intercepted_emit(line, rv=None, rt=None):
                 stripped = line.strip()
                 if gen.loop_stack and stripped in (
-                    f"goto {gen.loop_stack[-1][0]};",
-                    f"goto {gen.loop_stack[-1][1]};",
+                    f"goto {gen._loop_continue_bb()};",
+                    f"goto {gen._loop_break_bb()};",
                 ):
                     original_emit("  mojo_exc_pop ();")
                     original_emit(line)

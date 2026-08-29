@@ -3235,8 +3235,12 @@ class GimpleGen:
         return gst._handler_exc_all_names(self, h)
     def _handler_bind_name(self, h):
         return gst._handler_bind_name(self, h)
-    def _emit_except_handler(self, handler, node, bb_after):
+    def _emit_except_handler(self, handler, node, bb_after: str):
         return gst._emit_except_handler(self, handler, node, bb_after)
+    def _loop_continue_bb(self) -> str:
+        return gst._loop_continue_bb(self)
+    def _loop_break_bb(self) -> str:
+        return gst._loop_break_bb(self)
     def _gen_stmt_TryStmt(self, node):
         return gst._gen_stmt_TryStmt(self, node)
     def _gen_stmt_WithStmt(self, node):
