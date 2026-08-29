@@ -6068,7 +6068,7 @@ def gen_module_impl(self, stmts):
                     parts.append('')
                     self._emitted_structs.add(ci.env_struct)
 
-        if self._dispatch_solver and self._dispatch_tables:
+        if self._dispatch_solver and len(self._dispatch_tables) > 0:
             for callee_set, dispatch_table in self._dispatch_tables.items():
                 if dispatch_table.name not in self._emitted_dispatch_typedefs:
                     typedef = dispatch_table.emit_typedef()
@@ -6676,7 +6676,13 @@ def gen_module_impl(self, stmts):
                 self._emitted_funcptr_builtins.add(c_name)
             parts.append('')
 
-    if self.emit_struct_defs and self._dispatch_solver and self._dispatch_tables:
+    # `len(...) > 0`, not a bare `and self._dispatch_tables`: in the
+    # self-hosted compiler the `and`-chain's TypeLattice.join collapses the
+    # `MojoDict *` operand to a boxed int64_t, so the truthiness test became
+    # "pointer non-null" and this section (a literal comment line) was
+    # emitted for a module with no dispatch tables at all — a byte-parity
+    # divergence vs `python3 mojo.py --dump`. Same at the typedef site above.
+    if self.emit_struct_defs and self._dispatch_solver and len(self._dispatch_tables) > 0:
         parts.append("/* Dispatch table initializations (virtual method tables) */")
         for callee_set, dispatch_table in self._dispatch_tables.items():
             if dispatch_table.name not in self._emitted_dispatch_tables:
