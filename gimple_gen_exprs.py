@@ -248,6 +248,12 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name == 'None':  return 'int', '0'
     if name == 'True':  return 'int', '1'
     if name == 'False': return 'int', '0'
+    # Flow-sensitive `isinstance` narrowing: inside `if isinstance(name,
+    # T):` every read of `name` is a `T *` (see _apply_isinstance_
+    # narrowings). The cast temp was already materialised at the guard.
+    _nrw = gen._narrowed_exprs.get(f'i:{name}')
+    if _nrw is not None:
+        return _nrw[0], _nrw[1]
     if name in gen._boxed_mut_locals and name not in gen._captures:
         # This function's OWN local is heap-boxed because some nested
         # closure captures it by reference -- see _seed_mut_captured_
@@ -655,6 +661,15 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
 
 
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    # Flow-sensitive `isinstance` narrowing for a MemberExpr receiver
+    # (`if isinstance(node.target, IdentExpr): ... node.target.name`). The
+    # guarded expression's cast temp was materialised at the `if` — return
+    # it so the outer `.member` access lands as a real `->` field read
+    # instead of a type-erased dynamic getattr.
+    if isinstance(node.obj, gimple_ctypes.IdentExpr):
+        _nrw = gen._narrowed_exprs.get(f'm:{node.obj.name}.{node.member}')
+        if _nrw is not None:
+            return _nrw[0], _nrw[1]
     # Self-hosting bootstrap: strip the `gimple_ctypes` / sibling-module
     # re-export hub from a qualified reference — `gimple_solvers.LayoutSolver
     # .HEAP`, `gimple_ctypes.IdentExpr` used as a bare value. The qualifier

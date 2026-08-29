@@ -560,7 +560,11 @@ class TraitDef:
 @dataclass
 class ExceptHandler:
     exc_type: object
-    name: object
+    # The `as <name>` binding: an identifier string, or None/"" when the
+    # handler binds nothing. Annotated `str` (not `object`) to match every
+    # other AST node's `name` field — the lone `object` here made
+    # `.name` reads on a type-erased handler node ambiguously typed.
+    name: str
     body: list
     line: int = 0
     col: int = 0

@@ -156,6 +156,16 @@ def _reset_func(gen, body: list = None, params: list = None):
     # would mis-type a same-named temp in the next (e.g. an open() file handle
     # read as a leftover MojoSet*, emitting MojoSet_read).
     gen._actual_types:    dict[str, str]   = {}
+    # Flow-sensitive `isinstance()` narrowing. Inside the then-branch of
+    # `if isinstance(E, SomeStruct):` (and `and`-chains of such tests),
+    # every read of E is known to be a `SomeStruct *` — the guard the
+    # source already wrote. Key: "i:<name>" for an IdentExpr E, or
+    # "m:<obj>.<member>" for a MemberExpr E with an IdentExpr base. Value:
+    # (ctype, c_value). _lower_IdentExpr / _lower_MemberExpr consult this
+    # before their generic type-erased handling; _gen_stmt_IfStmt sets and
+    # restores it around each guarded body. Reset per function like every
+    # other per-body table here.
+    gen._narrowed_exprs:  dict             = {}
     # Function PARAM name -> the bare struct name its Mojo annotation
     # names, when that annotation's base is a known struct (e.g.
     # `downgrade: ArcPointer[Self.T]` → 'ArcPointer'). The ABI can box

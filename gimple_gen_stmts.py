@@ -1545,6 +1545,83 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
     return val
 
 
+def _narrow_key_for_expr(gen, e) -> str:
+    """The `_narrowed_exprs` key for an expression the compiler can track
+    across an `isinstance` guard — an IdentExpr, or a MemberExpr whose base
+    is an IdentExpr (`node.target`, `self.x`). "" for anything else."""
+    if isinstance(e, gimple_ctypes.IdentExpr):
+        return f'i:{e.name}'
+    if (isinstance(e, gimple_ctypes.MemberExpr)
+            and isinstance(e.obj, gimple_ctypes.IdentExpr)):
+        return f'm:{e.obj.name}.{e.member}'
+    return ''
+
+
+def _isinstance_narrow_struct(gen, type_arg) -> str:
+    """If `type_arg` names a single struct known to this codegen (a bare
+    `IdentExpr('IdentExpr')` or the `gimple_ctypes.IdentExpr` MemberExpr
+    spelling this codebase uses), return that bare struct name, else "".
+    A tuple of types yields "" (no single type to narrow to)."""
+    tn = ''
+    if isinstance(type_arg, gimple_ctypes.IdentExpr):
+        tn = type_arg.name
+    elif (isinstance(type_arg, gimple_ctypes.MemberExpr)
+          and isinstance(type_arg.obj, gimple_ctypes.IdentExpr)):
+        tn = type_arg.member
+    if tn and tn in gen.struct_field_types:
+        return tn
+    return ''
+
+
+def _collect_isinstance_narrowings(gen, cond, out: list) -> None:
+    """Walk `cond` for `isinstance(E, Struct)` tests (bare, or joined by
+    `and`) and append (narrow_key, 'Struct *', E) for each trackable E."""
+    if isinstance(cond, gimple_ctypes.BinaryOp) and cond.op == 'and':
+        gen._collect_isinstance_narrowings(cond.left, out)
+        gen._collect_isinstance_narrowings(cond.right, out)
+        return
+    if (isinstance(cond, gimple_ctypes.CallExpr)
+            and isinstance(cond.func, gimple_ctypes.IdentExpr)
+            and cond.func.name == 'isinstance'
+            and len(cond.args) == 2
+            and not gen._locally_binds_name('isinstance')):
+        key = gen._narrow_key_for_expr(cond.args[0])
+        sn = gen._isinstance_narrow_struct(cond.args[1])
+        if key and sn:
+            out.append((key, sn + ' *', cond.args[0]))
+
+
+def _apply_isinstance_narrowings(gen, cond) -> dict:
+    """Lower each `isinstance`-guarded expression once, cast it to the
+    guarded struct-pointer type, and register it in `_narrowed_exprs` for
+    the guarded body. Returns {key: prior_value_or_None} for _restore."""
+    narrowings: list = []
+    gen._collect_isinstance_narrowings(cond, narrowings)
+    saved: dict = {}
+    for key, ptr_ct, expr in narrowings:
+        if key in saved:
+            continue
+        ot, ov = gen.lower_expr(expr)
+        # Only worth narrowing a type-erased handle; a value already typed
+        # as a concrete pointer is either right already or was narrowed by
+        # an outer guard we must not clobber.
+        if ot != 'int64_t' and ot != 'int' and ot != 'void *':
+            continue
+        vp = gen._new_val('void *', f'(void *){ov}')
+        cast = gen._new_val(ptr_ct, f'({ptr_ct}){vp}')
+        saved[key] = gen._narrowed_exprs.get(key)
+        gen._narrowed_exprs[key] = (ptr_ct, cast)
+    return saved
+
+
+def _restore_isinstance_narrowings(gen, saved: dict) -> None:
+    for key, prior in saved.items():
+        if prior is None:
+            gen._narrowed_exprs.pop(key, None)
+        else:
+            gen._narrowed_exprs[key] = prior
+
+
 def _gen_stmt_IfStmt(gen, node):
     cond_type, cond_v = gen.lower_expr(node.condition)
     cond_v  = gen._ensure_bool_cond(cond_type, cond_v)
@@ -1555,8 +1632,10 @@ def _gen_stmt_IfStmt(gen, node):
 
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
+    _narrowed = gen._apply_isinstance_narrowings(node.condition)
     for s in node.then_body:
         gen.gen_stmt(s)
+    gen._restore_isinstance_narrowings(_narrowed)
     gen._emit(f"  goto {bb_merge};")
 
     current_false = bb_false
@@ -1577,8 +1656,10 @@ def _gen_stmt_IfStmt(gen, node):
         ev = gen._ensure_bool_cond(ec_t, ev)
         gen._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
         gen._emit_label(next_true)
+        _elif_narrowed = gen._apply_isinstance_narrowings(ec)
         for s in eb:
             gen.gen_stmt(s)
+        gen._restore_isinstance_narrowings(_elif_narrowed)
         gen._emit(f"  goto {bb_merge};")
         current_false = next_false
 

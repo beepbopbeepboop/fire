@@ -3197,6 +3197,16 @@ class GimpleGen:
         return gst._gen_stmt_ReturnStmt(self, node)
     def _ensure_bool_cond(self, ctype: str, val: str) -> str:
         return gst._ensure_bool_cond(self, ctype, val)
+    def _narrow_key_for_expr(self, e) -> str:
+        return gst._narrow_key_for_expr(self, e)
+    def _isinstance_narrow_struct(self, type_arg) -> str:
+        return gst._isinstance_narrow_struct(self, type_arg)
+    def _collect_isinstance_narrowings(self, cond, out: list) -> None:
+        return gst._collect_isinstance_narrowings(self, cond, out)
+    def _apply_isinstance_narrowings(self, cond) -> dict:
+        return gst._apply_isinstance_narrowings(self, cond)
+    def _restore_isinstance_narrowings(self, saved: dict) -> None:
+        return gst._restore_isinstance_narrowings(self, saved)
     def _gen_stmt_IfStmt(self, node):
         return gst._gen_stmt_IfStmt(self, node)
     def _gen_stmt_DelStmt(self, node):
