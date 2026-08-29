@@ -6108,15 +6108,24 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     if self.emit_struct_defs:
+        # Two parallel dicts (StructDef by name, field-count by name), NOT
+        # one dict of `(StructDef, int)` tuples: the self-hosted compiler
+        # does not carry a tuple's slot types through a dict value, so
+        # `for sd, _ in track_best.values()` typed `sd` int64_t and every
+        # `sd.name` boxed (`typedef struct <pointer-decimal>`). A dict
+        # whose values are a plain struct pointer DOES flow the type via
+        # `_dict_val_types`.
         track_best = {}
+        track_best_fc = {}
         for s in (stmts + self._imported_typedef_structs
                   + (imported_stmts if (self.do_imports or self.link_imports) else [])):
             if isinstance(s, StructDef):
                 field_count = len([f for f in s.fields if isinstance(f, VarDecl)])
-                if s.name not in track_best or field_count > track_best[s.name][1]:
-                    track_best[s.name] = (s, field_count)
+                if s.name not in track_best or field_count > track_best_fc[s.name]:
+                    track_best[s.name] = s
+                    track_best_fc[s.name] = field_count
 
-        for sd, _ in track_best.values():
+        for sd in track_best.values():
             if sd.name not in self._emitted_structs:
                 _td_start = len(parts)
                 if sd.name == 'Pointer':
