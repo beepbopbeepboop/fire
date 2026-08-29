@@ -120,6 +120,19 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     return t
 
 
+def _ident_call_name(gen, func_node) -> str:
+    """`func_node.name` for a call whose callee is an IdentExpr, forced to
+    `char *` by the return annotation. `CallExpr.func` is polymorphic
+    (`object`), so a boxed handle's `.name` read stays typed int64_t and,
+    used as a `func_return_types` / `imported_symbols` dict key, misses
+    every lookup — the compiled compiler then treats a plain call to a
+    local `def` as an unknown name and emits a bogus
+    `__attribute__((weak)) "unavailable in compiled mode"` stub for it
+    (`bump()`, `inner()`). Callers must have already checked
+    `isinstance(func_node, IdentExpr)`."""
+    return func_node.name
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
@@ -574,7 +587,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
         return 'int64_t', t
 
-    fname_raw = node.func.name
+    fname_raw = gen._ident_call_name(node.func)
     if fname_raw.startswith('mojo_python_'):
         gen._python_api_needed = True
     # An async closure NESTED INSIDE THIS METHOD (device_context.mojo's

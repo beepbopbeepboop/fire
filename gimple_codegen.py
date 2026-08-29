@@ -2832,6 +2832,8 @@ class GimpleGen:
 
     # ---- delegates: calls family (bodies in gimple_gen_calls.py) ----
 
+    def _ident_call_name(self, func_node) -> str:
+        return ggc._ident_call_name(self, func_node)
     def _lower_call(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_call(self, node)
 

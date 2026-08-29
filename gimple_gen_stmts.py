@@ -2158,7 +2158,7 @@ def _gen_stmt_ContinueStmt(gen, node):
 
 def _gen_stmt_ExprStmt(gen, node):
     if isinstance(node.value, gimple_ctypes.CallExpr) and isinstance(node.value.func, gimple_ctypes.IdentExpr):
-        raw_name = node.value.func.name
+        raw_name = gen._ident_call_name(node.value.func)
         if raw_name == 'print':
             gen._gen_print(node.value.args, node.value.kwargs)
             return
