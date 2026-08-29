@@ -1781,7 +1781,7 @@ def gen_module_impl(self, stmts):
                         # annotation is static truth available right here;
                         # only non-default element types need recording
                         # (int64_t is what every fallback already assumes).
-                        if (ft == 'MojoList *' and field.type_ann
+                        if (ft in ('MojoList *', 'MojoSet *') and field.type_ann
                                 and '[' in str(field.type_ann)):
                             _li = gimple_ctypes._split_top_level_commas(
                                 str(field.type_ann).split('[', 1)[1].rstrip(']').strip())
@@ -1862,6 +1862,22 @@ def gen_module_impl(self, stmts):
                                 if _dv_sa is not None:
                                     self._field_dict_val_types.setdefault(
                                         s.name, {})[fn] = _dv_sa
+                            # `self._struct_allocs_needed: set[str] = set()` /
+                            # `self._x: list[Foo] = []` in __init__ — seed the
+                            # element type from the annotation, mirroring the
+                            # dict-value seed just above. Without it a later
+                            # `for x in sorted(self._x):` / `for x in self._x:`
+                            # left `x` boxed int64_t.
+                            if (ft in ('MojoList *', 'MojoSet *')
+                                    and getattr(node, 'type_ann', None)
+                                    and '[' in str(node.type_ann)):
+                                _li_sa = gimple_ctypes._split_top_level_commas(
+                                    str(node.type_ann).split('[', 1)[1].rstrip(']').strip())
+                                if _li_sa:
+                                    _et_sa = self._resolve_type(_li_sa[0].strip())
+                                    if _et_sa and _et_sa != 'int64_t':
+                                        self._field_elem_types.setdefault(
+                                            s.name, {})[fn] = _et_sa
                     elif isinstance(node, MultiAssignStmt):
                         for tgt in node.targets:
                             fn = _self_member(tgt)

@@ -1551,6 +1551,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             dict_stored = gen._field_dict_val_types.get(struct_name, {}).get(node.member)
             if dict_stored:
                 gen._dict_val_types[t] = dict_stored
+        elif field_type == 'MojoSet *':
+            stored = gen._field_elem_types.get(struct_name, {}).get(node.member)
+            if stored:
+                gen._elem_types[t] = stored
         elif field_type == 'MojoDict *':
             stored = gen._field_dict_val_types.get(struct_name, {}).get(node.member)
             if stored:
