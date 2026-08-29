@@ -2682,6 +2682,13 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
     func = node.func
     is_class_ref = False
+    # `cls.method(...)` inside a @classmethod: the receiver `cls` (in `ov`)
+    # IS a real argument that must be prepended, exactly like `self` on an
+    # instance-method call — unlike `StructName.method(...)` (a name-call
+    # with no receiver value). Tracked separately so the "first C param
+    # isn't `Struct *`" heuristic below (which is meant for `StructName.
+    # staticmethod()`) does not wrongly suppress the `cls` argument.
+    _is_cls_receiver = False
     if isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name in gen.struct_field_types:
         struct_name = func.obj.name
         is_class_ref = True
@@ -2694,11 +2701,28 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         # `.join` resolved as a string method) — a hard segfault once the
         # self-host gate made these classmethod bodies actually compile.
         _cn = gen.current_func_name
-        _sn = _cn.rsplit('_', 1)[0] if _cn else ''
-        if (_sn in gen.struct_field_types
-                or f'{_sn}_{method}' in gen.func_return_types):
+        # Longest `_`-separated prefix that names a real struct or a
+        # compiled `{prefix}_{method}` — NOT `rsplit('_', 1)`, which is
+        # wrong when the ENCLOSING method's own name has an underscore
+        # (`TypeLattice_join_all` -> 'TypeLattice_join', so `cls.join`
+        # fell through here, `is_class_ref` stayed false, and the "first
+        # param isn't Struct *" heuristic then dropped the `cls` arg and
+        # padded a NULL — `join_all`'s inner `cls.join(result, t)` became
+        # `TypeLattice_join(result, t, 0)`, corrupting every multi-element
+        # `_infer_list_elem_type` / return-type join).
+        _sn = ''
+        if _cn:
+            _pp = _cn.split('_')
+            for _kk in range(len(_pp), 0, -1):
+                _cand = '_'.join(_pp[:_kk])
+                if (_cand in gen.struct_field_types
+                        or f'{_cand}_{method}' in gen.func_return_types):
+                    _sn = _cand
+                    break
+        if _sn and (_sn in gen.struct_field_types
+                    or f'{_sn}_{method}' in gen.func_return_types):
             struct_name = _sn
-            is_class_ref = True
+            _is_cls_receiver = True
         else:
             struct_name = gimple_exprtypes._struct_name_of(ot)
     else:
@@ -2785,7 +2809,8 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             mangled, struct_name, method, node.args, arg_pairs)
     full_param_list = gen.func_param_types.get(mangled,
         gen.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", []))
-    if not is_class_ref and full_param_list and full_param_list[0] != f"{struct_name} *":
+    if (not is_class_ref and not _is_cls_receiver
+            and full_param_list and full_param_list[0] != f"{struct_name} *"):
         is_class_ref = True
     # A @staticmethod called THROUGH AN INSTANCE (`obj.my_staticmethod()`
     # — real Python allows this; the instance is simply not passed,
@@ -2797,9 +2822,12 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # empty, so the `and full_param_list` guard short-circuits) — found
     # via Tools/ftscalingbench/ftscalingbench.py's `obj.my_staticmethod()`
     # ("too many arguments... expected 0, have 1").
-    if not is_class_ref and f"{struct_name}_{gimple_ctypes._safe_name(method)}" in gen._static_methods:
+    if (not is_class_ref and not _is_cls_receiver
+            and f"{struct_name}_{gimple_ctypes._safe_name(method)}" in gen._static_methods):
         is_class_ref = True
-    expected_non_self = len(full_param_list) - (0 if is_class_ref else 1)
+    # `_is_cls_receiver`: `cls` is prepended as arg 0 (like `self`), so one
+    # C parameter is supplied by the receiver — same as `not is_class_ref`.
+    expected_non_self = len(full_param_list) - (0 if (is_class_ref and not _is_cls_receiver) else 1)
     if full_param_list and len(arg_pairs) < expected_non_self:
         # Pad missing trailing args with the method's OWN recorded defaults
         # (`def _emit_label(self, label, freq_hint='')` called as
@@ -2864,10 +2892,16 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             gen._elaborated_externs.append(_stub)
         gen._auto_stubbed.add(mangled)
 
+    # For a `cls.` receiver the value passed is the classmethod's own
+    # `int64_t cls` (a class-tag placeholder, not a real struct pointer) —
+    # prepend it as `int64_t` so call-site parameter inference doesn't
+    # decide the callee's `cls` param is a `Struct *`.
+    _recv_pair = ('int64_t', ov) if _is_cls_receiver else (ot, ov)
+    _prepend_recv = (not is_class_ref) or _is_cls_receiver
     if ret_type == 'void':
-        all_arg_pairs = arg_pairs if is_class_ref else [(ot, ov)] + arg_pairs
+        all_arg_pairs = ([_recv_pair] + arg_pairs) if _prepend_recv else arg_pairs
         return gen._void_call(mangled, all_arg_pairs)
-    all_arg_pairs = ([(ot, ov)] + arg_pairs) if not is_class_ref else arg_pairs
+    all_arg_pairs = ([_recv_pair] + arg_pairs) if _prepend_recv else arg_pairs
     t = gen._call_expr(ret_type, mangled, all_arg_pairs)
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]
