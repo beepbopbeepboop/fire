@@ -3733,6 +3733,89 @@ class Parser:
                 return rest[1:-1]
         return raw
 
+    def _raw_string_is_ftstring(self, raw: str) -> bool:
+        """True if a raw STRING token carries an f/F/t/T prefix."""
+        _n = 0
+        while _n < len(raw) and _n < 2:
+            _c = raw[_n]
+            _is_prefix = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                          or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                          or _c == 't' or _c == 'T')
+            if not _is_prefix:
+                break
+            if _c == 'f' or _c == 'F' or _c == 't' or _c == 'T':
+                return True
+            _n += 1
+        return False
+
+    def _string_literal_inner(self, raw: str) -> str:
+        """The inner content of a raw STRING token — prefix and the outer
+        quote delimiters removed, `{...}` interpolations and escapes left
+        intact. Unlike `_strip_string_prefix_and_quotes` this ALSO unwraps
+        f/t-strings, for merging adjacent implicitly-concatenated literals
+        (`f'a' f'b'` -> one `f'ab'`). Without this the parser glued the raw
+        f-string tokens (`f'a'f'b'`), and codegen's outer-only
+        prefix/quote strip then left the inner `'f'` delimiters as literal
+        text (the stray `'f'` in every compiled weak-stub)."""
+        _n = 0
+        while _n < len(raw) and _n < 2:
+            _c = raw[_n]
+            _is_prefix = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                          or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                          or _c == 't' or _c == 'T')
+            if not _is_prefix:
+                break
+            _n += 1
+        rest = raw[_n:]
+        if len(rest) >= 1:
+            _q = rest[0]
+            if _q != '"' and _q != "'":
+                rest = raw  # no real prefix
+        # len()-based slice bounds (never a negative stop) — the compiled
+        # path resolves a negative slice stop wrong.
+        _rl = len(rest)
+        _dq3 = '"' * 3
+        _sq3 = "'" * 3
+        if _rl >= 6:
+            if rest.startswith(_dq3) and rest.endswith(_dq3):
+                return rest[3:_rl - 3]
+            if rest.startswith(_sq3) and rest.endswith(_sq3):
+                return rest[3:_rl - 3]
+        if _rl >= 2:
+            _first = rest[0]
+            _last = rest[_rl - 1]
+            if (_first == '"' or _first == "'") and _first == _last:
+                return rest[1:_rl - 1]
+        return rest
+
+    def _merge_string_literals(self, raws: list, line: int, col: int):
+        """Fold a run of adjacent implicitly-concatenated STRING tokens
+        into one StringLiteral. If any is an f/t-string the result is a
+        single f-string (`f<q>...<q>`); otherwise it is a plain string."""
+        _any_ft = False
+        for _r in raws:
+            if self._raw_string_is_ftstring(_r):
+                _any_ft = True
+                break
+        if not _any_ft:
+            _val = ''
+            for _r in raws:
+                _val += self._strip_string_prefix_and_quotes(_r)
+            return StringLiteral(_val, line=line, col=col)
+        _merged = ''
+        for _r in raws:
+            _merged += self._string_literal_inner(_r)
+        _dq3 = '"' * 3
+        _sq3 = "'" * 3
+        if _dq3 not in _merged:
+            return StringLiteral('f' + _dq3 + _merged + _dq3, line=line, col=col)
+        if _sq3 not in _merged:
+            return StringLiteral('f' + _sq3 + _merged + _sq3, line=line, col=col)
+        # Both triple-quote runs present in the content (extraordinarily
+        # rare) — fall back to a double-quoted wrap with `"` escaped.
+        return StringLiteral('f"' + _merged.replace('"', '\\"') + '"',
+                             line=line, col=col)
+
     def _parse_primary(self):
         t = self._peek()
         line, col = t.line, t.col
@@ -3759,11 +3842,20 @@ class Parser:
             self._advance()
             return IdentExpr(t.value, line=line, col=col)
         if t.kind == "STRING":
-            val = self._strip_string_prefix_and_quotes(self._advance().value)
-            # Handle implicit string concatenation (adjacent strings)
-            while self._peek().kind == "STRING":
-                val += self._strip_string_prefix_and_quotes(self._advance().value)
-            return StringLiteral(val, line=line, col=col)
+            _raw0 = self._advance().value
+            # Implicit string concatenation (adjacent literals). When any
+            # participant is an f/t-string the run must be merged into ONE
+            # f-string by unwrapping each literal's own prefix+quotes —
+            # gluing the raw f-string tokens (`f'a'f'b'`) leaves inner
+            # delimiters as literal text once codegen strips only the
+            # outer pair.
+            if self._peek().kind == "STRING":
+                _raws = [_raw0]
+                while self._peek().kind == "STRING":
+                    _raws.append(self._advance().value)
+                return self._merge_string_literals(_raws, line, col)
+            return StringLiteral(self._strip_string_prefix_and_quotes(_raw0),
+                                 line=line, col=col)
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()
         if t.kind == "LPAREN":
