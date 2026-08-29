@@ -2888,11 +2888,14 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 _method_scalar_ann.setdefault(s.name, {})[m.name] = m
 
-    _method_caller_bodies = (
-        [(f"{s.name}_{m.name}", s.name, m.body)
-         for s in all_structs_for_methods if isinstance(s, StructDef)
-         for m in s.methods]
-        + [(name, None, body) for name, body in _caller_bodies])
+    _method_caller_bodies = []
+    for s in all_structs_for_methods:
+        if not isinstance(s, StructDef):
+            continue
+        for m in s.methods:
+            _method_caller_bodies.append((f"{s.name}_{m.name}", s.name, m.body))
+    for name, body in _caller_bodies:
+        _method_caller_bodies.append((name, None, body))
 
     def _collect_method_scalar_obs():
         obs: dict = {}
