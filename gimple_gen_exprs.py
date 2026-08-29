@@ -749,6 +749,22 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
 
+        # `cls.CLASSATTR` inside a classmethod: `cls` is a PARAM (so the
+        # bare-type-name `ClassName.ATTR` branch further down is skipped —
+        # `cls` is in var_types), but `.member` is a real class attribute of
+        # the enclosing class. Resolve to its synthesized backing global,
+        # like `ClassName.ATTR` does, instead of a dynamic
+        # `_mojo_dispatch_getattr` on the boxed `cls` handle — which, once
+        # self-hosted, RAISED AttributeError and aborted the whole compile
+        # (TypeLattice.is_float's `t in cls._FLOAT`, reached lowering any
+        # comparison operator).
+        _cur_struct = getattr(gen, '_current_struct_name', None)
+        if (module_name == 'cls' and _cur_struct
+                and node.member in gen._class_attrs.get(_cur_struct, {})):
+            _gname = gen._class_attrs[_cur_struct][node.member]
+            _gtype = gen._global_var_types.get(_gname, 'int64_t')
+            return _gtype, gen._new_val(_gtype, f'{_gname}')
+
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
         # gen_module) for the full BUG-2026-049-adjacent story. Redirects
