@@ -2183,9 +2183,17 @@ def _split_expr_format(src: str) -> str:
     return src.strip()
 
 
-def _parse_fstring_parts(gen, inner):
-    """Parse f-string body into [('lit',text) | ('expr',code)] parts."""
-    parts = []
+def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
+    """Parse f-string body into `(kind, text, spec, conv)` 4-tuples, kind
+    being 'lit' or 'expr'.
+
+    The `-> list[tuple[str, str, str, str]]` return annotation is
+    load-bearing for the self-hosted compiler: without it every slot but
+    the first was typed int64_t, so the consumer (`_lower_StringLiteral`'s
+    f-string branch) read each part's TEXT as a boxed pointer, ran
+    `_c_escape` on the integer bits, and interned an empty string — every
+    compiled-codegen f-string collapsed to `""`."""
+    parts: list = []
     i = 0
     buf = []
     while i < len(inner):

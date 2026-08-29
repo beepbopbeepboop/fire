@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    Parser, py_tokenize,
 )
 import regex_compile
 import mlir
@@ -2224,8 +2225,10 @@ def _fstring_sub_exprs(gen, node) -> list:
         if kind != 'expr':
             continue
         try:
-            from mojo_compiler import Parser as _P, py_tokenize as _tok
-            expr_node = _P(_tok(text))._parse_expr(0)
+            # Module-level `Parser`/`py_tokenize` (see _lower_StringLiteral's
+            # matching fix): a function-scoped `from mojo_compiler import
+            # ... as _P` is unresolvable in the self-hosted compiler.
+            expr_node = Parser(py_tokenize(text))._parse_expr(0)
             expr_node = gimple_ctypes.ast_rewriter.rewrite_node(expr_node)
             out.append(expr_node)
         except Exception:

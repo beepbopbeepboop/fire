@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    Parser, py_tokenize,
 )
 import regex_compile
 import mlir
@@ -181,8 +182,19 @@ def _lower_StringLiteral(gen, node):
         else:
             # Expression: try to evaluate and convert to char*
             try:
-                from mojo_compiler import Parser as _P, py_tokenize as _tok
-                expr_node = _P(_tok(text))._parse_expr(0)
+                # `Parser` / `py_tokenize` are imported at MODULE level
+                # (added to the `from mojo_compiler import (...)` block
+                # above) — NOT via a function-scoped `from mojo_compiler
+                # import Parser as _P, ...`. The self-hosted compiler
+                # cannot resolve a function-scoped import of a compiled
+                # sibling symbol: `_P`/`_tok` were treated as unknown call
+                # targets and weak-stubbed ("unavailable in compiled
+                # mode"), so EVERY f-string interpolation silently lowered
+                # to the empty string once mojoc ran its own compiled
+                # codegen. At module scope `Parser(...)` is a recognised
+                # struct constructor and `py_tokenize(...)` a recognised
+                # function.
+                expr_node = Parser(py_tokenize(text))._parse_expr(0)
                 # This is parsed fresh from raw source text at codegen
                 # time (unlike the rest of the module), so it never went
                 # through ast_rewriter.rewrite() — do that here, or e.g.

@@ -3560,7 +3560,7 @@ class GimpleGen:
         return grsl._calls_in_stmts(self, stmts, out)
     def _split_expr_format(self, src: str) -> str:
         return grsl._split_expr_format(src)
-    def _parse_fstring_parts(self, inner):
+    def _parse_fstring_parts(self, inner: str) -> list[tuple[str, str, str, str]]:
         return grsl._parse_fstring_parts(self, inner)
     def _repr_value(self, rat: str, rav: str) -> str:
         return grsl._repr_value(self, rat, rav)
