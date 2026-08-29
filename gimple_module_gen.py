@@ -4165,6 +4165,7 @@ def gen_module_impl(self, stmts):
                     enriched_scope[bstmt.name] = t
                     self.var_types[bstmt.name] = t
         self.var_types = _saved_vt2
+        _sibling_cis: list = []   # (inner.name, ci, {names this ci calls})
         for stmt in _all_stmts_nonfunc(body):
             if not isinstance(stmt, FunctionDef):
                 continue
@@ -4217,6 +4218,7 @@ def gen_module_impl(self, stmts):
             if outer_name not in self._all_closures:
                 self._all_closures[outer_name] = {}
             self._all_closures[outer_name][inner.name] = ci
+            _sibling_cis.append((inner.name, ci, set(_called_names)))
             if inner.return_type is not None:
                 self.func_return_types[lifted] = self._resolve_type(inner.return_type)
             else:
@@ -4233,6 +4235,67 @@ def gen_module_impl(self, stmts):
                     if name not in inner_scope:
                         inner_scope[name] = self._quick_type(bstmt.value)
             _scan_for_closures(lifted, inner_scope, inner.body)
+
+        # Mutually-recursive SIBLING closures (e.g. `_infer_param_types`'s
+        # `scan_expr` <-> `scan_nodes`) each got their OWN env struct with
+        # only their OWN captures. When one calls the other,
+        # `_lower_sibling_closure_call` can forward only the fields whose
+        # names match between the two envs — the callee's other captures
+        # stay NULL and it SEGVs (`accessed_fields.add(...)` on NULL). Give
+        # each connected call-group ONE shared env struct holding the UNION
+        # of the group's captures, so any member can call any other by
+        # passing its own (now identical-layout) env through.
+        if len(_sibling_cis) > 1:
+            _names_here = {n for n, _, _ in _sibling_cis}
+            # Undirected sibling call graph (flat — no nested helper: this
+            # runs inside gen_module_impl's own nested `_scan_for_closures`
+            # and the self-host backend can't lift a 3-deep closure).
+            _adj: dict = {}
+            for _n in _names_here:
+                _adj[_n] = []
+            for _n, _ci_x, _cn in _sibling_cis:
+                for _m in _cn:
+                    if _m in _names_here and _m != _n:
+                        if _m not in _adj[_n]:
+                            _adj[_n].append(_m)
+                        if _n not in _adj[_m]:
+                            _adj[_m].append(_n)
+            _seen_names: set = set()
+            for _start in sorted(_names_here):
+                if _start in _seen_names:
+                    continue
+                _stack = [_start]
+                _members = []
+                while _stack:
+                    _cur = _stack.pop()
+                    if _cur in _seen_names:
+                        continue
+                    _seen_names.add(_cur)
+                    _members.append(_cur)
+                    for _nb in _adj[_cur]:
+                        if _nb not in _seen_names:
+                            _stack.append(_nb)
+                if len(_members) < 2:
+                    continue
+                _member_cis = [self._all_closures[outer_name][_m] for _m in _members]
+                _merged_caps: dict = {}
+                _merged_mut: list = []
+                for _mci in _member_cis:
+                    for _cv, _ct in _mci.captures:
+                        if _cv not in _merged_caps:
+                            _merged_caps[_cv] = _ct
+                    for _mn in (getattr(_mci, 'mut_names', None) or []):
+                        if _mn not in _merged_mut:
+                            _merged_mut.append(_mn)
+                if not _merged_caps:
+                    continue
+                _shared_env = outer_name + "_" + "_".join(sorted(_members)) + "_env"
+                _merged_list = [(_cv, _merged_caps[_cv]) for _cv in sorted(_merged_caps)]
+                _shared_mut = frozenset([_mn for _mn in _merged_mut if _mn in _merged_caps])
+                for _mci in _member_cis:
+                    _mci.captures = list(_merged_list)
+                    _mci.env_struct = _shared_env
+                    _mci.mut_names = _shared_mut
 
         def _find_re_sub_callbacks(search_body, context_outer):
             for stmt in search_body:
@@ -4840,6 +4903,10 @@ def gen_module_impl(self, stmts):
     func_parts: list[str] = []
 
     _emitted_closures: set[str] = set()
+    _emitted_env_allocs: set[str] = set()  # `_alloc_<env>` bodies — a merged
+    # mutually-recursive sibling-closure GROUP shares one env struct, so its
+    # allocator must be emitted exactly once (a second definition is a hard
+    # C redefinition error).
 
     def _emit_closure_recursive(ci, outer_name: str = None) -> None:
         """Emit sub-closures first (depth-first), then this closure's allocator + body."""
@@ -4848,7 +4915,8 @@ def gen_module_impl(self, stmts):
         _emitted_closures.add(ci.lifted_name)
         for sub_ci in self._all_closures.get(ci.lifted_name, {}).values():
             _emit_closure_recursive(sub_ci, ci.lifted_name)
-        if ci.env_struct:
+        if ci.env_struct and ci.env_struct not in _emitted_env_allocs:
+            _emitted_env_allocs.add(ci.env_struct)
             alloc_fn = f"_alloc_{ci.env_struct}"
             func_parts.append(
                 f"{ci.env_struct} * __GIMPLE {alloc_fn} (void)\n"

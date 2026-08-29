@@ -2219,15 +2219,15 @@ def _gen_stmt_ExprStmt(gen, node):
         # never got the same fix.
         _outer_ci = getattr(gen, '_lambda_outer_closures', {}).get(raw_name)
         if _outer_ci:
-            lifted   = _outer_ci.lifted_name
-            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
-            fname_c  = gimple_ctypes._safe_name(lifted)
-            if _outer_ci.env_struct:
-                null_env = gen._new_val(f'{_outer_ci.env_struct} *', f'({_outer_ci.env_struct} *)0')
-                full_arg_pairs = [(f'{_outer_ci.env_struct} *', null_env)] + arg_pairs
-            else:
-                full_arg_pairs = arg_pairs
-            gen._emit_call('void', '', fname_c, full_arg_pairs)
+            # Reuse the value-CONSUMING path (`_lower_outer_closure_call`),
+            # discarding the result. It forwards the callee's env — copying
+            # each captured field from THIS closure's own `_env` where the
+            # name matches — instead of the always-NULL env this branch used
+            # to pass. Critical for mutually-recursive sibling closures that
+            # share an env struct (`_infer_param_types`'s `scan_nodes`
+            # calling its sibling `scan_expr` as a bare statement): a NULL
+            # env there SEGV'd on the first `accessed_fields.add(...)`.
+            gen._lower_outer_closure_call(raw_name, _outer_ci, node.value)
             return
         # Redirect calls to user's main() to its renamed symbol (root ->
         # _gimple_main; sub-module -> _{module}_main), matching gen_func.
