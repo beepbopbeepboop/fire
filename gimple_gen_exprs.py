@@ -3248,7 +3248,7 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     return 'MojoDict *', t
 
 
-def _emit_dict_pair_store(gen, t, key_expr, val_expr) -> None:
+def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     """Emit one `mojo_dict_set_*` store of (key_expr → val_expr) into the
     dict temp `t`, shared by the dict-LITERAL lowering (`{k: v}` pairs)
     and the `dict(k=v, ...)` builtin's kwarg pairs — previously only the

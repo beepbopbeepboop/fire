@@ -1671,7 +1671,18 @@ def gen_module_impl(self, stmts):
                                      and isinstance(field.target, IdentExpr)
                                      and field.type_ann is not None)
                 if isinstance(field, VarDecl) or _is_typed_assign:
-                    f_name = field.name if isinstance(field, VarDecl) else field.target.name
+                    # Explicit if/else, NOT a ternary: the self-hosted
+                    # compiler's isinstance-narrowing only fires for a bare
+                    # `if isinstance(...)` statement, so a ternary
+                    # `field.name if isinstance(field, VarDecl) else ...`
+                    # left `field` type-erased and `field.name` boxed —
+                    # the struct-field-types dict then got a pointer-decimal
+                    # key and the emitted C struct read `int64_t <address>;`
+                    # for the field name.
+                    if isinstance(field, VarDecl):
+                        f_name = field.name
+                    else:
+                        f_name = field.target.name
                     if f_name not in self.struct_field_types[s.name]:
                         ft = _mojo_type(field.type_ann)
                         # BUG-2026-014 (box.3d/game): a bare capitalized

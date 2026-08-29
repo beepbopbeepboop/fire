@@ -2472,12 +2472,23 @@ def _known_field_type(gen, member: str) -> str | None:
     FloatLiteral, _Bool in BoolLiteral). A boxed handle's field read can
     only be returned with a single static C type, so only fields with an
     unambiguous type are typed here; the rest keep the int64_t default."""
-    _types = set()
-    for _fm in gen.struct_field_types.values():
+    # Iterate keys + index (with an ANNOTATED `_fm: dict` local), NOT
+    # `for _fm in ...values()`: the self-hosted compiler could not infer
+    # the value-element type of `struct_field_types` (a dict-of-dicts), so
+    # `_fm` was typed int64_t, `member in _fm` lowered to a `/* TODO: 'in'
+    # for int64_t */ = 0` no-op, and this function ALWAYS returned None in
+    # compiled mojoc — every boxed AST `.name`/`.member`/`.value` read
+    # stayed int64_t. A list (not a set + `.pop()`, also unlowered) keeps
+    # the compiled control flow simple.
+    _types: list = []
+    for _sn in gen.struct_field_types:
+        _fm: dict = gen.struct_field_types[_sn]
         if member in _fm:
-            _types.add(_fm[member])
+            _v = _fm[member]
+            if _v not in _types:
+                _types.append(_v)
     if len(_types) == 1:
-        return _types.pop()
+        return _types[0]
     return None
 
 
