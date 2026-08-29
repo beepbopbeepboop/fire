@@ -2273,10 +2273,18 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
     # and t-strings (template strings — same `{expr}` interpolation syntax,
     # treated identically here) keep prefix+quotes.
     is_fstring = False
-    prefix = ''
-    while val and val[0] in 'fFrRbBuUtT':
-        prefix += val[0]
-        val = val[1:]
+    # Index-based prefix walk (was `while val: ... val = val[1:]`). Once
+    # self-hosted, a `while` loop that reslices `val = val[1:]` every
+    # iteration to shrink it never terminated for an f/r/b-prefixed string
+    # (`f"..."`) — the compiled reslice-in-condition-loop didn't make
+    # progress, `val[0]` stayed `'f'`, and `_parse_fstring_parts` then spun
+    # on a mangled `inner` allocating forever. A single positive slice at
+    # the end has no such issue.
+    _pfx_end = 0
+    while _pfx_end < len(val) and val[_pfx_end] in 'fFrRbBuUtT':
+        _pfx_end += 1
+    prefix = val[:_pfx_end]
+    val = val[_pfx_end:]
     # mojo_compiler.py's Parser already strips the outer quotes from a plain
     # (non-f/t-string) StringLiteral's value at tokenize time. So if what's
     # left after the prefix walk does NOT start with a quote, it is a plain
@@ -2290,6 +2298,22 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
     # user StringLiteral's text was stripped to "" in the emitted pool ).
     if not val or val[0] not in ('"', "'"):
         return prefix + val, ''
+    # A value that is ENTIRELY quote characters (this file's own `'"'` /
+    # `"'"` / `'"""'` / `"'''"` literals — content, not delimiters) has no
+    # inner text to strip. Return it verbatim. Critical once self-hosted:
+    # otherwise `'"""'` -> `'"'` (a single `"`), and since this function's
+    # own `val.startswith('"""')` argument then IS just `"`,
+    # `"anything".startswith('"')` matched and every user `"..."` /
+    # `f"..."` literal got its "triple quotes" stripped
+    # (`'"vv={x}"'[3:len-3]` == `'={'`), mangling every f-string body ->
+    # `_parse_fstring_parts` spun forever.
+    _all_quote = True
+    for _c in val:
+        if _c != '"' and _c != "'":
+            _all_quote = False
+            break
+    if _all_quote:
+        return prefix + val, ('1' if any(c in 'fFtT' for c in prefix) else '')
     # val still carries quotes: an f/t-string (prefix has f/F/t/T) or a
     # triple-quoted value handed back from the placeholder cache.
     is_fstring = any(c in 'fFtT' for c in prefix)
@@ -2297,12 +2321,17 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
     # `"`, this file's own such literals) starts and ends with the quote but
     # carries no delimited content — a real `"""x"""` is >= 7 chars (>= 6
     # empty), a real `"x"` is >= 3 (>= 2 empty).
-    if len(val) >= 6 and val.startswith('"""') and val.endswith('"""'):
-        val = val[3:-3]
-    elif len(val) >= 6 and val.startswith("'''") and val.endswith("'''"):
-        val = val[3:-3]
-    elif len(val) >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
-        val = val[1:-1]
+    # `val[1:len(val)-1]` not `val[1:-1]`: a negative slice stop, once
+    # self-hosted, resolved wrong on the compiled path (`'"AB={x}"'[1:-1]`
+    # came back as a single middle char), which mangled every f-string
+    # body.
+    _vl = len(val)
+    if _vl >= 6 and val.startswith('"""') and val.endswith('"""'):
+        val = val[3:_vl - 3]
+    elif _vl >= 6 and val.startswith("'''") and val.endswith("'''"):
+        val = val[3:_vl - 3]
+    elif _vl >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
+        val = val[1:_vl - 1]
     # Return the is_fstring flag as an EMPTY/non-empty STRING ("", "1")
     # rather than a bool, so the (text, is_fstring) tuple is homogeneous
     # [char*, char*] — the caller unpacks both slots via get_str (the
