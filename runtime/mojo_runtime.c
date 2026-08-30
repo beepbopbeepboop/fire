@@ -1298,8 +1298,15 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
         free(merged);
         merged = next;
     }
+    /* NO `free(merged)` here: `mojo_list_append_str` stores the pointer
+     * verbatim (it never copies — every appended string in this file is
+     * heap-allocated-and-leaked, or a string literal), so freeing it makes
+     * `l[0]` a dangling pointer. This was a use-after-free: any
+     * `x.rsplit(sep, k)` with 0 <= k < ntokens-1 returned an empty first
+     * element (`"Counter * self".rsplit(" ", 1)` -> `["", "self"]`),
+     * which in this compiler's own `_gen_struct_method` corrupted every
+     * struct method's forward-declared parameter list. */
     mojo_list_append_str(l, merged);
-    free(merged);
     for (int64_t i = n_keep; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
     return l;
 }
