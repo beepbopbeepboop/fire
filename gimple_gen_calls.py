@@ -133,6 +133,53 @@ def _ident_call_name(gen, func_node) -> str:
     return func_node.name
 
 
+def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """BUG-2026-027: `UnsafePointer[T](x)` / `OwnedPointer[T](x)` /
+    `ArcPointer[T](x)` / `Pointer[T](x)` — the generic pointer-wrapper
+    constructor call. This codegen has no separate boxed representation for
+    these types: `_mojo_type`/`_resolve_type` already erase `UnsafePointer[T]`
+    straight to `T *` for any variable/parameter annotated with it, and
+    `.data` on such a value is identity (see the `.data` fix in
+    `gimple_gen_exprs.py`'s `_lower_MemberExpr`, which assumes the same
+    thing). So constructing one is just producing a `T *` value from
+    whatever the argument is — before this fix, `CallExpr(func=
+    SubscriptExpr(...))` for this shape fell all the way through
+    `_lower_call` to its final "indirect call via SubscriptExpr" catch-all,
+    silently dropping the argument and always yielding NULL.
+    """
+    idx = node.func.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    elem_ann = gen._type_expr_to_ann(elems[0]) if elems else None
+    # Reconstruct the full "UnsafePointer[T]"-shaped annotation string and
+    # hand it to `_resolve_type`, which already special-cases a struct
+    # element type to a SINGLE `T *` (struct locals/globals/params are
+    # themselves always `T *` — see BUG-2026-030 — so "a pointer to a
+    # struct" is just `T *`, not `T **`). Recomputing that logic here (e.g.
+    # naively appending " *" to `_resolve_type(elem_ann)`, which for a
+    # struct elem_ann already returns `T *` on its own) would double the
+    # pointer depth and mistype every `UnsafePointer[SomeStruct]` local as
+    # `T **`.
+    base = node.func.obj.name
+    ptr_ctype = gen._resolve_type(f"{base}[{elem_ann}]") if elem_ann else 'int64_t *'
+    if not node.args:
+        # UnsafePointer[T]() — no-arg form: a null pointer.
+        return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype})0")
+    at, av = gen.lower_expr(node.args[0])
+    if at == ptr_ctype:
+        return ptr_ctype, av
+    if at.endswith(' *'):
+        # Pointer-to-pointer reinterpret (e.g. wrapping another
+        # UnsafePointer's raw value, or a `.unsafe_ptr()` result of a
+        # different element type) — straight cast.
+        return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){av}")
+    # Integer address -> pointer. GIMPLE rejects a direct int64_t->T* cast
+    # in one statement ("invalid conversion"); go through void* in two
+    # single-cast statements, the same pattern `_strided_data_ptr` uses.
+    av64 = av if at == 'int64_t' else gen._new_val('int64_t', f"(int64_t){av}")
+    vp = gen._new_val('void *', f"(void *){av64}")
+    return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){vp}")
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
@@ -528,6 +575,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 t = gen._new_val('int64_t', f'(int64_t){av}' if at.endswith(' *') else av)
                 return 'int64_t', t
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
+        if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
+            return _lower_pointer_ctor(gen, node)
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
         # Calling the RESULT of a call expression directly —
         # `factory()(5)`, `make_adder2(100)(2)`, `pick(1)(x)` — where the
