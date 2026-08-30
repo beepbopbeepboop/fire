@@ -117,7 +117,25 @@ def _mt(ann, struct_names) -> str:
     return _mojo_type(ann)
 
 
-def collect_exports(stmts, module_prefix: str = '') -> list:
+def collect_local_struct_names(stmts) -> set:
+    """Bare names of every concrete struct DEFINED directly in `stmts`
+    (this one module's own parsed source) — no import-graph walk, just
+    this file's own top-level StructDefs. Used by build_stdlib_dylib.py's
+    BUG-2026-029 cross-file pre-pass (see `collect_exports`'s
+    `known_structs` param) to build a whole-build struct-name index BEFORE
+    calling `collect_exports` on any single module, so a module-level
+    global whose struct type is defined in a SIBLING file (not the global's
+    own file) can still be recognized as struct-typed."""
+    return {s.name for s in stmts if isinstance(s, StructDef)}
+
+
+def collect_local_struct_names_src(src: str) -> set:
+    """Source-text convenience wrapper for `collect_local_struct_names` —
+    see its docstring."""
+    return collect_local_struct_names(Parser(py_tokenize(src)).parse_module())
+
+
+def collect_exports(stmts, module_prefix: str = '', known_structs=None) -> list:
     """Exported symbols of a module: top-level non-underscore functions, plus
     concrete (non-generic) struct types and their methods. Returns dicts
     {name, signature, kind}.
@@ -127,6 +145,16 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
     pointer). This is what lets the real-stdlib distribution path work: the
     importer reads the layout + method symbols from the table and links the
     method bodies from the dylib — it never re-reads the type's source.
+
+    `known_structs` (BUG-2026-029, cross-file follow-up to the same-file-only
+    fix): an optional set of bare struct names defined ANYWHERE in the whole
+    multi-file compile unit this module is being built alongside (see
+    build_stdlib_dylib.build()'s pre-pass, `collect_local_struct_names_src`),
+    used ONLY to widen which module-level globals below are recognized as
+    struct-typed (and therefore get a SYM_GLOBAL export at all) — never to
+    resolve a bare function/struct-method name (that stays module-qualified
+    everywhere else in this file and in gimple_gen_resolve.py's consumer;
+    see the SYM_GLOBAL branch's own docstring for why this is safe).
 
     `module_prefix` (e.g. 'std_utils__ansi', from
     module_loader.module_name_for_path — the SAME value build_stdlib_dylib.py
@@ -141,6 +169,17 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
     file-local, that module's reflection entry would silently resolve to the
     FIRST module's implementation instead of its own."""
     struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
+    # BUG-2026-029 cross-file follow-up: `struct_names` above stays
+    # THIS-FILE-ONLY for every OTHER use in this function (function param/
+    # return types, struct field layouts, method signatures) — those all
+    # need this file's own StructDefs to compute a real field layout / csym,
+    # which a cross-file name alone can't provide. `all_struct_names` (used
+    # ONLY by the VarDecl/SYM_GLOBAL branch below) additionally recognizes a
+    # struct defined in a SIBLING file of the same compile unit, since that
+    # branch never needs the struct's layout — only whether the name is a
+    # struct at all (the accessor is always advertised/consumed as `void *`
+    # either way; see that branch's docstring).
+    all_struct_names = struct_names | (known_structs or set())
     # BUG-2026-021 parity: when a module REDEFINES a top-level function
     # (same name, identical signature — the duplicated-tail shape), gen_module's
     # duplicate-def pre-pass emits exactly ONE C definition (the LAST copy,
@@ -197,7 +236,7 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
                     'kind': SYM_METHOD,
                 })
         elif (isinstance(s, VarDecl) and s.name and not s.name.startswith('_')
-                and getattr(s, 'type_ann', None) in struct_names):
+                and getattr(s, 'type_ann', None) in all_struct_names):
             # BUG-2026-029: a module-level global's real storage
             # (`_{module}_globals.field`) is not reachable across a dylib
             # boundary at all — an importer only ever sees the OWNING
@@ -218,25 +257,45 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
             # own docstring on why a QUALIFIED name, not a bare one, is
             # required here).
             #
-            # Scoped to `type_ann in struct_names` (a struct type DEFINED
-            # IN THIS SAME FILE): this is a lightweight AST-only pre-pass
-            # (module_loader/build_stdlib_dylib call it before GimpleGen
-            # ever runs), with no access to the full cross-module struct
-            # registry GimpleGen itself builds from every import — a global
-            # whose struct type lives in some OTHER imported file can't be
-            # reliably resolved to `SomeStruct *` here (`_mt` would fall
-            # through to `_mojo_type`'s int64_t default, advertising a
-            # WRONG return type that would mismatch the real
-            # `SomeStruct *`-returning accessor GimpleGen actually emits).
-            # Non-struct globals (int64_t, MojoList*/Dict*/Set*, char *, an
-            # UnsafePointer's already-erased pointer, ...) are skipped for
-            # the analogous reason: this export list has no way to know
-            # ahead of time which of those get boxed at the C-struct-field
-            # level, so it can't advertise a signature guaranteed to match.
+            # Originally scoped to `type_ann in struct_names` (a struct type
+            # DEFINED IN THIS SAME FILE only): this is a lightweight AST-only
+            # pre-pass (module_loader/build_stdlib_dylib call it before
+            # GimpleGen ever runs), with no access to the full cross-module
+            # struct registry GimpleGen itself builds from every import — a
+            # global whose struct type lives in some OTHER imported file
+            # could not be reliably resolved to `SomeStruct *` here (`_mt`
+            # would fall through to `_mojo_type`'s int64_t default).
+            #
+            # BUG-2026-029 cross-file follow-up: `all_struct_names` (this
+            # branch's condition, above) additionally admits a struct name
+            # from ANOTHER file of the same compile unit, via the caller-
+            # supplied `known_structs` (build_stdlib_dylib.build()'s own
+            # whole-build struct-name pre-pass — see collect_exports's own
+            # docstring). This is safe DESPITE not knowing the struct's real
+            # field layout, because the consumer of this exact export kind
+            # (gimple_gen_resolve.py's `_register_link_imports`, SYM_GLOBAL
+            # branch) NEVER uses this advertised return type either way — it
+            # always registers the accessor as returning generic `void *`
+            # (the importing translation unit has no `struct World {...}`
+            # declaration to spell the real type with at all, same-file or
+            # not). `_mt(s.type_ann, all_struct_names)` below is therefore
+            # only ever used for a HUMAN-readable signature string / the
+            # gsym-extraction convenience in `export_csym` — not for any
+            # type-correctness-sensitive decode — so advertising `World *`
+            # for a cross-file struct (instead of silently misreporting
+            # int64_t) is strictly more correct, never less safe. Non-struct
+            # globals (int64_t, MojoList*/Dict*/Set*, char *, an
+            # UnsafePointer's already-erased pointer, ...) are still skipped
+            # for the same reason as before: this export list has no way to
+            # know ahead of time which of those get boxed at the C-struct-
+            # field level, so it can't advertise a signature guaranteed to
+            # match — `known_structs` only ever WIDENS which names count as
+            # "a struct", it never changes how a non-struct global is
+            # handled.
             gsym = f"{_c_field_name(module_prefix)}__mojo_global_get_{_c_field_name(s.name)}"
             exports.append({
                 'name': s.name,
-                'signature': f"{_mt(s.type_ann, struct_names)} {gsym} (void)",
+                'signature': f"{_mt(s.type_ann, all_struct_names)} {gsym} (void)",
                 'kind': SYM_GLOBAL,
             })
     return exports
@@ -254,13 +313,13 @@ _CLIB_SYMS = frozenset({
 })
 
 
-def collect_exports_src(src: str, module_prefix: str = '') -> list:
+def collect_exports_src(src: str, module_prefix: str = '', known_structs=None) -> list:
     """Exports of a module's source — minus generic templates. A `fn name[...]`
     is parametric: it has no single concrete symbol to put in the dylib, so it is
     NOT a reflection export. Instead, importers see it as a generic and elaborate
     it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
-    from the source text.) `module_prefix` is passed straight through to
-    collect_exports — see its docstring."""
+    from the source text.) `module_prefix` and `known_structs` are passed straight
+    through to collect_exports — see its docstring."""
     # Mojo functions may be declared `fn` or `def` — both forms must be
     # detected here, or an `def`-declared overload/generic slips past this
     # filter as a normal single export while gimple_codegen (whose own
@@ -309,7 +368,7 @@ def collect_exports_src(src: str, module_prefix: str = '') -> list:
     # `Struct.method`); skip a generic struct's TYPE entry *and* all its METHOD
     # entries — the parser drops `[T]`, so `collect_exports` cannot tell they are
     # parametric on its own.
-    return [e for e in collect_exports(_parsed, module_prefix)
+    return [e for e in collect_exports(_parsed, module_prefix, known_structs)
             if e['name'].split('.', 1)[0] not in skip
             and e['name'].split('.', 1)[0] not in _CLIB_SYMS]
 

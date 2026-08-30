@@ -657,18 +657,75 @@ class ModuleLoader:
             # return type without either side needing to know the other's
             # verdict in advance).
             import re as _re
+            # BUG-2026-029 cross-file follow-up: a DECLARATION-ONLY global
+            # (`var g_world: World`, no `= EXPR` — the real box.3d/game
+            # shape, assigned later inside `ffi_init()`) never matched this
+            # regex at all before (the trailing `=\s*(.+?)` was mandatory),
+            # so `g_world` was invisible to this scanner entirely and a
+            # cross-file `from game_ffi import g_world` in engine_world.mojo
+            # fell straight through to codegen's "undeclared -> 0"
+            # placeholder — with or without reflect.py's own same-file-only
+            # struct-global gap (a SEPARATE mechanism entirely: this
+            # `load_module_from_path` scan is what `mojo dylib`'s per-module-
+            # independent compile actually consults via
+            # `_local_sibling_module_exports` / `_emit_imported_global_
+            # accessors`, not reflect.py's `collect_exports`/
+            # `_register_link_imports`, which is `mojo build`'s link-mode-
+            # only path). The `(?:=\s*(?P<rhs>.+?))?` group is now optional;
+            # a bare `var NAME: Type` (or untyped `var NAME`, though Mojo
+            # requires an annotation or initializer) still exports an entry.
             _VAR_GLOBAL_RE = _re.compile(
-                r'^var\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=]+)?=\s*(.+?)\s*$')
+                r'^var\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(?P<ann>[^=]+?))?'
+                r'\s*(?:=\s*(?P<rhs>.+?))?\s*$')
             for _line in content.split('\n'):
                 if not _line or _line[0] in ' \t#':
                     continue   # indented (not top-level) or a comment
                 _m = _VAR_GLOBAL_RE.match(_line.strip()) if _line.strip().startswith('var ') else None
                 if not _m:
                     continue
-                _vname, _vrhs = _m.group(1), _m.group(2).strip()
+                _vname = _m.group(1)
+                _vrhs = (_m.group('rhs') or '').strip()
+                _vann = (_m.group('ann') or '').strip()
                 if _vname in exports or (_apply_c_stdlib_skip and _vname in _C_STDLIB_SKIP):
                     continue   # a same-named fn/def export always wins
-                if _vrhs.startswith('"') or _vrhs.startswith("'"):
+                _SCALAR_INT_ANNS = frozenset({
+                    'Int', 'Int8', 'Int16', 'Int32', 'Int64',
+                    'UInt', 'UInt8', 'UInt16', 'UInt32', 'UInt64',
+                })
+                if not _vrhs:
+                    # Declaration-only global (BUG-2026-029): no RHS shape to
+                    # read, so classify from the type annotation instead —
+                    # the same handful of scalar C types the RHS-shape branch
+                    # below already special-cases. A struct/custom/unresolved
+                    # annotation (e.g. `World`) gets `void *`, NOT `int64_t`:
+                    # BUG-2026-030's "structs are always T *" convention means
+                    # the REAL accessor gen_module emits for a struct-typed
+                    # global genuinely returns a pointer type — an `int64_t`
+                    # extern here would declare a MISMATCHED prototype in
+                    # this (separate) translation unit. Harmless at the ABI
+                    # level (both are one register-width value on this
+                    # platform, which is exactly why the wider "int64_t
+                    # boxed pointer" convention already relies on the same
+                    # coincidence elsewhere) but NOT harmless at the Mojo
+                    # codegen level: `addr(x)`/pointer-directed lowering
+                    # decisions key off whether the C type STRING ends in
+                    # ' *' (see gimple_gen_calls.py's `addr()` lowering,
+                    # BUG-2026-028) — an `int64_t`-declared accessor for a
+                    # struct global made `Int64(addr(g_world))` silently fall
+                    # through to the "no real address-of support" branch
+                    # instead of recognizing the value as already-a-pointer.
+                    _annb = _vann.split('[', 1)[0].strip()
+                    if _annb in ('str', 'String', 'StringLiteral', 'StaticString'):
+                        _vctype = 'char *'
+                    elif _annb == 'Bool':
+                        _vctype = '_Bool'
+                    elif _annb in ('Float64', 'Float32'):
+                        _vctype = 'double'
+                    elif _annb in _SCALAR_INT_ANNS:
+                        _vctype = 'int64_t'
+                    else:
+                        _vctype = 'void *'   # struct/custom/unresolved type: real pointer
+                elif _vrhs.startswith('"') or _vrhs.startswith("'"):
                     _vctype = 'char *'
                 elif _vrhs in ('True', 'False'):
                     _vctype = '_Bool'
@@ -676,8 +733,19 @@ class ModuleLoader:
                     _vctype = 'double'
                 elif _re.match(r'^-?\d+$', _vrhs):
                     _vctype = 'int64_t'
+                elif _vann.split('[', 1)[0].strip() in _SCALAR_INT_ANNS:
+                    # An explicit scalar-int annotation overrides a
+                    # non-scalar-looking RHS shape (e.g. `var n: Int64 =
+                    # compute()`) — still a real int64_t at the C level,
+                    # not a boxed pointer.
+                    _vctype = 'int64_t'
                 else:
-                    _vctype = 'int64_t'   # struct instance / call / other: boxed pointer convention
+                    # struct instance / call / container / other: real
+                    # pointer at the C level (BUG-2026-030's "structs are
+                    # always T *"; see the declaration-only branch above for
+                    # why `void *`, not `int64_t`, is the correct default
+                    # here too — same reasoning, same ABI-identical fix).
+                    _vctype = 'void *'
                 exports[_vname] = {
                     'kind': 'global_var',
                     'c_return_type': _vctype,
