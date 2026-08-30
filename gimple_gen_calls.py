@@ -1765,13 +1765,28 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
     if node.args:
         at, av = gen.lower_expr(node.args[0])
         for xa in node.args[1:]: gen.lower_expr(xa)
-        if at.endswith(' *'):
+        if at.endswith(' *') and ctype in ('float', 'double', '__fp16', '_Bool'):
+            # `Float64(some_struct)`/`Bool(some_struct)` is a genuinely
+            # different call shape from `Int64(some_struct)` below — real
+            # Mojo source uses it to invoke a `__float__`/conversion method
+            # (e.g. FloatLiteral.__float__'s own `return Float64(self)`),
+            # not to reinterpret an address. A *pointer*-to-floating-point
+            # (or -to-_Bool) cast is invalid C, not just semantically wrong
+            # a real `-fgimple` "invalid types in conversion to
+            # floating-point" compile error (found via compile_stdlib.py
+            # regressing on std/builtin/float_literal.mojo when the
+            # BUG-2026-028 fix below first landed without this exclusion).
+            # This codegen has no model for calling a user-defined
+            # `__float__`/`__bool__` here, so keep the pre-existing (if
+            # still "unsupported") placeholder for exactly this shape.
+            gen._emit(f'  {t} = ({ctype})0;  /* {fname_raw}(struct) unsupported */')
+        elif at.endswith(' *'):
             # BUG-2026-028: `Int64(x)`/`Int(x)`/etc. on a pointer-typed value
             # (a struct — struct locals/globals/params are ALWAYS `T *` in
             # this codegen's representation, see BUG-2026-030 — a
             # MojoList*/MojoDict*/MojoSet*, an UnsafePointer's already-erased
             # `T *`, ...) used to always drop the value and emit a constant 0
-            # ("unsupported"). A pointer-to-integer cast is a perfectly
+            # ("unsupported"). A pointer-to-INTEGER cast is a perfectly
             # ordinary single GIMPLE statement (the same pattern `.address`
             # in `gimple_gen_exprs.py` already relies on for exactly this),
             # so just take it — this is what callers actually want: the raw
