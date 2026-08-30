@@ -289,6 +289,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_get_int':          'int64_t',
     'mojo_dict_get_double':       'double',
     'mojo_dict_get_str':          'char *',
+    'mojo_dict_setdefault_int':   'int64_t',
+    'mojo_dict_setdefault_str':   'char *',
     'mojo_dict_contains':         'int',
     'mojo_dict_len':              'int64_t',
     'mojo_dict_iter_new':         'MojoDictIter *',

@@ -2127,7 +2127,14 @@ int64_t mojo_read_type_tag(int64_t addr) {
  * never this small) turns that into a safe "not a tagged struct" instead
  * of a crash. */
 int64_t mojo_read_type_tag_safe(int64_t addr) {
-    if (addr < 65536) return 0;
+    /* < 64KiB: None / small ints / bools. Also reject the whole 31-bit
+     * range the struct type-tags themselves occupy (`zlib.crc32(name) &
+     * 0x7fffffff`): a compiled `type(node)` yields such a tag rather than
+     * a class object, and `dataclasses.fields(<that tag>)` used to reach
+     * here and dereference the tag as a pointer. On every platform this
+     * runtime targets a genuine heap/stack/static address is far above
+     * 2GiB, so nothing legitimate is lost. */
+    if (addr < 0x80000000LL) return 0;
     return *(int64_t *)(intptr_t)addr;
 }
 
@@ -2913,6 +2920,15 @@ void mojo_raise_key_error(char *key) {
  * "always returns 0" non-error needs updating (there was never a
  * legitimate reason to depend on it — it was an unimplemented stub, not
  * a documented feature). */
+/* When non-zero, mojo_obj_getattr returns MOJO_ATTR_MISSING for an absent
+ * attribute instead of raising — set by the compiled 3-arg getattr lowering
+ * around its dispatch call so the caller's default can be substituted. Not
+ * thread-shared state that needs a lock: the flag is set and cleared within
+ * a single straight-line lowering with no call that could re-enter getattr
+ * on another thread's behalf. */
+int _mojo_getattr_nothrow = 0;
+int _mojo_getattr_missed = 0;
+
 int64_t mojo_obj_getattr(void *obj, char *attr) {
     if (_mojo_dynattr_objects) {
         char key[32];
@@ -2923,6 +2939,15 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
             if (mojo_dict_contains(attrs, attr))
                 return mojo_dict_get_int(attrs, attr);
         }
+    }
+    if (_mojo_getattr_nothrow) {
+        _mojo_getattr_missed = 1;
+        return 0;
+    }
+    if (getenv("MOJO_ATTR_DBG")) {
+        int64_t tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);
+        fprintf(stderr, "MOJO_ATTR_DBG: getattr '%s' miss on obj=%p tag=%lld\n",
+                attr ? attr : "?", obj, (long long)tag);
     }
     mojo_raise_attribute_error(attr);
     return 0;  /* unreached: mojo_raise_attribute_error always raises (mojo_raise
@@ -2956,14 +2981,35 @@ void mojo_unsupported_iter(const char *type_name) {
 }
 
 
+/* Weak fallback: overridden by the compiled gimple_codegen closure's own
+ * strong `compile_to_gimple` in a self-hosted `mojoc`; NULL everywhere else
+ * so the MOJO_NO_SHIM branch below degrades to the subprocess shim without a
+ * link error. */
+__attribute__((weak)) char *compile_to_gimple(char *src, int do_imports, char *filename) {
+    (void)src; (void)do_imports; (void)filename;
+    return (char *)0;
+}
+
 char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename) {
     /*
-     * Call Python's gimple_codegen.compile_to_gimple() via subprocess.
-     * We write src to a temp file, then run:
+     * MOJO_NO_SHIM=1: call the compiled `compile_to_gimple` in the SAME
+     * binary (from the inlined gimple_codegen closure of a self-hosted
+     * `mojoc`) instead of spawning a python3 subprocess. The weak fallback
+     * definition above returns NULL, so a standalone link of only this
+     * runtime (e.g. test_module_cache.py's stage1 extern-boundary check)
+     * links cleanly and falls through to the subprocess shim; a real
+     * self-hosted build's strong definition overrides it.
+     *
+     * Otherwise: call Python's gimple_codegen.compile_to_gimple() via
+     * subprocess. Write src to a temp file, run
      *   python3 -c "import gimple_codegen; print(gimple_codegen.compile_to_gimple(open('TMP').read(), do_imports, filename))"
-     * and capture the output.  Falls back to a valid-but-empty stub only on
+     * and capture the output. Falls back to a valid-but-empty stub only on
      * hard failures (popen/write errors).
      */
+    if (getenv("MOJO_NO_SHIM")) {
+        char *native = compile_to_gimple(src, do_imports, filename);
+        if (native) return native;
+    }
     static char *result_buf = NULL;
     static size_t result_cap = 0;
     char tmppath[128];
@@ -3133,6 +3179,23 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
     for (int64_t i = 0; i < src->cap; i++)
         if (src->slots[i].key)
             mojo_dict_set_int(dst, src->slots[i].key, src->slots[i].val);
+}
+
+/* dict.setdefault(key, default): return the value for `key`, inserting
+ * `default` first when `key` is absent. Matches CPython's setdefault
+ * (mutates the dict, returns whatever the value now is). */
+int64_t mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt) {
+    if (!d) return dflt;
+    if (mojo_dict_contains(d, key)) return mojo_dict_get_int(d, key);
+    mojo_dict_set_int(d, key, dflt);
+    return dflt;
+}
+
+char *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt) {
+    if (!d) return dflt;
+    if (mojo_dict_contains(d, key)) return mojo_dict_get_str(d, key);
+    mojo_dict_set_str(d, key, dflt);
+    return dflt;
 }
 
 int64_t mojo_dict_pop_int(MojoDict *d, char *key) {

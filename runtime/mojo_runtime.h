@@ -333,6 +333,8 @@ void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
 char *mojo_dict_get_str(MojoDict *d, char *key);
+int64_t     mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt);
+char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
 MojoList   *mojo_dict_values(MojoDict *d);
 MojoList   *mojo_dict_items(MojoDict *d);
@@ -361,6 +363,17 @@ int64_t     MojoList_index(MojoList *l, int v);
  * doc comment above the definition and bugs/hard/CODEGEN_dynamic_
  * attribute_on_generic_object.md. */
 int64_t     mojo_obj_getattr(void *obj, char *attr);
+/* 3-arg `getattr(obj, name, default)` support. `_mojo_dispatch_getattr`'s
+ * own fallback (mojo_obj_getattr) RAISES AttributeError on a miss, so the
+ * caller's default could never be substituted. The compiled lowering of a
+ * 3-arg getattr sets `_mojo_getattr_nothrow` around the dispatch call;
+ * while it is non-zero mojo_obj_getattr clears `_mojo_getattr_missed`,
+ * sets it to 1 and returns 0 on a miss instead of raising. The lowering
+ * then selects `default` whenever `_mojo_getattr_missed` is set. Plain int
+ * globals (not a wide sentinel constant) so the emitted __GIMPLE stays a
+ * bare load/store. */
+extern int  _mojo_getattr_nothrow;
+extern int  _mojo_getattr_missed;
 /* Raises a real AttributeError for attribute `attr` — same runtime call
  * sequence compiled `raise AttributeError(...)` itself lowers to, so a
  * compiled `except AttributeError:` genuinely catches this. Used by

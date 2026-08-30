@@ -1545,6 +1545,83 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
     return val
 
 
+def _narrow_key_for_expr(gen, e) -> str:
+    """The `_narrowed_exprs` key for an expression the compiler can track
+    across an `isinstance` guard — an IdentExpr, or a MemberExpr whose base
+    is an IdentExpr (`node.target`, `self.x`). "" for anything else."""
+    if isinstance(e, gimple_ctypes.IdentExpr):
+        return f'i:{e.name}'
+    if (isinstance(e, gimple_ctypes.MemberExpr)
+            and isinstance(e.obj, gimple_ctypes.IdentExpr)):
+        return f'm:{e.obj.name}.{e.member}'
+    return ''
+
+
+def _isinstance_narrow_struct(gen, type_arg) -> str:
+    """If `type_arg` names a single struct known to this codegen (a bare
+    `IdentExpr('IdentExpr')` or the `gimple_ctypes.IdentExpr` MemberExpr
+    spelling this codebase uses), return that bare struct name, else "".
+    A tuple of types yields "" (no single type to narrow to)."""
+    tn = ''
+    if isinstance(type_arg, gimple_ctypes.IdentExpr):
+        tn = type_arg.name
+    elif (isinstance(type_arg, gimple_ctypes.MemberExpr)
+          and isinstance(type_arg.obj, gimple_ctypes.IdentExpr)):
+        tn = type_arg.member
+    if tn and tn in gen.struct_field_types:
+        return tn
+    return ''
+
+
+def _collect_isinstance_narrowings(gen, cond, out: list) -> None:
+    """Walk `cond` for `isinstance(E, Struct)` tests (bare, or joined by
+    `and`) and append (narrow_key, 'Struct *', E) for each trackable E."""
+    if isinstance(cond, gimple_ctypes.BinaryOp) and cond.op == 'and':
+        gen._collect_isinstance_narrowings(cond.left, out)
+        gen._collect_isinstance_narrowings(cond.right, out)
+        return
+    if (isinstance(cond, gimple_ctypes.CallExpr)
+            and isinstance(cond.func, gimple_ctypes.IdentExpr)
+            and cond.func.name == 'isinstance'
+            and len(cond.args) == 2
+            and not gen._locally_binds_name('isinstance')):
+        key = gen._narrow_key_for_expr(cond.args[0])
+        sn = gen._isinstance_narrow_struct(cond.args[1])
+        if key and sn:
+            out.append((key, sn + ' *', cond.args[0]))
+
+
+def _apply_isinstance_narrowings(gen, cond) -> dict:
+    """Lower each `isinstance`-guarded expression once, cast it to the
+    guarded struct-pointer type, and register it in `_narrowed_exprs` for
+    the guarded body. Returns {key: prior_value_or_None} for _restore."""
+    narrowings: list = []
+    gen._collect_isinstance_narrowings(cond, narrowings)
+    saved: dict = {}
+    for key, ptr_ct, expr in narrowings:
+        if key in saved:
+            continue
+        ot, ov = gen.lower_expr(expr)
+        # Only worth narrowing a type-erased handle; a value already typed
+        # as a concrete pointer is either right already or was narrowed by
+        # an outer guard we must not clobber.
+        if ot != 'int64_t' and ot != 'int' and ot != 'void *':
+            continue
+        vp = gen._new_val('void *', f'(void *){ov}')
+        cast = gen._new_val(ptr_ct, f'({ptr_ct}){vp}')
+        saved[key] = gen._narrowed_exprs.get(key)
+        gen._narrowed_exprs[key] = (ptr_ct, cast)
+    return saved
+
+
+def _restore_isinstance_narrowings(gen, saved: dict) -> None:
+    for key, prior in saved.items():
+        if prior is None:
+            gen._narrowed_exprs.pop(key, None)
+        else:
+            gen._narrowed_exprs[key] = prior
+
+
 def _gen_stmt_IfStmt(gen, node):
     cond_type, cond_v = gen.lower_expr(node.condition)
     cond_v  = gen._ensure_bool_cond(cond_type, cond_v)
@@ -1555,8 +1632,10 @@ def _gen_stmt_IfStmt(gen, node):
 
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
+    _narrowed = gen._apply_isinstance_narrowings(node.condition)
     for s in node.then_body:
         gen.gen_stmt(s)
+    gen._restore_isinstance_narrowings(_narrowed)
     gen._emit(f"  goto {bb_merge};")
 
     current_false = bb_false
@@ -1577,8 +1656,10 @@ def _gen_stmt_IfStmt(gen, node):
         ev = gen._ensure_bool_cond(ec_t, ev)
         gen._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
         gen._emit_label(next_true)
+        _elif_narrowed = gen._apply_isinstance_narrowings(ec)
         for s in eb:
             gen.gen_stmt(s)
+        gen._restore_isinstance_narrowings(_elif_narrowed)
         gen._emit(f"  goto {bb_merge};")
         current_false = next_false
 
@@ -2043,9 +2124,25 @@ def _gen_stmt_ForStmt(gen, node):
         gen._gen_for_iter(node)
 
 
+def _loop_continue_bb(gen) -> str:
+    """The innermost loop's continue target (basic-block label). The `->
+    str` return annotation is load-bearing for the self-hosted compiler:
+    `loop_stack`'s `(str, str)` tuple element type does not survive the
+    struct-field `.append`, so a bare `loop_stack[-1][0]` read is typed
+    int64_t and an f-string interpolation of it emits the label pointer's
+    integer value (`goto 37359235440;`). Coercing on return through this
+    declared `char *` restores it — the label really is a char* string."""
+    return gen.loop_stack[-1][0]
+
+
+def _loop_break_bb(gen) -> str:
+    """The innermost loop's break target — see `_loop_continue_bb`."""
+    return gen.loop_stack[-1][1]
+
+
 def _gen_stmt_BreakStmt(gen, node):
     if gen.loop_stack:
-        gen._emit(f"  goto {gen.loop_stack[-1][1]};")
+        gen._emit(f"  goto {gen._loop_break_bb()};")
     else:
         # Skip emitting comment to avoid GIMPLE global-passing issues
         pass
@@ -2053,7 +2150,7 @@ def _gen_stmt_BreakStmt(gen, node):
 
 def _gen_stmt_ContinueStmt(gen, node):
     if gen.loop_stack:
-        gen._emit(f"  goto {gen.loop_stack[-1][0]};")
+        gen._emit(f"  goto {gen._loop_continue_bb()};")
     else:
         # Skip emitting comment to avoid GIMPLE global-passing issues
         pass
@@ -2061,7 +2158,7 @@ def _gen_stmt_ContinueStmt(gen, node):
 
 def _gen_stmt_ExprStmt(gen, node):
     if isinstance(node.value, gimple_ctypes.CallExpr) and isinstance(node.value.func, gimple_ctypes.IdentExpr):
-        raw_name = node.value.func.name
+        raw_name = gen._ident_call_name(node.value.func)
         if raw_name == 'print':
             gen._gen_print(node.value.args, node.value.kwargs)
             return
@@ -2219,15 +2316,15 @@ def _gen_stmt_ExprStmt(gen, node):
         # never got the same fix.
         _outer_ci = getattr(gen, '_lambda_outer_closures', {}).get(raw_name)
         if _outer_ci:
-            lifted   = _outer_ci.lifted_name
-            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
-            fname_c  = gimple_ctypes._safe_name(lifted)
-            if _outer_ci.env_struct:
-                null_env = gen._new_val(f'{_outer_ci.env_struct} *', f'({_outer_ci.env_struct} *)0')
-                full_arg_pairs = [(f'{_outer_ci.env_struct} *', null_env)] + arg_pairs
-            else:
-                full_arg_pairs = arg_pairs
-            gen._emit_call('void', '', fname_c, full_arg_pairs)
+            # Reuse the value-CONSUMING path (`_lower_outer_closure_call`),
+            # discarding the result. It forwards the callee's env — copying
+            # each captured field from THIS closure's own `_env` where the
+            # name matches — instead of the always-NULL env this branch used
+            # to pass. Critical for mutually-recursive sibling closures that
+            # share an env struct (`_infer_param_types`'s `scan_nodes`
+            # calling its sibling `scan_expr` as a bare statement): a NULL
+            # env there SEGV'd on the first `accessed_fields.add(...)`.
+            gen._lower_outer_closure_call(raw_name, _outer_ci, node.value)
             return
         # Redirect calls to user's main() to its renamed symbol (root ->
         # _gimple_main; sub-module -> _{module}_main), matching gen_func.
@@ -2662,7 +2759,7 @@ def _handler_bind_name(gen, h):
     return None
 
 
-def _emit_except_handler(gen, handler, node, bb_after):
+def _emit_except_handler(gen, handler, node, bb_after: str):
     """Emit one except-handler's binding + body + finally + exit goto.
     A plain method (not a closure nested in _gen_stmt_TryStmt): this file
     self-hosts, and a large method with several nested `def`s pushed
@@ -2856,8 +2953,8 @@ def _gen_stmt_TryStmt(gen, node):
             # out of this try's protected region exactly like an early
             # return does, and leak the same way if unaccounted for.
             if gen.loop_stack and stripped in (
-                f"goto {gen.loop_stack[-1][0]};",
-                f"goto {gen.loop_stack[-1][1]};",
+                f"goto {gen._loop_continue_bb()};",
+                f"goto {gen._loop_break_bb()};",
             ):
                 original_emit("  mojo_exc_pop ();")
                 original_emit(line)
@@ -3200,8 +3297,8 @@ def _gen_stmt_WithStmt(gen, node):
             def intercepted_emit(line, rv=None, rt=None):
                 stripped = line.strip()
                 if gen.loop_stack and stripped in (
-                    f"goto {gen.loop_stack[-1][0]};",
-                    f"goto {gen.loop_stack[-1][1]};",
+                    f"goto {gen._loop_continue_bb()};",
+                    f"goto {gen._loop_break_bb()};",
                 ):
                     original_emit("  mojo_exc_pop ();")
                     original_emit(line)

@@ -1,5 +1,5 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
-        check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit \
+        check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-abshim \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -339,6 +339,16 @@ validate-all: stage3
 bootstrap: verify validate-all
 	@echo ""
 	@echo "✓ Bootstrap complete — all stages verified"
+
+# ── check-abshim: compiled compile_to_gimple vs Python, byte-for-byte ─────────
+# `test_ab_shim.py` diffs `python3 mojo.py --dump X` against
+# `MOJO_NO_SHIM=1 ./mojoc --dump X` for a corpus of small programs. This is
+# the signal for removing the `python3 -c` subprocess shim from a self-hosted
+# `mojoc` (runtime/mojo_runtime.c). NOT in `check:` yet — the compiled
+# backend is not byte-parity with Python until the GimpleGen self-host
+# registry lands (see doc/architecture.html §6).
+check-abshim: mojoc $(GIMPLE_SOURCES) test_ab_shim.py
+	python3 checked_run.py check-abshim --extra test_ab_shim.py -- python3 test_ab_shim.py
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 preflight:

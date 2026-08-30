@@ -120,6 +120,19 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     return t
 
 
+def _ident_call_name(gen, func_node) -> str:
+    """`func_node.name` for a call whose callee is an IdentExpr, forced to
+    `char *` by the return annotation. `CallExpr.func` is polymorphic
+    (`object`), so a boxed handle's `.name` read stays typed int64_t and,
+    used as a `func_return_types` / `imported_symbols` dict key, misses
+    every lookup — the compiled compiler then treats a plain call to a
+    local `def` as an unknown name and emits a bogus
+    `__attribute__((weak)) "unavailable in compiled mode"` stub for it
+    (`bump()`, `inner()`). Callers must have already checked
+    `isinstance(func_node, IdentExpr)`."""
+    return func_node.name
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
@@ -574,7 +587,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
         return 'int64_t', t
 
-    fname_raw = node.func.name
+    fname_raw = gen._ident_call_name(node.func)
     if fname_raw.startswith('mojo_python_'):
         gen._python_api_needed = True
     # An async closure NESTED INSIDE THIS METHOD (device_context.mojo's
@@ -986,6 +999,28 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         acast = av if at == 'void *' else gen._new_val('void *', f'(void *){av}')
         return 'int64_t', gen._call_expr('int64_t', 'mojo_sum', [('void *', acast)])
 
+    # `hasattr(obj, attr)`: the `mojo_hasattr` runtime helper is a stub that
+    # returns 1 for ANY non-null object (the typed field list lives in the
+    # generated `_mojo_dispatch_getattr`, not the runtime lib), so a compiled
+    # `if hasattr(n, 'condition'):` always took the true branch and the
+    # `getattr(n, 'condition')` inside it then RAISED AttributeError on a node
+    # that has no such field. Probe the real generated dispatch under the
+    # nothrow flag instead (same mechanism the 3-arg getattr default uses):
+    # a miss sets `_mojo_getattr_missed`, so `missed == 0` is the answer.
+    if (fname_raw == 'hasattr' and len(node.args) == 2
+            and not gen._locally_binds_name('hasattr')):
+        ot, ov = gen.lower_expr(node.args[0])
+        at, av = gen.lower_expr(node.args[1])
+        vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
+        ap = av if at == 'char *' else gen._new_val('char *', f'(char *){av}')
+        gen._emit("  _mojo_getattr_missed = 0;")
+        gen._emit("  _mojo_getattr_nothrow = 1;")
+        gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                       [('void *', vp), ('char *', ap)])
+        gen._emit("  _mojo_getattr_nothrow = 0;")
+        _missed = gen._new_val('int', '_mojo_getattr_missed')
+        return '_Bool', gen._new_val('_Bool', f'{_missed} == 0')
+
     # Trivial builtins: lower_expr all args, call runtime fn
     _SIMPLE_BUILTINS = {
         'str':       ('char *',  'mojo_str'),
@@ -1091,25 +1126,52 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if ot in ('int', 'char'):
                     ov = gen._new_val('int64_t', f'(int64_t){ov}')
                 vp = gen._new_val('void *', f'(void *){ov}')
+                _nothrow3 = len(node.args) >= 3
+                if _nothrow3:
+                    # `_mojo_dispatch_getattr` RAISES on a miss (its fallback
+                    # is `mojo_obj_getattr`), so the default below could never
+                    # win — probe under the runtime's nothrow flag, which
+                    # makes a miss set `_mojo_getattr_missed` and return 0.
+                    gen._emit("  _mojo_getattr_missed = 0;")
+                    gen._emit("  _mojo_getattr_nothrow = 1;")
                 raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                                       [('void *', vp), ('char *', f'"{_attr}"')])
-                if len(node.args) >= 3:
+                if _nothrow3:
+                    gen._emit("  _mojo_getattr_nothrow = 0;")
                     dt, dv = gen.lower_expr(node.args[2])
                     if dt != 'int64_t':
                         dv = gen._new_val('int64_t', f'(int64_t){dv}')
-                    zero = gen._new_val('int64_t', '(int64_t)0')
+                    _missed = gen._new_val('int', '_mojo_getattr_missed')
                     # GIMPLE: the ?: condition must be a _Bool temp (an
                     # inline `!=` in the selector is "bogus comparison
                     # result type" / "expected ';' before '?'").
-                    cond = gen._new_val('_Bool', f'{raw} != {zero}')
-                    raw = gen._new_val('int64_t', f'{cond} ? {raw} : {dv}')
+                    cond = gen._new_val('_Bool', f'{_missed} != 0')
+                    raw = gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')
                 if _boxed_ft.endswith(' *'):
                     t = gen._new_val(_boxed_ft, f'({_boxed_ft}){raw}')
                 else:
                     t = gen._new_temp(_boxed_ft)
                     gen._emit(f"  {t} = ({_boxed_ft}){raw};")
                 return _boxed_ft, t
-        pairs = [gen.lower_expr(a) for a in node.args[:2]]  # drop optional default
+        pairs = [gen.lower_expr(a) for a in node.args[:2]]
+        if len(node.args) >= 3:
+            # 3-arg `getattr(obj, name, default)` with a NON-literal `name`
+            # (the literal case is the A5 branch above). `_mojo_dispatch_
+            # getattr`'s fallback (`mojo_obj_getattr`) RAISES AttributeError
+            # on a miss, so the default would never win. Probe under the
+            # runtime's `_mojo_getattr_nothrow` flag — which makes a miss set
+            # `_mojo_getattr_missed` and return 0 instead of raising — then
+            # select the caller's default whenever the miss flag is set.
+            dt, dv = gen.lower_expr(node.args[2])
+            if dt != 'int64_t':
+                dv = gen._new_val('int64_t', f'(int64_t){dv}')
+            gen._emit("  _mojo_getattr_missed = 0;")
+            gen._emit("  _mojo_getattr_nothrow = 1;")
+            raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
+            gen._emit("  _mojo_getattr_nothrow = 0;")
+            _missed = gen._new_val('int', '_mojo_getattr_missed')
+            cond = gen._new_val('_Bool', f'{_missed} != 0')
+            return 'int64_t', gen._new_val('int64_t', f'{cond} ? {dv} : {raw}')
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
     if fname_raw == 'type'    and len(node.args) == 1:
         _, av = gen.lower_expr(node.args[0])
@@ -1373,13 +1435,26 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     return gen._new_val('_Bool', f'(_Bool){res}')
 
 
+def _isinstance_type_name(ta):
+    """Bare class name for an isinstance() type argument — `IdentExpr` name
+    directly, or the trailing attribute of a `module.Class` `MemberExpr`
+    (`gimple_ctypes.IdentExpr` → `IdentExpr`); the module qualifier is a
+    Python-import artifact with no bearing on the runtime type tag."""
+    if isinstance(ta, gimple_ctypes.IdentExpr):
+        return ta.name
+    if (isinstance(ta, gimple_ctypes.MemberExpr)
+            and isinstance(ta.obj, gimple_ctypes.IdentExpr)):
+        return ta.member
+    return None
+
+
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     obj_type, obj_val = gen.lower_expr(node.args[0])
     type_arg = node.args[1]
     t = gen._new_temp('int')
-    if isinstance(type_arg, gimple_ctypes.IdentExpr):
-        type_name = type_arg.name
-        cmp_t = gen._isinstance_one_type(obj_type, obj_val, type_name)
+    _single_tn = _isinstance_type_name(type_arg)
+    if _single_tn is not None:
+        cmp_t = gen._isinstance_one_type(obj_type, obj_val, _single_tn)
         gen._emit(f'  {t} = (int){cmp_t};')
     elif isinstance(type_arg, gimple_ctypes.TupleExpr):
         # isinstance(x, (A, B, ...)) — OR together a per-alternative check
@@ -1390,9 +1465,10 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         # always produced an empty struct field list.
         acc = None
         for alt in type_arg.elements:
-            if not isinstance(alt, gimple_ctypes.IdentExpr):
+            _alt_tn = _isinstance_type_name(alt)
+            if _alt_tn is None:
                 continue
-            one = gen._isinstance_one_type(obj_type, obj_val, alt.name)
+            one = gen._isinstance_one_type(obj_type, obj_val, _alt_tn)
             # `|` not `||`: GIMPLE rejects a raw `||` token in a plain
             # assignment RHS ("not valid in GIMPLE") — only simple binary
             # ops are allowed. Bitwise OR on two already-computed _Bool
@@ -1442,8 +1518,17 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # boxed value] pair shape — carry the dict's value type through.
         # Look up from the ORIGINAL lowered value first (ov_c is a fresh
         # coercion temp with no value-type entry of its own).
-        gen._dict_items_val_elems[t] = (
-            gen._dict_val_types.get(ov_v) or gen._dict_val_types.get(ov_c) or 'int64_t')
+        _siv = gen._dict_val_types.get(ov_v) or gen._dict_val_types.get(ov_c)
+        if _siv is None and isinstance(arg0.func.obj, gimple_ctypes.MemberExpr) \
+                and isinstance(arg0.func.obj.obj, gimple_ctypes.IdentExpr):
+            # `sorted(self.FIELD.items())` — the dict's value type for a
+            # struct FIELD lives in _field_dict_val_types, not the local
+            # _dict_val_types map keyed by var/temp name.
+            _fsn = gimple_exprtypes._struct_name_of(
+                gen.var_types.get(arg0.func.obj.obj.name, ''))
+            if _fsn:
+                _siv = gen._field_dict_val_types.get(_fsn, {}).get(arg0.func.obj.member)
+        gen._dict_items_val_elems[t] = _siv or 'int64_t'
         return 'MojoList *', t
     at, av = gen.lower_expr(arg0)
     for a in node.args[1:]: gen.lower_expr(a)
@@ -1455,9 +1540,20 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # char* pointer values gives a non-deterministic, non-alphabetical
     # order that diverges from `python3 mojo.py --dump` output).
     if at == 'MojoSet *':
-        return 'MojoList *', gen._call_expr('MojoList *', 'mojo_set_sorted', [(at, av)])
+        t = gen._call_expr('MojoList *', 'mojo_set_sorted', [(at, av)])
+        # sorted() only reorders — carry the set's element type onto the
+        # result list (mirrors the MojoList branch below), or a later
+        # `for x in sorted(a_set_of_str):` typed `x` int64_t and every
+        # string use of it operated on the pointer bits (`for sn in
+        # sorted(self._struct_allocs_needed):` -> `_alloc_<decimal>`).
+        _se = gen._elem_of(av)
+        if _se and _se != 'int64_t':
+            gen._elem_types[t] = _se
+        return 'MojoList *', t
     if at == 'MojoDict *':
-        return 'MojoList *', gen._call_expr('MojoList *', 'mojo_dict_sorted_keys', [(at, av)])
+        t = gen._call_expr('MojoList *', 'mojo_dict_sorted_keys', [(at, av)])
+        gen._elem_types[t] = 'char *'   # dict keys are always strings
+        return 'MojoList *', t
     if at == 'MojoList *' and gen._elem_of(av) == 'char *':
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:
@@ -1670,19 +1766,45 @@ def _lower_recursive_self_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr
 
 
 def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """Call an outer function's nested closure from inside a lambda body.
+    """Call a SIBLING nested closure of the same parent from inside another
+    lifted closure/lambda body (`gen_module_impl`'s `_scan_body_for_local_
+    field_access` calling `_scan_stmt_var_candidates`, both nested in
+    `gen_module_impl`, both capturing `self`).
 
-    The env pointer is not available here (it belongs to the outer function scope),
-    so pass a null env — safe at link time; will crash at runtime if the env fields
-    are actually accessed, but the selfhost test only checks compile+link.
+    The sibling's own env local belongs to the parent's scope and isn't
+    visible here — but we ARE inside a lifted closure with its OWN env
+    param, and sibling closures of one parent capture overlapping variables
+    (`self` above all). Build a fresh env for the callee, copying each of
+    its captured fields from the current env where the name matches (else
+    from local scope). Only when neither source has a capture do we fall
+    back to a NULL field. Previously this ALWAYS passed a NULL env — a
+    documented "compiles and links, segfaults at runtime" stopgap that
+    made the self-hosted `compile_to_gimple` crash the moment
+    `gen_module_impl`'s field-scan helpers actually ran.
     """
     lifted    = ci.lifted_name
     ret_type  = gen.func_return_types.get(lifted, 'int64_t')
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
-        null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
-        full_arg_pairs = [(f'{ci.env_struct} *', null_env)] + arg_pairs
+        _cur_env = getattr(gen, '_env_param', '')
+        _cur_caps = getattr(gen, '_captures', {}) or {}
+        if _cur_env and getattr(ci, 'captures', None):
+            new_env = gen._new_temp(f'{ci.env_struct} *')
+            gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
+            for vname, vtype in ci.captures:
+                fld = gimple_ctypes._c_field_name(vname)
+                if vname in _cur_caps:
+                    tmp = gen._new_val(vtype, f'{_cur_env}->{fld}')
+                    gen._emit(f'  {new_env}->{fld} = {tmp};')
+                elif vname in gen.var_types:
+                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), vtype,
+                                          gen._write_dest(vname),
+                                          f'{new_env}->{fld}')
+            full_arg_pairs = [(f'{ci.env_struct} *', new_env)] + arg_pairs
+        else:
+            null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
+            full_arg_pairs = [(f'{ci.env_struct} *', null_env)] + arg_pairs
     else:
         full_arg_pairs = arg_pairs
     if ret_type == 'void':
@@ -2142,7 +2264,16 @@ def _default_expr_to_pair(gen, _dflt) -> tuple:
         return ('_Bool', '1' if _dflt.value else '0')
     if isinstance(_dflt, gimple_ctypes.StringLiteral):
         return ('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"')
-    if isinstance(_dflt, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
+    if isinstance(_dflt, gimple_ctypes.FloatLiteral):
+        # A float default is a `double` value — returning it typed `int`
+        # made the call-site coercion emit `(double)(int)0.5`, invalid in a
+        # `__GIMPLE` body ("expected expression before '(' token"). Mirror
+        # `_lower_FloatLiteral`.
+        _s = repr(_dflt.value)
+        if '.' not in _s and 'e' not in _s.lower():
+            _s += '.0'
+        return ('double', _s)
+    if isinstance(_dflt, gimple_ctypes.IntLiteral):
         return ('int', str(_dflt.value))
     if isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
         return ('int64_t', '0')

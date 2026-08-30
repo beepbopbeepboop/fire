@@ -461,6 +461,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._external_protos = gen._external_protos  # share: bubble extern protos up to root preamble
                 temp_gen._global_inline_defs = gen._global_inline_defs
                 temp_gen._emitted_allocs = gen._emitted_allocs
+                temp_gen._emitted_singletons = gen._emitted_singletons
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
                 # _module_stmts' union (see PERF_nested_module_compile_
@@ -481,6 +482,18 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._calls_in_stmts_cache = gen._calls_in_stmts_cache
                 temp_gen._extra_search_paths = gen._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                 temp_gen.func_return_types = gen.func_return_types  # share across gens
+                # share: the self-host GimpleGen registry seed (parsed
+                # `class GimpleGen` StructDef + the extracted-helper field
+                # union + the frozen-signature flag). Read-only; every nested
+                # temp_gen routes the same StructDef through its own
+                # `_imported_typedef_structs` so `self`/`gen` params type
+                # consistently. See gimple_codegen._selfhost_register_gimplegen.
+                for _sh_attr in ('_selfhost_gimplegen_stmts',
+                                 '_selfhost_gimplegen_extra_fields',
+                                 '_selfhost_gimplegen_registered',
+                                 '_selfhost_gimplegen_sigs'):
+                    if hasattr(gen, _sh_attr):
+                        setattr(temp_gen, _sh_attr, getattr(gen, _sh_attr))
                 # share: `self._compiled_modules`-based dedup (line above,
                 # `_compiled_modules`) means a module can be Pass1b-scanned
                 # exactly ONCE, in whichever temp_gen happens to compile it
@@ -1979,9 +1992,23 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                             and len(node.value.elements) == len(targets)):
                         elem_types = [gen._quick_type(e) for e in node.value.elements]
                     else:
-                        # Unpacking a single iterable: per-element type is unknown
-                        # here; use the int64_t storage default, not the container.
-                        elem_types = ['int64_t'] * len(targets)
+                        # Unpacking a single iterable: per-element type is
+                        # unknown here; use the int64_t storage default.
+                        # EXCEPT `text, is_fstring = ..._decode_str_literal_
+                        # text(...)`, which returns `(char*, char*)` — the
+                        # `is_fstring` slot is genuinely a "" / "1" STRING
+                        # (see that helper's own docstring). Pre-typing it
+                        # int64_t here re-boxed the per-slot get_str result
+                        # into an int64_t local, so `if not is_fstring:`
+                        # tested pointer-non-null and an empty-string ""
+                        # pointer (non-null) read as truthy → every plain
+                        # literal took the f-string path and lost its text.
+                        _cv = node.value
+                        _is_decode = (
+                            isinstance(_cv, gimple_ctypes.CallExpr)
+                            and isinstance(_cv.func, gimple_ctypes.MemberExpr)
+                            and _cv.func.member == '_decode_str_literal_text')
+                        elem_types = [('char *' if _is_decode else 'int64_t')] * len(targets)
                 else:
                     targets = [node.target]
                     elem_types = [gen._quick_type(node.value)]
@@ -2156,9 +2183,17 @@ def _split_expr_format(src: str) -> str:
     return src.strip()
 
 
-def _parse_fstring_parts(gen, inner):
-    """Parse f-string body into [('lit',text) | ('expr',code)] parts."""
-    parts = []
+def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
+    """Parse f-string body into `(kind, text, spec, conv)` 4-tuples, kind
+    being 'lit' or 'expr'.
+
+    The `-> list[tuple[str, str, str, str]]` return annotation is
+    load-bearing for the self-hosted compiler: without it every slot but
+    the first was typed int64_t, so the consumer (`_lower_StringLiteral`'s
+    f-string branch) read each part's TEXT as a boxed pointer, ran
+    `_c_escape` on the integer bits, and interned an empty string — every
+    compiled-codegen f-string collapsed to `""`."""
+    parts: list = []
     i = 0
     buf = []
     while i < len(inner):
@@ -2236,7 +2271,7 @@ def _repr_value(gen, rat: str, rav: str) -> str:
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 
-def _decode_str_literal_text(gen, val: str) -> tuple[str, bool]:
+def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
     """Strip a raw StringLiteral.value's f/r/b/u/t prefix and outer quotes,
     returning (text, is_fstring). Shared by plain-string lowering, f-string
     interpolation, and `%`-style string-formatting (which needs the format
@@ -2246,42 +2281,65 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, bool]:
     # and t-strings (template strings — same `{expr}` interpolation syntax,
     # treated identically here) keep prefix+quotes.
     is_fstring = False
-    prefix = ''
-    while val and val[0] in 'fFrRbBuUtT':
-        prefix += val[0]
-        val = val[1:]
-    # If the remaining value starts with a quote, it still has quotes (f-string case)
-    # If not, the prefix-like characters were part of the string content — restore them
+    # Index-based prefix walk (was `while val: ... val = val[1:]`). Once
+    # self-hosted, a `while` loop that reslices `val = val[1:]` every
+    # iteration to shrink it never terminated for an f/r/b-prefixed string
+    # (`f"..."`) — the compiled reslice-in-condition-loop didn't make
+    # progress, `val[0]` stayed `'f'`, and `_parse_fstring_parts` then spun
+    # on a mangled `inner` allocating forever. A single positive slice at
+    # the end has no such issue.
+    _pfx_end = 0
+    while _pfx_end < len(val) and val[_pfx_end] in 'fFrRbBuUtT':
+        _pfx_end += 1
+    prefix = val[:_pfx_end]
+    val = val[_pfx_end:]
+    # mojo_compiler.py's Parser already strips the outer quotes from a plain
+    # (non-f/t-string) StringLiteral's value at tokenize time. So if what's
+    # left after the prefix walk does NOT start with a quote, it is a plain
+    # string whose content is final — return it verbatim (plus any
+    # prefix-like leading chars that turned out to be content, not a
+    # prefix). Do NOT re-run the quote strip below: a plain string whose
+    # CONTENT happens to start and end with a quote — this file's own
+    # `'"'` / `"'"` / `'"""'` / `"'''"` literals, and every user string
+    # like `"a "` — would otherwise be mangled ( `'"""'` → `''`, so once
+    # self-hosted `"anything".startswith(<that literal>)` matched and every
+    # user StringLiteral's text was stripped to "" in the emitted pool ).
     if not val or val[0] not in ('"', "'"):
-        val = prefix + val  # restore — these weren't string prefixes
-    else:
-        # These were actual prefixes — check for f-string/t-string marker
-        is_fstring = any(c in 'fFtT' for c in prefix)
-    # Strip outer triple or single quotes. mojo_compiler.py's Parser
-    # already strips quotes from a plain (non-triple, non-f/t-string)
-    # StringLiteral's value at tokenize time — this defensive re-strip
-    # exists for values that DIDN'T go through that (f/t-strings keep
-    # their prefix+quotes per the comment above; triple-quoted strings
-    # come back from the placeholder cache still fully quoted). The
-    # `len(val) >= 2` guard matters: a bare single-character value that
-    # happens to BE a quote character (e.g. this file's own `'"'` /
-    # `"'"` literals — a StringLiteral literally containing just a
-    # double- or single-quote) both start AND end with that same
-    # character, indistinguishable from "an already-quoted empty
-    # string" to the naive check below without a length floor — an
-    # actually-quoted value needs at least the two delimiter
-    # characters. Without the guard, `'"'` silently became the empty
-    # string, and worse, collided in the string-interning pool with
-    # `"'"` (also emptied out) — found via mojo_compiler.py's own
-    # `_strip_inline_comment`'s `c in ('"', "'", '\`')` never matching
-    # a real `"` once self-hosted, letting a `#` inside an f-string
-    # call argument get misread as a real comment start.
-    if val.startswith('"""') and val.endswith('"""'):
-        val = val[3:-3]
-    elif val.startswith("'''") and val.endswith("'''"):
-        val = val[3:-3]
-    elif len(val) >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
-        val = val[1:-1]
+        return prefix + val, ''
+    # A value that is ENTIRELY quote characters (this file's own `'"'` /
+    # `"'"` / `'"""'` / `"'''"` literals — content, not delimiters) has no
+    # inner text to strip. Return it verbatim. Critical once self-hosted:
+    # otherwise `'"""'` -> `'"'` (a single `"`), and since this function's
+    # own `val.startswith('"""')` argument then IS just `"`,
+    # `"anything".startswith('"')` matched and every user `"..."` /
+    # `f"..."` literal got its "triple quotes" stripped
+    # (`'"vv={x}"'[3:len-3]` == `'={'`), mangling every f-string body ->
+    # `_parse_fstring_parts` spun forever.
+    _all_quote = True
+    for _c in val:
+        if _c != '"' and _c != "'":
+            _all_quote = False
+            break
+    if _all_quote:
+        return prefix + val, ('1' if any(c in 'fFtT' for c in prefix) else '')
+    # val still carries quotes: an f/t-string (prefix has f/F/t/T) or a
+    # triple-quoted value handed back from the placeholder cache.
+    is_fstring = any(c in 'fFtT' for c in prefix)
+    # `len(val) >= 6` / `>= 2`: a value that IS just quote characters (`"""`,
+    # `"`, this file's own such literals) starts and ends with the quote but
+    # carries no delimited content — a real `"""x"""` is >= 7 chars (>= 6
+    # empty), a real `"x"` is >= 3 (>= 2 empty).
+    # `val[1:len(val)-1]` not `val[1:-1]`: a negative slice stop, once
+    # self-hosted, resolved wrong on the compiled path (`'"AB={x}"'[1:-1]`
+    # came back as a single middle char), which mangled every f-string
+    # body.
+    _vl = len(val)
+    if _vl >= 6 and val.startswith('"""') and val.endswith('"""'):
+        val = val[3:_vl - 3]
+    elif _vl >= 6 and val.startswith("'''") and val.endswith("'''"):
+        val = val[3:_vl - 3]
+    elif _vl >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
+        val = val[1:_vl - 1]
     # Return the is_fstring flag as an EMPTY/non-empty STRING ("", "1")
     # rather than a bool, so the (text, is_fstring) tuple is homogeneous
     # [char*, char*] — the caller unpacks both slots via get_str (the

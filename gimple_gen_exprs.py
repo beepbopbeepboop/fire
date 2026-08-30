@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    Parser, py_tokenize,
 )
 import regex_compile
 import mlir
@@ -181,8 +182,19 @@ def _lower_StringLiteral(gen, node):
         else:
             # Expression: try to evaluate and convert to char*
             try:
-                from mojo_compiler import Parser as _P, py_tokenize as _tok
-                expr_node = _P(_tok(text))._parse_expr(0)
+                # `Parser` / `py_tokenize` are imported at MODULE level
+                # (added to the `from mojo_compiler import (...)` block
+                # above) — NOT via a function-scoped `from mojo_compiler
+                # import Parser as _P, ...`. The self-hosted compiler
+                # cannot resolve a function-scoped import of a compiled
+                # sibling symbol: `_P`/`_tok` were treated as unknown call
+                # targets and weak-stubbed ("unavailable in compiled
+                # mode"), so EVERY f-string interpolation silently lowered
+                # to the empty string once mojoc ran its own compiled
+                # codegen. At module scope `Parser(...)` is a recognised
+                # struct constructor and `py_tokenize(...)` a recognised
+                # function.
+                expr_node = Parser(py_tokenize(text))._parse_expr(0)
                 # This is parsed fresh from raw source text at codegen
                 # time (unlike the rest of the module), so it never went
                 # through ast_rewriter.rewrite() — do that here, or e.g.
@@ -233,11 +245,27 @@ def _lower_TstringLiteral(gen, node) -> tuple[str, str]:
     return 'char *', temp
 
 
-def _lower_IdentExpr(gen, node) -> tuple[str, str]:
+def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
+    # `node: IdentExpr` (not the bare-boxed-int64 default): once self-hosted,
+    # an unannotated `node` compiled to `int64_t`, so `node.name` went
+    # through `_mojo_dispatch_getattr` and — because `_known_field_type
+    # ('name')` is ambiguous (`ExceptHandler.name` is annotated `object`) —
+    # stayed boxed int64_t. `gen._c_names.get(name, name)` then ran
+    # `mojo_str_from_int` on that boxed char* POINTER (a decimal-string
+    # key that always missed), and the boxed-int `cname` was `append_int`'d
+    # into the `(ctype, cname)` return tuple → callers read slot 1 as 0
+    # (e.g. `print("hi", x)` emitted `x` as `(int64_t)0`). Typed
+    # `IdentExpr *`, `node.name` is a plain `node->name` char* field read.
     name = node.name
     if name == 'None':  return 'int', '0'
     if name == 'True':  return 'int', '1'
     if name == 'False': return 'int', '0'
+    # Flow-sensitive `isinstance` narrowing: inside `if isinstance(name,
+    # T):` every read of `name` is a `T *` (see _apply_isinstance_
+    # narrowings). The cast temp was already materialised at the guard.
+    _nrw = gen._narrowed_exprs.get(f'i:{name}')
+    if _nrw is not None:
+        return _nrw[0], _nrw[1]
     if name in gen._boxed_mut_locals and name not in gen._captures:
         # This function's OWN local is heap-boxed because some nested
         # closure captures it by reference -- see _seed_mut_captured_
@@ -645,6 +673,29 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
 
 
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    # Flow-sensitive `isinstance` narrowing for a MemberExpr receiver
+    # (`if isinstance(node.target, IdentExpr): ... node.target.name`). The
+    # guarded expression's cast temp was materialised at the `if` — return
+    # it so the outer `.member` access lands as a real `->` field read
+    # instead of a type-erased dynamic getattr.
+    if isinstance(node.obj, gimple_ctypes.IdentExpr):
+        _nrw = gen._narrowed_exprs.get(f'm:{node.obj.name}.{node.member}')
+        if _nrw is not None:
+            return _nrw[0], _nrw[1]
+    # Self-hosting bootstrap: strip the `gimple_ctypes` / sibling-module
+    # re-export hub from a qualified reference — `gimple_solvers.LayoutSolver
+    # .HEAP`, `gimple_ctypes.IdentExpr` used as a bare value. The qualifier
+    # is a Python-import artifact; `<Class>.<ATTR>` / `<Class>` resolves on
+    # the bare name (class-attr globals, struct typedefs) but the opaque
+    # module handle makes it fall through to a runtime `_mojo_dispatch_getattr`
+    # (→ AttributeError) or an UNRESOLVED-class-attr stub.
+    if (isinstance(node.obj, gimple_ctypes.MemberExpr)
+            and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)
+            and gmp._is_selfhost_sibling_alias(gen, node.obj.obj.name)):
+        return gen.lower_expr(gimple_ctypes.MemberExpr(
+            obj=gimple_ctypes.IdentExpr(name=node.obj.member,
+                                        line=getattr(node, 'line', 0)),
+            member=node.member))
     # `dict.fromkeys` read as a VALUE (real: zipfile/_path/__init__.py's
     # `_dedupe = dict.fromkeys`, later called as `_dedupe(iterable)`) —
     # `dict` itself already resolves to a real function-pointer VALUE
@@ -724,6 +775,22 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Check if obj is a simple identifier (module access)
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
+
+        # `cls.CLASSATTR` inside a classmethod: `cls` is a PARAM (so the
+        # bare-type-name `ClassName.ATTR` branch further down is skipped —
+        # `cls` is in var_types), but `.member` is a real class attribute of
+        # the enclosing class. Resolve to its synthesized backing global,
+        # like `ClassName.ATTR` does, instead of a dynamic
+        # `_mojo_dispatch_getattr` on the boxed `cls` handle — which, once
+        # self-hosted, RAISED AttributeError and aborted the whole compile
+        # (TypeLattice.is_float's `t in cls._FLOAT`, reached lowering any
+        # comparison operator).
+        _cur_struct = getattr(gen, '_current_struct_name', None)
+        if (module_name == 'cls' and _cur_struct
+                and node.member in gen._class_attrs.get(_cur_struct, {})):
+            _gname = gen._class_attrs[_cur_struct][node.member]
+            _gtype = gen._global_var_types.get(_gname, 'int64_t')
+            return _gtype, gen._new_val(_gtype, f'{_gname}')
 
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
@@ -844,6 +911,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 raw_ptr = gen._new_val(c_decl_type, f'{field_ref}')
                 vp = gen._new_val('void *', f'(void *){raw_ptr}')
                 gen._emit(f'  {t} = (int64_t){vp};')
+            elif ctype.endswith(' *') and c_decl_type == 'int64_t':
+                # A pointer-semantic global (`char *` — e.g. a boxed path
+                # string like gimple_codegen._SELFHOST_DIR) stored in a boxed
+                # `int64_t` field: cast the load back to its real type so a
+                # later string op / `==` on `t` isn't a bare integer compare.
+                gen._emit(f'  {t} = ({ctype}){field_ref};')
             else:
                 gen._emit(f'  {t} = {field_ref};')
             return ctype, t
@@ -965,6 +1038,17 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             aliases = gen._struct_comptime_aliases.get(module_name)
             if aliases and node.member in aliases:
                 return gen.lower_expr(aliases[node.member])
+            # A plain class-level attribute (`LayoutSolver.HEAP = 'heap'`)
+            # backed by a synthesized module global — the same redirect the
+            # instance-typed path below applies, but reached here via the
+            # bare type name. Without this a `ClassName.CONST` string/int
+            # constant stubbed to 0 (or, when the base was an opaque module
+            # handle, raised AttributeError at runtime).
+            _cattrs = gen._class_attrs.get(module_name)
+            if _cattrs and node.member in _cattrs:
+                gname = _cattrs[node.member]
+                gtype = gen._global_var_types.get(gname, 'int64_t')
+                return gtype, gen._new_val(gtype, f'{gname}')
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.
@@ -1467,6 +1551,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             dict_stored = gen._field_dict_val_types.get(struct_name, {}).get(node.member)
             if dict_stored:
                 gen._dict_val_types[t] = dict_stored
+        elif field_type == 'MojoSet *':
+            stored = gen._field_elem_types.get(struct_name, {}).get(node.member)
+            if stored:
+                gen._elem_types[t] = stored
         elif field_type == 'MojoDict *':
             stored = gen._field_dict_val_types.get(struct_name, {}).get(node.member)
             if stored:
@@ -3164,7 +3252,7 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     return 'MojoDict *', t
 
 
-def _emit_dict_pair_store(gen, t, key_expr, val_expr) -> None:
+def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     """Emit one `mojo_dict_set_*` store of (key_expr → val_expr) into the
     dict temp `t`, shared by the dict-LITERAL lowering (`{k: v}` pairs)
     and the `dict(k=v, ...)` builtin's kwarg pairs — previously only the

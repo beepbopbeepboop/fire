@@ -51,15 +51,13 @@ from generated_dispatch import (
 # definition instead of one per importing file - the latter is a hard
 # "redefinition of X" GCC error since it's all one translation unit.
 _emitted_unresolved_stub_syms: set[str] = set()
-# Dedup for the `_mojo_type_name` tag→name table emitted in gen_module's
-# preamble: the whole flattened closure is ONE translation unit, so a
-# `static char * _mojo_type_name` definition must appear exactly once even
-# when several modules' bodies call `type(x).__name__` (gimple_codegen,
-# myinterpreter, ...). Cleared per compile_to_gimple call like
-# _emitted_unresolved_stub_syms.
-# BUG-fix B2: was a set used purely as a boolean flag (`.add(True)`); it is
-# now a plain bool with identical reset points (every public compile_* entry).
-_emitted_type_name_emitted: bool = False
+# Dedup for the `_mojo_type_name` tag→name table (`static char *
+# _mojo_type_name`, must appear exactly once in the flattened closure's
+# single TU) now lives in `GimpleGen._emitted_singletons` under the
+# 'type_name_table' key — a per-`gen` set shared by ref into every nested
+# temp_gen (auto-reset each compile since each `_run_pipeline` builds a
+# fresh `gen`). The old module-level bool couldn't be read/written
+# cross-module in the compiled compile_to_gimple.
 
 
 # ---- constants displaced by the Wave-2 leaf split (restored verbatim) ----
@@ -168,6 +166,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_get_int':          'int64_t',
     'mojo_dict_get_double':       'double',
     'mojo_dict_get_str':          'char *',
+    'mojo_dict_setdefault_int':   'int64_t',
+    'mojo_dict_setdefault_str':   'char *',
     'mojo_dict_contains':         'int',
     'mojo_dict_len':              'int64_t',
     'mojo_dict_iter_new':         'MojoDictIter *',
@@ -294,6 +294,8 @@ _SELFHOST_HARDCODED_FUNCS = frozenset({
     'Interpreter___init__',
     'Interpreter_execute',
     'jit_compile_and_execute',
+    '_merge_struct_inheritance',
+    '_compute_exc_descendants',
 })
 
 
@@ -1339,6 +1341,13 @@ class GimpleGen:
         self._global_inline_defs: set[str] = set()   # all func names with inline definitions (shared)
         self._struct_allocs_needed: set[str] = set() # struct names needing _alloc_ helpers
         self._emitted_allocs: set[str] = set()       # struct names for which _alloc_ was already emitted
+        # Whole-compile "emitted exactly once" singletons keyed by a short
+        # tag (e.g. 'type_name_table'). Shared by ref into every nested
+        # temp_gen like _emitted_allocs — a plain module-global bool for
+        # this (the old `_emitted_type_name_emitted`) can't be read/written
+        # cross-module in the compiled compile_to_gimple (no module-global
+        # accessor plumbing for a `.py` sibling), and raised AttributeError.
+        self._emitted_singletons: set = set()
         self._compiled_modules: set[str] = set()     # modules already compiled to avoid duplicates
         # Absolute file paths currently being compiled anywhere in this whole-
         # program flattening (root file plus every transitively-imported
@@ -1445,6 +1454,29 @@ class GimpleGen:
         # `self.struct_field_types`, grown monotonically during
         # compilation — the same time-dependent-filter trap as Phase 2).
         self._param_usage_scan_cache: dict = {}
+        # Self-hosting bootstrap: `gen_module_impl` and its Pass-1.x helpers
+        # now live in `gimple_module_gen.py` as MODULE functions taking
+        # `self`, so the `class GimpleGen` field-type scan never sees their
+        # `self.<attr> = {}` / `[]` writes and defaults these fields to the
+        # opaque `int` — storing a real MojoDict*/MojoList* pointer into an
+        # `int` field truncates it and the next use segfaults. Seed them
+        # here with the right shape so the scan types the struct fields.
+        self._inferred_param_types: dict = {}
+        self._toplevel_dep_init_modules: list = []
+        self._struct_layout: dict = {}
+        self._layout_hint: str = ''
+        self._fn_returns_generator: dict = {}
+        self._inferred_var_types: dict = {}
+        self._param_generator_api: dict = {}
+        self._all_async_fn_names: set = set()
+        self._bound_method_ret_types: dict = {}
+        self._module_int_consts_cache: dict = {}
+        self._seen_generator_base_names: dict = {}
+        self._cpp_module_fn_asts: dict = {}
+        self._ctor_lit_param_types: dict = {}
+        self._global_literal_slot_ctypes: dict = {}
+        self._local_def_param_types: dict = {}
+        self._param_elem_types: dict = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement
         # memoization of `_calls_in_stmts`' pure CallExpr-collection walk
         # (gen_module's ctor-literal scan plus its Pass 1.3d/2c caller-body
@@ -2066,6 +2098,8 @@ class GimpleGen:
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
+        'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_setdefault_str': ('char *',  ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
         'mojo_replace_argv':   ('void',    ['MojoList *']),
         'mojo_is_registered_list': ('int',     ['int64_t']),
@@ -2677,6 +2711,15 @@ class GimpleGen:
         'main', '_toplevel', '_gimple_main', '_lib_main',
         'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'py_tokenize',
         'int_write', 'int_parse_module', 'jit_compile_and_execute', 'mojo_print',
+        # Self-hosting bootstrap: gimple_module_gen.py's `from gimple_codegen
+        # import _merge_struct_inheritance, _compute_exc_descendants` — the
+        # `gimple_codegen` `.py` sibling isn't resolvable by module_loader,
+        # so the call sites can't learn a mangled suffix that matches the
+        # definition. Both are single-definition helpers with no overloads;
+        # pinning the bare C name (plus a concrete forward decl in
+        # gen_module's `_is_selfhost_file` block) makes call and definition
+        # agree without any cross-module signature negotiation.
+        '_merge_struct_inheritance', '_compute_exc_descendants',
     })
 
     # ── Struct method generation ──────────────────────────────────────────
@@ -2789,6 +2832,8 @@ class GimpleGen:
 
     # ---- delegates: calls family (bodies in gimple_gen_calls.py) ----
 
+    def _ident_call_name(self, func_node) -> str:
+        return ggc._ident_call_name(self, func_node)
     def _lower_call(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_call(self, node)
 
@@ -3154,6 +3199,16 @@ class GimpleGen:
         return gst._gen_stmt_ReturnStmt(self, node)
     def _ensure_bool_cond(self, ctype: str, val: str) -> str:
         return gst._ensure_bool_cond(self, ctype, val)
+    def _narrow_key_for_expr(self, e) -> str:
+        return gst._narrow_key_for_expr(self, e)
+    def _isinstance_narrow_struct(self, type_arg) -> str:
+        return gst._isinstance_narrow_struct(self, type_arg)
+    def _collect_isinstance_narrowings(self, cond, out: list) -> None:
+        return gst._collect_isinstance_narrowings(self, cond, out)
+    def _apply_isinstance_narrowings(self, cond) -> dict:
+        return gst._apply_isinstance_narrowings(self, cond)
+    def _restore_isinstance_narrowings(self, saved: dict) -> None:
+        return gst._restore_isinstance_narrowings(self, saved)
     def _gen_stmt_IfStmt(self, node):
         return gst._gen_stmt_IfStmt(self, node)
     def _gen_stmt_DelStmt(self, node):
@@ -3182,8 +3237,12 @@ class GimpleGen:
         return gst._handler_exc_all_names(self, h)
     def _handler_bind_name(self, h):
         return gst._handler_bind_name(self, h)
-    def _emit_except_handler(self, handler, node, bb_after):
+    def _emit_except_handler(self, handler, node, bb_after: str):
         return gst._emit_except_handler(self, handler, node, bb_after)
+    def _loop_continue_bb(self) -> str:
+        return gst._loop_continue_bb(self)
+    def _loop_break_bb(self) -> str:
+        return gst._loop_break_bb(self)
     def _gen_stmt_TryStmt(self, node):
         return gst._gen_stmt_TryStmt(self, node)
     def _gen_stmt_WithStmt(self, node):
@@ -3206,7 +3265,7 @@ class GimpleGen:
         return gex._lower_StringLiteral(self, node)
     def _lower_TstringLiteral(self, node) -> tuple[str, str]:
         return gex._lower_TstringLiteral(self, node)
-    def _lower_IdentExpr(self, node) -> tuple[str, str]:
+    def _lower_IdentExpr(self, node: IdentExpr) -> tuple[str, str]:
         return gex._lower_IdentExpr(self, node)
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
         return gex._lower_WalrusExpr(self, node)
@@ -3503,11 +3562,11 @@ class GimpleGen:
         return grsl._calls_in_stmts(self, stmts, out)
     def _split_expr_format(self, src: str) -> str:
         return grsl._split_expr_format(src)
-    def _parse_fstring_parts(self, inner):
+    def _parse_fstring_parts(self, inner: str) -> list[tuple[str, str, str, str]]:
         return grsl._parse_fstring_parts(self, inner)
     def _repr_value(self, rat: str, rav: str) -> str:
         return grsl._repr_value(self, rat, rav)
-    def _decode_str_literal_text(self, val: str) -> tuple[str, bool]:
+    def _decode_str_literal_text(self, val: str) -> tuple[str, str]:
         return grsl._decode_str_literal_text(self, val)
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
         return grsl._stub_result(self, ctype, value, note)
@@ -3558,6 +3617,64 @@ class GimpleGen:
     def _eval_const(self, node):
         return grsl._eval_const(self, node)
 
+_SELFHOST_GG_CACHE: dict = {}
+
+
+def _selfhost_load_gimplegen_class():
+    """Parse `_SELFHOST_DIR/gimple_codegen.py` and return its `class GimpleGen`
+    StructDef node (or None). `gimple_codegen` is a bare `.py` sibling —
+    module_loader can't resolve `import gimple_codegen` as a Mojo module, and
+    the `gimple_codegen ↔ gimple_module_gen` import cycle keeps `class
+    GimpleGen` out of `imported_stmts` during gimple_module_gen.py's own
+    compile — so parse the file directly. Cached on path+mtime."""
+    _p = os.path.join(_SELFHOST_DIR, 'gimple_codegen.py')
+    try:
+        _mt = os.path.getmtime(_p)
+    except OSError:
+        return None
+    _hit = _SELFHOST_GG_CACHE.get('c')
+    if _hit is not None and _hit[0] == _mt:
+        return _hit[1]
+    try:
+        _mod = ast_rewriter.rewrite(
+            Parser(py_tokenize(open(_p).read())).with_filename(_p).parse_module())
+    except Exception:
+        return None
+    _cls = None
+    for _s in _mod:
+        if getattr(_s, 'name', None) == 'GimpleGen' and hasattr(_s, 'methods'):
+            _cls = _s
+            break
+    _SELFHOST_GG_CACHE['c'] = (_mt, _cls)
+    return _cls
+
+
+def _selfhost_register_gimplegen(gen):
+    """One-time (per top-level compile) GimpleGen self-host registry seed.
+
+    The function-extraction refactor moved `gen_module_impl` + ~330 former
+    `GimpleGen` methods into `gimple_module_gen.py` / `gimple_gen_*.py` as
+    module functions taking the instance as an ordinary `self`/`gen` first
+    parameter. For that parameter to be typed `GimpleGen *` (so `self.field`
+    / `self.method()` resolve statically instead of stubbing to a no-op —
+    which made the compiled `compile_to_gimple` silently produce nothing),
+    THIS compile needs `class GimpleGen`'s full field + method registry.
+
+    This seed only PARSES and stashes; `gimple_module_gen.gen_module_impl`
+    routes the parsed StructDef through `_imported_typedef_structs` so the
+    ordinary struct-registration passes build everything, and applies the
+    extracted-helper field union + frozen signature lock. The stashed
+    attributes are shared into every nested temp_gen (gimple_gen_resolve.py)."""
+    _cls = _selfhost_load_gimplegen_class()
+    if _cls is None:
+        return
+    gen._selfhost_gimplegen_stmts = _cls
+    gen._selfhost_gimplegen_extra_fields = \
+        gfn._selfhost_gimplegen_field_types(_cls)
+    gen._selfhost_gimplegen_sigs = gfn._selfhost_gimplegen_frozen_sigs(gen, _cls)
+    gen._selfhost_gimplegen_registered = True
+
+
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False):
     """Shared driver behind every public compile_* entry point.
@@ -3579,12 +3696,21 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # GimpleGen instance recursive import-inlining creates. Now applied in
     # ALL modes — link mode historically skipped this (REF.html B1).
     _emitted_unresolved_stub_syms.clear()
-    global _emitted_type_name_emitted  # B2: plain-bool reset
-    _emitted_type_name_emitted = False
     tokens = py_tokenize(mojo_src)
     stmts = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
     gen._current_filename = filename
+    # Self-hosting bootstrap: when compiling this compiler's own entry point
+    # as a transitive closure (`python3 mojo.py build mojo.py`, `--dump-full
+    # mojo.py`, `make bootstrap` stage 1, `make check-selfhost`), seed the
+    # GimpleGen registry so the extracted backend helpers can be typed.
+    # do_imports/link only, and only for mojo.py / mojo_main.py under the
+    # compiler's own source dir — never for `--dump <userfile>` or a
+    # compile_stdlib.py worker.
+    if ((do_imports or link_mode) and filename
+            and os.path.basename(filename) in ('mojo.py', 'mojo_main.py')
+            and os.path.abspath(os.path.dirname(filename)) == _SELFHOST_DIR):
+        _selfhost_register_gimplegen(gen)
     # Seed the self-import guard with the ROOT file's own identity — see
     # `_compiling_file_paths`'s declaration for why this is needed (a bare
     # import elsewhere in this file that happens to share this file's own

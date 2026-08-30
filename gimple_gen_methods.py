@@ -35,6 +35,62 @@ import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
 
+
+# Module aliases bound in this compiler's own backend sources that name a
+# sibling *implementation* module whose top-level functions are the former
+# GimpleGen methods (see _selfhost_sibling_module_call). Any `import X as Y`
+# in a `gimple*.py` file where X starts with one of these is in scope.
+_SELFHOST_SIBLING_MODULE_PREFIXES = ('gimple_', 'ast_rewriter', 'mlir',
+                                     'regex_compile', 'module_loader')
+
+
+def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
+    """True when compiling this compiler's OWN `gimple*.py` backend source and
+    `module_name` is a local alias for one of its sibling implementation
+    modules (`import gimple_gen_calls as ggc`, `import gimple_ctypes`, …).
+
+    Gated hard to `.py` sources under this repo whose basename starts with
+    `gimple` (the self-hosting bootstrap is always this compiler's own Python
+    — no `.mojo` file is ever part of it), so it can never intercept a real
+    stdlib module reference like `re.compile(...)`."""
+    cf = getattr(gen, '_current_filename', None)
+    if not cf or not cf.endswith('.py'):
+        return False
+    if not gimple_ctypes.os.path.basename(cf).startswith('gimple'):
+        return False
+    cur_abs = gimple_ctypes.os.path.abspath(cf)
+    sd = gimple_codegen._SELFHOST_DIR
+    if not (cur_abs == sd or cur_abs.startswith(sd + '/')):
+        return False
+    if module_name in getattr(gen, '_module_alias_names', ()):
+        _info = (getattr(gen, 'imported_symbols', {}) or {}).get(module_name) or {}
+        _mod = _info.get('module') or module_name
+        return _mod.startswith(_SELFHOST_SIBLING_MODULE_PREFIXES)
+    # A bare sibling-module base name (`regex_compile`, `ast_rewriter`,
+    # `mlir`) reached without a local `import` of its own — e.g. after the
+    # `gimple_ctypes` re-export hub is stripped off `gimple_ctypes.
+    # regex_compile.compile_pattern(...)`. Safe here: we are already inside
+    # this compiler's own `gimple*.py` source.
+    return module_name.startswith(_SELFHOST_SIBLING_MODULE_PREFIXES)
+
+
+def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):
+    """`'func'` if `<module_name>.<method_name>` names a registered top-level
+    function of a self-host sibling module, `'other'` if the alias is a
+    self-host sibling but the member is something else (a re-exported struct /
+    AST-node type, a constant, …), else None.
+
+    When it's a self-host sibling alias the qualifier is ALWAYS a removable
+    Python-import artifact, so both cases re-dispatch on the bare name — only
+    the entry point into the bare-name machinery differs."""
+    if not _is_selfhost_sibling_alias(gen, module_name):
+        return None
+    if (method_name in getattr(gen, 'func_param_types', {})
+            or method_name in getattr(gen, 'func_return_types', {})):
+        return 'func'
+    return 'other'
+
+
 def _lower_bound_method_value(gen, struct_name: str, method: str,
                                self_type: str, self_val: str) -> tuple[str, str]:
     """Lower a method referenced as a plain value (not called at this
@@ -799,6 +855,23 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         inner_member = func.obj.member
         outer_member = func.member
 
+        # Self-hosting bootstrap: `gimple_ctypes.ast_rewriter.rewrite(...)`,
+        # `gimple_ctypes.mlir.lower_op(...)`, `gimple_ctypes.Parser(...)` etc.
+        # — this compiler's own backend modules reach sibling modules through
+        # the `gimple_ctypes` re-export hub. The hub qualifier plus the
+        # re-exported module name are both Python-import artifacts; strip
+        # them and re-dispatch on `<real_module>.<member>(...)`.
+        if (isinstance(inner_obj, gimple_ctypes.IdentExpr)
+                and _is_selfhost_sibling_alias(gen, inner_obj.name)):
+            _rewritten = gimple_ctypes.CallExpr(
+                func=gimple_ctypes.MemberExpr(
+                    obj=gimple_ctypes.IdentExpr(
+                        name=inner_member, line=getattr(node, 'line', 0)),
+                    member=outer_member),
+                args=list(node.args),
+                kwargs=list(getattr(node, 'kwargs', None) or []))
+            return gen._lower_method_call(_rewritten)
+
         # Handle os.path.* calls
         if isinstance(inner_obj, gimple_ctypes.IdentExpr) and inner_obj.name == 'os' and inner_member == 'path':
             if outer_member == 'basename' and len(node.args) == 1:
@@ -932,6 +1005,36 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if isinstance(func.obj, gimple_ctypes.IdentExpr):
         module_name = func.obj.name
         method_name = func.member
+
+        # Self-hosting bootstrap: a module-qualified call to one of this
+        # compiler's OWN extracted sibling backend modules'
+        # (`import gimple_gen_calls as ggc` etc.) top-level functions —
+        # `ggc._lower_call(self, node)`, `gmg.gen_module_impl(self, stmts)`,
+        # `ginf._dedup_variadic_externs(parts)`, …. The function-extraction
+        # refactor turned ~300 former GimpleGen methods into thin
+        # `return <alias>.<impl>(self, ...)` delegates; without this the
+        # `<alias>` module handle is an opaque int64_t and every one of
+        # those calls stubbed to 0, so the self-hosted `compile_to_gimple`
+        # returned an empty `.ci`. Resolve to the same mangled C symbol a
+        # bare-name call would use (the `ast_rewriter.rewrite` special case
+        # below is the original, hand-written instance of this — now
+        # generalized). Gated to this compiler's own `gimple*.py` sources
+        # so it can never intercept a real stdlib module method.
+        if _selfhost_sibling_member_kind(gen, module_name, method_name) is not None:
+            # Re-dispatch as a BARE-name call: the alias qualifier is a
+            # Python-import artifact only. `_lower_call` owns struct-ctor
+            # allocation, default-argument padding, keyword ordering and
+            # vararg packing (and falls through to `_lower_named_call` for a
+            # plain function) — none of which a hand-rolled call here would
+            # get right (the sibling impls have many defaulted params, and
+            # re-exported AST-node types register a `Name *` return type
+            # that would otherwise look like a function).
+            _bare_node = gimple_ctypes.CallExpr(
+                func=gimple_ctypes.IdentExpr(
+                    name=method_name, line=getattr(node, 'line', 0)),
+                args=list(node.args),
+                kwargs=list(getattr(node, 'kwargs', None) or []))
+            return gen._lower_call(_bare_node)
 
         # Check if this is a known module method
         if module_name == 're' and method_name == 'sub':
@@ -1958,7 +2061,16 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._elem_types[t] = 'char *'
         return 'MojoList *', t
     if method == 'values':
-        return 'MojoList *', gen._new_val('MojoList *', f"mojo_dict_values ({ov})")
+        t = gen._new_val('MojoList *', f"mojo_dict_values ({ov})")
+        # Carry the dict's VALUE type onto the value-list temp (mirrors
+        # `keys()` recording 'char *') so `for v in d.values():` types `v`
+        # from it instead of the int64_t default — without this a
+        # `for sd in track_best.values()` over a dict of `StructDef *`
+        # left `sd` boxed and every `sd.name` read a pointer-decimal.
+        _vt = gen._dict_val_of(ov)
+        if _vt and _vt != 'int64_t':
+            gen._elem_types[t] = _vt
+        return 'MojoList *', t
     if method == 'items':
         t = gen._new_val('MojoList *', f"mojo_dict_items ({ov})")
         # Record the dict's VALUE type on the item-list temp so the
@@ -2040,8 +2152,34 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit(f"  mojo_dict_clear ({ov});")
         return 'int', gen._new_val('int', '0')
     if method == 'setdefault' and args:
+        # `d.setdefault(key[, default])` — real Python: insert `default`
+        # (None if omitted) under `key` when absent, then return the current
+        # value. The previous lowering was just `mojo_dict_get_int`, which
+        # returns 0 for an absent key and NEVER inserts — so the ubiquitous
+        # `d.setdefault(k, []).append(x)` accumulator pattern (this compiler's
+        # own `gen_module_impl` uses it) appended to a NULL list and
+        # segfaulted the self-hosted binary.
         key_type, key_val = gen.lower_expr(args[0])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (key_type, key_val)])
+        key_type, key_val = gen._char_to_cstr(key_type, key_val)
+        if len(args) >= 2:
+            dt, dv = gen.lower_expr(args[1])
+        else:
+            dt, dv = 'int64_t', '0'
+        if dt == 'char *':
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_dict_setdefault_str',
+                [('MojoDict *', ov), (key_type, key_val), ('char *', dv)])
+        dv64 = gen._to_int64(dt, dv)
+        raw = gen._call_expr(
+            'int64_t', 'mojo_dict_setdefault_int',
+            [('MojoDict *', ov), (key_type, key_val), ('int64_t', dv64)])
+        # Preserve a container/pointer default's static type so a chained
+        # `.append(...)` / `[...]` resolves against the real runtime type.
+        if dt not in ('int64_t', 'int', '_Bool', 'double', ''):
+            typed = gen._new_val(dt, f"({dt}){raw}")
+            gen._elem_types[typed] = gen._elem_types.get(dv, gen._elem_types.get(raw))
+            return dt, typed
+        return 'int64_t', raw
     return 'int64_t', gen._new_val('int64_t', '0')
 
 
@@ -2553,6 +2691,13 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
     func = node.func
     is_class_ref = False
+    # `cls.method(...)` inside a @classmethod: the receiver `cls` (in `ov`)
+    # IS a real argument that must be prepended, exactly like `self` on an
+    # instance-method call — unlike `StructName.method(...)` (a name-call
+    # with no receiver value). Tracked separately so the "first C param
+    # isn't `Struct *`" heuristic below (which is meant for `StructName.
+    # staticmethod()`) does not wrongly suppress the `cls` argument.
+    _is_cls_receiver = False
     if isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name in gen.struct_field_types:
         struct_name = func.obj.name
         is_class_ref = True
@@ -2565,11 +2710,28 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         # `.join` resolved as a string method) — a hard segfault once the
         # self-host gate made these classmethod bodies actually compile.
         _cn = gen.current_func_name
-        _sn = _cn.rsplit('_', 1)[0] if _cn else ''
-        if (_sn in gen.struct_field_types
-                or f'{_sn}_{method}' in gen.func_return_types):
+        # Longest `_`-separated prefix that names a real struct or a
+        # compiled `{prefix}_{method}` — NOT `rsplit('_', 1)`, which is
+        # wrong when the ENCLOSING method's own name has an underscore
+        # (`TypeLattice_join_all` -> 'TypeLattice_join', so `cls.join`
+        # fell through here, `is_class_ref` stayed false, and the "first
+        # param isn't Struct *" heuristic then dropped the `cls` arg and
+        # padded a NULL — `join_all`'s inner `cls.join(result, t)` became
+        # `TypeLattice_join(result, t, 0)`, corrupting every multi-element
+        # `_infer_list_elem_type` / return-type join).
+        _sn = ''
+        if _cn:
+            _pp = _cn.split('_')
+            for _kk in range(len(_pp), 0, -1):
+                _cand = '_'.join(_pp[:_kk])
+                if (_cand in gen.struct_field_types
+                        or f'{_cand}_{method}' in gen.func_return_types):
+                    _sn = _cand
+                    break
+        if _sn and (_sn in gen.struct_field_types
+                    or f'{_sn}_{method}' in gen.func_return_types):
             struct_name = _sn
-            is_class_ref = True
+            _is_cls_receiver = True
         else:
             struct_name = gimple_exprtypes._struct_name_of(ot)
     else:
@@ -2636,15 +2798,28 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # dropped kwargs since it accepts any args; now that a real,
     # concretely-typed candidate is resolved, the value must actually be
     # passed.
+    # Recorded parameter defaults for this method (gimple_module_gen.py's
+    # Pass 10 populates `_func_param_defaults[f"{struct}_{method}"]` from
+    # `m.param_defaults` — same source `_lower_named_call` uses for free
+    # functions). `[(pname, default_ast), ...]`, only params that HAVE a
+    # default, starting at the first defaulted position.
+    _method_dflts = (gen._func_param_defaults.get(mangled)
+                     or gen._func_param_defaults.get(
+                         f"{struct_name}_{method}{_method_overload_suffix}")
+                     or gen._func_param_defaults.get(f"{struct_name}_{method}")
+                     or [])
+    _method_dflt_map = {pn: dv for pn, dv in _method_dflts}
     if _chosen_method is not None:
-        arg_pairs = gen._build_call_args_for_candidate(_chosen_method, node.args, node.kwargs)
+        arg_pairs = gen._build_call_args_for_candidate(
+            _chosen_method, node.args, node.kwargs, defaults=_method_dflt_map)
     else:
         arg_pairs = [gen.lower_expr(a) for a in node.args]
         arg_pairs = gen._repack_method_call_spread_args(
             mangled, struct_name, method, node.args, arg_pairs)
     full_param_list = gen.func_param_types.get(mangled,
         gen.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", []))
-    if not is_class_ref and full_param_list and full_param_list[0] != f"{struct_name} *":
+    if (not is_class_ref and not _is_cls_receiver
+            and full_param_list and full_param_list[0] != f"{struct_name} *"):
         is_class_ref = True
     # A @staticmethod called THROUGH AN INSTANCE (`obj.my_staticmethod()`
     # — real Python allows this; the instance is simply not passed,
@@ -2656,12 +2831,27 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # empty, so the `and full_param_list` guard short-circuits) — found
     # via Tools/ftscalingbench/ftscalingbench.py's `obj.my_staticmethod()`
     # ("too many arguments... expected 0, have 1").
-    if not is_class_ref and f"{struct_name}_{gimple_ctypes._safe_name(method)}" in gen._static_methods:
+    if (not is_class_ref and not _is_cls_receiver
+            and f"{struct_name}_{gimple_ctypes._safe_name(method)}" in gen._static_methods):
         is_class_ref = True
-    expected_non_self = len(full_param_list) - (0 if is_class_ref else 1)
+    # `_is_cls_receiver`: `cls` is prepended as arg 0 (like `self`), so one
+    # C parameter is supplied by the receiver — same as `not is_class_ref`.
+    expected_non_self = len(full_param_list) - (0 if (is_class_ref and not _is_cls_receiver) else 1)
     if full_param_list and len(arg_pairs) < expected_non_self:
+        # Pad missing trailing args with the method's OWN recorded defaults
+        # (`def _emit_label(self, label, freq_hint='')` called as
+        # `gen._emit_label(label)` must pad with `""`, not `0`), mirroring
+        # `_lower_named_call`'s free-function padding. `_method_dflts` holds
+        # only the params that have a default, starting at the first
+        # defaulted position, so it indexes from
+        # `expected_non_self - len(_method_dflts)` (BUG-2026-020 shape).
+        _first_dflt = expected_non_self - len(_method_dflts)
         while len(arg_pairs) < expected_non_self:
-            arg_pairs.append(('int', '0'))
+            _pos = len(arg_pairs)
+            _dv = (_method_dflts[_pos - _first_dflt][1]
+                   if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
+            arg_pairs.append(gen._default_expr_to_pair(_dv)
+                             if _dv is not None else ('int', '0'))
     # Auto-stub if the mangled method name has no known declaration. Check
     # both the suffixed key (this specific overload) and the bare key
     # (set for ANY overload by Pass 2b's return-type inference, which
@@ -2711,10 +2901,16 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             gen._elaborated_externs.append(_stub)
         gen._auto_stubbed.add(mangled)
 
+    # For a `cls.` receiver the value passed is the classmethod's own
+    # `int64_t cls` (a class-tag placeholder, not a real struct pointer) —
+    # prepend it as `int64_t` so call-site parameter inference doesn't
+    # decide the callee's `cls` param is a `Struct *`.
+    _recv_pair = ('int64_t', ov) if _is_cls_receiver else (ot, ov)
+    _prepend_recv = (not is_class_ref) or _is_cls_receiver
     if ret_type == 'void':
-        all_arg_pairs = arg_pairs if is_class_ref else [(ot, ov)] + arg_pairs
+        all_arg_pairs = ([_recv_pair] + arg_pairs) if _prepend_recv else arg_pairs
         return gen._void_call(mangled, all_arg_pairs)
-    all_arg_pairs = ([(ot, ov)] + arg_pairs) if not is_class_ref else arg_pairs
+    all_arg_pairs = ([_recv_pair] + arg_pairs) if _prepend_recv else arg_pairs
     t = gen._call_expr(ret_type, mangled, all_arg_pairs)
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]

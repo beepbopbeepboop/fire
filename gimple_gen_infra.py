@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    Parser, py_tokenize,
 )
 import regex_compile
 import mlir
@@ -156,6 +157,16 @@ def _reset_func(gen, body: list = None, params: list = None):
     # would mis-type a same-named temp in the next (e.g. an open() file handle
     # read as a leftover MojoSet*, emitting MojoSet_read).
     gen._actual_types:    dict[str, str]   = {}
+    # Flow-sensitive `isinstance()` narrowing. Inside the then-branch of
+    # `if isinstance(E, SomeStruct):` (and `and`-chains of such tests),
+    # every read of E is known to be a `SomeStruct *` — the guard the
+    # source already wrote. Key: "i:<name>" for an IdentExpr E, or
+    # "m:<obj>.<member>" for a MemberExpr E with an IdentExpr base. Value:
+    # (ctype, c_value). _lower_IdentExpr / _lower_MemberExpr consult this
+    # before their generic type-erased handling; _gen_stmt_IfStmt sets and
+    # restores it around each guarded body. Reset per function like every
+    # other per-body table here.
+    gen._narrowed_exprs:  dict             = {}
     # Function PARAM name -> the bare struct name its Mojo annotation
     # names, when that annotation's base is a known struct (e.g.
     # `downgrade: ArcPointer[Self.T]` → 'ArcPointer'). The ABI can box
@@ -554,6 +565,22 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
                 qual = _mlmod.module_name_for_path(_imp_path)
         except Exception:
             exports, qual = gen._local_sibling_module_exports(mod)
+        if (not exports or not qual):
+            # Self-host bootstrap: `from gimple_codegen import _C_RESERVED_
+            # FUNCS` names a sibling `.py` compiler module that neither
+            # module_loader (stdlib/test only) nor imports.resolve_source
+            # (.mojo only) can resolve. Scan it directly for its
+            # frozenset/set module globals so a re-exported set doesn't fall
+            # to the codegen "undeclared -> (int64_t)0" NULL-set crash.
+            # Scoped to global_var consumption below — no fn/struct/overload
+            # signature is taken from this path.
+            import module_loader as _mlmod2
+            _sd = gimple_ctypes.os.path.dirname(
+                gimple_ctypes.os.path.abspath(_mlmod2.__file__))
+            _cand = gimple_ctypes.os.path.join(_sd, mod.split('.')[-1] + '.py')
+            if gimple_ctypes.os.path.isfile(_cand):
+                exports = _mlmod2._module_loader.load_module_from_path(_cand)
+                qual = _mlmod2.module_name_for_path(_cand)
         if not exports or not qual:
             continue
         for name, alias in stmt.names:
@@ -564,7 +591,17 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
             if sym in gen._imported_global_accessors:
                 continue
             ctype = info.get('c_return_type', 'int64_t')
-            accessor_csym = (f'{gimple_ctypes._c_field_name(qual)}__mojo_global_get_'
+            # A re-exported global (`from gimple_codegen import _C_RESERVED_
+            # FUNCS`, itself `from gimple_ctypes import ...`) is accessed
+            # through the accessor its TRUE defining module emits — use the
+            # home path the scanner recorded, not the module named in this
+            # `from` statement.
+            _home_qual = qual
+            _hp = info.get('home_module_path')
+            if _hp:
+                import module_loader as _mlmod_g
+                _home_qual = _mlmod_g.module_name_for_path(_hp) or qual
+            accessor_csym = (f'{gimple_ctypes._c_field_name(_home_qual)}__mojo_global_get_'
                               f'{gimple_ctypes._c_field_name(name)}')
             gen._imported_global_accessors[sym] = (ctype, accessor_csym)
             guard = gimple_ctypes._stub_guard_name(accessor_csym)
@@ -2188,8 +2225,10 @@ def _fstring_sub_exprs(gen, node) -> list:
         if kind != 'expr':
             continue
         try:
-            from mojo_compiler import Parser as _P, py_tokenize as _tok
-            expr_node = _P(_tok(text))._parse_expr(0)
+            # Module-level `Parser`/`py_tokenize` (see _lower_StringLiteral's
+            # matching fix): a function-scoped `from mojo_compiler import
+            # ... as _P` is unresolvable in the self-hosted compiler.
+            expr_node = Parser(py_tokenize(text))._parse_expr(0)
             expr_node = gimple_ctypes.ast_rewriter.rewrite_node(expr_node)
             out.append(expr_node)
         except Exception:
@@ -2433,12 +2472,23 @@ def _known_field_type(gen, member: str) -> str | None:
     FloatLiteral, _Bool in BoolLiteral). A boxed handle's field read can
     only be returned with a single static C type, so only fields with an
     unambiguous type are typed here; the rest keep the int64_t default."""
-    _types = set()
-    for _fm in gen.struct_field_types.values():
+    # Iterate keys + index (with an ANNOTATED `_fm: dict` local), NOT
+    # `for _fm in ...values()`: the self-hosted compiler could not infer
+    # the value-element type of `struct_field_types` (a dict-of-dicts), so
+    # `_fm` was typed int64_t, `member in _fm` lowered to a `/* TODO: 'in'
+    # for int64_t */ = 0` no-op, and this function ALWAYS returned None in
+    # compiled mojoc — every boxed AST `.name`/`.member`/`.value` read
+    # stayed int64_t. A list (not a set + `.pop()`, also unlowered) keeps
+    # the compiled control flow simple.
+    _types: list = []
+    for _sn in gen.struct_field_types:
+        _fm: dict = gen.struct_field_types[_sn]
         if member in _fm:
-            _types.add(_fm[member])
+            _v = _fm[member]
+            if _v not in _types:
+                _types.append(_v)
     if len(_types) == 1:
-        return _types.pop()
+        return _types[0]
     return None
 
 

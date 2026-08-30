@@ -489,6 +489,126 @@ class ModuleLoader:
             # Extract function definitions with full signatures
             _scan_source(content)
 
+            # Self-host `.py` compiler modules: a module-scope
+            # `NAME = frozenset({...})` / `NAME = set(...)` global is a real
+            # export the `.mojo`-only `var NAME = ...` scan above never saw,
+            # so an importer's cross-TU reference (`from gimple_codegen import
+            # _C_RESERVED_FUNCS`, itself re-exported from gimple_ctypes) fell
+            # to the codegen's "undeclared -> (int64_t)0" path — a NULL set
+            # into `mojo_set_difference` / `mojo_set_union` -> segfault in the
+            # compiled compile_to_gimple. SCOPED to frozenset/set-CALL RHS
+            # only: the compiler's Phase-1.7 global-type inference doesn't
+            # recognise `frozenset(...)` so its accessor return type is
+            # `int64_t` (boxed pointer) — matching the extern emitted here.
+            # Dict / set-LITERAL / list globals get a precise `MojoDict *` /
+            # `MojoSet *` accessor from their home compile that a blind
+            # int64_t extern here would CONFLICT with, so they are left out
+            # (they weren't the crash and their undeclared->0 fallback, while
+            # imprecise, is not a hard failure).
+            _selfhost_dir = os.path.dirname(os.path.abspath(__file__))
+            if path.endswith('.py') and os.path.dirname(os.path.abspath(path)) == _selfhost_dir:
+                import re as _re_py
+                _pydir = os.path.dirname(path)
+                # `NAME = frozenset(...)` / `set(...)` -> boxed int64_t accessor
+                # (Phase 1.7 doesn't classify a `frozenset(...)` CALL, so the
+                # home emits an int64_t accessor and this extern must match).
+                _SET_GLOBAL_RE = _re_py.compile(
+                    r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:frozenset|set)\s*\(')
+                # `NAME: set = {...}` / `NAME = {x, ...}` / `NAME: dict = {...}`
+                # / `NAME = {k: v}` / `NAME: list = [...]` / `NAME = [...]` — a
+                # container LITERAL global. The home compile's Phase 1.7 gives
+                # these a precise `MojoSet *` / `MojoDict *` / `MojoList *`
+                # accessor, so this extern must declare the SAME type (a blind
+                # int64_t extern would `conflicting types` against the home
+                # definition). Without exporting them at all, a re-exported
+                # such global (`from generated_dispatch import _CMP_OPS as
+                # _GD_CMP_OPS` in gimple_ctypes.py) fell to codegen's
+                # "undeclared -> (int64_t)0" -> NULL set into
+                # `mojo_set_contains_str` -> SEGV lowering any BinaryOp.
+                #
+                # SCOPED to `generated_dispatch.py`: it is nothing BUT
+                # cross-module dispatch-table container globals, every one of
+                # which its home compile emits a `__mojo_global_get_` accessor
+                # for. A broader match hits modules (gimple_codegen.py,
+                # gimple_ctypes.py) whose same-named `{...}` globals are also
+                # locally re-defined / imported both ways, so the importer
+                # extern raced the home's own decl -> `conflicting types for
+                # 'gimple_codegen__mojo_global_get__RUNTIME_FUNCS'`.
+                _scan_container_literals = (
+                    os.path.basename(path) == 'generated_dispatch.py')
+                _CONTAINER_GLOBAL_RE = _re_py.compile(
+                    r'^([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([A-Za-z_][\w.\[\], ]*?))?\s*=\s*([\{\[])')
+                _local_set_globals = set()
+                for _line in content.split('\n'):
+                    if not _line or _line[0] in ' \t#':
+                        continue
+                    _ls = _line.rstrip()
+                    _m = _SET_GLOBAL_RE.match(_ls)
+                    if _m and _m.group(1) not in exports:
+                        _local_set_globals.add(_m.group(1))
+                        exports[_m.group(1)] = {
+                            'kind': 'global_var', 'c_return_type': 'int64_t',
+                            'home_module_path': path}
+                        continue
+                    if not _scan_container_literals:
+                        continue
+                    _cm = _CONTAINER_GLOBAL_RE.match(_ls)
+                    if not _cm or _cm.group(1) in exports:
+                        continue
+                    _nm, _ann, _open = _cm.group(1), (_cm.group(2) or '').strip(), _cm.group(3)
+                    _annb = _ann.split('[', 1)[0].strip().lower()
+                    if _annb in ('dict', 'mapping'):
+                        _crt = 'MojoDict *'
+                    elif _annb in ('set', 'frozenset'):
+                        _crt = 'MojoSet *'
+                    elif _annb in ('list', 'tuple', 'sequence'):
+                        _crt = 'MojoList *'
+                    elif _open == '[':
+                        _crt = 'MojoList *'
+                    else:
+                        # `{...}` with no annotation — a set literal `{a, b}` or
+                        # a dict literal `{k: v}`. `:` at brace-depth 1 before
+                        # the first top-level `,` means dict.
+                        _body = _ls[_ls.index('{') + 1:]
+                        _depth, _is_dict = 1, False
+                        for _ch in _body:
+                            if _ch in '([{':
+                                _depth += 1
+                            elif _ch in ')]}':
+                                _depth -= 1
+                                if _depth == 0:
+                                    break
+                            elif _ch == ':' and _depth == 1:
+                                _is_dict = True
+                                break
+                            elif _ch == ',' and _depth == 1:
+                                break
+                        _crt = 'MojoDict *' if _is_dict else 'MojoSet *'
+                    _local_set_globals.add(_nm)
+                    exports[_nm] = {
+                        'kind': 'global_var', 'c_return_type': _crt,
+                        'home_module_path': path}
+                # Re-exports: `from SIBLING import (a, b)` — a set global not
+                # defined locally but surfaced through this module carries the
+                # sibling's own home accessor.
+                _reexp = _re_py.findall(
+                    r'^from\s+([A-Za-z_][\w.]*)\s+import\s+\(([^)]*)\)',
+                    content, _re_py.MULTILINE)
+                _reexp += [(m.group(1), m.group(2)) for m in _re_py.finditer(
+                    r'^from\s+([A-Za-z_][\w.]*)\s+import\s+([^\n(]+)$', content, _re_py.MULTILINE)]
+                for _srcmod, _names_blob in _reexp:
+                    _sib = os.path.join(_pydir, _srcmod.split('.')[-1] + '.py')
+                    if not os.path.isfile(_sib) or _sib == path:
+                        continue
+                    _sib_exp = self.load_module_from_path(_sib)
+                    for _nm in _re_py.findall(r'[A-Za-z_][A-Za-z0-9_]*', _names_blob):
+                        _si = _sib_exp.get(_nm)
+                        if (isinstance(_si, dict) and _si.get('kind') == 'global_var'
+                                and _si.get('c_return_type') in (
+                                    'int64_t', 'MojoSet *', 'MojoDict *', 'MojoList *')
+                                and _nm not in exports):
+                            exports[_nm] = dict(_si)
+
             # Extract module-scope PLAIN `var NAME = EXPR` globals (not
             # `comptime` — those are handled separately, by re-parsing and
             # constant-folding the imported module's own source directly at

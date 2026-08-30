@@ -26,6 +26,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    Parser, py_tokenize,
 )
 import regex_compile
 import mlir
@@ -606,8 +607,11 @@ def _cpp_string_literal_expr(gen, val: str) -> str:
             piece = f'"{gimple_ctypes._c_escape(part_text)}"'
         else:
             try:
-                from mojo_compiler import Parser as _P, py_tokenize as _tok
-                expr_node = _P(_tok(part_text))._parse_expr(0)
+                # Module-level `Parser`/`py_tokenize` (see
+                # _lower_StringLiteral's matching fix): a function-scoped
+                # `from mojo_compiler import ... as _P` is unresolvable in
+                # the self-hosted compiler.
+                expr_node = Parser(py_tokenize(part_text))._parse_expr(0)
                 # Parsed fresh from raw source text (this expression never
                 # went through the module's own ast_rewriter.rewrite()
                 # pass) — same as _lower_StringLiteral's identical need.
