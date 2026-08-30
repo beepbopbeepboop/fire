@@ -225,7 +225,8 @@ def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
         return f.read()
 
 
-def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tuple = _OBJ_FLAGS):
+def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tuple = _OBJ_FLAGS,
+                         known_structs: frozenset = frozenset()):
     """Per-module independent work (source → object): read, collect exports,
     compile (cache-or-build). Each module is fully independent — no shared
     state — so this parallelizes across processes the same way
@@ -237,7 +238,16 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
     cas.stats: with -j>1 each job runs in its own worker process, so
     cas.get_or_build's in-process stats increment is invisible to the
     parent's cas.stats (a separate module-global per process) — the
-    aggregate would otherwise silently under-report."""
+    aggregate would otherwise silently under-report.
+
+    `known_structs` (BUG-2026-029 cross-file follow-up): the bare names of
+    every concrete struct defined ANYWHERE across the whole `modules` list
+    this job is one of (computed once by `build()` before dispatching any
+    job — see its own pre-pass), passed straight through to
+    `reflect.collect_exports_src` so a module-level global whose struct type
+    is defined in a SIBLING file (not this module's own file) still gets a
+    SYM_GLOBAL reflection export instead of being silently un-advertised.
+    Must be picklable for ProcessPoolExecutor — a frozenset of str is."""
     gcc = find_gcc()
     name = _module_name_for(path)
     src = open(path).read()
@@ -245,7 +255,8 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
         # module_prefix=name: the SAME identity GimpleGen(module_name=name)
         # below uses when actually compiling this module, so the reflection
         # table's advertised method symbols match what codegen emits.
-        exports = reflect.collect_exports_src(src, module_prefix=name)
+        exports = reflect.collect_exports_src(src, module_prefix=name,
+                                               known_structs=known_structs)
     except Exception:
         exports = []
     hit = None
@@ -280,6 +291,31 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     workdir = tempfile.mkdtemp(prefix='mojostdlib_')
     objs = []
 
+    # BUG-2026-029 cross-file follow-up: a cheap, source-text-only pre-pass
+    # over EVERY module in this build (before any per-module job runs) to
+    # index which bare names are concrete structs ANYWHERE in the compile
+    # unit — not just in the one file that happens to reference them. This
+    # is what lets reflect.collect_exports_src (called per-module, in
+    # parallel, with no visibility into sibling files on its own) recognize
+    # a module-level global whose struct type is defined in a DIFFERENT
+    # file (e.g. box.3d/game's `g_world: World` in game_ffi.mojo, with
+    # `struct World` defined in engine_world.mojo) as struct-typed, and so
+    # advertise a SYM_GLOBAL reflection export for it — see
+    # reflect.collect_exports's `known_structs` param docstring for exactly
+    # why this is safe (the accessor is always consumed as generic `void *`
+    # regardless of which file the struct's real layout lives in). A parse
+    # failure on one file here just contributes no names from that file —
+    # the exact same file will fail again (and get reported) in its own
+    # real `_compile_module_job` below, so silently skipping it here isn't
+    # hiding anything.
+    known_structs = set()
+    for _path in modules:
+        try:
+            known_structs |= reflect.collect_local_struct_names_src(open(_path).read())
+        except Exception:
+            pass
+    known_structs = frozenset(known_structs)
+
     # Compile every module's source → object first (fully independent per
     # module, so parallelizes cleanly across processes — same scheme as
     # compile_stdlib.py's ProcessPoolExecutor use). Order is preserved
@@ -290,7 +326,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             results = list(pool.map(
                 _compile_module_job, modules,
                 [workdir] * len(modules), [use_cache] * len(modules),
-                [objflags] * len(modules)))
+                [objflags] * len(modules), [known_structs] * len(modules)))
         # Merge each job's own CAS hit/miss into this process's cas.stats —
         # see _compile_module_job's docstring on why worker-process stats
         # don't propagate on their own. Only needed here: the jobs<=1 path
@@ -303,7 +339,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             elif hit is False:
                 cas.stats['misses'] += 1
     else:
-        results = [_compile_module_job(path, workdir, use_cache, objflags) for path in modules]
+        results = [_compile_module_job(path, workdir, use_cache, objflags, known_structs)
+                   for path in modules]
 
     # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
     # symbol from it if present, else falls back to source), so it need not be
