@@ -26,7 +26,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser,
+    py_tokenize, Parser, _as_str,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -6225,6 +6225,12 @@ def gen_module_impl(self, stmts):
                         self._emitted_dispatch_typedefs.add(dispatch_table.name)
 
     for sn in sorted(self._struct_allocs_needed):
+        # `sn` is a struct-name string; the compiled backend erased it to
+        # int64_t (the sorted-set element type never got seeded in time —
+        # see `_struct_allocs_needed`'s `set[str]` annotation), so
+        # `f'_alloc_{sn}'` emitted `_alloc_<pointer-decimal>`. Re-view it
+        # as `str`.
+        sn = _as_str(sn)
         if sn in self._emitted_allocs:
             continue  # already emitted by an imported module
         self._emitted_allocs.add(sn)

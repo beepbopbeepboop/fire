@@ -1381,6 +1381,14 @@ def _as_funcdef_node(e: object) -> FunctionDef:
     return e
 
 
+def _as_str(e: object) -> str:
+    """See _as_ident_node: static `str` view of a value the compiled
+    backend erased to int64_t (e.g. a loop variable over
+    `sorted(a_set_of_str)` whose element type the seeder could not fill
+    in in time). CPython identity; the `-> str` annotation is the point."""
+    return e
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
