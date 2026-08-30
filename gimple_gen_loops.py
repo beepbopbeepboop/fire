@@ -654,7 +654,24 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # pair-accessor gap (counter/interval/_unicode/string_slice
             # stdlib modules regress) — see A5-BUG.md. Keep this patch in
             # the tree as the starting point for resolving the frontier.
-            if it_type in ('int', 'int64_t', 'void *'):
+            # POSITIVE EVIDENCE the boxed handle is a LIST: a tracked element
+            # type that is a real (non-boxed) pointer can only have been
+            # recorded for a list. Take the list path directly instead of
+            # emitting the runtime dict-or-list dispatch below, whose dict
+            # arm would bind this same loop variable to a `char *` KEY.
+            # `_declare_var` is first-decl-wins, so the two arms otherwise
+            # declare one variable with two incompatible types and GCC
+            # rejects the dead dict arm outright ("assignment to
+            # 'FunctionDef *' from incompatible pointer type 'char *'").
+            # The dict arm is provably dead for such a value anyway.
+            _boxed_elem = gen._elem_of(it_val)
+            if (it_type in ('int', 'int64_t', 'void *') and _boxed_elem
+                    and _boxed_elem != 'int64_t' and _boxed_elem.endswith(' *')):
+                _lp_known = gen._new_val(
+                    'MojoList *', f"(MojoList *){gen._to_int64(it_type, it_val)}")
+                gen._elem_types[_lp_known] = _boxed_elem
+                gen._gen_for_list(var, _lp_known, node.body)
+            elif it_type in ('int', 'int64_t', 'void *'):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
                 bb_not_dict = gen._new_bb(); bb_not_list = gen._new_bb()
                 bb_after = gen._new_bb()

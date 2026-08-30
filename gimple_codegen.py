@@ -1057,6 +1057,16 @@ class GimpleGen:
         # -> 'char *'), so `field[k]` / `field.get(k, {})` / `field.items()`
         # one level down still carries a real value type instead of int64_t.
         self._field_dict_nested_val_types: dict[str, dict[str, str]] = {}
+        # For a struct field that is a LIST OF TUPLES (`FunctionDef.params`
+        # is a `list[tuple[str, str]]` of (name, annotation) pairs): the
+        # INNER tuple's slot C type. `struct_field_types` only records that
+        # the field is a `MojoList *`, and `_field_elem_types` only the
+        # element type — without this third level every `for a, b in
+        # node.params:` / `for i, (a, b) in enumerate(node.params):` unpacks
+        # both slots with `mojo_list_get_int`, binding boxed pointers that
+        # then compare unequal to every string literal. Consumed by
+        # `_gen_for_list` / `_gen_for_enumerate` via `_nested_elem_types`.
+        self._field_nested_elem_types: dict[str, dict[str, str]] = {}
         # FLAT `"Struct.field" -> raw annotation string` map — a `dict[str,
         # str]`, so it survives the self-host compile intact (unlike the
         # nested `_field_dict_val_types` / `struct_field_types`, whose inner
@@ -3487,6 +3497,10 @@ class GimpleGen:
         return ginf._subst_in_value(self, v, mapping)
     def _is_known_field(self, member: str) -> bool:
         return ginf._is_known_field(self, member)
+    def _known_field_elem_type(self, member: str) -> str | None:
+        return ginf._known_field_elem_type(self, member)
+    def _known_field_nested_elem_type(self, member: str) -> str | None:
+        return ginf._known_field_nested_elem_type(self, member)
     def _known_field_type(self, member: str) -> str | None:
         return ginf._known_field_type(self, member)
     def _try_lower_slice_region_eq(self, slice_node, other_node, negate: bool):

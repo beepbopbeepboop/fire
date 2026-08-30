@@ -1663,10 +1663,23 @@ def _apply_isinstance_narrowings(gen, cond) -> dict:
         if key in saved:
             continue
         ot, ov = gen.lower_expr(expr)
-        # Only worth narrowing a type-erased handle; a value already typed
-        # as a concrete pointer is either right already or was narrowed by
-        # an outer guard we must not clobber.
-        if ot != 'int64_t' and ot != 'int' and ot != 'void *':
+        # Narrow unless the value ALREADY has exactly the guarded type.
+        # `isinstance(x, T)` is positive RUNTIME evidence that x is a T for
+        # the whole guarded body, so it outranks whatever static type the
+        # value happens to carry — including a wrong one. This used to skip
+        # any value already typed as some concrete pointer, on the theory
+        # that such a type is "either right already or narrowed by an outer
+        # guard"; but a loop variable mis-typed by first-decl-wins element
+        # inference (`for _ms in module_stmts:` binding `FunctionDef *`
+        # because an earlier loop in the same function used that name) is
+        # neither. There, `elif isinstance(_ms, StructDef): for _m in
+        # _ms.methods:` silently kept the WRONG struct type, so `.methods`
+        # missed StructDef's field map, fell to the boxed dynamic-getattr
+        # path, and the loop degraded to a runtime dict-or-list dispatch.
+        # Casting to the guarded type is safe even when the prior type was
+        # genuinely unrelated: the body only executes when the runtime tag
+        # actually matches.
+        if ot == ptr_ct:
             continue
         vp = gen._new_val('void *', f'(void *){ov}')
         cast = gen._new_val(ptr_ct, f'({ptr_ct}){vp}')

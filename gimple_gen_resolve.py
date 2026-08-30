@@ -3004,13 +3004,32 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     inner_str = (target_str[1:-1].strip()
                  if (target_str.startswith('(') and target_str.endswith(')'))
                  else target_str)
-    parts = [p.strip() for p in inner_str.split(',')]
+    # Bracket-AWARE split, matching every other loop path (_gen_for_list,
+    # _gen_for_enumerate, _gen_for_zip): a naive `inner_str.split(',')` tore
+    # the nested slot of `for i, (pn, _pt) in enumerate(params)` into the
+    # fragments `(pn` / `_pt)`, and `(pn` was then handed straight to
+    # `_declare_var` — emitting the hard C syntax error `int64_t (pn;`.
+    # (Real: this compiler's own `_struct_method_overload_ids` param scan,
+    # only reachable once `zip()` got a lowering and the enclosing pass
+    # stopped running zero times.)
+    parts = [p.strip() for p in gen._split_top_level_comma(inner_str)]
     idx_var = parts[0] if len(parts) >= 1 and parts[0] else '_enum_i'
     val_var = parts[1] if len(parts) >= 2 and parts[1] else '_enum_val'
 
     elem = gen._elem_of(it_val)
     gen._declare_var(idx_var, 'int64_t')
-    gen._declare_var(val_var, elem if elem else 'int64_t')
+    # A nested tuple value slot (`for i, (a, b) in enumerate(pairs)`) is not
+    # itself a variable: bind the element into a fresh temp and unpack its
+    # own slots from that below, mirroring _gen_for_enumerate's val_is_tuple
+    # path. `_nested_elem_types` supplies the inner slot accessor.
+    val_names = None
+    if val_var.startswith('(') and val_var.endswith(')'):
+        val_names = [v.strip() for v
+                     in gen._split_top_level_comma(val_var[1:-1].strip())]
+        val_var = gen._new_temp('int64_t')
+        gen.var_types[val_var] = 'int64_t'
+    else:
+        gen._declare_var(val_var, elem if elem else 'int64_t')
     # Emitted references go through _cname: _declare_var renames targets
     # colliding with C reserved identifiers (`index` is a POSIX function →
     # `_var_index`), and emitting the raw Python name wrote an UNDECLARED
@@ -3054,6 +3073,33 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
             gen._safe_coerce_emit('int64_t', target_type, raw64, val_c)
         else:
             gen._emit(f"  {val_c} = (int64_t) {raw64};")
+    if val_names is not None:
+        # Unpack the nested tuple slot bound above into its own names, with
+        # the accessor matching the inner tuple's recorded slot type.
+        _pair_ptr = gen._new_val('MojoList *', f"(MojoList *){val_c}")
+        _pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
+        _pair_suf = gimple_ctypes.TypeLattice.list_suffix(_pair_elem)
+        for _vi in range(len(val_names)):
+            _vn = val_names[_vi]
+            if _vn == '_':
+                continue
+            gen._declare_var(_vn, _pair_elem)
+            _vc = gen._cname(_vn)
+            _vt = gen.var_types.get(_vn, _pair_elem)
+            if _pair_suf == 'str':
+                _sv = gen._new_val('char *', f"mojo_list_get_str ({_pair_ptr}, {_vi})")
+                if _vt == 'char *':
+                    gen._emit(f"  {_vc} = {_sv};")
+                else:
+                    _bv = gen._new_val('int64_t', f"(int64_t){_sv}")
+                    gen._emit(f"  {_vc} = {_bv};")
+                    gen._actual_types[_vn] = 'char *'
+            else:
+                _iv = gen._new_val('int64_t', f"mojo_list_get_int ({_pair_ptr}, {_vi})")
+                if _vt == 'int64_t':
+                    gen._emit(f"  {_vc} = {_iv};")
+                else:
+                    gen._safe_coerce_emit('int64_t', _vt, _iv, _vc)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

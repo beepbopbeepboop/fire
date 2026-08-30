@@ -2467,6 +2467,44 @@ def _is_known_field(gen, member: str) -> bool:
     return False
 
 
+def _known_field_elem_type(gen, member: str) -> str | None:
+    """Element C type of `member` when it is a container field whose element
+    type is recorded identically by every struct that has one — the
+    `_known_field_type` treatment ONE LEVEL DOWN, for a boxed receiver whose
+    own struct isn't statically known.
+
+    Without this a boxed `node.methods` resolved to `MojoList *` (via
+    `_known_field_type`) but with NO element type, so `for m in node.methods:`
+    fell to `_gen_for_iter`'s runtime dict-or-list dispatch — whose dict arm
+    binds the loop variable to a `char *` KEY while the list arm binds a real
+    element, giving one variable two incompatible declared types."""
+    _ets: list = []
+    for _sn in gen._field_elem_types:
+        _fm: dict = gen._field_elem_types[_sn]
+        if member in _fm:
+            _v = _fm[member]
+            if _v not in _ets:
+                _ets.append(_v)
+    if len(_ets) == 1:
+        return _ets[0]
+    return None
+
+
+def _known_field_nested_elem_type(gen, member: str) -> str | None:
+    """`_known_field_elem_type` for the inner tuple SLOT type of a
+    list-of-tuples field (see `_field_nested_elem_types`)."""
+    _ets: list = []
+    for _sn in gen._field_nested_elem_types:
+        _fm: dict = gen._field_nested_elem_types[_sn]
+        if member in _fm:
+            _v = _fm[member]
+            if _v not in _ets:
+                _ets.append(_v)
+    if len(_ets) == 1:
+        return _ets[0]
+    return None
+
+
 def _known_field_type(gen, member: str) -> str | None:
     """The static C type of `member` when it is a field of structs in
     struct_field_types and ALL of them agree on that type; None if the

@@ -1442,6 +1442,25 @@ def gen_module_impl(self, stmts):
     self.struct_boxed_fields['Comprehension'] = {'element', 'key'}
     self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
 
+    # ELEMENT types for the homogeneous list fields of the AST tables above.
+    # `struct_field_types` records only that a field IS a `MojoList *`; with
+    # no element type every `for m in struct_def.methods:` binds its loop
+    # variable as an opaque int64_t, so `m.name` goes through the boxed
+    # dynamic-getattr path and `m.params` cannot be typed at all. These
+    # mirror the `list[FunctionDef]` / `list[tuple[str, str]]` annotations on
+    # the corresponding dataclasses in mojo_compiler.py (the single source of
+    # truth) — the same declarative seed the field-type tables above already
+    # are, kept here because those tables are what a compile of an arbitrary
+    # user file has available. Only genuinely HOMOGENEOUS fields are listed:
+    # `StructDef.fields` (VarDecl | AssignStmt) and `FunctionDef.body` (any
+    # statement) have no single element type and are deliberately absent.
+    self._field_elem_types.setdefault('StructDef', {})['methods'] = 'FunctionDef *'
+    self._field_elem_types.setdefault('TraitDef', {})['methods'] = 'FunctionDef *'
+    # `params` is a list of (name, annotation) STRING pairs — the element is
+    # itself a 2-slot tuple, so the slot type goes in the nested table.
+    self._field_nested_elem_types.setdefault('FunctionDef', {})['params'] = 'char *'
+    self._field_nested_elem_types.setdefault('LambdaExpr', {})['params'] = 'char *'
+
     self.struct_nullable_container_fields['SubscriptExpr'] = {'attrs'}
     self.struct_nullable_container_fields['IfStmt'] = {'else_body'}
     self.struct_nullable_container_fields['WhileStmt'] = {'else_body'}
@@ -1820,6 +1839,42 @@ def gen_module_impl(self, stmts):
                                     self._field_elem_types.setdefault(s.name, {})[f_name] = _et
                                 elif _et == 'MojoList *':
                                     self._field_elem_types.setdefault(s.name, {})[f_name] = _et
+                                # `list[tuple[T, T]]` — a list whose elements
+                                # are themselves tuples. Record the inner
+                                # SLOT type so `for a, b in obj.field:`
+                                # unpacks with the right accessor instead of
+                                # boxing both slots (see
+                                # `_field_nested_elem_types`). Only a
+                                # homogeneous tuple has one slot type; a
+                                # heterogeneous one is deliberately skipped.
+                                _inner_ann = _li[0].strip()
+                                _inner_base = _inner_ann.split('[', 1)[0].strip()
+                                if (_inner_base in ('tuple', 'Tuple')
+                                        and '[' in _inner_ann):
+                                    _slots = gimple_ctypes._split_top_level_commas(
+                                        _inner_ann.split('[', 1)[1].rstrip(']').strip())
+                                    # Explicit homogeneity loop, NOT
+                                    # `len(set(...)) == 1`: this file's own
+                                    # code has to compile under the
+                                    # self-hosted backend, which lowers
+                                    # neither `set()` nor a comprehension
+                                    # over a generator here.
+                                    _slot_ct = None
+                                    _slot_same = True
+                                    for _sl in _slots:
+                                        _sl = _sl.strip()
+                                        if not _sl:
+                                            continue
+                                        _sct = self._resolve_type(_sl)
+                                        if _slot_ct is None:
+                                            _slot_ct = _sct
+                                        elif _sct != _slot_ct:
+                                            _slot_same = False
+                                            break
+                                    if (_slot_same and _slot_ct is not None
+                                            and _slot_ct != 'int64_t'):
+                                        self._field_nested_elem_types.setdefault(
+                                            s.name, {})[f_name] = _slot_ct
 
             def _self_member(expr):
                 """MemberExpr's `.member` name iff its object is bare `self`."""

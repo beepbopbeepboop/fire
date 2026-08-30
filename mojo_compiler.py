@@ -226,7 +226,7 @@ class TernaryExpr:
 
 @dataclass
 class LambdaExpr:
-    params: list
+    params: list[tuple[str, str]]
     body: object
     line: int = 0
     col: int = 0
@@ -451,7 +451,7 @@ class ForStmt:
 @dataclass
 class FunctionDef:
     name: str
-    params: list      # [(name, type|None), ...]
+    params: list[tuple[str, str]]      # [(name, type|None), ...]
     return_type: object
     body: list
     decorators: list = field(default_factory=list)
@@ -533,7 +533,7 @@ class AssertStmt:
 class StructDef:
     name: str
     fields: list
-    methods: list
+    methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
@@ -552,7 +552,7 @@ class StructDef:
 @dataclass
 class TraitDef:
     name: str
-    methods: list
+    methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
     line: int = 0
     col: int = 0

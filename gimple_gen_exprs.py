@@ -1353,6 +1353,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             stored = gen._field_elem_types.get(_pst, {}).get(node.member)
             if stored:
                 gen._elem_types[t] = stored
+            # List-of-tuples field: carry the inner tuple's slot type so a
+            # `for a, b in obj.field:` unpack reads real values, not boxed
+            # ints (see `_field_nested_elem_types`).
+            _nested_e = gen._field_nested_elem_types.get(_pst, {}).get(node.member)
+            if _nested_e:
+                gen._nested_elem_types[t] = _nested_e
             dict_stored = gen._field_dict_val_types.get(_pst, {}).get(node.member)
             if dict_stored:
                 gen._dict_val_types[t] = dict_stored
@@ -1592,6 +1598,9 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             stored = gen._field_elem_types.get(struct_name, {}).get(node.member)
             if stored:
                 gen._elem_types[t] = stored
+            _nested_e = gen._field_nested_elem_types.get(struct_name, {}).get(node.member)
+            if _nested_e:
+                gen._nested_elem_types[t] = _nested_e
             # Also propagate dict value type for list-of-dicts fields
             dict_stored = gen._field_dict_val_types.get(struct_name, {}).get(node.member)
             if dict_stored:
@@ -1746,6 +1755,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # only the object's own tag to be one of the registered structs.
         vp = gen._new_val('void *', f'(void *){ov}')
         _boxed_ft = gen._known_field_type(node.member)
+        # `_known_field_type` answers None when a member name is shared by
+        # struct families that type it differently (`methods` is a
+        # `MojoList *` on the AST's StructDef/TraitDef but a `MojoDict *` on
+        # the interpreter's runtime MojoClass). An unambiguously recorded
+        # ELEMENT type is stronger, more specific evidence than that tie:
+        # only a list-like field ever gets one, so the field is a list here.
+        # Without this the read stayed an opaque int64_t and the loop over
+        # it fell to `_gen_for_iter`'s runtime dict-or-list dispatch, whose
+        # two arms bind the SAME loop variable to a `char *` key and to a
+        # real element — one variable, two incompatible declared types.
+        if _boxed_ft is None and gen._known_field_elem_type(node.member):
+            _boxed_ft = 'MojoList *'
         raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                               [('void *', vp), ('char *', f'"{node.member}"')])
         if _boxed_ft is not None and _boxed_ft != 'int64_t':
@@ -1754,6 +1775,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             else:
                 t = gen._new_temp(_boxed_ft)
                 gen._emit(f"  {t} = ({_boxed_ft}){raw};")
+            _boxed_propagate_container_elems(gen, node.member, _boxed_ft, t)
             return _boxed_ft, t
         return 'int64_t', raw
     elif ot in ('int', 'int64_t', 'void *', 'char *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
@@ -1794,6 +1816,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # boxed int64_t default is kept (correct for the overwhelmingly common
         # boxed-expression/IntLiteral use).
         _boxed_ft = gen._known_field_type(node.member)
+        # `_known_field_type` answers None when a member name is shared by
+        # struct families that type it differently (`methods` is a
+        # `MojoList *` on the AST's StructDef/TraitDef but a `MojoDict *` on
+        # the interpreter's runtime MojoClass). An unambiguously recorded
+        # ELEMENT type is stronger, more specific evidence than that tie:
+        # only a list-like field ever gets one, so the field is a list here.
+        # Without this the read stayed an opaque int64_t and the loop over
+        # it fell to `_gen_for_iter`'s runtime dict-or-list dispatch, whose
+        # two arms bind the SAME loop variable to a `char *` key and to a
+        # real element — one variable, two incompatible declared types.
+        if _boxed_ft is None and gen._known_field_elem_type(node.member):
+            _boxed_ft = 'MojoList *'
         if (_boxed_ft is None and gen._is_except_as_member_target(node.obj)
                 and node.member in gen._except_attr_str_fields):
             # `err.filename` (a caught exception object's dynamically-set
@@ -1826,6 +1860,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             else:
                 t = gen._new_temp(_boxed_ft)
                 gen._emit(f"  {t} = ({_boxed_ft}){raw};")
+            _boxed_propagate_container_elems(gen, node.member, _boxed_ft, t)
             return _boxed_ft, t
         if ot in ('int', 'char'):
             ov = gen._new_val('int64_t', f'(int64_t){ov}')
@@ -1861,6 +1896,26 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         else:
             t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
         return field_type, t
+
+
+def _boxed_propagate_container_elems(gen, member: str, ft: str, t: str) -> None:
+    """Carry container ELEMENT metadata onto a field read taken through the
+    boxed `_mojo_dispatch_getattr` path, mirroring what the direct
+    `ptr->field` path already does from `_field_elem_types`.
+
+    The boxed path only ever recovered the field's own C type (via
+    `_known_field_type`), never its element type, so `for m in node.methods:`
+    on a boxed receiver got a `MojoList *` with UNKNOWN elements and fell to
+    `_gen_for_iter`'s runtime dict-or-list dispatch — whose dict arm binds
+    the loop variable to a `char *` key while the list arm binds a real
+    element, declaring one variable with two incompatible types."""
+    if ft == 'MojoList *':
+        _e = gen._known_field_elem_type(member)
+        if _e:
+            gen._elem_types[t] = _e
+        _ne = gen._known_field_nested_elem_type(member)
+        if _ne:
+            gen._nested_elem_types[t] = _ne
 
 
 def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
