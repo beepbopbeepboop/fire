@@ -1159,8 +1159,17 @@ def gen_module_impl(self, stmts):
         self.func_param_types['Scope_get']    = ['Scope *', 'char *']
         self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int']
         self.func_param_types['Scope___init__'] = ['Scope *', 'Scope *']
+        # Runtime helpers whose real C signature (mojo_runtime.h) takes
+        # int64_t-boxed pointers. `_KNOWN_SIGS` carries these for the
+        # Python build but is an EMPTY dict once mojoc runs its own
+        # codegen (the class-attr emitter only populates str->str dict
+        # literals, not this str->tuple one), so `_emit_call` fell back to
+        # whatever the call site passed (char *) and skipped the boxing —
+        # a `-Wint-conversion` warning and a byte-parity divergence.
+        self.func_param_types['_char_replace_impl'] = ['int64_t', 'int64_t', 'int64_t']
         self._selfhost_locked_param_types.update((
             'Scope_define', 'Scope_get', 'Scope_set', 'Scope___init__',
+            '_char_replace_impl',
         ))
         self._func_kwargs_slot['MojoFunction___call__'] = 3
         self._func_kwargs_has_vararg['MojoFunction___call__'] = True
@@ -4594,11 +4603,17 @@ def gen_module_impl(self, stmts):
             else:
                 return 'int64_t'
 
-    def _phase17_set_gtype(_gname, _ctype):
+    def _phase17_set_gtype(_gname: str, _ctype: str):
         """Record a Phase 1.7 global-type conclusion into BOTH the
         whole-program-shared dict and THIS instance's own overlay (see
         `_own_global_var_types`/`_global_dst_ctype` for why the overlay
-        must exist alongside the shared dict)."""
+        must exist alongside the shared dict).
+
+        `_gname: str` is load-bearing: without it the self-hosted compiler
+        typed the param int64_t and `_own_global_var_types[_gname] = ...`
+        keyed by the boxed pointer, so `_own_overlay_global_ctype` missed
+        and a `var counter: Int = 0` module global was declared `int` (the
+        IntLiteral default) instead of `int64_t` (the annotation)."""
         self._global_var_types[_gname] = _ctype
         self._own_global_var_types[_gname] = _ctype
 
@@ -5964,8 +5979,14 @@ def gen_module_impl(self, stmts):
                 self._module_global_inits[current_mod_name][gname] = init_code
                 self._global_to_module[gname] = current_mod_name
 
-    if self._module_globals.get(current_mod_name):
-        globals_list = self._module_globals[current_mod_name]
+    _mg_list = self._module_globals.get(current_mod_name) or []
+    # `len(...) > 0`, NOT bare truthiness: the self-hosted compiler's
+    # `if <empty MojoList>:` tests the pointer, not the length, so
+    # `_module_globals[mod]` (pre-created as `[]`) was truthy and every
+    # compiled program got an empty `typedef struct _<mod>_toplev {}` /
+    # `_<mod>_globals = {}` block even with no module-level globals.
+    if len(_mg_list) > 0:
+        globals_list = _mg_list
         current_mod_str = str(current_mod_name) if current_mod_name else "root"
         safe_name = _c_field_name(current_mod_str) if current_mod_str else "root"
         typedef_name = f"_{safe_name}_toplev"
@@ -6013,7 +6034,12 @@ def gen_module_impl(self, stmts):
 
         insert_idx = _module_globals_insert_idx
         if insert_idx is not None and insert_idx <= len(parts):
-            parts[insert_idx:insert_idx] = globals_struct_lines
+            # Rebuild via slice + concat, NOT `parts[i:i] = lines` — the
+            # self-hosted compiler has no lowering for a splice-assignment
+            # to a list slice, so the module-globals struct/typedef/
+            # accessor block was silently dropped from every compiled
+            # program with a module-level `var`.
+            parts = parts[:insert_idx] + globals_struct_lines + parts[insert_idx:]
         else:
             parts.extend(globals_struct_lines)
 
