@@ -1918,6 +1918,30 @@ def _boxed_propagate_container_elems(gen, member: str, ft: str, t: str) -> None:
             gen._nested_elem_types[t] = _ne
 
 
+def _homogeneous_literal_inner_elem(gen, elements) -> str:
+    """Inner element C type shared by every element of a container literal
+    when those elements are THEMSELVES tuple/list literals — e.g. the
+    `char *` of `[("a", "b"), ("c", "d")]`. "" when the literal is empty,
+    has a non-literal element, or the inner types disagree (a genuinely
+    heterogeneous pair like `("int", 5)` has no single slot type)."""
+    if not elements:
+        return ''
+    _ct = ''
+    for _el in elements:
+        if not isinstance(_el, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+            return ''
+        if not _el.elements:
+            return ''
+        _e = gen._infer_list_elem_type(_el.elements)
+        if not _e or _e == 'int64_t':
+            return ''
+        if not _ct:
+            _ct = _e
+        elif _e != _ct:
+            return ''
+    return _ct
+
+
 def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     if node.op == ':=':
         vtype, vv = gen.lower_expr(node.right)
@@ -3376,6 +3400,17 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # check), silently misprinting that `None` as `0`.
     if not (elem == 'int64_t' and gen._literal_elements_include_none(node.elements)):
         gen._elem_types[t] = elem
+    # Every element is itself a tuple/list literal with a homogeneous,
+    # non-default element type: record that INNER slot type so a later
+    # `for a, b in lst:` / `[x for a, b in lst]` unpacks each slot with the
+    # right accessor. Without it both slots fall to `mojo_list_get_int` and
+    # a list of STRING pairs binds boxed pointers — `[at for (at, _) in
+    # arg_pairs]` produced pointer decimals instead of the ctype strings,
+    # and (in this compiler's own `_lower_named_call`) overwrote
+    # `func_param_types[callee]` with garbage on every call site.
+    _inner_ct = _homogeneous_literal_inner_elem(gen, node.elements)
+    if _inner_ct:
+        gen._nested_elem_types[t] = _inner_ct
     gen._emit(f"  {t} = mojo_list_new ();")
     # Lower elements first so we can see all their types before choosing how
     # to append. A single list-wide suffix mis-types a genuinely heterogeneous
@@ -3536,6 +3571,17 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # mojo_repr_list_ints and silently misprint that `None` as `0`.
     if not (elem == 'int64_t' and gen._literal_elements_include_none(node.elements)):
         gen._elem_types[t] = elem
+    # Every element is itself a tuple/list literal with a homogeneous,
+    # non-default element type: record that INNER slot type so a later
+    # `for a, b in lst:` / `[x for a, b in lst]` unpacks each slot with the
+    # right accessor. Without it both slots fall to `mojo_list_get_int` and
+    # a list of STRING pairs binds boxed pointers — `[at for (at, _) in
+    # arg_pairs]` produced pointer decimals instead of the ctype strings,
+    # and (in this compiler's own `_lower_named_call`) overwrote
+    # `func_param_types[callee]` with garbage on every call site.
+    _inner_ct = _homogeneous_literal_inner_elem(gen, node.elements)
+    if _inner_ct:
+        gen._nested_elem_types[t] = _inner_ct
     gen._emit(f"  {t} = mojo_list_new ();")
     # Mark as a tuple (not a plain list) so generic repr() picks `(...)`
     # over `[...]` — see mojo_mark_as_tuple's doc comment in

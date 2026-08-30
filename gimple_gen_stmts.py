@@ -264,9 +264,13 @@ def _gen_stmt_VarDecl(gen, node):
             actual_dst = gen._global_dst_ctype(node.name)
         if ctype in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
             gen._elem_types[node.name] = gen._elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[node.name] = gen._nested_elem_types[v]
         if ctype == 'MojoDict *':
             if v in gen._elem_types:
                 gen._elem_types[node.name] = gen._elem_types[v]
+                if v in gen._nested_elem_types:
+                    gen._nested_elem_types[node.name] = gen._nested_elem_types[v]
             if v in gen._dict_val_types:
                 gen._dict_val_types[node.name] = gen._dict_val_types[v]
                 if v in gen._dict_nested_val_types:
@@ -274,6 +278,8 @@ def _gen_stmt_VarDecl(gen, node):
         # If value has element type tracking (e.g. split result), propagate to inferred var
         if node.type_ann is None and v in gen._elem_types:
             gen._elem_types[node.name] = gen._elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[node.name] = gen._nested_elem_types[v]
         # `var g = counter(3)` / `var task = create_task(f())` — the
         # `var`-keyword spelling of a declaration lowers through THIS
         # method (VarDecl), not the plain AssignStmt path a few lines
@@ -431,6 +437,8 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
             gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
         if dst == 'MojoList *' and v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[tname] = gen._nested_elem_types[v]
         return
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
@@ -438,6 +446,8 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
         gen._actual_types[tname] = vtype
         if v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[tname] = gen._nested_elem_types[v]
         if v in gen._dict_val_types:
             gen._dict_val_types[tname] = gen._dict_val_types[v]
             if v in gen._dict_nested_val_types:
@@ -452,9 +462,13 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[tname] = gen._nested_elem_types[v]
         elif actual_type == 'MojoDict *':
             if v in gen._elem_types:
                 gen._elem_types[tname] = gen._elem_types[v]
+                if v in gen._nested_elem_types:
+                    gen._nested_elem_types[tname] = gen._nested_elem_types[v]
             if v in gen._dict_val_types:
                 gen._dict_val_types[tname] = gen._dict_val_types[v]
                 if v in gen._dict_nested_val_types:
@@ -655,6 +669,8 @@ def _gen_stmt_AssignStmt(gen, node):
             elif vtype == 'MojoList *':
                 if v in gen._elem_types:
                     gen._elem_types[tname] = gen._elem_types[v]
+                    if v in gen._nested_elem_types:
+                        gen._nested_elem_types[tname] = gen._nested_elem_types[v]
             return
         # Genuine module-scope statement (we're generating THIS module's own
         # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
@@ -702,6 +718,8 @@ def _gen_stmt_AssignStmt(gen, node):
             elif vtype == 'MojoList *':
                 if v in gen._elem_types:
                     gen._elem_types[tname] = gen._elem_types[v]
+                    if v in gen._nested_elem_types:
+                        gen._nested_elem_types[tname] = gen._nested_elem_types[v]
             # Propagate _actual_types so the global load path (line 6481)
             # sets the correct actual type instead of gtype (which may be
             # int64_t).  Without this, a boxed MojoDict* or MojoList* stored
@@ -781,6 +799,8 @@ def _gen_stmt_AssignStmt(gen, node):
 
         if dst in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[tname] = gen._nested_elem_types[v]
             # Also propagate nested element types (for lists of lists)
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
@@ -805,6 +825,8 @@ def _gen_stmt_AssignStmt(gen, node):
         if dst == 'MojoDict *':
             if v in gen._elem_types:
                 gen._elem_types[tname] = gen._elem_types[v]
+                if v in gen._nested_elem_types:
+                    gen._nested_elem_types[tname] = gen._nested_elem_types[v]
             if v in gen._dict_val_types:
                 gen._dict_val_types[tname] = gen._dict_val_types[v]
                 if v in gen._dict_nested_val_types:
@@ -2011,6 +2033,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 elif vtype == 'MojoList *':
                     if v in gen._elem_types:
                         gen._elem_types[tname] = gen._elem_types[v]
+                        if v in gen._nested_elem_types:
+                            gen._nested_elem_types[tname] = gen._nested_elem_types[v]
                 continue
             if gen._in_toplevel_gen and tname in gen._global_var_types:
                 safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
@@ -2025,6 +2049,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 elif vtype == 'MojoList *':
                     if v in gen._elem_types:
                         gen._elem_types[tname] = gen._elem_types[v]
+                        if v in gen._nested_elem_types:
+                            gen._nested_elem_types[tname] = gen._nested_elem_types[v]
                 if vtype.endswith(' *') and v in gen._actual_types:
                     gen._actual_types[tname] = gen._actual_types[v]
                 elif v in gen._actual_types:
