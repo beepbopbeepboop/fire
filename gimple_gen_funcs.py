@@ -792,6 +792,27 @@ def _selfhost_gimplegen_field_types(gg_cls) -> dict:
         elif isinstance(_fld, VarDecl) and _fld.name:
             _ct = _selfhost_ann_ctype(getattr(_fld, 'type_ann', None))
             _selfhost_merge_field(_fields, _fld.name, _ct or 'int64_t')
+    # `__init__(self, ..., module_name="", ...)` param defaults: a bare
+    # `self.module_name = module_name` in the body carries no literal RHS,
+    # so infer the field ctype from the parameter's own default value /
+    # annotation. Without this `module_name` stayed int64_t and every
+    # `gen.module_name`-based module-name compare (`_global_to_module`
+    # ownership, `_<mod>_globals` struct routing) read boxed garbage.
+    _init_param_ct: dict = {}
+    for _m in getattr(gg_cls, 'methods', []):
+        if _m.name != '__init__':
+            continue
+        for _pn, _pt in (getattr(_m, 'params', None) or []):
+            _bare = _pn.lstrip('*')
+            _pc = _selfhost_ann_ctype(_pt)
+            if _pc is not None:
+                _init_param_ct[_bare] = _pc
+        for _pn2, _dv in (getattr(_m, 'param_defaults', None) or {}).items():
+            _bare2 = _pn2.lstrip('*')
+            if _bare2 not in _init_param_ct:
+                _lc = _selfhost_literal_ctype(_dv)
+                if _lc is not None:
+                    _init_param_ct[_bare2] = _lc
     # `self.X = <literal>` in every method body (dominated by __init__)
     for _m in getattr(gg_cls, 'methods', []):
         for _n in gimple_exprtypes._walk_ast(_m.body):
@@ -800,9 +821,76 @@ def _selfhost_gimplegen_field_types(gg_cls) -> dict:
                     and isinstance(_n.target.obj, IdentExpr)
                     and _n.target.obj.name == 'self'):
                 _ct = (_selfhost_ann_ctype(getattr(_n, 'type_ann', None))
-                       or _selfhost_literal_ctype(_n.value) or 'int64_t')
-                _selfhost_merge_field(_fields, _n.target.member, _ct)
+                       or _selfhost_literal_ctype(_n.value))
+                if _ct is None and isinstance(_n.value, IdentExpr):
+                    _ct = _init_param_ct.get(_n.value.name)
+                _selfhost_merge_field(_fields, _n.target.member, _ct or 'int64_t')
     return _fields
+
+
+def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
+    """`{field_name: (outer_val_ctype, nested_val_ctype_or_None, raw_ann)}` for every
+    `class GimpleGen` instance/class field annotated `dict[K, V]` (or
+    `dict[K, dict[K2, V2]]`) — parsed straight from the real declared
+    annotation, bracket-aware (so `dict[str, dict[str, str]]` yields
+    `('MojoDict *', 'char *')`, not a mangled 3-way naive split).
+
+    A nested temp_gen compiling a backend `gimple_*.py` module never sees
+    `class GimpleGen`'s StructDef, so `_seed_struct_field_types`'
+    `_annotation_dict_val_type` seeding of `_field_dict_val_types` /
+    `_field_dict_nested_val_types` never runs for it — `gen.struct_field_types
+    [k]` / `.get(k, {})` then loses its `MojoDict *` value type and every
+    `member in field_map` / `_known_field_type` lookup silently no-ops on an
+    int64_t. This recovers exactly that seeding for GimpleGen."""
+    _out: dict = {}
+    if gg_cls is None:
+        return _out
+
+    def _val_cts(_ann):
+        if not isinstance(_ann, str):
+            return None
+        _s = _ann.strip()
+        if not ((_s.startswith('dict[') or _s.startswith('Dict['))
+                and _s.endswith(']')):
+            return None
+        _inner = _s[_s.index('[') + 1:-1]
+        _parts = gimple_ctypes._split_top_level_commas(_inner)
+        if len(_parts) != 2:
+            return None
+        _vann = _parts[1].strip()
+        _outer = _selfhost_ann_ctype(_vann)
+        if _outer is None:
+            _outer = 'int64_t'
+        _nested = None
+        if _outer == 'MojoDict *':
+            _nv = _val_cts(_vann)
+            if _nv is not None:
+                _nested = _nv[0]
+        return (_outer, _nested)
+
+    def _consider(_tgt, _ann):
+        _fname = None
+        if (isinstance(_tgt, MemberExpr) and isinstance(_tgt.obj, IdentExpr)
+                and _tgt.obj.name == 'self'):
+            _fname = _tgt.member
+        elif isinstance(_tgt, IdentExpr):
+            _fname = _tgt.name
+        if _fname is None or _fname in _out:
+            return
+        _r = _val_cts(_ann)
+        if _r is not None:
+            _out[_fname] = (_r[0], _r[1], str(_ann).strip())
+
+    for _fld in getattr(gg_cls, 'fields', []):
+        if isinstance(_fld, AssignStmt):
+            _consider(_fld.target, getattr(_fld, 'type_ann', None))
+        elif isinstance(_fld, VarDecl) and _fld.name:
+            _consider(IdentExpr(_fld.name), getattr(_fld, 'type_ann', None))
+    for _m in getattr(gg_cls, 'methods', []):
+        for _n in gimple_exprtypes._walk_ast(_m.body):
+            if isinstance(_n, AssignStmt) and getattr(_n, 'type_ann', None):
+                _consider(_n.target, str(_n.type_ann))
+    return _out
 
 
 def _selfhost_extracted_fn_index() -> dict:
@@ -1873,7 +1961,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _func_scope = gen._push_import_scope()
     gen._collect_body_import_bindings(node.body, _func_scope)
     # Set module context for global field access
-    gen._current_module_ctx = gen.module_name or "root"
+    gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
 
     # Seed param types into var_types BEFORE return-type inference so
@@ -2142,7 +2230,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     """Generate _toplevel() or _{module}_toplevel() function for top-level statements."""
     gen._reset_func(toplevel_stmts)
     # Set module context for global field access
-    gen._current_module_ctx = gen.module_name or "root"
+    gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     # Choose function name based on whether this is the root module or a library module
     if gen.emit_entry_points:
         fn_name = '_toplevel'
@@ -3257,7 +3345,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # that fix's audit didn't cover because it never SET the context in
     # the first place, rather than consulting the wrong (shared,
     # first-writer-wins) map.
-    gen._current_module_ctx = gen.module_name or "root"
+    gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     # Per-lexical-scope import tracking: a method body is its own lexical
     # scope (its own local `from X import ...` statements shadow the
     # module-level same-named bindings).

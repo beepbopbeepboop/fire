@@ -3607,6 +3607,12 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # later v[k2] / v.get(...) dispatches on the right container.
             raw = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
             t = gen._new_val(val_ctype, f"({val_ctype}){raw}")
+            # `d[k]` where `d: dict[K, dict[K2, V2]]` — carry V2 onto the inner
+            # dict temp so `d[k][k2]` / `d[k].items()` type right (bug: every
+            # `member in gen.struct_field_types[sn]` no-op'd on an int64_t).
+            _nd = gen._dict_nested_val_types.get(ov)
+            if _nd and val_ctype == 'MojoDict *':
+                gen._dict_val_types[t] = _nd
             return val_ctype, t
         t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
         return 'int64_t', t

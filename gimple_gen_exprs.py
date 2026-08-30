@@ -399,9 +399,27 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # its `if __name__ == "__main__":` block) is also named `filename`
     # and is reachable via the whole-tree scan. See bugs/CODEGEN_
     # generator_function_Lib_weakref.md.
-    _global_owner_mod = getattr(gen, '_global_to_module', {}).get(name)
-    _this_mod = gen.module_name or "root"
-    if (_global_owner_mod is None or _global_owner_mod == _this_mod) and \
+    # Direct attribute access (not `getattr(gen, '_global_to_module', {})`):
+    # the field carries an annotation-seeded `char *` value type, so `.get`
+    # returns a real string here instead of a boxed int64_t that compares
+    # unequal to every module name.
+    _g2m = gen._global_to_module
+    _global_owner_mod = _g2m.get(name) if name in _g2m else None
+    # Explicit `len(...) > 0`, not `X or "root"`: the self-hosted `or` keeps
+    # an empty-but-non-null `char *` rather than falling through to "root",
+    # so `_this_mod` was "" and disagreed with the "root"-keyed owner map —
+    # a bare `global counter` read then fell to the `(int64_t)0` placeholder.
+    _this_mod = gen.module_name if len(gen.module_name) > 0 else "root"
+    # `name in gen._own_global_var_types`: THIS compile's own Phase-1.7 scan
+    # concluded a type for `name` as a module global. Unambiguous "it's ours"
+    # even when the shared, name-keyed `_global_to_module` superset reads
+    # back a boxed/garbage owner under self-compile (`_global_owner_mod ==
+    # _this_mod` then spuriously fails and a bare `global counter` read fell
+    # through to `(int64_t)0`). `_flatten_resolved_conditionals` already
+    # drops an imported module's `if __name__ == '__main__':`-guarded
+    # top-level globals from this scan, so it stays this-module-scoped.
+    _owned_here = name in gen._own_global_var_types
+    if (_global_owner_mod is None or _global_owner_mod == _this_mod or _owned_here) and \
             (name in gen._func_declared_globals or name not in gen.var_types) and name in gen._global_var_types:
         gtype = gen._global_var_types[name]
         # Globals are stored at C level as int64_t (boxed pointers) except
@@ -423,6 +441,8 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # dispatches d["key"] to mojo_dict_get_str — see BUG-2026-044.
         if name in gen._dict_val_types:
             gen._dict_val_types[t] = gen._dict_val_types[name]
+        if name in gen._dict_nested_val_types:
+            gen._dict_nested_val_types[t] = gen._dict_nested_val_types[name]
         # Same for the list element type of a boxed MojoList * global:
         # without it, print()/repr() of a read-back list temp can't pick
         # the double-aware repr (see _list_repr_fn) — found via
@@ -1340,6 +1360,9 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             dict_stored = gen._field_dict_val_types.get(_pst, {}).get(node.member)
             if dict_stored:
                 gen._dict_val_types[t] = dict_stored
+            _nested_p = gen._field_dict_nested_val_types.get(_pst, {}).get(node.member)
+            if _nested_p:
+                gen._dict_nested_val_types[t] = _nested_p
         return field_type, t
 
     # If the object lowered to a C type name (class used as cls argument),
@@ -1557,6 +1580,23 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 gen._elem_types[t] = stored
         elif field_type == 'MojoDict *':
             stored = gen._field_dict_val_types.get(struct_name, {}).get(node.member)
+            _nested = gen._field_dict_nested_val_types.get(struct_name, {}).get(node.member)
+            # Cycle-breaker: the pre-digested nested maps above are themselves
+            # `dict[str, dict[str, str]]` and read back as int64_t inside the
+            # self-hosted compiler, so derive the value/nested types straight
+            # from the FLAT `_field_annotations` map (a `dict[str, str]`,
+            # intact under self-compile) when they come back empty.
+            if stored is None or _nested is None:
+                _ann = gen._field_annotations.get(struct_name + '.' + node.member)
+                if _ann:
+                    if stored is None:
+                        _av = gen._annotation_dict_val_type(_ann)
+                        if _av is not None:
+                            stored = _av
+                    if _nested is None:
+                        _an = gen._annotation_dict_nested_val_type(_ann)
+                        if _an is not None:
+                            _nested = _an
             if stored:
                 gen._dict_val_types[t] = stored
             elif node.member in gen._dict_val_types:
@@ -1564,6 +1604,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 # dict[str, str]`) — carry it onto the field-read temp so
                 # `.items()`/`d[k]` on the field pick the right accessor.
                 gen._dict_val_types[t] = gen._dict_val_types[node.member]
+            if _nested:
+                # `dict[K, dict[K2, V2]]` field — one level down keeps V2 so
+                # `field[k].items()` / `field.get(k, {}).items()` type right.
+                gen._dict_nested_val_types[t] = _nested
         # Track struct field owner for container-type fields so that append
         # operations can propagate element type info back to _field_elem_types.
         if field_type in ('MojoList *', 'MojoDict *', 'MojoSet *') and isinstance(node.obj, gimple_ctypes.IdentExpr) \

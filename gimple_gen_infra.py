@@ -207,6 +207,9 @@ def _reset_func(gen, body: list = None, params: list = None):
         **{k: v for k, v in gen._global_dict_val_types.items()
            if k not in _reset_locally_bound},
     }  # dict var → value C type
+    # dict var/temp → the value C type of the dicts held AS this dict's
+    # values (one nesting level down); mirrors _nested_elem_types for lists.
+    gen._dict_nested_val_types: dict[str, str] = {}
     gen._struct_layout:   dict[str, str]   = {}  # var_name → STACK|HEAP
     gen._layout_hint:  str             = gimple_solvers.LayoutSolver.HEAP  # for struct constructors
     gen.current_func_name: str         = ''
@@ -1961,7 +1964,7 @@ def _write_dest(gen, name: str) -> str:
                  or (not gen._in_toplevel_gen
                      and name not in gen.var_types
                      and getattr(gen, '_global_to_module', {}).get(name) in (
-                         None, gen.module_name or "root")))):
+                         None, (gen.module_name if len(gen.module_name) > 0 else "root"))))):
         # `global x` declared in this function — write to the module
         # globals struct, mirroring the AssignStmt write path's routing
         # (otherwise AugAssign `x += 1` on a global emitted a LOCAL

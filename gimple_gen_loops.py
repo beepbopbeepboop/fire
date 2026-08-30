@@ -1478,7 +1478,7 @@ def _gen_lifted_closure(gen, ci: gimple_solvers.ClosureInfo, outer_name: str = N
     # processed for a fresh per-module GimpleGen instance would otherwise
     # see the "" __init__ default (read as "root" downstream) instead of
     # this module's real name.
-    gen._current_module_ctx = gen.module_name or "root"
+    gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     # Per-lexical-scope import tracking: a lifted closure body is its own
     # lexical scope (its own local `from X import ...` statements shadow
     # the enclosing function's / module's same-named bindings).

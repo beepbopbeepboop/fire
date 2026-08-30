@@ -1052,6 +1052,20 @@ class GimpleGen:
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
+        # For a struct field annotated `dict[K, dict[K2, V2]]`: the INNER
+        # dict's value C type (`struct_field_types: dict[str, dict[str, str]]`
+        # -> 'char *'), so `field[k]` / `field.get(k, {})` / `field.items()`
+        # one level down still carries a real value type instead of int64_t.
+        self._field_dict_nested_val_types: dict[str, dict[str, str]] = {}
+        # FLAT `"Struct.field" -> raw annotation string` map — a `dict[str,
+        # str]`, so it survives the self-host compile intact (unlike the
+        # nested `_field_dict_val_types` / `struct_field_types`, whose inner
+        # dict reads box to int64_t). `_lower_MemberExpr` derives a field's
+        # container value/element type from the annotation here when the
+        # pre-digested nested maps come back empty — the cycle-breaker that
+        # lets `member in gen.struct_field_types[sn]` / `_known_field_type`
+        # work in the compiled compiler.
+        self._field_annotations: dict[str, str] = {}
         # Function names whose `func_param_types` entry was set by this
         # file's own "self-host hardcoded struct tables" block (below, e.g.
         # `Scope___init__`) and must NOT be silently overwritten by the
@@ -3181,6 +3195,8 @@ class GimpleGen:
         return gst._gen_stmt_PassStmt(self, node)
     def _annotation_dict_val_type(self, ann) -> str | None:
         return gst._annotation_dict_val_type(self, ann)
+    def _annotation_dict_nested_val_type(self, ann) -> str | None:
+        return gst._annotation_dict_nested_val_type(self, ann)
     def _gen_stmt_VarDecl(self, node):
         return gst._gen_stmt_VarDecl(self, node)
     def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str) -> None:
@@ -3672,6 +3688,7 @@ def _selfhost_register_gimplegen(gen):
     gen._selfhost_gimplegen_extra_fields = \
         gfn._selfhost_gimplegen_field_types(_cls)
     gen._selfhost_gimplegen_sigs = gfn._selfhost_gimplegen_frozen_sigs(gen, _cls)
+    gen._selfhost_gimplegen_dict_vts = gfn._selfhost_gimplegen_dict_val_types(_cls)
     gen._selfhost_gimplegen_registered = True
 
 

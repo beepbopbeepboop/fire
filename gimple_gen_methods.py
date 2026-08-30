@@ -2113,9 +2113,16 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             # heap/static addresses as variable/type names), so the
             # default-application is spelled as branch-and-assign.
             result_type = val_type
-            if result_type not in ('char *', 'double', '_Bool'):
+            _container_vt = val_type in ('MojoDict *', 'MojoList *', 'MojoSet *')
+            if result_type not in ('char *', 'double', '_Bool') and not _container_vt:
                 result_type = default_ty if default_ty in ('char *', 'double', '_Bool') else 'int64_t'
-            raw_r = gen._coerce_to_type(val_type, result_type, raw)
+            if _container_vt:
+                # `d.get(k, {})` on `d: dict[K, <container>]` — keep the
+                # container type (was collapsed to int64_t, losing every
+                # downstream `x[k2]` / `x.items()` / `member in x`).
+                raw_r = gen._new_val(result_type, f"({result_type}){raw}")
+            else:
+                raw_r = gen._coerce_to_type(val_type, result_type, raw)
             default_r = gen._coerce_to_type(default_ty, result_type, default_val)
             cond = gen._ensure_bool_cond(result_type, raw_r)
             t = gen._new_temp(result_type)
@@ -2129,11 +2136,22 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             gen._emit_label(bb_false)
             gen._emit(f"  {t} = {default_r};")
             gen._emit_label(bb_done)
+            if _container_vt and result_type == 'MojoDict *':
+                _nd = gen._dict_nested_val_types.get(ov)
+                if _nd:
+                    gen._dict_val_types[t] = _nd
             return result_type, t
         if val_type == 'char *':
             return 'char *', raw
         elif val_type == 'double':
             return 'double', raw
+        elif val_type in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+            t = gen._new_val(val_type, f"({val_type}){raw}")
+            if val_type == 'MojoDict *':
+                _nd = gen._dict_nested_val_types.get(ov)
+                if _nd:
+                    gen._dict_val_types[t] = _nd
+            return val_type, t
         else:
             return 'int64_t', raw
     if method == 'update' and args:

@@ -1488,6 +1488,19 @@ def gen_module_impl(self, stmts):
             if _dflts:
                 self._func_param_defaults[_mangled] = list(_dflts)
             self._selfhost_locked_param_types.add(_mangled)
+        # Recover the `_annotation_dict_val_type` seeding of
+        # `_field_dict_val_types` / `_field_dict_nested_val_types` that
+        # `_seed_struct_field_types` would have done had `class GimpleGen`'s
+        # StructDef reached its annotation loop — parsed from the real
+        # declared field annotations (see _selfhost_gimplegen_dict_val_types).
+        _gg_dvts = getattr(self, '_selfhost_gimplegen_dict_vts', None) or {}
+        for _f, (_outer_vt, _nested_vt, _raw_ann) in _gg_dvts.items():
+            if _outer_vt and _outer_vt != 'int64_t':
+                self._field_dict_val_types.setdefault('GimpleGen', {}).setdefault(_f, _outer_vt)
+            if _nested_vt and _nested_vt != 'int64_t':
+                self._field_dict_nested_val_types.setdefault('GimpleGen', {}).setdefault(_f, _nested_vt)
+            if _raw_ann:
+                self._field_annotations.setdefault('GimpleGen.' + _f, _raw_ann)
 
     # The synthetic `class GimpleGen` rides `_imported_typedef_structs`, which
     # only wires method externs + typedef layout — it never reaches the
@@ -1768,9 +1781,16 @@ def gen_module_impl(self, stmts):
                             elif ft.endswith(' *') and _outer_base in self.struct_field_types:
                                 ft = f'{_outer_base} *'
                         self.struct_field_types[s.name][f_name] = ft
+                        if field.type_ann:
+                            self._field_annotations[s.name + '.' + f_name] = str(field.type_ann)
                         _dv_early = self._annotation_dict_val_type(field.type_ann)
                         if _dv_early is not None:
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
+                        if _dv_early == 'MojoDict *':
+                            _nv_early = self._annotation_dict_nested_val_type(field.type_ann)
+                            if _nv_early is not None and _nv_early != 'int64_t':
+                                self._field_dict_nested_val_types.setdefault(
+                                    s.name, {})[f_name] = _nv_early
                         # BUG-2026-023 residual (box.3d/game's
                         # ComputerCase.variables: List[String]): seed
                         # `_field_elem_types` from this field's OWN declared
@@ -4500,7 +4520,7 @@ def gen_module_impl(self, stmts):
         return _out
 
     _pre_declared_globals = set()
-    _phase17_mod = self.module_name or "root"  # module name for _global_to_module mapping
+    _phase17_mod = self.module_name if len(self.module_name) > 0 else "root"  # module name for _global_to_module mapping
     _phase17_own_stmts = _flatten_resolved_conditionals(stmts)
     _phase17_stmts = (_phase17_own_stmts
                        + (_flatten_resolved_conditionals(imported_stmts)
@@ -5423,7 +5443,7 @@ def gen_module_impl(self, stmts):
     for _decl in self._link_import_decl_list:
         parts.append(_decl)
 
-    our_mod = self.module_name or "root"
+    our_mod = self.module_name if len(self.module_name) > 0 else "root"
     if not self.module_name and self._current_filename:
         our_mod = os.path.splitext(os.path.basename(self._current_filename))[0]
 
@@ -5545,7 +5565,7 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     global_decls = []  # kept for compatibility, but won't be emitted
-    current_mod_name = self.module_name or "root"
+    current_mod_name = self.module_name if len(self.module_name) > 0 else "root"
     if current_mod_name not in self._module_globals:
         self._module_globals[current_mod_name] = []
         self._module_global_inits[current_mod_name] = {}

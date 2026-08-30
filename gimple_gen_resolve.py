@@ -491,7 +491,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 for _sh_attr in ('_selfhost_gimplegen_stmts',
                                  '_selfhost_gimplegen_extra_fields',
                                  '_selfhost_gimplegen_registered',
-                                 '_selfhost_gimplegen_sigs'):
+                                 '_selfhost_gimplegen_sigs',
+                                 '_selfhost_gimplegen_dict_vts'):
                     if hasattr(gen, _sh_attr):
                         setattr(temp_gen, _sh_attr, getattr(gen, _sh_attr))
                 # share: `self._compiled_modules`-based dedup (line above,

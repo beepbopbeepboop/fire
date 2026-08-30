@@ -169,6 +169,25 @@ def _annotation_dict_val_type(gen, ann) -> str | None:
     return None
 
 
+def _annotation_dict_nested_val_type(gen, ann) -> str | None:
+    """For `dict[K, dict[K2, V2]]` → the C type of the INNER dict's value
+    (`V2`), so a `field[k]` / `field.get(k, {})` / `field.items()` read one
+    level down carries a real value type. None for a non-dict-of-dicts."""
+    if isinstance(ann, str):
+        s = ann.strip()
+        if s.startswith('dict[') or s.startswith('Dict['):
+            inner = s.split('[', 1)[1].rstrip(']').strip()
+            parts = gimple_ctypes._split_top_level_commas(inner)
+            if len(parts) >= 2:
+                v = parts[1].strip()
+                if v.startswith('dict[') or v.startswith('Dict['):
+                    vparts = gimple_ctypes._split_top_level_commas(
+                        v.split('[', 1)[1].rstrip(']').strip())
+                    if len(vparts) >= 2:
+                        return gen._resolve_type(vparts[1].strip())
+    return None
+
+
 def _gen_stmt_VarDecl(gen, node):
     # `var name = value` where `name` is heap-boxed (some nested
     # closure captures it BY REFERENCE -- see _seed_mut_captured_
@@ -250,6 +269,8 @@ def _gen_stmt_VarDecl(gen, node):
                 gen._elem_types[node.name] = gen._elem_types[v]
             if v in gen._dict_val_types:
                 gen._dict_val_types[node.name] = gen._dict_val_types[v]
+                if v in gen._dict_nested_val_types:
+                    gen._dict_nested_val_types[node.name] = gen._dict_nested_val_types[v]
         # If value has element type tracking (e.g. split result), propagate to inferred var
         if node.type_ann is None and v in gen._elem_types:
             gen._elem_types[node.name] = gen._elem_types[v]
@@ -399,6 +420,8 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
             gen._elem_types[tname] = gen._elem_types[v]
         if v in gen._dict_val_types:
             gen._dict_val_types[tname] = gen._dict_val_types[v]
+            if v in gen._dict_nested_val_types:
+                gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
     elif vtype == 'char':
         gen._actual_types[tname] = 'char'
     if v in gen._struct_field_owners:
@@ -414,6 +437,8 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
                 gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._dict_val_types:
                 gen._dict_val_types[tname] = gen._dict_val_types[v]
+                if v in gen._dict_nested_val_types:
+                    gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
 
 
 def _assign_target(gen, tgt, et, ev):
@@ -583,7 +608,7 @@ def _gen_stmt_AssignStmt(gen, node):
         if (((tname in gen._func_declared_globals
                 or (tname not in gen.var_types
                     and getattr(gen, '_global_to_module', {}).get(tname) in (
-                        None, gen.module_name or "root"))))
+                        None, (gen.module_name if len(gen.module_name) > 0 else "root")))))
                 and tname in gen._global_var_types):
             safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
             field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
@@ -605,6 +630,8 @@ def _gen_stmt_AssignStmt(gen, node):
             if vtype == 'MojoDict *':
                 if v in gen._dict_val_types:
                     gen._dict_val_types[tname] = gen._dict_val_types[v]
+                    if v in gen._dict_nested_val_types:
+                        gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
             elif vtype == 'MojoList *':
                 if v in gen._elem_types:
                     gen._elem_types[tname] = gen._elem_types[v]
@@ -650,6 +677,8 @@ def _gen_stmt_AssignStmt(gen, node):
             if vtype == 'MojoDict *':
                 if v in gen._dict_val_types:
                     gen._dict_val_types[tname] = gen._dict_val_types[v]
+                    if v in gen._dict_nested_val_types:
+                        gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
             elif vtype == 'MojoList *':
                 if v in gen._elem_types:
                     gen._elem_types[tname] = gen._elem_types[v]
@@ -758,6 +787,8 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._dict_val_types:
                 gen._dict_val_types[tname] = gen._dict_val_types[v]
+                if v in gen._dict_nested_val_types:
+                    gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
         # `f = self.b` (a bound-method value, see _lower_bound_method_value):
         # carry the method's real return type along with the variable so a
         # later `f()` (_lower_bound_method_call) narrows the result
@@ -1918,7 +1949,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             if (((tname in gen._func_declared_globals
                     or (tname not in gen.var_types
                         and getattr(gen, '_global_to_module', {}).get(tname) in (
-                            None, gen.module_name or "root"))))
+                            None, (gen.module_name if len(gen.module_name) > 0 else "root")))))
                     and tname in gen._global_var_types):
                 # Same BUG-2026-018 interpreter-parity extension as
                 # _gen_stmt_AssignStmt's branch above (un-shadowed bare-name
@@ -1932,6 +1963,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 if vtype == 'MojoDict *':
                     if v in gen._dict_val_types:
                         gen._dict_val_types[tname] = gen._dict_val_types[v]
+                        if v in gen._dict_nested_val_types:
+                            gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
                 elif vtype == 'MojoList *':
                     if v in gen._elem_types:
                         gen._elem_types[tname] = gen._elem_types[v]
@@ -1944,6 +1977,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 if vtype == 'MojoDict *':
                     if v in gen._dict_val_types:
                         gen._dict_val_types[tname] = gen._dict_val_types[v]
+                        if v in gen._dict_nested_val_types:
+                            gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
                 elif vtype == 'MojoList *':
                     if v in gen._elem_types:
                         gen._elem_types[tname] = gen._elem_types[v]
