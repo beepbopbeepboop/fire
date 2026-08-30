@@ -5059,7 +5059,15 @@ def gen_module_impl(self, stmts):
             func_parts.append('')
         elif isinstance(stmt, StructDef):
             _moids = self._struct_method_overload_ids(stmt)
-            for m, overload_id in zip(stmt.methods, _moids):
+            # Index loop, NOT `zip(stmt.methods, _moids)`: the self-hosted
+            # backend has no `zip()` lowering (`mojo_unsupported_iter`, body
+            # runs zero times), so this method-BODY emission loop silently
+            # emitted nothing — every struct method was missing from compiled
+            # mojoc's output. `_moids` is length-aligned with `stmt.methods`.
+            _z7_meths = stmt.methods
+            for _z7k in range(len(_z7_meths)):
+                m = _z7_meths[_z7k]
+                overload_id = _moids[_z7k] if _z7k < len(_moids) else ''
                 if (stmt.name, m.name) in self._supported_generator_methods:
                     continue
                 method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
@@ -6694,12 +6702,16 @@ def gen_module_impl(self, stmts):
         struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
     for sd in struct_defs:
         _moids = self._struct_method_overload_ids(sd)
-        method_ids = {id(m): oid for m, oid in zip(sd.methods, _moids)}
-
-        for m in sd.methods:
+        # Index loop, NOT `{id(m): oid for m, oid in zip(...)}`: neither
+        # `zip()` nor a dict comprehension over it lowers in the self-hosted
+        # backend, and `id()` is unreliable there — walk `sd.methods` by
+        # position so `_moids` (same length) stays aligned.
+        _z8_meths = sd.methods
+        for _z8k in range(len(_z8_meths)):
+            m = _z8_meths[_z8k]
             if (sd.name, m.name) in self._supported_generator_methods:
                 continue
-            overload_suffix = method_ids.get(id(m), '')
+            overload_suffix = _moids[_z8k] if _z8k < len(_moids) else ''
             mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
             ret = (self.func_return_types.get(f"{sd.name}_{m.name}{overload_suffix}")
                    or self.func_return_types.get(f"{sd.name}_{m.name}")
@@ -6730,8 +6742,10 @@ def gen_module_impl(self, stmts):
             parts.append(f"{ret} {mangled_name} ({ptypes});")
 
         _emitted_base: set[str] = set()
-        for m in sd.methods:
-            if method_ids.get(id(m), ''):  # has an overload suffix
+        _z9_meths = sd.methods
+        for _z9k in range(len(_z9_meths)):
+            m = _z9_meths[_z9k]
+            if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
                 base_cname = self._struct_method_csym(sd.name, m.name, '')
                 if base_cname not in _emitted_base:
                     base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")

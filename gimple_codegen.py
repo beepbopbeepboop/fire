@@ -3120,7 +3120,6 @@ class GimpleGen:
     def _register_imported_generic_structs(self, stmts) -> None:
         return gfn._register_imported_generic_structs(self, stmts)
     @staticmethod
-    @staticmethod
     def _struct_method_overload_ids(stmt) -> list:
         return gfn._struct_method_overload_ids(stmt)
     def _struct_method_qualifier(self, struct_name: str) -> str:
