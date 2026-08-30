@@ -1434,7 +1434,23 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
     unit never actually CALLS by that bare name never triggers an
     error, only a genuinely ambiguous reference does (never silently
     miscompile, but also never spuriously refuse an innocuous
-    same-named-but-unused coincidence)."""
+    same-named-but-unused coincidence).
+
+    `module_name` is normalized by stripping LEADING dots before storage/
+    comparison: two call sites can legitimately register the SAME
+    relative import under different spellings — `_register_link_imports`'
+    link-mode fallback (and `_compile_imported_module`'s temp_gen
+    `module_name=` param) pass `stmt.module` through completely raw
+    (`.base`, dots preserved), while `_emit_stdlib_import_externs`
+    resolves the identical statement via `_resolve_relative` first
+    (`base`, dots already stripped). Comparing the raw strings marked
+    every such import falsely `_AMBIGUOUS_FUNC_HOME` even though both
+    sides name the exact same module — see `_func_qualifier`'s
+    `_sanitize_qualifier` (which now strips the same leading dots for
+    the same reason) and bugs/CODEGEN_link_mode_from_submodule_import_
+    symbol_value_call_segfault.md."""
+    if module_name:
+        module_name = module_name.lstrip('.')
     scopes = gen._import_scope_stack
     if record_scope and scopes:
         # Per-lexical-scope: within the CURRENT scope, a later import of
@@ -1641,7 +1657,26 @@ def _func_qualifier(gen, bare_name: str) -> str:
     # dotted submodule's file at all; before that fix this tier was
     # never reached for a dotted import in the first place).
     def _sanitize_qualifier(q):
-        return q.replace('.', '_').replace('-', '_') if q else q
+        # Strip LEADING dots before the '.'->'_' substitution: a raw
+        # relative-import spelling (`.base`, from `_link_inline_modules`'
+        # link-mode fallback — see `_compile_imported_module`'s temp_gen
+        # `module_name=module_name`, which passes `stmt.module` through
+        # completely unresolved) would otherwise sanitize to `_base`
+        # (leading underscore) here, while `_emit_stdlib_import_externs`'
+        # OWN relative-import resolution (`_resolve_relative`, run
+        # against the SAME statement) already strips the dots before
+        # this function ever sees the name and produces plain `base` —
+        # two internally-consistent but MUTUALLY DISAGREEING spellings
+        # of the identical module for the identical bare name. A call
+        # site resolving one way and the definition resolving the other
+        # way emits a reference to an undeclared identifier that (being
+        # a bare, non-function name in a `(void *)` cast) silently
+        # compiles to a null pointer instead of erroring — see
+        # bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_
+        # call_segfault.md. Stripping leading dots here makes every
+        # qualifier path converge on the same plain-name spelling
+        # regardless of which one happened to run first.
+        return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
     _cur_file = getattr(gen, '_current_filename', None)
     _cur_abs = gimple_ctypes.os.path.abspath(_cur_file) if _cur_file else ''
     if (_cur_file and _cur_file.endswith('.py')
@@ -2847,6 +2882,48 @@ def _parsed_import(gen, module: str):
         try:
             import imports as _imp
             path = _imp.resolve_source(module) or gen._resolve_test_relative_module(module)
+            # A LEADING-DOT relative ref (`from .base import triple`) can
+            # never be resolved by either helper above: `imports.py`'s
+            # resolver only understands MOJO_PATH-relative dotted names
+            # (`_find`'s `name.replace('.', os.sep)` turns a leading dot
+            # into a leading path separator, which `os.path.join` then
+            # treats as absolute and silently DISCARDS the search
+            # directory it was joined onto — `os.path.join('/foo',
+            # '/base.mojo') == '/base.mojo'`), and
+            # `_resolve_test_relative_module` only tries the `.mojo`
+            # extension and mis-splits a leading dot into an empty path
+            # component. Both gaps are real but harmless everywhere else
+            # `_parsed_import` is called from (struct/generic lookups
+            # degrade to "not found" the same as any other unresolvable
+            # module) — the one place they turned into a genuine crash is
+            # `_register_link_imports` (link mode's `mojo build`): failing
+            # to resolve `.base` meant `triple` never got registered at
+            # all, `f = triple` fell through to the generic "undeclared
+            # identifier" placeholder (a literal `0`), and calling through
+            # that placeholder (`f(14)`) called a NULL function pointer —
+            # `Segmentation fault: 11` (see bugs/CODEGEN_link_mode_from_
+            # submodule_import_symbol_value_call_segfault.md). Reuse
+            # `_module_candidate_paths`, the do_imports=True inline path's
+            # OWN relative-import resolver (anchors at the IMPORTING
+            # file's directory, handles the dot-count-as-level Python
+            # semantics, and tries `.py` before `.mojo`) — it was already
+            # correct, just never wired into this cache-filling helper.
+            # Gated to `module.startswith('.')` (a genuine relative ref)
+            # ONLY — widening this fallback to every otherwise-
+            # unresolvable ABSOLUTE bare name too (the first attempt at
+            # this fix did) regressed `make check-selfhost`:
+            # `_module_candidate_paths`' broad search (CWD, ancestor
+            # dirs, this repo's own script_dir) can spuriously MATCH an
+            # unrelated same-named file for a bare name that was always
+            # intentionally left unresolved (a real external/unmodeled
+            # package), changing struct/generic type-resolution behavior
+            # across the whole self-hosted build in ways this fix has
+            # nothing to do with.
+            if not path and module.startswith('.'):
+                for _cand in gen._module_candidate_paths(module):
+                    if gimple_ctypes.os.path.exists(_cand):
+                        path = _cand
+                        break
             src = open(path).read() if path else ''
             cache[module] = (path, src,
                              ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)
@@ -3128,7 +3205,26 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     # an undefined symbol). See _func_qualifier's own comment for the
     # same fix applied to the free-function case.
     def _sanitize_qualifier(q):
-        return q.replace('.', '_').replace('-', '_') if q else q
+        # Strip LEADING dots before the '.'->'_' substitution: a raw
+        # relative-import spelling (`.base`, from `_link_inline_modules`'
+        # link-mode fallback — see `_compile_imported_module`'s temp_gen
+        # `module_name=module_name`, which passes `stmt.module` through
+        # completely unresolved) would otherwise sanitize to `_base`
+        # (leading underscore) here, while `_emit_stdlib_import_externs`'
+        # OWN relative-import resolution (`_resolve_relative`, run
+        # against the SAME statement) already strips the dots before
+        # this function ever sees the name and produces plain `base` —
+        # two internally-consistent but MUTUALLY DISAGREEING spellings
+        # of the identical module for the identical bare name. A call
+        # site resolving one way and the definition resolving the other
+        # way emits a reference to an undeclared identifier that (being
+        # a bare, non-function name in a `(void *)` cast) silently
+        # compiles to a null pointer instead of erroring — see
+        # bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_
+        # call_segfault.md. Stripping leading dots here makes every
+        # qualifier path converge on the same plain-name spelling
+        # regardless of which one happened to run first.
+        return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
     _cur_file = getattr(gen, '_current_filename', None)
     _cur_abs = gimple_ctypes.os.path.abspath(_cur_file) if _cur_file else ''
     if (_cur_file and _cur_file.endswith('.py')

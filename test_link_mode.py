@@ -86,24 +86,25 @@ def test_bare_submodule_import_value_read() -> bool:
     return ok
 
 
-def test_bare_submodule_import_call_KNOWN_BUG() -> bool:
+def test_bare_submodule_import_call() -> bool:
     """A CALL through a bare `from . import SUBMODULE` marker
     (`base2.doubleval(21)`, real: `base_futures.isfuture(...)`-shaped
-    calls) — returns 0 instead of the real value. A generic fix was
-    attempted 2026-08-28 (routing any module-qualified call through
-    `_func_csym`/`_call_expr` the same way 3 hardcoded compiler-internal
-    module names already do) but reverted: it resolves purely by bare
-    method NAME with no module qualification, and broke self-hosting via
-    a real collision (`compile` matched the wrong function across
-    modules — `mojo_compiler.py`'s own `re.compile(...)` vs. a
-    2-argument `compile` elsewhere), the exact hazard
-    `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
-    already documents. A safe fix needs module-QUALIFIED symbol
-    resolution (e.g. mirroring `_join_import_member`), not a bare-name
-    lookup in the global `func_return_types` table — not attempted here.
-    Filed as
-    bugs/CODEGEN_link_mode_module_qualified_call_silent_wrong_value.md.
-    Tracked here as a KNOWN BUG, not a plain failure."""
+    calls) — used to silently return 0 instead of the real value (see
+    bugs/CODEGEN_link_mode_module_qualified_call_silent_wrong_value.md,
+    now fixed and removed). A first attempt (2026-08-28, reverted)
+    resolved purely by bare method NAME with no module qualification
+    and broke self-hosting via a real cross-module collision. The
+    landed fix instead registers the call's own syntactically-known
+    module reference into `_own_imported_func_home`
+    (`_note_own_func_home`, module-qualified) and resolves the C symbol
+    through the EXISTING `_func_csym`/`_func_qualifier` tier system —
+    the same qualifier-aware machinery an ordinary `from X import f;
+    f(...)` call already goes through, which raises on a genuine
+    cross-module bare-name collision instead of silently guessing —
+    guarded to only fire when the target module's own source
+    independently confirms `method_name` is a plain, non-generic,
+    non-overloaded top-level function (gimple_gen_methods.py's new
+    generic branch in `_lower_method_call`)."""
     pkg = {
         'pkg2/__init__.py': '',
         'pkg2/base2.py': 'def doubleval(x):\n    return x * 2\n',
@@ -114,28 +115,34 @@ def test_bare_submodule_import_call_KNOWN_BUG() -> bool:
     }
     with tempfile.TemporaryDirectory() as td:
         rc, stdout = _build_and_run(pkg, 'pkg2/main.py', td)
-    # Expected outcome right now IS the silent-wrong-value bug (rc == 0,
-    # stdout '0' instead of '42').
-    known_bug_still_reproduces = (rc == 0 and stdout.strip() == '0')
-    if not known_bug_still_reproduces:
-        print(f"  ? bare_submodule_import_call_KNOWN_BUG: expected the known "
-              f"wrong-value bug (rc=0, stdout='0'), got rc={rc} stdout={stdout!r} "
-              f"— either fixed (update the doc + this test) or a different failure")
-    return known_bug_still_reproduces
+    ok = rc == 0 and stdout.strip() == '42'
+    if not ok:
+        print(f"  ✗ bare_submodule_import_call: rc={rc} stdout={stdout!r}")
+    return ok
 
 
-def test_from_submodule_import_symbol_value_read_KNOWN_BUG() -> bool:
+def test_from_submodule_import_symbol_value_read() -> bool:
     """`from SUBMODULE import SYMBOL` (not a bare submodule marker), the
     symbol bound to a new local, then called through that local
-    (`f = triple; f(14)`) — SEGFAULTS. Confirmed pre-existing (reproduces
-    identically with every other fix in this area reverted) and unrelated
-    to them — a separate, real, more severe (crash, not just wrong value)
-    link-mode bug this test suite surfaced as a side effect. Filed as
-    bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_call_segfault.md
-    for a dedicated pass; not attempted here (see this task's own scope
-    boundary). Tracked here as a KNOWN BUG, not a plain failure, so this
-    suite still reports a meaningful pass/fail signal for `make check`
-    without blocking on a separately-filed, already-documented gap."""
+    (`f = triple; f(14)`) — used to SEGFAULT. Root cause (see
+    bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_call_
+    segfault.md, now fixed and removed): a leading-dot relative import
+    (`from .base3 import triple`) was never resolved by
+    `_register_link_imports`'s `_exists()` helper (neither
+    `imports.resolve_source` nor `_resolve_test_relative_module` handle
+    a leading-dot ref against a `.py` sibling), so `triple` never got
+    registered at all and `f = triple` compiled to a bare NULL
+    placeholder — calling through it segfaulted. Fixed by wiring
+    `_parsed_import`'s cache-fill to fall back to
+    `_module_candidate_paths` (the do_imports=True inline path's own,
+    already-correct relative-import resolver). A second, independent
+    bug surfaced once resolution worked: the module qualifier used for
+    the CALL site (`_emit_stdlib_import_externs`'s dot-stripped `base3`)
+    disagreed with the qualifier used for the DEFINITION
+    (`_link_inline_modules`' raw, dot-preserving `.base3` sanitizing to
+    `_base3`) — fixed by stripping leading dots in `_func_qualifier`'s/
+    `_struct_method_qualifier`'s `_sanitize_qualifier` and in
+    `_note_own_func_home`."""
     pkg = {
         'pkg3/__init__.py': '',
         'pkg3/base3.py': 'def triple(x):\n    return x * 3\n',
@@ -147,22 +154,16 @@ def test_from_submodule_import_symbol_value_read_KNOWN_BUG() -> bool:
     }
     with tempfile.TemporaryDirectory() as td:
         rc, stdout = _build_and_run(pkg, 'pkg3/main.py', td)
-    # Expected outcome right now IS the crash (rc == -11, SIGSEGV) — this
-    # "passes" (as a known-bug pin, not a real pass) only while that stays
-    # true; if it starts returning 0/'42' the bug is fixed and this case
-    # (and its KNOWN_BUG suffix, and the filed doc) should be updated/removed.
-    known_bug_still_reproduces = (rc == -11)
-    if not known_bug_still_reproduces:
-        print(f"  ? from_submodule_import_symbol_value_read_KNOWN_BUG: "
-              f"expected the known SIGSEGV (rc=-11), got rc={rc} stdout={stdout!r} "
-              f"— either fixed (update the doc + this test) or a different failure")
-    return known_bug_still_reproduces
+    ok = rc == 0 and stdout.strip() == '42'
+    if not ok:
+        print(f"  ✗ from_submodule_import_symbol_value_read: rc={rc} stdout={stdout!r}")
+    return ok
 
 
 CASES = [
     test_bare_submodule_import_value_read,
-    test_bare_submodule_import_call_KNOWN_BUG,
-    test_from_submodule_import_symbol_value_read_KNOWN_BUG,
+    test_bare_submodule_import_call,
+    test_from_submodule_import_symbol_value_read,
 ]
 
 
