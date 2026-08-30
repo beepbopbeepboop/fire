@@ -740,6 +740,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # _gen_stmt_RaiseStmt uses for `raise StopIteration`, rather than a
     # third, novel signaling convention — so `except StopIteration:`
     # around a next() call in the same function catches it correctly.
+    # `next(<generator expression>[, default])` — checked before the two
+    # MojoGenerator* forms below, which only match a real coroutine handle
+    # and would otherwise let a comprehension argument fall through to the
+    # undefined variadic `next(...)` stub. See _lower_next_over_comprehension.
+    if (fname_raw == 'next' and 1 <= len(node.args) <= 2
+            and isinstance(node.args[0], gimple_ctypes.Comprehension)
+            and not gen._locally_binds_name('next')):
+        return _lower_next_over_comprehension(gen, node)
     if fname_raw == 'next' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         at = gen._get_actual_type(at, av)
@@ -1550,6 +1558,73 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
     return 'int', t
+
+
+def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`next(<generator expression>[, default])` — the "first element
+    satisfying a predicate, else a fallback" idiom.
+
+    The generator expression materializes to a `MojoList *` through the
+    ordinary comprehension lowering (the same convention `any()`/`all()`
+    already use for a generator argument — see `_lower_builtin_all_any`),
+    then element 0 is taken when the list is non-empty. The 2-arg form
+    yields `default` on empty; the 1-arg form raises StopIteration, exactly
+    like the MojoGenerator* paths in `_lower_call`.
+
+    Before this, a generator-expression argument matched neither of those
+    `MojoGenerator *` branches and fell through to the declared-but-never-
+    defined variadic `next(...)` stub, failing at LINK time with an
+    undefined `_next` symbol. That stayed invisible for as long as no
+    reachable code evaluated such an expression — this compiler's own
+    `gen_module_impl` has one inside a `for m, oid in zip(...)` loop, which
+    ran zero iterations until `zip()` itself got a for-loop lowering.
+
+    NOTE (deliberate, matches `any`/`all`): the comprehension is fully
+    materialized rather than short-circuited at the first match. Real
+    Python stops early; every predicate this form is used with here is
+    side-effect-free, so the only difference is wasted work on long
+    sequences."""
+    lt, lv = gen.lower_expr(node.args[0])
+    if lt != 'MojoList *':
+        lv = gen._new_val('MojoList *', f"(MojoList *){lv}")
+    elem = gen._elem_of(lv) or 'int64_t'
+    n_t = gen._new_val('int64_t', f"mojo_list_len ({lv})")
+    zero = gen._new_val('int64_t', "(int64_t)0")
+    have = gen._new_val('_Bool', f"{n_t} > {zero}")
+    result = gen._new_temp(elem)
+    bb_have = gen._new_bb(); bb_empty = gen._new_bb(); bb_done = gen._new_bb()
+    gen._emit(f"  if ({have}) goto {bb_have}; else goto {bb_empty};")
+
+    gen._emit_label(bb_have)
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem)
+    if suf == 'str':
+        first = gen._new_val('char *', f"mojo_list_get_str ({lv}, {zero})")
+        gen._safe_coerce_emit('char *', elem, first, result)
+    elif suf == 'double':
+        first = gen._new_val('double', f"mojo_list_get_double ({lv}, {zero})")
+        gen._safe_coerce_emit('double', elem, first, result)
+    else:
+        first = gen._new_val('int64_t', f"mojo_list_get_int ({lv}, {zero})")
+        gen._safe_coerce_emit('int64_t', elem, first, result)
+    gen._emit(f"  goto {bb_done};")
+
+    gen._emit_label(bb_empty)
+    if len(node.args) == 2:
+        # `default` is only evaluated on the empty branch — real Python
+        # semantics, and the same ordering the 2-arg MojoGenerator* path
+        # above uses for its own exhausted branch.
+        dt, dv = gen.lower_expr(node.args[1])
+        gen._safe_coerce_emit(dt, elem, dv, result)
+    else:
+        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+        gen._emit("  mojo_raise ();")
+        # `mojo_raise()` does not return, but the merge block below still
+        # needs `result` definitely-assigned on every incoming edge for
+        # GIMPLE's own SSA construction.
+        gen._safe_coerce_emit('int64_t', elem, zero, result)
+    gen._emit(f"  goto {bb_done};")
+    gen._emit_label(bb_done)
+    return elem, result
 
 
 def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

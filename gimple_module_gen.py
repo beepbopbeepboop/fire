@@ -2709,12 +2709,18 @@ def gen_module_impl(self, stmts):
             for m, _oid in zip(s.methods, _moids):
                 _has_self_first = bool(m.params) and m.params[0][0] == 'self'
                 _params_no_self = m.params[1:] if _has_self_first else m.params
+                # Sentinel is -1, NOT None: this compiler models None as 0,
+                # so a `def m(self, *args)` whose star param IS at index 0
+                # would be indistinguishable from "no star param" once
+                # self-hosted (`_star_idx is not None` -> `0 != 0` -> False),
+                # silently giving a varargs method max_arity 0. -1 is
+                # unambiguous for an index under both evaluators.
                 _star_idx = next((i for i, (pn, _pt) in enumerate(_params_no_self)
-                                   if pn.startswith('*') and not pn.startswith('**')), None)
+                                   if pn.startswith('*') and not pn.startswith('**')), -1)
                 real_params = [(pn, pt) for pn, pt in _params_no_self
                                if not (pn.startswith('*') and not pn.startswith('**'))]
                 _defaults = m.param_has_default or {}
-                if _star_idx is not None:
+                if _star_idx >= 0:
                     _pre_star = _params_no_self[:_star_idx]
                     min_arity = sum(1 for pn, _pt in _pre_star if pn not in _defaults)
                     max_arity = float('inf')
@@ -2724,7 +2730,7 @@ def gen_module_impl(self, stmts):
                     max_arity = len(real_params)
                 _all_ctypes = self._signature_ctypes(m.params, m, s.name)
                 param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
-                if _star_idx is not None:
+                if _star_idx >= 0:
                     param_ctypes = [c for c in param_ctypes if c != '...']
                 if m.return_type is not None:
                     _ret_base = m.return_type.split('[', 1)[0].strip() if isinstance(m.return_type, str) else ''
@@ -2760,8 +2766,8 @@ def gen_module_impl(self, stmts):
                     'min_arity': min_arity,
                     'max_arity': max_arity,
                     'ret_type': _ret_type,
-                    'has_varargs': _star_idx is not None,
-                    'pre_star_count': _star_idx if _star_idx is not None else None,
+                    'has_varargs': _star_idx >= 0,
+                    'pre_star_count': _star_idx if _star_idx >= 0 else None,
                 })
                 self._mangled_signature_ctypes[f"{s.name}_{m.name}{_oid}"] = _all_ctypes
 

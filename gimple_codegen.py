@@ -3156,6 +3156,8 @@ class GimpleGen:
         return glo._gen_for_iter(self, node)
     def _gen_for_enumerate(self, node):
         return glo._gen_for_enumerate(self, node)
+    def _gen_for_zip(self, node):
+        return glo._gen_for_zip(self, node)
     def _gen_for_zip_longest(self, node):
         return glo._gen_for_zip_longest(self, node)
     def _gen_for_list(self, var: str, it_val: str, body: list, shadow_name: str | None=None):

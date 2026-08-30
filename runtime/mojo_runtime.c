@@ -3973,9 +3973,27 @@ double mojo_sum_double(void *args) {
     return total;
 }
 
+/* zip(a, b) -> list of 2-element pair lists, truncated to the SHORTER
+ * input (real Python semantics). Was a stub that unconditionally returned
+ * an EMPTY list, so every `zip()` reaching a runtime call site (>2-sequence
+ * chains via _lower_builtin_zip_n, `list(zip(...))`, or a `for` shape the
+ * dedicated _gen_for_zip lowering declines) silently iterated zero times
+ * instead of failing loudly. Pairs box each slot with append_int, the same
+ * convention mojo_dict_items uses for its [key, value] pairs, so the
+ * existing tuple-unpack accessors read them unchanged. */
 void *mojo_zip(void *a, void *b) {
-    (void)a; (void)b;
-    return mojo_list_new();
+    MojoList *la = (MojoList *)a;
+    MojoList *lb = (MojoList *)b;
+    MojoList *out = mojo_list_new();
+    if (!la || !lb) return out;
+    int64_t n = la->len < lb->len ? la->len : lb->len;
+    for (int64_t i = 0; i < n; i++) {
+        MojoList *pair = mojo_list_new();
+        mojo_list_append_int(pair, mojo_list_get_int(la, i));
+        mojo_list_append_int(pair, mojo_list_get_int(lb, i));
+        mojo_list_append_int(out, (int64_t)(intptr_t)pair);
+    }
+    return out;
 }
 
 /* Sets a dynamic attribute on `obj`'s own per-object dict — see the

@@ -1967,7 +1967,52 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # merged result type is fixed before either branch runs.
         ltype, lval = gen.lower_expr(node.left)
         cond = gen._ensure_bool_cond(ltype, lval)
-        res_type = gimple_ctypes.TypeLattice.join(ltype, gen._quick_type(node.right))
+        _rq = gen._quick_type(node.right)
+        res_type = gimple_ctypes.TypeLattice.join(ltype, _rq)
+        # MIXED POINTER/SCALAR OPERANDS: `TypeLattice.join` always prefers
+        # the POINTER side (join('MojoList *', '_Bool') == 'MojoList *'),
+        # so the scalar branch used to store its value straight into a
+        # pointer-typed merge temp — `_t432 = (MojoList *)_t434;` for a
+        # plain `_Bool`. Every later use then dereferenced that: reading
+        # the merged value as a condition calls `_ensure_bool_cond` on the
+        # POINTER type, i.e. `mojo_list_len((MojoList *)1)` — a hard
+        # segfault for the extremely ordinary shape
+        # `if some_list and len(x) < n:`. (Confirmed in this compiler's own
+        # `_lower_struct_method_call`: `if full_param_list and
+        # len(arg_pairs) < expected_non_self:` crashed compiled mojoc on
+        # any struct-method call.) There is no C type that can hold both a
+        # container pointer and a bare scalar while still answering
+        # truthiness correctly, and a value whose type is "either a list or
+        # a bool" has no legal use OTHER than a truthiness test — so lower
+        # the whole `and`/`or` to a real `_Bool` in that case. Python's own
+        # answer for such a mix is bool-equivalent anyway; only the
+        # identity of the selected operand is lost, and that was a corrupt
+        # pointer before this. Same-representation operands (pointer+
+        # pointer, scalar+scalar) keep full value semantics, so
+        # `path = a or "default"` and `x = lst or []` are unaffected.
+        # Scoped to a `_Bool` operand specifically, NOT "any scalar". An
+        # `int`/`int64_t` operand is very often a BOXED POINTER (every
+        # unannotated param holding a string is int64_t — `opt_flag or
+        # '-O0'`), and storing that into a `char *` slot is correct; a
+        # literal `None`/`0` is an exact NULL there too. A `_Bool` is the
+        # one type that is never a boxed pointer — it only ever comes from
+        # a comparison / `in` / `not` / `isinstance` test — so reinterpreting
+        # one as a pointer is unconditionally wrong.
+        #
+        # Which side can push that `_Bool` into the pointer slot depends on
+        # the operator, because the short-circuit branch's operand is
+        # known-FALSY for `and` and known-TRUTHY for `or`:
+        #   ptr  and bool -> bool stored on the eval-right edge   -> unsafe
+        #   ptr  or  bool -> bool stored on the eval-right edge   -> unsafe
+        #   bool and ptr  -> short-circuit stores a falsy bool (0) -> exact
+        #                    NULL, harmless; keep pointer value semantics
+        #   bool or  ptr  -> short-circuit stores a truthy bool    -> unsafe
+        _lp = ltype.endswith(' *')
+        _rp = isinstance(_rq, str) and _rq.endswith(' *')
+        _bool_merge = ((_lp and _rq == '_Bool')
+                       or (ltype == '_Bool' and _rp and node.op == 'or'))
+        if _bool_merge:
+            res_type = '_Bool'
         result = gen._new_temp(res_type)
         bb_short = gen._new_bb()
         bb_eval_right = gen._new_bb()
@@ -1979,11 +2024,21 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             # Left truthy -> short-circuit on left; left falsy -> right decides.
             gen._emit(f"  if ({cond}) goto {bb_short}; else goto {bb_eval_right};")
         gen._emit_label(bb_short)
-        gen._safe_coerce_emit(ltype, res_type, lval, result)
+        if _bool_merge:
+            # The short-circuit branch's truth value is a compile-time
+            # constant: `and` only takes it on a FALSY left, `or` only on a
+            # TRUTHY one.
+            gen._emit(f"  {result} = (_Bool){'0' if node.op == 'and' else '1'};")
+        else:
+            gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._emit(f"  goto {bb_merge};")
         gen._emit_label(bb_eval_right)
         rtype, rval = gen.lower_expr(node.right)
-        gen._safe_coerce_emit(rtype, res_type, rval, result)
+        if _bool_merge:
+            _rb = gen._ensure_bool_cond(rtype, rval)
+            gen._emit(f"  {result} = {_rb};")
+        else:
+            gen._safe_coerce_emit(rtype, res_type, rval, result)
         gen._emit(f"  goto {bb_merge};")
         gen._emit_label(bb_merge)
         return res_type, result
@@ -3018,6 +3073,25 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
             list_elem = gen._elem_types[rv]
         else:
             list_elem = xt
+        # A RECORDED `int64_t` element type is indistinguishable from "no
+        # information": it is also exactly what `_infer_list_elem_type`
+        # returns for an EMPTY literal, so `buf = []` pins int64_t before any
+        # later `.append()` can establish the real type, and that bogus entry
+        # then wins over the needle-type fallback just above. With a `char *`
+        # needle this compiled `s not in buf` to `mojo_list_contains_int` —
+        # POINTER identity instead of string equality, so the test was always
+        # true and the accumulator collected duplicates forever. Python's `in`
+        # is defined in terms of `==`, and `==` on strings is never pointer
+        # identity, so a `char *` needle is authoritative over an int64_t
+        # element type that carries no positive evidence.
+        #
+        # Found via this compiler's own `_known_field_type`: its `if _v not in
+        # _types:` dedup over `_types = []` never deduped once self-hosted, so
+        # the `len(_types) == 1` unambiguity test never held, every boxed AST
+        # `.name`/`.member` read stayed int64_t, and every struct method got a
+        # garbage overload key (`Counter_inc_0_2`).
+        if list_elem == 'int64_t' and xt == 'char *':
+            list_elem = 'char *'
         suf = gimple_ctypes.TypeLattice.list_suffix(list_elem)
         xv_cast = gen._cast_for_list(xt, xv, suf)
         gen._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")

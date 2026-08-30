@@ -2167,6 +2167,22 @@ def _gen_stmt_ForStmt(gen, node):
             node.iterable.func.name == 'enumerate'):
         gen._gen_for_enumerate(node)
     elif (isinstance(node.iterable, gimple_ctypes.CallExpr) and
+            isinstance(node.iterable.func, gimple_ctypes.IdentExpr) and
+            node.iterable.func.name == 'zip' and
+            not gen._locally_binds_name('zip')):
+        # Transactional, same pattern as the zip_longest attempt below: any
+        # shape `_gen_for_zip` can't prove supported raises, we roll back
+        # whatever it emitted, and fall through to the generic path.
+        body_mark, decls_mark = len(gen.body_lines), len(gen.decls)
+        try:
+            gen._gen_for_zip(node)
+            return
+        except Exception as e:
+            del gen.body_lines[body_mark:]
+            del gen.decls[decls_mark:]
+            gimple_ctypes._debug_note('zip lowering failed, falling back', e)
+        gen._gen_for_iter(node)
+    elif (isinstance(node.iterable, gimple_ctypes.CallExpr) and
             isinstance(node.iterable.func, gimple_ctypes.MemberExpr) and
             node.iterable.func.member == 'zip_longest' and
             isinstance(node.iterable.func.obj, gimple_ctypes.IdentExpr) and

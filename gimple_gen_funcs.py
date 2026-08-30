@@ -3189,7 +3189,7 @@ def _register_imported_generic_structs(gen, stmts) -> None:
                 continue
             gen._imported_generic_structs.setdefault(st.name, gen._current_filename)
 
-def _struct_method_overload_ids(stmt) -> list:
+def _struct_method_overload_ids(stmt: StructDef) -> list:
     """Overload-id per method, aligned with stmt.methods. Must match the
     emission loop in gen_module so the method's C symbol, its closure-lookup
     key (current_func_name), and the pre-pass closure registration all agree.
@@ -3199,7 +3199,20 @@ def _struct_method_overload_ids(stmt) -> list:
     bare `Struct_method` name unconditionally, which silently diverged from
     this hash-suffix scheme for any overloaded method and produced a
     reflection-table entry (and forward-declared `extern` in the dylib's
-    merged reflect table) pointing at a symbol nothing ever defines."""
+    merged reflect table) pointing at a symbol nothing ever defines.
+
+    `stmt: StructDef` is load-bearing for the self-hosted build, not
+    decoration: unannotated, `stmt` compiles to an opaque int64_t, so
+    `stmt.methods` resolves through `_known_field_type('methods')` — which
+    is AMBIGUOUS (`MojoList *` on StructDef/TraitDef, `MojoDict *` on the
+    interpreter's runtime MojoClass) and therefore answers None. The loop
+    then fell to the runtime dict-or-list dispatch whose dict branch binds
+    the loop variable as `char *`, so `m.name` hit `_lower_MemberExpr`'s
+    pathlib `.name`->basename special case and every method collapsed onto
+    ONE `counts` key. Compiled mojoc consequently believed every method of
+    every struct was overloaded and emitted `Counter___init___0` /
+    `Counter_inc_0_2` / `Counter_get_0_3` where the reference emits plain
+    `Counter___init__` / `Counter_inc` / `Counter_get`."""
     counts = {}
     for m in stmt.methods:
         counts[m.name] = counts.get(m.name, 0) + 1

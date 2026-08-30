@@ -883,6 +883,156 @@ def _gen_for_zip_longest(gen, node):
     gen._emit_label(bb_after)
 
 
+def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
+    """Bind one `zip()` loop target `vn` to `list_ptr[idx_t]`, reading with
+    the accessor matching THAT sequence's own element type and coercing to
+    the target's declared C type.
+
+    Mirrors `_gen_for_list`'s per-slot `_emit_target_assign` (same accessor
+    choice, same box/unbox and `_actual_types` recovery conventions) — the
+    only difference is that a zip slot reads element `idx_t` of its OWN
+    per-slot LIST, where a tuple-unpack slot reads element `i` of one
+    shared tuple."""
+    cvn = gen._cname(vn)
+    vt = gen.var_types.get(vn, elem)
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem)
+    if suf == 'double':
+        raw = gen._new_val('double', f"mojo_list_get_double ({list_ptr}, {idx_t})")
+        if vt == 'double':
+            gen._emit(f"  {cvn} = {raw};")
+        else:
+            gen._safe_coerce_emit('double', vt, raw, cvn)
+        return
+    if suf == 'str':
+        raw = gen._new_val('char *', f"mojo_list_get_str ({list_ptr}, {idx_t})")
+        if vt == 'char *':
+            gen._emit(f"  {cvn} = {raw};")
+        else:
+            ip = gen._new_val('int64_t', f"(int64_t){raw}")
+            gen._emit(f"  {cvn} = {ip};")
+            # Recover the real string type for later reads (print(),
+            # f-strings, call args) — see _gen_for_list's identical note.
+            gen._actual_types[vn] = 'char *'
+        return
+    raw = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
+    if vt == 'int64_t':
+        gen._emit(f"  {cvn} = {raw};")
+    else:
+        gen._safe_coerce_emit('int64_t', vt, raw, cvn)
+    # A pointer element (struct pointer or nested container) keeps its real
+    # type so `.member` / subscript reads inside the body resolve statically
+    # instead of falling to the boxed dynamic-dispatch path.
+    if elem and elem.endswith(' *'):
+        gen._actual_types[vn] = elem
+        if elem == 'MojoList *' and list_ptr in gen._nested_elem_types:
+            gen._elem_types[vn] = gen._nested_elem_types[list_ptr]
+
+
+def _gen_for_zip(gen, node):
+    """`for (a, b[, c, ...]) in zip(seq_a, seq_b[, ...]):` — real zip
+    semantics as a plain index loop over `min(len(seq_i))` iterations, each
+    tuple-target slot read from its OWN sequence with that sequence's own
+    tracked element-type accessor (so a `list[str]` slot binds a real
+    `char *`, a `list[Struct *]` slot a real struct pointer, etc).
+
+    Before this, `zip()` had NO for-loop lowering at all. The call fell
+    through to `BUILTIN_VALUE_MAP`'s `mojo_zip`, so `_gen_for_iter` saw an
+    opaque handle and emitted `mojo_unsupported_iter` — the loop body ran
+    ZERO times, silently, with no diagnostic beyond that one note. That
+    made SEVEN separate `for m, oid in zip(struct.methods, overload_ids):`
+    passes in this compiler's own `gen_module_impl` dead code the moment it
+    was self-hosted: Pass 2b-bis's `_struct_method_signatures` (so no
+    overload ever resolved), the per-overload `_mangled_signature_ctypes`
+    registrations, the comptime bracket-param scan, and `_scan_for_closures`
+    over struct methods. Compiled mojoc therefore emitted no method
+    signatures, no per-overload forward declarations, and auto-stubbed
+    every struct-method call it lowered (`#define _MOJO_STUB_Counter_inc` /
+    `int64_t Counter_inc (...);` in place of the real symbol).
+
+    Any shape this handler can't prove supported (keyword arguments, fewer
+    than two sequences, a non-tuple loop target, a target/sequence arity
+    mismatch, a nested tuple slot, a non-list sequence) raises; the caller
+    (`_gen_stmt_ForStmt`) rolls back partial output transactionally and
+    falls through to the pre-existing generic path unchanged."""
+    it = node.iterable
+    if it.kwargs:
+        raise ValueError("zip() takes no keyword arguments")
+    args = list(it.args)
+    if len(args) < 2:
+        raise ValueError("only the multi-sequence zip() shape is lowered here")
+    target = node.target
+    if not (isinstance(target, str) and target.startswith('(') and target.endswith(')')):
+        raise ValueError("zip() lowering needs a tuple loop target")
+    tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
+    if len(tgt_names) != len(args):
+        raise ValueError("zip() target arity does not match its sequence count")
+    for _tn in tgt_names:
+        if _tn.startswith('(') and _tn.endswith(')'):
+            raise ValueError("nested tuple target in zip() is unsupported here")
+
+    seq_ptrs = []
+    seq_elems = []
+    for _ai in range(len(args)):
+        st, sv = gen.lower_expr(args[_ai])
+        st = gen._get_actual_type(st, sv)
+        if st != 'MojoList *':
+            raise ValueError(f"zip() over {st} is unsupported here")
+        ptr = sv
+        if ptr in gen.var_types and gen.var_types[ptr] == 'int64_t':
+            ptr = gen._new_val('MojoList *', f"(MojoList *){sv}")
+        seq_ptrs.append(ptr)
+        _e = gen._elem_of(sv)
+        seq_elems.append(_e if _e else 'int64_t')
+
+    # Declare each target by its OWN slot's element type BEFORE the loop
+    # (mirrors _gen_for_zip_longest / _gen_for_enumerate ordering).
+    # `_declare_var` is first-decl-wins, so a later loop reusing the same
+    # name inherits these real types instead of an int64_t lock-in.
+    for _di in range(len(tgt_names)):
+        gen._declare_var(tgt_names[_di], seq_elems[_di])
+
+    # Trip count is min(len(seq_i)) — real zip stops at the SHORTEST
+    # sequence (that is the whole semantic difference from zip_longest,
+    # which pads to the longest with a fill value).
+    len_ts = []
+    for _li in range(len(seq_ptrs)):
+        _lt = gen._new_temp('int64_t')
+        gen._emit(f"  {_lt} = mojo_list_len ({seq_ptrs[_li]});")
+        len_ts.append(_lt)
+    n_t = len_ts[0]
+    for _mi in range(1, len(len_ts)):
+        _shorter = gen._new_val('_Bool', f"{len_ts[_mi]} < {n_t}")
+        n_t = gen._new_val('int64_t', f"{_shorter} ? {len_ts[_mi]} : {n_t}")
+
+    idx_t = gen._new_temp('int64_t')
+    gen._emit(f"  {idx_t} = (int64_t)0;")
+
+    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
+    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond_t = gen._new_val('_Bool', f"{idx_t} < {n_t}")
+    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    gen.loop_stack.append((bb_post, bb_after))
+    for _bi in range(len(tgt_names)):
+        _zip_bind_slot(gen, tgt_names[_bi], seq_ptrs[_bi], seq_elems[_bi], idx_t)
+    for s in node.body:
+        gen.gen_stmt(s)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    one = gen._new_val('int64_t', "(int64_t)1")
+    nxt = gen._new_val('int64_t', f"{idx_t} + {one}")
+    gen._emit(f"  {idx_t} = {nxt};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+
+
 def _gen_for_enumerate(gen, node):
     """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
     lst_arg = node.iterable.args[0]
