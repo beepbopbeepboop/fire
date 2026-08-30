@@ -13,9 +13,10 @@ codegen uses, so the declared signature matches the emitted symbol exactly.
 import re
 
 import hashlib
-from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef
+from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef, VarDecl
 from gimple_codegen import _mojo_type, _safe_name, GimpleGen
 from gimple_gen_funcs import dup_def_signature_key
+from gimple_ctypes import _c_field_name
 
 # Free functions whose C symbol the codegen does NOT overload-mangle (must match
 # GimpleGen._NO_OVERLOAD_MANGLE).
@@ -195,6 +196,49 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
                     'signature': f"{cret} {msym} ({', '.join(cparams)})",
                     'kind': SYM_METHOD,
                 })
+        elif (isinstance(s, VarDecl) and s.name and not s.name.startswith('_')
+                and getattr(s, 'type_ann', None) in struct_names):
+            # BUG-2026-029: a module-level global's real storage
+            # (`_{module}_globals.field`) is not reachable across a dylib
+            # boundary at all — an importer only ever sees the OWNING
+            # module's globals struct via an `__attribute__((incomplete))`
+            # forward declaration (see gimple_module_gen.py's "extern
+            # module globals struct" emission), so a direct field read from
+            # outside that translation unit isn't valid C. Every module-
+            # level global already gets a real READ accessor function
+            # unconditionally (gimple_module_gen.py's per-global
+            # `{module}__mojo_global_get_{name}` emission, right after the
+            # globals-struct instance) — this reflection entry is what lets
+            # an IMPORTER discover and call it, mirroring exactly how a
+            # METHOD entry above lets an importer call a struct method
+            # without seeing its body. Symbol name mirrors that same
+            # emission's naming convention exactly (module-qualified, via
+            # `_c_field_name`, so it never collides with an unrelated
+            # module's same-named global — see `_register_link_imports`'s
+            # own docstring on why a QUALIFIED name, not a bare one, is
+            # required here).
+            #
+            # Scoped to `type_ann in struct_names` (a struct type DEFINED
+            # IN THIS SAME FILE): this is a lightweight AST-only pre-pass
+            # (module_loader/build_stdlib_dylib call it before GimpleGen
+            # ever runs), with no access to the full cross-module struct
+            # registry GimpleGen itself builds from every import — a global
+            # whose struct type lives in some OTHER imported file can't be
+            # reliably resolved to `SomeStruct *` here (`_mt` would fall
+            # through to `_mojo_type`'s int64_t default, advertising a
+            # WRONG return type that would mismatch the real
+            # `SomeStruct *`-returning accessor GimpleGen actually emits).
+            # Non-struct globals (int64_t, MojoList*/Dict*/Set*, char *, an
+            # UnsafePointer's already-erased pointer, ...) are skipped for
+            # the analogous reason: this export list has no way to know
+            # ahead of time which of those get boxed at the C-struct-field
+            # level, so it can't advertise a signature guaranteed to match.
+            gsym = f"{_c_field_name(module_prefix)}__mojo_global_get_{_c_field_name(s.name)}"
+            exports.append({
+                'name': s.name,
+                'signature': f"{_mt(s.type_ann, struct_names)} {gsym} (void)",
+                'kind': SYM_GLOBAL,
+            })
     return exports
 
 
