@@ -37,7 +37,7 @@ import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
 
-def _gen_stmt_FunctionDef(gen, node):
+def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # A nested `async def` (not an async generator) — whether nested
     # inside a struct method (device_context.mojo's `async def
     # wrapper(...) capturing -> None:` shape, discovered by gen_module's
@@ -68,7 +68,12 @@ def _gen_stmt_FunctionDef(gen, node):
     if ci is None:
         gen._emit(f"  /* TODO: closure '{node.name}' (no pre-pass info) */")
         return
-    if ci.captures:
+    # `len(...) > 0`, not a bare `if ci.captures`: a non-capturing nested
+    # `def` has `ci.captures == []`, and an empty MojoList is a non-null
+    # pointer -> truthy in the self-hosted backend, so a bare check made
+    # every non-capturing closure allocate a bogus env and its call sites
+    # prepend an empty env arg (`outer_inner (, x)`).
+    if len(ci.captures) > 0:
         env_var  = f"_env_{node.name}"
         alloc_fn = f"_alloc_{ci.env_struct}"
         gen._declare_var(env_var, f"{ci.env_struct} *")

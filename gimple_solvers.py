@@ -1433,7 +1433,7 @@ class TypePromotionSolver:
 class ClosureInfo:
     """Describes a nested function lifted to module scope."""
     def __init__(self, lifted_name: str, env_struct: str,
-                 captures: list, inner_def):
+                 captures: list, inner_def: FunctionDef):
         self.lifted_name        = lifted_name
         self.env_struct         = env_struct
         self.captures           = captures   # [(varname, ctype)]

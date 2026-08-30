@@ -258,6 +258,7 @@ from gimple_ctypes import (
     _str_literal_value_is_fstring, _extract_init_expr, _module_toplevel_name,
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
     _CPP_CALLABLE_CTYPE_1ARG,
+    _compute_exc_descendants, _unpack_target_leaf_names, _declared_vars_body,
 )
 from gimple_solvers import (
     _find_idents, _scan_for_escaping, _find_escaping, EscapeAnalyzer,
@@ -389,77 +390,6 @@ def _merge_struct_inheritance(all_struct_defs):
             resolve(s)
 
 
-def _compute_exc_descendants(all_struct_defs):
-    """For each struct name, the set of all struct names that transitively
-    inherit from it (including itself) — used so a compiled `except
-    BaseError:` handler matches any raised subclass of BaseError, not just
-    an exact type-tag match (see _gen_stmt_TryStmt's typed-dispatch loop).
-    The interpreter gets the equivalent behavior by walking a MojoClass's
-    `.bases` chain at catch time (myinterpreter.py's _matches_exc_type);
-    the compiled path has no such runtime walk available (dispatch is
-    static int comparisons against a fixed tag), so this precomputes the
-    same answer once, at compile time, instead."""
-    by_name = {s.name: s for s in all_struct_defs if isinstance(s, StructDef)}
-    descendants = {name: {name} for name in by_name}
-    for name, s in by_name.items():
-        stack = list(getattr(s, 'bases', None) or [])
-        seen = set()
-        while stack:
-            base_name = stack.pop()
-            if base_name in seen:
-                continue
-            seen.add(base_name)
-            if base_name in by_name:
-                descendants.setdefault(base_name, {base_name}).add(name)
-                stack.extend(getattr(by_name[base_name], 'bases', None) or [])
-    return descendants
-
-
-def _unpack_target_leaf_names(target: str) -> list:
-    """Flatten a tuple-unpack target string (`'(a, b)'`,
-    `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target
-    preserves) into its LEAF variable names. Bracket-aware at every
-    level: a naive `.split(',')` tore nested slots into paren-carrying
-    fragments that then leaked into declared-name sets (or worse, into
-    emitted C declarations verbatim)."""
-    t = target.strip()
-    if t.startswith('(') and t.endswith(')'):
-        names = []
-        for part in ginf._split_top_level_comma(t[1:-1]):
-            names.extend(_unpack_target_leaf_names(part))
-        return names
-    return [t] if t else []
-
-
-def _declared_vars_body(stmts) -> set:
-    """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
-    result: set = set()
-    for node in stmts:
-        if isinstance(node, VarDecl):
-            result.add(node.name)
-        elif isinstance(node, ForStmt):
-            tgt = node.target
-            name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
-            if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
-                # tuple target `for a, b in ...`: each unpacked name is declared
-                result.update(_unpack_target_leaf_names(name))
-            elif name:
-                result.add(name)
-            result |= _declared_vars_body(node.body)
-        elif isinstance(node, IfStmt):
-            result |= _declared_vars_body(node.then_body)
-            for _, eb in node.elifs: result |= _declared_vars_body(eb)
-            if node.else_body: result |= _declared_vars_body(node.else_body)
-        elif isinstance(node, (WhileStmt, WithStmt)):
-            result |= _declared_vars_body(node.body)
-        elif isinstance(node, TryStmt):
-            result |= _declared_vars_body(node.body)
-            for h in node.handlers:
-                if h.name: result.add(h.name)
-                result |= _declared_vars_body(h.body)
-            if node.else_body:    result |= _declared_vars_body(node.else_body)
-            if node.finally_body: result |= _declared_vars_body(node.finally_body)
-    return result
 _HELPERS = """\
 static int64_t __mojo_floordiv (int64_t a, int64_t b)
 {
@@ -1357,6 +1287,14 @@ class GimpleGen:
         # dedup across the files that make up one flattened program.
         self._all_closures: dict = {}   # populated by gen_module pre-pass
         self._lambda_outer_closures: dict = {}  # set during lambda body codegen
+        # Also (re)initialised per-function in _reset_func; declared here so
+        # the self-host field-union scanner records the `dict[str, str]`
+        # value type — without it `_lower_closure_call`'s
+        # `gen._closure_envs[name]` read lowered to `mojo_dict_get_int`
+        # (boxing the `''` / `_env_<name>` string), so every non-capturing
+        # nested `def` call prepended a bogus empty env arg.
+        self._closure_envs: dict[str, str] = {}   # inner fn name -> env var ('' if none)
+        self._inner_func_name: str = ''           # original inner name (recursive-call detection)
         self._self_ctor_stubs: set = set()  # struct names needing `Name___new` stubs (see _lower_self_ctor)
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers

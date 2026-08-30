@@ -26,7 +26,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str,
+    py_tokenize, Parser, _as_str, _as_funcdef_node,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -4269,7 +4269,7 @@ def gen_module_impl(self, stmts):
 
     def _scan_for_closures(outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
-        def _all_stmts_nonfunc(stmts):
+        def _all_stmts_nonfunc(stmts: list) -> list:
             """Return a list of statements recursively through control flow, not entering FunctionDef bodies."""
             result = []
             for s in stmts:
@@ -4326,9 +4326,15 @@ def gen_module_impl(self, stmts):
         for stmt in _all_stmts_nonfunc(body):
             if not isinstance(stmt, FunctionDef):
                 continue
-            if stmt.is_async and not stmt.is_generator:
+            # `_as_funcdef_node`: identity in CPython, but its `-> FunctionDef`
+            # annotation gives the self-hosted backend a real `FunctionDef *`
+            # view of the otherwise-boxed loop element — without it `inner.name`
+            # goes through dynamic getattr and the lifted symbol comes out
+            # `outer_<garbage-bytes>`, the `_all_closures` key is garbage, and
+            # every nested `def` degrades to a weak "unavailable" stub.
+            inner     = _as_funcdef_node(stmt)
+            if inner.is_async and not inner.is_generator:
                 continue
-            inner     = stmt
             lifted    = f"{outer_name}_{inner.name}"
             used      = set()
             for body_node in inner.body:
@@ -4365,7 +4371,7 @@ def gen_module_impl(self, stmts):
                         _cap_names_so_far.add(_tn)
                     if _tn in (_t_api.get('mut_capture_names') or frozenset()):
                         _transitive_mut.add(_tn)
-            env_struct   = f"{lifted}_env" if captures else ""
+            env_struct   = f"{lifted}_env" if len(captures) > 0 else ""
             ci           = ClosureInfo(lifted, env_struct, captures, inner)
             _inner_dflts = getattr(inner, 'param_defaults', None) or {}
             if _inner_dflts:
@@ -4483,6 +4489,12 @@ def gen_module_impl(self, stmts):
 
     for s in stmts:
         if isinstance(s, FunctionDef):
+            s = _as_funcdef_node(s)   # real FunctionDef view: keeps `pname`/
+            # `ptype` from `s.params` as `char *` so `outer_scope` is keyed
+            # by the parameter NAME, not a boxed pointer — otherwise a
+            # nested closure's `if v in enriched_scope` capture filter never
+            # matches and every capture is silently dropped (`return add`
+            # from a capturing closure came out a bare funcptr, no env).
             outer_scope: dict = {}
             for pname, ptype in s.params:
                 _sh_ct = (None if _selfhost_fn_reassigns_method(s)
@@ -6919,7 +6931,13 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     if self._funcptr_builtins_needed:
-        _new_names = sorted(self._funcptr_builtins_needed - self._emitted_funcptr_builtins)
+        # List comprehension (not `sorted(setA - setB)`): iterating the set
+        # field directly binds `n` from `_field_elem_types['GimpleGen']` as
+        # `char *`, so the sorted result's elements stay `char *` and the
+        # `c_name[0]` check below is a real string index rather than a
+        # segfaulting `mojo_list_get_int` on a char* pointer.
+        _new_names = sorted([n for n in self._funcptr_builtins_needed
+                             if n not in self._emitted_funcptr_builtins])
         # A SUPPORTED compiled generator has no ordinary C definition
         # under its bare csym (only its `<base>_start/_resume/_value/
         # _destroy` coroutine API), so a plain `(void *)<csym>`

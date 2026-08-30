@@ -1346,6 +1346,79 @@ def _used_idents_node(node) -> set:
     return set()
 
 
+def _compute_exc_descendants(all_struct_defs):
+    """For each struct name, the set of all struct names that transitively
+    inherit from it (including itself) — used so a compiled `except
+    BaseError:` handler matches any raised subclass of BaseError, not just
+    an exact type-tag match (see _gen_stmt_TryStmt's typed-dispatch loop).
+    The interpreter gets the equivalent behavior by walking a MojoClass's
+    `.bases` chain at catch time (myinterpreter.py's _matches_exc_type);
+    the compiled path has no such runtime walk available (dispatch is
+    static int comparisons against a fixed tag), so this precomputes the
+    same answer once, at compile time, instead."""
+    by_name = {s.name: s for s in all_struct_defs if isinstance(s, StructDef)}
+    descendants = {name: {name} for name in by_name}
+    for name, s in by_name.items():
+        stack = list(getattr(s, 'bases', None) or [])
+        seen = set()
+        while stack:
+            base_name = stack.pop()
+            if base_name in seen:
+                continue
+            seen.add(base_name)
+            if base_name in by_name:
+                descendants.setdefault(base_name, {base_name}).add(name)
+                stack.extend(getattr(by_name[base_name], 'bases', None) or [])
+    return descendants
+
+
+def _unpack_target_leaf_names(target: str) -> list:
+    """Flatten a tuple-unpack target string (`'(a, b)'`,
+    `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target
+    preserves) into its LEAF variable names. Bracket-aware at every
+    level: a naive `.split(',')` tore nested slots into paren-carrying
+    fragments that then leaked into declared-name sets (or worse, into
+    emitted C declarations verbatim)."""
+    t = target.strip()
+    if t.startswith('(') and t.endswith(')'):
+        names = []
+        for part in _split_top_level_commas(t[1:-1]):
+            names.extend(_unpack_target_leaf_names(part))
+        return names
+    return [t] if t else []
+
+
+def _declared_vars_body(stmts) -> set:
+    """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
+    result: set = set()
+    for node in stmts:
+        if isinstance(node, VarDecl):
+            result.add(node.name)
+        elif isinstance(node, ForStmt):
+            tgt = node.target
+            name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
+            if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
+                # tuple target `for a, b in ...`: each unpacked name is declared
+                result.update(_unpack_target_leaf_names(name))
+            elif name:
+                result.add(name)
+            result |= _declared_vars_body(node.body)
+        elif isinstance(node, IfStmt):
+            result |= _declared_vars_body(node.then_body)
+            for _, eb in node.elifs: result |= _declared_vars_body(eb)
+            if node.else_body: result |= _declared_vars_body(node.else_body)
+        elif isinstance(node, (WhileStmt, WithStmt)):
+            result |= _declared_vars_body(node.body)
+        elif isinstance(node, TryStmt):
+            result |= _declared_vars_body(node.body)
+            for h in node.handlers:
+                if h.name: result.add(h.name)
+                result |= _declared_vars_body(h.body)
+            if node.else_body:    result |= _declared_vars_body(node.else_body)
+            if node.finally_body: result |= _declared_vars_body(node.finally_body)
+    return result
+
+
 # (what `_cpp_expr`'s LambdaExpr case below emits) has an ANONYMOUS,
 # uniquely-generated closure type that can only be held as `auto` -- not
 # storable in a variable DECLARED ahead of its initializer, which is how

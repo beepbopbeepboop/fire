@@ -1993,7 +1993,12 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
     # their own entry here rather than sharing the top-level
     # free-function one.
     expected_params = gen.func_param_types.get(lifted, [])
-    user_param_count = len(expected_params) - (1 if env_var and expected_params else 0)
+    # `len(env_var) > 0`, not a bare `if env_var`: a NON-capturing nested
+    # closure has `_closure_envs[name] == ''`, and an empty C string is a
+    # non-null pointer -> truthy in the self-hosted backend, so a bare
+    # check wrongly prepended an empty env arg (`outer_inner (, x)`).
+    _has_env = len(env_var) > 0
+    user_param_count = len(expected_params) - (1 if _has_env and expected_params else 0)
     if user_param_count > len(arg_pairs):
         kwargs = getattr(node, 'kwargs', []) or []
         kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
@@ -2017,7 +2022,7 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
             else:
                 arg_pairs.append(('int', '0'))
     fname_c  = gimple_ctypes._safe_name(lifted)
-    if env_var:
+    if _has_env:
         # No slice inside the f-string: the self-hosted f-string parser
         # reads `[1:]` as a format spec and mis-parses the interpolation.
         env_base = env_var[1:]

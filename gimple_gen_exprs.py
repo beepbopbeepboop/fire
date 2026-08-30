@@ -2662,17 +2662,27 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         if t == 'MojoSet *':
             return v
         return gen._new_val('MojoSet *', f'(MojoSet *){gen._ensure_local(t, v)}')
+    def _set_op(_fn, _la, _lb, _ov_a, _ov_b):
+        """Emit a set-op call and carry a known element type onto the
+        result — `sorted(a_set - b_set)` / `for x in (a | b):` otherwise
+        binds `x` as boxed int64_t (a real self-host miscompile:
+        `sorted(self._funcptr_builtins_needed - self._emitted_funcptr_
+        builtins)` -> `c_name[0]` on a char* pointer via mojo_list_get_int
+        -> segfault)."""
+        _res = gen._call_expr('MojoSet *', _fn,
+                              [('MojoSet *', _la), ('MojoSet *', _lb)])
+        _e = gen._elem_of(_ov_a) or gen._elem_of(_ov_b)
+        if _e and _e != 'int64_t':
+            gen._elem_types[_res] = _e
+        return 'MojoSet *', _res
     if op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
-        return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_union',
-                                            [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
+        return _set_op('mojo_set_union', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
     # For - on set types, use runtime difference, not C subtraction
     if op == '-' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_difference',
-                                            [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
+        return _set_op('mojo_set_difference', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
     # For & on set types, use runtime intersection, not C bitwise &
     if op == '&' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_intersection',
-                                            [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
+        return _set_op('mojo_set_intersection', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
     # For ^ on set types, symmetric difference = (a - b) | (b - a).
     # No dedicated runtime entry; compose from difference + union.
     if op == '^' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
