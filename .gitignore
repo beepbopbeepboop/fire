@@ -28,3 +28,12 @@ bnbody
 bnqueens
 py314_build_cache.json
 artifacts/
+
+# selfhost A/B scratch harness
+_ab_root.py
+_d.py
+_abt*.mojo
+_abt*.ci
+_*.nc
+_*.py.orig
+mojoc.dbg
