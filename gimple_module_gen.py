@@ -1805,7 +1805,7 @@ def gen_module_impl(self, stmts):
                         _dv_early = self._annotation_dict_val_type(field.type_ann)
                         if _dv_early is not None:
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
-                        if _dv_early == 'MojoDict *':
+                        if _dv_early in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                             _nv_early = self._annotation_dict_nested_val_type(field.type_ann)
                             if _nv_early is not None and _nv_early != 'int64_t':
                                 self._field_dict_nested_val_types.setdefault(

@@ -2183,7 +2183,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # instead of generating StructName_method(...) that doesn't exist.
     # This handles e.g. a param reassigned `args = []` where var_types
     # still shows the original type but the actual value is a MojoList*.
-    _sn = gimple_exprtypes._struct_name_of(ot) if ot.endswith(' *') else None
+    # NOT `... if ot.endswith(' *') else None`: that ternary's result type
+    # is join(str, None) — which the self-hosted backend lowers as int64_t,
+    # boxing the `char *` struct name so `f'{_sn}_{method}'` stringifies a
+    # pointer decimal and the `in func_return_types` check below always
+    # misses (a real compiled-path miscompile: `c.get()` on a genuine
+    # user-struct instance fell through to `mojo_obj_call1` dynamic
+    # dispatch instead of the real `Counter_get`).
+    _sn = ''
+    if ot.endswith(' *'):
+        _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':
         return gen._lower_list_method(ov, method, node.args)
     if _sn == 'MojoDict':
@@ -2192,7 +2201,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return gen._lower_set_method(ov, method, node.args)
     if _sn == 'MojoStr':
         return gen._lower_str_method(ov, method, node.args)
-    if (_sn is not None
+    if (len(_sn) > 0
             and (_sn not in gen.struct_field_types
                  or f'{_sn}_{method}' not in gen.func_return_types)
             and method in ('append', 'extend', 'sort', 'reverse', 'clear',
@@ -2345,10 +2354,17 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             gen._emit_label(bb_false)
             gen._emit(f"  {t} = {default_r};")
             gen._emit_label(bb_done)
-            if _container_vt and result_type == 'MojoDict *':
+            if _container_vt:
                 _nd = gen._dict_nested_val_types.get(ov)
                 if _nd:
-                    gen._dict_val_types[t] = _nd
+                    if result_type == 'MojoDict *':
+                        gen._dict_val_types[t] = _nd
+                    else:
+                        # `dict[K, list[E]]` / `dict[K, set[E]]`: E is the
+                        # ELEMENT type of the container this .get() returns,
+                        # so `d.get(k)[i]` / `for x in d.get(k)` reads with
+                        # the right accessor rather than boxing the pointer.
+                        gen._elem_types[t] = _nd
             return result_type, t
         if val_type == 'char *':
             return 'char *', raw
@@ -2356,10 +2372,12 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             return 'double', raw
         elif val_type in ('MojoDict *', 'MojoList *', 'MojoSet *'):
             t = gen._new_val(val_type, f"({val_type}){raw}")
-            if val_type == 'MojoDict *':
-                _nd = gen._dict_nested_val_types.get(ov)
-                if _nd:
+            _nd = gen._dict_nested_val_types.get(ov)
+            if _nd:
+                if val_type == 'MojoDict *':
                     gen._dict_val_types[t] = _nd
+                else:
+                    gen._elem_types[t] = _nd
             return val_type, t
         else:
             return 'int64_t', raw

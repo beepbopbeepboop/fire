@@ -692,7 +692,7 @@ def _scalar_arg_is_addressable_local(gen, aval) -> bool:
     return aval in gen.var_types
 
 
-def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
+def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
     arg_pairs: list of (ctype, varname) for each argument.

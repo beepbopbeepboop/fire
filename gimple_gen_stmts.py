@@ -170,9 +170,11 @@ def _annotation_dict_val_type(gen, ann) -> str | None:
 
 
 def _annotation_dict_nested_val_type(gen, ann) -> str | None:
-    """For `dict[K, dict[K2, V2]]` → the C type of the INNER dict's value
-    (`V2`), so a `field[k]` / `field.get(k, {})` / `field.items()` read one
-    level down carries a real value type. None for a non-dict-of-dicts."""
+    """For `dict[K, dict[K2, V2]]` → the inner dict's value C type (`V2`);
+    for `dict[K, list[E]]` / `dict[K, set[E]]` → the inner container's
+    ELEMENT C type (`E`). So a `field[k]` / `field.get(k, ...)` /
+    `field.items()` read one level down carries a real type instead of
+    boxing. None otherwise."""
     if isinstance(ann, str):
         s = ann.strip()
         if s.startswith('dict[') or s.startswith('Dict['):
@@ -180,11 +182,18 @@ def _annotation_dict_nested_val_type(gen, ann) -> str | None:
             parts = gimple_ctypes._split_top_level_commas(inner)
             if len(parts) >= 2:
                 v = parts[1].strip()
-                if v.startswith('dict[') or v.startswith('Dict['):
+                vbase = v.split('[', 1)[0].strip()
+                if vbase in ('dict', 'Dict') and '[' in v:
                     vparts = gimple_ctypes._split_top_level_commas(
                         v.split('[', 1)[1].rstrip(']').strip())
                     if len(vparts) >= 2:
                         return gen._resolve_type(vparts[1].strip())
+                if vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in v:
+                    eparts = gimple_ctypes._split_top_level_commas(
+                        v.split('[', 1)[1].rstrip(']').strip())
+                    if len(eparts) == 1 and eparts[0].strip():
+                        _e = gen._resolve_type(eparts[0].strip())
+                        return _e if _e and _e != 'int64_t' else None
     return None
 
 

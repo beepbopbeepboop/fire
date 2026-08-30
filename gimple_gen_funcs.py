@@ -866,6 +866,20 @@ def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
             _nv = _val_cts(_vann)
             if _nv is not None:
                 _nested = _nv[0]
+        elif _outer in ('MojoList *', 'MojoSet *'):
+            # `dict[K, list[E]]` / `dict[K, set[E]]` — E, so `d.get(k)[i]`
+            # / `for x in d.get(k)` reads with the right accessor instead
+            # of boxing (e.g. `func_param_types: dict[str, list[str]]` ->
+            # `func_param_types.get(fn)[0]` must be a real `char *`, not a
+            # pointer-decimal cast target).
+            _vbase = _vann.split('[', 1)[0].strip()
+            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
+                _einner = _vann[_vann.index('[') + 1:_vann.rindex(']')].strip()
+                _eparts = gimple_ctypes._split_top_level_commas(_einner)
+                if len(_eparts) == 1 and _eparts[0].strip():
+                    _ec = _selfhost_ann_ctype(_eparts[0].strip())
+                    if _ec is not None and _ec != 'int64_t':
+                        _nested = _ec
         return (_outer, _nested)
 
     def _consider(_tgt, _ann):
@@ -2024,6 +2038,68 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         pst = gen._param_struct_name(ptype)
         if pst:
             gen._param_struct_types[bare] = pst
+
+    # Seed container element types straight from a param's own declared
+    # annotation — the same static-truth seed struct fields already get
+    # (see gimple_module_gen.py's `list[tuple[T, T]]` field block). A param
+    # annotated `list[tuple[str, str]]` / `list[str]` / `dict[str, list[str]]`
+    # otherwise binds its loop/unpack vars as boxed int64_t inside the body
+    # even though the caller's shape is fully known here (concretely:
+    # `_emit_call(arg_pairs: list[tuple[str, str]])` unpacked `(atype, aval)`
+    # as int64_t, so once a callee's `func_param_types` entry became readable
+    # the `ptype != atype` compare fired a bogus `(char *)` reinterpret cast).
+    for pname, ptype in node.params:
+        if ptype is None or pname.startswith('*') or not isinstance(ptype, str):
+            continue
+        bare = pname.lstrip('*')
+        _pa = ptype.strip()
+        _pbase = _pa.split('[', 1)[0].strip()
+        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict') or '[' not in _pa:
+            continue
+        _pin = gimple_ctypes._split_top_level_commas(
+            _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
+        if _pbase in ('dict', 'Dict'):
+            if len(_pin) != 2:
+                continue
+            _vann = _pin[1].strip()
+            _vc = gen._resolve_type(_vann)
+            if _vc and _vc != 'int64_t':
+                gen._dict_val_types.setdefault(bare, _vc)
+            _vbase = _vann.split('[', 1)[0].strip()
+            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
+                _ei = gimple_ctypes._split_top_level_commas(
+                    _vann[_vann.index('[') + 1:_vann.rindex(']')].strip())
+                if len(_ei) == 1 and _ei[0].strip():
+                    _ec = gen._resolve_type(_ei[0].strip())
+                    if _ec and _ec != 'int64_t':
+                        gen._dict_nested_val_types.setdefault(bare, _ec)
+            continue
+        if len(_pin) != 1 or not _pin[0].strip():
+            continue
+        _eann = _pin[0].strip()
+        _ebase = _eann.split('[', 1)[0].strip()
+        if _ebase in ('tuple', 'Tuple') and '[' in _eann:
+            _slots = gimple_ctypes._split_top_level_commas(
+                _eann[_eann.index('[') + 1:_eann.rindex(']')].strip())
+            _sc = None
+            _same = True
+            for _sl in _slots:
+                _sl = _sl.strip()
+                if not _sl:
+                    continue
+                _t = gen._resolve_type(_sl)
+                if _sc is None:
+                    _sc = _t
+                elif _t != _sc:
+                    _same = False
+                    break
+            if _same and _sc and _sc != 'int64_t':
+                gen._elem_types.setdefault(bare, 'MojoList *')
+                gen._nested_elem_types.setdefault(bare, _sc)
+        else:
+            _ec = gen._resolve_type(_eann)
+            if _ec and _ec != 'int64_t':
+                gen._elem_types.setdefault(bare, _ec)
 
     # Seed the cross-call element-type contract for container params, so
     # param[i][j] reads the inner element with the right getter and return

@@ -3448,7 +3448,7 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
-    def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
+    def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
         return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
