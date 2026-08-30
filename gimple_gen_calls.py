@@ -133,6 +133,53 @@ def _ident_call_name(gen, func_node) -> str:
     return func_node.name
 
 
+def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """BUG-2026-027: `UnsafePointer[T](x)` / `OwnedPointer[T](x)` /
+    `ArcPointer[T](x)` / `Pointer[T](x)` — the generic pointer-wrapper
+    constructor call. This codegen has no separate boxed representation for
+    these types: `_mojo_type`/`_resolve_type` already erase `UnsafePointer[T]`
+    straight to `T *` for any variable/parameter annotated with it, and
+    `.data` on such a value is identity (see the `.data` fix in
+    `gimple_gen_exprs.py`'s `_lower_MemberExpr`, which assumes the same
+    thing). So constructing one is just producing a `T *` value from
+    whatever the argument is — before this fix, `CallExpr(func=
+    SubscriptExpr(...))` for this shape fell all the way through
+    `_lower_call` to its final "indirect call via SubscriptExpr" catch-all,
+    silently dropping the argument and always yielding NULL.
+    """
+    idx = node.func.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    elem_ann = gen._type_expr_to_ann(elems[0]) if elems else None
+    # Reconstruct the full "UnsafePointer[T]"-shaped annotation string and
+    # hand it to `_resolve_type`, which already special-cases a struct
+    # element type to a SINGLE `T *` (struct locals/globals/params are
+    # themselves always `T *` — see BUG-2026-030 — so "a pointer to a
+    # struct" is just `T *`, not `T **`). Recomputing that logic here (e.g.
+    # naively appending " *" to `_resolve_type(elem_ann)`, which for a
+    # struct elem_ann already returns `T *` on its own) would double the
+    # pointer depth and mistype every `UnsafePointer[SomeStruct]` local as
+    # `T **`.
+    base = node.func.obj.name
+    ptr_ctype = gen._resolve_type(f"{base}[{elem_ann}]") if elem_ann else 'int64_t *'
+    if not node.args:
+        # UnsafePointer[T]() — no-arg form: a null pointer.
+        return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype})0")
+    at, av = gen.lower_expr(node.args[0])
+    if at == ptr_ctype:
+        return ptr_ctype, av
+    if at.endswith(' *'):
+        # Pointer-to-pointer reinterpret (e.g. wrapping another
+        # UnsafePointer's raw value, or a `.unsafe_ptr()` result of a
+        # different element type) — straight cast.
+        return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){av}")
+    # Integer address -> pointer. GIMPLE rejects a direct int64_t->T* cast
+    # in one statement ("invalid conversion"); go through void* in two
+    # single-cast statements, the same pattern `_strided_data_ptr` uses.
+    av64 = av if at == 'int64_t' else gen._new_val('int64_t', f"(int64_t){av}")
+    vp = gen._new_val('void *', f"(void *){av64}")
+    return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){vp}")
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
@@ -528,6 +575,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 t = gen._new_val('int64_t', f'(int64_t){av}' if at.endswith(' *') else av)
                 return 'int64_t', t
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
+        if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
+            return _lower_pointer_ctor(gen, node)
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
         # Calling the RESULT of a call expression directly —
         # `factory()(5)`, `make_adder2(100)(2)`, `pick(1)(x)` — where the
@@ -818,6 +867,26 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'len' and node.args
             and not gen._locally_binds_name('len')):
         return gen._lower_builtin_len(node)
+    # BUG-2026-028: `addr(x)` had NO real lowering at all — any call fell
+    # through to a declared-but-never-defined variadic stub
+    # (`int64_t addr(...);`), an undefined symbol at link time (same shape
+    # of gap `ord`/`chr` used to have, fixed just below). Struct locals/
+    # globals/params, UnsafePointer values, and MojoList*/MojoDict*/
+    # MojoSet* are ALL already represented as a real C pointer at this
+    # codegen's C level (see BUG-2026-030's "structs are always T *"
+    # convention and `_lower_pointer_ctor`/`.data` for UnsafePointer) — for
+    # any of those, the value already IS its own address, so `addr(x)` is
+    # just `x` reinterpreted as an integer, exactly like `.address`.
+    # Scoped to that case only: taking the real address of a plain SCALAR
+    # local's stack slot is a separate, harder problem this codegen has no
+    # support for (`-fgimple` rejects an address-taken local that is later
+    # cast or returned — see the general {mut}-capture-spec closure fix's
+    # heap-boxing workaround for the same underlying constraint) and is
+    # left as the pre-existing undefined-symbol gap for that shape.
+    if fname_raw == 'addr' and len(node.args) == 1:
+        at, av = gen.lower_expr(node.args[0])
+        if at.endswith(' *'):
+            return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
     # ord()/chr() had NO real lowering at all — any call fell through to
     # a declared-but-never-defined variadic stub (`int64_t ord(...);`),
     # an undefined symbol at link time. Found via regex_compile.py's own
@@ -1696,10 +1765,35 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
     if node.args:
         at, av = gen.lower_expr(node.args[0])
         for xa in node.args[1:]: gen.lower_expr(xa)
-        if not at.endswith(' *') and at not in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *'):
-            gen._emit(f'  {t} = ({ctype}){gen._ensure_local(at, av)};')
-        else:
+        if at.endswith(' *') and ctype in ('float', 'double', '__fp16', '_Bool'):
+            # `Float64(some_struct)`/`Bool(some_struct)` is a genuinely
+            # different call shape from `Int64(some_struct)` below — real
+            # Mojo source uses it to invoke a `__float__`/conversion method
+            # (e.g. FloatLiteral.__float__'s own `return Float64(self)`),
+            # not to reinterpret an address. A *pointer*-to-floating-point
+            # (or -to-_Bool) cast is invalid C, not just semantically wrong
+            # a real `-fgimple` "invalid types in conversion to
+            # floating-point" compile error (found via compile_stdlib.py
+            # regressing on std/builtin/float_literal.mojo when the
+            # BUG-2026-028 fix below first landed without this exclusion).
+            # This codegen has no model for calling a user-defined
+            # `__float__`/`__bool__` here, so keep the pre-existing (if
+            # still "unsupported") placeholder for exactly this shape.
             gen._emit(f'  {t} = ({ctype})0;  /* {fname_raw}(struct) unsupported */')
+        elif at.endswith(' *'):
+            # BUG-2026-028: `Int64(x)`/`Int(x)`/etc. on a pointer-typed value
+            # (a struct — struct locals/globals/params are ALWAYS `T *` in
+            # this codegen's representation, see BUG-2026-030 — a
+            # MojoList*/MojoDict*/MojoSet*, an UnsafePointer's already-erased
+            # `T *`, ...) used to always drop the value and emit a constant 0
+            # ("unsupported"). A pointer-to-INTEGER cast is a perfectly
+            # ordinary single GIMPLE statement (the same pattern `.address`
+            # in `gimple_gen_exprs.py` already relies on for exactly this),
+            # so just take it — this is what callers actually want: the raw
+            # bits of the object's address.
+            gen._emit(f'  {t} = ({ctype}){av};')
+        else:
+            gen._emit(f'  {t} = ({ctype}){gen._ensure_local(at, av)};')
     else:
         gen._emit(f'  {t} = ({ctype})0;')
     return ctype, t

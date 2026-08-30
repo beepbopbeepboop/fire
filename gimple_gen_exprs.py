@@ -1365,6 +1365,28 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         t = gen._new_val('int64_t', f"(int64_t){ov}")
         return 'int64_t', t
 
+    # BUG-2026-027: `.data` on an UnsafePointer[T] value. This codegen has no
+    # separate boxed representation for UnsafePointer — `_mojo_type`/
+    # `_resolve_type` erase `UnsafePointer[T]` straight to `T *` (see their
+    # 'UnsafePointer'/'OwnedPointer'/'ArcPointer'/'Pointer' branches), exactly
+    # like `.address` above already assumes. So the variable IS the pointer
+    # already; `.data` is just that same value, not a field to read through
+    # it. Before this fix `.data` fell through to the generic member-access
+    # path below: for a struct pointee that meant
+    # `_mojo_dispatch_getattr((void*)p, "data")` (a dynamic runtime attribute
+    # lookup on raw pointer bits — wrong, and it also crashed since the
+    # constructor bug, fixed alongside this in `gimple_gen_calls.py`'s
+    # `_lower_pointer_ctor`, meant `p` was always NULL); for a primitive
+    # pointee (e.g. `UnsafePointer[Int]`, ot == 'int64_t *') it emitted
+    # `p->data`, a C compile error (member access on a scalar-element
+    # pointer). Scoped to exclude a genuine user struct field literally
+    # named `data` (and MojoList's own `.data`/`elems`, already handled
+    # above) so this only fires for the erased-pointer representation.
+    if node.member == 'data' and ot.endswith(' *'):
+        _data_sn = gimple_exprtypes._struct_name_of(ot)
+        if not (_data_sn and 'data' in (gen.struct_field_types.get(_data_sn) or {})):
+            return ot, ov
+
     # `x._mlir_value` unwraps a scalar newtype (Int/UInt over an __mlir_type)
     # to its underlying MLIR value — at the C level that is the scalar itself,
     # so pass the operand through unchanged. Only for already-scalar operands:

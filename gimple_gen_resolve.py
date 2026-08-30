@@ -872,6 +872,62 @@ def _register_link_imports(gen, stmts) -> list:
                         gen._register_reflected_struct(
                             sym, info, exports, _parse_c_sig)
                         continue
+                    # BUG-2026-029: a module-level global imported from
+                    # ANOTHER module (kind 2 / SYM_GLOBAL — reflect.py's
+                    # collect_exports). Before this, `g_world` fell all the
+                    # way through this scan (no `info` at all — reflect.py
+                    # never exported globals) to the generic identifier
+                    # resolver's "ct param or undeclared" placeholder,
+                    # silently reading as 0 — even with an explicit `from
+                    # OtherModule import g_world`. A cross-module global has
+                    # no locally-visible struct field to read directly (this
+                    # module only sees the OWNING module's globals struct as
+                    # an `__attribute__((incomplete))` forward decl) — route
+                    # every read through the owning module's real accessor
+                    # function instead, reusing the SAME
+                    # `_imported_global_accessors` mechanism
+                    # `_emit_imported_global_accessors` already populates
+                    # for the (narrower, .py-selfhost-only) module_loader
+                    # path — `_lower_IdentExpr` already checks it before
+                    # falling back to a direct field read, so no read-path
+                    # change is needed here, only registration. Deliberately
+                    # QUALIFIED by the accessor's own module-prefixed C
+                    # symbol (never a bare name) — see this function's
+                    # module docstring on the bare-name collision hazard a
+                    # sibling fix in this exact area hit and had to revert.
+                    if from_reflection and info.get('kind') == 2:
+                        seen.add(sym)
+                        # The accessor symbol is the last token before '('
+                        # in the advertised signature — same extraction
+                        # reflect.py's own `export_csym` uses for every
+                        # non-SYM_FUNCTION kind (methods, and now globals).
+                        gsym = info['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
+                        # Register (and extern-declare) the accessor as
+                        # returning `void *`, NOT the struct type reflect.py
+                        # advertised (e.g. `World *`) — this importing
+                        # translation unit has no `struct World { ... }`
+                        # declaration at all (a SYM_GLOBAL export carries no
+                        # field-layout information, unlike a SYM_TYPE import,
+                        # which DOES bring one via `_register_reflected_
+                        # struct`), so an extern decl naming the real struct
+                        # type is a hard "unknown type name 'World'" compile
+                        # error. `void *` is sufficient for every currently
+                        # supported use of a cross-module global (BUG-2026-
+                        # 029's own repro: `Int64(addr(g_world))`/
+                        # `Int64(g_world)`, both of which only need the
+                        # pointer's BITS — see `_lower_scalar_ctor`'s and the
+                        # `addr` builtin's `at.endswith(' *')` checks, which
+                        # accept any pointer type). Genuine cross-module
+                        # FIELD access on an imported global (`g_world.x`)
+                        # remains unsupported either way — that needs the
+                        # struct's real layout imported too, a larger,
+                        # separate feature.
+                        gen._imported_global_accessors[sym] = ('void *', gsym)
+                        guard = gimple_ctypes._stub_guard_name(gsym)
+                        decls.append(
+                            f'#ifndef {guard}\n#define {guard}\n'
+                            f'extern void * {gsym} (void);\n#endif')
+                        continue
                     sig = info.get('signature')
                     if not sig:
                         continue
