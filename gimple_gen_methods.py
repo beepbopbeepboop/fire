@@ -74,6 +74,47 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     return module_name.startswith(_SELFHOST_SIBLING_MODULE_PREFIXES)
 
 
+def _resolve_class_attr_write_target(gen, target):
+    """If `target` (a MemberExpr) is a class-level-attribute WRITE —
+    `ClassName.ATTR = ...` / `ClassName.ATTR += ...`, optionally reached
+    through one self-host sibling-module qualifier (e.g. `gimple_codegen.
+    GimpleGen._cpp_kwfwd_counter`, `import gimple_codegen` then `.GimpleGen.
+    _cpp_kwfwd_counter`) — return `(gtype, gname)` for its synthesized
+    backing global, else None.
+
+    Mirrors `_lower_MemberExpr`'s READ-side resolution (the sibling-alias
+    qualifier strip, then the `_class_attrs` lookup) so a write lands on the
+    exact same global a read of the same expression resolves to. Without
+    this, `_gen_stmt_AssignStmt`/`_gen_stmt_AugAssignStmt`'s generic
+    MemberExpr-write path lowers `target.obj` (here, the bare class
+    reference `gimple_codegen.GimpleGen`, itself not a real value) as if it
+    were a genuine struct-instance pointer, then writes `<garbage>-
+    >_cpp_kwfwd_counter` — no hard GIMPLE rejection (the garbage base
+    happens to already be an integer-shaped value), just a real, silent
+    pointer<->int size-mismatch warning and a write that never reaches the
+    real counter. Real repro: `gimple_cpp_core.py`'s `gimple_codegen.
+    GimpleGen._cpp_kwfwd_counter += 1` under self-host compilation.
+    """
+    obj = target.obj
+    if (isinstance(obj, gimple_ctypes.MemberExpr)
+            and isinstance(obj.obj, gimple_ctypes.IdentExpr)
+            and _is_selfhost_sibling_alias(gen, obj.obj.name)):
+        obj = obj.member if isinstance(obj.member, str) else None
+        obj = gimple_ctypes.IdentExpr(name=obj, line=getattr(target, 'line', 0)) \
+            if obj is not None else None
+    if not isinstance(obj, gimple_ctypes.IdentExpr):
+        return None
+    class_name = obj.name
+    if class_name not in gen.struct_field_types or class_name in gen.var_types:
+        return None
+    cattrs = gen._class_attrs.get(class_name)
+    if not cattrs or target.member not in cattrs:
+        return None
+    gname = cattrs[target.member]
+    gtype = gen._global_var_types.get(gname, 'int64_t')
+    return gtype, gname
+
+
 def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):
     """`'func'` if `<module_name>.<method_name>` names a registered top-level
     function of a self-host sibling module, `'other'` if the alias is a
@@ -854,6 +895,48 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         inner_obj = func.obj.obj
         inner_member = func.obj.member
         outer_member = func.member
+
+        # Self-hosting bootstrap, ONE LEVEL DEEPER than the plain
+        # `gimple_ctypes.<module>.<method>(...)` strip just below:
+        # `gimple_ctypes.os.path.dirname(source)` (a real shape in this
+        # compiler's own `_register_link_imports` — `os` reached through
+        # the `gimple_ctypes` hub, then `.path.dirname(...)` on top of
+        # that) has `inner_obj` itself be a MemberExpr (`gimple_ctypes.
+        # os`), so it never matched the single-level `isinstance(inner_obj,
+        # IdentExpr)` check below at all — neither hub-strip branch fired,
+        # and the whole 4-deep chain fell past the "Handle os.path.*
+        # calls" block too (which itself requires a BARE `os` IdentExpr
+        # receiver), landing in the generic dynamic-dispatch fallback: an
+        # opaque `int`-typed stub (always `0`) standing in for `os.path.
+        # dirname`'s real `char *` result. `_pkg_dir = gimple_ctypes.os.
+        # path.dirname(source)` then declared its local as plain `int`
+        # (4 bytes) from that stub's type, and every later use of
+        # `_pkg_dir` as a path (`os.path.isdir(_pkg_dir)`, `os.listdir
+        # (_pkg_dir)`, `os.path.join(_pkg_dir, ...)`) cast that 4-byte
+        # `int` straight to a pointer type — a real `-Wint-to-pointer-
+        # cast: cast to pointer from integer of different size` warning
+        # for EVERY such site of a genuinely wrong value (path operations
+        # on a truncated stub, not the intended real dirname), not just a
+        # diagnostic. Peel off the LEADING `gimple_ctypes.` (or any other
+        # sibling-hub alias) qualifier from the innermost MemberExpr,
+        # leaving the rest of the chain (`.os.path.dirname(...)`) intact,
+        # and re-dispatch — the single-level branch immediately below
+        # then peels no further (its own `inner_obj` is already a bare
+        # `os` IdentExpr) and the real `os.path.*` handling further down
+        # this same function fires normally.
+        if (isinstance(inner_obj, gimple_ctypes.MemberExpr)
+                and isinstance(inner_obj.obj, gimple_ctypes.IdentExpr)
+                and _is_selfhost_sibling_alias(gen, inner_obj.obj.name)):
+            _rewritten = gimple_ctypes.CallExpr(
+                func=gimple_ctypes.MemberExpr(
+                    obj=gimple_ctypes.MemberExpr(
+                        obj=gimple_ctypes.IdentExpr(
+                            name=inner_obj.member, line=getattr(node, 'line', 0)),
+                        member=inner_member),
+                    member=outer_member),
+                args=list(node.args),
+                kwargs=list(getattr(node, 'kwargs', None) or []))
+            return gen._lower_method_call(_rewritten)
 
         # Self-hosting bootstrap: `gimple_ctypes.ast_rewriter.rewrite(...)`,
         # `gimple_ctypes.mlir.lower_op(...)`, `gimple_ctypes.Parser(...)` etc.

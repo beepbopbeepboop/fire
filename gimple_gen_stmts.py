@@ -852,6 +852,11 @@ def _gen_stmt_AssignStmt(gen, node):
             gtype = gen._global_var_types.get(mangled, 'int64_t')
             gen._safe_coerce_emit(vtype, gtype, v, mangled)
             return
+        _cattr_w = gmp._resolve_class_attr_write_target(gen, node.target)
+        if _cattr_w is not None:
+            gtype, gname = _cattr_w
+            gen._safe_coerce_emit(vtype, gtype, v, gname)
+            return
         _dv = gen._annotation_dict_val_type(getattr(node, 'type_ann', None))
         if _dv is not None:
             gen._dict_val_types[node.target.member] = _dv
@@ -1277,6 +1282,11 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 'MojoList *', f"(MojoList *){v}")
             gen._emit_call('void', '', 'mojo_replace_argv',
                             [('MojoList *', _av)])
+            return
+        _cattr_w = gmp._resolve_class_attr_write_target(gen, node.target)
+        if _cattr_w is not None:
+            gtype, gname = _cattr_w
+            gen._safe_coerce_emit(vtype, gtype, v, gname)
             return
         _dv = gen._annotation_dict_val_type(getattr(node, 'type_ann', None))
         if _dv is not None:

@@ -1120,6 +1120,21 @@ def _c_escape(s: str) -> str:
             out.append('\\t')
         elif ch == '\r':
             out.append('\\r')
+        elif ch == '?':
+            # Break up any run of `?` so two consecutive ones can never
+            # abut a third trigraph-completing char in the EMITTED C
+            # source (`??'`, `??=`, `??/`, ...) — `\?` is a real C escape
+            # for a literal `?`, so this changes nothing about the string
+            # VALUE, only how it's spelled in the .ci text. Without this,
+            # a Mojo/Python string literal containing e.g. `'???'`
+            # (gimple_gen_resolve.py's own docstring, quoting `UNKNOWN =
+            # '???'`) landed verbatim in the generated C string, and its
+            # last two characters plus the closing `"` — or here, a
+            # following `'` — formed a genuine trigraph sequence GCC
+            # warns about (self-host build of gimple_gen_resolve.py: "In
+            # function ... warning: trigraph '??'' ignored, use
+            # -trigraphs to enable").
+            out.append('\\?')
         else:
             out.append(ch)
         i += 1

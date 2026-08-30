@@ -758,6 +758,41 @@ def _register_link_imports(gen, stmts) -> list:
                 for name, alias in stmt.names:
                     info = exports.get(name)
                     sym = alias if alias else name
+                    # Overload registration must NOT be gated on `not info`:
+                    # `exports`/`info` (the dylib-reflection or source-scan
+                    # ABI lookup) records exactly ONE signature per bare
+                    # name, so a genuinely overloaded free function (two-plus
+                    # `def <name>(...)` in `source` with different param
+                    # types — e.g. pwd/_macos.mojo's `_getpw_macos(uid:
+                    # UInt32)` / `_getpw_macos(var name: String)`) still gets
+                    # an `info` hit (for whichever overload the ABI/scan
+                    # happened to pick, almost always the first declared),
+                    # which used to short-circuit the `if not info:` block
+                    # below — the ONLY place that ever populated
+                    # `_imported_overloads` — so `_elaborate_overload_call`'s
+                    # per-call-site signature match (gimple_gen_calls.py)
+                    # never even ran. Every call site then fell through to
+                    # the generic single-signature path, which always
+                    # emitted a call to THAT ONE cached signature's mangled
+                    # symbol regardless of the actual argument types —
+                    # `pwd.getpwnam(name: String)`'s `_getpw_macos(name)`
+                    # silently called the `(UInt32)`-parameter overload,
+                    # truncating the `char *` argument to `uint32_t` (a real
+                    # `-Wpointer-to-int-cast` warning and a wrong value, not
+                    # just a diagnostic). Scanning for and registering
+                    # overloads FIRST, unconditionally, lets the real
+                    # per-call-site resolution run whenever the source
+                    # genuinely defines more than one `<name>(...)`, with
+                    # `info` still available below for every other
+                    # (non-overloaded) import.
+                    if source:
+                        try:
+                            _ov_src = open(source).read()
+                        except Exception:
+                            _ov_src = ''
+                        if len(gimple_ctypes.re.findall(
+                                rf'\b(?:fn|def)\s+{gimple_ctypes.re.escape(name)}\s*\(', _ov_src)) > 1:
+                            gen._imported_overloads.setdefault(sym, source)
                     # Record the module source for any imported name, so a
                     # comptime call to it can be evaluated at compile time.
                     if source:
