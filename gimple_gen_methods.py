@@ -2124,7 +2124,17 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             else:
                 raw_r = gen._coerce_to_type(val_type, result_type, raw)
             default_r = gen._coerce_to_type(default_ty, result_type, default_val)
-            cond = gen._ensure_bool_cond(result_type, raw_r)
+            # Presence test on the RAW int64_t (0 == absent, per the comment
+            # above) — NOT `_ensure_bool_cond(result_type, raw_r)`, which for
+            # a container result type emits `mojo_list_len(raw_r)` and
+            # dereferences: a dict whose value slot happens to hold a small
+            # non-pointer int (a stale/garbage `func_param_types` entry) then
+            # segfaulted in `mojo_list_len(1)` instead of falling to the
+            # default.
+            if _container_vt:
+                cond = gen._ensure_bool_cond('int64_t', raw)
+            else:
+                cond = gen._ensure_bool_cond(result_type, raw_r)
             t = gen._new_temp(result_type)
             bb_true = gen._new_bb()
             bb_false = gen._new_bb()
