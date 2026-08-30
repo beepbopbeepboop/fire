@@ -74,6 +74,47 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     return module_name.startswith(_SELFHOST_SIBLING_MODULE_PREFIXES)
 
 
+def _resolve_class_attr_write_target(gen, target):
+    """If `target` (a MemberExpr) is a class-level-attribute WRITE —
+    `ClassName.ATTR = ...` / `ClassName.ATTR += ...`, optionally reached
+    through one self-host sibling-module qualifier (e.g. `gimple_codegen.
+    GimpleGen._cpp_kwfwd_counter`, `import gimple_codegen` then `.GimpleGen.
+    _cpp_kwfwd_counter`) — return `(gtype, gname)` for its synthesized
+    backing global, else None.
+
+    Mirrors `_lower_MemberExpr`'s READ-side resolution (the sibling-alias
+    qualifier strip, then the `_class_attrs` lookup) so a write lands on the
+    exact same global a read of the same expression resolves to. Without
+    this, `_gen_stmt_AssignStmt`/`_gen_stmt_AugAssignStmt`'s generic
+    MemberExpr-write path lowers `target.obj` (here, the bare class
+    reference `gimple_codegen.GimpleGen`, itself not a real value) as if it
+    were a genuine struct-instance pointer, then writes `<garbage>-
+    >_cpp_kwfwd_counter` — no hard GIMPLE rejection (the garbage base
+    happens to already be an integer-shaped value), just a real, silent
+    pointer<->int size-mismatch warning and a write that never reaches the
+    real counter. Real repro: `gimple_cpp_core.py`'s `gimple_codegen.
+    GimpleGen._cpp_kwfwd_counter += 1` under self-host compilation.
+    """
+    obj = target.obj
+    if (isinstance(obj, gimple_ctypes.MemberExpr)
+            and isinstance(obj.obj, gimple_ctypes.IdentExpr)
+            and _is_selfhost_sibling_alias(gen, obj.obj.name)):
+        obj = obj.member if isinstance(obj.member, str) else None
+        obj = gimple_ctypes.IdentExpr(name=obj, line=getattr(target, 'line', 0)) \
+            if obj is not None else None
+    if not isinstance(obj, gimple_ctypes.IdentExpr):
+        return None
+    class_name = obj.name
+    if class_name not in gen.struct_field_types or class_name in gen.var_types:
+        return None
+    cattrs = gen._class_attrs.get(class_name)
+    if not cattrs or target.member not in cattrs:
+        return None
+    gname = cattrs[target.member]
+    gtype = gen._global_var_types.get(gname, 'int64_t')
+    return gtype, gname
+
+
 def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):
     """`'func'` if `<module_name>.<method_name>` names a registered top-level
     function of a self-host sibling module, `'other'` if the alias is a
@@ -855,6 +896,48 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         inner_member = func.obj.member
         outer_member = func.member
 
+        # Self-hosting bootstrap, ONE LEVEL DEEPER than the plain
+        # `gimple_ctypes.<module>.<method>(...)` strip just below:
+        # `gimple_ctypes.os.path.dirname(source)` (a real shape in this
+        # compiler's own `_register_link_imports` — `os` reached through
+        # the `gimple_ctypes` hub, then `.path.dirname(...)` on top of
+        # that) has `inner_obj` itself be a MemberExpr (`gimple_ctypes.
+        # os`), so it never matched the single-level `isinstance(inner_obj,
+        # IdentExpr)` check below at all — neither hub-strip branch fired,
+        # and the whole 4-deep chain fell past the "Handle os.path.*
+        # calls" block too (which itself requires a BARE `os` IdentExpr
+        # receiver), landing in the generic dynamic-dispatch fallback: an
+        # opaque `int`-typed stub (always `0`) standing in for `os.path.
+        # dirname`'s real `char *` result. `_pkg_dir = gimple_ctypes.os.
+        # path.dirname(source)` then declared its local as plain `int`
+        # (4 bytes) from that stub's type, and every later use of
+        # `_pkg_dir` as a path (`os.path.isdir(_pkg_dir)`, `os.listdir
+        # (_pkg_dir)`, `os.path.join(_pkg_dir, ...)`) cast that 4-byte
+        # `int` straight to a pointer type — a real `-Wint-to-pointer-
+        # cast: cast to pointer from integer of different size` warning
+        # for EVERY such site of a genuinely wrong value (path operations
+        # on a truncated stub, not the intended real dirname), not just a
+        # diagnostic. Peel off the LEADING `gimple_ctypes.` (or any other
+        # sibling-hub alias) qualifier from the innermost MemberExpr,
+        # leaving the rest of the chain (`.os.path.dirname(...)`) intact,
+        # and re-dispatch — the single-level branch immediately below
+        # then peels no further (its own `inner_obj` is already a bare
+        # `os` IdentExpr) and the real `os.path.*` handling further down
+        # this same function fires normally.
+        if (isinstance(inner_obj, gimple_ctypes.MemberExpr)
+                and isinstance(inner_obj.obj, gimple_ctypes.IdentExpr)
+                and _is_selfhost_sibling_alias(gen, inner_obj.obj.name)):
+            _rewritten = gimple_ctypes.CallExpr(
+                func=gimple_ctypes.MemberExpr(
+                    obj=gimple_ctypes.MemberExpr(
+                        obj=gimple_ctypes.IdentExpr(
+                            name=inner_obj.member, line=getattr(node, 'line', 0)),
+                        member=inner_member),
+                    member=outer_member),
+                args=list(node.args),
+                kwargs=list(getattr(node, 'kwargs', None) or []))
+            return gen._lower_method_call(_rewritten)
+
         # Self-hosting bootstrap: `gimple_ctypes.ast_rewriter.rewrite(...)`,
         # `gimple_ctypes.mlir.lower_op(...)`, `gimple_ctypes.Parser(...)` etc.
         # — this compiler's own backend modules reach sibling modules through
@@ -1373,6 +1456,122 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 "supported directly as `await asyncio.sock_recv(<fd>)` "
                 "inside a compiled async function body -- falling "
                 "back to interpreting this module from source instead")
+
+        # Generic module-qualified call to an ARBITRARY imported
+        # module's plain top-level function (`base2.doubleval(21)`,
+        # real: `from . import base2` then `base2.doubleval(...)`) —
+        # the general case `_selfhost_sibling_member_kind` above only
+        # covers this compiler's own 3 hardcoded internal sibling
+        # modules for. Without this, `module_name` is an opaque
+        # `int64_t` marker (see `_gen_stmt_FromImportStmt`'s "module
+        # marker" branch a few thousand lines up) and the call fell all
+        # the way through this function's generic scalar-receiver
+        # dispatch, which matched `method_name` against unrelated
+        # BUILTIN scalar-type method stubs by bare name coincidence
+        # (`base2.doubleval(21)` renamed to `double` matched
+        # `int64_t.double()`) — a silent WRONG VALUE, not a compile
+        # error. See bugs/CODEGEN_link_mode_module_qualified_call_
+        # silent_wrong_value.md.
+        #
+        # A prior attempt at this (2026-08-28, reverted) resolved
+        # `method_name` directly against the shared, FLAT, bare-name-
+        # keyed `func_return_types` table — which is exactly the
+        # same-bare-name-collision hazard `bugs/hard/CODEGEN_same_
+        # bare_name_struct_collision_across_modules.md` documents for
+        # struct fields, and broke `make check-selfhost` for real
+        # (`mojo_compiler.py`'s own `re.compile(...)` silently called a
+        # DIFFERENT, unrelated 2-argument `compile` elsewhere in the
+        # self-hosted source). This version is safe against that
+        # exact hazard: it registers the call's OWN, syntactically-known
+        # module reference into `_own_imported_func_home` (via
+        # `_note_own_func_home`, module-qualified) and resolves the C
+        # symbol through `_func_csym`/`_func_qualifier`'s existing tier
+        # system — the SAME qualifier-aware machinery every ordinary
+        # `from X import f; f(...)` call already goes through — which
+        # raises a loud, honest error on a genuine cross-module bare-
+        # name collision instead of silently guessing (see
+        # `_note_own_func_home`'s own `_AMBIGUOUS_FUNC_HOME` handling).
+        #
+        # Narrow guard, deliberately conservative: `module_name` must be
+        # a REGISTERED import alias/marker (`_module_alias_names` —
+        # covers both a bare `from . import SUBMODULE` marker and a
+        # plain `import SUBMODULE as alias`), no keyword arguments (this
+        # fallback, like the ast_rewriter/mlir/regex_compile cases
+        # above, forwards only positional args), and `method_name` must
+        # be independently confirmed — by actually reading and
+        # regex-scanning the target module's OWN source, never guessed
+        # — to be a plain (non-generic, non-overloaded, no sibling
+        # struct of the same name) top-level `def`/`fn`, so this never
+        # misfires on a name meant for a completely different
+        # elaboration mechanism (generics, overloads, struct
+        # construction) that some earlier, more specific branch in this
+        # very function already owns.
+        # Excluded entirely for this compiler's OWN self-hosting sources
+        # (mirrors `_is_selfhost_sibling_alias`'s identical directory
+        # gate): `_func_qualifier` deliberately returns '' (an
+        # UNQUALIFIED bare symbol) for every function while compiling a
+        # `_SELFHOST_DIR` file — self-hosting relies on flat, hand-
+        # verified bare-name registration (see doc/ "self-host
+        # hardcoded struct tables"), not module-qualified mangling.
+        # `_note_own_func_home`/`_func_csym` still WORK in that mode
+        # (returning the bare name), but calling `_call_expr` directly
+        # here bypasses whatever separate bookkeeping the NORMAL bare-
+        # name call path (`_lower_call`/`_lower_named_call`) performs to
+        # get that bare symbol actually forward-declared/defined in the
+        # self-hosted output — confirmed via a real regression: routing
+        # `build_stdlib_dylib`'s `_imported_sigs`/`build` through this
+        # branch during `imports.py`'s own self-host compile produced
+        # `implicit declaration of function '_imported_sigs'` (no
+        # forward decl ever emitted), where the pre-existing behavior
+        # (falling through to whatever handled it before this branch
+        # existed) at least compiled clean.
+        _mgc_cur = getattr(gen, '_current_filename', None)
+        _mgc_is_selfhost = False
+        if _mgc_cur and _mgc_cur.endswith('.py'):
+            _mgc_abs = gimple_ctypes.os.path.abspath(_mgc_cur)
+            _mgc_is_selfhost = (_mgc_abs == gimple_codegen._SELFHOST_DIR
+                                 or _mgc_abs.startswith(gimple_codegen._SELFHOST_DIR + '/'))
+        if (not _mgc_is_selfhost
+                and module_name in getattr(gen, '_module_alias_names', ())
+                and not getattr(node, 'kwargs', None)):
+            _mgc_info = gen.imported_symbols.get(module_name)
+            _mgc_sub_ref = (_mgc_info.get('module')
+                            if isinstance(_mgc_info, dict) else None) or module_name
+            _mgc_path = None
+            for _mgc_cand in gen._module_candidate_paths(_mgc_sub_ref):
+                if gimple_ctypes.os.path.exists(_mgc_cand):
+                    _mgc_path = _mgc_cand
+                    break
+            if _mgc_path:
+                try:
+                    _mgc_src = open(_mgc_path).read()
+                except Exception:
+                    _mgc_src = ''
+                _mgc_name_re = gimple_ctypes.re.escape(method_name)
+                _mgc_def_count = len(gimple_ctypes.re.findall(
+                    rf'\b(?:fn|def)\s+{_mgc_name_re}\s*\(', _mgc_src))
+                _mgc_is_plain_fn = (
+                    _mgc_def_count == 1
+                    and not gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_mgc_name_re}\s*\[', _mgc_src)
+                    and not gimple_ctypes.re.search(rf'\bstruct\s+{_mgc_name_re}\s*(\[|\(|:)', _mgc_src))
+                if _mgc_is_plain_fn:
+                    # Re-dispatch as a BARE-name call through `_lower_call`
+                    # (exactly `_selfhost_sibling_member_kind`'s own
+                    # pattern above) rather than hand-rolling `_call_expr`
+                    # here: `_lower_call`/`_lower_named_call` own ALL the
+                    # supporting bookkeeping a plain call needs (forward
+                    # declarations, default-argument padding, keyword
+                    # ordering, vararg packing) — duplicating just the
+                    # symbol-resolution half and skipping the rest is
+                    # exactly what caused the self-host regression noted
+                    # above.
+                    gen._note_own_func_home(method_name, _mgc_sub_ref, record_scope=False)
+                    _mgc_bare_node = gimple_ctypes.CallExpr(
+                        func=gimple_ctypes.IdentExpr(
+                            name=method_name, line=getattr(node, 'line', 0)),
+                        args=list(node.args),
+                        kwargs=list(getattr(node, 'kwargs', None) or []))
+                    return gen._lower_call(_mgc_bare_node)
 
     ot, ov = gen.lower_expr(func.obj)
     # The receiver's RAW lowered pair, before the resolution blocks below

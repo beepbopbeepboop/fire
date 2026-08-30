@@ -27,6 +27,46 @@ work in this project. Rules:
 - `myinterpreter.py` imports AST nodes as `import mojo_compiler as N`.
 - `ast_nodes.py` is dead and should not exist.
 
+## Bug-fixing sessions — no time-boxing, no re-verify-and-stop, amortize the gate
+When asked to work through a batch of bugs (from `bugs/`, `bugs/hard/`, or
+anywhere else), these rules override any instinct to move on quickly:
+
+- **No per-bug time limit.** Do not budget "~30-45 minutes then move to the
+  next one" or any similar clock. A problem takes what it takes — 2 minutes
+  or 2 hours or 2 days. Time-boxing a hard bug produces exactly the failure
+  mode this rule exists to stop: stopping right as real progress was about
+  to happen, then writing up the stop as if it were a considered conclusion.
+- **Never spend a turn just re-verifying/re-confirming a bug's existing
+  Status entry and stopping there.** A doc with many "re-verified unchanged"
+  entries is a sign PAST sessions did this — it is not proof the bug is
+  unfixable, and re-doing that same non-fix one more time is pure token
+  burn with zero output. For every bug you touch, either (a) land a real
+  fix, (b) land real partial forward progress and say so honestly (see
+  below), or (c) don't start on it this session — there is no fourth
+  option where you spend effort and produce a fresh "confirmed still
+  broken" paragraph with no code change.
+- **Partial progress counts, and should be checked in.** If a bug is
+  genuinely large, it's fine to land 30% of it — real scaffolding,
+  interpreter/codegen groundwork, a data model, whatever moves the actual
+  implementation forward — commit that, and update the bug doc's Status
+  section to describe exactly what landed and what's still missing, rather
+  than reverting because "it doesn't fully close the bug." Shared
+  infrastructure that several bugs need (feature X/Y/Z) but that by itself
+  fixes none of them is equally worth checking in on its own, noted as
+  infrastructure rather than as a fix for any specific doc.
+- **Stop and report only when truly stalled** — no viable next step, not
+  merely "this will take a while." At that point, stop, explain concretely
+  what's blocking forward progress, and let the user decide (pick a
+  different angle, accept it as a real feature project, or hand it to a
+  more capable model). Do not manufacture a stopping point at a fixed
+  effort level.
+- **Batch bugs specifically to amortize the quality gate below**, not to
+  cap total effort. The full gate (steps 0-4) is the expensive part in
+  TOKEN terms (not wall-clock/CPU, which is free to spend) — running it
+  after every single small fix wastes tokens re-deriving the same green
+  result. Group related fixes and run the full gate once per group and
+  once at the end, per the batching guidance already in that section.
+
 ## Quality gate for gimple/codegen-affecting changes
 Before considering a change to `mojo_compiler.py` (the shared parser/AST),
 `gimple_codegen.py`, or `module_loader.py` (or anything else on the compiled

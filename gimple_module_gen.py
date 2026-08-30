@@ -2278,6 +2278,43 @@ def gen_module_impl(self, stmts):
                         for name, alias in s.names:
                             sym_name = alias if alias else name
                             sym_info = exports.get(name, {})
+                            # Genuine overload (2+ `def <name>(...)` in the
+                            # exporting module's own source, distinguished
+                            # only by parameter TYPE — `exports`/`sym_info`
+                            # above is a single-signature reflection/scan
+                            # result, whichever overload the loader happened
+                            # to pick, almost always the first declared).
+                            # Register into `_imported_overloads` so
+                            # `_lower_call` (gimple_gen_calls.py) routes each
+                            # CALL SITE through `_elaborate_overload_call`'s
+                            # real per-argument-type signature match instead
+                            # of blindly emitting a call to this one cached
+                            # signature's mangled symbol regardless of the
+                            # actual argument types. Previously this
+                            # registration only ever happened in link-mode's
+                            # separate `_register_link_imports` pass — a
+                            # plain (non-link-mode) top-level `from X import
+                            # f` never populated it at all, so an overloaded
+                            # free function reached this way silently always
+                            # called whichever overload `exports.get(name)`
+                            # returned. Real repro: pwd.mojo's `from ._macos
+                            # import _getpw_macos` — `_getpw_macos(uid:
+                            # UInt32)` / `_getpw_macos(var name: String)` —
+                            # `getpwnam(name: String)`'s `_getpw_macos(name)`
+                            # called the `(UInt32)` overload, truncating the
+                            # `char *` argument to `uint32_t` (a real
+                            # `-Wpointer-to-int-cast` warning, not just a
+                            # diagnostic).
+                            try:
+                                _ov_path = self._parsed_import(s.module)[0]
+                                if _ov_path:
+                                    _ov_src = open(_ov_path).read()
+                                    if len(re.findall(
+                                            rf'\b(?:fn|def)\s+{re.escape(name)}\s*\(',
+                                            _ov_src)) > 1:
+                                        self._imported_overloads.setdefault(sym_name, _ov_path)
+                            except Exception:
+                                pass
                             # A compiled free-function generator in another
                             # module of this whole-program compile: bind the
                             # alias to that module's api (via the shared
