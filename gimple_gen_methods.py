@@ -2259,6 +2259,17 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
                         gen._field_elem_types[_sn] = {}
                     gen._field_elem_types[_sn][_fn] = 'char *'
         else:
+            # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
+            # than leaving it to `_emit_call`'s param-type lookup: in the
+            # self-hosted compiler `_KNOWN_SIGS` is an empty dict and
+            # `mojo_list_append_int` has no `func_param_types` entry, so
+            # `_emit_call` skipped the widening and emitted `append_int(l, 4)`
+            # instead of the `(int64_t)4` temp the Python reference builds
+            # (byte-parity drift on `list_append`). `mojo_list_append_int`'s
+            # 2nd param is always int64_t, so this is unconditionally correct.
+            if at in ('int', '_Bool'):
+                av = gen._coerce_to_type(at, 'int64_t', av)
+                at = 'int64_t'
             gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
             if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(av, at)

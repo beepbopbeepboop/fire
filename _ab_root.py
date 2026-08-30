@@ -1,0 +1,27 @@
+import os, subprocess, sys
+import test_ab_shim as T
+CASES = T.BUILTIN_TESTS
+root = os.getcwd()
+only = sys.argv[1:]
+ident=diff=crash=0
+for name, src in sorted(CASES.items()):
+    if only and name not in only:
+        continue
+    f = os.path.join(root, "_abt_"+name+".mojo")
+    open(f,"w").write(src)
+    ci = f[:-5]+".ci"
+    def dump(env):
+        e = dict(os.environ); e.update(env)
+        if os.path.exists(ci): os.remove(ci)
+        cmd = ["./mojoc", "--dump", f] if env.get("MOJO_NO_SHIM") else ["python3", "mojo.py", "--dump", f]
+        subprocess.run(cmd, cwd=root, env=e, capture_output=True)
+        if os.path.exists(ci):
+            b=open(ci,"rb").read(); os.remove(ci); return b
+        return None
+    py = dump({})
+    nc = dump({"MOJO_NO_SHIM":"1","MOJO_HOME":root})
+    os.remove(f)
+    if nc is None: crash+=1; print("CRASH", name)
+    elif py==nc: ident+=1
+    else: diff+=1; print("DIFF ", name, len(py) if py else 0, len(nc))
+print(f"\n{ident} IDENTICAL, {diff} DIFF, {crash} CRASH")
