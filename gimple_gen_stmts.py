@@ -309,6 +309,26 @@ def _gen_stmt_VarDecl(gen, node):
     else:
         ctype = gen._resolve_type(node.type_ann)
         gen._declare_var(node.name, ctype)
+        # BUG-2026-030: a default-constructed struct local (`var w: W`, no
+        # initializer) used to leave `w` a bare, never-allocated `W *` --
+        # reading/writing through it is undefined behavior (usually a
+        # segfault, sometimes silent heap corruption when the garbage bit
+        # pattern happens to land in mapped memory). This is the exact same
+        # shape of gap the "()"-suffix List[T]/Dict/Set auto-alloc a few
+        # lines below in this function already fixes for those container
+        # types (see its own long comment, box.3d/game's
+        # DYLIB_string_copy_append_return_segv.md) -- give a struct local
+        # real storage the same way an explicit `W()` constructor call does
+        # (`_lower_struct_constructor`): call the `_alloc_W()` helper so the
+        # struct's `__mojo_type_id` tag and any class-attribute-seeded
+        # fields are initialized too, not just a raw `malloc` with no field
+        # initialization. Struct-by-value RETURNS ride on the same local
+        # (`return w`), so this also fixes that shape.
+        _sann = gen._c_kw_struct_renames.get(node.type_ann, node.type_ann) \
+            if isinstance(node.type_ann, str) else node.type_ann
+        if isinstance(_sann, str) and _sann in gen.struct_field_types:
+            gen._struct_allocs_needed.add(_sann)
+            gen._emit(f"  {gen._write_dest(node.name)} = _alloc_{_sann} ();")
         _dv = gen._annotation_dict_val_type(node.type_ann)
         if _dv is not None:
             gen._dict_val_types[node.name] = _dv
