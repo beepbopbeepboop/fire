@@ -1245,7 +1245,7 @@ def _module_init_name(module_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _used_idents_node(node) -> set:
+def _used_idents_node(node) -> set[str]:
     """All IdentExpr names referenced in node; does NOT cross FunctionDef boundaries."""
     if node is None: return set()
     if isinstance(node, IdentExpr):         return {node.name}
@@ -1388,7 +1388,7 @@ def _unpack_target_leaf_names(target: str) -> list:
     return [t] if t else []
 
 
-def _declared_vars_body(stmts) -> set:
+def _declared_vars_body(stmts) -> set[str]:
     """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
     result: set = set()
     for node in stmts:

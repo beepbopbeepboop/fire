@@ -4355,8 +4355,14 @@ def gen_module_impl(self, stmts):
             outer_params = set(outer_scope.keys())
             free_globals = set(self.func_return_types.keys()) - outer_params
             free         = used - inner_declared - free_globals
-            captures     = [(v, enriched_scope[v]) for v in sorted(free)
-                            if v in enriched_scope]
+            # `_as_str(v)`: elements of `sorted(free)` (a set-of-str) erase
+            # to boxed int64_t under self-compile — without the static
+            # `str` view `v in enriched_scope` would hash the pointer.
+            captures     = []
+            for v in sorted(free):
+                v = _as_str(v)
+                if v in enriched_scope:
+                    captures.append((v, enriched_scope[v]))
             _cap_names_so_far = {_cn for _cn, _ in captures}
             _called_names = {nd.func.name for nd in _walk_ast(inner.body)
                               if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)}

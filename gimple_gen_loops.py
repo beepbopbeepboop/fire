@@ -1633,7 +1633,14 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
-def _gen_lifted_closure(gen, ci: gimple_solvers.ClosureInfo, outer_name: str = None) -> str:
+def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
+    # `ci` deliberately UNANNOTATED: a `gimple_solvers.ClosureInfo`
+    # qualified annotation doesn't resolve for the self-hosted backend
+    # (it stayed `int64_t`, so every `ci.env_struct` / `ci.captures` /
+    # `ci.inner_def` read went through boxed dynamic getattr and the
+    # capture env was silently dropped). Left bare, usage-based inference
+    # types it `ClosureInfo *` exactly as it already does for
+    # `_lower_outer_closure_call` / `_emit_closure_recursive`.
     """Generate a top-level C function for a nested (closure) function."""
     gen._reset_func(ci.inner_def.body, ci.inner_def.params)
     # Set module context for global field access -- same fix, same reason

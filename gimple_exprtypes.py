@@ -1659,7 +1659,7 @@ def _bracket_param_type_annotations(gsrc: str, name: str, occurrence: int = 0) -
     return out
 
 
-def _used_idents_deep(node) -> set:
+def _used_idents_deep(node) -> set[str]:
     """Like _used_idents_node, but ALSO recurses into nested FunctionDef
     bodies (a nested closure's own free-identifier references count as
     "used" by the enclosing function too) — needed to detect a comptime
