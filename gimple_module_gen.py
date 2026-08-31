@@ -532,7 +532,8 @@ def gen_module_impl(self, stmts):
                 for _tb_nm, _tb_alias in (_tb_s.names or []):
                     _names.add(_tb_alias if _tb_alias else _tb_nm)
             elif isinstance(_tb_s, ImportStmt):
-                for _tb_mod, _tb_alias in _import_targets(_tb_s):
+                for _tb_mod0, _tb_alias0 in _import_targets(_tb_s):
+                    _tb_mod = _as_str(_tb_mod0); _tb_alias = _as_str(_tb_alias0)
                     _names.add(_tb_alias if _tb_alias else _tb_mod.split('.')[0])
             elif isinstance(_tb_s, FunctionDef):
                 _names.add(_tb_s.name)
@@ -2189,7 +2190,9 @@ def gen_module_impl(self, stmts):
     # a `from X import Y` already set for the same local name.
     for s in stmts:
         if isinstance(s, ImportStmt):
-            for _im_mod, _im_alias in _import_targets(s):
+            for _im_mod0, _im_alias0 in _import_targets(s):
+                _im_mod = _as_str(_im_mod0)
+                _im_alias = _as_str(_im_alias0)
                 _im_local = _im_alias if _im_alias else _im_mod.split('.')[0]
                 if _im_local not in self.imported_symbols:
                     self.imported_symbols[_im_local] = {
@@ -5067,7 +5070,15 @@ def gen_module_impl(self, stmts):
     def _scan_try_imports(stmt_list):
         for _s in stmt_list:
             if isinstance(_s, ImportStmt):
-                for _tm, _ta in _import_targets(_s):
+                for _tm0, _ta0 in _import_targets(_s):
+                    # `_as_str` into fresh locals: the tuple slots erase to
+                    # int64_t on the self-hosted path, so `_global_var_types
+                    # [_local]` would stringify the char* pointer into a
+                    # decimal dict key (the top-level `import os/sys/re/...`
+                    # module-marker globals then never made it into the
+                    # `_root_toplev` struct).
+                    _tm = _as_str(_tm0)
+                    _ta = _as_str(_ta0)
                     _local = _ta if _ta else _tm
                     if _local not in self._global_var_types:
                         self._global_var_types[_local] = 'int64_t'
@@ -5734,7 +5745,8 @@ def gen_module_impl(self, stmts):
                         self._global_c_decl_types[check_name] = 'MojoSet *'
                         self._global_var_types[check_name] = 'MojoSet *'
         elif isinstance(stmt, ImportStmt):
-            for _tm, _ta in _import_targets(stmt):
+            for _tm0, _ta0 in _import_targets(stmt):
+                _tm = _as_str(_tm0); _ta = _as_str(_ta0)
                 local_name = _ta if _ta else _tm
                 if local_name not in _declared_globals:
                     global_decls.append(f"int64_t {local_name};")
@@ -6089,7 +6101,8 @@ def gen_module_impl(self, stmts):
             self._global_var_types[stmt.name] = ctype
             self._global_c_decl_types[stmt.name] = ctype
         elif isinstance(stmt, ImportStmt):
-            for _tm, _ta in _import_targets(stmt):
+            for _tm0, _ta0 in _import_targets(stmt):
+                _tm = _as_str(_tm0); _ta = _as_str(_ta0)
                 local_name = _ta if _ta else _tm
                 if local_name not in _declared_globals:
                     _declared_globals.add(local_name)
@@ -6133,7 +6146,8 @@ def gen_module_impl(self, stmts):
                     init_code = _extract_init_expr(stmt.value)
                     break
                 elif isinstance(stmt, ImportStmt) and gname in (
-                        (_ta if _ta else _tm) for _tm, _ta in _import_targets(stmt)):
+                        (_as_str(_ta) if _as_str(_ta) else _as_str(_tm))
+                        for _tm, _ta in _import_targets(stmt)):
                     init_code = '0'
                     break
             if (gname, c_type, g_mtype) not in self._module_globals[current_mod_name]:
