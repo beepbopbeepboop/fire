@@ -342,11 +342,13 @@ bootstrap: verify validate-all
 
 # ── check-abshim: compiled compile_to_gimple vs Python, byte-for-byte ─────────
 # `test_ab_shim.py` diffs `python3 mojo.py --dump X` against
-# `MOJO_NO_SHIM=1 ./mojoc --dump X` for a corpus of small programs. This is
-# the signal for removing the `python3 -c` subprocess shim from a self-hosted
-# `mojoc` (runtime/mojo_runtime.c). NOT in `check:` yet — the compiled
-# backend is not byte-parity with Python until the GimpleGen self-host
-# registry lands (see doc/architecture.html §6).
+# `MOJO_NO_SHIM=1 ./mojoc --dump X` for a 27-case corpus of small programs,
+# both run from the repo root, compared byte-for-byte. All 27 are now
+# byte-identical — this is the regression guard for that parity, and the
+# green light for eventually removing the `python3 -c` subprocess shim
+# from a self-hosted `mojoc` (runtime/mojo_runtime.c). The full `mojo.py`
+# self-compile is not yet shimless (AttributeError: __file__), so
+# `make bootstrap` itself still uses the shim.
 check-abshim: mojoc $(GIMPLE_SOURCES) test_ab_shim.py
 	python3 checked_run.py check-abshim --extra test_ab_shim.py -- python3 test_ab_shim.py
 
