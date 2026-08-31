@@ -2263,24 +2263,53 @@ def _calls_in_stmts(gen, stmts, out):
 
 
 def _collect_calls_in_stmt(gen, n, out):
-    """Walk ONE statement, appending every reachable CallExpr to out —
-    the exact per-statement body of the pre-memoization `_calls_in_stmts`
-    loop (same attribute order, same recursion through the memoized
-    `gen._calls_in_stmts` entry point so nested statement lists are
-    cached too)."""
-    for attr in ('value', 'condition', 'iterable'):
-        if hasattr(n, attr):
-            gen._collect_calls(getattr(n, attr), out)
-    for attr in ('body', 'then_body', 'else_body', 'finally_body'):
-        sub = getattr(n, attr, None)
-        if isinstance(sub, list):
-            gen._calls_in_stmts(sub, out)
-    for _cond, eb in (getattr(n, 'elifs', None) or []):
-        gen._calls_in_stmts(eb, out)
-    for h in (getattr(n, 'handlers', None) or []):
-        hb = getattr(h, 'body', None)
-        if isinstance(hb, list):
-            gen._calls_in_stmts(hb, out)
+    """Walk ONE statement, appending every reachable CallExpr to out.
+
+    A FAITHFUL translation of the old `for attr in ('value','condition',
+    'iterable'): ... / for attr in ('body','then_body','else_body',
+    'finally_body'): if isinstance(sub, list): ...` loop into explicit
+    per-node-type branches — same node coverage, same recursion, NOTHING
+    added (in particular NOT `WithStmt.items`). The old form used
+    `getattr(n, <runtime-attr-name>)` + `isinstance(sub, list)`, and on
+    the self-hosted path a dynamic getattr yields int64_t while
+    `isinstance(<int64_t>, list)` is the always-false runtime stub — so it
+    never recursed into ANY control flow and the cross-call scalar
+    contract missed every call site nested inside an `if`/`try`."""
+    # ── the `value`/`condition`/`iterable` expression sweep ──
+    if isinstance(n, (ExprStmt, ReturnStmt, AssignStmt,
+                      AugAssignStmt, MultiAssignStmt, RaiseStmt, AssertStmt,
+                      VarDecl, ComptimeVarStmt)):
+        _v = getattr(n, 'value', None)
+        if _v is not None:
+            gen._collect_calls(_v, out)
+    if isinstance(n, (IfStmt, WhileStmt)):
+        gen._collect_calls(n.condition, out)
+    elif isinstance(n, ForStmt):
+        gen._collect_calls(n.iterable, out)
+    # ── the body-list recursion sweep ──
+    if isinstance(n, IfStmt):
+        gen._calls_in_stmts(n.then_body, out)
+        if isinstance(n.else_body, list):
+            gen._calls_in_stmts(n.else_body, out)
+        for _cond, _eb in (n.elifs or []):
+            gen._calls_in_stmts(_eb, out)
+    elif isinstance(n, TryStmt):
+        gen._calls_in_stmts(n.body, out)
+        for _h in (n.handlers or []):
+            _hb = getattr(_h, 'body', None)
+            if isinstance(_hb, list):
+                gen._calls_in_stmts(_hb, out)
+        if isinstance(n.else_body, list):
+            gen._calls_in_stmts(n.else_body, out)
+        if isinstance(n.finally_body, list):
+            gen._calls_in_stmts(n.finally_body, out)
+    elif isinstance(n, (WhileStmt, ForStmt, WithStmt, FunctionDef)):
+        _b = getattr(n, 'body', None)
+        if isinstance(_b, list):
+            gen._calls_in_stmts(_b, out)
+        _eb2 = getattr(n, 'else_body', None)
+        if isinstance(_eb2, list):
+            gen._calls_in_stmts(_eb2, out)
 
 def _split_expr_format(src: str) -> str:
     """Split off format spec and conversion from an f-string expression.
