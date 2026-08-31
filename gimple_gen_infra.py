@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize,
+    Parser, py_tokenize, _as_str, _as_set,
 )
 import regex_compile
 import mlir
@@ -1777,6 +1777,12 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                     is_iterated, is_char_compared, is_str_key_subscripted,
                     is_nondict_key_subscripted, called_methods, is_dict_method,
                     aug_member_targets)
+            # The SET slots round-trip through the return tuple as int64_t on
+            # the self-hosted path (packed/unpacked with the int accessor) —
+            # re-view them as `MojoSet *` so the struct-evidence set
+            # arithmetic below works (`format_token(tok)` -> `Token *`).
+            fields_accessed = _as_set(fields_accessed)
+            called_methods = _as_set(called_methods)
 
             # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
             is_polymorphic = any(
@@ -1853,7 +1859,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
 
             # If no type inferred from functions, try from struct member accesses
             # Only infer struct type if exactly one struct matches (avoid ambiguity)
-            if pname not in inferred and fields_accessed:
+            if pname not in inferred and len(fields_accessed) > 0:
                 # A member CALLED as a builtin-container method on the param
                 # (`map.items()`) is method dispatch, not field evidence —
                 # without this exclusion the single registered struct with a
@@ -1861,11 +1867,34 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                 # gencodec.py's marshalmap/python_mapdef_code `map` params).
                 struct_evidence = fields_accessed - (
                     called_methods & BUILTIN_CONTAINER_METHODS)
-                matches = [
-                    sname for sname, sfields in _g.struct_field_types.items()
-                    if struct_evidence
-                    and all(f in sfields for f in struct_evidence)
-                ]
+                # Explicit nested loops, NOT `[sname for sname, sfields in
+                # .items() if all(f in sfields for f in ...)]`: the
+                # comprehension form (2-tuple `.items()` target + an
+                # `all(genexpr)` whose inner `f in sfields` reads the dict
+                # value slot) miscompiled on the self-hosted path — every
+                # unannotated struct-typed parameter (e.g. mojo.py's own
+                # `format_token(tok)` -> `Token *`) stayed int64_t.
+                # `sorted(struct_evidence)`, not a bare `for f in
+                # struct_evidence`: iterating a str-SET lowers to
+                # mojo_set_iter_val_int (0 for every string slot) on the
+                # self-hosted path; `sorted()` goes through mojo_set_sorted
+                # which handles string slots.
+                # `_as_str` per element: `sorted()` of a str-set returns a
+                # MojoList whose element type the backend doesn't track, so
+                # `for f in _evidence_fields` reads each string via the int
+                # accessor and `f in sfields` then stringifies the pointer.
+                _evidence_fields = sorted(struct_evidence)
+                matches: list = []
+                if len(_evidence_fields) > 0:
+                    for sname in _g.struct_field_types:
+                        sfields = _g.struct_field_types[sname]
+                        _all_present = True
+                        for _f0 in _evidence_fields:
+                            if _as_str(_f0) not in sfields:
+                                _all_present = False
+                                break
+                        if _all_present:
+                            matches.append(sname)
                 if len(matches) == 1:
                     inferred[pname] = f"{matches[0]} *"
             # A dict-only method call with no better signal: the param is a
@@ -1877,7 +1906,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
             # string concatenation, with no field access suggesting a
             # struct) — see the BinaryOp '+' scan above for the motivating
             # dyld.py `suffix` shape.
-            if pname not in inferred and is_string_method and not fields_accessed:
+            if pname not in inferred and is_string_method and len(fields_accessed) == 0:
                 inferred[pname] = 'char *'
 
     return inferred

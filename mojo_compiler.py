@@ -1389,6 +1389,18 @@ def _as_str(e: object) -> str:
     return e
 
 
+def _as_set(e: object) -> set:
+    """`MojoSet *` view of a value the compiled backend erased to int64_t
+    (e.g. a `set` slot round-tripped through a returned tuple / a
+    dict-of-mixed-value-types). CPython identity; the annotation is the point."""
+    return e
+
+
+def _as_list(e: object) -> list:
+    """`MojoList *` view — the list sibling of `_as_set`/`_as_str`."""
+    return e
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens

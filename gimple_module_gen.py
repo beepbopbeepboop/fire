@@ -4291,21 +4291,40 @@ def gen_module_impl(self, stmts):
     def _scan_for_closures(outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
         def _all_stmts_nonfunc(stmts: list) -> list:
-            """Return a list of statements recursively through control flow, not entering FunctionDef bodies."""
+            """Return a list of statements recursively through control flow,
+            not entering FunctionDef bodies. Explicit per-node-type branches
+            (NOT `getattr(s, <loop-var>)` + `isinstance(sub, list)`): a
+            dynamic getattr keyed by a runtime attr name yields int64_t, and
+            `isinstance(<int64_t>, list)` is the always-false runtime stub —
+            so the self-hosted backend never recursed into ANY control flow
+            and a deeply-nested `def` (e.g. mojo.py's `format_token` five
+            blocks down inside `main`) was never seen by the closure-lift
+            pre-pass."""
             result = []
             for s in stmts:
                 result.append(s)
                 if isinstance(s, FunctionDef):
                     continue
-                for attr in ('then_body', 'else_body', 'body', 'finally_body'):
-                    sub = getattr(s, attr, None)
-                    if isinstance(sub, list):
-                        result.extend(_all_stmts_nonfunc(sub))
-                for _cond, elif_body in getattr(s, 'elifs', []):
-                    result.extend(_all_stmts_nonfunc(elif_body))
-                for handler in getattr(s, 'handlers', []):
-                    if hasattr(handler, 'body') and isinstance(handler.body, list):
-                        result.extend(_all_stmts_nonfunc(handler.body))
+                if isinstance(s, IfStmt):
+                    result.extend(_all_stmts_nonfunc(s.then_body))
+                    if s.else_body:
+                        result.extend(_all_stmts_nonfunc(s.else_body))
+                    for _cond, _eb in (s.elifs or []):
+                        result.extend(_all_stmts_nonfunc(_eb))
+                elif isinstance(s, TryStmt):
+                    result.extend(_all_stmts_nonfunc(s.body))
+                    for _h in (s.handlers or []):
+                        _hb = getattr(_h, 'body', None)
+                        if _hb:
+                            result.extend(_all_stmts_nonfunc(_hb))
+                    if s.else_body:
+                        result.extend(_all_stmts_nonfunc(s.else_body))
+                    if s.finally_body:
+                        result.extend(_all_stmts_nonfunc(s.finally_body))
+                elif isinstance(s, (WhileStmt, ForStmt, WithStmt)):
+                    result.extend(_all_stmts_nonfunc(s.body))
+                    if isinstance(s, (WhileStmt, ForStmt)) and getattr(s, 'else_body', None):
+                        result.extend(_all_stmts_nonfunc(s.else_body))
             return result
 
         enriched_scope = dict(outer_scope)
