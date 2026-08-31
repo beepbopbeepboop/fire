@@ -1918,12 +1918,17 @@ static int64_t _set_slot_int(MojoSet *s, int64_t v)
 
 static int64_t _set_slot_str(MojoSet *s, char *v)
 {
+    /* A NULL needle is a real None value the codegen boxed as a null char*
+     * (e.g. a `None` alias/name flowing into `{ ... for n in names }`).
+     * Treat it as the empty string for slotting rather than dereferencing
+     * NULL in _str_hash/strcmp — mirrors mojo_list_contains_str's guard. */
+    if (!v) v = "";
     uint64_t h = _str_hash(v) % (uint64_t)s->cap;
     for (int64_t i = 0; i < s->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)s->cap);
         _SetSlot *sl = &s->slots[idx];
         if (sl->tag == -1) return idx;
-        if (sl->tag == 1 && strcmp(sl->val_s, v) == 0) return idx;
+        if (sl->tag == 1 && sl->val_s && strcmp(sl->val_s, v) == 0) return idx;
     }
     return -1;
 }
@@ -1958,7 +1963,7 @@ void mojo_set_add_str(MojoSet *s, char *v)
     if (idx < 0) { _set_grow(s); idx = _set_slot_str(s, v); }
     if (s->slots[idx].tag == -1) {
         s->slots[idx].tag   = 1;
-        s->slots[idx].val_s = strdup(v);
+        s->slots[idx].val_s = strdup(v ? v : "");
         s->used++;
     }
 }

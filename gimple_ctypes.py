@@ -32,7 +32,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser,
+    py_tokenize, Parser, _as_str,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -1061,7 +1061,16 @@ def _import_targets(node) -> list:
     declares a name must walk this full list, not just the primary target —
     shared here instead of re-deriving `[(module, alias)] + extra` at each
     call site."""
-    return [(node.module, node.alias)] + list(getattr(node, 'extra', None) or [])
+    # `_as_str` on every slot: `ImportStmt.alias` (and `extra`'s alias slots)
+    # are typed `object` (`str|None`), so the self-hosted backend erases them
+    # to int64_t — the tuple would then carry the alias as an int slot and a
+    # consumer unpacking it would read a boxed pointer / 0, ultimately
+    # `imported_symbols[<garbage>]`. The `-> str` view keeps every slot a
+    # real `char *` (NULL stays NULL, still correctly falsy downstream).
+    out = [(_as_str(node.module), _as_str(node.alias))]
+    for _pair in (getattr(node, 'extra', None) or []):
+        out.append((_as_str(_pair[0]), _as_str(_pair[1])))
+    return out
 
 
 def _join_import_member(mod: str, name: str) -> str:

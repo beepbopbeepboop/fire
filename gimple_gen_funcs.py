@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize,
+    Parser, py_tokenize, _as_str,
 )
 import ast_rewriter
 import regex_compile
@@ -124,6 +124,12 @@ def _gen_stmt_ImportStmt(gen, node):
     # import module [as alias][, module2 [as alias2], ...] — handle every
     # target in a comma-separated list (node.extra), not just the first.
     for module, alias in gimple_ctypes._import_targets(node):
+        # `_as_str`: the self-hosted backend erases `ImportStmt.alias`
+        # (typed `object`) to int64_t, so without this the tuple-unpack
+        # leaves `module`/`alias` boxed and `module.split('.')` hits the
+        # int64_t method stub (-> "" -> `imported_symbols[""]`).
+        module = _as_str(module)
+        alias = _as_str(alias)
         # `import a.b.c` (no alias) binds the top-level package name `a` in
         # scope (Python semantics) — not the invalid C identifier "a.b.c".
         local_name = alias if alias else module.split('.')[0]
