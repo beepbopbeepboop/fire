@@ -147,6 +147,16 @@ def _reset_func(gen, body: list = None, params: list = None):
         if k not in _reset_locally_bound
     }  # container var → element C type
     gen._nested_elem_types: dict[str, str] = {}
+    # Per-function, keyed by C temp/value NAMES (`_t40`, ...) which repeat
+    # across functions — so a stale entry (e.g. `_dict_items_val_elems
+    # ['_t40'] = 'int'` from a `sorted(d.items())` in an earlier function)
+    # otherwise poisons the NEXT function's identically-named temp
+    # (`_t40 = node->elifs` -> `for _, eb in _t40` decided slot 1 was
+    # `int`, truncating a list pointer to 32 bits -> SEGV in the compiled
+    # `_collect_return_elems`).
+    gen._dict_items_val_elems: dict[str, str] = {}
+    gen._tuple_slot_types: dict[str, list] = {}
+    gen._dict_item_pair_vars: dict[str, str] = {}
     gen._span_mut_params: dict[str, bool]  = {}  # param/var name → literal Span/StringSlice mut=True/False
     # NOTE: _field_elem_types is intentionally NOT reset here — it stores
     # per-struct metadata that must persist across function boundaries

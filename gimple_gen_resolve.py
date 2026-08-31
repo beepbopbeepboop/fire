@@ -1355,6 +1355,17 @@ def _cname(gen, name: str) -> str:
     return gen._c_names.get(name, name)
 
 
+def _record_closure_alias(gen, result: dict, tgt: str, val):
+    """Record `tgt`'s C type when `val` is a bare reference to a nested
+    (closure) function. Kept as a top-level helper so `val` usage-infers to
+    a pointer instead of the `int` a `None`-initialized local would get."""
+    if tgt in result or not isinstance(val, gimple_ctypes.IdentExpr):
+        return
+    _ci = gen._closure_info_for_ident(val.name)
+    if _ci is not None:
+        result[tgt] = 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+
+
 def _closure_value_locals(gen, body: list) -> dict:
     """Map local name → 'MojoBoundMethod *'/'void *' for the locals of a
     function body that are assigned a nested-function (closure) VALUE
@@ -1369,19 +1380,16 @@ def _closure_value_locals(gen, body: list) -> dict:
 
     def _walk(stmts: list):
         for st in stmts:
-            tgt = None
-            val = None
+            # NB: keep the target-name / value pair off local vars that get
+            # a `None` initializer — the self-hosted backend types those
+            # `int`, which truncates the char*/AST-node pointer and makes
+            # the `isinstance(val, IdentExpr)` tag read segfault. Route
+            # straight through a helper whose params usage-infer to pointers.
             if isinstance(st, gimple_ctypes.AssignStmt) and isinstance(st.target, gimple_ctypes.IdentExpr):
-                tgt = st.target.name
-                val = st.value
+                _record_closure_alias(gen, result, st.target.name, st.value)
             elif (isinstance(st, gimple_ctypes.VarDecl) and isinstance(st.name, str)
                     and ',' not in st.name and st.value is not None):
-                tgt = st.name
-                val = st.value
-            if tgt is not None and tgt not in result and isinstance(val, gimple_ctypes.IdentExpr):
-                _ci = gen._closure_info_for_ident(val.name)
-                if _ci is not None:
-                    result[tgt] = 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+                _record_closure_alias(gen, result, st.name, st.value)
             if isinstance(st, gimple_ctypes.FunctionDef):
                 continue
             for attr in ('then_body', 'else_body', 'body', 'finally_body'):
