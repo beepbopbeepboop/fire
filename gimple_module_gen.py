@@ -2932,11 +2932,11 @@ def gen_module_impl(self, stmts):
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
     for s in all_functions:
         if isinstance(s, FunctionDef):
-            self._inferred_var_types[s.name] = self._infer_local_var_types(s)
+            self._inferred_var_types[_as_str(s.name)] = self._infer_local_var_types(s)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             for m in s.methods:
-                key = f"{s.name}_{m.name}"
+                key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
 
     def _expr_provably_str(e):
@@ -3297,8 +3297,16 @@ def gen_module_impl(self, stmts):
                 self._func_param_defaults[_mangled] = list(_dflts)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
-    _free_params = {s.name: [pn for pn, _ in (s.params or []) if not pn.startswith('*')]
-                    for s in all_functions if isinstance(s, FunctionDef)}
+    _free_params: dict = {}
+    for _fp_s in all_functions:
+        if not isinstance(_fp_s, FunctionDef):
+            continue
+        _fp_names: list = []
+        for _fp_pn, _ in (_fp_s.params or []):
+            _fp_pn = _as_str(_fp_pn)
+            if not _fp_pn.startswith('*'):
+                _fp_names.append(_fp_pn)
+        _free_params[_as_str(_fp_s.name)] = _fp_names
 
     def _record_param_elem(callee, pname, e, ne):
         d = self._param_elem_types.setdefault(callee, {})
@@ -3307,7 +3315,10 @@ def gen_module_impl(self, stmts):
         else:
             d[pname] = (e, ne)
 
-    _fn_by_name = {s.name: s for s in all_functions if isinstance(s, FunctionDef)}
+    _fn_by_name: dict = {}
+    for _fbn_s in all_functions:
+        if isinstance(_fbn_s, FunctionDef):
+            _fn_by_name[_as_str(_fbn_s.name)] = _fbn_s
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
 
     for caller_name, body in _caller_bodies:
@@ -3317,16 +3328,16 @@ def gen_module_impl(self, stmts):
         for call in calls:
             if not isinstance(call.func, IdentExpr):
                 continue
-            callee = call.func.name
+            callee = _as_str(call.func.name)
             pnames = _free_params.get(callee)
             if not pnames:
                 continue
             for i, a in enumerate(call.args):
                 if i >= len(pnames):
                     break
-                if isinstance(a, IdentExpr) and a.name in elem:
+                if isinstance(a, IdentExpr) and _as_str(a.name) in elem:
                     _record_param_elem(callee, pnames[i],
-                                        elem[a.name], nested.get(a.name))
+                                        elem[_as_str(a.name)], nested.get(_as_str(a.name)))
                 st = _arg_scalar_type(caller_name, a)
                 if st:
                     _scalar_obs.setdefault(callee, {}).setdefault(pnames[i], set()).add(st)
@@ -3376,19 +3387,25 @@ def gen_module_impl(self, stmts):
             if _isinst_elem:
                 _pm[_pn] = (None, None)
 
-    for callee, pmap in _scalar_obs.items():
+    for callee in sorted(_scalar_obs):
+        pmap = _scalar_obs[callee]
         fn = _fn_by_name.get(callee)
         if not fn:
             continue
-        ann = {pn: pt for pn, pt in (fn.params or [])}
-        for pname, types in pmap.items():
-            if types not in ({'double'}, {'char *'}):
+        ann: dict = {}
+        for _an_pn, _an_pt in (fn.params or []):
+            ann[_as_str(_an_pn)] = _an_pt
+        for pname in sorted(pmap):
+            types = pmap[pname]
+            _has_dbl = 'double' in types
+            _has_cs = 'char *' in types
+            if len(types) != 1 or not (_has_dbl or _has_cs):
                 continue                         # not unanimous double / char *
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
             cur = self._inferred_param_types.get(callee, {}).get(pname)
             if cur in (None, 'int', 'int64_t'):
-                resolved_type = 'double' if types == {'double'} else 'char *'
+                resolved_type = 'double' if _has_dbl else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
 
     # Coroutine-bound functions (generators/async defs about to go down the
@@ -4082,11 +4099,11 @@ def gen_module_impl(self, stmts):
 
     for s in all_functions:
         if isinstance(s, FunctionDef):
-            self._inferred_var_types[s.name] = self._infer_local_var_types(s)
+            self._inferred_var_types[_as_str(s.name)] = self._infer_local_var_types(s)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             for m in s.methods:
-                key = f"{s.name}_{m.name}"
+                key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
 
     self._param_generator_api: dict[str, dict[str, str]] = {}

@@ -2129,7 +2129,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                     elem_types = [gen._quick_type(node.value)]
                 for target, vtype in zip(targets, elem_types):
                     if isinstance(target, gimple_ctypes.IdentExpr):
-                        vname = target.name
+                        vname = _as_str(target.name)
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
@@ -2145,7 +2145,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 vtype = gen._quick_type(node.value)
                 for target in node.targets:
                     if isinstance(target, gimple_ctypes.IdentExpr):
-                        vname = target.name
+                        vname = _as_str(target.name)
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
@@ -2178,7 +2178,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 # a statement-level `:=` (never a plain `=`) never got an
                 # inferred type here. See box.3d/game/bugs/DYLIB_struct_
                 # list_index_reads_first_field_only_wrong_craft_results.md.
-                vname = node.value.name
+                vname = _as_str(node.value.name)
                 if vname not in inferred:
                     inferred[vname] = []
                 inferred[vname].append(gen._quick_type(node.value.value))
@@ -2190,9 +2190,10 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
 
     # Join all types for each variable using TypeLattice
     result = {}
-    for vname, types in inferred.items():
+    for vname in inferred:
+        types = inferred[vname]
         if types:
-            result[vname] = gimple_ctypes.TypeLattice.join_all(types)
+            result[_as_str(vname)] = gimple_ctypes.TypeLattice.join_all(types)
 
     return result
 
