@@ -1435,7 +1435,13 @@ class GimpleGen:
         self._struct_layout: dict = {}
         self._layout_hint: str = ''
         self._fn_returns_generator: dict = {}
-        self._inferred_var_types: dict = {}
+        # `dict[str, dict[str, str]]`, NOT bare `dict` — so the field-type
+        # scan types `gen._inferred_var_types[fn]` as `MojoDict *` and
+        # `.get(varname)` on it works. Without it the cross-call scalar
+        # contract (`_arg_scalar_type` reading a caller local's inferred
+        # type) silently got 0 on the self-hosted path, so a string local
+        # passed to an unannotated parameter never propagated its `char *`.
+        self._inferred_var_types: dict[str, dict[str, str]] = {}
         self._param_generator_api: dict = {}
         self._all_async_fn_names: set = set()
         self._bound_method_ret_types: dict = {}
