@@ -578,8 +578,15 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
             # Scoped to global_var consumption below — no fn/struct/overload
             # signature is taken from this path.
             import module_loader as _mlmod2
-            _sd = gimple_ctypes.os.path.dirname(
-                gimple_ctypes.os.path.abspath(_mlmod2.__file__))
+            # `gimple_codegen._SELFHOST_DIR`, not `_mlmod2.__file__`: a
+            # compiled-in module object has no `__file__` attribute, so
+            # `os.path.abspath(_mlmod2.__file__)` raised `AttributeError:
+            # __file__` and killed the whole `./mojoc --dump mojo.py`
+            # self-compile. `_SELFHOST_DIR` is the same sibling directory
+            # (it's `dirname(abspath(gimple_codegen.__file__))`, and every
+            # compiler `.py` lives in one directory) and is already the
+            # value the rest of the self-host machinery keys off.
+            _sd = gimple_codegen._SELFHOST_DIR
             _cand = gimple_ctypes.os.path.join(_sd, mod.split('.')[-1] + '.py')
             if gimple_ctypes.os.path.isfile(_cand):
                 exports = _mlmod2._module_loader.load_module_from_path(_cand)
