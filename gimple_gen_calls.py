@@ -1727,7 +1727,7 @@ def _lower_builtin_import(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return 'int', gen._new_val('int', '0  /* __import__ stubbed */')
 
 
-def _lower_ctor_from_iterable(_g, kind: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Shared `set(iterable)` / `list(iterable)` lowering: build a
     synthetic `{x for x in <arg>}` / `[x for x in <arg>]` Comprehension
     node and hand it to `_lower_comprehension`, so `set(...)`/`list(...)`
@@ -1736,18 +1736,23 @@ def _lower_ctor_from_iterable(_g, kind: str, node: gimple_ctypes.CallExpr) -> tu
     resolution `_lower_comprehension` already does) as real
     comprehensions and `for x in <iterable>:` loops, instead of a third,
     narrower iteration scheme. See bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md.
+
+    NB: first param is named `gen` (not `_g`) so the self-hosted backend
+    types it `GimpleGen *` — an unrecognized name is typed `int64_t`, and
+    then `gen._lower_comprehension(...)` stubs to a no-op that returned the
+    instance pointer itself (a segfault at the `list(x)` call site).
     """
     if not node.args:
         new_fn = 'mojo_set_new' if kind == 'set' else 'mojo_list_new'
         res_type = 'MojoSet *' if kind == 'set' else 'MojoList *'
-        return res_type, _g._new_val(res_type, f'{new_fn} ()')
-    _g.temp_counter += 1
-    var = f"_ctor_elem{_g.temp_counter}"
-    gen = gimple_ctypes.Generator(target=var, iterable=node.args[0], conditions=[],
+        return res_type, gen._new_val(res_type, f'{new_fn} ()')
+    gen.temp_counter += 1
+    var = f"_ctor_elem{gen.temp_counter}"
+    synth_gen = gimple_ctypes.Generator(target=var, iterable=node.args[0], conditions=[],
                      line=node.line, col=node.col)
     compr = gimple_ctypes.Comprehension(kind=kind, element=gimple_ctypes.IdentExpr(var, node.line, node.col),
-                           generators=[gen], line=node.line, col=node.col)
-    return _g._lower_comprehension(compr)
+                           generators=[synth_gen], line=node.line, col=node.col)
+    return gen._lower_comprehension(compr)
 
 
 def _lower_builtin_set(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
