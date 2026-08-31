@@ -1329,7 +1329,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 elif 'filename' in kwarg_map:
                     fn_type, fn_val = gen.lower_expr(kwarg_map['filename'])
                     filename_val = fn_val
-                if gimple_ctypes.os.environ.get('MOJO_NO_SHIM'):
+                # Bare `os.environ.get`, NOT `gimple_ctypes.os.environ`: the
+                # ast_rewriter `os.environ.get(...)` -> `mojo_c_getenv(...)`
+                # rule only matches `obj=IdentExpr('os')`, so the qualified
+                # form stayed a real attr access on the opaque `os` module
+                # marker and raised `AttributeError: environ` when a
+                # self-hosted mojoc lowered mojo.py's own
+                # `gimple_codegen.compile_to_gimple(...)` call sites (in
+                # `build_executable` / the `--dump` handler) — silently
+                # truncating those functions from the output.
+                if os.environ.get('MOJO_NO_SHIM'):
                     # Native path: call compiled compile_to_gimple directly
                     t = gen._new_val('char *', f"compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
                 else:

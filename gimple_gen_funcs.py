@@ -124,17 +124,20 @@ def _gen_stmt_ImportStmt(gen, node):
     # import module [as alias][, module2 [as alias2], ...] — handle every
     # target in a comma-separated list (node.extra), not just the first.
     for module, alias in gimple_ctypes._import_targets(node):
-        # `_as_str`: the self-hosted backend erases `ImportStmt.alias`
-        # (typed `object`) to int64_t, so without this the tuple-unpack
-        # leaves `module`/`alias` boxed and `module.split('.')` hits the
-        # int64_t method stub (-> "" -> `imported_symbols[""]`).
-        module = _as_str(module)
-        alias = _as_str(alias)
+        # `_as_str` into FRESH names (`_mod`/`_al`, never reassigning the
+        # loop vars): `ImportStmt.alias` is typed `object` so the self-hosted
+        # backend erases it to int64_t, and reassigning `module`/`alias`
+        # in place would unify those locals to int64_t too — then
+        # `imported_symbols[local_name]` stringifies the char* pointer as a
+        # decimal dict key. A name only ever assigned an `_as_str(...)`
+        # (`-> str`) stays `char *`.
+        _mod = _as_str(module)
+        _al = _as_str(alias)
         # `import a.b.c` (no alias) binds the top-level package name `a` in
         # scope (Python semantics) — not the invalid C identifier "a.b.c".
-        local_name = alias if alias else module.split('.')[0]
+        local_name = _al if _al else _mod.split('.')[0]
         gen.imported_symbols[local_name] = {
-            'module': module,
+            'module': _mod,
             'return_type': 'unknown',
         }
         gen._module_alias_names.add(local_name)

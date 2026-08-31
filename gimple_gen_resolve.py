@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    _as_str,
 )
 import regex_compile
 import mlir
@@ -109,8 +110,19 @@ def _locally_bound_names(gen, body: list, params: list = None) -> set:
                     walk(node.finally_body)
             elif isinstance(node, gimple_ctypes.WithStmt):
                 for item in (node.items or []):
-                    if item.alias is not None:
-                        bound.add(item.alias if isinstance(item.alias, str) else item.alias.name)
+                    _al = item.alias
+                    if _al is not None:
+                        # `isinstance(_al, str)` is unreliable in the
+                        # self-hosted backend (WithItem.alias is typed
+                        # `object` -> int64_t -> the isinstance stub says
+                        # False for a real `char *`, then `_al.name` on the
+                        # bare string "f" raises AttributeError). Check for
+                        # the node case explicitly; everything else is the
+                        # string alias.
+                        if isinstance(_al, gimple_ctypes.IdentExpr):
+                            bound.add(_al.name)
+                        else:
+                            bound.add(_as_str(_al))
                 walk(node.body)
 
     walk(body)

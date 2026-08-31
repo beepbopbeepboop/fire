@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    _as_str,
 )
 import regex_compile
 import mlir
@@ -145,6 +146,17 @@ def gen_stmt(gen, node):
         for i in range(len(gen.body_lines) - 1, body_start, -1):
             if gen.body_lines[i] != directive and not gen.body_lines[i].lstrip().startswith('#line '):
                 gen.body_lines.insert(i, directive)
+
+
+def _with_item_alias_name(alias) -> str:
+    """Bare name a `with ... as <alias>` binds. `WithItem.alias` is typed
+    `object`, so the self-hosted backend erases it to int64_t and
+    `isinstance(alias, str)` (the stub) reports False for a real `char *` —
+    `alias.name` on the bare string then raises AttributeError and silently
+    truncates the enclosing function. Check the node case explicitly."""
+    if isinstance(alias, IdentExpr):
+        return alias.name
+    return _as_str(alias)
 
 
 def _gen_stmt_PassStmt(gen, node):
@@ -3328,7 +3340,7 @@ def _gen_stmt_WithStmt(gen, node):
             resume_t = gen._new_temp('_Bool')
             gen._emit(f"  {resume_t} = {base}_resume ({ctx_v});")
             if item.alias is not None:
-                alias = item.alias if isinstance(item.alias, str) else item.alias.name
+                alias = _with_item_alias_name(item.alias)
                 val_t = gen._call_expr('int64_t', f"{base}_value",
                                        [('MojoGenerator *', ctx_v)])
                 if alias not in gen.var_types:
@@ -3370,7 +3382,7 @@ def _gen_stmt_WithStmt(gen, node):
             enter_v = ctx_v
             enter_ret_t = et
         if item.alias is not None:
-            alias = item.alias if isinstance(item.alias, str) else item.alias.name
+            alias = _with_item_alias_name(item.alias)
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
