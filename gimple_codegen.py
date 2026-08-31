@@ -1423,7 +1423,14 @@ class GimpleGen:
         # opaque `int` — storing a real MojoDict*/MojoList* pointer into an
         # `int` field truncates it and the next use segfaults. Seed them
         # here with the right shape so the scan types the struct fields.
-        self._inferred_param_types: dict = {}
+        # `dict[str, dict[str, str]]`, NOT bare `dict`: the field-type scan
+        # needs the nested value shape so `gen._inferred_param_types[fn]`
+        # reads as `MojoDict *` and `pname in that` lowers to a real
+        # `mojo_dict_contains` (not the int64_t `/* TODO: 'in' */` stub) —
+        # without it `_param_ctype` never found a usage-inferred parameter
+        # type in the self-hosted backend and every unannotated free
+        # parameter fell back to int64_t.
+        self._inferred_param_types: dict[str, dict[str, str]] = {}
         self._toplevel_dep_init_modules: list = []
         self._struct_layout: dict = {}
         self._layout_hint: str = ''

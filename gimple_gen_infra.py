@@ -1330,10 +1330,19 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
         # match (see BUILTIN_CONTAINER_METHODS above).
         called_methods: set = set()
         function_calls = []  # List of (function_name, arg_index)
-        is_subscripted = False  # Track if parameter is used with [...]
-        is_string_method = False  # Track if param.<str-only-method>(...) is called
-        is_dict_method = False  # Track if param.<dict-only-method>(...) is called
-        is_iterated = False  # Track if parameter is used as for-loop iterable
+        # The boolean usage signals live in ONE mutable dict rather than as
+        # separate `nonlocal` scalars: the nested `scan_expr`/`scan_nodes`/
+        # `_track_derivation` closures mutate them, and a container captured
+        # by reference propagates cleanly at any nesting depth in the
+        # self-hosted backend, where a `nonlocal` SCALAR mut-capture across
+        # two closure levels does not (it silently lost every write, so
+        # every unannotated container/string parameter mis-inferred as
+        # int64_t — the root of self-hosted param-inference weakness).
+        _F: dict = {}
+        # `is_subscripted`  : parameter used with `[...]`
+        # `is_string_method`: `param.<str-only-method>(...)` called
+        # `is_dict_method`  : `param.<dict-only-method>(...)` called
+        # `is_iterated`     : parameter used as a for-loop iterable
         # Track if a single-character subscript of the param (`param[i]`,
         # directly or via a local it was assigned to, e.g. `c = param[i]`)
         # is ever compared against a string literal (`c == '"'`) — a
@@ -1354,7 +1363,6 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
         # self-hosted string literal whose own content happens to
         # start/end with a quote. Needs to trace through that whole
         # subscript-of-a-slice-of-the-param chain, not just a single hop.
-        is_char_compared = False
         # Every local known to hold a value sliced/subscripted (directly
         # or transitively) FROM the param — `derived_from_param` answers
         # "does this trace back to the param at all", `single_char_vars`
@@ -1374,8 +1382,6 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
         # key/value — hard -Wint-conversion errors). Any OTHER subscript
         # key (int literal, arithmetic, unknown identifier) or any slice
         # keeps the historical sequence interpretation.
-        is_str_key_subscripted = False
-        is_nondict_key_subscripted = False
         str_vars: set = set()
         # `self.<member> += <param-derived value>` sinks (root ident name,
         # member name). An augmented assignment whose RHS involves the param
@@ -1425,9 +1431,6 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
 
         def scan_expr(expr):
             """Recursively scan an expression."""
-            nonlocal is_subscripted, is_string_method, is_char_compared, is_iterated
-            nonlocal is_str_key_subscripted, is_nondict_key_subscripted
-            nonlocal is_dict_method
             if isinstance(expr, gimple_ctypes.Comprehension):
                 # A list/set/dict/generator comprehension embedded inside
                 # an expression (`sum(x**2 for x in values)`,
@@ -1448,7 +1451,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                 # `sum(x**2 for x in values)` (this exact shape).
                 for gen in expr.generators:
                     if isinstance(gen.iterable, gimple_ctypes.IdentExpr) and gen.iterable.name == param_name:
-                        is_iterated = True
+                        _F['is_iterated'] = True
                     scan_expr(gen.iterable)
                     for cond in (gen.conditions or []):
                         scan_expr(cond)
@@ -1461,18 +1464,18 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                 while isinstance(base, gimple_ctypes.SubscriptExpr):
                     base = base.obj
                 if isinstance(base, gimple_ctypes.IdentExpr) and base.name == param_name:
-                    is_subscripted = True
+                    _F['is_subscripted'] = True
                     if _expr_is_stringish(expr.index):
-                        is_str_key_subscripted = True
+                        _F['is_str_key_subscripted'] = True
                     else:
-                        is_nondict_key_subscripted = True
+                        _F['is_nondict_key_subscripted'] = True
                 scan_expr(expr.obj)
                 scan_expr(expr.index)
             elif isinstance(expr, gimple_ctypes.SliceExpr):
                 # Slicing a param means it is an indexable sequence, same as subscript.
                 if isinstance(expr.obj, gimple_ctypes.IdentExpr) and expr.obj.name == param_name:
-                    is_subscripted = True
-                    is_nondict_key_subscripted = True
+                    _F['is_subscripted'] = True
+                    _F['is_nondict_key_subscripted'] = True
                 scan_expr(expr.obj)
                 if expr.start is not None: scan_expr(expr.start)
                 if expr.stop is not None: scan_expr(expr.stop)
@@ -1489,7 +1492,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                                      and a.obj.name in derived_from_param)
                         is_indirect = isinstance(a, gimple_ctypes.IdentExpr) and a.name in single_char_vars
                         if (is_direct or is_indirect) and _is_single_char_literal(b):
-                            is_char_compared = True
+                            _F['is_char_compared'] = True
                 if expr.op == '+':
                     # `param + <string literal>` / `<string literal> +
                     # param` (directly, or through a local already known
@@ -1510,11 +1513,11 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                         if not _a_param:
                             continue
                         if _expr_is_stringish(_b):
-                            is_string_method = True
+                            _F['is_string_method'] = True
                         elif (isinstance(_b, gimple_ctypes.IdentExpr)
                                 and _b.name != param_name
                                 and _b.name in str_vars):
-                            is_string_method = True
+                            _F['is_string_method'] = True
                 scan_expr(expr.left)
                 scan_expr(expr.right)
             elif isinstance(expr, gimple_ctypes.CompareChain):
@@ -1549,20 +1552,20 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                     if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
                             and expr.func.obj.name == param_name
                             and expr.func.member in STRING_ONLY_METHODS):
-                        is_string_method = True
+                        _F['is_string_method'] = True
                     # <slice/subscript-of-param>.<str-only-method>(...) —
                     # the indirect twin just above.
                     if (_meth_recv is not expr.func.obj
                             and isinstance(_meth_recv, gimple_ctypes.IdentExpr)
                             and _meth_recv.name == param_name
                             and expr.func.member in STRING_ONLY_METHODS):
-                        is_string_method = True
+                        _F['is_string_method'] = True
                     # param.<dict-only-method>(...) — same unambiguous
                     # "param is a dict" evidence (see DICT_ONLY_METHODS).
                     if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
                             and expr.func.obj.name == param_name):
                         if expr.func.member in DICT_ONLY_METHODS:
-                            is_dict_method = True
+                            _F['is_dict_method'] = True
                         if expr.func.member in BUILTIN_CONTAINER_METHODS:
                             called_methods.add(expr.func.member)
                     # Handle re.sub(pattern, fn, src) → src (index 2) is char*
@@ -1602,7 +1605,6 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
 
         def scan_nodes(node_list):
             """Recursively scan a list of statements."""
-            nonlocal is_iterated
             def _track_derivation(target, value):
                 """`x = <subscript/slice of something already known to
                 derive from param>` — propagate that knowledge to `x` too,
@@ -1658,7 +1660,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                         # Detect `for x in <param>:` — evidence param is a list
                         it = node.iterable
                         if isinstance(it, gimple_ctypes.IdentExpr) and it.name == param_name:
-                            is_iterated = True
+                            _F['is_iterated'] = True
                         # `for name in ('A', 'B', ...):` — every element of
                         # an all-string-literal tuple/list/set literal is a
                         # string, so the loop target is a string variable (a
@@ -1728,6 +1730,13 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                         scan_nodes(node.finally_body)
 
         scan_nodes(nodes)
+        is_subscripted = bool(_F.get('is_subscripted'))
+        is_string_method = bool(_F.get('is_string_method'))
+        is_dict_method = bool(_F.get('is_dict_method'))
+        is_iterated = bool(_F.get('is_iterated'))
+        is_char_compared = bool(_F.get('is_char_compared'))
+        is_str_key_subscripted = bool(_F.get('is_str_key_subscripted'))
+        is_nondict_key_subscripted = bool(_F.get('is_nondict_key_subscripted'))
         return (accessed_fields, function_calls, is_subscripted, is_string_method,
                 is_iterated, is_char_compared, is_str_key_subscripted,
                 is_nondict_key_subscripted, called_methods, is_dict_method,

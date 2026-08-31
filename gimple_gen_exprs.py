@@ -2112,7 +2112,21 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             gen._safe_coerce_emit(ltype, res_type, lval, result)
         gen._emit(f"  goto {bb_merge};")
         gen._emit_label(bb_eval_right)
+        # `isinstance(x, T) and x.field ...`: the right operand only runs
+        # when the left (the isinstance test) was true, so narrow `x` to
+        # `T *` for it — matches Python/mypy and `_gen_stmt_IfStmt`'s own
+        # body narrowing. Without this `x.field` on a boxed `x` fell to the
+        # dynamic-getattr int64_t path and, when the other operand was a
+        # string, `_lower_binary`'s `==` mis-read the boxed pointer as a
+        # single ASCII char (`mojo_char_to_str((char)ptr)`) — which is why
+        # self-hosted `analyze_param_usage`'s `for s in <param>:` detection
+        # (`isinstance(it, IdentExpr) and it.name == param_name`) never
+        # fired, mis-inferring every container/string parameter as int64_t.
+        _and_narrowed = (gen._apply_isinstance_narrowings(node.left)
+                         if node.op == 'and' else {})
         rtype, rval = gen.lower_expr(node.right)
+        if node.op == 'and':
+            gen._restore_isinstance_narrowings(_and_narrowed)
         if _bool_merge:
             _rb = gen._ensure_bool_cond(rtype, rval)
             gen._emit(f"  {result} = {_rb};")

@@ -43,6 +43,21 @@ from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWOR
 _SELFHOST_MODGLOBAL_CACHE: dict = {}
 
 
+def _free_func_param_ctypes(self, s) -> list:
+    """`[self._param_ctype(pn, pt, s) for pn, pt in s.params]` as an
+    EXPLICIT loop with a per-element unpack: the list-comprehension form
+    with a 2-tuple target miscompiled in the self-hosted backend (the
+    `pn`/`pt` slots boxed to int64_t), so `_param_ctype`'s
+    `pname in _inferred_param_types[func_key]` lookup missed on the boxed
+    key and every unannotated free-function parameter fell back to the
+    int64_t default even after usage inference had resolved it."""
+    out: list = []
+    for _pp in (s.params or []):
+        _pn, _pt = _pp
+        out.append(self._param_ctype(_pn, _pt, s))
+    return out
+
+
 def _selfhost_modglobal_is_pathcall(_v) -> bool:
     """`os.path.<fn>(...)` (any nesting) — a char*-producing path expression."""
     if not isinstance(_v, CallExpr):
@@ -2463,7 +2478,7 @@ def gen_module_impl(self, stmts):
                 self.func_param_types[s.name] = _s_pts
                 self._note_vararg_trailing_param_types(s)
             else:
-                _s_pts = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
+                _s_pts = _free_func_param_ctypes(self, s)
                 self.func_param_types[s.name] = _s_pts
         # Does THIS gen's resolution tiers (`_func_csym`/`_effective_param_
         # types`: own top-level defs first, then lexical import scopes, then
@@ -3177,7 +3192,7 @@ def gen_module_impl(self, stmts):
                 self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 self._note_vararg_trailing_param_types(s)
             else:
-                self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
+                self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             for m in s.methods:
@@ -3403,7 +3418,7 @@ def gen_module_impl(self, stmts):
                 self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 self._note_vararg_trailing_param_types(s)
             else:
-                self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
+                self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
 
     _ctor_scalar_obs: dict[str, dict[str, set]] = {}   # struct -> {pname -> {types}}
     for caller_name, body in _caller_bodies:
@@ -4075,10 +4090,13 @@ def gen_module_impl(self, stmts):
         `known_params` maps a caller param already proven to hold a
         generator to its function name, for the chained shape
         `def outer(g): consume(g)`."""
-        found = None
+        # 1-element list, not a `nonlocal` scalar: a container captured by
+        # reference propagates the nested `_scan`'s writes cleanly in the
+        # self-hosted backend, where a `nonlocal` scalar mut-capture does
+        # not (it silently kept `_walk_gen_prov` returning None always).
+        _found = [None]
 
         def _scan(stmts):
-            nonlocal found
             for st in stmts:
                 val = None
                 if isinstance(st, AssignStmt) and isinstance(st.target, IdentExpr):
@@ -4096,10 +4114,10 @@ def gen_module_impl(self, stmts):
                     elif isinstance(val, IdentExpr):
                         prov = known_params.get(val.name)
                     if prov is not None:
-                        if found is None:
-                            found = prov
-                        elif found != prov:
-                            found = '<conflict>'
+                        if _found[0] is None:
+                            _found[0] = prov
+                        elif _found[0] != prov:
+                            _found[0] = '<conflict>'
                     continue
                 if isinstance(st, FunctionDef):
                     continue
@@ -4115,7 +4133,7 @@ def gen_module_impl(self, stmts):
                         _scan(hb)
 
         _scan(body)
-        return found
+        return _found[0]
 
     def _arg_generator_prov(caller_name, arg):
         """The generator function name behind call-site argument `arg`
@@ -4230,7 +4248,7 @@ def gen_module_impl(self, stmts):
                 self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 self._note_vararg_trailing_param_types(s)
             else:
-                self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
+                self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
 
     if self.emit_struct_defs:  # Only main module does dispatch solving
         self._dispatch_solver = DispatchSolver(

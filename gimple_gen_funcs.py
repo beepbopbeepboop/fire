@@ -1210,15 +1210,20 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     _sh = _selfhost_gen_self_param_ctype(gen, pname, ptype, node)
     if _sh is not None:
         return _sh
-    # Check inferred parameter types first (for unannotated parameters)
+    # Check inferred parameter types first (for unannotated parameters).
+    # `.get` into a local (typed MojoDict* via the field's declared
+    # `dict[str, dict[str, str]]` shape), NOT a double `[fn][pname]`
+    # subscript — the latter left the inner dict typed int64_t in the
+    # self-hosted backend, so `pname in it` lowered to the `/* TODO: 'in'
+    # for int64_t */` no-op and no usage-inferred type was ever found.
+    ctype = None
     if ptype is None and hasattr(gen, '_inferred_param_types'):
         func_key: str
         func_key = node.name
-        if func_key in gen._inferred_param_types and pname in gen._inferred_param_types[func_key]:
-            ctype = gen._inferred_param_types[func_key][pname]
-        else:
-            ctype = gen._resolve_type(ptype)
-    else:
+        _ipt_fn = gen._inferred_param_types.get(func_key)
+        if _ipt_fn is not None and pname in _ipt_fn:
+            ctype = _ipt_fn[pname]
+    if ctype is None:
         ctype = gen._resolve_type(ptype)
     # An UNANNOTATED parameter whose declared default value is a string
     # literal IS a string parameter. The default expression is type
