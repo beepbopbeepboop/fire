@@ -2401,17 +2401,33 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                         elem[v] = 'MojoList *'
                         if a.name in nested:
                             nested[v] = nested[a.name]
-            # recurse into compound statements
-            for attr in ('body', 'then_body', 'else_body', 'finally_body'):
-                sub = getattr(n, attr, None)
-                if isinstance(sub, list):
-                    walk(sub)
-            for _cond, eb in (getattr(n, 'elifs', None) or []):
-                walk(eb)
-            for h in (getattr(n, 'handlers', None) or []):
-                hb = getattr(h, 'body', None)
-                if isinstance(hb, list):
-                    walk(hb)
+            # recurse into compound statements (explicit branches so the
+            # self-hosted backend, which can't lower getattr(n, <loop var>)
+            # + isinstance(sub, list), still descends into control flow)
+            if isinstance(n, gimple_ctypes.IfStmt):
+                walk(n.then_body)
+                if isinstance(n.else_body, list):
+                    walk(n.else_body)
+                for _cond, _eb in (n.elifs or []):
+                    walk(_eb)
+            elif isinstance(n, gimple_ctypes.TryStmt):
+                walk(n.body)
+                for _h in (n.handlers or []):
+                    _hb = getattr(_h, 'body', None)
+                    if isinstance(_hb, list):
+                        walk(_hb)
+                if isinstance(n.else_body, list):
+                    walk(n.else_body)
+                if isinstance(n.finally_body, list):
+                    walk(n.finally_body)
+            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt,
+                                gimple_ctypes.WithStmt, gimple_ctypes.FunctionDef)):
+                _b = getattr(n, 'body', None)
+                if isinstance(_b, list):
+                    walk(_b)
+                _eb2 = getattr(n, 'else_body', None)
+                if isinstance(_eb2, list):
+                    walk(_eb2)
 
     walk(body)
     return elem, nested, dict_val
