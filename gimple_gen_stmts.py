@@ -3038,6 +3038,15 @@ def _gen_stmt_TryStmt(gen, node):
     # _gen_lifted_closure) is generating this statement must drop
     # `__GIMPLE` from its signature.
     gen._func_used_setjmp = True
+    # Loop nesting at try-entry: a `break`/`continue` inside the try body
+    # only leaves this try's setjmp region if it targets a loop that was
+    # ALREADY open here (a loop OUTSIDE the try). A loop opened inside the
+    # try body keeps its `continue` within the protected region — popping
+    # there is a spurious `mojo_exc_pop()` every iteration, which is
+    # exactly what walked `_mojo_exc_top` negative across a full self-host
+    # run (`ModuleLoader.load_module_from_path`'s `try: ... for _l in
+    # src.split(): ... continue`).
+    _entry_loop_depth = len(getattr(gen, 'loop_stack', []))
     sj_ret = gen._new_temp('int')
     cond_t = gen._new_temp('_Bool')
     bb_try   = gen._new_bb()
@@ -3103,14 +3112,17 @@ def _gen_stmt_TryStmt(gen, node):
                 gen._last_was_terminal = True
                 return
             # break/continue lower to a bare `goto <loop label>;` (see
-            # _gen_stmt_BreakStmt/_gen_stmt_ContinueStmt) — anywhere
-            # inside the try body, even nested in an if/while, they jump
-            # out of this try's protected region exactly like an early
-            # return does, and leak the same way if unaccounted for.
-            if gen.loop_stack and stripped in (
-                f"goto {gen._loop_continue_bb()};",
-                f"goto {gen._loop_break_bb()};",
-            ):
+            # _gen_stmt_BreakStmt/_gen_stmt_ContinueStmt). It leaves this
+            # try's protected region — and so needs a `mojo_exc_pop()` —
+            # ONLY when it targets a loop that was already open at
+            # try-entry (a loop OUTSIDE the try). `len(loop_stack) >
+            # _entry_loop_depth` means the innermost loop was opened
+            # inside the try body, and its `continue` stays put.
+            if (gen.loop_stack and len(gen.loop_stack) <= _entry_loop_depth
+                    and stripped in (
+                        f"goto {gen._loop_continue_bb()};",
+                        f"goto {gen._loop_break_bb()};",
+                    )):
                 original_emit("  mojo_exc_pop ();")
                 original_emit(line)
                 return

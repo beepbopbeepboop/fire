@@ -209,7 +209,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         rel_mojo_paths = []
         for _suffix, _is_pkg_self in _rel_candidates:
             _parts = _suffix.split('.')
-            _flat = gimple_ctypes.os.sep.join(_parts)
+            _flat = '/'.join(_parts)
             for ext in extensions:
                 rel_mojo_paths.append(gimple_ctypes.os.path.join(_base_dir, f"{_flat}{ext}"))
             rel_mojo_paths.append(gimple_ctypes.os.path.join(
@@ -233,7 +233,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         search_dirs.append(importer_dir)
         _anc = gimple_ctypes.os.path.dirname(importer_dir)
         for _ in range(6):
-            if not _anc or _anc == gimple_ctypes.os.path.sep:
+            if not _anc or _anc == '/':   # os.path.sep — opaque on the compiled path
                 break
             search_dirs.append(_anc)
             _parent = gimple_ctypes.os.path.dirname(_anc)
@@ -282,8 +282,11 @@ def _module_candidate_paths(gen, module_name: str) -> list:
     # ModuleLoader path just below.
     if '.' in module_name:
         _dotted_parts = module_name.split('.')
-        _rel_flat = gimple_ctypes.os.sep.join(_dotted_parts)
-        _rel_pkg = gimple_ctypes.os.path.join(gimple_ctypes.os.sep.join(_dotted_parts), '__init__')
+        # `'/'`, not `os.sep`: `gimple_ctypes.os` is an opaque module
+        # marker in the compiled backend, so `.sep` raised
+        # `AttributeError: sep`. Every supported target uses `/`.
+        _rel_flat = '/'.join(_dotted_parts)
+        _rel_pkg = gimple_ctypes.os.path.join(_rel_flat, '__init__')
         for d in _seen_dirs:
             mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_flat}.py"))
             mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_flat}.mojo"))
@@ -302,8 +305,8 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         # bugs/COMPILE_FAIL_tkinter_filedialog.md.
         if len(_dotted_parts) > 1:
             _suffix_parts = _dotted_parts[1:]
-            _rel_suffix_flat = gimple_ctypes.os.sep.join(_suffix_parts)
-            _rel_suffix_pkg = gimple_ctypes.os.path.join(gimple_ctypes.os.sep.join(_suffix_parts), '__init__')
+            _rel_suffix_flat = '/'.join(_suffix_parts)
+            _rel_suffix_pkg = gimple_ctypes.os.path.join(_rel_suffix_flat, '__init__')
             for d in _seen_dirs:
                 if gimple_ctypes.os.path.basename(gimple_ctypes.os.path.normpath(d)) == _dotted_parts[0]:
                     for ext in extensions:

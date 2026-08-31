@@ -424,6 +424,18 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
         # Resolve relative imports: '._foo' → 'std.pkg._foo', '.._foo' → 'std.parent._foo'
         if mod.startswith('.'):
             mod = _resolve_relative(mod, _pkg_prefix)
+        # A bare `from <name> import ...` naming one of the compiler's own
+        # `.py` sibling modules (build_config, gimple_codegen, ...) — not a
+        # stdlib/test module. `load_module` raises "Only stdlib and test
+        # imports supported" for those, and the compiled backend's
+        # try/except around this call does NOT reliably catch a raised
+        # ValueError, so `./mojoc --dump mojo.py` died on
+        # `from build_config import ...`. Pre-filter: those siblings carry
+        # no stdlib externs anyway.
+        if ('.' not in mod and not mod.startswith('std')
+                and gimple_ctypes.os.path.isfile(gimple_ctypes.os.path.join(
+                    gimple_codegen._SELFHOST_DIR, mod + '.py'))):
+            continue
         try:
             exports = gimple_ctypes.load_module(mod)
         except Exception as e:
@@ -559,15 +571,27 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
         if not isinstance(stmt, gimple_ctypes.FromImportStmt):
             continue
         mod = stmt.module
-        try:
-            exports = gimple_ctypes.load_module(mod)
-            qual = None
-            import module_loader as _mlmod
-            _imp_path = _mlmod._module_loader.resolve_module_path(mod)
-            if _imp_path and gimple_ctypes.os.path.exists(_imp_path):
-                qual = _mlmod.module_name_for_path(_imp_path)
-        except Exception:
+        # A bare `from <name> import ...` naming a compiler `.py` sibling
+        # (build_config, ...): `load_module` raises "Only stdlib and test
+        # imports supported" and the compiled backend's `except Exception`
+        # around it does not reliably catch a raised ValueError. Route
+        # straight to the local-sibling path (which the fallback below
+        # would reach anyway).
+        _is_py_sibling = ('.' not in mod and not mod.startswith('std')
+                          and gimple_ctypes.os.path.isfile(gimple_ctypes.os.path.join(
+                              gimple_codegen._SELFHOST_DIR, mod + '.py')))
+        if _is_py_sibling:
             exports, qual = gen._local_sibling_module_exports(mod)
+        else:
+            try:
+                exports = gimple_ctypes.load_module(mod)
+                qual = None
+                import module_loader as _mlmod
+                _imp_path = _mlmod._module_loader.resolve_module_path(mod)
+                if _imp_path and gimple_ctypes.os.path.exists(_imp_path):
+                    qual = _mlmod.module_name_for_path(_imp_path)
+            except Exception:
+                exports, qual = gen._local_sibling_module_exports(mod)
         if (not exports or not qual):
             # Self-host bootstrap: `from gimple_codegen import _C_RESERVED_
             # FUNCS` names a sibling `.py` compiler module that neither
