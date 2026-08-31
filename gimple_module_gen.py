@@ -2999,19 +2999,27 @@ def gen_module_impl(self, stmts):
         if deep_str and _expr_provably_str(a):
             return 'char *'
         if isinstance(a, IdentExpr):
-            t = self._inferred_var_types.get(caller_name, {}).get(a.name)
+            # `_as_str`: `caller_name` comes boxed from the `for caller_name,
+            # body in _caller_bodies` unpack, and `a.name` is a boxed AST
+            # field read — an unwrapped either one decimal-stringifies its
+            # pointer as the dict key and every lookup misses, so the
+            # cross-call scalar contract never saw a caller local's type.
+            _cn = _as_str(caller_name)
+            _an = _as_str(a.name)
+            t = self._inferred_var_types.get(_cn, {}).get(_an)
             if prefer_refined_param:
-                _pt = self._inferred_param_types.get(caller_name, {}) \
-                    .get(a.name)
+                _pt = self._inferred_param_types.get(_cn, {}).get(_an)
                 if _pt in ('char *', 'double'):
                     return _pt
                 return t or _pt
-            return t or self._inferred_param_types.get(caller_name, {}) \
-                .get(a.name)
+            return t or self._inferred_param_types.get(_cn, {}).get(_an)
         return None
 
     _TOPLEVEL_CALLER = '<toplevel>'
-    _caller_bodies = [(s.name, s.body) for s in all_functions if isinstance(s, FunctionDef)]
+    _caller_bodies: list = []
+    for _cb_s in all_functions:
+        if isinstance(_cb_s, FunctionDef):
+            _caller_bodies.append((_as_str(_cb_s.name), _cb_s.body))
     _caller_bodies.append((_TOPLEVEL_CALLER, stmts))
 
     # Pass 1.3e: struct-METHOD cross-call scalar contract — the same
