@@ -1050,6 +1050,62 @@ def _gen_for_zip(gen, node):
     gen._emit_label(bb_after)
 
 
+def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None:
+    """`for i, c in enumerate(s)` where `s` is a plain `char *` string —
+    iterate characters via mojo_strlen/_mojo_at_char (mirrors _gen_for_cstr),
+    NOT the list accessors _gen_for_enumerate otherwise uses (which
+    reinterpret the char* as a MojoList* and segfault). Value slot is `char`."""
+    target = node.target
+    if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
+        parts = [p.strip() for p in gen._split_top_level_comma(target[1:-1])]
+    elif isinstance(target, str):
+        parts = [target, '_enum_val']
+    else:
+        gen._emit("  /* TODO: enumerate(str) non-string target */")
+        return
+    idx_var = parts[0] if len(parts) >= 1 else '_enum_i'
+    val_var = parts[1] if len(parts) >= 2 else '_enum_val'
+
+    gen._declare_var(idx_var, 'int64_t')
+    gen._declare_var(val_var, 'char')
+    cidx_var = gen._cname(idx_var)
+    cval_var = gen._cname(val_var)
+
+    len_t = gen._new_val('int64_t', f"mojo_strlen ({s_val})")
+    idx_t = gen._new_temp('int64_t')
+    gen._emit(f"  {idx_t} = (int64_t)0;")
+
+    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
+    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond_t = gen._new_val('_Bool', f"{idx_t} < {len_t}")
+    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    gen.loop_stack.append((bb_post, bb_after))
+    if start_val is not None:
+        disp_idx = gen._new_val('int64_t', f"{idx_t} + {start_val}")
+        gen._emit(f"  {cidx_var} = {disp_idx};")
+    else:
+        gen._emit(f"  {cidx_var} = {idx_t};")
+    gen._ptr_helpers_needed.add('char')
+    addr = gen._new_val('char *', f"_mojo_at_char ({s_val}, {idx_t})")
+    gen._emit(f"  {cval_var} = *{addr};")
+    for st in node.body:
+        gen.gen_stmt(st)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    one = gen._new_val('int64_t', "(int64_t)1")
+    nxt = gen._new_val('int64_t', f"{idx_t} + {one}")
+    gen._emit(f"  {idx_t} = {nxt};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+
+
 def _gen_for_enumerate(gen, node):
     """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
     lst_arg = node.iterable.args[0]
@@ -1072,6 +1128,10 @@ def _gen_for_enumerate(gen, node):
     if len(node.iterable.args) >= 2:
         _, start_raw = gen.lower_expr(node.iterable.args[1])
         start_val = gen._new_val('int64_t', f"(int64_t){start_raw}")
+
+    if lst_type == 'char *':
+        _gen_for_enumerate_str(gen, node, lst_val, start_val)
+        return
 
     target = node.target
     if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
