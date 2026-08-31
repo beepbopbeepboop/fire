@@ -6937,13 +6937,13 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     if self._funcptr_builtins_needed:
-        # List comprehension (not `sorted(setA - setB)`): iterating the set
-        # field directly binds `n` from `_field_elem_types['GimpleGen']` as
-        # `char *`, so the sorted result's elements stay `char *` and the
-        # `c_name[0]` check below is a real string index rather than a
-        # segfaulting `mojo_list_get_int` on a char* pointer.
-        _new_names = sorted([n for n in self._funcptr_builtins_needed
-                             if n not in self._emitted_funcptr_builtins])
+        # `sorted(setA - setB)`, NOT `sorted([n for n in setA if n not in
+        # setB])`: the plain `for n in <str set>` comprehension lowers to
+        # `mojo_set_iter_val_int`, which reads slot.val_i (0 for a string
+        # slot) — every name came back empty. `mojo_set_difference` +
+        # `mojo_set_sorted` both handle string slots correctly; `_as_str`
+        # in the loop below re-views the (still boxed) result elements.
+        _new_names = sorted(self._funcptr_builtins_needed - self._emitted_funcptr_builtins)
         # A SUPPORTED compiled generator has no ordinary C definition
         # under its bare csym (only its `<base>_start/_resume/_value/
         # _destroy` coroutine API), so a plain `(void *)<csym>`
@@ -6980,6 +6980,10 @@ def gen_module_impl(self, stmts):
                 parts.append("int main (int argc, const char **argv);")
                 parts.append('')
             for c_name in _new_names:
+                c_name = _as_str(c_name)   # `_new_names` erases to boxed
+                # int64_t under self-compile (a set-of-str's element type
+                # doesn't survive `- ` / `sorted`), so `c_name[0]` would
+                # index a pointer and the funcptr global was never emitted.
                 if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
                     parts.append(f"static void * _funcptr_{c_name} = (void *){_funcptr_target(c_name)};")
                 self._emitted_funcptr_builtins.add(c_name)

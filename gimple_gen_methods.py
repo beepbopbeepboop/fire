@@ -407,11 +407,17 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
     helper). `mojo_bound_method_call_N` re-supplies `bm->self` as the
     lifted function's implicit first argument (the captured env / bound
     receiver)."""
-    arg_pairs = [gen.lower_expr(a) for a in node.args]
-    n = len(arg_pairs)
+    # Unpack `lower_expr`'s `tuple[str, str]` return DIRECTLY per arg,
+    # not `for at, av in [<comprehension>]` — a nested unpack over a list
+    # comprehension of tuple-returning calls boxes both slots on the
+    # self-hosted path, so `f'(int64_t){av}'` stringified the boxed `av`
+    # pointer (`add5(37)` -> `(int64_t)41453655152` instead of
+    # `(int64_t)37`).
     widened = []
-    for at, av in arg_pairs:
+    for a in node.args:
+        at, av = gen.lower_expr(a)
         widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
+    n = len(widened)
     helper = f'mojo_bound_method_call_{min(n, 4)}'
     raw_t = gen._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
                              [('int64_t', w) for w in widened[:4]])

@@ -1995,13 +1995,23 @@ int64_t mojo_set_len(MojoSet *s) { return s ? s->used : 0; }
 MojoSet *mojo_set_union(MojoSet *a, MojoSet *b) {
     MojoSet *out = mojo_set_new();
     if (!a && !b) return out;
+    /* Copy BOTH int slots (tag 0) and string slots (tag 1) — the
+     * string branch was missing, so `set_of_str_a | set_of_str_b`
+     * silently returned an empty set (mojo_set_intersection /
+     * mojo_set_difference already handle both). This broke every
+     * `used |= _used_idents_node(...)` in the compiler's own closure
+     * capture scan: capturing closures lost their whole env struct. */
     if (a) for (int64_t i = 0; i < a->cap; i++) {
         if (a->slots[i].tag == 0)
             mojo_set_add_int(out, a->slots[i].val_i);
+        else if (a->slots[i].tag == 1)
+            mojo_set_add_str(out, a->slots[i].val_s);
     }
     if (b) for (int64_t i = 0; i < b->cap; i++) {
         if (b->slots[i].tag == 0)
             mojo_set_add_int(out, b->slots[i].val_i);
+        else if (b->slots[i].tag == 1)
+            mojo_set_add_str(out, b->slots[i].val_s);
     }
     return out;
 }

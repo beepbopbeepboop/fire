@@ -1735,13 +1735,27 @@ def _gen_stmt_IfStmt(gen, node):
     has_else    = bool(node.elifs or node.else_body)
     bb_false    = gen._new_bb() if has_else else bb_merge
 
+    # `bb_merge` is reachable via a condition's false-edge unless a real
+    # `else:` block consumes the last one; otherwise only a
+    # non-terminating branch body keeps it live.
+    _merge_reachable = not node.else_body
+
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
     _narrowed = gen._apply_isinstance_narrowings(node.condition)
     for s in node.then_body:
         gen.gen_stmt(s)
     gen._restore_isinstance_narrowings(_narrowed)
-    gen._emit(f"  goto {bb_merge};")
+    # No `goto {bb_merge}` when the body already ended in `return`/`goto`:
+    # a dead `goto` after `return` is not just noise — when GCC INLINES
+    # this function it can follow that trailing `goto` (to the next
+    # isinstance check) instead of the return, so a branch that computed
+    # the right answer falls through to a later `return set()`. This is
+    # exactly why the self-hosted `_used_idents_node` returned an empty
+    # set for a closure body once it got inlined into `_scan_for_closures`.
+    if not gen._last_was_terminal:
+        gen._emit(f"  goto {bb_merge};")
+        _merge_reachable = True
 
     current_false = bb_false
     elifs = list(node.elifs)
@@ -1765,16 +1779,28 @@ def _gen_stmt_IfStmt(gen, node):
         for s in eb:
             gen.gen_stmt(s)
         gen._restore_isinstance_narrowings(_elif_narrowed)
-        gen._emit(f"  goto {bb_merge};")
+        if not gen._last_was_terminal:
+            gen._emit(f"  goto {bb_merge};")
+            _merge_reachable = True
         current_false = next_false
 
     if node.else_body:
         gen._emit_label(current_false)
         for s in node.else_body:
             gen.gen_stmt(s)
-        gen._emit(f"  goto {bb_merge};")
+        if not gen._last_was_terminal:
+            gen._emit(f"  goto {bb_merge};")
+            _merge_reachable = True
 
-    gen._emit_label(bb_merge)
+    if _merge_reachable:
+        gen._emit_label(bb_merge)
+        gen._last_was_terminal = False
+    else:
+        # Every branch returned/jumped — anything the caller emits after
+        # this `if` is unreachable. Drop the orphan `bb_merge` label
+        # (GIMPLE rejects a label with no predecessors) and let the
+        # caller's own `_last_was_terminal` handling suppress dead code.
+        gen._last_was_terminal = True
 
 
 def _gen_stmt_DelStmt(gen, node):
