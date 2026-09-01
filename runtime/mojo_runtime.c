@@ -2107,15 +2107,31 @@ void mojo_set_iter_free(MojoSetIter *it) { free(it); }
 /* ── Python builtin functions for C types ──────────────────────────────────*/
 
 int mojo_isinstance(int obj, int type_id) {
-    /* Stub: returns 0 (false) for now. Only covers scalar builtins
-     * (bool, int, float, str, list, dict, set) -- those have no tagged
-     * runtime representation in this compiler (a plain int64_t, double,
-     * char pointer, or MojoList pointer carries no dynamic type marker), so
-     * a real isinstance() there would need a much bigger boxing-scheme
-     * change. isinstance() against a real user-defined struct/dataclass
-     * type does NOT go through this stub -- see mojo_read_type_tag below
-     * and _lower_builtin_isinstance's struct_field_types branch in
-     * gimple_codegen.py. */
+    /* type_id: 1 bool, 2 int, 3 float, 4 str, 5 list, 6 dict, 7 set
+     * (see _TYPE_IDS in gimple_gen_calls.py). bool/int/float are raw
+     * unboxed values with no runtime marker -- still unanswerable, stay 0.
+     * list/dict CAN be answered: the runtime keeps a registry of every
+     * MojoList / MojoDict it allocates (mojo_is_registered_list/_dict).
+     * This is what makes `isinstance(node, list)` in the compiler's own
+     * generic AST walkers (_walk_ast_into, _rewrite_node, ...) actually
+     * work when self-hosted, instead of silently never recursing. NOTE:
+     * `obj` is declared `int` but callers pass `(int)(int64_t)ptr` -- a
+     * 32-bit-truncated pointer -- so we can only check the low half.
+     * `mojo_isinstance_p` (below, int64_t arg) is the real entry point;
+     * codegen prefers it. */
+    if (type_id == 5 || type_id == 7)  /* list / tuple-as-list */
+        return mojo_is_registered_list((int64_t)(uint32_t)obj);
+    if (type_id == 6)
+        return mojo_is_registered_dict((int64_t)(uint32_t)obj);
+    return 0;
+}
+
+int mojo_isinstance_p(int64_t obj, int type_id) {
+    /* Full-width sibling of mojo_isinstance -- no pointer truncation. */
+    if (type_id == 5 || type_id == 7)
+        return mojo_is_registered_list(obj);
+    if (type_id == 6)
+        return mojo_is_registered_dict(obj);
     return 0;
 }
 
@@ -2134,7 +2150,14 @@ int mojo_isinstance(int obj, int type_id) {
  * `mojo --dump`'s own do_imports resolution) never recognizing any import
  * statement inside a nested function/if/try block once self-hosted. */
 int64_t mojo_read_type_tag(int64_t addr) {
-    if (!addr) return 0;
+    /* Was: `if (!addr) return 0; return *(int64_t*)addr;` — but once the
+     * compiler's own generic AST walkers actually recurse (mojo_isinstance
+     * for containers now works), `isinstance(<leaf>, SomeStruct)` reaches
+     * here with `addr` being a small int / None / a 31-bit struct
+     * type-tag, and the bare deref segfaulted. Same guard as
+     * mojo_read_type_tag_safe: nothing legitimate lives below 2GiB on any
+     * platform this runtime targets. */
+    if (addr < 0x80000000LL) return 0;
     return *(int64_t *)(intptr_t)addr;
 }
 

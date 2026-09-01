@@ -1513,8 +1513,13 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     res = gen._new_temp('int')
     if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or obj_type.endswith(' *'):
         iv  = gen._new_val('int64_t', f'(int64_t){obj_val}')
-        iv2 = gen._new_val('int', f'(int){iv}')
-        gen._emit(f'  {res} = mojo_isinstance ({iv2}, {type_id});')
+        # `mojo_isinstance_p` (int64_t arg), NOT `mojo_isinstance((int)iv)`:
+        # the old cast truncated the pointer to 32 bits so the runtime's
+        # list/dict registry lookup always missed. The full-width entry
+        # point makes `isinstance(node, list)` / `isinstance(node, dict)`
+        # actually work for a boxed handle — the compiler's own generic
+        # AST walkers depend on it when self-hosted.
+        gen._emit(f'  {res} = mojo_isinstance_p ({iv}, {type_id});')
     else:
         gen._emit(f'  {res} = mojo_isinstance ({obj_val}, {type_id});')
     return gen._new_val('_Bool', f'(_Bool){res}')
