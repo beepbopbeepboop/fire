@@ -2894,7 +2894,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     arg_pairs = gen._expand_sole_spread_into_fixed_slots(
         node, fname, fname_raw, arg_pairs, expected_params)
 
-    if expected_params and len(arg_pairs) < len(expected_params):
+    if len(expected_params) > 0 and len(arg_pairs) < len(expected_params):
         kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
         # Free-function param defaults: `def greet(name: String = "world")`
         # called as `greet()` must pad with "world", not NULL/0.
@@ -2969,7 +2969,13 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # to variadic callees: a '...' signature takes the extras by
     # convention, and a MojoList* parameter slot means this call was (or
     # will be) pack-lowered, where extras belong INSIDE the pack.
-    if (expected_params and len(arg_pairs) > len(expected_params)
+    # `len(...) > 0`, not a bare `if expected_params`: an empty list is
+    # TRUTHY in the self-hosted compiler (container-truthiness gap), so
+    # `if expected_params and len(arg_pairs) > 0` fired for a callee with
+    # NO known signature and truncated `arg_pairs` to `[:0]` — every
+    # such call (`py_tokenize(src)` in mojo_main.py, ...) emitted arity-0
+    # and GCC rejected it against the runtime header's real prototype.
+    if (len(expected_params) > 0 and len(arg_pairs) > len(expected_params)
             and not any('...' in p or p == 'MojoList *'
                         for p in expected_params)):
         arg_pairs = arg_pairs[:len(expected_params)]
