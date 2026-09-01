@@ -3323,8 +3323,15 @@ def _gen_stmt_WithStmt(gen, node):
     # `X().__enter__()`'s RETURN value, not to the `X()` instance
     # itself) — __exit__ must always be called on the context manager
     # object, never on whatever __enter__ happened to return.
-    contexts = []
-    gen_ctxs = []   # parallel: generator-context info per item (or None)
+    # 3 index-parallel lists rather than a list of 3-tuples — the
+    # self-hosted backend boxes `contexts[i][k]` tuple-element access.
+    _ctx_ts = []
+    _ctx_vs = []
+    _ctx_sns = []
+    # parallel per-item generator-context info: base name (or None) + the
+    # coroutine handle value. Two lists, not a list of (v, base) tuples.
+    _gctx_bases = []
+    _gctx_vs = []
     for item in node.items:
         et, ev = gen.lower_expr(item.expr)
         ctx_t, ctx_v = et, ev
@@ -3356,8 +3363,11 @@ def _gen_stmt_WithStmt(gen, node):
                 if alias not in gen.var_types:
                     gen._declare_var(alias, 'int64_t')
                 gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
-            gen_ctxs.append((ctx_v, base))
-            contexts.append((ctx_t, ctx_v, None))
+            _gctx_bases.append(base)
+            _gctx_vs.append(ctx_v)
+            _ctx_ts.append(ctx_t)
+            _ctx_vs.append(ctx_v)
+            _ctx_sns.append(None)
             continue
         enter_fn    = gen._struct_method_csym(struct_name, '__enter__', '')
         has_enter = (enter_fn in gen.func_return_types
@@ -3396,11 +3406,26 @@ def _gen_stmt_WithStmt(gen, node):
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
-            contexts.append((ctx_t, ctx_v, struct_name))
+            _ctx_ts.append(ctx_t)
+            _ctx_vs.append(ctx_v)
+            _ctx_sns.append(struct_name)
+            _gctx_bases.append(None)   # keep index-parallel
+            _gctx_vs.append(None)
 
     def _emit_exits():
-        for (ct, cv, sn), gctx in zip(contexts, gen_ctxs):
-            if gctx is not None:
+        # Index walk over 3 parallel lists, NOT
+        # `for (ct, cv, sn), gctx in zip(contexts, gen_ctxs)` — the
+        # nested-tuple `for` target has no self-hosted lowering (emits
+        # mojo_unsupported_iter, the loop ran zero times so `with` blocks
+        # never emitted their __exit__ / generator teardown in the
+        # compiled compiler's own output).
+        for _xi in range(len(_ctx_ts)):
+            ct = _ctx_ts[_xi]
+            cv = _ctx_vs[_xi]
+            sn = _ctx_sns[_xi]
+            _gbase = _gctx_bases[_xi]
+            _gval = _gctx_vs[_xi]
+            if _gbase is not None:
                 # Generator context manager: the final resume() runs the
                 # body from its bare yield to co_return (= __exit__), then
                 # the coroutine frame is destroyed. resume()'s _Bool
@@ -3409,9 +3434,9 @@ def _gen_stmt_WithStmt(gen, node):
                 # suppresses exceptions, and this normal-path emission
                 # runs after an unexceptional body.
                 done_t = gen._new_temp('_Bool')
-                gen._emit(f"  {done_t} = {gctx[1]}_resume ({gctx[0]});")
-                gen._emit_call('void', '', f"{gctx[1]}_destroy",
-                               [('MojoGenerator *', gctx[0])])
+                gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
+                gen._emit_call('void', '', f"{_gbase}_destroy",
+                               [('MojoGenerator *', _gval)])
                 continue
             exit_fn = gen._struct_method_csym(sn, '__exit__', '')
             if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
@@ -3445,11 +3470,14 @@ def _gen_stmt_WithStmt(gen, node):
             else:
                 gen._emit(f"  /* with: __exit__ ({sn}) */")
 
-    has_exit = any(
-        sn is not None
-        and (gen._struct_method_csym(sn, '__exit__', '') in gen.func_return_types
-             or f"{sn}___exit__" in gen.func_return_types)
-        for _, _, sn in contexts)
+    has_exit = False
+    for _hxi in range(len(_ctx_sns)):
+        _hsn = _ctx_sns[_hxi]
+        if _hsn is not None and (
+                gen._struct_method_csym(_hsn, '__exit__', '') in gen.func_return_types
+                or f"{_hsn}___exit__" in gen.func_return_types):
+            has_exit = True
+            break
 
     if has_exit:
         # See _reset_func's own comment on `_func_used_setjmp` -- same

@@ -1888,7 +1888,12 @@ def _locally_binds_name(gen, bare_name: str) -> bool:
         return True
     scopes = getattr(gen, '_import_scope_stack', None)
     if scopes:
-        for frame in reversed(scopes):
+        # forward iteration (not `reversed(scopes)` — the self-hosted
+        # backend has no `reversed(<list>)` lowering, emitting
+        # mojo_unsupported_iter so the loop ran zero times): this is a
+        # pure "is `bare_name` in ANY frame" membership test, order-
+        # independent.
+        for frame in scopes:
             if bare_name in frame:
                 return True
     own_home = getattr(gen, '_own_imported_func_home', None)
@@ -3193,17 +3198,57 @@ def _find_generic_source(gen, module: str, name: str, kind: str = 'fn', depth: i
     if gimple_ctypes.re.search(head + rf'{gimple_ctypes.re.escape(name)}\s*\[', src):
         return path
     nm = gimple_ctypes.re.escape(name)
-    for mm in gimple_ctypes.re.finditer(r'from\s+([.\w]+)\s+import\s*\(([^)]*)\)', src):
-        if gimple_ctypes.re.search(rf'(?:^|[\s,(]){nm}(?:[\s,)]|$)', mm.group(2)):
-            r = gen._find_generic_source(gen._abs_module(mm.group(1), module), name, kind, depth + 1)
-            if r:
-                return r
-    for mm in gimple_ctypes.re.finditer(r'from\s+([.\w]+)\s+import\s+([^\n(]+)', src):
-        if gimple_ctypes.re.search(rf'(?:^|[\s,]){nm}(?:[\s,]|$)', mm.group(2)):
-            r = gen._find_generic_source(gen._abs_module(mm.group(1), module), name, kind, depth + 1)
+    # Flat [mod0, names0, mod1, names1, ...] scan instead of two
+    # `re.finditer(...)` loops with `mm.group(1)/.group(2)` — the
+    # self-hosted backend has no lowering for `re.finditer` (emits
+    # `mojo_unsupported_iter`, loop body runs zero times) nor for
+    # `.group(n)` with an argument, so on the compiled path re-export
+    # hop resolution here was silently dead.
+    _fi = _scan_from_imports_flat(src)
+    _j = 0
+    while _j < len(_fi):
+        _fmod = _fi[_j]
+        _fnames = _fi[_j + 1]
+        _j += 2
+        if gimple_ctypes.re.search(rf'(?:^|[\s,(]){nm}(?:[\s,)]|$)', _fnames):
+            r = gen._find_generic_source(gen._abs_module(_fmod, module), name, kind, depth + 1)
             if r:
                 return r
     return None
+
+
+def _scan_from_imports_flat(src: str) -> list:
+    """Every `from X import ...` in `src` as a flat list
+    [mod0, names0, mod1, names1, ...] — a flat list (not a list of
+    2-tuples, not a tuple return) so the self-hosted backend can iterate
+    it by index without boxing. A parenthesised, multi-line import list
+    (`from X import (\n a,\n b,\n)`) is joined into one names string."""
+    out: list = []
+    lines = src.split('\n')
+    _i = 0
+    _n = len(lines)
+    while _i < _n:
+        _ln = lines[_i].strip()
+        _i += 1
+        if not _ln.startswith('from '):
+            continue
+        _rest = _ln[5:]
+        _p = _rest.find(' import')
+        if _p < 0:
+            continue
+        _mod = _rest[:_p].strip()
+        _names = _rest[_p + 7:].lstrip()
+        if _names.startswith('('):
+            _names = _names[1:]
+            while (')' not in _names) and (_i < _n):
+                _names = _names + ' ' + lines[_i].strip()
+                _i += 1
+            _cut = _names.find(')')
+            if _cut >= 0:
+                _names = _names[:_cut]
+        out.append(_mod)
+        out.append(_names)
+    return out
 
 
 def _register_imported_generics(gen, stmts) -> None:
