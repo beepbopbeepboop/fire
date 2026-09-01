@@ -3167,8 +3167,9 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
 
 
 def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
+    _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     gen._declare_var(gen0.target, 'char')
-    len64 = gen._new_val('int64_t', f'mojo_str_len ({it_val})')
+    len64 = gen._new_val('int64_t', f'mojo_str_len ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3177,7 +3178,7 @@ def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({it_val}, {idx64});")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({_iv}, {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -3201,8 +3202,9 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     for every self-hosted-compiled program). Mirrors _compr_str_loop's
     identical index-loop shape, just over mojo_strlen/_mojo_at_char
     instead of mojo_str_len/mojo_str_char_at."""
+    _iv = _as_str(it_val)   # see _compr_list_loop
     gen._declare_var(gen0.target, 'char')
-    len64 = gen._new_val('int64_t', f'mojo_strlen ({it_val})')
+    len64 = gen._new_val('int64_t', f'mojo_strlen ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3212,7 +3214,7 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     gen._ptr_helpers_needed.add('char')
-    addr = gen._new_val('char *', f"_mojo_at_char ({it_val}, {idx64})")
+    addr = gen._new_val('char *', f"_mojo_at_char ({_iv}, {idx64})")
     gen._emit(f"  {gen._cname(gen0.target)} = *{addr};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")

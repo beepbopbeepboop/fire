@@ -2989,6 +2989,17 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
 
 
 def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
+    # `it_val` arrives from `_lower_comprehension` where it is reassigned
+    # (the `_get_actual_type` cast block) — whole-function type
+    # unification there can widen it back to int64_t even though it holds
+    # a `MojoList *`. Every `f'... ({it_val})'` below would then emit
+    # `mojo_str_from_int(<ptr>)` — a raw ASLR pointer decimal baked into
+    # the generated code (`mojo_list_len (37556144960)`), the top
+    # stage2-vs-stage3 non-determinism source. Bind a FRESH `char *`
+    # local here (never reassigned → nothing to unify with) and use it in
+    # every emitted reference. FRESH name, not `it_val = _as_str(it_val)`:
+    # reassigning the param re-widens it via the same unification.
+    _iv = _as_str(it_val)
     # Detect tuple unpacking target: "_, av" or "(_, av)"
     target_str = gen0.target.strip()
     inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
@@ -3016,10 +3027,10 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         # comprehension site (real: Tools/scripts/summarize_stats.py's
         # `[... for label, (value, den) in object_stats.items()]`).
         var_names = _split_top_level_comma(inner_str)
-        is_dict_items = it_val in gen._dict_items_val_elems
-        value_elem = gen._dict_items_val_elems.get(it_val) if is_dict_items else None
-        slot_types = gen._tuple_slot_types.get(it_val)
-        pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
+        is_dict_items = _iv in gen._dict_items_val_elems
+        value_elem = gen._dict_items_val_elems.get(_iv) if is_dict_items else None
+        slot_types = gen._tuple_slot_types.get(_iv)
+        pair_elem = gen._nested_elem_types.get(_iv, 'int64_t')
         slot_elems = []
         for i, vn in enumerate(var_names):
             if is_dict_items:
@@ -3051,7 +3062,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             _cvn = _as_str(var_names[_czi])
             _cse = _as_str(slot_elems[_czi]) if _czi < len(slot_elems) else 'int64_t'
             _declare_target_name(_cvn, _cse)
-        len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
+        len64 = gen._new_val('int64_t', f'mojo_list_len ({_iv})')
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
         bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3060,7 +3071,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
         gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
         gen._emit_label(bb_body)
-        raw_elem = gen._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
+        raw_elem = gen._new_val('int64_t', f"mojo_list_get_int ({_iv}, {idx64})")
         sub_list = gen._new_val('MojoList *', f"(MojoList *){raw_elem}")
 
         def _emit_slot_assign(ptr, vn, i, se):
@@ -3069,8 +3080,14 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             # identically), mirroring _gen_for_list. Checked BEFORE any
             # accessor dispatch so even a wrongly-str-typed slot can't
             # emit a parenthesized name verbatim.
+            # `_p` fresh `char *` view: `ptr` (a `MojoList *` temp name)
+            # gets unified to int64_t through this nested fn on the
+            # self-hosted path, so `f'... ({ptr} ...)'` emitted a raw
+            # ASLR pointer decimal (`mojo_list_get_str (46304590592, 0)`)
+            # — a stage2-vs-stage3 non-determinism source.
+            _p = _as_str(ptr)
             if vn.startswith('(') and vn.endswith(')'):
-                raw_n = gen._new_val('int64_t', f"mojo_list_get_int ({ptr}, {i})")
+                raw_n = gen._new_val('int64_t', f"mojo_list_get_int ({_p}, {i})")
                 nested_ptr = gen._new_val('MojoList *', f"(MojoList *){raw_n}")
                 nested_names = _split_top_level_comma(vn[1:-1].strip())
                 for j, nn in enumerate(nested_names):
@@ -3080,7 +3097,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             suf = gimple_ctypes.TypeLattice.list_suffix(se)
             vt = gen.var_types.get(vn, se)
             if suf == 'str':
-                sub_str = gen._new_val('char *', f"mojo_list_get_str ({ptr}, {i})")
+                sub_str = gen._new_val('char *', f"mojo_list_get_str ({_p}, {i})")
                 if vt == 'char *':
                     gen._emit(f"  {cv} = {sub_str};")
                 else:
@@ -3088,7 +3105,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
                     gen._emit(f"  {cv} = {sub_val};")
                     gen._actual_types[vn] = 'char *'
             else:
-                raw = gen._new_val('int64_t', f"mojo_list_get_int ({ptr}, {i})")
+                raw = gen._new_val('int64_t', f"mojo_list_get_int ({_p}, {i})")
                 if vt == 'int64_t':
                     gen._emit(f"  {cv} = {raw};")
                 else:
@@ -3105,9 +3122,9 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._emit(f"  goto {bb_cond};")
         gen._emit_label(bb_after)
         return
-    elem = _as_str(gen._elem_of(it_val))
+    elem = _as_str(gen._elem_of(_iv))
     gen._declare_var(_as_str(gen0.target), elem)
-    len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
+    len64 = gen._new_val('int64_t', f'mojo_list_len ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
@@ -3118,10 +3135,10 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit_label(bb_body)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
     if suf == 'double':
-        gen._emit(f"  {gen0.target} = mojo_list_get_double ({it_val}, {idx64});")
+        gen._emit(f"  {gen0.target} = mojo_list_get_double ({_iv}, {idx64});")
     elif suf == 'str':
         # mojo_list_get_str returns char*, handle type mismatch with target variable
-        temp_str = gen._new_val('char *', f"mojo_list_get_str ({it_val}, {idx64})")
+        temp_str = gen._new_val('char *', f"mojo_list_get_str ({_iv}, {idx64})")
         target_type = gen._type_of(gen0.target)
         if target_type == 'char *':
             gen._emit(f"  {gen0.target} = {temp_str};")
@@ -3130,7 +3147,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
             gen._emit(f"  {gen0.target} = {int_ptr};")
     else:
-        raw64 = gen._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
+        raw64 = gen._new_val('int64_t', f"mojo_list_get_int ({_iv}, {idx64})")
         # The loop variable may have been first declared elsewhere in this
         # function with a non-int64_t C type (e.g. `f` used as a string in
         # one branch and as a node handle in `for f in node.fields` later —
@@ -3162,7 +3179,8 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     docstring) so a `for` loop and this comprehension-based consumer
     (which `list(...)`/`set(...)`/etc. all route through via
     _lower_ctor_from_iterable) get identical, non-duplicated semantics."""
-    api = gen._generator_var_api.get(it_val)
+    _iv = _as_str(it_val)   # see _compr_list_loop
+    api = gen._generator_var_api.get(_iv)
     if api is None:
         gen._emit(f"  /* TODO: comprehension over MojoGenerator* with no known API (unreachable in Milestone B scope) */")
         return
@@ -3205,10 +3223,10 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_cond)
-    cond_t = gen._new_val('_Bool', f"{base}_resume ({it_val})")
+    cond_t = gen._new_val('_Bool', f"{base}_resume ({_iv})")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    val = gen._new_val(vct, f"{base}_value ({it_val})")
+    val = gen._new_val(vct, f"{base}_value ({_iv})")
     if is_tuple_target:
         gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val)
     else:
@@ -3221,14 +3239,15 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit_label(bb_post)
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    gen._emit(f"  {base}_destroy ({it_val});")
+    gen._emit(f"  {base}_destroy ({_iv});")
 
 
 def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
+    _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     gen._declare_var(gen0.target, 'char *')
     iter_t = gen._new_temp('MojoDictIter *')
     more_t = gen._new_temp('int')
-    gen._emit(f"  {iter_t} = mojo_dict_iter_new ({it_val});")
+    gen._emit(f"  {iter_t} = mojo_dict_iter_new ({_iv});")
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -3256,10 +3275,11 @@ def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
 
 
 def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
+    _iv = _as_str(it_val)   # see _compr_list_loop
     gen._declare_var(gen0.target, 'int64_t')
     iter_t = gen._new_temp('MojoSetIter *')
     more_t = gen._new_temp('int')
-    gen._emit(f"  {iter_t} = mojo_set_iter_new ({it_val});")
+    gen._emit(f"  {iter_t} = mojo_set_iter_new ({_iv});")
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
