@@ -86,8 +86,16 @@ def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags, link_driver):
     link = [link_driver, '-o', target, client_o] + list(objects) + link_dylibs
     for rp in rpaths:
         link += [f'-Wl,-rpath,{rp}']
-    if platform.system() != 'Darwin':
-        link += ['-ldl']
+    if platform.system() == 'Darwin':
+        # 512MB main-thread stack (default is 8MB). The self-hosted compiler's
+        # own regex engine (re_match_node/re_match_repeat) and its generic AST
+        # walkers are deeply CPS-recursive — a `re.sub`/`findall` over a
+        # 200KB module source, or a walk of a big AST, recurses per input
+        # position and blows the 8MB stack. Enlarging it is the pragmatic fix
+        # until those are made iterative.
+        link += ['-Wl,-stack_size,0x20000000']
+    else:
+        link += ['-ldl', '-Wl,-z,stacksize=536870912']
 
     r = subprocess.run(link, capture_output=True, text=True)
     if r.returncode != 0:

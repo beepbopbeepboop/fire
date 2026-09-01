@@ -14,6 +14,12 @@ MOJO_MAIN    = mojo.py
 GCC_MP15     = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
 
+# 512MB main-thread stack (default 8MB). The self-hosted compiler's regex
+# engine and generic AST walkers are deeply CPS-recursive — a re.sub/findall
+# over a 200KB module source recurses per input position and blows the
+# default stack (only reached on the MOJO_NO_SHIM=1 --dump-full path).
+BIG_STACK_LDFLAGS = $(shell test "$$(uname -s)" = "Darwin" && echo "-Wl,-stack_size,0x20000000" || echo "-Wl,-z,stacksize=536870912")
+
 # MacPorts GCC can't find SDK headers without this
 SDKROOT := $(shell xcrun --show-sdk-path 2>/dev/null)
 export SDKROOT
@@ -231,6 +237,7 @@ stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/mojo.ci ==="
 	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime -x c \
+	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
 	    stage1/mojo.ci \
 	    $(RUNTIME_SRC)
@@ -399,7 +406,7 @@ build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 
 build/mojo: build/system.o build/mojo_runtime.o
 	@mkdir -p build
-	$(BOOTSTRAP_CC) -o $@ build/system.o build/mojo_runtime.o
+	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/mojo_runtime.o
 	@chmod +x $@
 	@echo "build/mojo linked successfully"
 
