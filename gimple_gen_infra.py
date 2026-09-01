@@ -1869,8 +1869,22 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                 # without this exclusion the single registered struct with a
                 # same-named FIELD won (WithStmt.items → `WithStmt *` for
                 # gencodec.py's marshalmap/python_mapdef_code `map` params).
-                struct_evidence = fields_accessed - (
-                    called_methods & BUILTIN_CONTAINER_METHODS)
+                # Build the evidence list from `sorted(<plain set>)` +
+                # explicit membership, NOT `fields_accessed - (called_methods
+                # & BUILTIN_CONTAINER_METHODS)` (a set DIFFERENCE of a set
+                # INTERSECTION) — those compound set ops lose str-slot
+                # tracking on the self-hosted path, so `sorted(...)` then
+                # `_as_str(elem)` viewed GARBAGE bytes and the
+                # `elem not in sfields` check came out non-deterministic
+                # (a struct-type collapse that differs run to run — the
+                # `AssertStmt_parse_module` / spurious `_funcptr_<S>_<f>`
+                # stage2-vs-stage3 diffs).
+                _struct_evidence_list = []
+                for _fe in sorted(fields_accessed):
+                    _fes = _as_str(_fe)
+                    if _fes in called_methods and _fes in BUILTIN_CONTAINER_METHODS:
+                        continue
+                    _struct_evidence_list.append(_fes)
                 # Explicit nested loops, NOT `[sname for sname, sfields in
                 # .items() if all(f in sfields for f in ...)]`: the
                 # comprehension form (2-tuple `.items()` target + an
@@ -1887,18 +1901,18 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                 # MojoList whose element type the backend doesn't track, so
                 # `for f in _evidence_fields` reads each string via the int
                 # accessor and `f in sfields` then stringifies the pointer.
-                _evidence_fields = sorted(struct_evidence)
+                _evidence_fields = _struct_evidence_list
                 matches: list = []
                 if len(_evidence_fields) > 0:
-                    for sname in _g.struct_field_types:
-                        sfields = _g.struct_field_types[sname]
+                    for sname in sorted(_g.struct_field_types):
+                        sfields = _g.struct_field_types[_as_str(sname)]
                         _all_present = True
                         for _f0 in _evidence_fields:
-                            if _as_str(_f0) not in sfields:
+                            if _f0 not in sfields:
                                 _all_present = False
                                 break
                         if _all_present:
-                            matches.append(sname)
+                            matches.append(_as_str(sname))
                 if len(matches) == 1:
                     inferred[pname] = f"{matches[0]} *"
             # A dict-only method call with no better signal: the param is a
