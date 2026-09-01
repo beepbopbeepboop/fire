@@ -3417,8 +3417,17 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             out.append(gen._default_expr_to_pair(
                 (defaults or {}).get(chosen['param_names'][len(out)])))
         out[_kw_idx] = ('MojoDict *', gen._pack_kwargs_dict(_rest))
-    while len(out) < chosen['max_arity']:
-        _dflt = (defaults or {}).get(chosen['param_names'][len(out)]) if len(out) < len(chosen['param_names']) else None
+    # Pad up to max_arity, but never past the real parameter count — for a
+    # `*args` overload max_arity is `float('inf')` (which the varargs
+    # branch above already `return`ed for, but `chosen['has_varargs']` can
+    # read falsy on the self-hosted path so a varargs candidate can still
+    # arrive here; an unguarded `while len(out) < inf` then never
+    # terminated — a hard hang, e.g. `MOJO_NO_SHIM=1 ./mojoc --dump
+    # mojo_compiler.py`).
+    _pn_count = len(chosen['param_names'])
+    _max_ar = chosen['max_arity']
+    while len(out) < _pn_count and len(out) < _max_ar:
+        _dflt = (defaults or {}).get(chosen['param_names'][len(out)])
         out.append(gen._default_expr_to_pair(_dflt))
     return out
 

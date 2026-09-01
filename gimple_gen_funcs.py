@@ -3185,11 +3185,14 @@ def _find_generic_source(gen, module: str, name: str, kind: str = 'fn', depth: i
     function when kind='fn', a struct when kind='struct'), reachable from
     `module` by following `from X import (...)` re-export hops (e.g.
     std.os re-exports listdir from .os = os.mojo). None if not generic."""
-    key = (module, name, kind)
+    # String key, NOT a `(module, name, kind)` tuple — a tuple set-key is
+    # coerced to a boxed int64_t on the self-hosted path so `key in
+    # visited` never hits, forcing a full re-scan on every repeat call.
+    key = module + '\x1f' + name + '\x1f' + kind
     if key in gen._find_generic_visited:
         return None
     gen._find_generic_visited.add(key)
-    if depth > 5 or not module:
+    if depth > 3 or not module:
         return None
     path, src, mod = gen._parsed_import(module)
     if not src:
