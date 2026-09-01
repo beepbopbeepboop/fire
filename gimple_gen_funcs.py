@@ -135,7 +135,12 @@ def _gen_stmt_ImportStmt(gen, node):
         _al = _as_str(alias)
         # `import a.b.c` (no alias) binds the top-level package name `a` in
         # scope (Python semantics) — not the invalid C identifier "a.b.c".
-        local_name = _al if _al else _mod.split('.')[0]
+        if _al:
+            local_name = _al
+        elif '.' in _mod:
+            local_name = _mod[:_mod.index('.')]
+        else:
+            local_name = _mod
         gen.imported_symbols[local_name] = {
             'module': _mod,
             'return_type': 'unknown',

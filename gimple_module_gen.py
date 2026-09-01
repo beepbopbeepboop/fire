@@ -534,7 +534,12 @@ def gen_module_impl(self, stmts):
             elif isinstance(_tb_s, ImportStmt):
                 for _tb_mod0, _tb_alias0 in _import_targets(_tb_s):
                     _tb_mod = _as_str(_tb_mod0); _tb_alias = _as_str(_tb_alias0)
-                    _names.add(_tb_alias if _tb_alias else _tb_mod.split('.')[0])
+                    if _tb_alias:
+                        _names.add(_tb_alias)
+                    elif '.' in _tb_mod:
+                        _names.add(_tb_mod[:_tb_mod.index('.')])
+                    else:
+                        _names.add(_tb_mod)
             elif isinstance(_tb_s, FunctionDef):
                 _names.add(_tb_s.name)
         return _names
@@ -682,7 +687,8 @@ def gen_module_impl(self, stmts):
                 _struct_src = _gsrc
             _moids_pre = self._struct_method_overload_ids(_s)
             _name_occurrence: dict = {}  # method name -> next occurrence index to consume
-            for _m, _oid in zip(_s.methods, _moids_pre):
+            for _zmi in range(len(_s.methods)):
+                _m = _as_funcdef_node(_s.methods[_zmi]); _oid = _as_str(_moids_pre[_zmi]) if _zmi < len(_moids_pre) else ""
                 _occ = _name_occurrence.get(_m.name, 0)
                 _name_occurrence[_m.name] = _occ + 1
                 if not _m.comptime_params:
@@ -2193,7 +2199,12 @@ def gen_module_impl(self, stmts):
             for _im_mod0, _im_alias0 in _import_targets(s):
                 _im_mod = _as_str(_im_mod0)
                 _im_alias = _as_str(_im_alias0)
-                _im_local = _im_alias if _im_alias else _im_mod.split('.')[0]
+                if _im_alias:
+                    _im_local = _im_alias
+                elif '.' in _im_mod:
+                    _im_local = _im_mod[:_im_mod.index('.')]
+                else:
+                    _im_local = _im_mod
                 if _im_local not in self.imported_symbols:
                     self.imported_symbols[_im_local] = {
                         'module': _im_mod,
@@ -2779,7 +2790,8 @@ def gen_module_impl(self, stmts):
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _moids = self._struct_method_overload_ids(s)
-            for m, _oid in zip(s.methods, _moids):
+            for _zmi in range(len(s.methods)):
+                m = _as_funcdef_node(s.methods[_zmi]); _oid = _as_str(_moids[_zmi]) if _zmi < len(_moids) else ""
                 _has_self_first = bool(m.params) and m.params[0][0] == 'self'
                 _params_no_self = m.params[1:] if _has_self_first else m.params
                 # Sentinel is -1, NOT None: this compiler models None as 0,
@@ -2847,7 +2859,9 @@ def gen_module_impl(self, stmts):
     for s in self._imported_typedef_structs:
         if not s.methods:
             continue
-        for _oid, m in zip(self._struct_method_overload_ids(s), s.methods):
+        _s2850_oids = self._struct_method_overload_ids(s)
+        for _zmi in range(len(s.methods)):
+            m = _as_funcdef_node(s.methods[_zmi]); _oid = _as_str(_s2850_oids[_zmi]) if _zmi < len(_s2850_oids) else ""
             bare_mangled = f"{s.name}_{m.name}{_oid}"
             mangled = self._struct_method_csym(s.name, m.name, _oid)
             param_ctypes = self._mangled_signature_ctypes.get(bare_mangled)
@@ -3186,7 +3200,9 @@ def gen_module_impl(self, stmts):
     for s in (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])):
         if not isinstance(s, StructDef):
             continue
-        for m, _oid in zip(s.methods, self._struct_method_overload_ids(s)):
+        _s3189_oids = self._struct_method_overload_ids(s)
+        for _zmi in range(len(s.methods)):
+            m = _as_funcdef_node(s.methods[_zmi]); _oid = _as_str(_s3189_oids[_zmi]) if _zmi < len(_s3189_oids) else ""
             _sigkey = f"{s.name}_{m.name}{_oid}"
             _old_ct = self._mangled_signature_ctypes.get(_sigkey)
             if _old_ct is None:
@@ -3964,7 +3980,8 @@ def gen_module_impl(self, stmts):
         if not isinstance(_sd, StructDef):
             continue
         _moids_ac = self._struct_method_overload_ids(_sd)
-        for _m, _oid in zip(_sd.methods, _moids_ac):
+        for _zmi in range(len(_sd.methods)):
+            _m = _as_funcdef_node(_sd.methods[_zmi]); _oid = _as_str(_moids_ac[_zmi]) if _zmi < len(_moids_ac) else ""
             _outer_scope = {_sd.name.lower(): f"{_sd.name} *",
                              'self': f"{_sd.name} *"}
             for _pname, _ptype in _m.params:
@@ -4587,7 +4604,14 @@ def gen_module_impl(self, stmts):
             _scan_for_closures(s.name, outer_scope, s.body)
         elif isinstance(s, StructDef):
             _moids = self._struct_method_overload_ids(s)
-            for method, _oid in zip(s.methods, _moids):
+            # index walk, NOT `zip(s.methods, _moids)` — the zip 2-tuple
+            # unpack boxes `_oid` on the self-hosted path, so `f"...{_oid}"`
+            # emitted the (non-deterministic) POINTER of the empty-string
+            # oid into every closure-env struct name for a non-overloaded
+            # method (stage2-vs-stage3 idempotency failure).
+            for _smi in range(len(s.methods)):
+                method = _as_funcdef_node(s.methods[_smi])
+                _oid = _as_str(_moids[_smi]) if _smi < len(_moids) else ''
                 outer_name = f"{s.name}_{method.name}{_oid}"
                 outer_scope = {s.name.lower(): f"{s.name} *"}  # struct instance
                 for pname, ptype in method.params:
@@ -5751,14 +5775,23 @@ def gen_module_impl(self, stmts):
         parts.append('')
         parts.extend(imported_code)
 
-    new_helpers = self._ptr_helpers_needed - self._emitted_ptr_helpers
-    for et in sorted(new_helpers):
+    # `sorted(<set>)` + `_as_str(et)` — a raw `<set> - <set>` difference /
+    # bare `for x in <str set>` reads each str slot as a boxed int64_t on
+    # the self-hosted path, so `et` came out a decimal-stringified pointer
+    # in the emitted `static <ptr> * _mojo_at_<ptr> (...)` (non-deterministic
+    # C — a stage2-vs-stage3 idempotency failure).
+    _new_helper_count = 0
+    for et in sorted(self._ptr_helpers_needed):
+        et = _as_str(et)
+        if et in self._emitted_ptr_helpers:
+            continue
         cn = _c_id(et)
         parts.append(
             f"static {et} * _mojo_at_{cn} ({et} * p, int64_t n) {{ return p + n; }}"
         )
         self._emitted_ptr_helpers.add(et)
-    if new_helpers:
+        _new_helper_count += 1
+    if _new_helper_count > 0:
         parts.append('')
 
     global_decls = []  # kept for compatibility, but won't be emitted
