@@ -396,6 +396,48 @@ def _render_struct_typedef_body(struct_name, fields):
     return lines
 
 
+def _collect_import_modules(modules_to_compile, node_list):
+    """Populate `modules_to_compile` with every module named by an import
+    anywhere in `node_list` — top level and nested inside function bodies,
+    if/try/loop blocks. Deliberately a module-level function taking the
+    accumulator explicitly rather than a nested closure over it: on the
+    self-hosted (compiled) path a recursive nested function's capture of a
+    mutable set was unreliable, so `--dump-full` silently saw only the
+    module's own top-level imports and emitted a truncated closure."""
+    for stmt in node_list:
+        if isinstance(stmt, FromImportStmt):
+            modules_to_compile.add(stmt.module)
+            for _fip14 in gimple_ctypes._fromimport_names(stmt):
+                _fn = _as_str(_fip14[0])
+                # _join_import_member, not a blind f"{module}.{name}": for a
+                # bare-relative module (`from . import strutil`, module == '.')
+                # the separator dot would double-count the depth. The joined
+                # string must be EXACTLY what _module_candidate_paths resolves
+                # and what the temp_gen's module_name/qualifier derive from.
+                modules_to_compile.add(gimple_ctypes._join_import_member(stmt.module, _fn))
+        elif isinstance(stmt, ImportStmt):
+            # Read `stmt.module` DIRECTLY (a char* field, exactly like the
+            # FromImportStmt branch above), not via `_import_targets(stmt)`
+            # with a `for _m, _a in ...` unpack: that 2-tuple unpack types
+            # _m as int64_t on the self-hosted backend, so the module string
+            # POINTER was stored via mojo_set_add_int and every later
+            # `name in modules_to_compile` missed — the compiled --dump-full
+            # then emitted a truncated transitive closure.
+            modules_to_compile.add(_as_str(stmt.module))
+            for _ex in (getattr(stmt, 'extra', None) or []):
+                modules_to_compile.add(_as_str(_ex[0]))
+        elif isinstance(stmt, FunctionDef):
+            _collect_import_modules(modules_to_compile, stmt.body)
+        elif isinstance(stmt, IfStmt):
+            _collect_import_modules(modules_to_compile, stmt.then_body)
+            for _elif_pair in stmt.elifs:
+                _collect_import_modules(modules_to_compile, _elif_pair[1])
+            if stmt.else_body:
+                _collect_import_modules(modules_to_compile, stmt.else_body)
+        elif isinstance(stmt, (WhileStmt, ForStmt, TryStmt)):
+            _collect_import_modules(modules_to_compile, stmt.body)
+
+
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
     self._toplevel_dep_init_modules: list[str] = []
@@ -766,38 +808,7 @@ def gen_module_impl(self, stmts):
     imported_stmts = []
     if self.do_imports:
         modules_to_compile = set()
-        def find_imports(node_list):
-            for stmt in node_list:
-                if isinstance(stmt, FromImportStmt):
-                    modules_to_compile.add(stmt.module)
-                    for _fip14 in gimple_ctypes._fromimport_names(stmt):
-                        _fn = _as_str(_fip14[0])
-                        _fa = _as_str(_fip14[1])
-                        # _join_import_member, not a blind f"{module}.{name}":
-                        # for a bare-relative module (`from . import strutil`,
-                        # module == '.') the separator dot would double-count
-                        # the depth ('.' + '.' + 'strutil' spells '..strutil',
-                        # a level-2 name that resolves one directory too high
-                        # or nowhere at all). The joined string must be EXACTLY
-                        # what _module_candidate_paths resolves and what the
-                        # temp_gen's own module_name/qualifier derive from —
-                        # see _join_import_member's docstring.
-                        modules_to_compile.add(gimple_ctypes._join_import_member(stmt.module, _fn))
-                elif isinstance(stmt, ImportStmt):
-                    for _m, _a in _import_targets(stmt):
-                        modules_to_compile.add(_m)
-                elif isinstance(stmt, FunctionDef):
-                    find_imports(stmt.body)
-                elif isinstance(stmt, IfStmt):
-                    find_imports(stmt.then_body)
-                    for _, elif_body in stmt.elifs:
-                        find_imports(elif_body)
-                    if stmt.else_body:
-                        find_imports(stmt.else_body)
-                elif isinstance(stmt, (WhileStmt, ForStmt, TryStmt)):
-                    find_imports(stmt.body)
-
-        find_imports(stmts)
+        _collect_import_modules(modules_to_compile, stmts)
 
         # Cross-module generator scalar contracts (pre-pass, MUST run
         # before any imported module is inlined): for every bare-name call
