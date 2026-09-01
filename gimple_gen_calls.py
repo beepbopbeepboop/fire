@@ -3436,19 +3436,13 @@ def _lower_struct_constructor(gen, struct_name: str,
     gen._struct_allocs_needed.add(struct_name)
     gen._emit(f"  {t} = _alloc_{struct_name} ();")
 
-    # Normalize kwargs to a fresh list of (str, expr) pairs, keyed by an
-    # `_as_str`-viewed name, via explicit index access — NOT `for k, v in
-    # kwargs` / `dict(kwargs)`. On the self-hosted path a `for a, b in
-    # <list of 2-tuples>` unpack boxes both slots (the key reads as an
-    # int64_t pointer), so every `kname in fields_dict` / `pname not in
-    # dict(kwargs)` test downstream missed and `Struct(field=...)` /
-    # `Interpreter(filename=.., argv=..)` kwarg constructors silently
-    # lowered to a bare `_alloc_Struct()` with no field inits.
-    if kwargs:
-        _norm_kw = []
-        for _kp in kwargs:
-            _norm_kw.append((_as_str(_kp[0]), _kp[1]))
-        kwargs = _norm_kw
+    # Explicit length-based flags — a bare `if kwargs:` / `kwargs or args`
+    # on a `list`-typed param is unreliable on the self-hosted path (the
+    # compiled `or` of two pointer operands can fold to a falsy int64_t
+    # even when the list is non-empty), which silently skipped the
+    # field-assignment branch for every no-__init__ struct kwarg ctor.
+    _n_kw = len(kwargs) if kwargs else 0
+    _n_args = len(args) if args else 0
 
     # Same-file overload resolution: if this struct's __init__ overloads
     # (including any @fieldwise_init-synthesized one) were registered from
@@ -3479,8 +3473,14 @@ def _lower_struct_constructor(gen, struct_name: str,
         # single-signature path below (unsuffixed call if __init__ exists
         # at all, field-assignment otherwise) rather than returning here.
 
-    # If struct has __init__, call it with the provided arguments
+    # If struct has __init__, call it with the provided arguments.
+    # A plain `elif` after this (large) block is unreliable on the
+    # self-hosted path — track whether we took it with an explicit flag
+    # and gate the field-assignment fallback on `not _did_init_call`
+    # instead.
+    _did_init_call = False
     if struct_name in gen._struct_has_init:
+        _did_init_call = True
         init_fname = gen._struct_method_csym(struct_name, '__init__', '')
         arg_pairs = [(f"{struct_name} *", t)]  # self parameter
         for arg in args:
@@ -3548,22 +3548,32 @@ def _lower_struct_constructor(gen, struct_name: str,
             _dflt = init_defaults.get(_missing_pname) if _missing_pname else None
             arg_pairs.append(gen._default_expr_to_pair(_dflt))
         gen._emit_call('void', '', init_fname, arg_pairs)
-    elif kwargs or args:
-        # Positional args + keyword args — assign fields by position then by name
-        fields_list = list(gen.struct_field_types.get(struct_name, {}).items())
-        fields_dict = dict(fields_list)
+    if (not _did_init_call) and (_n_kw > 0 or _n_args > 0):
+        # Positional args + keyword args — assign fields by position then by
+        # name. Iterate `gen.struct_field_types[struct_name]` (a real dict)
+        # directly rather than `list(... .items())` / `dict(...)` — on the
+        # self-hosted path a `.items()` 2-tuple comprehension + `list()`/
+        # `dict()` round-trip boxes the field-name keys, so the
+        # `kname in fields_dict` test below missed every kwarg and
+        # `Point(x=3, y=4)` lowered to a bare `_alloc_Point()`.
+        _sft = gen.struct_field_types.get(struct_name, {})
+        _fnames = []
+        for _fn0 in _sft:
+            _fnames.append(_as_str(_fn0))
         # Assign positional args first (by field declaration order)
         for i, arg in enumerate(args):
-            if i < len(fields_list):
-                fname, ftype = fields_list[i]
+            if i < len(_fnames):
+                _fnm = _fnames[i]
+                _ft = _sft[_fnm]
                 at, av = gen.lower_expr(arg)
-                gen._safe_coerce_emit(at, ftype, av, f"{t}->{gimple_ctypes._safe_field(fname)}")
+                gen._safe_coerce_emit(at, _ft, av, f"{t}->{gimple_ctypes._safe_field(_fnm)}")
         # Then assign kwargs by name (may override positional, as in Python)
         for kname, kexpr in (kwargs or []):
-            if kname in fields_dict:
-                ftype = fields_dict[kname]
+            _kn = _as_str(kname)
+            if _kn in _sft:
+                ftype = _sft[_kn]
                 at, av = gen.lower_expr(kexpr)
-                gen._safe_coerce_emit(at, ftype, av, f"{t}->{gimple_ctypes._safe_field(kname)}")
+                gen._safe_coerce_emit(at, ftype, av, f"{t}->{gimple_ctypes._safe_field(_kn)}")
     if struct_name == 'Span':
         # Span is erased to a hardcoded fat-pointer {_data, _len} struct
         # with no notion of its real element type (see struct_field_types
