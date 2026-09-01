@@ -1702,7 +1702,15 @@ def _apply_isinstance_narrowings(gen, cond) -> dict:
     narrowings: list = []
     gen._collect_isinstance_narrowings(cond, narrowings)
     saved: dict = {}
-    for key, ptr_ct, expr in narrowings:
+    # Index the 3-tuple, NOT `for key, ptr_ct, expr in narrowings`: the
+    # unpack boxes `ptr_ct` (a C type string like 'ExprStmt *') on the
+    # self-hosted path, so `f'({ptr_ct}){vp}'` emitted a raw pointer
+    # decimal AS THE CAST TYPE (`_t16 = (47828682656)_t15;`) — invalid C
+    # on the shimless `--dump`.
+    for _nw in narrowings:
+        key = _as_str(_nw[0])
+        ptr_ct = _as_str(_nw[1])
+        expr = _nw[2]
         if key in saved:
             continue
         ot, ov = gen.lower_expr(expr)
