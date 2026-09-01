@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize,
+    Parser, py_tokenize, _as_str,
 )
 import regex_compile
 import mlir
@@ -2444,8 +2444,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                     (rt == 'int64_t' and (lv_is_str_lit or lt == 'char *')))
         if uses_str:
             def _to_char_star(typ, var, is_other_str_lit=False):
+                # `_as_str(var)` for every INTERPOLATION of `var` (not the
+                # dict lookups): `var` reaches here via a `lt, lv =
+                # gen.lower_expr(...)` 2-tuple-return unpack, which boxes
+                # the value slot on the self-hosted path — a bare
+                # `f'{var}'` then emits `mojo_str_from_int(var)`, a
+                # decimal-stringified pointer (non-deterministic C: a
+                # stage2-vs-stage3 verify failure, e.g. `cwd == "..."`
+                # where `cwd = int_dirname(...)`).
+                _v = _as_str(var)
                 if typ == 'char *':
-                    t2 = gen._new_temp('char *'); gen._emit(f'  {t2} = {var};'); return t2
+                    t2 = gen._new_temp('char *'); gen._emit(f'  {t2} = {_v};'); return t2
                 # A raw single character (real C 'char', or an 'int'/'int64_t'
                 # holding a small ASCII code with no tracked pointer identity)
                 # is a distinct representation from a char*-boxed-as-int64_t
@@ -2480,9 +2489,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 if typ == 'char' or is_tracked_char or (
                         not is_other_str_lit and typ in ('int', 'int64_t')
                         and not (actual and actual.endswith(' *'))):
-                    cv = var if typ == 'char' else gen._new_val('char', f'(char){var}')
+                    cv = _v if typ == 'char' else gen._new_val('char', f'(char){_v}')
                     return gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
-                ip = gen._new_val('int64_t', f'(int64_t){var}')
+                ip = gen._new_val('int64_t', f'(int64_t){_v}')
                 cp = gen._new_val('char *', f'(char *){ip}')
                 return cp
             ls = _to_char_star(lt, lv, rv_is_str_lit)

@@ -7081,7 +7081,15 @@ def gen_module_impl(self, stmts):
         # slot) — every name came back empty. `mojo_set_difference` +
         # `mojo_set_sorted` both handle string slots correctly; `_as_str`
         # in the loop below re-views the (still boxed) result elements.
-        _new_names = sorted(self._funcptr_builtins_needed - self._emitted_funcptr_builtins)
+        # `sorted(<plain set>)` then filter — NOT `sorted(<set> - <set>)`:
+        # a set DIFFERENCE loses str-slot tracking, so `sorted()` on the
+        # result orders by the boxed pointer VALUE (non-deterministic
+        # emission order — a stage2-vs-stage3 idempotency failure).
+        _new_names = []
+        for _fpn in sorted(self._funcptr_builtins_needed):
+            _fpn = _as_str(_fpn)
+            if _fpn not in self._emitted_funcptr_builtins:
+                _new_names.append(_fpn)
         # A SUPPORTED compiled generator has no ordinary C definition
         # under its bare csym (only its `<base>_start/_resume/_value/
         # _destroy` coroutine API), so a plain `(void *)<csym>`
