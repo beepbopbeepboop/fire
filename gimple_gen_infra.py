@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str, _as_set,
+    Parser, py_tokenize, _as_str, _as_set, _as_int,
 )
 import regex_compile
 import mlir
@@ -698,9 +698,19 @@ def _elem_of(gen, name: str) -> str:
     """Element type for a container variable."""
     # First, check if this is an int64_t-stored pointer with tracked element type
     if name in gen._elem_types:
-        # `_as_str`: a boxed/garbage entry (self-hosted path) would reach
-        # `_declare_var`'s `mojo_str_cat` and segfault in `strlen()`.
-        return _as_str(gen._elem_types[name])
+        _v = gen._elem_types[name]
+        # On the self-hosted path a metadata writer can leave an erased
+        # sentinel here (`-1` / a tiny value) — the slot was stored via
+        # `mojo_dict_set_int` after its value type unified to int64_t, so
+        # `mojo_dict_get_str` hands back a bogus `char *`. `_as_str` can't
+        # fix a genuine `-1`; `_declare_var`'s `mojo_str_cat` would then
+        # `strlen()` it (hard segfault on the single-TU `--dump
+        # myinterpreter.py`). Range-check the raw value; `isinstance`-gate
+        # keeps CPython (where `_as_int` is identity → a `str`) unaffected.
+        _vi = _as_int(_v)
+        if isinstance(_vi, int) and (_vi < 0x100000 or _vi > 0x00007fffffffffff):
+            return 'int64_t'
+        return _as_str(_v)
     # If no tracked element type, return default
     return 'int64_t'
 

@@ -1401,6 +1401,17 @@ def _as_list(e: object) -> list:
     return e
 
 
+def _as_int(e: object) -> int:
+    """`int64_t` view of a value — the numeric sibling of `_as_str`. Used
+    to range-check a pointer-typed slot the compiled backend may hand back
+    as an erased sentinel (e.g. a metadata-dict value stored via set_int
+    after its slot type was unified to int64_t): in the compiled backend
+    this yields the raw 64-bit value; in CPython it is identity, so
+    callers must `isinstance(..., int)`-gate any numeric comparison so the
+    interpreter path stays unaffected."""
+    return e
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
