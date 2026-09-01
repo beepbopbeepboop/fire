@@ -142,10 +142,18 @@ def _reset_func(gen, body: list = None, params: list = None):
     # the table before that point would otherwise see the wrong,
     # global-seeded entry for a name Python itself treats as local
     # for this entire function.
-    gen._elem_types:      dict[str, str]   = {
-        k: v for k, v in gen._global_elem_types.items()
-        if k not in _reset_locally_bound
-    }  # container var → element C type
+    # explicit loop + `_as_str`, NOT `{k: v for k, v in
+    # gen._global_elem_types.items() if ...}`: a dict comprehension with a
+    # 2-tuple `.items()` target boxes both k and v on the self-hosted
+    # path, so `_elem_of(name)` later returned a boxed/garbage value that
+    # `_declare_var`'s `mojo_str_cat` ran `strlen()` on — a hard segfault
+    # on the single-TU `--dump myinterpreter.py` (list comprehension over
+    # a container with a seeded element type).
+    gen._elem_types = {}   # container var → element C type
+    for _gek in gen._global_elem_types:
+        _gek_s = _as_str(_gek)
+        if _gek_s not in _reset_locally_bound:
+            gen._elem_types[_gek_s] = _as_str(gen._global_elem_types[_gek])
     gen._nested_elem_types: dict[str, str] = {}
     # Per-function, keyed by C temp/value NAMES (`_t40`, ...) which repeat
     # across functions — so a stale entry (e.g. `_dict_items_val_elems
@@ -690,7 +698,9 @@ def _elem_of(gen, name: str) -> str:
     """Element type for a container variable."""
     # First, check if this is an int64_t-stored pointer with tracked element type
     if name in gen._elem_types:
-        return gen._elem_types[name]
+        # `_as_str`: a boxed/garbage entry (self-hosted path) would reach
+        # `_declare_var`'s `mojo_str_cat` and segfault in `strlen()`.
+        return _as_str(gen._elem_types[name])
     # If no tracked element type, return default
     return 'int64_t'
 
@@ -3022,8 +3032,16 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             else:
                 gen._declare_var(vn, se)
 
-        for vn, se in zip(var_names, slot_elems):
-            _declare_target_name(vn, se)
+        # index walk + `_as_str` — NOT `for vn, se in zip(var_names,
+        # slot_elems)`: the zip 2-tuple unpack boxes both slots on the
+        # self-hosted path, so `_declare_var(vn, se)` got a boxed ctype
+        # and `mojo_str_cat` in the decl builder ran `strlen()` on
+        # garbage (a hard segfault on the single-TU `--dump
+        # myinterpreter.py`, in a list comprehension with a tuple target).
+        for _czi in range(len(var_names)):
+            _cvn = _as_str(var_names[_czi])
+            _cse = _as_str(slot_elems[_czi]) if _czi < len(slot_elems) else 'int64_t'
+            _declare_target_name(_cvn, _cse)
         len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3078,8 +3096,8 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._emit(f"  goto {bb_cond};")
         gen._emit_label(bb_after)
         return
-    elem = gen._elem_of(it_val)
-    gen._declare_var(gen0.target, elem)
+    elem = _as_str(gen._elem_of(it_val))
+    gen._declare_var(_as_str(gen0.target), elem)
     len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()

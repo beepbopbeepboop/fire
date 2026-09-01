@@ -2156,7 +2156,13 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # for-target over .items() isn't lowered correctly when self-compiled.)
     _pe = getattr(gen, '_param_elem_types', {}).get(node.name, {})
     for bare in _pe:
-        e, ne = _pe[bare]
+        # `_pe[bare]` is a 2-tuple; `e, ne = _pe[bare]` boxes both slots
+        # on the self-hosted path, so `_elem_types[bare]` got a garbage
+        # ctype string and `_declare_var`'s `mojo_str_cat` ran `strlen()`
+        # on it — a hard segfault on the single-TU `--dump myinterpreter.py`.
+        _pe_v = _pe[bare]
+        e = _as_str(_pe_v[0])
+        ne = _as_str(_pe_v[1])
         if e:
             gen._elem_types[bare] = e
             if ne:
@@ -2165,12 +2171,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # through nested subscripts on locals (e.g. `return bodies[0][0]` where
     # bodies is a local list-of-double-lists). Lowering re-derives the same.
     _loc_elem, _loc_nested, _loc_dict_val = gen._scan_container_elems(node.body)
-    for v, e in _loc_elem.items():
-        gen._elem_types.setdefault(v, e)
-    for v, ne in _loc_nested.items():
-        gen._nested_elem_types.setdefault(v, ne)
-    for v, dv in _loc_dict_val.items():
-        gen._dict_val_types.setdefault(v, dv)
+    for v in _loc_elem:
+        gen._elem_types.setdefault(_as_str(v), _as_str(_loc_elem[v]))
+    for v in _loc_nested:
+        gen._nested_elem_types.setdefault(_as_str(v), _as_str(_loc_nested[v]))
+    for v in _loc_dict_val:
+        gen._dict_val_types.setdefault(_as_str(v), _as_str(_loc_dict_val[v]))
 
     # Determine return type: annotation takes priority; infer if absent.
     if node.return_type is not None:

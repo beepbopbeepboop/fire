@@ -3260,7 +3260,14 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # failures back through _gen_for_cstr's own motivating bug
         # (mojo_compiler.py's `_process_nested_tstrings` uses exactly
         # this any(genexpr) shape).
-        et, ev = gen.lower_expr(node.element)
+        # Index the 2-tuple return rather than `et, ev = ...`: the unpack
+        # boxes `et` on the self-hosted path, and `_elem_types[res] = et`
+        # then stored a garbage ctype string that a later `_elem_of(res)`
+        # (nested comprehension / `for` over the result) fed into
+        # `_declare_var`'s `mojo_str_cat` -> `strlen()` segfault on the
+        # single-TU `--dump myinterpreter.py`.
+        _lr = gen.lower_expr(node.element)
+        et = _as_str(_lr[0]); ev = _lr[1]
         suf = gimple_ctypes.TypeLattice.list_suffix(et)
         ev_cast = gen._cast_for_list(et, ev, suf)
         # GIMPLE: load global string literals into temp before function call

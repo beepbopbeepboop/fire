@@ -3644,7 +3644,17 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # runtime/mojo_runtime.c; there is otherwise no runtime distinction
     # between the two, since both lower to the same MojoList.
     gen._emit(f"  mojo_mark_as_tuple ({t});")
-    lowered = [(el, *gen.lower_expr(el)) for el in node.elements]
+    # Explicit loop, NOT `[(el, *gen.lower_expr(el)) for el in ...]`: the
+    # 2-tuple return of `lower_expr` unpacked into a comprehension target
+    # boxes `et`/`ev` on the self-hosted path, so `_tuple_slot_types[t]`
+    # below became a list of garbage ctype strings and `_declare_var`'s
+    # `mojo_str_cat` ran `strlen()` on one — a hard segfault on the
+    # single-TU `--dump myinterpreter.py` (tuple literal with mixed slot
+    # types feeding a later `for a, b in <list of these tuples>`).
+    lowered = []
+    for _le in node.elements:
+        _lres = gen.lower_expr(_le)
+        lowered.append((_le, _as_str(_lres[0]), _lres[1]))
     scalar_sufs = {gimple_ctypes.TypeLattice.list_suffix(et) for _el, et, _ev in lowered}
     # Any mix of suffixes (not just str-vs-other) needs per-element dispatch —
     # e.g. (Float64, Span*) both look like non-str, but list_suffix maps
@@ -3656,8 +3666,17 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # slot's real accessor (get_str vs get_int). The joined `elem` is
     # useless for a (char*, pointer) pair like `(name, func)`.
     if per_element:
-        gen._tuple_slot_types[t] = [et for _el, et, _ev in lowered if not (isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*')]
-    for _el, et, ev in lowered:
+        _slot_ts = []
+        for _slt in lowered:
+            _sl_el = _slt[0]
+            if isinstance(_sl_el, gimple_ctypes.UnaryOp) and _sl_el.op == '*':
+                continue
+            _slot_ts.append(_as_str(_slt[1]))
+        gen._tuple_slot_types[t] = _slot_ts
+    for _lwi in range(len(lowered)):
+        _el = lowered[_lwi][0]
+        et = _as_str(lowered[_lwi][1])
+        ev = lowered[_lwi][2]
         # A `*spread` element (`(el, *self.lower_expr(el))`, this codegen's
         # own pervasive comprehension pattern) must EXTEND the tuple with the
         # spread's elements, not append the container handle as one element

@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    _as_str,
 )
 import regex_compile
 import mlir
@@ -1270,13 +1271,18 @@ def _tuple_unpack_slot_elems(gen, it_val: str, nslots: int) -> list:
     slot_types = gen._tuple_slot_types.get(it_val)
     pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
     elems = []
+    # `_as_str` on every appended slot type: the source metadata dicts
+    # (_tuple_slot_types / _nested_elem_types / _dict_items_val_elems)
+    # can hand back a boxed/garbage value on the self-hosted path, and
+    # `_declare_var`'s `mojo_str_cat` then ran `strlen()` on it — a hard
+    # segfault on the single-TU `--dump myinterpreter.py`.
     for i in range(nslots):
         if is_dict_items:
-            elems.append('char *' if i == 0 else (value_elem or 'int64_t'))
+            elems.append('char *' if i == 0 else _as_str(value_elem or 'int64_t'))
         elif slot_types is not None and i < len(slot_types):
-            elems.append(slot_types[i])
+            elems.append(_as_str(slot_types[i]))
         else:
-            elems.append(pair_elem)
+            elems.append(_as_str(pair_elem))
     return elems
 
 
@@ -1313,11 +1319,13 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     _declare_target_name(_nv, 'int64_t')
             else:
                 gen._declare_var(vn, se, force=(vn == shadow_name))
-        for vn, se in zip(var_names, slot_elems):
-            _declare_target_name(vn, se)
+        for _fli in range(len(var_names)):
+            _fl_vn = _as_str(var_names[_fli])
+            _fl_se = _as_str(slot_elems[_fli]) if _fli < len(slot_elems) else 'int64_t'
+            _declare_target_name(_fl_vn, _fl_se)
     else:
         var_names = None
-        gen._declare_var(var, elem, force=(var == shadow_name))
+        gen._declare_var(var, _as_str(elem) if elem is not None else elem, force=(var == shadow_name))
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
