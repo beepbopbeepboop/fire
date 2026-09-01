@@ -6582,23 +6582,21 @@ def gen_module_impl(self, stmts):
                         parts.append('')
                         self._emitted_dispatch_typedefs.add(dispatch_table.name)
 
-    for sn in sorted(self._struct_allocs_needed):
-        # `sn` is a struct-name string; the compiled backend erased it to
-        # int64_t (the sorted-set element type never got seeded in time —
-        # see `_struct_allocs_needed`'s `set[str]` annotation), so
-        # `f'_alloc_{sn}'` emitted `_alloc_<pointer-decimal>`. Re-view it
-        # as `str`.
-        # Some entries are worse than a boxed-but-valid pointer: genuinely
-        # UNINITIALIZED heap bytes (a `MojoSet` slot whose value was never
-        # actually stored with the right accessor), which `_as_str` can't
-        # rescue — the emitted `typedef`/`_alloc_<sn>` collapsed to a few
-        # raw garbage bytes (`T\xf3\xcc0`), a hard GCC parse failure on
-        # `MOJO_NO_SHIM=1 --dump myinterpreter.py`'s generated .ci. Skip
-        # (rather than crash-guard) anything that doesn't look like a
-        # plausible heap pointer at all.
-        if not _ptr_slot_in_range(sn):
-            continue
-        sn = _as_str(sn)
+    # Filter + `_as_str` BEFORE `sorted()`, not inside the loop: the
+    # compiled backend erased `_struct_allocs_needed`'s `set[str]` element
+    # type to int64_t, and some entries are genuinely uninitialised heap
+    # bytes / NULL (a `MojoSet` slot never stored with the right accessor;
+    # see SESSION-19 `T\xf3\xcc0`). `sorted()` lowers to `mojo_list_sorted_
+    # str`, whose `strcmp` hits a NULL entry and SEGFAULTs before any
+    # per-element `_ptr_slot_in_range` guard in the loop body could skip it
+    # — the `mojo_list_sorted_str + 112` crash on `MOJO_NO_SHIM=1 --dump-
+    # full mojo.py`. Mirror the same pre-sort clean-list pattern already
+    # used for `_mojo_at_<T>` emission.
+    _sa_names = []
+    for _sx in self._struct_allocs_needed:
+        if _ptr_slot_in_range(_sx):
+            _sa_names.append(_as_str(_sx))
+    for sn in sorted(_sa_names):
         if sn in self._emitted_allocs:
             continue  # already emitted by an imported module
         self._emitted_allocs.add(sn)

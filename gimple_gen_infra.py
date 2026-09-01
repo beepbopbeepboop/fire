@@ -293,6 +293,20 @@ def _record_sys_path_inserts(gen, source: str, base_dir: str = None) -> None:
     gap entirely; `.group(n)` with an argument isn't self-host-supported
     either way (see _gen_for_regex_iter's docstring), so `.findall()`
     loses nothing here — this pattern only has the one capture group."""
+    # `sys.path.insert(...)` is a module-init statement — always in the first
+    # few KB of a file, never buried deep. Bound the regex scan to a head
+    # slice: a cheap `path.insert` substring gate skips it entirely for the
+    # (vast) majority of modules, and the slice keeps the recursive (CPS)
+    # regex matcher — `re_match_cont`/`re_match_node`, which recurses per
+    # input position / per quantifier repetition — from being run over
+    # 100-250KB of a big compiler module (gimple_codegen.py etc.) on the
+    # self-hosted compiled path, where that recursion depth blows the 8MB
+    # main-thread stack (EXC_BAD_ACCESS on the guard page). Any real
+    # `sys.path.insert` past 8KB is already outside every observed shape.
+    _head = source if len(source) <= 8192 else source[:8192]
+    if 'path.insert' not in _head:
+        return
+    source = _head
     for p in gimple_codegen._SYS_PATH_INSERT_RE.findall(source):
         if base_dir and not gimple_ctypes.os.path.isabs(p):
             p = gimple_ctypes.os.path.join(base_dir, p)

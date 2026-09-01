@@ -3940,11 +3940,28 @@ void *mojo_sorted(void *iterable) {
  * different from Python's alphabetical `sorted(...)`. The codegen picks these
  * by its own knowledge of the element type (see _lower_builtin_sorted), so the
  * runtime never has to guess. */
+/* NULL-safe string compare: a `sorted(<list of char*>)` whose codegen source
+ * (a set of names, dict keys, ...) contains a NULL / erased-to-0 element must
+ * not segfault the whole sort in `strcmp`. Order NULL before any real string
+ * (deterministic); callers' per-element `_ptr_slot_in_range` guards then skip
+ * it in the loop body. Also treats a value below the userspace-heap window as
+ * NULL — an erased int sentinel that isn't a real pointer. */
+static int _mojo_sorted_str_cmp(int64_t a_raw, int64_t b_raw) {
+    const char *a = (const char *)(uintptr_t)a_raw;
+    const char *b = (const char *)(uintptr_t)b_raw;
+    int a_ok = (a != NULL) && ((uint64_t)a_raw >= 0x1000);
+    int b_ok = (b != NULL) && ((uint64_t)b_raw >= 0x1000);
+    if (!a_ok && !b_ok) return 0;
+    if (!a_ok) return -1;
+    if (!b_ok) return 1;
+    return strcmp(a, b);
+}
+
 MojoList *mojo_list_sorted_str(MojoList *src) {
     MojoList *dst = mojo_list_copy(src);
     for (int64_t i = 0; i < dst->len; i++) {
         for (int64_t j = i + 1; j < dst->len; j++) {
-            if (strcmp((char *)(uintptr_t)dst->data[i], (char *)(uintptr_t)dst->data[j]) > 0) {
+            if (_mojo_sorted_str_cmp(dst->data[i], dst->data[j]) > 0) {
                 int64_t tmp = dst->data[i];
                 dst->data[i] = dst->data[j];
                 dst->data[j] = tmp;
