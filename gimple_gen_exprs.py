@@ -347,8 +347,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         c_name = gen.BUILTIN_VALUE_MAP[name]
         # Use a pre-declared static void* (emitted in non-GIMPLE context) to avoid
         # the invalid `&func_name` syntax that GIMPLE strict mode rejects.
-        # Only add if c_name is a valid C identifier (skip casts like ((int)0))
-        if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
+        # Only add if c_name is a valid C identifier (skip casts like
+        # `((int)0)`). `not c_name.startswith('(')`, NOT
+        # `c_name[0] in '<letters>'` — subscripting a `char *` with `[0]`
+        # lowers to `mojo_list_get_int((MojoList*)c_name, 0)` on the
+        # self-hosted path (a hard segfault: `c_name` is
+        # `BUILTIN_VALUE_MAP[name]`, e.g. "mojo_make_list", reached via
+        # `ctor in (Fn, ...)` on `--dump myinterpreter.py`).
+        if c_name and not c_name.startswith('('):
             gen._funcptr_builtins_needed.add(c_name)
             static_name = f'_funcptr_{c_name}'
             t = gen._new_val('void *', f'{static_name}')
@@ -361,8 +367,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # Can't use a function name as rvalue in GIMPLE — use a pre-declared static void*.
     if (name in gen.func_return_types and name not in gen.var_types
             and name not in gen.struct_field_types and name not in gen._global_var_types):
-        # Use the overload-mangled C symbol so &fn points at the real definition.
-        c_name = gen._c_names.get(name, gen._func_csym(name))
+        # Use the overload-mangled C symbol so &fn points at the real
+        # definition. Membership + subscript, NOT
+        # `gen._c_names.get(name, gen._func_csym(name))` — on the
+        # self-hosted path `_c_names` can lower boxed and the defaulted
+        # `.get`'s char* default was then coerced through a list accessor
+        # (`mojo_list_get_int("mojo_make_list", 0)` — a hard segfault on
+        # `--dump myinterpreter.py`, reached via `ctor in (Fn, ...)`).
+        c_name = gen._func_csym(name)
+        if name in gen._c_names:
+            c_name = gen._c_names[name]
         gen._funcptr_builtins_needed.add(c_name)
         static_name = f'_funcptr_{c_name}'
         t = gen._new_val('void *', f'{static_name}')
@@ -480,7 +494,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             gen._emit(f'  {t} = {field_ref};')
         return ctype, t
     ctype = gen._type_of(name)
-    cname = gen._c_names.get(name, name)
+    # membership + subscript, NOT `gen._c_names.get(name, name)` — on the
+    # self-hosted path `_c_names` lowers boxed and the `.get` char* default
+    # (`name` itself) gets coerced through a list accessor
+    # (`mojo_list_get_int("mojo_make_list", 0)` — a hard segfault on
+    # `--dump myinterpreter.py`, `name` being a bare `mojo_make_list` ref).
+    cname = name
+    if name in gen._c_names:
+        cname = gen._c_names[name]
     if name in gen.var_types:
         return ctype, cname
     # A nested function (closure) referenced as a VALUE (`return add`,
@@ -1227,7 +1248,9 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             and node.obj.name not in gen._module_alias_names
             and not _dunder_member):
         _fn_name = node.obj.name
-        _c_fn = gen._c_names.get(_fn_name, gimple_ctypes._safe_name(_fn_name))
+        _c_fn = gimple_ctypes._safe_name(_fn_name)
+        if _fn_name in gen._c_names:      # not `.get(k, <char* default>)` — see _lower_IdentExpr
+            _c_fn = gen._c_names[_fn_name]
         # Resolve through _resolve_type: some imports register a bare
         # 'int' sentinel (unknown-signature placeholder, see
         # _gen_stmt_FromImportStmt) rather than a real C type. Declaring

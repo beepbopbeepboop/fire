@@ -443,7 +443,7 @@ import gimple_gen_infra as ginf
 import gimple_gen_resolve as grsl
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
-    BUILTIN_VALUE_MAP = {
+    BUILTIN_VALUE_MAP: dict[str, str] = {
         'print': 'mojo_print',
         'len': 'mojo_len',
         'range': 'mojo_range',
@@ -1452,6 +1452,24 @@ class GimpleGen:
         self._global_literal_slot_ctypes: dict = {}
         self._local_def_param_types: dict = {}
         self._param_elem_types: dict = {}
+        # Per-function maps that `_reset_func` (a MODULE function in
+        # gimple_gen_infra.py, taking `gen`) re-initialises with real
+        # `dict[str, str]` annotations the `class GimpleGen` field-type
+        # scan never sees — same gap / same fix as `_inferred_param_types`
+        # above. Without the `char *` VALUE shape here, `self._c_names.get(
+        # name, _func_csym(name))` in `_lower_IdentExpr` fell to the
+        # int64_t dict path and its char* default was coerced through a
+        # list accessor — a hard segfault on `--dump myinterpreter.py`
+        # (`mojo_list_get_int("mojo_make_list", 0)`).
+        self._c_names: dict[str, str] = {}
+        self._gimple_mut_ptr: dict[str, str] = {}
+        self._boxed_mut_locals: dict[str, str] = {}
+        self._elem_types: dict[str, str] = {}
+        self._nested_elem_types: dict[str, str] = {}
+        self._param_struct_types: dict[str, str] = {}
+        self._dict_val_types: dict[str, str] = {}
+        self._dict_nested_val_types: dict[str, str] = {}
+        self._captures: dict[str, str] = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement
         # memoization of `_calls_in_stmts`' pure CallExpr-collection walk
         # (gen_module's ctor-literal scan plus its Pass 1.3d/2c caller-body

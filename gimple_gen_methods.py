@@ -2311,6 +2311,14 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # Ensure key is char * for dict operations
         key_type, key_val = gen._char_to_cstr(key_type, key_val)
         val_type = gen._dict_val_of(ov)
+        # `dict.get(k, <char* default>)` on a dict whose value type is
+        # unknown (int64_t): the default must NOT be coerced through a
+        # list accessor. If the caller supplied a char* default, treat the
+        # result as char* — a plain pointer round-trip, never a
+        # `mojo_list_get_int(default, 0)` (a hard segfault on the
+        # self-hosted `--dump myinterpreter.py`).
+        if val_type == 'int64_t' and default_ty == 'char *':
+            val_type = 'char *'
         if val_type == 'char *':
             raw = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (key_type, key_val)])
         elif val_type == 'double':

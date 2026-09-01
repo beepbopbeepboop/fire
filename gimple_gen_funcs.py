@@ -1450,7 +1450,11 @@ def _imported_def_pts(gen, bare_name: str):
     candidate_quals = []
     scopes = getattr(gen, '_import_scope_stack', None)
     if scopes:
-        for frame in reversed(scopes):
+        # reverse-index walk (innermost scope wins), NOT `reversed(scopes)`
+        # — no self-hosted `reversed(<list>)` lowering (mojo_unsupported_iter,
+        # zero iterations).
+        for _si in range(len(scopes) - 1, -1, -1):
+            frame = scopes[_si]
             if bare_name in frame:
                 candidate_quals.append(frame[bare_name])
                 break
@@ -1822,7 +1826,10 @@ def _func_qualifier(gen, bare_name: str) -> str:
     # resolves correctly instead of refusing.
     scopes = getattr(gen, '_import_scope_stack', None)
     if scopes:
-        for frame in reversed(scopes):
+        # reverse-index walk (innermost scope wins), NOT `reversed(scopes)`
+        # — no self-hosted `reversed(<list>)` lowering.
+        for _si in range(len(scopes) - 1, -1, -1):
+            frame = scopes[_si]
             if bare_name in frame:
                 return _sanitize_qualifier(frame[bare_name])
     own_home = getattr(gen, '_own_imported_func_home', None)
