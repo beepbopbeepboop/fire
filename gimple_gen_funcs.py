@@ -229,6 +229,55 @@ def _from_import_name_is_submodule(gen, module: str, name: str) -> bool:
         gimple_ctypes._join_import_member(module, name)) is not None
 
 
+def _resolve_reexported_closure_func(gen, module: str, name: str, _depth: int = 0):
+    """Follow a closure module's own `from SIBLING import (...)` re-exports
+    to the top-level FunctionDef that actually defines `name`. Returns
+    (FunctionDef, defining_module_name) or (None, None). Bounded recursion;
+    parses are `_parsed_import`-cached so this is cheap."""
+    if _depth > 4:
+        return None, None
+    _stmts = None
+    try:
+        _pi = gen._parsed_import(module)
+        _stmts = _pi[2] if _pi else None
+    except Exception:
+        _stmts = None
+    if not _stmts:
+        # _parsed_import (imports.resolve_source) can't see a bare repo-local
+        # `.py` sibling; resolve it the way _compile_imported_module does and
+        # seed the shared cache so this parse is done at most once.
+        try:
+            _mp = None
+            for _c in gen._module_candidate_paths(module):
+                if os.path.exists(_c):
+                    _mp = _c
+                    break
+            if _mp:
+                with open(_mp) as _mf:
+                    _msrc = _mf.read()
+                _stmts = gimple_ctypes.ast_rewriter.rewrite(
+                    gimple_ctypes.Parser(gimple_ctypes.py_tokenize(_msrc)).parse_module())
+                gen._imported_src_cache[module] = (_mp, _msrc, _stmts)
+        except Exception:
+            _stmts = None
+    if not _stmts:
+        return None, None
+    for _s in _stmts:
+        if isinstance(_s, FunctionDef) and _s.name == name:
+            return _s, module
+    for _s in _stmts:
+        if not isinstance(_s, gimple_ctypes.FromImportStmt) or getattr(_s, 'wildcard', False):
+            continue
+        for _fp in gimple_ctypes._fromimport_names(_s):
+            _rn = _as_str(_fp[0]); _ra = _as_str(_fp[1])
+            if (_ra if _ra else _rn) == name:
+                _fn, _home = _resolve_reexported_closure_func(
+                    gen, _s.module, _rn, _depth + 1)
+                if _fn is not None:
+                    return _fn, _home
+    return None, None
+
+
 def _gen_stmt_FromImportStmt(gen, node):
     # from module import name1, name2, ...
     # Per-lexical-scope import tracking: this statement executes in the
@@ -471,6 +520,47 @@ def _gen_stmt_FromImportStmt(gen, node):
             except Exception:
                 pass
             continue
+        # do_imports closure: a function-local `from M import name` where M
+        # RE-EXPORTS `name` from a sibling (`from gimple_codegen import
+        # _mojo_type`, gimple_codegen re-exporting it from gimple_ctypes).
+        # Neither load_module (M isn't a stdlib/test module) nor _local_
+        # sibling_module_exports (no .py path) resolves it, so it fell to
+        # the bare no-signature registration → the extern pass emitted a
+        # weak `int64_t name (...)` "unavailable in compiled mode" NULL
+        # stub, and the call site bound to that (bare, unmangled) instead
+        # of the real `name_<suffix>` the sibling's own compile emitted →
+        # strcmp(NULL)/segfault on the shimless closure path. Follow M's
+        # own `from SIBLING import (...)` re-exports to the real def and
+        # register a properly-typed mangleable imported symbol.
+        if (getattr(gen, 'do_imports', False)
+                and not getattr(node, 'wildcard', False)
+                and symbol_name == name
+                and not (isinstance(gen.imported_symbols.get(symbol_name), dict)
+                         and 'signature' in gen.imported_symbols[symbol_name])):
+            _rx_fn, _rx_home = _resolve_reexported_closure_func(gen, node.module, name)
+            if _rx_fn is not None and _rx_fn.return_type is not None:
+                _rx_ret = gen._resolve_type(_rx_fn.return_type)
+                _rx_pts = []
+                for _rxi, (_rxpn, _rxpt) in enumerate(_rx_fn.params):
+                    if _rxi == 0 and _rxpn == 'self':
+                        continue
+                    _rx_pts.append(gen._param_ctype(_rxpn, _rxpt, _rx_fn))
+                _rx_sig = f"{_rx_ret} {name} ({', '.join(_rx_pts) if _rx_pts else 'void'})"
+                gen.imported_symbols[symbol_name] = {
+                    'module': _rx_home,
+                    'original_name': name,
+                    'c_return_type': _rx_ret,
+                    'return_type': _rx_ret,
+                    'c_parameters': list(_rx_pts),
+                    'signature': _rx_sig,
+                }
+                gen._mangled_funcs.add(name)
+                gen.func_return_types.setdefault(name, _rx_ret)
+                gen.func_param_types.setdefault(name, list(_rx_pts))
+                if _rx_home:
+                    gen._note_own_func_home(
+                        name, _rx_home.replace('.', '_').replace('-', '_'))
+                continue
         # Use known signature if available. Default to 'int64_t' (NOT
         # 'int') for unknown symbols — this must match the fallback
         # return type every other unknown-callee path in this file
