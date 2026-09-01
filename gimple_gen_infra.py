@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str, _as_set, _as_int,
+    Parser, py_tokenize, _as_str, _as_set, _as_int, _ptr_slot_in_range,
 )
 import regex_compile
 import mlir
@@ -707,8 +707,7 @@ def _elem_of(gen, name: str) -> str:
         # `strlen()` it (hard segfault on the single-TU `--dump
         # myinterpreter.py`). Range-check the raw value; `isinstance`-gate
         # keeps CPython (where `_as_int` is identity → a `str`) unaffected.
-        _vi = _as_int(_v)
-        if isinstance(_vi, int) and (_vi < 0x100000 or _vi > 0x00007fffffffffff):
+        if not _ptr_slot_in_range(_v):
             return 'int64_t'
         return _as_str(_v)
     # If no tracked element type, return default

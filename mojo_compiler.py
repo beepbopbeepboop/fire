@@ -1401,6 +1401,18 @@ def _as_list(e: object) -> list:
     return e
 
 
+def _ptr_slot_in_range(e: object) -> bool:
+    """Guard for a `char *` metadata-dict slot the compiled backend may
+    hand back as an erased sentinel (`-1`, a tiny value) after its slot
+    type unified to int64_t. CPython: a genuine `str` is always in range.
+    Compiled: range-check the raw 64-bit value against the plausible
+    userspace-heap window."""
+    if isinstance(e, str):
+        return True
+    _n = _as_int(e)
+    return 0x0000000000100000 <= _n <= 0x00007fffffffffff
+
+
 def _as_int(e: object) -> int:
     """`int64_t` view of a value — the numeric sibling of `_as_str`. Used
     to range-check a pointer-typed slot the compiled backend may hand back
