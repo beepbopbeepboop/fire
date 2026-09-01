@@ -131,6 +131,26 @@ class ModuleLoader:
         self.exported_symbols = {}  # (module, name) -> type_info
         self._path_cache = {}  # absolute file path -> exports (see load_module_from_path)
 
+    def can_resolve_module_path(self, module_name: str) -> bool:
+        """Non-raising predicate mirroring `resolve_module_path`'s own
+        acceptance test (test-module-under-TEST_PATH, or `std`/`std.*`).
+        Callers on the compiled backend must use this to GUARD a call to
+        `resolve_module_path`/`load_module` rather than wrapping the call
+        in try/except: this codegen's compiled `try`/`except` does not
+        reliably catch a raised exception (a documented gap — see the
+        `_is_py_sibling` pre-filter comments in gimple_gen_infra.py /
+        gimple_gen_funcs.py), so a genuine non-stdlib Python import (e.g.
+        `from dataclasses import dataclass`, real stdlib source this
+        project's own `myinterpreter.py` uses) reached `resolve_module_
+        path`'s `raise` UNCAUGHT and crashed the whole
+        `MOJO_NO_SHIM=1 --dump` compile instead of just skipping that
+        one import's externs."""
+        parts = module_name.split('.')
+        if len(parts) == 1 and not parts[0].startswith('std'):
+            if os.path.exists(os.path.join(TEST_PATH, parts[0] + '.mojo')):
+                return True
+        return parts[0] == 'std'
+
     def resolve_module_path(self, module_name: str) -> str:
         """Convert module name to file path.
 
@@ -900,6 +920,14 @@ def read_reflection(dylib_path: str, runtime_dylib: str = None) -> dict:
 
 # Global module loader instance
 _module_loader = ModuleLoader()
+
+
+def can_resolve_module_path(module_name: str) -> bool:
+    """Module-level wrapper — see ModuleLoader.can_resolve_module_path's
+    docstring for why callers on the compiled backend must guard with
+    this instead of relying on try/except around `load_module`/
+    `resolve_module_path`."""
+    return _module_loader.can_resolve_module_path(module_name)
 
 
 def load_module(module_name: str) -> dict:

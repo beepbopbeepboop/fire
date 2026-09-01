@@ -26,7 +26,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_funcdef_node,
+    py_tokenize, Parser, _as_str, _as_funcdef_node, _ptr_slot_in_range,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -6497,6 +6497,16 @@ def gen_module_impl(self, stmts):
         # see `_struct_allocs_needed`'s `set[str]` annotation), so
         # `f'_alloc_{sn}'` emitted `_alloc_<pointer-decimal>`. Re-view it
         # as `str`.
+        # Some entries are worse than a boxed-but-valid pointer: genuinely
+        # UNINITIALIZED heap bytes (a `MojoSet` slot whose value was never
+        # actually stored with the right accessor), which `_as_str` can't
+        # rescue — the emitted `typedef`/`_alloc_<sn>` collapsed to a few
+        # raw garbage bytes (`T\xf3\xcc0`), a hard GCC parse failure on
+        # `MOJO_NO_SHIM=1 --dump myinterpreter.py`'s generated .ci. Skip
+        # (rather than crash-guard) anything that doesn't look like a
+        # plausible heap pointer at all.
+        if not _ptr_slot_in_range(sn):
+            continue
         sn = _as_str(sn)
         if sn in self._emitted_allocs:
             continue  # already emitted by an imported module
@@ -7047,8 +7057,21 @@ def gen_module_impl(self, stmts):
                     parts.append(f"}} {ci.env_struct};")
                     parts.append('')
                     self._emitted_structs.add(ci.env_struct)
-    for outer_name, inner_map in self._all_closures.items():
-        for inner_name, ci in inner_map.items():
+    # Index-walk both dict levels, NOT `for outer_name, inner_map in
+    # self._all_closures.items(): for inner_name, ci in inner_map.items():`
+    # — a NESTED `.items()` 2-tuple unpack boxes `ci` itself on the
+    # self-hosted path (it's the SECOND unpack target), so `ci.env_struct`
+    # read a mis-typed attribute off a boxed handle and the forward-decl
+    # `f"{ci.env_struct} * {alloc_fn} (void);"` emitted a few bytes of
+    # raw heap garbage instead of the struct name — a hard GCC parse
+    # failure on `MOJO_NO_SHIM=1 --dump myinterpreter.py`'s generated
+    # .ci (real: `T\xf3\xcc0` in place of a struct name). The sibling
+    # typedef-emission loop just above this one avoids the bug by using
+    # a single-target `for ci in inner_map.values():` — mirror that here.
+    for outer_name in self._all_closures:
+        inner_map = self._all_closures[outer_name]
+        for inner_name in inner_map:
+            ci = inner_map[inner_name]
             if ci.env_struct:
                 alloc_fn = f"_alloc_{ci.env_struct}"
                 parts.append(f"{ci.env_struct} * {alloc_fn} (void);")

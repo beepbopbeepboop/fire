@@ -454,6 +454,16 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
                 and gimple_ctypes.os.path.isfile(gimple_ctypes.os.path.join(
                     gimple_codegen._SELFHOST_DIR, mod + '.py'))):
             continue
+        # Guard BEFORE calling, not just try/except around the call: this
+        # codegen's compiled `try`/`except` does not reliably catch a
+        # raised exception, so a real (non-mojo-stdlib) Python import —
+        # `from dataclasses import dataclass`, real stdlib source
+        # myinterpreter.py itself uses — reached module_loader's `raise`
+        # UNCAUGHT and crashed the whole `MOJO_NO_SHIM=1 --dump` compile.
+        # See ModuleLoader.can_resolve_module_path's docstring.
+        import module_loader as _mlmod0
+        if not _mlmod0.can_resolve_module_path(mod):
+            continue
         try:
             exports = gimple_ctypes.load_module(mod)
         except Exception as e:
@@ -600,13 +610,19 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
         _is_py_sibling = ('.' not in mod and not mod.startswith('std')
                           and gimple_ctypes.os.path.isfile(gimple_ctypes.os.path.join(
                               gimple_codegen._SELFHOST_DIR, mod + '.py')))
-        if _is_py_sibling:
+        import module_loader as _mlmod
+        # A genuine non-mojo-stdlib Python import (e.g. `dataclasses`,
+        # real stdlib source myinterpreter.py itself uses) is neither a
+        # `.py` sibling nor mojo-stdlib-resolvable — GUARD before calling
+        # `load_module`/`resolve_module_path` rather than relying on the
+        # try/except below, which (see the comment above) does not
+        # reliably catch a raised exception on the compiled backend.
+        if _is_py_sibling or not _mlmod.can_resolve_module_path(mod):
             exports, qual = gen._local_sibling_module_exports(mod)
         else:
             try:
                 exports = gimple_ctypes.load_module(mod)
                 qual = None
-                import module_loader as _mlmod
                 _imp_path = _mlmod._module_loader.resolve_module_path(mod)
                 if _imp_path and gimple_ctypes.os.path.exists(_imp_path):
                     qual = _mlmod.module_name_for_path(_imp_path)

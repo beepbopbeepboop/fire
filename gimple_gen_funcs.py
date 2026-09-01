@@ -361,13 +361,24 @@ def _gen_stmt_FromImportStmt(gen, node):
         # (stdlib/test modules), then the local-sibling source fallback.
         _fi_exports = None
         _fi_qual = None
-        try:
-            import module_loader as _mlmod_fi
-            _fi_exports = _mlmod_fi.load_module(node.module)
-            _fi_path = _mlmod_fi._module_loader.resolve_module_path(node.module)
-            if _fi_path and os.path.exists(_fi_path):
-                _fi_qual = _mlmod_fi.module_name_for_path(_fi_path)
-        except Exception:
+        import module_loader as _mlmod_fi
+        # Guard BEFORE calling load_module/resolve_module_path, not just
+        # try/except around the call: this codegen's compiled try/except
+        # does not reliably catch a raised exception, so a genuine
+        # non-mojo-stdlib Python import (`from dataclasses import ...`,
+        # real stdlib source myinterpreter.py itself uses) reached
+        # module_loader's `raise` UNCAUGHT and crashed the whole
+        # `MOJO_NO_SHIM=1 --dump` compile. See ModuleLoader.
+        # can_resolve_module_path's docstring.
+        if _mlmod_fi.can_resolve_module_path(node.module):
+            try:
+                _fi_exports = _mlmod_fi.load_module(node.module)
+                _fi_path = _mlmod_fi._module_loader.resolve_module_path(node.module)
+                if _fi_path and os.path.exists(_fi_path):
+                    _fi_qual = _mlmod_fi.module_name_for_path(_fi_path)
+            except Exception:
+                _fi_exports = None
+        if _fi_exports is None:
             try:
                 _fi_exports, _fi_qual = gen._local_sibling_module_exports(node.module)
             except Exception:
@@ -1654,10 +1665,14 @@ def _resolve_import_module_qualifier(gen, mod: str) -> str:
         if path is None:
             return ''
     else:
-        try:
-            path = _mlmod._module_loader.resolve_module_path(mod)
-        except Exception:
-            path = None
+        # Guard first (compiled try/except is not reliable — see
+        # ModuleLoader.can_resolve_module_path's docstring).
+        path = None
+        if _mlmod.can_resolve_module_path(mod):
+            try:
+                path = _mlmod._module_loader.resolve_module_path(mod)
+            except Exception:
+                path = None
         if not path or not gimple_ctypes.os.path.exists(path):
             # Not a stdlib/test module (e.g. a sibling project module,
             # `alpha_module` in a mojo.py build test dir) — fall back to
