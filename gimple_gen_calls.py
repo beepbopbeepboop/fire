@@ -3514,6 +3514,14 @@ def _lower_struct_constructor(gen, struct_name: str,
         # order after the positional args.
         init_pnames = gen._struct_init_params.get(struct_name, [])
         init_defaults = gen._struct_init_defaults.get(struct_name, {})
+        # A cross-module struct whose __init__ signature was registered only
+        # via _register_closure_struct_inits (do_imports closure) has the
+        # param NAMES but not func_param_types, so `expected` above is -1 —
+        # fall back to the name count so the padding loop below fills every
+        # __init__ parameter (an under-filled call is `too few arguments to
+        # GimpleGen___init__`).
+        if expected < 0 and init_pnames:
+            expected = len(init_pnames)
         if kwargs and init_pnames:
             kw = dict(kwargs)
             for idx, pname in enumerate(init_pnames):
@@ -3567,6 +3575,21 @@ def _lower_struct_constructor(gen, struct_name: str,
             _missing_pname = init_pnames[len(arg_pairs) - 1] if init_pnames and len(arg_pairs) - 1 < len(init_pnames) else None
             _dflt = init_defaults.get(_missing_pname) if _missing_pname else None
             arg_pairs.append(gen._default_expr_to_pair(_dflt))
+        # Coerce each argument to its declared __init__ param C type — the
+        # field-assignment fallback path below runs _safe_coerce_emit per
+        # field, but this __init__-call path historically emitted the raw
+        # arg_pairs, so a cross-module `Class(module_name=<boxed local>,
+        # aset={..})` passed an int64_t into `char *` / a MojoSet* into
+        # `int64_t` uncast (GCC -Wint-conversion, hard error under -fgimple).
+        _init_full = gen.func_param_types.get(init_fname, [])
+        if len(_init_full) == len(arg_pairs):
+            for _ai in range(1, len(arg_pairs)):
+                _want = _init_full[_ai]
+                _have_t, _have_v = arg_pairs[_ai]
+                if _want and _have_t and _want != _have_t:
+                    _cv = gen._new_temp(_want)
+                    gen._safe_coerce_emit(_have_t, _want, _have_v, _cv)
+                    arg_pairs[_ai] = (_want, _cv)
         gen._emit_call('void', '', init_fname, arg_pairs)
     if (not _did_init_call) and (_n_kw > 0 or _n_args > 0):
         # Positional args + keyword args — assign fields by position then by

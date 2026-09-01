@@ -354,6 +354,41 @@ def _submodule_source_path(gen, module_name: str) -> str | None:
     return None
 
 
+def _register_closure_struct_inits(gen, stmts) -> None:
+    """Populate `gen._struct_has_init` / `_struct_init_params` /
+    `_struct_init_defaults` / `_struct_method_names` for every top-level
+    StructDef in `stmts` that defines an `__init__`. Called for each module
+    of a do_imports=True closure BEFORE its bodies are lowered, so a
+    cross-module `Class(kw=...)` constructor resolves to the real
+    `Class___init__` call instead of falling to the field-assignment
+    fallback. Mirrors gen_module_impl's Pass 2b registration."""
+    for s in stmts:
+        if not isinstance(s, StructDef):
+            continue
+        for m in s.methods:
+            gen._struct_method_names.setdefault(s.name, set()).add(m.name)
+            if m.name == '__init__':
+                gen._struct_has_init.add(s.name)
+                gen._struct_init_params[s.name] = [
+                    pn for pn, _pt in m.params if pn != 'self']
+                _init_defaults = getattr(m, 'param_defaults', {}) or {}
+                gen._struct_init_defaults[s.name] = {
+                    pn: dv for pn, dv in _init_defaults.items() if pn != 'self'}
+                # Full C signature too, so _lower_struct_constructor's
+                # __init__-call path coerces every arg to its declared param
+                # type (a cross-module `Class(kw=..., aset={..})` otherwise
+                # passes a MojoSet* into an int64_t slot uncast → GCC
+                # -Wint-conversion). Mirrors gen_module_impl Pass 2b.
+                _mangled = s.name + "___init__"
+                if _mangled not in gen.func_param_types:
+                    _ctypes = [s.name + " *"]
+                    for _i, (_pn, _pt) in enumerate(m.params):
+                        if _i == 0 and _pn == 'self':
+                            continue
+                        _ctypes.append(gen._param_ctype(_pn, _pt, m))
+                    gen.func_param_types[_mangled] = _ctypes
+
+
 def _compile_imported_module(gen, module_name: str) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
@@ -497,6 +532,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._calls_in_stmts_cache = gen._calls_in_stmts_cache
                 temp_gen._extra_search_paths = gen._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                 temp_gen.func_return_types = gen.func_return_types  # share across gens
+                temp_gen.func_param_types = gen.func_param_types  # share across gens (mirrors func_return_types) — cross-module __init__ arg coercion
                 # share: the self-host GimpleGen registry seed (parsed
                 # `class GimpleGen` StructDef + the extracted-helper field
                 # union + the frozen-signature flag). Read-only; every nested
@@ -587,6 +623,28 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # into the coroutine-body emitter's local-elem registry.
                 if getattr(gen, '_xmod_gen_elem_hints', None):
                     temp_gen._xmod_gen_elem_hints = gen._xmod_gen_elem_hints
+
+                # Share the struct-__init__ registries by reference and
+                # pre-register every StructDef.__init__ reachable in the
+                # whole transitive closure BEFORE this module's bodies are
+                # lowered. Without this, a cross-module `Class(kw=...)`
+                # constructor whose class lives in a not-yet-lowered sibling
+                # (e.g. gimple_gen_resolve.py's own
+                # `gimple_codegen.GimpleGen(do_imports=True, ...)`) missed
+                # `_struct_has_init`, fell to _lower_struct_constructor's
+                # field-assignment fallback, and emitted `_alloc_GimpleGen()`
+                # + raw field stores with NO `GimpleGen___init__(...)` call —
+                # so every dict field (`_actual_types`, `_module_stmts`, ...)
+                # stayed NULL and the shimless `--dump-full` SIGSEGV'd in
+                # `_dict_set_raw_seq_kind`. (Invisible until now because
+                # `stage2/mojo --dump-full` is shimmed to python3 in
+                # `make bootstrap`.)
+                temp_gen._struct_has_init = gen._struct_has_init
+                temp_gen._struct_init_params = gen._struct_init_params
+                temp_gen._struct_init_defaults = gen._struct_init_defaults
+                temp_gen._struct_method_names = gen._struct_method_names
+                _register_closure_struct_inits(gen, stmts)
+
                 code = temp_gen.gen_module(stmts)
 
                 # Link mode's 4th coroutine-code source: a PLAIN (non-
