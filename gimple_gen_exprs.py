@@ -3775,7 +3775,14 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
 
     it_type = ''
     if not is_range:
-        it_type, it_val = gen.lower_expr(gen0.iterable)
+        # Index the 2-tuple return, not `it_type, it_val = ...`: the
+        # unpack boxes `it_val` on the self-hosted path, so the
+        # `mojo_list_len ({it_val})` / `mojo_list_get_int ({it_val}, ...)`
+        # f-strings in `_compr_list_loop` fed `mojo_str_cat` a garbage
+        # pointer -> `strlen()` segfault on the single-TU
+        # `--dump myinterpreter.py`.
+        _cit = gen.lower_expr(gen0.iterable)
+        it_type = _cit[0]; it_val = _as_str(_cit[1])
         # Resolve a pointer stored as int64_t (e.g. from a method call
         # returning a list) to its real tracked type — mirrors
         # _gen_for_iter's identical call, which this comprehension path
