@@ -4317,6 +4317,26 @@ def gen_module_impl(self, stmts):
         all_stmts_for_dispatch = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         self._dispatch_solver.analyze(all_stmts_for_dispatch)
         self._dispatch_tables = self._dispatch_solver.get_dispatch_tables()
+        # Self-hosted-codegen safety: DispatchTable / DispatchSolver live in
+        # gimple_solvers.py, and when the compiler self-compiles, those
+        # classes' field types don't propagate here — `dispatch_type` /
+        # `struct_fields` erase, so `emit_typedef()` returns a few bytes of
+        # raw heap garbage instead of a `typedef struct {...}` (invalid C
+        # in `MOJO_NO_SHIM=1 --dump myinterpreter.py`, ~4 corrupt lines
+        # before `_alloc_BoundMethod`). If ANY planned table can't emit a
+        # well-formed typedef, drop the whole dispatch-table optimisation
+        # for this module and fall back to dynamic dispatch — always
+        # correct, just not devirtualised.
+        if self._dispatch_tables:
+            _dt_ok = True
+            for _dt_chk in self._dispatch_tables.values():
+                _td = _dt_chk.emit_typedef()
+                if not (isinstance(_td, str) and (_td.startswith('typedef') or _td.startswith('/*'))):
+                    _dt_ok = False
+                    break
+            if not _dt_ok:
+                self._dispatch_tables = {}
+                self._dispatch_solver = None
         # Dispatch-table callee qualification: each planned row's symbol was
         # registered BARE (`f"{struct}_{method}"`, see DispatchSolver's
         # struct_methods population), but Phase 2a emits a non-root module's
