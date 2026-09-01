@@ -2952,7 +2952,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
     name = gen._ensure_generic_struct(g, type_args)
     if not name:
         return None
-    return gen._lower_struct_constructor(name, node.args, getattr(node, 'kwargs', None))
+    return gen._lower_struct_constructor(name, node.args, node.kwargs)
 
 
 def _emit_generic_instantiation(gen, info, arg_pairs):

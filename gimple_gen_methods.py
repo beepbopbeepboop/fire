@@ -784,7 +784,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         sn_cls = gimple_exprtypes._struct_name_of(ot_cls)
         if sn_cls in gen.struct_field_types:
             return gen._lower_struct_constructor(
-                sn_cls, list(node.args), getattr(node, 'kwargs', None) or [])
+                sn_cls, list(node.args), node.kwargs or [])
         for a in node.args:
             gen.lower_expr(a)
         return 'int64_t', gen._new_val('int64_t', '(int64_t)0')

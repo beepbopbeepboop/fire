@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    _as_str,
 )
 import regex_compile
 import mlir
@@ -1274,7 +1275,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # renamed registration (`_kw_auto`) so the constructor resolves.
     _fname_ctor = gen._c_kw_struct_renames.get(fname_raw, fname_raw)
     if _fname_ctor in gen.struct_field_types:
-        return gen._lower_struct_constructor(_fname_ctor, node.args, getattr(node, 'kwargs', None))
+        # `node.kwargs` (a direct CallExpr field read) NOT
+        # `getattr(node, 'kwargs', None)` — the 3-arg getattr lowers to a
+        # dynamic `_mojo_dispatch_getattr` on the self-hosted path, which
+        # doesn't see a plain dataclass list field and returns the None
+        # default, so every `Struct(field=...)` kwarg-only constructor
+        # (e.g. `CallExpr(func=IdentExpr(name='main'))` at mojo.py:127)
+        # silently lowered to a bare `_alloc_Struct()` with no field inits.
+        return gen._lower_struct_constructor(_fname_ctor, node.args, node.kwargs)
     if gen.func_return_types.get(fname_raw) == f'{fname_raw} *':
         return gen._lower_imported_struct_ctor(fname_raw, node)
 
@@ -3416,7 +3424,7 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
 
 
 def _lower_struct_constructor(gen, struct_name: str,
-                              args: list, kwargs: list | None = None) -> tuple[str, str]:
+                              args: list, kwargs: list = None) -> tuple[str, str]:
     """
     Lower TypeName(field1, field2, ...) to allocation + field init + __init__ call.
 
@@ -3427,6 +3435,20 @@ def _lower_struct_constructor(gen, struct_name: str,
     t      = gen._new_temp(ctype)
     gen._struct_allocs_needed.add(struct_name)
     gen._emit(f"  {t} = _alloc_{struct_name} ();")
+
+    # Normalize kwargs to a fresh list of (str, expr) pairs, keyed by an
+    # `_as_str`-viewed name, via explicit index access — NOT `for k, v in
+    # kwargs` / `dict(kwargs)`. On the self-hosted path a `for a, b in
+    # <list of 2-tuples>` unpack boxes both slots (the key reads as an
+    # int64_t pointer), so every `kname in fields_dict` / `pname not in
+    # dict(kwargs)` test downstream missed and `Struct(field=...)` /
+    # `Interpreter(filename=.., argv=..)` kwarg constructors silently
+    # lowered to a bare `_alloc_Struct()` with no field inits.
+    if kwargs:
+        _norm_kw = []
+        for _kp in kwargs:
+            _norm_kw.append((_as_str(_kp[0]), _kp[1]))
+        kwargs = _norm_kw
 
     # Same-file overload resolution: if this struct's __init__ overloads
     # (including any @fieldwise_init-synthesized one) were registered from

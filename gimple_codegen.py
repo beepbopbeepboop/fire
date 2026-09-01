@@ -2911,7 +2911,7 @@ class GimpleGen:
     def _build_call_args_for_candidate(self, chosen: dict, args: list, kwargs: list | None, defaults: dict | None=None) -> list:
         return ggc._build_call_args_for_candidate(self, chosen, args, kwargs, defaults)
 
-    def _lower_struct_constructor(self, struct_name: str, args: list, kwargs: list | None=None) -> tuple[str, str]:
+    def _lower_struct_constructor(self, struct_name: str, args: list, kwargs: list=None) -> tuple[str, str]:
         return ggc._lower_struct_constructor(self, struct_name, args, kwargs)
 
     def _array_field_elem_ptr(self, member_expr) -> tuple[str, str] | None:
