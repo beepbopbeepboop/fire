@@ -82,7 +82,19 @@ def _walk_ast_into(node, out):
         # (`_mojo_dispatch_fields`); handle both without a `.name` access
         # that would fault on the string form.
         _raw = dataclasses.fields(node)
-        fnames = tuple(f if isinstance(f, str) else f.name for f in _raw)
+        # `dataclasses.fields()` yields `Field` objects under CPython, a
+        # plain list of field-NAME strings under the self-hosted runtime.
+        # `isinstance(f, str)` can't tell them apart (the builtin-type
+        # isinstance stub), and `f.name` on the string form hits this
+        # codegen's pathlib `.name`→basename special case and returns
+        # garbage — which then made `getattr(node, <garbage>)` walk
+        # nothing, so every generic AST scan (`_collect_self_assigns`,
+        # `_rewrite_node`, ...) saw an empty node. A `Field` has a
+        # `.type` attribute; a bare string does not.
+        _names = []
+        for _f in _raw:
+            _names.append(_f.name if hasattr(_f, 'type') else _f)
+        fnames = tuple(_names)
         _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
     for fname in fnames:
         _walk_ast_into(getattr(node, fname), out)
