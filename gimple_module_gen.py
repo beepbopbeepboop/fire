@@ -429,7 +429,7 @@ def gen_module_impl(self, stmts):
             continue
         if not _imp_stmts:
             continue
-        for _iname, _ialias in _fis.names:
+        for _iname, _ialias in gimple_ctypes._fromimport_names(_fis):
             _isym = _ialias if _ialias else _iname
             if _isym in self._comptime_vals:
                 continue   # a same-named local binding always wins
@@ -529,7 +529,7 @@ def gen_module_impl(self, stmts):
         _names = set()
         for _tb_s in (_tb_body or []):
             if isinstance(_tb_s, FromImportStmt):
-                for _tb_nm, _tb_alias in (_tb_s.names or []):
+                for _tb_nm, _tb_alias in gimple_ctypes._fromimport_names(_tb_s):
                     _names.add(_tb_alias if _tb_alias else _tb_nm)
             elif isinstance(_tb_s, ImportStmt):
                 for _tb_mod0, _tb_alias0 in _import_targets(_tb_s):
@@ -760,7 +760,7 @@ def gen_module_impl(self, stmts):
             for stmt in node_list:
                 if isinstance(stmt, FromImportStmt):
                     modules_to_compile.add(stmt.module)
-                    for _fn, _fa in (stmt.names or []):
+                    for _fn, _fa in gimple_ctypes._fromimport_names(stmt):
                         # _join_import_member, not a blind f"{module}.{name}":
                         # for a bare-relative module (`from . import strutil`,
                         # module == '.') the separator dot would double-count
@@ -810,7 +810,7 @@ def gen_module_impl(self, stmts):
             _xg_module_binding: dict = {}
             for _xg_n in _walk_ast(stmts):
                 if isinstance(_xg_n, FromImportStmt) and not getattr(_xg_n, 'wildcard', False):
-                    for _xg_name, _xg_alias in (_xg_n.names or []):
+                    for _xg_name, _xg_alias in gimple_ctypes._fromimport_names(_xg_n):
                         _xg_bound = _xg_alias if _xg_alias else _xg_name
                         _xg_pm = _xg_alias_mod.get(_xg_bound)
                         if _xg_pm is None:
@@ -1772,7 +1772,7 @@ def gen_module_impl(self, stmts):
                                     if not (isinstance(_ist, FromImportStmt)
                                             and not getattr(_ist, 'wildcard', False)):
                                         continue
-                                    for _inm, _ialias in _ist.names:
+                                    for _inm, _ialias in gimple_ctypes._fromimport_names(_ist):
                                         if (_ialias or _inm) != _fann_s:
                                             continue
                                         if self._materialize_imported_struct(
@@ -2345,10 +2345,10 @@ def gen_module_impl(self, stmts):
                         self._note_own_func_home(sym_name, _qual)
                 try:
                     if not s.names:
-                        for _wc_key, _wc_info in exports.items():
-                            _register_sym(_wc_key, _wc_key, _wc_info)
+                        for _wc_key in exports:   # not `.items()` — 2-tuple unpack boxes the key on the self-hosted path
+                            _register_sym(_wc_key, _wc_key, exports[_wc_key])
                     else:
-                        for name, alias in s.names:
+                        for name, alias in gimple_ctypes._fromimport_names(s):
                             sym_name = alias if alias else name
                             sym_info = exports.get(name, {})
                             # Genuine overload (2+ `def <name>(...)` in the
@@ -2428,7 +2428,7 @@ def gen_module_impl(self, stmts):
             else:
                 _debug_note('module load failed while registering imports')
                 if not s.wildcard:
-                    for _fb_name, _fb_alias in s.names:
+                    for _fb_name, _fb_alias in gimple_ctypes._fromimport_names(s):
                         _fb_sym = _fb_alias if _fb_alias else _fb_name
                         # Same generator-binding rule as the resolved-exports
                         # branch above: exports can fail to load while the

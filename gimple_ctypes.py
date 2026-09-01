@@ -1073,6 +1073,20 @@ def _import_targets(node) -> list:
     return out
 
 
+def _fromimport_names(node) -> list:
+    """`[(name, alias|None), ...]` for a FromImportStmt, every slot
+    `_as_str`-viewed — `FromImportStmt.names` is `list[(str, str|None)]` but
+    the alias slot erases to int64_t on the self-hosted backend, so a
+    consumer unpacking `for name, alias in stmt.names:` reads a boxed
+    pointer and feeds it to `_stub_guard_name(...)` / `imported_symbols[...]`
+    as a decimal-stringified address (non-deterministic garbage C
+    identifiers). Mirrors `_import_targets` for ImportStmt."""
+    out = []
+    for _pair in (getattr(node, 'names', None) or []):
+        out.append((_as_str(_pair[0]), _as_str(_pair[1])))
+    return out
+
+
 def _join_import_member(mod: str, name: str) -> str:
     """Canonical dotted string naming what `from mod import name` binds —
     the exact string _module_candidate_paths/_compile_imported_module must

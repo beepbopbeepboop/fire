@@ -771,7 +771,7 @@ def _register_link_imports(gen, stmts) -> list:
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.FromImportStmt):
                 exports, from_reflection, source = _exports(stmt.module)
-                for name, alias in stmt.names:
+                for name, alias in gimple_ctypes._fromimport_names(stmt):
                     info = exports.get(name)
                     sym = alias if alias else name
                     # Overload registration must NOT be gated on `not info`:
@@ -1074,7 +1074,8 @@ def _register_reflected_struct(gen, name, type_info, exports, parse_c_sig):
     if not gen.struct_field_types.get(name):
         gen.struct_field_types[name] = fields
     # Register each method (kind 1) belonging to this struct.
-    for ename, einfo in exports.items():
+    for ename in exports:   # not `.items()` — 2-tuple unpack boxes the key
+        einfo = exports[ename]
         if einfo.get('kind') != 1 or not ename.startswith(name + '.'):
             continue
         msig = einfo.get('signature', '')
