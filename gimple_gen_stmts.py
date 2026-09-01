@@ -1744,13 +1744,21 @@ def _gen_stmt_IfStmt(gen, node):
     cond_v  = gen._ensure_bool_cond(cond_type, cond_v)
     bb_true     = gen._new_bb()
     bb_merge    = gen._new_bb()
-    has_else    = bool(node.elifs or node.else_body)
+    # Explicit length tests, NOT `bool(node.elifs or node.else_body)` — an
+    # `or` of two list attributes folds to a falsy int64_t on the
+    # self-hosted compiled path even when a list is non-empty, so an
+    # `if: ... elif: ...` with no `else:` mis-computed `has_else = False`,
+    # aimed the main condition's false-edge straight at bb_merge and
+    # never tested the elif at all.
+    _n_elifs = len(node.elifs) if node.elifs else 0
+    _n_else  = len(node.else_body) if node.else_body else 0
+    has_else    = _n_elifs > 0 or _n_else > 0
     bb_false    = gen._new_bb() if has_else else bb_merge
 
     # `bb_merge` is reachable via a condition's false-edge unless a real
     # `else:` block consumes the last one; otherwise only a
     # non-terminating branch body keeps it live.
-    _merge_reachable = not node.else_body
+    _merge_reachable = _n_else == 0
 
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
@@ -1771,10 +1779,12 @@ def _gen_stmt_IfStmt(gen, node):
 
     current_false = bb_false
     elifs = list(node.elifs)
-    while elifs:
-        ec, eb = elifs.pop(0)
+    _ei = 0
+    while _ei < len(elifs):
+        ec, eb = elifs[_ei]
+        _ei += 1
         gen._emit_label(current_false)
-        has_more   = bool(elifs or node.else_body)
+        has_more   = (len(elifs) - _ei) > 0 or _n_else > 0
         next_false = gen._new_bb() if has_more else bb_merge
         next_true  = gen._new_bb()
         ec_t, ev = gen.lower_expr(ec)
@@ -1796,7 +1806,7 @@ def _gen_stmt_IfStmt(gen, node):
             _merge_reachable = True
         current_false = next_false
 
-    if node.else_body:
+    if _n_else > 0:
         gen._emit_label(current_false)
         for s in node.else_body:
             gen.gen_stmt(s)
