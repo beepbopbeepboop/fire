@@ -5824,9 +5824,21 @@ def gen_module_impl(self, stmts):
     # the self-hosted path, so `et` came out a decimal-stringified pointer
     # in the emitted `static <ptr> * _mojo_at_<ptr> (...)` (non-deterministic
     # C — a stage2-vs-stage3 idempotency failure).
+    # Build a clean, value-deduped, value-SORTED list of element type
+    # names first: `sorted(self._ptr_helpers_needed)` alone orders by the
+    # boxed pointer VALUE when the set has int-tagged slots (element type
+    # erased on the self-hosted path) — non-deterministic run to run. And
+    # `_ptr_slot_in_range` drops an entry that is raw garbage rather than
+    # a boxed-but-valid string pointer.
+    _pth_names: list = []
+    for _pth in self._ptr_helpers_needed:
+        if not _ptr_slot_in_range(_pth):
+            continue
+        _pth_s = _as_str(_pth)
+        if _pth_s and _pth_s not in _pth_names:
+            _pth_names.append(_pth_s)
     _new_helper_count = 0
-    for et in sorted(self._ptr_helpers_needed):
-        et = _as_str(et)
+    for et in sorted(_pth_names):
         if et in self._emitted_ptr_helpers:
             continue
         cn = _c_id(et)
