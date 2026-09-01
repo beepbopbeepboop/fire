@@ -1217,7 +1217,7 @@ class GimpleGen:
         # different temp_gen instances, each of which would otherwise start
         # from a fresh, empty "have I seen this name" view and merge its own
         # fields in regardless of what an earlier temp_gen already decided.
-        self._struct_name_owner: dict[str, int] = {}
+        self._struct_name_owner: dict = {}
         # struct name -> [base class names]; populated per gen_module call
         # (see the struct-bases scan below). Default empty here so any method
         # lookup that runs before that scan (or on a GimpleGen instance that

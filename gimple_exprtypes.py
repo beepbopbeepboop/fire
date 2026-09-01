@@ -49,7 +49,10 @@ def _walk_ast_into(node, out):
     traversal order/content is byte-identical by construction."""
     if node is None:
         return
-    if isinstance(node, (list, tuple)):
+    # `isinstance(node, list) or isinstance(node, tuple)`, NOT
+    # `isinstance(node, (list, tuple))`: the self-hosted backend's
+    # `isinstance` with a TUPLE of types always evaluated False.
+    if isinstance(node, list) or isinstance(node, tuple):
         for item in node:
             _walk_ast_into(item, out)
         return
@@ -67,7 +70,8 @@ def _walk_ast_into(node, out):
     # string>, 'name')` off a stale field list raised `AttributeError:
     # name`, aborting the whole self-hosted compile. `is_dataclass` maps
     # straight to the runtime `_mojo_dispatch_is_dataclass` tag check.
-    if isinstance(node, (str, int, float, bool)) or node is None:
+    if (isinstance(node, str) or isinstance(node, int)
+            or isinstance(node, float) or isinstance(node, bool) or node is None):
         return
     if not dataclasses.is_dataclass(node):
         return

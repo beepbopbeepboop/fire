@@ -1516,7 +1516,7 @@ def gen_module_impl(self, stmts):
         _gg_ft0 = dict(getattr(self, '_selfhost_gimplegen_extra_fields', {}) or {})
         self.struct_field_types['GimpleGen'] = _gg_ft0
         self._imported_struct_names.add('GimpleGen')
-        self._struct_name_owner.setdefault('GimpleGen', id(_gg_stmts))
+        self._struct_name_owner.setdefault('GimpleGen', _gg_stmts)
         self._imported_typedef_structs.append(_gg_stmts)
     # Apply + LOCK the frozen GimpleGen signature table BEFORE any of the
     # method-registration / Pass-2b-bis / forward-decl passes run, in EVERY
@@ -1671,18 +1671,18 @@ def gen_module_impl(self, stmts):
     # `_alloc_GimpleGen` seed, leaving the field NULL at runtime.
     for s in all_struct_defs:
         if isinstance(s, StructDef) and s.name == 'GimpleGen':
-            self._struct_name_owner['GimpleGen'] = id(s)
+            self._struct_name_owner['GimpleGen'] = s
             break
     for s in all_struct_defs:
         if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
-            self._struct_name_owner[s.name] = id(s)
+            self._struct_name_owner[s.name] = s
     for s in all_struct_defs:
-        if isinstance(s, StructDef) and self._struct_name_owner.get(s.name) == id(s):
+        if isinstance(s, StructDef) and self._struct_name_owner.get(s.name) is s:
             if s.name not in self.struct_field_types:
                 self.struct_field_types[s.name] = {}
     for s in all_struct_defs:
         if isinstance(s, StructDef):
-            if self._struct_name_owner.get(s.name) != id(s):
+            if self._struct_name_owner.get(s.name) is not s:
                 continue
             if s.name not in self.struct_field_types:
                 self.struct_field_types[s.name] = {}
@@ -1911,8 +1911,8 @@ def gen_module_impl(self, stmts):
             def _self_member(expr):
                 """MemberExpr's `.member` name iff its object is bare `self`."""
                 if (isinstance(expr, MemberExpr) and isinstance(expr.obj, IdentExpr)
-                        and expr.obj.name == 'self'):
-                    return expr.member
+                        and _as_str(expr.obj.name) == 'self'):
+                    return _as_str(expr.member)
                 return None
 
             def _collect_self_assigns(body, param_types, found):
@@ -2036,7 +2036,9 @@ def gen_module_impl(self, stmts):
                             pm[pname] = 'int64_t'
                 new_fields = {}
                 _collect_self_assigns(method.body, pm, new_fields)
-                for fn, ft in new_fields.items():
+                for _nf_k in new_fields:
+                    fn = _as_str(_nf_k)
+                    ft = _as_str(new_fields[_nf_k])
                     existing_ft = self.struct_field_types[s.name].get(fn)
                     can_override = (existing_ft == 'int' and ft.endswith(' *'))
                     if fn not in self.struct_field_types[s.name] or can_override:
@@ -2073,7 +2075,7 @@ def gen_module_impl(self, stmts):
 
     _struct_by_name = {st.name: st for st in all_struct_defs
                         if isinstance(st, StructDef)
-                        and self._struct_name_owner.get(st.name) == id(st)}
+                        and self._struct_name_owner.get(st.name) is st}
 
     def _scan_stmt_var_candidates(stmt):
         sid = id(stmt)
