@@ -404,6 +404,17 @@ def _collect_import_modules(modules_to_compile, node_list):
     self-hosted (compiled) path a recursive nested function's capture of a
     mutable set was unreliable, so `--dump-full` silently saw only the
     module's own top-level imports and emitted a truncated closure."""
+    _collect_import_modules_rec(modules_to_compile, node_list, 0)
+
+
+def _collect_import_modules_rec(modules_to_compile, node_list, _depth):
+    # Depth cap: on the self-hosted path a mis-lowered `isinstance(stmt,
+    # (WhileStmt, ForStmt, TryStmt))` tuple-isinstance or an aliased `.body`
+    # can make this recurse without bound (observed as a multi-GB memory
+    # runaway on `MOJO_NO_SHIM=1 --dump-full` before any module is even
+    # compiled). Real nesting never approaches 40.
+    if _depth > 40:
+        return
     for stmt in node_list:
         if isinstance(stmt, FromImportStmt):
             modules_to_compile.add(stmt.module)
@@ -427,15 +438,15 @@ def _collect_import_modules(modules_to_compile, node_list):
             for _ex in (getattr(stmt, 'extra', None) or []):
                 modules_to_compile.add(_as_str(_ex[0]))
         elif isinstance(stmt, FunctionDef):
-            _collect_import_modules(modules_to_compile, stmt.body)
+            _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
         elif isinstance(stmt, IfStmt):
-            _collect_import_modules(modules_to_compile, stmt.then_body)
+            _collect_import_modules_rec(modules_to_compile, stmt.then_body, _depth + 1)
             for _elif_pair in stmt.elifs:
-                _collect_import_modules(modules_to_compile, _elif_pair[1])
+                _collect_import_modules_rec(modules_to_compile, _elif_pair[1], _depth + 1)
             if stmt.else_body:
-                _collect_import_modules(modules_to_compile, stmt.else_body)
+                _collect_import_modules_rec(modules_to_compile, stmt.else_body, _depth + 1)
         elif isinstance(stmt, (WhileStmt, ForStmt, TryStmt)):
-            _collect_import_modules(modules_to_compile, stmt.body)
+            _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
 
 
 def gen_module_impl(self, stmts):
