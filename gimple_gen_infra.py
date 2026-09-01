@@ -3305,7 +3305,13 @@ def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
 
 def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop
-    gen._declare_var(gen0.target, 'int64_t')
+    # A source set of strings (e.g. `frozenset({'a','b'})`) must round-trip
+    # its elements as `char *` — reading them back with mojo_set_iter_val_int
+    # tags the pointer bits 'int', so a later `x in frozenset` via
+    # mojo_set_contains_str misses every element.
+    _sv_elem = _as_str(gen._elem_of(_iv))
+    _sv_is_str = (_sv_elem == 'char *')
+    gen._declare_var(gen0.target, 'char *' if _sv_is_str else 'int64_t')
     iter_t = gen._new_temp('MojoSetIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_set_iter_new ({_iv});")
@@ -3317,7 +3323,10 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     cond_t = gen._new_val('_Bool', f"{more_t} != 0")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_set_iter_val_int ({iter_t});")
+    if _sv_is_str:
+        gen._emit(f"  {gen._cname(gen0.target)} = mojo_set_iter_val_str ({iter_t});")
+    else:
+        gen._emit(f"  {gen._cname(gen0.target)} = mojo_set_iter_val_int ({iter_t});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

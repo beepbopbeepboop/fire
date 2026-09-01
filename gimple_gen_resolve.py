@@ -3285,7 +3285,17 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         if et == 'MojoList *' and ev in gen._tuple_slot_types:
             gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
     elif node.kind == 'set':
-        et, ev = gen.lower_expr(node.element)
+        # Index the 2-tuple, NOT `et, ev = gen.lower_expr(...)`: the
+        # unpack boxes `et` on the self-hosted path, so `et == 'char *'`
+        # failed for a genuinely-string element and EVERY `{s for s in
+        # strs}` / `frozenset({...})` re-added its strings via
+        # `mojo_set_add_int` — the set then had int-tagged slots holding
+        # char* pointers and `name in <that set>` (mojo_set_contains_str)
+        # always missed (e.g. `_SELFHOST_HARDCODED_FUNCS`, so
+        # `Interpreter_execute` got a conflicting arity-variadic weak
+        # stub on the shimless `--dump`).
+        _sr = gen.lower_expr(node.element)
+        et = _as_str(_sr[0]); ev = _sr[1]
         if et == 'char *':
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', res), ('char *', ev)])
         else:
