@@ -2653,15 +2653,23 @@ def _known_field_type(gen, member: str) -> str | None:
     # compiled mojoc — every boxed AST `.name`/`.member`/`.value` read
     # stayed int64_t. A list (not a set + `.pop()`, also unlowered) keeps
     # the compiled control flow simple.
+    # `_as_str` on both the struct-name key and the field-type value: on
+    # the self-hosted path `struct_field_types` (a dict-of-dicts) erases
+    # its inner value type to int64_t, so `_v` came back a boxed pointer
+    # and the `f'({_boxed_ft}){raw}'` cast at the call site emitted a raw
+    # ASLR pointer decimal as the cast type (`_t16 = (47634928176)_t15;`)
+    # — a stage2-vs-stage3 idempotency failure. Dedup by string VALUE
+    # (`in` over a list of real `char *` does strcmp) so a genuinely
+    # type-varying member still returns None regardless of key order.
     _types: list = []
-    for _sn in gen.struct_field_types:
-        _fm: dict = gen.struct_field_types[_sn]
+    for _sn0 in gen.struct_field_types:
+        _fm: dict = gen.struct_field_types[_as_str(_sn0)]
         if member in _fm:
-            _v = _fm[member]
+            _v = _as_str(_fm[member])
             if _v not in _types:
                 _types.append(_v)
     if len(_types) == 1:
-        return _types[0]
+        return _as_str(_types[0])
     return None
 
 
@@ -3124,6 +3132,11 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         return
     elem = _as_str(gen._elem_of(_iv))
     gen._declare_var(_as_str(gen0.target), elem)
+    # FRESH `char *` view of the loop-target C name: `gen0.target` (an AST
+    # str field) erases to int64_t on the self-hosted path, so a bare
+    # `f'  {gen0.target} = ...'` LVALUE emitted a raw ASLR pointer decimal
+    # (`54648467328 = _t224;`) — a stage2-vs-stage3 idempotency failure.
+    _tgt = gen._cname(_as_str(gen0.target))
     len64 = gen._new_val('int64_t', f'mojo_list_len ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3135,17 +3148,17 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit_label(bb_body)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
     if suf == 'double':
-        gen._emit(f"  {gen0.target} = mojo_list_get_double ({_iv}, {idx64});")
+        gen._emit(f"  {_tgt} = mojo_list_get_double ({_iv}, {idx64});")
     elif suf == 'str':
         # mojo_list_get_str returns char*, handle type mismatch with target variable
         temp_str = gen._new_val('char *', f"mojo_list_get_str ({_iv}, {idx64})")
-        target_type = gen._type_of(gen0.target)
+        target_type = gen._type_of(_as_str(gen0.target))
         if target_type == 'char *':
-            gen._emit(f"  {gen0.target} = {temp_str};")
+            gen._emit(f"  {_tgt} = {temp_str};")
         else:
             # Cast to int64_t if target is opaque
             int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
-            gen._emit(f"  {gen0.target} = {int_ptr};")
+            gen._emit(f"  {_tgt} = {int_ptr};")
     else:
         raw64 = gen._new_val('int64_t', f"mojo_list_get_int ({_iv}, {idx64})")
         # The loop variable may have been first declared elsewhere in this
@@ -3157,11 +3170,11 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         # coercion. A node handle boxed into a char*-declared var is a
         # bit-pattern-preserving cast — the field-access lowering already
         # reads boxed handles through the runtime tag dispatch.
-        target_type = gen._type_of(gen0.target)
+        target_type = gen._type_of(_as_str(gen0.target))
         if target_type != 'int64_t':
-            gen._safe_coerce_emit('int64_t', target_type, raw64, gen0.target)
+            gen._safe_coerce_emit('int64_t', target_type, raw64, _tgt)
         else:
-            gen._emit(f"  {gen0.target} = (int64_t) {raw64};")
+            gen._emit(f"  {_tgt} = (int64_t) {raw64};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
