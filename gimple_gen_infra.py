@@ -453,7 +453,9 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
             continue
         if not exports:
             continue
-        for name, alias in gimple_ctypes._fromimport_names(stmt):
+        for _fip9 in gimple_ctypes._fromimport_names(stmt):
+            name = _as_str(_fip9[0])
+            alias = _as_str(_fip9[1])
             sym = alias if alias else name
             # Record this function's home module (SB-1 fix, _func_qualifier)
             # UNCONDITIONALLY — deliberately BEFORE the `sym in seen`
@@ -627,7 +629,9 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
                 qual = _mlmod2.module_name_for_path(_cand)
         if not exports or not qual:
             continue
-        for name, alias in gimple_ctypes._fromimport_names(stmt):
+        for _fip10 in gimple_ctypes._fromimport_names(stmt):
+            name = _as_str(_fip10[0])
+            alias = _as_str(_fip10[1])
             info = exports.get(name)
             if not info or info.get('kind') != 'global_var':
                 continue

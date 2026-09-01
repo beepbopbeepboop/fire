@@ -771,7 +771,9 @@ def _register_link_imports(gen, stmts) -> list:
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.FromImportStmt):
                 exports, from_reflection, source = _exports(stmt.module)
-                for name, alias in gimple_ctypes._fromimport_names(stmt):
+                for _fip11 in gimple_ctypes._fromimport_names(stmt):
+                    name = _as_str(_fip11[0])
+                    alias = _as_str(_fip11[1])
                     info = exports.get(name)
                     sym = alias if alias else name
                     # Overload registration must NOT be gated on `not info`:

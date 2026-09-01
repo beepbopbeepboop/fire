@@ -429,7 +429,9 @@ def gen_module_impl(self, stmts):
             continue
         if not _imp_stmts:
             continue
-        for _iname, _ialias in gimple_ctypes._fromimport_names(_fis):
+        for _fip12 in gimple_ctypes._fromimport_names(_fis):
+            _iname = _as_str(_fip12[0])
+            _ialias = _as_str(_fip12[1])
             _isym = _ialias if _ialias else _iname
             if _isym in self._comptime_vals:
                 continue   # a same-named local binding always wins
@@ -529,7 +531,9 @@ def gen_module_impl(self, stmts):
         _names = set()
         for _tb_s in (_tb_body or []):
             if isinstance(_tb_s, FromImportStmt):
-                for _tb_nm, _tb_alias in gimple_ctypes._fromimport_names(_tb_s):
+                for _fip13 in gimple_ctypes._fromimport_names(_tb_s):
+                    _tb_nm = _as_str(_fip13[0])
+                    _tb_alias = _as_str(_fip13[1])
                     _names.add(_tb_alias if _tb_alias else _tb_nm)
             elif isinstance(_tb_s, ImportStmt):
                 for _tb_mod0, _tb_alias0 in _import_targets(_tb_s):
@@ -766,7 +770,9 @@ def gen_module_impl(self, stmts):
             for stmt in node_list:
                 if isinstance(stmt, FromImportStmt):
                     modules_to_compile.add(stmt.module)
-                    for _fn, _fa in gimple_ctypes._fromimport_names(stmt):
+                    for _fip14 in gimple_ctypes._fromimport_names(stmt):
+                        _fn = _as_str(_fip14[0])
+                        _fa = _as_str(_fip14[1])
                         # _join_import_member, not a blind f"{module}.{name}":
                         # for a bare-relative module (`from . import strutil`,
                         # module == '.') the separator dot would double-count
@@ -816,7 +822,9 @@ def gen_module_impl(self, stmts):
             _xg_module_binding: dict = {}
             for _xg_n in _walk_ast(stmts):
                 if isinstance(_xg_n, FromImportStmt) and not getattr(_xg_n, 'wildcard', False):
-                    for _xg_name, _xg_alias in gimple_ctypes._fromimport_names(_xg_n):
+                    for _fip15 in gimple_ctypes._fromimport_names(_xg_n):
+                        _xg_name = _as_str(_fip15[0])
+                        _xg_alias = _as_str(_fip15[1])
                         _xg_bound = _xg_alias if _xg_alias else _xg_name
                         _xg_pm = _xg_alias_mod.get(_xg_bound)
                         if _xg_pm is None:
@@ -1778,7 +1786,9 @@ def gen_module_impl(self, stmts):
                                     if not (isinstance(_ist, FromImportStmt)
                                             and not getattr(_ist, 'wildcard', False)):
                                         continue
-                                    for _inm, _ialias in gimple_ctypes._fromimport_names(_ist):
+                                    for _fip16 in gimple_ctypes._fromimport_names(_ist):
+                                        _inm = _as_str(_fip16[0])
+                                        _ialias = _as_str(_fip16[1])
                                         if (_ialias or _inm) != _fann_s:
                                             continue
                                         if self._materialize_imported_struct(
@@ -2359,7 +2369,9 @@ def gen_module_impl(self, stmts):
                         for _wc_key in exports:   # not `.items()` — 2-tuple unpack boxes the key on the self-hosted path
                             _register_sym(_wc_key, _wc_key, exports[_wc_key])
                     else:
-                        for name, alias in gimple_ctypes._fromimport_names(s):
+                        for _fip17 in gimple_ctypes._fromimport_names(s):
+                            name = _as_str(_fip17[0])
+                            alias = _as_str(_fip17[1])
                             sym_name = alias if alias else name
                             sym_info = exports.get(name, {})
                             # Genuine overload (2+ `def <name>(...)` in the
@@ -2439,7 +2451,9 @@ def gen_module_impl(self, stmts):
             else:
                 _debug_note('module load failed while registering imports')
                 if not s.wildcard:
-                    for _fb_name, _fb_alias in gimple_ctypes._fromimport_names(s):
+                    for _fip18 in gimple_ctypes._fromimport_names(s):
+                        _fb_name = _as_str(_fip18[0])
+                        _fb_alias = _as_str(_fip18[1])
                         _fb_sym = _fb_alias if _fb_alias else _fb_name
                         # Same generator-binding rule as the resolved-exports
                         # branch above: exports can fail to load while the
@@ -6778,39 +6792,54 @@ def gen_module_impl(self, stmts):
         inline_defined = set()
 
     _stub_only_modules = {'jit.arm64', 'jit'}
+    # LOCAL dedup set (shadows the `from gimple_codegen import
+    # _emitted_unresolved_stub_syms` above) — that module-level `set()`
+    # global doesn't resolve cross-module on the self-hosted path, so it
+    # was NULL and `_emitted_unresolved_stub_syms.add(...)` segfaulted in
+    # `mojo_set_add_str(NULL, ...)` the moment a `jit`/`jit.arm64` import
+    # actually reached this branch.
+    _emitted_unresolved_stub_syms = set()
     for sym_name in sorted(self.imported_symbols.keys()):
-        if sym_name in hardcoded:
+        # `_sn` — a FRESH `_as_str` view (the sorted() loop var is int64_t;
+        # reassigning `sym_name` would re-widen it via whole-function
+        # unification). The `< 0x10000` skip drops the rare non-pointer
+        # garbage key (a small int a mis-scoped writer stored) that would
+        # otherwise segfault `_as_str(it)` + `it in <str set>`.
+        if not isinstance(sym_name, str) and sym_name < 0x10000:
             continue
-        sym_info = self.imported_symbols[sym_name]
+        _sn = _as_str(sym_name)
+        if _sn in hardcoded:
+            continue
+        sym_info = self.imported_symbols[_sn]
         if sym_info.get('return_type') == 'unknown':
             continue
-        if sym_name in inline_defined or sym_name in self._global_inline_defs:
+        if _sn in inline_defined or _sn in self._global_inline_defs:
             continue
-        if sym_name in self.struct_field_types:
+        if _sn in self.struct_field_types:
             continue
-        if sym_name in self._LIBC_DECLARED and sym_name not in _C_RESERVED_FUNCS:
+        if _sn in self._LIBC_DECLARED and _sn not in _C_RESERVED_FUNCS:
             continue
 
-        module = sym_info.get('module', '')
+        module = _as_str(sym_info.get('module', ''))
         if module in _stub_only_modules:
-            cname = _safe_name(sym_name)
+            cname = _safe_name(_as_str(sym_name))
             if cname in _emitted_unresolved_stub_syms:
                 continue
             _emitted_unresolved_stub_syms.add(cname)
             ret_type = sym_info.get('return_type', 'int64_t')
             ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
             if ret_type == 'void':
-                body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); }}'
+                body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
             else:
-                body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); return ({ret_type})0; }}'
+                body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
             _stub_only_guard = _stub_guard_name(cname)
             parts.append(f"#ifndef {_stub_only_guard}\n#define {_stub_only_guard}\n"
                           f"{ret_type} {cname} () {body}  /* stub from {module} */\n#endif")
             continue
 
-        safe = self._func_csym(sym_name)
+        safe = self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
-            if sym_name in _C_RESERVED_FUNCS:
+            if _sn in _C_RESERVED_FUNCS:
                 ret_type = sym_info.get('c_return_type') or sym_info.get('return_type', 'int64_t')
                 if ret_type and ret_type != 'unknown' and not any(
                         c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
@@ -6820,7 +6849,7 @@ def gen_module_impl(self, stmts):
                 parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
             else:
                 signature = sym_info['signature']
-                orig_name = sym_info.get('original_name', sym_name)
+                orig_name = sym_info.get('original_name', _sn)
                 if safe != orig_name:
                     signature = re.sub(r'\b' + re.escape(orig_name) + r'\b', safe, signature, count=1)
                 signature = re.sub(
@@ -6838,9 +6867,9 @@ def gen_module_impl(self, stmts):
                     continue
                 _emitted_unresolved_stub_syms.add(safe)
                 if ret_type == 'void':
-                    body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); }}'
+                    body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
                 else:
-                    body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); return ({ret_type})0; }}'
+                    body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
                 _unresolved_guard = _stub_guard_name(safe)
                 parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
                               f"__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
