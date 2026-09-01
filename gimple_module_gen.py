@@ -4653,8 +4653,18 @@ def gen_module_impl(self, stmts):
     _changed = True
     while _changed:
         _changed = False
-        for _outer_name, _inner_map in list(self._all_closures.items()):
-            for _inner_name, _ci in list(_inner_map.items()):
+        # Index-walk both dict levels, NOT nested `.items()` 2-tuple
+        # unpacks: the SECOND one boxes `_ci` itself on the self-hosted
+        # path, so `_ci.env_struct = f"{_ci.lifted_name}_env"` below
+        # wrote a garbage/degraded string onto a mis-typed handle —
+        # a real `MOJO_NO_SHIM=1 --dump myinterpreter.py` corruption
+        # (raw heap-garbage bytes in place of a closure-env struct name
+        # in the generated .ci, a hard GCC parse failure). Mirrors the
+        # closure-typedef-emission loops' identical fix.
+        for _outer_name in list(self._all_closures):
+            _inner_map = self._all_closures[_outer_name]
+            for _inner_name in list(_inner_map):
+                _ci = _inner_map[_inner_name]
                 _sub_closures = self._all_closures.get(_ci.lifted_name, {})
                 if not _sub_closures:
                     continue
