@@ -214,10 +214,23 @@ mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@echo "✓ mojoc ready"
 
 # ── stage2/mojo: compile stage1 output into a real binary ────────────────────
+# -ftrivial-auto-var-init=zero: the generated .ci reads some `char *`
+# locals before every codegen path has assigned them (a real gap in the
+# self-hosted metadata-dict/AST-field type inference, tracked separately
+# — see bugs list / selfhost-shimless-progress memory). Without this
+# flag GCC leaves such a read as classic uninitialized-stack garbage,
+# which under MOJO_NO_SHIM=1 (this binary's OWN compiled codegen
+# running, not the python3 shim) was a flaky SIGSEGV in
+# `_declare_var`'s `mojo_str_cat` (strlen on a garbage pointer). Zero-
+# init makes the read well-defined (NULL), which the codegen's own
+# `_ptr_slot_in_range` guard already treats as "no known type" and
+# falls back on safely. Inert for the STOCK (shimmed) bootstrap path —
+# stage2/mojo's own compiled functions never run there at all, only
+# under MOJO_NO_SHIM=1.
 stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/mojo.ci ==="
-	$(BOOTSTRAP_CC) -fgimple -I runtime -x c \
+	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime -x c \
 	    -o stage2/mojo \
 	    stage1/mojo.ci \
 	    $(RUNTIME_SRC)
