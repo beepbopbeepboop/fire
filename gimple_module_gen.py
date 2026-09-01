@@ -6405,12 +6405,48 @@ def gen_module_impl(self, stmts):
                             _all_str = bool(_pairs) and all(
                                 isinstance(k, StringLiteral) and isinstance(vv, StringLiteral)
                                 for k, vv in _pairs)
+                            # `dict[str, tuple[str, list[str]]]` — the
+                            # `_KNOWN_SIGS` / `_LIBC_SIGS` shape: value is
+                            # `(ret_ctype, [param_ctype, ...])`. Store each
+                            # as a 2-element MojoList `[ret, [params...]]`
+                            # so `_KNOWN_SIGS[name][0]` / `[1]` (the exact
+                            # tuple-indexing every consumer uses) still
+                            # work. Without this the class-attr emitter
+                            # left the dict EMPTY on the self-hosted path,
+                            # so every `fname in gen._KNOWN_SIGS` missed
+                            # and `py_tokenize(src)` / `int_join(...)` /
+                            # `Interpreter_execute(...)` lowered arity-/
+                            # type-wrong against the runtime header's real
+                            # prototype (hard GCC errors on the shimless
+                            # per-file `--dump`).
+                            _sig_pairs = bool(_pairs) and all(
+                                isinstance(k, StringLiteral)
+                                and isinstance(vv, TupleExpr)
+                                and len(vv.elements) == 2
+                                and isinstance(vv.elements[0], StringLiteral)
+                                and isinstance(vv.elements[1], (ListExpr, TupleExpr))
+                                and all(isinstance(_pe, StringLiteral) for _pe in vv.elements[1].elements)
+                                for k, vv in _pairs)
                             if _all_str:
                                 for k, vv in _pairs:
                                     _di.append(
                                         f'  mojo_dict_set_str ({mangled}, "{_c_escape(k.value)}", '
                                         f'"{_c_escape(vv.value)}");')
                                 self._global_dict_val_types[mangled] = 'char *'
+                                class_attr_inits.extend(_di)
+                            elif _sig_pairs:
+                                _sig_tmp = 0
+                                for k, vv in _pairs:
+                                    _sig_tmp += 1
+                                    _pl = f'{mangled}__pl{_sig_tmp}'
+                                    _sl = f'{mangled}__sl{_sig_tmp}'
+                                    _di.append(f'  MojoList *{_pl} = mojo_list_new();')
+                                    for _pe in vv.elements[1].elements:
+                                        _di.append(f'  mojo_list_append_str ({_pl}, "{_c_escape(_pe.value)}");')
+                                    _di.append(f'  MojoList *{_sl} = mojo_list_new();')
+                                    _di.append(f'  mojo_list_append_str ({_sl}, "{_c_escape(vv.elements[0].value)}");')
+                                    _di.append(f'  mojo_list_append_int ({_sl}, (int64_t){_pl});')
+                                    _di.append(f'  mojo_dict_set_int ({mangled}, "{_c_escape(k.value)}", (int64_t){_sl});')
                                 class_attr_inits.extend(_di)
                             else:
                                 class_attr_inits.append(f"  {mangled} = mojo_dict_new();")
