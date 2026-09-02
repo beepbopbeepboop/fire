@@ -1765,9 +1765,37 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
         new_fn = 'mojo_set_new' if kind == 'set' else 'mojo_list_new'
         res_type = 'MojoSet *' if kind == 'set' else 'MojoList *'
         return res_type, gen._new_val(res_type, f'{new_fn} ()')
+    # `set(<a set>)` / `frozenset(<a set>)` copies SLOTS, exactly as
+    # `dict(<a dict>)` already lowers to mojo_dict_copy above, instead of
+    # going round the generic comprehension. That is not just an
+    # optimization: a MojoSet keeps `val_i` and `val_s` in separate fields
+    # (MojoList/MojoDict store one word that both views share), so the
+    # comprehension's int-view read + int-view add DOWNGRADES every str
+    # slot to an int slot holding the char* — after which `x in <copy>`,
+    # which emits mojo_set_contains_str, misses every element.
+    # Real repro: gimple_ctypes' own `_C_RESERVED_FUNCS = frozenset({...})`
+    # came out all-int-slots, so `name in _C_RESERVED_FUNCS` was False for
+    # every libc name and the compiler emitted a weak `int64_t abs ()`
+    # stub that collides with <stdlib.h>'s — one error cascading into 849
+    # more in mojo_compiler.py's own translation unit. mojo_set_copy
+    # dispatches per slot on its tag, so both kinds survive.
+    _arg0 = node.args[0]
+    if kind == 'set':
+        _at, _av = gen.lower_expr(_arg0)
+        _at = gen._get_actual_type(_at, _av) or _at
+        if _at == 'MojoSet *':
+            t = gen._new_temp('MojoSet *')
+            gen._emit_call('MojoSet *', t, 'mojo_set_copy', [('MojoSet *', _av)])
+            return 'MojoSet *', t
+        # Not a set — hand the ALREADY-lowered value to the comprehension
+        # below as a plain name rather than re-lowering `node.args[0]` (which
+        # would emit its side effects twice). A name registered in
+        # `var_types` lowers straight back to itself with this ctype.
+        gen.var_types[_av] = _at
+        _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
     gen.temp_counter += 1
     var = f"_ctor_elem{gen.temp_counter}"
-    synth_gen = gimple_ctypes.Generator(target=var, iterable=node.args[0], conditions=[],
+    synth_gen = gimple_ctypes.Generator(target=var, iterable=_arg0, conditions=[],
                      line=node.line, col=node.col)
     compr = gimple_ctypes.Comprehension(kind=kind, element=gimple_ctypes.IdentExpr(var, node.line, node.col),
                            generators=[synth_gen], line=node.line, col=node.col)
