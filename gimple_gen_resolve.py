@@ -1198,6 +1198,13 @@ def _register_reflected_struct(gen, name, type_info, exports, parse_c_sig):
 
 
 def _new_temp(gen, ctype: str) -> str:
+    # `_as_str(ctype)` — a CHOKEPOINT guard, deliberately here rather than at
+    # the hundreds of call sites. A C type is a plain `str`, and this backend
+    # erases an uninferable `str` to int64_t; a caller that hands one over
+    # would have its ADDRESS written as the declaration's type:
+    #     47303466400 * _t34;          /* should be `Parser * _t34;` */
+    # which is invalid C and different on every run (ASLR).
+    ctype = _as_str(ctype)
     gen.temp_counter += 1
     name = f"_t{gen.temp_counter}"
     gen.decls.append(f"  {gimple_ctypes._c_var_decl(ctype, name)};")
@@ -1298,6 +1305,10 @@ def _strided_data_ptr(gen, pt: str, pv: str) -> str:
 def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     """Emit `lhs = val` coercing src→dst; routes struct-field LHS and literal RHS
     through register temps as required by GIMPLE."""
+    # Same chokepoint guard as _new_temp: these two are C TYPE text, and an
+    # erased one is emitted as its own address in the cast written below.
+    src = _as_str(src)
+    dst = _as_str(dst)
 
     # A dot-accessed struct member (e.g. a non-pointer module-globals
     # instance's own field, `_typing_globals.some_field`) needs the exact

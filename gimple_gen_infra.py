@@ -2077,6 +2077,11 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
     new, correct type — never touching the OLD declaration (still
     valid C, just no longer reachable under `name`).
     """
+    # Chokepoint guard, same as _new_temp/_safe_coerce_emit: `ctype` is C
+    # TYPE text, and this backend erases an uninferable `str` to int64_t.
+    # The `decls.append(f"  {ctype} {c_name};")` calls below would then
+    # write the string's ADDRESS as the type — `47303466400 * _t34;`.
+    ctype = _as_str(ctype)
     if force and name in gen.var_types:
         gen.temp_counter += 1
         import re as _re

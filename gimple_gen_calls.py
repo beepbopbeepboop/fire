@@ -1564,12 +1564,17 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
             _alt_tn = _isinstance_type_name(alt)
             if _alt_tn is None:
                 continue
-            one = gen._isinstance_one_type(obj_type, obj_val, _alt_tn)
+            # `_as_str`: the returned temp NAME is erased to int64_t on the
+            # self-hosted path, so formatting it straight into the join below
+            # printed the string's ADDRESS — `_t19 = 40139116528 | _t18;`.
+            # A raw heap address in emitted code is both invalid C and a
+            # per-run difference, since addresses move under ASLR.
+            one = _as_str(gen._isinstance_one_type(obj_type, obj_val, _alt_tn))
             # `|` not `||`: GIMPLE rejects a raw `||` token in a plain
             # assignment RHS ("not valid in GIMPLE") — only simple binary
             # ops are allowed. Bitwise OR on two already-computed _Bool
             # (0/1) values is equivalent and GIMPLE-legal.
-            acc = one if acc is None else gen._new_val('_Bool', f'{acc} | {one}')
+            acc = one if acc is None else gen._new_val('_Bool', _as_str(acc) + ' | ' + one)
         if acc is None:
             acc = gen._new_val('_Bool', '0')
         gen._emit(f'  {t} = (int){acc};')
