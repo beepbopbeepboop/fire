@@ -26,7 +26,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _sms_key, _as_funcdef_node, _ptr_slot_in_range,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -3192,7 +3192,7 @@ def gen_module_impl(self, stmts):
                     _all_ctypes = list(_fz_params)
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
                     max_arity = len(param_ctypes)
-                key = (s.name, m.name)
+                key = _sms_key(s.name, m.name)
                 self._struct_method_signatures.setdefault(key, []).append({
                     'overload_id': _oid,
                     'param_names': [pn for pn, _pt in real_params],
@@ -3217,7 +3217,7 @@ def gen_module_impl(self, stmts):
             if param_ctypes is None:
                 continue
             ret_type = None
-            for _cand in self._struct_method_signatures.get((s.name, m.name), []):
+            for _cand in self._struct_method_signatures.get(_sms_key(s.name, m.name), []):
                 if _cand.get('overload_id') == _oid:
                     ret_type = _cand.get('ret_type')
                     break

@@ -1381,6 +1381,33 @@ def _as_funcdef_node(e: object) -> FunctionDef:
     return e
 
 
+def _sms_key(struct_name: object, method: object) -> str:
+    """Composite string key for `_struct_method_signatures`.
+
+    That map used to be keyed by the 2-tuple `(struct_name, method)`. In
+    CPython a tuple hashes by CONTENTS; self-hosted, a tuple lowers to a
+    MojoList and the dict coerces the key to that list's ADDRESS. Storing
+    and looking up therefore used two different fresh tuples' addresses,
+    so lookups normally missed outright — and, worse, could spuriously HIT
+    when the allocator handed a fresh tuple the address of a freed one.
+
+    That spurious hit is not hypothetical: it made `_lower_MemberExpr`
+    believe `PassStmt.targets` was a METHOD, emit a bound-method value for
+    it, and degrade `for _tgt in _s.targets:` to `mojo_unsupported_iter` —
+    silently dropping the whole loop body. Whether it happened depended on
+    heap addresses, so the SAME binary produced different output for the
+    same input on consecutive runs.
+
+    A string key hashes by content on both paths.
+    """
+    # None-safe: `_as_str` is a CPython identity function, so `_as_str(None)`
+    # is None and a bare concatenation would raise. Several call sites test
+    # membership for a receiver whose struct is not resolved yet.
+    _s = struct_name if struct_name is not None else ''
+    _m = method if method is not None else ''
+    return _as_str(_s) + '\x00' + _as_str(_m)
+
+
 def _as_str(e: object) -> str:
     """See _as_ident_node: static `str` view of a value the compiled
     backend erased to int64_t (e.g. a loop variable over

@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _as_str,
+    _as_str, _sms_key,
 )
 import regex_compile
 import mlir
@@ -1845,8 +1845,8 @@ def _quick_type(gen, node) -> str:
         # method's `_lower_bound_method_value` call site). See bugs/
         # COMPILE_FAIL_zipfile__path___init__.md.
         if sn and (f"{sn}_{node.member}" in gen.func_return_types
-                   or (sn, node.member) in gen._struct_method_signatures):
-            candidates = gen._struct_method_signatures.get((sn, node.member))
+                   or _sms_key(sn, node.member) in gen._struct_method_signatures):
+            candidates = gen._struct_method_signatures.get(_sms_key(sn, node.member))
             overload_id = ''
             if candidates and len(candidates) == 1:
                 overload_id = candidates[0].get('overload_id', '') or ''

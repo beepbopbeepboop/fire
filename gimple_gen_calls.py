@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _as_str,
+    _as_str, _sms_key,
 )
 import regex_compile
 import mlir
@@ -3515,7 +3515,7 @@ def _lower_struct_constructor(gen, struct_name: str,
     # _struct_method_signatures entry — see ~line 2672) fall through to
     # the single-signature path below unchanged; cross-module overload
     # resolution is a separate follow-on (elaborate.py extension).
-    _init_candidates = gen._struct_method_signatures.get((struct_name, '__init__'))
+    _init_candidates = gen._struct_method_signatures.get(_sms_key(struct_name, '__init__'))
     if _init_candidates:
         _chosen = gen._resolve_overload(_init_candidates, args, kwargs)
         if _chosen is not None:

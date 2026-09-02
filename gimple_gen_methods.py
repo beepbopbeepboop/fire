@@ -25,6 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    _sms_key,
 )
 import regex_compile
 import mlir
@@ -194,7 +195,7 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
             "API, which a MojoBoundMethod* (single-call, scalar-"
             "return) value can't represent -- falling back to "
             "interpreting this module from source instead")
-    candidates = gen._struct_method_signatures.get((struct_name, method))
+    candidates = gen._struct_method_signatures.get(_sms_key(struct_name, method))
     overload_id = ''
     if candidates and len(candidates) == 1:
         overload_id = candidates[0].get('overload_id', '') or ''
@@ -326,7 +327,7 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     (`return self[key]`) against UserDict's own `__getitem__`.
     """
     sn = gimple_exprtypes._struct_name_of(ot)
-    cands = gen._struct_method_signatures.get((sn, method)) if sn else None
+    cands = gen._struct_method_signatures.get(_sms_key(sn, method)) if sn else None
     if not (ot.endswith(' *') and sn in gen.struct_field_types and cands):
         return None
     chosen = None
@@ -719,7 +720,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # rather than emitting an unresolvable symbol.
         def _base_defines_method(b):
             return (f"{b}_{gimple_ctypes._safe_name(method)}" in gen.func_return_types
-                    or (b, method) in gen._struct_method_signatures)
+                    or _sms_key(b, method) in gen._struct_method_signatures)
         for b in (gen._struct_bases.get(cur_struct) or []) if cur_struct else ():
             # Only a base with an actual known definition (fields/methods
             # registered in struct_field_types) has a real C function to
@@ -2258,7 +2259,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (_recv_struct is not None and _recv_struct in gen.struct_field_types
             and method in gen.struct_field_types[_recv_struct]
             and f'{_recv_struct}_{method}' not in gen.func_return_types
-            and (_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
+            and _sms_key(_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
         _has_spread = any(isinstance(a, gimple_ctypes.UnaryOp) and a.op in ('*', '**')
                           for a in node.args)
         if _has_spread:
@@ -3029,7 +3030,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # known only via dylib reflection has no entry here and falls
     # through to the unsuffixed name unchanged (cross-module overload
     # resolution is a separate follow-on, elaborate.py extension).
-    _method_candidates = gen._struct_method_signatures.get((struct_name, method))
+    _method_candidates = gen._struct_method_signatures.get(_sms_key(struct_name, method))
     _method_overload_suffix = ''
     _chosen_method = None
     if _method_candidates and len(_method_candidates) > 1:

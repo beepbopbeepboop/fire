@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str,
+    Parser, py_tokenize, _as_str, _sms_key,
 )
 import regex_compile
 import mlir
@@ -1683,7 +1683,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # method case first and produce a real bound-method value instead.
     if struct_name in gen.struct_field_types and (
             f"{struct_name}_{node.member}" in gen.func_return_types
-            or (struct_name, node.member) in gen._struct_method_signatures):
+            or _sms_key(struct_name, node.member) in gen._struct_method_signatures):
         return gen._lower_bound_method_value(struct_name, node.member, ot, ov)
     # A BUILTIN-container method referenced as a plain VALUE (`append =
     # l.append`) — the container twin of the user-struct case just above.
@@ -1738,7 +1738,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if (not (node.member.startswith('__') and node.member.endswith('__'))
                 and ((f"{struct_name}_{gimple_ctypes._safe_name('__getattr__')}"
                       in gen.func_return_types)
-                     or (struct_name, '__getattr__') in gen._struct_method_signatures)):
+                     or _sms_key(struct_name, '__getattr__') in gen._struct_method_signatures)):
             _ga_csym = gen._struct_method_csym(struct_name, '__getattr__', '')
             # The method's own Pass-2a-inferred return type (the bare
             # `{Struct}___getattr__` key) — NOT a hardcoded boxed int64_t.
