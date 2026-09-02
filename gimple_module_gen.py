@@ -6617,7 +6617,14 @@ def gen_module_impl(self, stmts):
     for _sx in self._struct_allocs_needed:
         if _ptr_slot_in_range(_sx):
             _sa_names.append(_as_str(_sx))
-    for sn in sorted(_sa_names):
+    for _sn_iter in sorted(_sa_names):
+        # Fresh `sn` bound via `_as_str`, NOT the raw `for x in sorted(...)`
+        # loop variable — that's int64_t on the self-hosted backend, so the
+        # `f"static {sn} * __GIMPLE _alloc_{sn}"` f-string concatenated a
+        # boxed pointer as a string → `strlen()` on garbage in
+        # `mojo_str_cat` (crash-report bt: `mojo_str_cat` ←
+        # `gen_module_impl` on a shimless `--dump-full`).
+        sn = _as_str(_sn_iter)
         if sn in self._emitted_allocs:
             continue  # already emitted by an imported module
         self._emitted_allocs.add(sn)
@@ -6626,12 +6633,20 @@ def gen_module_impl(self, stmts):
             self.func_return_types[alloc_name] = f'{sn} *'
         class_attrs = self._class_attrs.get(sn, {})
         field_map = self.struct_field_types.get(sn, {})
-        attr_inits = ''.join(
-            f"  _p->{_safe_field(aname)} = {gname};\n"
-            for aname, gname in sorted(class_attrs.items())
-            if aname in field_map
-            and field_map[aname] == self._global_var_types.get(gname, field_map[aname])
-        )
+        # Explicit loop, NOT `for aname, gname in sorted(class_attrs.items())`
+        # in a genexpr: that 2-tuple unpack boxes `aname`/`gname` on the
+        # self-hosted backend, so `_safe_field(aname)` / `{gname}` in the
+        # f-string ran on garbage → `strlen()` on a bad pointer in
+        # `mojo_str_cat` (crash-report bt: `mojo_str_cat` ← `gen_module_impl`
+        # on a shimless `--dump-full`).
+        _ai_parts = []
+        for _aname in sorted(class_attrs):
+            _aname = _as_str(_aname)
+            _gname = _as_str(class_attrs[_aname])
+            if (_aname in field_map
+                    and field_map[_aname] == self._global_var_types.get(_gname, field_map[_aname])):
+                _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
+        attr_inits = ''.join(_ai_parts)
         parts.append(
             f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
             f"{{\n"

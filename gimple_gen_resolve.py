@@ -399,7 +399,18 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
     for path in mojo_paths:
         if gimple_ctypes.os.path.exists(path):
             _abspath = gimple_ctypes.os.path.abspath(path)
-            if _abspath in gen._compiling_file_paths:
+            # `_ap_key`: a fresh `_as_str`-typed local for the two
+            # `_compiling_file_paths` set ops. `_abspath` derives from the
+            # `for path in mojo_paths` loop var (int64_t on the self-hosted
+            # backend), so `.add(_abspath)` lowered to `mojo_set_add_int`
+            # and `_abspath in ...` to `mojo_set_contains_int` — a set keyed
+            # by POINTER VALUE. `os.path.abspath` returns a fresh string
+            # each call, so the cycle guard NEVER matched a re-entrant
+            # import → infinite `_compile_imported_module` recursion through
+            # the gimple_codegen ↔ gimple_gen_resolve import cycle → RSS
+            # runaway on `MOJO_NO_SHIM=1 --dump-full`.
+            _ap_key = _as_str(_abspath)
+            if _ap_key in gen._compiling_file_paths:
                 # This candidate resolves (by real file identity, not by
                 # the module NAME being looked up) to a file already
                 # being compiled somewhere in the current whole-program
@@ -441,7 +452,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # reference (their referencing text was discarded with it).
             funcptr_needed_before = set(gen._funcptr_builtins_needed)
             funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
-            gen._compiling_file_paths.add(_abspath)
+            gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
                     source = f.read()
