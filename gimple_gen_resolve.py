@@ -747,7 +747,15 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # Return both code and parsed statements
                 return (code, stmts)
             except Exception as e:
-                __import__('sys').stderr.write(f"# ERROR: compiling imported module {module_name!r} from {path}: {e}\n")
+                # `print`, NOT `sys.stderr.write`: the self-hosted backend
+                # has no lowering for `sys.stderr.write` (it faults —
+                # `mojo_subprocess_stderr` deref of a NULL handle), so on a
+                # shimless `--dump-full` a module whose compile legitimately
+                # raises (and is meant to fall back to source inclusion via
+                # the rollback below) instead crashed the whole run inside
+                # this handler. `print(..., flush=True)` is the diagnostic
+                # channel that works in the compiled binary.
+                print(f"# ERROR: compiling imported module {module_name!r} from {path}: {e}", flush=True)
                 # Rollback: remove any modules/helpers/structs added during this failed
                 # compilation so the outer module can re-compile them and include their code.
                 for _m in list(gen._compiled_modules - modules_before):
