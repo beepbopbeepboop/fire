@@ -1122,7 +1122,28 @@ def _gen_stmt_AssignStmt(gen, node):
             if ot in ('int', 'int64_t'):
                 # Check if this is actually a list (from nested access) or dict
                 actual_type = gen._get_actual_type(ot, obj_v)
-                if actual_type == 'MojoList *':
+                # Mirror the READ side's rule EXACTLY (`_lower_subscript` in
+                # gimple_gen_calls.py): an opaque container is a dict only
+                # when its resolved type says so, or when the KEY is
+                # string-shaped; otherwise it is a list. This used to
+                # default to dict while the read defaulted to list, so
+                # `val[i]` and `val[i] = ...` on the same opaque local
+                # disagreed: the read emitted `mojo_list_get_int(val, i)`
+                # and the write `mojo_dict_set_int((MojoDict *)val,
+                # mojo_str_from_int(i), ...)`. Writing through a MojoList
+                # reinterpreted as a MojoDict scribbles over the list
+                # header, and the next _dict_grow free()s a `slots`
+                # pointer the allocator never handed out — a
+                # POINTER_BEING_FREED_WAS_NOT_ALLOCATED abort. Real repro:
+                # ast_rewriter._rewrite_node's `val[i] = _rewrite_node(...)`
+                # inside its `isinstance(val, list)` branch, which only
+                # became reachable once isinstance stopped truncating
+                # pointers (see mojo_isinstance).
+                _idx_is_str = (it in ('char *', 'MojoStr *')
+                               or gen._get_actual_type(it, idx_v) == 'char *')
+                _is_dict = (actual_type == 'MojoDict *'
+                            or (_idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')))
+                if not _is_dict:
                     # It's a list - cast to MojoList* and set element
                     ip = gen._new_temp('int64_t')
                     lp = gen._new_temp('MojoList *')
@@ -2217,7 +2238,15 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             elif ot in ('int', 'int64_t'):
                 actual_type = gen._get_actual_type(ot, obj_v)
-                if actual_type == 'MojoList *':
+                # Same read/write-symmetry rule as the other two subscript
+                # stores in this file (see the AssignStmt branch's comment):
+                # an opaque container is a dict only when its resolved type
+                # says so or the KEY is string-shaped, never merely because
+                # the container's type is unknown.
+                _idx_is_str2 = (it2 in ('char *', 'MojoStr *')
+                                or gen._get_actual_type(it2, idx_v) == 'char *')
+                if not (actual_type == 'MojoDict *'
+                        or (_idx_is_str2 and actual_type not in ('MojoList *', 'MojoSet *'))):
                     ip = gen._new_temp('int64_t')
                     lp = gen._new_temp('MojoList *')
                     gen._emit(f"  {ip} = (int64_t){obj_v};")

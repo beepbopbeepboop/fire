@@ -2169,7 +2169,7 @@ void mojo_set_iter_free(MojoSetIter *it) { free(it); }
 
 /* ── Python builtin functions for C types ──────────────────────────────────*/
 
-int mojo_isinstance(int obj, int type_id) {
+int mojo_isinstance(int64_t obj, int type_id) {
     /* type_id: 1 bool, 2 int, 3 float, 4 str, 5 list, 6 dict, 7 set
      * (see _TYPE_IDS in gimple_gen_calls.py). bool/int/float are raw
      * unboxed values with no runtime marker -- still unanswerable, stay 0.
@@ -2177,15 +2177,31 @@ int mojo_isinstance(int obj, int type_id) {
      * MojoList / MojoDict it allocates (mojo_is_registered_list/_dict).
      * This is what makes `isinstance(node, list)` in the compiler's own
      * generic AST walkers (_walk_ast_into, _rewrite_node, ...) actually
-     * work when self-hosted, instead of silently never recursing. NOTE:
-     * `obj` is declared `int` but callers pass `(int)(int64_t)ptr` -- a
-     * 32-bit-truncated pointer -- so we can only check the low half.
-     * `mojo_isinstance_p` (below, int64_t arg) is the real entry point;
-     * codegen prefers it. */
+     * work when self-hosted, instead of silently never recursing.
+     *
+     * `obj` MUST be int64_t. It used to be `int`, which truncated every
+     * argument to 32 bits before the registry lookup. That was survivable
+     * only while the process heap stayed under 4 GB; self-hosting a real
+     * file pushes allocations well past it (observed handles around
+     * 0xA_8EDC_E140 ~= 45 GB), and from that point `isinstance(x, list)`
+     * answered NO for every genuine list. `_walk_ast_into` then treated
+     * the statement LIST it was handed as an opaque leaf, appended it,
+     * and recursed into nothing — so every generic AST scan built on it
+     * (`_collect_self_assigns`, `_collect_self_reads`, ...) saw exactly
+     * one node and found nothing. Downstream, every class whose fields
+     * come only from `__init__` assignments emitted as an empty
+     * `typedef struct X { int _dummy; }` stub.
+     *
+     * The full-width `mojo_isinstance_p` below already existed for the
+     * pointer-typed call sites; widening this one fixes the boxed
+     * (`int64_t`-typed) call sites, which are the overwhelming majority
+     * (190 of 191 in the compiler's own generated output) — and does so
+     * for already-generated .ci files too, since they take this
+     * prototype from the header rather than declaring it themselves. */
     if (type_id == 5 || type_id == 7)  /* list / tuple-as-list */
-        return mojo_is_registered_list((int64_t)(uint32_t)obj);
+        return mojo_is_registered_list(obj);
     if (type_id == 6)
-        return mojo_is_registered_dict((int64_t)(uint32_t)obj);
+        return mojo_is_registered_dict(obj);
     return 0;
 }
 

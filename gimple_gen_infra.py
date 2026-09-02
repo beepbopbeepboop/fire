@@ -1361,7 +1361,14 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
     # param `WithStmt *`. Every real dict argument then flowed through a
     # wrong-struct signature, `.items()` fell to opaque runtime dispatch,
     # and the pair loop ran zero times (mojo_unsupported_iter).
-    DICT_ONLY_METHODS = {'items', 'keys', 'values', 'setdefault'}
+    # `get` belongs here for the same reason as the other four: among this
+    # runtime's builtin containers only a dict has it (list/set/tuple/str
+    # do not), so `param.get(...)` is unambiguous "param is a dict"
+    # evidence. It is already in BUILTIN_CONTAINER_METHODS below, so a
+    # struct that happens to define its own `get` method is already
+    # excluded from the accessed-field struct match and cannot be
+    # misidentified by adding it here.
+    DICT_ONLY_METHODS = {'items', 'keys', 'values', 'setdefault', 'get'}
 
     # Method names shared across the builtin containers. When one of these
     # is CALLED on the param, it is method-dispatch evidence, NOT evidence
@@ -1875,8 +1882,35 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                             _root == 'self'
                             and _g.struct_field_types.get(owner_struct, {}).get(_member) == 'char *'
                             for _root, _member in aug_member_targets))
-                    inferred[pname] = 'char *' if (is_string_method or is_char_compared
-                                                   or _aug_into_str) else 'MojoList *'
+                    if is_string_method or is_char_compared or _aug_into_str:
+                        inferred[pname] = 'char *'
+                    elif is_dict_method:
+                        # A dict-only method call (see DICT_ONLY_METHODS) is
+                        # POSITIVE evidence that the param is a dict, whereas
+                        # reaching this branch only means "some subscript key
+                        # could not be PROVEN to be a string" — the absence of
+                        # evidence, not evidence of a list. The unambiguous
+                        # signal has to win, or a dict subscripted with a key
+                        # whose stringness this analysis cannot see through
+                        # (e.g. `d[f(x)]`, where `f` is a local helper
+                        # returning str) is silently typed `MojoList *`.
+                        #
+                        # Real repro: gen_module_impl's own nested
+                        # `_collect_self_assigns(body, param_types, found)`
+                        # does `found.get(fn)` / `fn not in found` /
+                        # `found[fn] = ft` with `fn = _self_member(...)`. The
+                        # `found[fn]` subscript alone made this branch pick
+                        # `MojoList *`, so every `self.X = ...` field the pass
+                        # discovered was written into a dict-shaped value
+                        # through list accessors and lost. Every class whose
+                        # fields come only from `__init__` assignments then
+                        # emitted as an empty `typedef struct X { int _dummy; }`
+                        # stub on the self-hosted path, and each of its
+                        # `_mojo_getattr_X`/`_mojo_repr_X` reflection helpers
+                        # was referenced but never defined.
+                        inferred[pname] = 'MojoDict *'
+                    else:
+                        inferred[pname] = 'MojoList *'
 
             # If not subscripted, try to infer from function calls
             elif function_calls:

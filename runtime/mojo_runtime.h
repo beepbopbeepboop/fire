@@ -480,7 +480,11 @@ void mojo_print_stderr(char *str);
 char *mojo_input(char *prompt);
 
 /* Python built-in functions for C strings */
-int mojo_isinstance(int obj, int type_id);
+/* Both take the handle at FULL width — a 32-bit `obj` silently truncated
+ * every heap pointer past 4 GB and made isinstance(x, list/dict) answer NO
+ * for real containers once the self-hosted compile grew past that. See the
+ * definition in mojo_runtime.c. */
+int mojo_isinstance(int64_t obj, int type_id);
 int mojo_isinstance_p(int64_t obj, int type_id);
 int64_t mojo_read_type_tag(int64_t addr);
 int64_t mojo_read_type_tag_safe(int64_t addr);

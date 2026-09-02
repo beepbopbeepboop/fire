@@ -1521,7 +1521,13 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         # AST walkers depend on it when self-hosted.
         gen._emit(f'  {res} = mojo_isinstance_p ({iv}, {type_id});')
     else:
-        gen._emit(f'  {res} = mojo_isinstance ({obj_val}, {type_id});')
+        # Widen through an explicit int64_t temp here too. The operand at
+        # this point is typically an `int64_t`-typed BOXED handle (an
+        # unannotated AST-node parameter, e.g. `_walk_ast_into(node, ...)`),
+        # i.e. exactly the case that must not be truncated — see
+        # mojo_isinstance's own definition for what the 32-bit form cost.
+        _iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+        gen._emit(f'  {res} = mojo_isinstance_p ({_iv}, {type_id});')
     return gen._new_val('_Bool', f'(_Bool){res}')
 
 
