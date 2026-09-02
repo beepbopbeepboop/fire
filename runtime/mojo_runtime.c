@@ -1864,6 +1864,21 @@ void mojo_dict_iter_free(MojoDictIter *it) { free(it->order); free(it); }
  * ═══════════════════════════════════════════════════════════════════════*/
 /* (struct definitions now in mojo_runtime.h) */
 
+/* Registry of every MojoSet this runtime allocates — the set-shaped
+ * sibling of _mojo_list_registry above, and for the same reason: a set
+ * reaching codegen as a boxed `int64_t` (a cross-module module-global
+ * accessor returns int64_t, so `gimple_ctypes._C_RESERVED_FUNCS` and
+ * friends arrive type-erased) carries no tag of its own, and without a
+ * registry `x in <that value>` had no way to discover it was a set. See
+ * mojo_in_dispatch_str. */
+static MojoSet *_mojo_set_registry = NULL;
+static int      _mojo_set_registry_busy = 0;
+
+int mojo_is_registered_set(int64_t addr) {
+    if (!_mojo_set_registry || addr < 65536) return 0;
+    return mojo_set_contains_int(_mojo_set_registry, addr);
+}
+
 MojoSet *mojo_set_new(void)
 {
     MojoSet *s = malloc(sizeof(MojoSet));
@@ -1871,6 +1886,14 @@ MojoSet *mojo_set_new(void)
     s->used  = 0;
     s->slots = malloc((size_t)s->cap * sizeof(_SetSlot));
     for (int64_t i = 0; i < s->cap; i++) s->slots[i].tag = -1;
+    /* `_busy` breaks the recursion of registering the registry itself
+     * (and of the list registry, which is also a MojoSet). */
+    if (!_mojo_set_registry_busy) {
+        _mojo_set_registry_busy = 1;
+        if (!_mojo_set_registry) _mojo_set_registry = mojo_set_new();
+        mojo_set_add_int(_mojo_set_registry, (int64_t)(uintptr_t)s);
+        _mojo_set_registry_busy = 0;
+    }
     return s;
 }
 
@@ -2168,6 +2191,44 @@ char *mojo_set_iter_val_str(MojoSetIter *it)
 void mojo_set_iter_free(MojoSetIter *it) { free(it); }
 
 /* ── Python builtin functions for C types ──────────────────────────────────*/
+
+/* `x in <container>` where the container reached codegen as a boxed
+ * `int64_t` and so has no static type. Previously codegen emitted
+ * `/* TODO: 'in' for int64_t *\/ t = 0;` — a hardcoded FALSE. That is not
+ * a missing optimisation, it silently inverts program logic: every
+ * membership test against a cross-module container global answered "no".
+ * `name in gimple_ctypes._C_RESERVED_FUNCS` (read through the
+ * int64_t-returning `gimple_ctypes__mojo_global_get__C_RESERVED_FUNCS`
+ * accessor) was dead, so the compiler stopped recognising libc names and
+ * emitted a `__attribute__((weak)) int64_t abs (...)` stub that collides
+ * with <stdlib.h>'s own `abs` — one "conflicting types" error that then
+ * cascaded into 631 more in mojo_compiler.py alone.
+ *
+ * The three container kinds are all discoverable at runtime through the
+ * registries, so answer the question instead of guessing. Order is
+ * dict, list, set; a value that is none of them is not a container and
+ * the answer really is 0. */
+int mojo_in_dispatch_str(int64_t container, char *needle)
+{
+    if (container == 0) return 0;
+    if (mojo_is_registered_dict(container))
+        return mojo_dict_contains((MojoDict *)(uintptr_t)container, needle);
+    if (mojo_is_registered_list(container))
+        return mojo_list_contains_str((MojoList *)(uintptr_t)container, needle);
+    if (mojo_is_registered_set(container))
+        return mojo_set_contains_str((MojoSet *)(uintptr_t)container, needle);
+    return 0;
+}
+
+int mojo_in_dispatch_int(int64_t container, int64_t needle)
+{
+    if (container == 0) return 0;
+    if (mojo_is_registered_list(container))
+        return mojo_list_contains_int((MojoList *)(uintptr_t)container, needle);
+    if (mojo_is_registered_set(container))
+        return mojo_set_contains_int((MojoSet *)(uintptr_t)container, needle);
+    return 0;
+}
 
 int mojo_isinstance(int64_t obj, int type_id) {
     /* type_id: 1 bool, 2 int, 3 float, 4 str, 5 list, 6 dict, 7 set

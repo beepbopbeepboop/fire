@@ -178,6 +178,12 @@ MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);
 int mojo_is_registered_dict(int64_t addr);
+/* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
+int mojo_is_registered_set(int64_t addr);
+/* `x in <boxed container>`: resolves list/dict/set at runtime instead of
+ * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
+int mojo_in_dispatch_str(int64_t container, char *needle);
+int mojo_in_dispatch_int(int64_t container, int64_t needle);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
 void      mojo_list_free(MojoList *l);

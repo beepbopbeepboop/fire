@@ -3268,6 +3268,33 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
             cv = gen._new_val('char', f'(char){xv}')
             needle = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
         gen._emit_call('int', ti, 'mojo_str_contains', [('char *', rv), ('char *', needle)])
+    elif rt in ('int64_t', 'int', 'void *') or rt.endswith(' *'):
+        # A container that reached here BOXED — no static type, most often
+        # a cross-module module-global read (those accessors are declared
+        # `int64_t`, so `gimple_ctypes._C_RESERVED_FUNCS` and friends
+        # arrive type-erased). This used to emit a hardcoded FALSE, which
+        # is not a missing optimisation but a silent logic inversion:
+        # every such membership test answered "no". `name in
+        # _C_RESERVED_FUNCS` being dead is why the compiler stopped
+        # recognising libc names and emitted a weak `int64_t abs (...)`
+        # stub colliding with <stdlib.h> — one error that cascaded into
+        # 631 more in mojo_compiler.py alone.
+        #
+        # The runtime CAN answer this: list/dict/set are all discoverable
+        # through their allocation registries. Same runtime-dispatch shape
+        # the for-loop over an opaque iterable already uses.
+        _cv = gen._new_val('int64_t', f'(int64_t){rv}')
+        if xt == 'char *':
+            gen._emit_call('int', ti, 'mojo_in_dispatch_str',
+                           [('int64_t', _cv), ('char *', xv)])
+        elif xt.endswith(' *'):
+            _nv = gen._new_val('char *', f'(char *){xv}')
+            gen._emit_call('int', ti, 'mojo_in_dispatch_str',
+                           [('int64_t', _cv), ('char *', _nv)])
+        else:
+            _nv = gen._new_val('int64_t', f'(int64_t){xv}')
+            gen._emit_call('int', ti, 'mojo_in_dispatch_int',
+                           [('int64_t', _cv), ('int64_t', _nv)])
     else:
         gen._emit(f"  /* TODO: 'in' for {rt} */")
         gen._emit(f"  {ti} = 0;")
