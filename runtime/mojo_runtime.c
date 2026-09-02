@@ -2373,10 +2373,25 @@ int mojo_hasattr(int obj, char *attr) {
     return obj != 0 ? 1 : 0;
 }
 
+/* A genuine C-string pointer always lands in the userspace-heap/static
+   window [0x1000, 2^47) on macOS and Linux. A value outside it is not a
+   string address — most often a `str` AST field the self-hosted codegen
+   erased to int64_t (barrier 2: `_known_field_type` gap) whose 8 raw bytes
+   are the string CONTENT, not a pointer to it (e.g. a struct name reaching
+   an f-string as `0x6547656c706d6940` == "\x40impleGe"). Treat it as empty
+   rather than dereferencing garbage: on the shimless `--dump-full` this
+   turns a chain of one-crash-per-rebuild boxed-name faults into a single
+   completable run whose remaining defects surface as GCC errors. Inert on
+   the shimmed/Python path, where every argument is a real pointer. */
+static int _mojo_cstr_ptr_ok(char *p) {
+    uintptr_t v = (uintptr_t)p;
+    return v >= 0x1000ULL && v < 0x0000800000000000ULL;
+}
+
 char *mojo_str_cat(char *a, char *b) {
     /* Concatenate two C strings */
-    if (!a) a = "";
-    if (!b) b = "";
+    if (!_mojo_cstr_ptr_ok(a)) a = "";
+    if (!_mojo_cstr_ptr_ok(b)) b = "";
 
     size_t len_a = strlen(a);
     size_t len_b = strlen(b);
