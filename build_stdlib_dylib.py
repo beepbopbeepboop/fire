@@ -144,6 +144,65 @@ def _imported_sigs(src: str) -> list:
     return sigs
 
 
+def _local_dep_fingerprint(path: str, dep_src_by_key: dict) -> str:
+    """Content fingerprint of every LOCAL module reachable from `path` by
+    following `from X import ...` (transitively), for folding into this
+    module's CAS key.
+
+    `_imported_sigs` above only captures a *direct* dependency's fn/def
+    *signatures* — it never sees a `comptime` constant's value (which
+    gimple_codegen constant-folds directly into every importer's generated C),
+    and it never chases a re-export hop's own transitive imports. So a content
+    change to a module imported only *transitively* (import graph
+    game_engine -> recipes -> block_registry) left every importer's cached
+    object stale: `mojo dylib` reported a fresh build yet the dylib kept the
+    previous `block_registry.NUM_CPP_BLOCKS` (BUG-2026-032, box.3d/game).
+
+    `dep_src_by_key` maps every candidate import spelling (full module name,
+    its last dotted segment, and the bare file basename) of the modules in
+    this build to `(path, source)`. Only modules IN this build participate —
+    stdlib imports are covered by `cas.stdlib_fingerprint()` elsewhere and are
+    deliberately not walked here."""
+    import hashlib
+    seen: dict = {}                 # dep module key -> sha256 of its source
+    visited_paths = {path}
+    stack = [path]
+    while stack:
+        p = stack.pop()
+        try:
+            s = open(p).read()
+        except Exception:
+            continue
+        try:
+            stmts = Parser(py_tokenize(s)).parse_module()
+        except Exception:
+            continue
+        for st in stmts:
+            if not isinstance(st, FromImportStmt):
+                continue
+            mod = (st.module or '').lstrip('.')
+            # Stdlib imports are covered wholesale by cas.stdlib_fingerprint()
+            # (folded into every stdlib module's key elsewhere); walking them
+            # here would give every stdlib module a non-empty dep fingerprint
+            # and force a full cold rebuild of the stdlib cache on no real
+            # change. Mirrors driver._expand_dylib_modules' own `std` skip.
+            if not mod or mod.startswith('std'):
+                continue
+            entry = (dep_src_by_key.get(mod)
+                     or dep_src_by_key.get(mod.split('.')[-1]))
+            if entry is None:
+                continue
+            dep_path, dep_src = entry
+            if dep_path in visited_paths:
+                continue
+            visited_paths.add(dep_path)
+            seen[dep_path] = hashlib.sha256(dep_src.encode('utf-8', 'replace')).hexdigest()
+            stack.append(dep_path)
+    if not seen:
+        return ''
+    return '\n'.join(f"{k}={seen[k]}" for k in sorted(seen))
+
+
 def _defined_symbols(gcc: str, obj: str) -> set:
     """External symbols *defined* (not undefined) by an object file, via nm.
     Used to drop modules whose symbols collide with an already-included one."""
@@ -226,7 +285,7 @@ def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
 
 
 def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tuple = _OBJ_FLAGS,
-                         known_structs: frozenset = frozenset()):
+                         known_structs: frozenset = frozenset(), dep_fingerprint: str = ''):
     """Per-module independent work (source → object): read, collect exports,
     compile (cache-or-build). Each module is fully independent — no shared
     state — so this parallelizes across processes the same way
@@ -262,7 +321,8 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
     hit = None
     try:
         if use_cache:
-            key = cas.module_key(src, _imported_sigs(src), gcc, objflags)
+            key = cas.module_key(src, _imported_sigs(src), gcc, objflags,
+                                 dep_fingerprint=dep_fingerprint)
             ofile, hit = cas.get_or_build(
                 key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc, objflags))
         else:
@@ -275,7 +335,8 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
 
 
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
-          extra_exports: list = None, jobs: int = 1, opt_flag: str = None) -> str:
+          extra_exports: list = None, jobs: int = 1, opt_flag: str = None,
+          track_local_deps: bool = True) -> str:
     """`opt_flag` (e.g. '-O2'): folded into every module's AND the runtime's
     (mojo_runtime.c/mojo_async_runtime.cpp) own object-compile flags, and
     into their CAS keys (so an -O2 build never serves a stale -O0-compiled
@@ -316,6 +377,31 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             pass
     known_structs = frozenset(known_structs)
 
+    # Per-module transitive local-dependency fingerprint (BUG-2026-032): index
+    # every module in this build under each spelling it might be imported as,
+    # then fold the content hash of each module's reachable local-import
+    # closure into its CAS key. Cheap text pre-pass; a parse failure on one
+    # file just contributes nothing (it fails again, reported, in its own job).
+    _dep_src_by_key: dict = {}
+    for _path in (modules if track_local_deps else ()):
+        try:
+            _src = open(_path).read()
+        except Exception:
+            continue
+        _nm = _module_name_for(_path)
+        _base = os.path.splitext(os.path.basename(_path))[0]
+        for _k in {_nm, _nm.split('.')[-1], _base}:
+            _dep_src_by_key.setdefault(_k, (_path, _src))
+    dep_fps = {}
+    for _path in modules:
+        if not _dep_src_by_key:
+            dep_fps[_path] = ''
+            continue
+        try:
+            dep_fps[_path] = _local_dep_fingerprint(_path, _dep_src_by_key)
+        except Exception:
+            dep_fps[_path] = ''
+
     # Compile every module's source → object first (fully independent per
     # module, so parallelizes cleanly across processes — same scheme as
     # compile_stdlib.py's ProcessPoolExecutor use). Order is preserved
@@ -326,7 +412,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             results = list(pool.map(
                 _compile_module_job, modules,
                 [workdir] * len(modules), [use_cache] * len(modules),
-                [objflags] * len(modules), [known_structs] * len(modules)))
+                [objflags] * len(modules), [known_structs] * len(modules),
+                [dep_fps[p] for p in modules]))
         # Merge each job's own CAS hit/miss into this process's cas.stats —
         # see _compile_module_job's docstring on why worker-process stats
         # don't propagate on their own. Only needed here: the jobs<=1 path
@@ -339,7 +426,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             elif hit is False:
                 cas.stats['misses'] += 1
     else:
-        results = [_compile_module_job(path, workdir, use_cache, objflags, known_structs)
+        results = [_compile_module_job(path, workdir, use_cache, objflags, known_structs,
+                                       dep_fps[path])
                    for path in modules]
 
     # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
@@ -611,7 +699,14 @@ def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1) 
     """Build the monolithic stdlib dylib from all auto-discovered library modules."""
     rt_header = os.path.join(RUNTIME, 'mojo_runtime.h')
     rt_exports = reflect.collect_runtime_exports_h(rt_header)
-    return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports, jobs=jobs)
+    # track_local_deps=False: every module here IS a stdlib module, and the
+    # whole stdlib closure is already folded into each one's key via
+    # cas.stdlib_fingerprint(). Per-module local-dep tracking would only
+    # re-hash that same closure under a new key and force a needless full
+    # cold rebuild. It exists for `mojo dylib` on a PROJECT's own file set
+    # (BUG-2026-032), reached via driver.compile_dylib -> build(...).
+    return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports,
+                 jobs=jobs, track_local_deps=False)
 
 
 def main():

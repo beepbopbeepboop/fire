@@ -151,21 +151,38 @@ def toolchain_fingerprint(gcc: str, flags: tuple = ()) -> str:
     return _toolchain_fp_cache[key]
 
 
-def module_key(source: str, imported_sigs, gcc: str, flags: tuple = ()) -> str:
+def module_key(source: str, imported_sigs, gcc: str, flags: tuple = (),
+               dep_fingerprint: str = '') -> str:
     """The content key for compiling one module to an object artifact.
 
     The returned key is `module/<hash>` — the `module/` segment domain-separates
     this artifact kind on disk so it can never be confused with an instantiation
-    or comptime artifact (no type mismatch), and the hash is also kind-prefixed."""
+    or comptime artifact (no type mismatch), and the hash is also kind-prefixed.
+
+    `dep_fingerprint` folds in the *content* of every local module reachable
+    from this one by following `from X import ...` (see
+    build_stdlib_dylib._local_dep_fingerprint).  `imported_sigs` only carries a
+    dependency's fn/def *signatures* — never a `comptime` constant's value,
+    which gimple_codegen constant-folds straight into every importer's C, nor a
+    re-export hop's own transitive content — so without this a regenerated
+    `comptime` value in a transitively-imported module kept serving its
+    previously-cached object (BUG-2026-032, box.3d/game)."""
     sigs = '\n'.join(sorted(imported_sigs or ()))
-    return 'module/' + _hash(
+    parts = [
         'mojo-cas-v1-module',
         ABI_VERSION,
         compiler_fingerprint(),
         toolchain_fingerprint(gcc, flags),
         source,
         sigs,
-    )
+    ]
+    # Only extend the key material when there actually is a local-dep
+    # fingerprint: a module with no local (non-stdlib) imports — every stdlib
+    # module — keeps its existing `module/` cache entry, so introducing this
+    # does not force a cold rebuild of the whole stdlib.
+    if dep_fingerprint:
+        parts.append(dep_fingerprint)
+    return 'module/' + _hash(*parts)
 
 
 def _inst_hash(domain: str, template_id: str, type_args, comptime_args,
