@@ -1884,8 +1884,9 @@ MojoSet *mojo_set_new(void)
     MojoSet *s = malloc(sizeof(MojoSet));
     s->cap   = 8;
     s->used  = 0;
+    s->next_seq = 0;
     s->slots = malloc((size_t)s->cap * sizeof(_SetSlot));
-    for (int64_t i = 0; i < s->cap; i++) s->slots[i].tag = -1;
+    for (int64_t i = 0; i < s->cap; i++) { s->slots[i].tag = -1; s->slots[i].seq = 0; }
     /* `_busy` breaks the recursion of registering the registry itself
      * (and of the list registry, which is also a MojoSet). */
     if (!_mojo_set_registry_busy) {
@@ -1915,8 +1916,10 @@ void mojo_set_clear(MojoSet *s)
         s->slots[i].tag = -1;
         s->slots[i].val_i = 0;
         s->slots[i].val_s = NULL;
+        s->slots[i].seq = 0;
     }
     s->used = 0;
+    s->next_seq = 0;
 }
 
 static void _set_grow(MojoSet *s);
@@ -1972,11 +1975,24 @@ static void _set_grow(MojoSet *s)
     s->cap   *= 2;
     s->used  = 0;
     s->slots = malloc((size_t)s->cap * sizeof(_SetSlot));
-    for (int64_t i = 0; i < s->cap; i++) s->slots[i].tag = -1;
+    for (int64_t i = 0; i < s->cap; i++) { s->slots[i].tag = -1; s->slots[i].seq = 0; }
+    /* Re-insert carries each entry's ORIGINAL seq across the rehash, so a
+     * grow never reorders iteration. The adders below stamp `next_seq++`
+     * on a fresh insert, so save/restore it around the replay. */
+    int64_t saved_seq = s->next_seq;
     for (int64_t i = 0; i < old_cap; i++) {
-        if (old[i].tag == 0) mojo_set_add_int(s, old[i].val_i);
-        else if (old[i].tag == 1) { mojo_set_add_str(s, old[i].val_s); free(old[i].val_s); }
+        if (old[i].tag == 0) {
+            mojo_set_add_int(s, old[i].val_i);
+            int64_t j = _set_slot_int(s, old[i].val_i);
+            if (j >= 0) s->slots[j].seq = old[i].seq;
+        } else if (old[i].tag == 1) {
+            mojo_set_add_str(s, old[i].val_s);
+            int64_t j = _set_slot_str(s, old[i].val_s);
+            if (j >= 0) s->slots[j].seq = old[i].seq;
+            free(old[i].val_s);
+        }
     }
+    s->next_seq = saved_seq;
     free(old);
 }
 
@@ -1985,7 +2001,10 @@ void mojo_set_add_int(MojoSet *s, int64_t v)
     if (s->used * 2 >= s->cap) _set_grow(s);
     int64_t idx = _set_slot_int(s, v);
     if (idx < 0) { _set_grow(s); idx = _set_slot_int(s, v); }
-    if (s->slots[idx].tag == -1) { s->slots[idx].tag = 0; s->slots[idx].val_i = v; s->used++; }
+    if (s->slots[idx].tag == -1) {
+        s->slots[idx].tag = 0; s->slots[idx].val_i = v;
+        s->slots[idx].seq = s->next_seq++; s->used++;
+    }
 }
 
 void mojo_set_add_str(MojoSet *s, char *v)
@@ -1996,6 +2015,7 @@ void mojo_set_add_str(MojoSet *s, char *v)
     if (s->slots[idx].tag == -1) {
         s->slots[idx].tag   = 1;
         s->slots[idx].val_s = strdup(v ? v : "");
+        s->slots[idx].seq   = s->next_seq++;
         s->used++;
     }
 }
@@ -2142,22 +2162,37 @@ struct MojoSetIter {
     int64_t  pos;   /* current slot index */
 };
 
+/* Live slot indices in insertion order — the set analogue of
+ * mojo_dict_order_indices, and it exists for the same reason: iteration
+ * order must not depend on where the heap happened to put things. */
+int64_t *mojo_set_order_indices(MojoSet *s)
+{
+    if (!s || s->used == 0) return NULL;
+    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)s->used);
+    int64_t n = 0;
+    for (int64_t i = 0; i < s->cap; i++)
+        if (s->slots[i].tag != -1) { tmp[n][0] = s->slots[i].seq; tmp[n][1] = i; n++; }
+    qsort(tmp, (size_t)n, sizeof(int64_t) * 2, _cmp_seqidx);
+    int64_t *out = malloc(sizeof(int64_t) * (size_t)n);
+    for (int64_t i = 0; i < n; i++) out[i] = tmp[i][1];
+    free(tmp);
+    return out;
+}
+
 MojoSetIter *mojo_set_iter_new(MojoSet *s)
 {
     MojoSetIter *it = malloc(sizeof(MojoSetIter));
-    it->set = s;
-    it->pos = -1;
+    it->set   = s;
+    it->pos   = -1;
+    it->n     = s ? s->used : 0;
+    it->order = s ? mojo_set_order_indices(s) : NULL;
     return it;
 }
 
 int mojo_set_iter_next(MojoSetIter *it)
 {
     it->pos++;
-    while (it->pos < it->set->cap) {
-        if (it->set->slots[it->pos].tag != -1) return 1;
-        it->pos++;
-    }
-    return 0;
+    return (it->order && it->pos < it->n) ? 1 : 0;
 }
 
 /* Both accessors follow the int/str view-equivalence rule documented at
@@ -2171,7 +2206,7 @@ int mojo_set_iter_next(MojoSetIter *it)
  * call sites were. */
 int64_t mojo_set_iter_val_int(MojoSetIter *it)
 {
-    _SetSlot *sl = &it->set->slots[it->pos];
+    _SetSlot *sl = &it->set->slots[it->order[it->pos]];
     if (sl->tag == 1) return (int64_t)(uintptr_t)sl->val_s;
     return sl->val_i;
 }
@@ -2184,11 +2219,11 @@ int64_t mojo_set_iter_val_int(MojoSetIter *it)
  * unambiguous, because there the pointer IS the value. */
 char *mojo_set_iter_val_str(MojoSetIter *it)
 {
-    _SetSlot *sl = &it->set->slots[it->pos];
+    _SetSlot *sl = &it->set->slots[it->order[it->pos]];
     return sl->val_s ? sl->val_s : "";
 }
 
-void mojo_set_iter_free(MojoSetIter *it) { free(it); }
+void mojo_set_iter_free(MojoSetIter *it) { free(it->order); free(it); }
 
 /* ── Python builtin functions for C types ──────────────────────────────────*/
 

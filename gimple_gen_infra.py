@@ -1859,10 +1859,37 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             called_methods = _as_set(called_methods)
 
             # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
-            is_polymorphic = any(
-                fn == 'isinstance' and ai == 0
-                for fn, ai in function_calls
-            )
+            # Explicit indexed loop, NOT `any(fn == 'isinstance' and ai == 0
+            # for fn, ai in function_calls)`. That one line stacked BOTH of
+            # this backend's documented self-hosting traps:
+            #   * `any(<generator expression>)` — a bare genexpr's body has
+            #     appended nothing on the compiled path (see _gen_compr_
+            #     append's own note), so `any(...)` answered False; and
+            #   * `for fn, ai in <list of 2-tuples>` — a tuple unpack over
+            #     list elements boxes BOTH slots to int64_t, after which
+            #     `fn == 'isinstance'` compares a boxed pointer against a
+            #     string. Same shape gimple_module_gen.py's module-globals
+            #     loop had to index rather than unpack.
+            # Indexing the tuple and recovering each slot's real type is the
+            # established fix for both.
+            #
+            # This flag is load-bearing for DETERMINISM, not just accuracy:
+            # it is what keeps a genuinely polymorphic parameter at int64_t.
+            # `mojo_compiler.py`'s own `_scan_yield_bearing(node, out_ids)`
+            # is exactly that — `node` is a list, a dataclass, or None — and
+            # when this came out False the `is_subscripted or is_iterated`
+            # rule below typed `node` as `MojoList *` on the strength of the
+            # `for item in node:` that sits INSIDE `if isinstance(node,
+            # list):`. It did so on some runs and not others, which flipped
+            # the function's mangled symbol, which reordered the string-
+            # literal pool, which renumbered every `_slit_N` in the file:
+            # the same binary emitted a different .ci for the same input on
+            # consecutive runs.
+            is_polymorphic = False
+            for _fc in function_calls:
+                if _as_str(_fc[0]) == 'isinstance' and _as_int(_fc[1]) == 0:
+                    is_polymorphic = True
+                    break
             if is_polymorphic:
                 continue  # leave as int64_t (default for unannotated)
 

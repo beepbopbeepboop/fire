@@ -442,12 +442,14 @@ typedef struct {
     int     tag;   /* -1 = empty, 0 = int, 1 = str */
     int64_t val_i;
     char   *val_s;
+    int64_t seq;   /* insertion order; see mojo_set_order_indices */
 } _SetSlot;
 
 typedef struct {
     _SetSlot *slots;
     int64_t   used;
     int64_t   cap;
+    int64_t   next_seq;
 } MojoSet;
 
 MojoSet *mojo_set_new(void);
@@ -467,10 +469,23 @@ MojoSet *mojo_set_copy(MojoSet *s);
 void     mojo_set_update(MojoSet *dst, MojoSet *src);
 void     mojo_set_discard(MojoSet *s, int64_t v);
 
-/* Set iterator */
+int64_t *mojo_set_order_indices(MojoSet *s);
+
+/* Set iterator. Walks in INSERTION order (mojo_set_order_indices), exactly
+ * as MojoDictIter already does, NOT in slot/hash order.
+ *
+ * This is a determinism requirement, not a nicety. An int slot's hash is
+ * derived from the value itself, and the self-hosted compiler routinely
+ * stores boxed `char *` STRINGS through the int view (`mojo_set_add_int`
+ * on a boxed name) — so those slots hash by heap ADDRESS. Addresses move
+ * per run under ASLR, so hash-order iteration made the compiler emit
+ * DIFFERENT output for identical input on consecutive runs. Insertion
+ * order depends only on the program's own execution, so it is stable. */
 typedef struct {
     MojoSet *set;
-    int64_t  pos;   /* current slot index */
+    int64_t  pos;   /* index into `order` */
+    int64_t  n;     /* number of live entries */
+    int64_t *order; /* slot indices, insertion-ordered */
 } MojoSetIter;
 MojoSetIter *mojo_set_iter_new(MojoSet *s);
 int          mojo_set_iter_next(MojoSetIter *it);      /* 1=has entry, 0=done */

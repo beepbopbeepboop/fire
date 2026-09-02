@@ -474,11 +474,27 @@ def _emit_reflection_dispatch(self, parts):
     for _sanx in self._struct_allocs_needed:
         if _ptr_slot_in_range(_sanx):
             _san_str.add(_as_str(_sanx))
-    _rs_names = []
+    # A SET, not a list, purely so `sorted()` below sorts by string CONTENT.
+    # `sorted(<MojoList *>)` only reaches `mojo_list_sorted_str` when the
+    # backend has recorded the list's element type as `char *`; with the
+    # element type unknown it falls through to the generic `mojo_sorted`,
+    # which orders by the raw int64_t payload — i.e. by heap ADDRESS for a
+    # list of strings. `sorted(<MojoSet *>)` goes to `mojo_set_sorted`,
+    # which checks the slot tags and sorts string slots with
+    # `mojo_list_sorted_str` regardless of what the backend inferred.
+    #
+    # That mattered a great deal: these names drive the order the reflection
+    # emitter walks structs, which drives the order string literals are
+    # interned into `_str_pool`, which numbers every `_slit_N` in the whole
+    # output. Under ASLR the addresses move per run, so the SAME binary on
+    # the SAME input produced a differently-numbered string pool and ~30k
+    # differing lines. The entries are dict KEYS, so they are already
+    # unique and a set changes nothing else.
+    _rs_names = set()
     for _rsk in self.struct_field_types.keys():
         _rsk = _as_str(_rsk)
         if _rsk in _es_str and _rsk in _san_str:
-            _rs_names.append(_rsk)
+            _rs_names.add(_rsk)
     reflect_structs = sorted(_rs_names)
     refl_parts = []
     # The structs this loop actually EMITS helpers for. Every dispatch table
