@@ -1977,17 +1977,53 @@ void mojo_set_add_str(MojoSet *s, char *v)
     }
 }
 
+/* ── int/str view equivalence ──────────────────────────────────────────
+ * MojoList and MojoDict each store one value word per entry, so their
+ * `_get_int` / `_get_str` accessors are just two VIEWS of the same
+ * storage and agree by construction. MojoSet is the odd one out: it
+ * keeps `val_i` and `val_s` in separate fields, so an entry added
+ * through one view was invisible through the other.
+ *
+ * That asymmetry is not a theoretical concern — it is precisely the
+ * failure the self-hosted compiler keeps hitting. When the codegen
+ * cannot infer a `set[str]`'s element type it erases the element to
+ * int64_t, so `s.add(x)` emits `mojo_set_add_int(s, <char* as int>)`
+ * while `x in s` emits `mojo_set_contains_str(...)` (or the reverse, or
+ * an int-view ITERATION over str slots). Each such mismatch silently
+ * behaved as "not present" / "empty", and each has previously been
+ * chased down and patched one at a time in the Python sources.
+ *
+ * Fix it once, here, by making the two views agree the way List and Dict
+ * already do: a str slot's int view is its pointer, an int slot's str
+ * view is that pointer when it plausibly is one, and each `contains`
+ * falls back to the other kind's slots. The fallbacks are gated on the
+ * per-kind counters so a single-kind set (the normal case) stays O(1).
+ */
+
 int mojo_set_contains_int(MojoSet *s, int64_t v)
 {
+    if (!s) return 0;
     int64_t idx = _set_slot_int(s, v);
     return idx >= 0 && s->slots[idx].tag == 0;
 }
 
 int mojo_set_contains_str(MojoSet *s, char *v)
 {
+    if (!s) return 0;
     int64_t idx = _set_slot_str(s, v);
     return idx >= 0 && s->slots[idx].tag == 1;
 }
+
+/* NOTE on the `contains` pair: unlike the iterator accessors below, these
+ * are deliberately NOT made cross-view. An int slot holds a bare 64-bit
+ * value with no way to tell a boxed `char *` from a genuine integer (a
+ * type tag, an id(), a heap pointer to a NON-string object — all of which
+ * this runtime really does store in int-keyed sets), so answering a
+ * `contains_str` query by strcmp-ing against int slots reads unbounded
+ * memory through a pointer that was never a string. Tried, and it
+ * segfaulted two translation units that previously compiled. An
+ * `add_int` / `contains_str` mismatch is a codegen element-type inference
+ * gap and has to be fixed there, where the static type is known. */
 
 void mojo_set_print(MojoSet *s)
 {
@@ -2101,14 +2137,32 @@ int mojo_set_iter_next(MojoSetIter *it)
     return 0;
 }
 
+/* Both accessors follow the int/str view-equivalence rule documented at
+ * mojo_set_contains_int: a str slot's int64_t view is its pointer, an int
+ * slot's str view is that pointer when it plausibly is one. Returning the
+ * raw (always-zero) sibling field instead made `for x in <str set>` — which
+ * the codegen lowers through the INT view whenever it cannot infer the
+ * element type — hand back 0 for every element, so e.g. gen_module_impl's
+ * `_ptr_helpers_needed` scan produced an empty list and the
+ * `static char * _mojo_at_char (...)` helper was never emitted while its
+ * call sites were. */
 int64_t mojo_set_iter_val_int(MojoSetIter *it)
 {
-    return it->set->slots[it->pos].val_i;
+    _SetSlot *sl = &it->set->slots[it->pos];
+    if (sl->tag == 1) return (int64_t)(uintptr_t)sl->val_s;
+    return sl->val_i;
 }
 
+/* The str view of an INT slot is deliberately NOT the raw value cast to
+ * `char *` — see the note above mojo_set_contains_int: an int slot may
+ * legitimately hold a non-string (a type tag, an id(), a pointer to a
+ * non-string object), and handing that to the caller as a string reads
+ * unbounded memory. Only the int-view-of-a-str-slot direction above is
+ * unambiguous, because there the pointer IS the value. */
 char *mojo_set_iter_val_str(MojoSetIter *it)
 {
-    return it->set->slots[it->pos].val_s;
+    _SetSlot *sl = &it->set->slots[it->pos];
+    return sl->val_s ? sl->val_s : "";
 }
 
 void mojo_set_iter_free(MojoSetIter *it) { free(it); }
