@@ -3324,8 +3324,17 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
     matching how `d[k] = v` already lowers a subscript store."""
     d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
     _val_ty = ''
-    for kname in (kwarg_pairs or {}):
-        kt, kv = kwarg_pairs[kname]
+    _kwp = kwarg_pairs if kwarg_pairs else {}
+    for kname in _kwp:
+        # Index the (ctype, value) pair, NOT `kt, kv = _kwp[kname]`: on the
+        # self-hosted path the 2-tuple unpack lowers `_kwp[kname]` through
+        # `mojo_list_get_int` on a slot that can be boxed/garbage → SIGBUS
+        # (crash-report bt: `mojo_list_get_int` ← `_pack_kwargs_dict` on a
+        # shimless `--dump-full` of an imported struct method's
+        # `return Struct(x=.., y=..)`).
+        _pair = _kwp[kname]
+        kt = _as_str(_pair[0])
+        kv = _pair[1]
         _val_ty = kt if not _val_ty or _val_ty == kt else 'int64_t'
         if kt == 'char *':
             gen._emit_call('void', '', 'mojo_dict_set_str',

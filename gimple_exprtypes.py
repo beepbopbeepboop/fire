@@ -28,7 +28,10 @@ from mojo_compiler import (
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 
 
-def _walk_ast_into(node, out):
+_WALK_AST_MAX_DEPTH = 900
+
+
+def _walk_ast_into(node, out, _depth=0):
     """Append to `out` every AST node `_walk_ast(node)` would return, in
     exactly its order — the same pre-order generic walk, minus the
     intermediate per-subtree lists (`result.extend(_walk_ast(child))`
@@ -49,12 +52,22 @@ def _walk_ast_into(node, out):
     traversal order/content is byte-identical by construction."""
     if node is None:
         return
+    # Depth cap. Real AST nesting is well under a few hundred; hitting 900
+    # means a cycle — on the self-hosted path a `getattr(node, <field>)`
+    # for a field name that `dataclasses.fields()`'s compiled form got
+    # wrong can hand back the node itself, and this walker (which appends
+    # every node it visits, with no id()-based visited set — id() is
+    # unreliable in the compiled runtime) then recurses forever, appending
+    # unboundedly. Observed as a multi-GB RSS runaway on `MOJO_NO_SHIM=1
+    # --dump-full` in the do_imports pre-pass's `_walk_ast(stmts)` loop.
+    if _depth > _WALK_AST_MAX_DEPTH:
+        return
     # `isinstance(node, list) or isinstance(node, tuple)`, NOT
     # `isinstance(node, (list, tuple))`: the self-hosted backend's
     # `isinstance` with a TUPLE of types always evaluated False.
     if isinstance(node, list) or isinstance(node, tuple):
         for item in node:
-            _walk_ast_into(item, out)
+            _walk_ast_into(item, out, _depth + 1)
         return
     out.append(node)
     if isinstance(node, type):
@@ -97,7 +110,14 @@ def _walk_ast_into(node, out):
         fnames = tuple(_names)
         _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
     for fname in fnames:
-        _walk_ast_into(getattr(node, fname), out)
+        _child = getattr(node, fname, None)
+        # A field that resolves back to the node itself (a bogus field name
+        # from the compiled `dataclasses.fields()` — see the depth-cap
+        # comment) would otherwise recurse forever; the depth cap catches
+        # the general case, this catches the common immediate one cheaply.
+        if _child is node:
+            continue
+        _walk_ast_into(_child, out, _depth + 1)
 
 
 def _walk_ast(node):

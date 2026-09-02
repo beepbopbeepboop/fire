@@ -1056,26 +1056,36 @@ def gen_module_impl(self, stmts):
                         # just derived transitively.
                         _xg_record_hint(_xg_key, _xg_pnames[_xi], _xg_enc_map[_xa.name])
 
-        for module_name in sorted(modules_to_compile):
-            if module_name not in self._compiled_modules:
-                self._compiled_modules.add(module_name)
-                code, module_stmts = self._compile_imported_module(module_name)
+        for _mc_iter in sorted(modules_to_compile):
+            # FRESH `_mn` local, NOT `module_name = _as_str(module_name)`:
+            # reassigning the `for x in sorted(<set of str>)` loop variable
+            # doesn't win against its int64_t loop-var type under whole-
+            # function unification, so `_compiled_modules.add(module_name)`
+            # still lowered to `mojo_set_add_int` while the `not in` check
+            # used `mojo_set_contains_str` — the set filled with int-tagged
+            # entries the check never matched, so every module (os, pathlib,
+            # gimple_codegen, ...) got recompiled once per importer: an
+            # exponential blowup that OOM'd `MOJO_NO_SHIM=1 --dump-full`.
+            _mn = _as_str(_mc_iter)
+            if _mn not in self._compiled_modules:
+                self._compiled_modules.add(_mn)
+                code, module_stmts = self._compile_imported_module(_mn)
                 if code:
-                    imported_code.append(f"/* ─── Imported module: {module_name} ───────────────────── */")
+                    imported_code.append(f"/* ─── Imported module: {_mn} ───────────────────── */")
                     imported_code.append(code)
                     imported_code.append('')
                     imported_stmts.extend(module_stmts)
                     for _ms in module_stmts:
                         if isinstance(_ms, FunctionDef):
                             self._global_inline_defs.add(_ms.name)
-                            self._imported_func_home.setdefault(_ms.name, module_name)
-                            self._note_own_func_home(_ms.name, module_name, record_scope=False)
+                            self._imported_func_home.setdefault(_ms.name, _mn)
+                            self._note_own_func_home(_ms.name, _mn, record_scope=False)
                         elif isinstance(_ms, StructDef):
                             for _m in _ms.methods:
                                 self._global_inline_defs.add(_m.name)
                                 self._global_inline_defs.add(f"{_ms.name}_{_m.name}")
-                            self._imported_struct_home.setdefault(_ms.name, module_name)
-                self._compiled_modules.add(module_name)
+                            self._imported_struct_home.setdefault(_ms.name, _mn)
+                self._compiled_modules.add(_mn)
 
         already_in_stmts = set(id(s) for s in imported_stmts)
         for s in self._all_transitive_stmts_ordered:

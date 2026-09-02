@@ -3940,21 +3940,25 @@ void *mojo_sorted(void *iterable) {
  * different from Python's alphabetical `sorted(...)`. The codegen picks these
  * by its own knowledge of the element type (see _lower_builtin_sorted), so the
  * runtime never has to guess. */
-/* NULL-safe string compare: a `sorted(<list of char*>)` whose codegen source
- * (a set of names, dict keys, ...) contains a NULL / erased-to-0 element must
- * not segfault the whole sort in `strcmp`. Order NULL before any real string
- * (deterministic); callers' per-element `_ptr_slot_in_range` guards then skip
- * it in the loop body. Also treats a value below the userspace-heap window as
- * NULL — an erased int sentinel that isn't a real pointer. */
+/* Range-safe string compare: a `sorted(<list of char*>)` whose codegen
+ * source (a name set, dict keys, ...) contains a NULL / erased-to-0 element
+ * — or, on the self-hosted path, an int slot holding pure garbage that was
+ * never a real pointer (`0xb343c47860b33ba0` &c) — must not segfault the
+ * whole sort in `strcmp`. Only a value inside the plausible userspace
+ * pointer window [0x1000, 2^47) is dereferenced; anything else sorts first
+ * (deterministically), and callers' per-element `_ptr_slot_in_range` guards
+ * then skip it in the loop body. */
+static int _mojo_sorted_str_ok(int64_t raw) {
+    uint64_t v = (uint64_t)raw;
+    return v >= 0x1000ULL && v < 0x0000800000000000ULL;
+}
 static int _mojo_sorted_str_cmp(int64_t a_raw, int64_t b_raw) {
-    const char *a = (const char *)(uintptr_t)a_raw;
-    const char *b = (const char *)(uintptr_t)b_raw;
-    int a_ok = (a != NULL) && ((uint64_t)a_raw >= 0x1000);
-    int b_ok = (b != NULL) && ((uint64_t)b_raw >= 0x1000);
+    int a_ok = _mojo_sorted_str_ok(a_raw);
+    int b_ok = _mojo_sorted_str_ok(b_raw);
     if (!a_ok && !b_ok) return 0;
     if (!a_ok) return -1;
     if (!b_ok) return 1;
-    return strcmp(a, b);
+    return strcmp((const char *)(uintptr_t)a_raw, (const char *)(uintptr_t)b_raw);
 }
 
 MojoList *mojo_list_sorted_str(MojoList *src) {
