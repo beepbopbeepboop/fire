@@ -6160,6 +6160,23 @@ def gen_module_impl(self, stmts):
     if current_mod_name not in self._module_globals:
         self._module_globals[current_mod_name] = []
         self._module_global_inits[current_mod_name] = {}
+    # Set of composite "name\0ctype\0mtype" strings mirroring
+    # `_module_globals[mod]`, so the registration loop below can test
+    # "already registered" by VALUE. It cannot do that against the tuple
+    # list itself once self-hosted: a tuple lowers to a MojoList, so `in`
+    # compares handles rather than contents and never matches.
+    if getattr(self, '_module_global_names', None) is None:
+        self._module_global_names = {}
+    if current_mod_name not in self._module_global_names:
+        # Seed from whatever is already registered: `_module_globals[mod]`
+        # survives across calls on the same generator (the guard above only
+        # creates it once), so an empty set here would re-append entries
+        # already in that list.
+        _seed = set()
+        for _e in self._module_globals[current_mod_name]:
+            _seed.add(_as_str(_e[0]) + '\x00' + _as_str(_e[1])
+                      + '\x00' + _as_str(_e[2]))
+        self._module_global_names[current_mod_name] = _seed
     _dispatch_dict_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
                             '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
     _dispatch_set_names = {'_CMP_OPS'}
@@ -6588,7 +6605,31 @@ def gen_module_impl(self, stmts):
                         for _tm, _ta in _import_targets(stmt)):
                     init_code = '0'
                     break
-            if (gname, c_type, g_mtype) not in self._module_globals[current_mod_name]:
+            # Faithful restoration of this line's ORIGINAL intent —
+            # "append unless this exact (name, c_type, g_mtype) triple is
+            # already registered" — which self-hosting silently broke: a
+            # tuple lowers to a MojoList, so `<tuple> not in <list of
+            # tuples>` compares HANDLES, not contents, and a freshly built
+            # triple never matches an equal-valued one already in the list.
+            #
+            # The visible damage: mojo_compiler.py has `import sys` at
+            # module level AND inside a function, so `sys` registered twice
+            # and its own translation unit failed to compile at all with
+            # "duplicate member 'sys'" in `struct _root_toplev`.
+            #
+            # Compared elementwise through `_as_str` so the comparison works
+            # on boxed values. Deliberately still keyed on the WHOLE triple,
+            # not on the name alone: collapsing per-name looks tidier but
+            # drops entries this loop legitimately registers more than once,
+            # and that really does lose declarations (`LayoutSolver.STACK`
+            # stopped being emitted as a class-attribute global, leaving
+            # "'LayoutSolver_STACK' undeclared" behind). Same policy as
+            # before, working comparison.
+            _mg_seen = self._module_global_names[current_mod_name]
+            _mg_key = (_as_str(gname) + '\x00' + _as_str(c_type)
+                       + '\x00' + _as_str(g_mtype))
+            if _mg_key not in _mg_seen:
+                _mg_seen.add(_mg_key)
                 self._module_globals[current_mod_name].append((gname, c_type, g_mtype))
                 self._module_global_inits[current_mod_name][gname] = init_code
                 self._global_to_module[gname] = current_mod_name
