@@ -2228,6 +2228,35 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
  * always took the "not this type" branch — found via find_imports() (used by
  * `mojo --dump`'s own do_imports resolution) never recognizing any import
  * statement inside a nested function/if/try block once self-hosted. */
+/* Can `addr` be the address of a codegen-emitted struct (i.e. is it safe
+ * to read an `int64_t __mojo_type_id` from it)? Three independent
+ * requirements, all of which a genuine struct pointer meets:
+ *
+ *   - at least 2 GiB: below that live None, small ints, bools, and the
+ *     31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags themselves,
+ *     which a compiled `type(node)` yields in place of a class object;
+ *   - 8-byte aligned: `__mojo_type_id` is an int64_t at offset 0, and
+ *     every allocator this runtime uses returns 16-byte-aligned blocks,
+ *     so a misaligned value is definitionally not a struct pointer;
+ *   - canonical: below 2^47, the top of the userspace half on every
+ *     platform this runtime targets.
+ *
+ * The alignment and upper-bound checks were added after the isinstance
+ * widening (see mojo_isinstance) let the compiler's own recursive AST
+ * scans reach values they had never been handed before: mojo_compiler.py's
+ * `_scan_yield_bearing` walked into the sentinel 0x00007fffffffffff — past
+ * the low guard, unaligned, and at the very last byte of the address
+ * space — and the bare dereference segfaulted. Answering "not a tagged
+ * struct" is both correct and non-fatal. */
+static int _mojo_tagged_addr_ok(int64_t addr)
+{
+    uint64_t u = (uint64_t)addr;
+    if (u < 0x80000000ULL) return 0;
+    if (u >= 0x0000800000000000ULL) return 0;
+    if (u & 7ULL) return 0;
+    return 1;
+}
+
 int64_t mojo_read_type_tag(int64_t addr) {
     /* Was: `if (!addr) return 0; return *(int64_t*)addr;` — but once the
      * compiler's own generic AST walkers actually recurse (mojo_isinstance
@@ -2236,7 +2265,7 @@ int64_t mojo_read_type_tag(int64_t addr) {
      * type-tag, and the bare deref segfaulted. Same guard as
      * mojo_read_type_tag_safe: nothing legitimate lives below 2GiB on any
      * platform this runtime targets. */
-    if (addr < 0x80000000LL) return 0;
+    if (!_mojo_tagged_addr_ok(addr)) return 0;
     return *(int64_t *)(intptr_t)addr;
 }
 
@@ -2258,7 +2287,7 @@ int64_t mojo_read_type_tag_safe(int64_t addr) {
      * here and dereference the tag as a pointer. On every platform this
      * runtime targets a genuine heap/stack/static address is far above
      * 2GiB, so nothing legitimate is lost. */
-    if (addr < 0x80000000LL) return 0;
+    if (!_mojo_tagged_addr_ok(addr)) return 0;
     return *(int64_t *)(intptr_t)addr;
 }
 

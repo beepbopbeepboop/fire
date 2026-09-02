@@ -1597,8 +1597,21 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # tuples) isn't first-decl-wins'd into char* — that made a
         # function-pointer slot read as a string and `func(...)` compile to
         # a bogus direct call.
+        # Record the C type each slot ACTUALLY ended up declared as.
+        # `_declare_var` is first-decl-wins, so a slot may keep a type an
+        # earlier declaration chose rather than the one requested here —
+        # and the assignment code below used to re-derive the type with
+        # `gen.var_types.get(vn, 'char *')`, whose *default* contradicts
+        # the `int64_t` requested for every non-key slot. When the name was
+        # missing from `var_types` that default won and emitted
+        # `vtype = (char *)0;` into an `int64_t vtype;` declaration — a
+        # hard -Wint-conversion error (real: gimple_gen_funcs.py's
+        # `for vname, vtype in ci.captures:`).
+        _slot_ctypes = []
         for i, vn in enumerate(var_names):
-            gen._declare_var(vn, 'char *' if i == 0 else 'int64_t', force=(vn == shadow_name))
+            _want = 'char *' if i == 0 else 'int64_t'
+            gen._declare_var(vn, _want, force=(vn == shadow_name))
+            _slot_ctypes.append(gen.var_types.get(vn, _want))
     else:
         gen._declare_var(var, 'char *', force=(var == shadow_name))
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
@@ -1632,18 +1645,24 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # Assign key to first name, NULL (zero) to remaining names
         vn0 = var_names[0]
         cvn0 = gen._cname(vn0)
-        vt0 = gen.var_types.get(vn0, 'char *')
+        # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
+        # store must use the type the slot was actually DECLARED with (see
+        # where _slot_ctypes is built).
+        vt0 = _slot_ctypes[0]
         if vt0 in ('int64_t', 'int', 'int32_t'):
             vp = gen._new_val('void *', f'(void *){key_tmp}')
             box = gen._new_val('int64_t', f'(int64_t){vp}')
             gen._emit(f"  {cvn0} = {box};")
         else:
             gen._emit(f"  {cvn0} = (char *) {key_tmp};")
-        for vn in var_names[1:]:
+        for _vi in range(1, len(var_names)):
+            vn = var_names[_vi]
             cvn = gen._cname(vn)
-            vt = gen.var_types.get(vn, 'char *')
+            vt = _slot_ctypes[_vi]
             if vt in ('int64_t', 'int', 'int32_t'):
                 gen._emit(f"  {cvn} = (int64_t)0;")
+            elif vt.endswith(' *'):
+                gen._emit(f"  {cvn} = ({vt})0;")
             else:
                 gen._emit(f"  {cvn} = (char *)0;")
     else:
