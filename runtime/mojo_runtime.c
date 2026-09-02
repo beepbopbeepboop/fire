@@ -892,7 +892,16 @@ char *mojo_char_to_str(char c) {
  * regex_compile.py's own ord(c) calls (the first code in this self-hosted
  * codebase to actually call ord()). */
 int64_t mojo_ord(char *s) {
-    if (!s || !s[0]) return 0;
+    uintptr_t v = (uintptr_t)s;
+    if (v == 0) return 0;
+    /* Self-hosted path: a `str` field the compiled codegen erased to
+     * int64_t can reach here holding a raw codepoint (e.g. regex_compile's
+     * `ord(node.c)` where `Char.c` boxed to the int 0x5b) rather than a
+     * pointer to a 1-char string. A value in the Unicode range is that
+     * codepoint, never a valid userspace address (no real pointer is
+     * < 0x110000 on any target this runs on). */
+    if (v <= 0x10FFFFULL) return (int64_t)v;
+    if (!s[0]) return 0;
     return (int64_t)(unsigned char)s[0];
 }
 
