@@ -1287,16 +1287,30 @@ def _resolve_type(gen, ann: str | None) -> str:
     return gimple_ctypes._mojo_type(ann)
 
 
-def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
+def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                        owner_struct: str | None = None) -> dict[str, str]:
     """Infer parameter types from member accesses and function calls in function body.
+
+    First parameter MUST be named `gen` (it was `_g`): only an unannotated
+    first param named exactly `gen`/`self` is typed `GimpleGen *` when this
+    compiler compiles its own `gimple*.py` source (see `_selfhost_gen_self_
+    param_type` in gimple_gen_funcs.py). Named anything else it is `int64_t`,
+    so `gen.struct_field_types` became a boxed getattr, `sorted(...)` over it
+    missed the `MojoDict *` branch (`mojo_dict_sorted_keys`, elem `char *`)
+    and fell through to the generic `mojo_sorted`, which orders by POINTER.
+    Heap addresses vary per run under ASLR, so the struct-evidence match
+    below picked a different winner each time and this compiler emitted
+    DIFFERENT output for the same input on two consecutive runs — observed
+    as `_scan_yield_bearing`/`_as_ident_node`/`_as_funcdef_node`/
+    `_detect_generator` flipping between `MojoList *` and `int64_t` params
+    (and their mangled symbol suffixes with them).
 
     If a parameter is accessed with .field, infer it's a struct with that field.
     If a parameter is passed to a known function, infer type from that function.
 
     `owner_struct`: the StructDef whose method `func` is, when it is one —
     needed ONLY so the decision step below can resolve `self.<member>` AugAssign
-    sinks against `_g.struct_field_types`; pure signal collection inside
+    sinks against `gen.struct_field_types`; pure signal collection inside
     analyze_param_usage never touches it (see its Phase 3 memoization note).
     """
     inferred = {}
@@ -1820,7 +1834,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
             # Phase 2 already had to work around) and must therefore
             # still be recomputed fresh on every call.
             _pu_key = (id(func), pname)
-            _pu_cached = _g._param_usage_scan_cache.get(_pu_key)
+            _pu_cached = gen._param_usage_scan_cache.get(_pu_key)
             if _pu_cached is not None:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
@@ -1832,7 +1846,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                  is_nondict_key_subscripted, called_methods, is_dict_method,
                  aug_member_targets
                  ) = analyze_param_usage(func.body, pname)
-                _g._param_usage_scan_cache[_pu_key] = (
+                gen._param_usage_scan_cache[_pu_key] = (
                     fields_accessed, function_calls, is_subscripted, is_string_method,
                     is_iterated, is_char_compared, is_str_key_subscripted,
                     is_nondict_key_subscripted, called_methods, is_dict_method,
@@ -1880,7 +1894,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                         bool(aug_member_targets) and owner_struct is not None
                         and all(
                             _root == 'self'
-                            and _g.struct_field_types.get(owner_struct, {}).get(_member) == 'char *'
+                            and gen.struct_field_types.get(owner_struct, {}).get(_member) == 'char *'
                             for _root, _member in aug_member_targets))
                     if is_string_method or is_char_compared or _aug_into_str:
                         inferred[pname] = 'char *'
@@ -1924,7 +1938,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                         inferred[pname] = 'char *'
                         break
                     # Infer from known function signatures
-                    sig = _g._KNOWN_SIGS.get(func_name)
+                    sig = gen._KNOWN_SIGS.get(func_name)
                     if sig is not None and arg_index < len(sig[1]):
                         inferred[pname] = sig[1][arg_index]
                         break
@@ -1987,8 +2001,8 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef,
                 _evidence_fields = _struct_evidence_list
                 matches: list = []
                 if len(_evidence_fields) > 0:
-                    for sname in sorted(_g.struct_field_types):
-                        sfields = _g.struct_field_types[_as_str(sname)]
+                    for sname in sorted(gen.struct_field_types):
+                        sfields = gen.struct_field_types[_as_str(sname)]
                         _all_present = True
                         for _f0 in _evidence_fields:
                             if _f0 not in sfields:

@@ -481,10 +481,22 @@ def _emit_reflection_dispatch(self, parts):
             _rs_names.append(_rsk)
     reflect_structs = sorted(_rs_names)
     refl_parts = []
+    # The structs this loop actually EMITS helpers for. Every dispatch table
+    # below is driven from this list rather than re-deriving the same
+    # condition, so a table can never reference a helper that was skipped.
+    # It used to re-test `if self.struct_field_types.get(sn)` inside each
+    # join's generator expression; self-hosted, those genexpr `if` clauses
+    # did not filter, so the tables listed EVERY reflect struct while this
+    # loop correctly skipped the field-less ones — emitting
+    # `return _mojo_getattr_Layout((Layout *)obj, attr);` against a helper
+    # that was never generated ("implicit declaration of function
+    # '_mojo_getattr_Layout'", the head of mojo_compiler.py's error list).
+    reflect_emitted = []
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
-        if not fields:
+        if len(fields) == 0:
             continue
+        reflect_emitted.append(sn)
         get_lines = []
         set_lines = []
         name_lits = []
@@ -530,12 +542,14 @@ def _emit_reflection_dispatch(self, parts):
             f"  return _r;\n}}\n"
             + asdict_part
         )
-    repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);" for sn in reflect_structs
-                       if self.struct_field_types.get(sn)]
-    for sn in reflect_structs:
+    repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
+                      for sn in reflect_emitted]
+    # Same list as the getattr/setattr helpers above: this loop had its own
+    # copy of the "skip field-less structs" condition, and the forward-decl
+    # comprehension above had a third copy inside a comprehension `if` —
+    # which self-hosted does not filter. One list, one decision.
+    for sn in reflect_emitted:
         fields = self.struct_field_types.get(sn, {})
-        if not fields:
-            continue
         boxed = self.struct_boxed_fields.get(sn, set())
         bool_fields = self.struct_bool_fields.get(sn, set())
         nullable_containers = self.struct_nullable_container_fields.get(sn, set())
@@ -612,18 +626,18 @@ def _emit_reflection_dispatch(self, parts):
         parts.extend(refl_parts)
         tag_cases_get = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'
-            for sn in reflect_structs if self.struct_field_types.get(sn))
+            for sn in reflect_emitted)
         tag_cases_set = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) {{ _mojo_setattr_{sn}(({sn} *)obj, attr, val); return; }}'
-            for sn in reflect_structs if self.struct_field_types.get(sn))
+            for sn in reflect_emitted)
         tag_cases_fields = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_fieldnames_{sn}();'
-            for sn in reflect_structs if self.struct_field_types.get(sn))
+            for sn in reflect_emitted)
         tag_cases_asdict = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_asdict_{sn}(({sn} *)obj);'
-            for sn in reflect_structs if self.struct_field_types.get(sn))
+            for sn in reflect_emitted)
         tag_set_literal = ", ".join(
-            str(_struct_type_id(sn)) for sn in reflect_structs if self.struct_field_types.get(sn))
+            str(_struct_type_id(sn)) for sn in reflect_emitted)
         if len(tag_set_literal) == 0:
             tag_set_literal = "0"
         asdict_dispatch_part = (
@@ -661,10 +675,10 @@ def _emit_reflection_dispatch(self, parts):
         )
         tag_cases_repr = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_repr_{sn}(({sn} *)obj);'
-            for sn in reflect_structs if self.struct_field_types.get(sn))
+            for sn in reflect_emitted)
         tag_cases_repr_elem = "\n".join(
             f'    if (_tag == {_struct_type_id(sn)}) return _mojo_repr_{sn}(({sn} *)(intptr_t)val);'
-            for sn in reflect_structs if self.struct_field_types.get(sn))
+            for sn in reflect_emitted)
         parts.append(
             ("static char * _mojo_dispatch_repr (void *obj) {\n"
              "  if (!obj) return \"None\";\n"
