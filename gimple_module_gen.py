@@ -449,6 +449,277 @@ def _collect_import_modules_rec(modules_to_compile, node_list, _depth):
             _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
 
 
+def _emit_reflection_dispatch(self, parts):
+    """Emit the generic reflection dispatch (getattr/setattr/repr/
+    dataclasses.fields/asdict). Extracted from gen_module_impl so its
+    `sn` struct-name loop variable lives in a fresh function scope: in
+    gen_module_impl's ~6000-line body `sn` was cross-unified to int64_t
+    by unrelated integer uses on the self-hosted backend, so every
+    `f"..._mojo_repr_{sn}"` here concatenated a boxed pointer and
+    crashed in mojo_str_cat/strlen on the shimless --dump-full path."""
+    # Build `reflect_structs` as an explicitly `_as_str`-typed list, NOT
+    # `sorted(setA & setB & setC)`. `self._emitted_structs` /
+    # `self._struct_allocs_needed` carry int64_t-tagged / boxed slots on
+    # the self-hosted backend, so the set intersection and the resulting
+    # `sorted()` loop var typed to int64_t — every `f"..._mojo_repr_{sn}"`
+    # / `f"..._mojo_getattr_{sn}"` f-string below then concatenated a
+    # boxed pointer, crashing in `mojo_str_cat` → `strlen()` on garbage
+    # (crash-report bt: `_platform_strlen` ← `mojo_str_cat` ←
+    # `gen_module_impl`, recursing through `_compile_imported_module` on
+    # a shimless `--dump-full`).
+    _es_str = set()
+    for _esx in self._emitted_structs:
+        _es_str.add(_as_str(_esx))
+    _san_str = set()
+    for _sanx in self._struct_allocs_needed:
+        if _ptr_slot_in_range(_sanx):
+            _san_str.add(_as_str(_sanx))
+    _rs_names = []
+    for _rsk in self.struct_field_types.keys():
+        _rsk = _as_str(_rsk)
+        if _rsk in _es_str and _rsk in _san_str:
+            _rs_names.append(_rsk)
+    reflect_structs = sorted(_rs_names)
+    refl_parts = []
+    for sn in reflect_structs:
+        fields = self.struct_field_types.get(sn, {})
+        if not fields:
+            continue
+        get_lines = []
+        set_lines = []
+        name_lits = []
+        asdict_lines = []
+        for fname, ftype in fields.items():
+            if fname == '__mojo_type_id':
+                continue
+            safe_f = _safe_field(fname)
+            if re.match(r'^.+\[\d+\]$', ftype):
+                name_lits.append(f'"{fname}"')
+                continue
+            if ftype.endswith(' *'):
+                get_lines.append(
+                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')
+                set_lines.append(
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
+                asdict_lines.append(
+                    f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
+            else:
+                get_lines.append(
+                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
+                set_lines.append(
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; return; }}')
+                asdict_lines.append(
+                    f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
+            name_lits.append(f'"{fname}"')
+        asdict_part = (
+            f"static MojoDict * _mojo_asdict_{sn} ({sn} *obj) {{\n"
+            f"  MojoDict *_r = mojo_dict_new();\n"
+            + "".join(asdict_lines) +
+            f"\n  return _r;\n}}\n"
+        ) if self._asdict_dispatch_needed else ""
+        refl_parts.append(
+            f"static int64_t _mojo_getattr_{sn} ({sn} *obj, char *attr) {{\n"
+            + "\n".join(get_lines) +
+            f"\n  return mojo_obj_getattr((void *)obj, attr);\n}}\n"
+            f"static void _mojo_setattr_{sn} ({sn} *obj, char *attr, int64_t val) {{\n"
+            + "\n".join(set_lines) +
+            f"\n  mojo_setattr((void *)obj, attr, val);\n}}\n"
+            f"static MojoList * _mojo_fieldnames_{sn} (void) {{\n"
+            f"  MojoList *_r = mojo_list_new();\n"
+            + "".join(f'  mojo_list_append_str(_r, {nl});\n' for nl in name_lits) +
+            f"  return _r;\n}}\n"
+            + asdict_part
+        )
+    repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);" for sn in reflect_structs
+                       if self.struct_field_types.get(sn)]
+    for sn in reflect_structs:
+        fields = self.struct_field_types.get(sn, {})
+        if not fields:
+            continue
+        boxed = self.struct_boxed_fields.get(sn, set())
+        bool_fields = self.struct_bool_fields.get(sn, set())
+        nullable_containers = self.struct_nullable_container_fields.get(sn, set())
+        part_exprs = []
+        for fname, ftype in fields.items():
+            if fname == '__mojo_type_id':
+                continue
+            safe_f = _safe_field(fname)
+            fref = f'obj->{safe_f}'
+            if sn == 'IntLiteral' and fname == 'value' and 'raw' in fields:
+                raw_fref = f"obj->{_safe_field('raw')}"
+                val_expr = (f'(({raw_fref} && {raw_fref}[0]) '
+                            f'? mojo_int_literal_decimal({raw_fref}) '
+                            f': mojo_repr_int((int64_t){fref}))')
+            elif fname in bool_fields:
+                val_expr = f'({fref} ? "True" : "False")'
+            elif fname in boxed and ftype in (
+                    'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+                    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
+                val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
+            elif ftype == 'char *':
+                val_expr = f'({fref} ? mojo_repr_str({fref}) : "None")'
+            elif ftype == '_Bool':
+                val_expr = f'({fref} ? "True" : "False")'
+            elif ftype in ('double', 'float'):
+                val_expr = f'mojo_repr_float((double){fref})'
+            elif ftype == 'MojoList *':
+                if self._field_elem_types.get(sn, {}).get(fname) == 'double':
+                    list_repr = f'mojo_repr_list_doubles({fref})'
+                else:
+                    list_repr = f'_mojo_repr_list({fref})'
+                if fname in nullable_containers:
+                    val_expr = f'({fref} ? {list_repr} : "None")'
+                else:
+                    val_expr = list_repr
+            elif ftype == 'MojoDict *':
+                if fname in nullable_containers:
+                    val_expr = f'({fref} ? _mojo_repr_dict({fref}) : "None")'
+                else:
+                    val_expr = f'_mojo_repr_dict({fref})'
+            elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+                           'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
+                val_expr = f'mojo_repr_int((int64_t){fref})'
+            elif ftype.endswith(' *'):
+                val_expr = f'({fref} ? _mojo_dispatch_repr((void *){fref}) : "None")'
+            else:
+                val_expr = f'mojo_repr_int((int64_t){fref})'
+            part_exprs.append(f'"{fname}=", {val_expr}')
+        cat_chain = f'strdup("{sn}(")'
+        for i, pe in enumerate(part_exprs):
+            sep = ', ' if i > 0 else ''
+            if sep:
+                cat_chain = f'mojo_str_cat({cat_chain}, ", ")'
+            name_lit, val_e = pe.split(', ', 1)
+            cat_chain = f'mojo_str_cat({cat_chain}, {name_lit})'
+            cat_chain = f'mojo_str_cat({cat_chain}, {val_e})'
+        cat_chain = f'mojo_str_cat({cat_chain}, ")")'
+        refl_parts.append(
+            f"static char * _mojo_repr_{sn} ({sn} *obj) {{\n"
+            f"  if (!obj) return \"None\";\n"
+            f"  return {cat_chain};\n"
+            f"}}\n"
+        )
+    parts.append("static char * _mojo_dispatch_repr (void *);")
+    parts.append("static char * _mojo_repr_list (MojoList *);")
+    parts.append("static char * _mojo_repr_dict (MojoDict *);")
+    parts.append("static char * _mojo_generic_elem_repr (int64_t);")
+    if repr_fwd_decls:
+        parts.append("/* Forward decls for generic repr() (mutual struct references) */")
+        parts.append("\n".join(repr_fwd_decls))
+        parts.append('')
+    if True:
+        parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
+        parts.extend(refl_parts)
+        tag_cases_get = "\n".join(
+            f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'
+            for sn in reflect_structs if self.struct_field_types.get(sn))
+        tag_cases_set = "\n".join(
+            f'  if (_tag == {_struct_type_id(sn)}) {{ _mojo_setattr_{sn}(({sn} *)obj, attr, val); return; }}'
+            for sn in reflect_structs if self.struct_field_types.get(sn))
+        tag_cases_fields = "\n".join(
+            f'  if (_tag == {_struct_type_id(sn)}) return _mojo_fieldnames_{sn}();'
+            for sn in reflect_structs if self.struct_field_types.get(sn))
+        tag_cases_asdict = "\n".join(
+            f'  if (_tag == {_struct_type_id(sn)}) return _mojo_asdict_{sn}(({sn} *)obj);'
+            for sn in reflect_structs if self.struct_field_types.get(sn))
+        tag_set_literal = ", ".join(
+            str(_struct_type_id(sn)) for sn in reflect_structs if self.struct_field_types.get(sn))
+        if len(tag_set_literal) == 0:
+            tag_set_literal = "0"
+        asdict_dispatch_part = (
+            "static MojoDict * _mojo_dispatch_asdict (void *obj) {\n"
+            "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n"
+            + f"{tag_cases_asdict}\n"
+            + "  return mojo_dict_new();\n"
+            "}\n"
+        ) if self._asdict_dispatch_needed else ""
+        parts.append(
+            ("static int64_t _mojo_dispatch_getattr (void *obj, char *attr) {\n"
+             "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
+            + f"{tag_cases_get}\n"
+            + ("  return mojo_obj_getattr(obj, attr);\n"
+               "}\n"
+               "static void _mojo_dispatch_setattr (void *obj, char *attr, int64_t val) {\n"
+               "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
+            + f"{tag_cases_set}\n"
+            + ("  mojo_setattr(obj, attr, val);\n"
+               "}\n"
+               "static MojoList * _mojo_dispatch_fields (void *obj) {\n"
+               "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
+            + f"{tag_cases_fields}\n"
+            + ("  return mojo_list_new();\n"
+               "}\n")
+            + asdict_dispatch_part
+            + ("static int _mojo_dispatch_is_dataclass (void *obj) {\n"
+               "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
+            + f"  static const int64_t _known[] = {{{tag_set_literal}}};\n"
+            + ("  if (_tag == 0) return 0;\n"
+               "  for (size_t _i = 0; _i < sizeof(_known)/sizeof(_known[0]); _i++)\n"
+               "    if (_known[_i] == _tag) return 1;\n"
+               "  return 0;\n"
+               "}\n")
+        )
+        tag_cases_repr = "\n".join(
+            f'  if (_tag == {_struct_type_id(sn)}) return _mojo_repr_{sn}(({sn} *)obj);'
+            for sn in reflect_structs if self.struct_field_types.get(sn))
+        tag_cases_repr_elem = "\n".join(
+            f'    if (_tag == {_struct_type_id(sn)}) return _mojo_repr_{sn}(({sn} *)(intptr_t)val);'
+            for sn in reflect_structs if self.struct_field_types.get(sn))
+        parts.append(
+            ("static char * _mojo_dispatch_repr (void *obj) {\n"
+             "  if (!obj) return \"None\";\n"
+             "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
+            + f"{tag_cases_repr}\n"
+            + ("  return mojo_repr_obj((int64_t)(intptr_t)obj);\n"
+               "}\n"
+               "static char * _mojo_generic_elem_repr (int64_t val) {\n"
+               "  if (val == 0) return \"None\";\n"
+               "  if (val > 65536) {\n"
+               "    if (mojo_is_registered_list(val))\n"
+               "      return _mojo_repr_list((MojoList *)(intptr_t)val);\n"
+               "    if (mojo_is_registered_dict(val))\n"
+               "      return _mojo_repr_dict((MojoDict *)(intptr_t)val);\n"
+               "    int64_t _tag = mojo_read_type_tag_safe(val);\n")
+            + f"{tag_cases_repr_elem}\n"
+            + ("    return mojo_repr_str((char *)(intptr_t)val);\n"
+               "  }\n"
+               "  return mojo_repr_int(val);\n"
+               "}\n"
+               "static char * _mojo_repr_list (MojoList *lst) {\n"
+               "  int _is_tup = lst && mojo_is_tuple(lst);\n"
+               "  if (!lst) return _is_tup ? \"()\" : \"[]\";\n"
+               "  int64_t _n = mojo_list_len(lst);\n"
+               "  char *_buf = strdup(_is_tup ? \"(\" : \"[\");\n"
+               "  for (int64_t _i = 0; _i < _n; _i++) {\n"
+               "    if (_i > 0) _buf = mojo_str_cat(_buf, \", \");\n"
+               "    _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(mojo_list_get_int(lst, _i)));\n"
+               "  }\n"
+               "  if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, \",\");\n"
+               "  return mojo_str_cat(_buf, _is_tup ? \")\" : \"]\");\n"
+               "}\n"
+               "static char * _mojo_repr_dict (MojoDict *d) {\n"
+               "  if (!d) return \"{}\";\n"
+               "  int _is_booldict = mojo_is_bool_dict(d);\n"
+               "  char *_buf = strdup(\"{\");\n"
+               "  int64_t *_order = mojo_dict_order_indices(d);\n"
+               "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
+               "    int64_t _i = _order[_oi];\n"
+               "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
+               "    _buf = mojo_str_cat(_buf, mojo_repr_str(d->slots[_i].key));\n"
+               "    _buf = mojo_str_cat(_buf, \": \");\n"
+               "    if (_is_booldict)\n"
+               "      _buf = mojo_str_cat(_buf, d->slots[_i].val ? \"True\" : \"False\");\n"
+               "    else\n"
+               "      _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(d->slots[_i].val));\n"
+               "  }\n"
+               "  free(_order);\n"
+               "  return mojo_str_cat(_buf, \"}\");\n"
+               "}\n"
+            )
+        )
+        parts.append('')
+
+
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
     self._toplevel_dep_init_modules: list[str] = []
@@ -6665,246 +6936,7 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     if self.emit_struct_defs:
-        reflect_structs = sorted(set(self.struct_field_types.keys())
-                                  & self._emitted_structs & self._struct_allocs_needed)
-        refl_parts = []
-        for sn in reflect_structs:
-            fields = self.struct_field_types.get(sn, {})
-            if not fields:
-                continue
-            get_lines = []
-            set_lines = []
-            name_lits = []
-            asdict_lines = []
-            for fname, ftype in fields.items():
-                if fname == '__mojo_type_id':
-                    continue
-                safe_f = _safe_field(fname)
-                if re.match(r'^.+\[\d+\]$', ftype):
-                    name_lits.append(f'"{fname}"')
-                    continue
-                if ftype.endswith(' *'):
-                    get_lines.append(
-                        f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')
-                    set_lines.append(
-                        f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
-                    asdict_lines.append(
-                        f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
-                else:
-                    get_lines.append(
-                        f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
-                    set_lines.append(
-                        f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; return; }}')
-                    asdict_lines.append(
-                        f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
-                name_lits.append(f'"{fname}"')
-            asdict_part = (
-                f"static MojoDict * _mojo_asdict_{sn} ({sn} *obj) {{\n"
-                f"  MojoDict *_r = mojo_dict_new();\n"
-                + "".join(asdict_lines) +
-                f"\n  return _r;\n}}\n"
-            ) if self._asdict_dispatch_needed else ""
-            refl_parts.append(
-                f"static int64_t _mojo_getattr_{sn} ({sn} *obj, char *attr) {{\n"
-                + "\n".join(get_lines) +
-                f"\n  return mojo_obj_getattr((void *)obj, attr);\n}}\n"
-                f"static void _mojo_setattr_{sn} ({sn} *obj, char *attr, int64_t val) {{\n"
-                + "\n".join(set_lines) +
-                f"\n  mojo_setattr((void *)obj, attr, val);\n}}\n"
-                f"static MojoList * _mojo_fieldnames_{sn} (void) {{\n"
-                f"  MojoList *_r = mojo_list_new();\n"
-                + "".join(f'  mojo_list_append_str(_r, {nl});\n' for nl in name_lits) +
-                f"  return _r;\n}}\n"
-                + asdict_part
-            )
-        repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);" for sn in reflect_structs
-                           if self.struct_field_types.get(sn)]
-        for sn in reflect_structs:
-            fields = self.struct_field_types.get(sn, {})
-            if not fields:
-                continue
-            boxed = self.struct_boxed_fields.get(sn, set())
-            bool_fields = self.struct_bool_fields.get(sn, set())
-            nullable_containers = self.struct_nullable_container_fields.get(sn, set())
-            part_exprs = []
-            for fname, ftype in fields.items():
-                if fname == '__mojo_type_id':
-                    continue
-                safe_f = _safe_field(fname)
-                fref = f'obj->{safe_f}'
-                if sn == 'IntLiteral' and fname == 'value' and 'raw' in fields:
-                    raw_fref = f"obj->{_safe_field('raw')}"
-                    val_expr = (f'(({raw_fref} && {raw_fref}[0]) '
-                                f'? mojo_int_literal_decimal({raw_fref}) '
-                                f': mojo_repr_int((int64_t){fref}))')
-                elif fname in bool_fields:
-                    val_expr = f'({fref} ? "True" : "False")'
-                elif fname in boxed and ftype in (
-                        'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-                        'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
-                    val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
-                elif ftype == 'char *':
-                    val_expr = f'({fref} ? mojo_repr_str({fref}) : "None")'
-                elif ftype == '_Bool':
-                    val_expr = f'({fref} ? "True" : "False")'
-                elif ftype in ('double', 'float'):
-                    val_expr = f'mojo_repr_float((double){fref})'
-                elif ftype == 'MojoList *':
-                    if self._field_elem_types.get(sn, {}).get(fname) == 'double':
-                        list_repr = f'mojo_repr_list_doubles({fref})'
-                    else:
-                        list_repr = f'_mojo_repr_list({fref})'
-                    if fname in nullable_containers:
-                        val_expr = f'({fref} ? {list_repr} : "None")'
-                    else:
-                        val_expr = list_repr
-                elif ftype == 'MojoDict *':
-                    if fname in nullable_containers:
-                        val_expr = f'({fref} ? _mojo_repr_dict({fref}) : "None")'
-                    else:
-                        val_expr = f'_mojo_repr_dict({fref})'
-                elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-                               'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
-                    val_expr = f'mojo_repr_int((int64_t){fref})'
-                elif ftype.endswith(' *'):
-                    val_expr = f'({fref} ? _mojo_dispatch_repr((void *){fref}) : "None")'
-                else:
-                    val_expr = f'mojo_repr_int((int64_t){fref})'
-                part_exprs.append(f'"{fname}=", {val_expr}')
-            cat_chain = f'strdup("{sn}(")'
-            for i, pe in enumerate(part_exprs):
-                sep = ', ' if i > 0 else ''
-                if sep:
-                    cat_chain = f'mojo_str_cat({cat_chain}, ", ")'
-                name_lit, val_e = pe.split(', ', 1)
-                cat_chain = f'mojo_str_cat({cat_chain}, {name_lit})'
-                cat_chain = f'mojo_str_cat({cat_chain}, {val_e})'
-            cat_chain = f'mojo_str_cat({cat_chain}, ")")'
-            refl_parts.append(
-                f"static char * _mojo_repr_{sn} ({sn} *obj) {{\n"
-                f"  if (!obj) return \"None\";\n"
-                f"  return {cat_chain};\n"
-                f"}}\n"
-            )
-        parts.append("static char * _mojo_dispatch_repr (void *);")
-        parts.append("static char * _mojo_repr_list (MojoList *);")
-        parts.append("static char * _mojo_repr_dict (MojoDict *);")
-        parts.append("static char * _mojo_generic_elem_repr (int64_t);")
-        if repr_fwd_decls:
-            parts.append("/* Forward decls for generic repr() (mutual struct references) */")
-            parts.append("\n".join(repr_fwd_decls))
-            parts.append('')
-        if True:
-            parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
-            parts.extend(refl_parts)
-            tag_cases_get = "\n".join(
-                f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'
-                for sn in reflect_structs if self.struct_field_types.get(sn))
-            tag_cases_set = "\n".join(
-                f'  if (_tag == {_struct_type_id(sn)}) {{ _mojo_setattr_{sn}(({sn} *)obj, attr, val); return; }}'
-                for sn in reflect_structs if self.struct_field_types.get(sn))
-            tag_cases_fields = "\n".join(
-                f'  if (_tag == {_struct_type_id(sn)}) return _mojo_fieldnames_{sn}();'
-                for sn in reflect_structs if self.struct_field_types.get(sn))
-            tag_cases_asdict = "\n".join(
-                f'  if (_tag == {_struct_type_id(sn)}) return _mojo_asdict_{sn}(({sn} *)obj);'
-                for sn in reflect_structs if self.struct_field_types.get(sn))
-            tag_set_literal = ", ".join(
-                str(_struct_type_id(sn)) for sn in reflect_structs if self.struct_field_types.get(sn))
-            if len(tag_set_literal) == 0:
-                tag_set_literal = "0"
-            asdict_dispatch_part = (
-                "static MojoDict * _mojo_dispatch_asdict (void *obj) {\n"
-                "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n"
-                + f"{tag_cases_asdict}\n"
-                + "  return mojo_dict_new();\n"
-                "}\n"
-            ) if self._asdict_dispatch_needed else ""
-            parts.append(
-                ("static int64_t _mojo_dispatch_getattr (void *obj, char *attr) {\n"
-                 "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
-                + f"{tag_cases_get}\n"
-                + ("  return mojo_obj_getattr(obj, attr);\n"
-                   "}\n"
-                   "static void _mojo_dispatch_setattr (void *obj, char *attr, int64_t val) {\n"
-                   "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
-                + f"{tag_cases_set}\n"
-                + ("  mojo_setattr(obj, attr, val);\n"
-                   "}\n"
-                   "static MojoList * _mojo_dispatch_fields (void *obj) {\n"
-                   "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
-                + f"{tag_cases_fields}\n"
-                + ("  return mojo_list_new();\n"
-                   "}\n")
-                + asdict_dispatch_part
-                + ("static int _mojo_dispatch_is_dataclass (void *obj) {\n"
-                   "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
-                + f"  static const int64_t _known[] = {{{tag_set_literal}}};\n"
-                + ("  if (_tag == 0) return 0;\n"
-                   "  for (size_t _i = 0; _i < sizeof(_known)/sizeof(_known[0]); _i++)\n"
-                   "    if (_known[_i] == _tag) return 1;\n"
-                   "  return 0;\n"
-                   "}\n")
-            )
-            tag_cases_repr = "\n".join(
-                f'  if (_tag == {_struct_type_id(sn)}) return _mojo_repr_{sn}(({sn} *)obj);'
-                for sn in reflect_structs if self.struct_field_types.get(sn))
-            tag_cases_repr_elem = "\n".join(
-                f'    if (_tag == {_struct_type_id(sn)}) return _mojo_repr_{sn}(({sn} *)(intptr_t)val);'
-                for sn in reflect_structs if self.struct_field_types.get(sn))
-            parts.append(
-                ("static char * _mojo_dispatch_repr (void *obj) {\n"
-                 "  if (!obj) return \"None\";\n"
-                 "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
-                + f"{tag_cases_repr}\n"
-                + ("  return mojo_repr_obj((int64_t)(intptr_t)obj);\n"
-                   "}\n"
-                   "static char * _mojo_generic_elem_repr (int64_t val) {\n"
-                   "  if (val == 0) return \"None\";\n"
-                   "  if (val > 65536) {\n"
-                   "    if (mojo_is_registered_list(val))\n"
-                   "      return _mojo_repr_list((MojoList *)(intptr_t)val);\n"
-                   "    if (mojo_is_registered_dict(val))\n"
-                   "      return _mojo_repr_dict((MojoDict *)(intptr_t)val);\n"
-                   "    int64_t _tag = mojo_read_type_tag_safe(val);\n")
-                + f"{tag_cases_repr_elem}\n"
-                + ("    return mojo_repr_str((char *)(intptr_t)val);\n"
-                   "  }\n"
-                   "  return mojo_repr_int(val);\n"
-                   "}\n"
-                   "static char * _mojo_repr_list (MojoList *lst) {\n"
-                   "  int _is_tup = lst && mojo_is_tuple(lst);\n"
-                   "  if (!lst) return _is_tup ? \"()\" : \"[]\";\n"
-                   "  int64_t _n = mojo_list_len(lst);\n"
-                   "  char *_buf = strdup(_is_tup ? \"(\" : \"[\");\n"
-                   "  for (int64_t _i = 0; _i < _n; _i++) {\n"
-                   "    if (_i > 0) _buf = mojo_str_cat(_buf, \", \");\n"
-                   "    _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(mojo_list_get_int(lst, _i)));\n"
-                   "  }\n"
-                   "  if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, \",\");\n"
-                   "  return mojo_str_cat(_buf, _is_tup ? \")\" : \"]\");\n"
-                   "}\n"
-                   "static char * _mojo_repr_dict (MojoDict *d) {\n"
-                   "  if (!d) return \"{}\";\n"
-                   "  int _is_booldict = mojo_is_bool_dict(d);\n"
-                   "  char *_buf = strdup(\"{\");\n"
-                   "  int64_t *_order = mojo_dict_order_indices(d);\n"
-                   "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
-                   "    int64_t _i = _order[_oi];\n"
-                   "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
-                   "    _buf = mojo_str_cat(_buf, mojo_repr_str(d->slots[_i].key));\n"
-                   "    _buf = mojo_str_cat(_buf, \": \");\n"
-                   "    if (_is_booldict)\n"
-                   "      _buf = mojo_str_cat(_buf, d->slots[_i].val ? \"True\" : \"False\");\n"
-                   "    else\n"
-                   "      _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(d->slots[_i].val));\n"
-                   "  }\n"
-                   "  free(_order);\n"
-                   "  return mojo_str_cat(_buf, \"}\");\n"
-                   "}\n"
-                )
-            )
-            parts.append('')
+        _emit_reflection_dispatch(self, parts)
 
     if self.emit_struct_defs:
         parts.append("static void _mojo_classattr_init (void);")
