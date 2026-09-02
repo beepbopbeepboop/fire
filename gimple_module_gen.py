@@ -6610,8 +6610,15 @@ def gen_module_impl(self, stmts):
         globals_struct_lines.append(f'#ifndef {_toplev_guard}')
         globals_struct_lines.append(f'#define {_toplev_guard}')
         globals_struct_lines.append(f"typedef struct {typedef_name} {{")
-        for gname, c_type, _ in globals_list:
-            globals_struct_lines.append(f"  {c_type} {_c_field_name(gname)};")
+        # Index the (gname, c_type, g_mtype) tuples — a `for a, b, _ in list`
+        # 3-tuple unpack boxes every slot to int64_t on the self-hosted
+        # backend, so `c_type` came out as a stringified pointer decimal
+        # (`50764586080 ANY;`) and the whole `_<mod>_toplev` struct failed
+        # GCC with "expected specifier-qualifier-list before numeric
+        # constant" on the shimless `--dump-full`.
+        for _gt in globals_list:
+            _gn = _as_str(_gt[0]); _ct = _as_str(_gt[1])
+            globals_struct_lines.append(f"  {_ct} {_c_field_name(_gn)};")
         globals_struct_lines.append(f"}} {typedef_name};")
         globals_struct_lines.append('#endif')
         globals_struct_lines.append("")
@@ -6620,7 +6627,8 @@ def gen_module_impl(self, stmts):
         globals_struct_lines.append(f"struct {typedef_name} {instance_name} = {{")
         inits = self._module_global_inits.get(current_mod_name, {})
 
-        for gname, c_type, _ in globals_list:
+        for _gt in globals_list:
+            gname = _as_str(_gt[0]); c_type = _as_str(_gt[1])
             init_val = inits.get(gname)
             if not init_val or init_val == '0' or 'mojo_' in str(init_val) or 'new' in str(init_val):
                 if c_type.endswith(' *'):
@@ -6640,7 +6648,8 @@ def gen_module_impl(self, stmts):
         globals_struct_lines.append("};")
         globals_struct_lines.append("")
 
-        for gname, c_type, _ in globals_list:
+        for _gt in globals_list:
+            gname = _as_str(_gt[0]); c_type = _as_str(_gt[1])
             _acc_sym = f'{safe_name}__mojo_global_get_{_c_field_name(gname)}'
             globals_struct_lines.append(
                 f'{c_type} {_acc_sym} (void) {{ return {instance_name}.{_c_field_name(gname)}; }}')
