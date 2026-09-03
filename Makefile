@@ -1,5 +1,6 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-abshim \
+        check-coro \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -122,6 +123,18 @@ check-linkmode: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py driv
 		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra driver.py \
 		--extra test_link_mode.py \
 		-- python3 test_link_mode.py
+
+# ── check-coro: the A3 stack-switch coroutine runtime (doc/COROUTINE.html) ───
+# Standalone C unit tests for Layer 3 (context switch) and Layer 2 (coroutine
+# runtime), each run against every Layer 3 backend at -O0 and -O2.
+check-coro: runtime/mojo_coro.c runtime/mojo_coro.h runtime/mojo_coro_ctx.h \
+            runtime/mojo_coro_ctx_aarch64.S runtime/mojo_coro_ctx_generic.c \
+            runtime/test_mojo_coro.c runtime/test_mojo_coro_ctx.c \
+            runtime/test_mojo_coro_exc_stub.c test_coro_runtime.py
+	python3 checked_run.py check-coro --extra test_coro_runtime.py \
+		--extra runtime/mojo_coro.c --extra runtime/mojo_coro_ctx_aarch64.S \
+		--extra runtime/mojo_coro_ctx_generic.c \
+		-- python3 test_coro_runtime.py
 
 # Run all stdlib test and benchmark files through both the interpreter
 # (mojo.py run) and the JIT compiler (mojo.py --jit).
