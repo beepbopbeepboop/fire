@@ -6812,7 +6812,17 @@ def gen_module_impl(self, stmts):
     for s in _cai_structs:
         if isinstance(s, StructDef):
             class_attrs = self._class_attrs
-            for aname, mangled in class_attrs.get(s.name, {}).items():
+            _ca_map = class_attrs.get(s.name, {})
+            # Index, don't `for aname, mangled in ....items()`: unpacking the
+            # 2-tuple re-boxes both str slots to int64_t on the self-hosted
+            # path, so `mangled` (the `_classattr_<Struct>__<attr>` global
+            # name) became a decimal heap address — `int64_t <addr>;` fields
+            # in `_root_toplev` / `<addr> = mojo_set_new();` inits, different
+            # every run. Same fix as the `for _aname in sorted(class_attrs)`
+            # loop further down this function.
+            for aname in _ca_map:
+                mangled = _as_str(_ca_map[aname])
+                aname = _as_str(aname)
                 for field in s.fields:
                     if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr) and field.target.name == aname:
                         v = field.value
