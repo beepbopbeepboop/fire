@@ -416,6 +416,10 @@ class FromImportStmt:
     wildcard: bool = False
     line: int = 0
     col: int = 0
+    # Parser-built flat list[str]: `name` or `name|alias`. `names`' tuples
+    # box their str slots to int64_t self-hosted. Read via gimple_ctypes._fi_name
+    # / _fi_alias.
+    name_alias_strs: list = field(default_factory=list)
 
 @dataclass
 class IfStmt:
@@ -1452,6 +1456,13 @@ def _as_list(e: object) -> list:
     return e
 
 
+def _as_dict(e: object) -> dict:
+    """`MojoDict *` view of a value the compiled backend erased to int64_t
+    (e.g. `self.<dict-field>` where `_lower_MemberExpr` lost the declared
+    `dict[...]` ctype). CPython identity."""
+    return e
+
+
 def _ptr_slot_in_range(e: object) -> bool:
     """Guard for a `char *` metadata-dict slot the compiled backend may
     hand back as an erased sentinel (`-1`, a tiny value) after its slot
@@ -2305,6 +2316,7 @@ class Parser:
             self._advance()
             paren_import = True
         names = []
+        _nas = []
         # Parse first name, skipping any leading newlines in parenthesized imports
         if paren_import:
             while self._peek().kind == "NEWLINE": self._advance()
@@ -2319,6 +2331,7 @@ class Parser:
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
         names.append((name, alias))
+        _nas.append((name + '|' + alias) if alias else name)
         # Parse remaining names
         while True:
             if paren_import:
@@ -2339,7 +2352,9 @@ class Parser:
             if self._is_kw("as"):
                 self._advance(); alias = self._ident()
             names.append((name, alias))
-        return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
+            _nas.append((name + '|' + alias) if alias else name)
+        return FromImportStmt(module=module, names=names, wildcard=False,
+                              name_alias_strs=_nas, line=t.line, col=t.col)
 
     def _parse_var_decl(self):
         self._expect("KW", 'var')

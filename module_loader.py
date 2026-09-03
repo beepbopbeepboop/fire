@@ -25,6 +25,14 @@ _C_KEYWORDS = frozenset({
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _ml_as_str(e: object) -> str:
+    """Re-tag a value the self-hosted backend erased to int64_t back to `str`.
+    Identity on CPython; the char* bits are intact, only the static type was lost.
+    Used at signature-string interpolation sites so an erased `c_return_type`
+    prints its text, not its pointer address (determinism)."""
+    return e
+
+
 def _mkfn(sig):
     before_paren = sig.split('(')[0].strip()
     parts = before_paren.rsplit(None, 1)  # split on last whitespace token
@@ -416,7 +424,7 @@ class ModuleLoader:
 
                         # Build C signature from extracted info
                         try:
-                            c_return_type = self._mojo_type_to_c(return_type)
+                            c_return_type = _ml_as_str(self._mojo_type_to_c(return_type))
                         except Exception:
                             c_return_type = 'int64_t'
                         c_params = []
@@ -478,7 +486,7 @@ class ModuleLoader:
 
                         if name in exports:
                             existing = exports[name]
-                            existing['signature'] = f"{existing['c_return_type']} {name} (...)"
+                            existing['signature'] = _ml_as_str(existing['c_return_type']) + ' ' + name + ' (...)'
                             existing['c_parameters'] = []
                             existing['parameters'] = []
                             existing['variadic'] = True
@@ -492,11 +500,11 @@ class ModuleLoader:
                         # single-line overload was parsed above but overloaded
                         # names must be variadic to satisfy every call site.
                         if name in _overloaded:
-                            c_signature = f"{c_return_type} {name} (...)"
+                            c_signature = _ml_as_str(c_return_type) + ' ' + name + ' (...)'
                             c_params = []
                         else:
                             c_param_str = ', '.join(c_params) if c_params else 'void'
-                            c_signature = f"{c_return_type} {name} ({c_param_str})"
+                            c_signature = _ml_as_str(c_return_type) + ' ' + name + ' (' + c_param_str + ')'
 
                         exports[name] = {
                             'return_type': return_type,

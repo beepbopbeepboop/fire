@@ -1073,6 +1073,25 @@ def _import_targets(node) -> list:
     return out
 
 
+def _fi_name(entry) -> str:
+    """Name half of a `name|alias` composite (FromImportStmt.name_alias_strs)."""
+    _s = _as_str(entry)
+    _i = _s.find('|')
+    return _s[:_i] if _i >= 0 else _s
+
+
+def _fi_alias(entry) -> str:
+    """Alias half of a `name|alias` composite, or None when unaliased."""
+    _s = _as_str(entry)
+    _i = _s.find('|')
+    if _i < 0:
+        return None
+    _a = _s[_i + 1:]
+    if _a:
+        return _a
+    return None
+
+
 def _fromimport_names(node) -> list:
     """`[(name, alias|None), ...]` for a FromImportStmt, every slot
     `_as_str`-viewed — `FromImportStmt.names` is `list[(str, str|None)]` but

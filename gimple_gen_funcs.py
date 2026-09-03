@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str, _pair_key,
+    Parser, py_tokenize, _as_str, _as_dict, _pair_key,
 )
 import ast_rewriter
 import regex_compile
@@ -2074,18 +2074,30 @@ def _func_csym(gen, bare_name: str) -> str:
     # exports (e.g. `from b import add as plus` mangling to `b_plus_<hash>`
     # here while b.mojo's own standalone compile emits `b_add_<hash>` —
     # "implicit declaration"/undefined-symbol, not just a naming quirk).
-    _imp_info = gen.imported_symbols.get(bare_name)
-    # `_as_str`: a dict VALUE slot erases to int64_t on the self-hosted
-    # path, so `_safe_name(_orig)` stringified the boxed pointer as a
-    # decimal — the source of the non-deterministic
-    # `extern int64_t <ptr> (...); /* from ... */` externs.
-    _orig = _as_str(_imp_info.get('original_name')) if _imp_info else None
-    base = gimple_ctypes._safe_name(_orig) if (_orig and _orig != bare_name) else gimple_ctypes._safe_name(bare_name)
+    # `_as_dict` at BOTH levels: `gen.imported_symbols` is `dict[str, dict]`
+    # but the self-hosted backend erases the OUTER field AND the nested
+    # `.get()` value to int64_t, so `_imp_info.get('original_name')` and
+    # `_safe_name(_orig)` stringified boxed pointers into decimal C
+    # identifiers — the `#ifndef _Users_..._<addr>` re-export guards and
+    # `extern <addr> <name>` decls, address-ordered / different every run.
+    _imp_info = _as_dict(_as_dict(gen.imported_symbols).get(bare_name))
+    _orig = _as_str(_as_dict(_imp_info).get('original_name')) if _imp_info else None
+    # `_as_str` on the ternary: the phi'd `base` local came back typed
+    # int64_t on the self-hosted path, so `f"{qualifier}_{base}"` below
+    # emitted `mojo_str_from_int(base)` — the guard/decl name became a
+    # decimal ADDRESS (`_Users_..._<addr>`, `extern <addr> <fn>`).
+    if _orig and _orig != bare_name:
+        base = _as_str(gimple_ctypes._safe_name(_orig))
+    else:
+        base = _as_str(gimple_ctypes._safe_name(bare_name))
     if not gen._func_mangleable(bare_name):
         return base
-    qualifier = gen._func_qualifier(bare_name)
-    qualified_base = f"{qualifier}_{base}" if qualifier else base
-    mangled = qualified_base + gen._overload_suffix(bare_name)
+    qualifier = _as_str(gen._func_qualifier(bare_name))
+    if qualifier:
+        qualified_base = qualifier + '_' + base
+    else:
+        qualified_base = base
+    mangled = qualified_base + _as_str(gen._overload_suffix(bare_name))
     # Mirror the param/return types under the mangled key so _emit_call's
     # argument coercion and return typing (keyed by the emitted name) still
     # work — func_param_types/func_return_types are keyed by the bare name.

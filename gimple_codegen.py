@@ -1309,7 +1309,7 @@ class GimpleGen:
         # nested `def` call prepended a bogus empty env arg.
         self._closure_envs: dict[str, str] = {}   # inner fn name -> env var ('' if none)
         self._inner_func_name: str = ''           # original inner name (recursive-call detection)
-        self._self_ctor_stubs: set = set()  # struct names needing `Name___new` stubs (see _lower_self_ctor)
+        self._self_ctor_stubs: dict = {}  # struct names needing `Name___new` stubs (see _lower_self_ctor); dict-not-set so self-hosted `sorted(...)` keeps str keys (mojo_dict_sorted_keys), not address-ordered boxed slots
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
@@ -1596,6 +1596,7 @@ class GimpleGen:
         self._module_global_inits: dict[str, dict[str, str]] = {}  # module_name -> {name -> init_code} (shared)
         self._global_to_module: dict[str, str] = {}  # global_name -> module_name (shared)
         self._current_module_ctx: str = ""  # current module name for global field access
+        self._current_struct_name: str = ""  # struct whose method body is being lowered (for Self() ctor); declared here so self-host keeps it `char *` — a `getattr` read erases it to int64_t and the `Name___new` stub decl came out as `<addr>___new`, nondeterministic
         self._global_var_types: dict[str, str] = {}  # module-level global name -> C type (persists across functions)
         self._global_c_decl_types: dict[str, str] = {}  # global name -> actual C declaration type (int64_t or pointer)
         # Phase C: Dispatch solver for static dispatch table planning
@@ -2011,6 +2012,7 @@ class GimpleGen:
         'mojo_subprocess_stdout':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_subprocess_stderr':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
+        'mojo_str_rfind':        ('int64_t',   ['char *', 'char *']),
         'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),

@@ -26,7 +26,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -752,6 +752,153 @@ def _emit_reflection_dispatch(self, parts):
         parts.append('')
 
 
+
+
+def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
+                  _sib_qualifier, _sib_is_local_project):
+    """Hoisted out of gen_module_impl's `if exports is not None:` block —
+    as a nested closure its params lifted to int64_t and `_sk`/`sym_name`
+    erased into `imported_symbols` as decimal-address keys (address-ordered
+    re-export externs). A real module function gets `str`-typed params and
+    a single emission context, so `_lower_MemberExpr(self.imported_symbols)`
+    keeps its `MojoDict *` ctype (via `_as_dict` too, belt-and-suspenders)."""
+    # Fresh `_as_str` view — a lifted-closure param whose
+    # `_infer_param_types` guess is int64_t would make every
+    # `self.imported_symbols[sym_name] = ...` below store the
+    # `char *` bits as a DECIMAL dict key (address-ordered
+    # `sorted(keys())` in the re-export extern block).
+    _sk = _as_str(sym_name)
+    _reg_isym = _as_dict(self.imported_symbols)
+    if _sk in self.struct_field_types:
+        return
+    if not s.wildcard and self._from_import_name_is_submodule(s.module, orig_name):
+        _reg_isym[_sk] = {
+            # _join_import_member: same canonical member-module
+            # string find_imports compiled the submodule under —
+            # consumers (including the coroutine emitter's
+            # bound-module generator resolution) key off THIS
+            # value, so it must match the temp_gen's own
+            # module_name byte for byte (a bare-relative
+            # `from . import strutil` means '.strutil', never
+            # '..strutil').
+            'module': gimple_ctypes._join_import_member(s.module, orig_name),
+            'return_type': 'unknown',
+        }
+        self._module_alias_names.add(_sk)
+        return
+    if _sib_qualifier and not sym_info:
+        if not s.wildcard:
+            self._unresolved_import_aliases.add(_sk)
+        return
+    if isinstance(sym_info, str):
+        _reg_isym[_sk] = {
+            'module': s.module, 'original_name': orig_name,
+            'return_type': sym_info, 'parameters': [],
+            'signature': f"{sym_info} {_sk} (void)"
+        }
+        self.func_return_types[_sk] = sym_info
+    elif isinstance(sym_info, dict):
+        sym_info = _as_dict(dict(sym_info))
+        sym_info['module'] = s.module
+        # Only record `original_name` for a genuine `import X as Y` alias.
+        # For an unaliased import it equals `_sk`, and storing it makes
+        # `_func_csym` read it back (MojoDict get -> int64_t, then a POINTER
+        # `!=` against `bare_name` that is always true on the self-hosted
+        # path) take its alias branch -> `_safe_name(<erased ptr>)` -> a
+        # decimal-address guard name (`#ifndef _Users_..._<addr>`), different
+        # every run. `orig_name`/`_sk` here are real str params (module-level
+        # fn, not a lifted closure), so this compare is a true string compare.
+        if orig_name != _sk:
+            sym_info['original_name'] = orig_name
+        _reg_isym[_sk] = sym_info
+        _ret_changed = False
+        if orig_name.startswith('_'):
+            pass
+        elif _sib_is_local_project and sym_info.get('return_type'):
+            _resolved_ret = self._resolve_sibling_param_ctype(
+                s.module, sym_info['return_type'])
+            if _resolved_ret:
+                sym_info['c_return_type'] = _resolved_ret
+                _ret_changed = True
+        if 'c_return_type' in sym_info:
+            self.func_return_types[_sk] = sym_info['c_return_type']
+        if sym_info.get('variadic'):
+            if _ret_changed:
+                sym_info['signature'] = (
+                    _as_str(sym_info.get('c_return_type', 'int64_t')) + ' '
+                    + orig_name + ' (...)')
+        elif (_sib_is_local_project and not orig_name.startswith('_')
+                and sym_info.get('c_parameters') is not None
+                and len(sym_info.get('parameters') or []) == len(sym_info['c_parameters'])
+                and (sym_info.get('parameters') or _ret_changed)):
+            _new_c_params = []
+            _params_changed = False
+            for (_p_name, _p_raw_type), _c_param in zip(
+                    sym_info.get('parameters') or [],
+                    sym_info['c_parameters']):
+                _resolved_ctype = self._resolve_sibling_param_ctype(
+                    s.module, _p_raw_type)
+                if _resolved_ctype:
+                    _c_name = (_c_param.split()[-1]
+                               if _c_param.strip() else _p_name)
+                    _new_c_params.append(f"{_resolved_ctype} {_c_name}")
+                    _params_changed = True
+                else:
+                    _new_c_params.append(_c_param)
+            if _params_changed or _ret_changed:
+                sym_info['c_parameters'] = _new_c_params
+                _c_ret = _as_str(sym_info.get('c_return_type', 'int64_t'))
+                _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
+                sym_info['signature'] = f"{_c_ret} {orig_name} ({_param_str})"
+        if _sib_qualifier and 'c_parameters' in sym_info:
+            self.func_param_types[_sk] = [
+                ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
+                for cp in (sym_info.get('c_parameters') or [])
+            ]
+    if _sib_qualifier and sym_info:
+        if self.do_imports:
+            _qual = (s.module.replace('.', '_')
+                     .replace('-', '_'))
+        else:
+            _qual = _sib_qualifier
+        # BUG-2026-024: snapshot THIS import's param ctypes
+        # under (home_qualifier, as_referenced_name) BEFORE
+        # anything else can overwrite the shared bare-name
+        # slot — a later sibling module's inline compile
+        # registers its own same-named function into
+        # func_param_types[bare] (mod.computer.network's
+        # get_energy(n: ComputerNetwork) clobbering
+        # mod.computer.computer_case's get_energy(c:
+        # ComputerCase) after this line wrote the Case
+        # shape), and _overload_suffix's shared-slot tier
+        # then hashes the WRONG sibling for every one of
+        # this module's call sites. The snapshot is keyed by
+        # home module, so same-named siblings land under
+        # different keys and nothing oscillates; lookup goes
+        # through _imported_def_pts, which walks the SAME
+        # tier order _func_qualifier uses, so the qualifier
+        # half and suffix half of one mangled symbol always
+        # mean the same binding. Preferred source is the
+        # defining module's own FunctionDef resolved via
+        # THIS gen's _signature_ctypes (the definition
+        # side's exact resolver — export-table c_parameters
+        # can carry int64_t placeholders for struct params,
+        # which hashed a DIFFERENT suffix than the
+        # definition); falls back to the already-populated
+        # slot.
+        try:
+            _pts_snap = None
+            for _fs in (self._parsed_import(s.module)[2] or []):
+                if isinstance(_fs, FunctionDef) and _fs.name == orig_name:
+                    _pts_snap = self._signature_ctypes(_fs.params, _fs)
+                    break
+        except Exception:
+            _pts_snap = None
+        if not _pts_snap:
+            _pts_snap = self.func_param_types.get(_sk)
+        if _pts_snap is not None:
+            self._imported_home_param_types[_pair_key(_qual, _sk)] = list(_pts_snap)
+        self._note_own_func_home(_sk, _qual)
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
     self._toplevel_dep_init_modules: list[str] = []
@@ -2579,142 +2726,14 @@ def gen_module_impl(self, stmts):
             if _sib_is_local_project and _sib_qualifier not in self._toplevel_dep_init_modules:
                 self._toplevel_dep_init_modules.append(_sib_qualifier)
             if exports is not None:
-                def _register_sym(sym_name, orig_name, sym_info):
-                    # Fresh `_as_str` view — a lifted-closure param whose
-                    # `_infer_param_types` guess is int64_t would make every
-                    # `self.imported_symbols[sym_name] = ...` below store the
-                    # `char *` bits as a DECIMAL dict key (address-ordered
-                    # `sorted(keys())` in the re-export extern block).
-                    _sk = _as_str(sym_name)
-                    if _sk in self.struct_field_types:
-                        return
-                    if not s.wildcard and self._from_import_name_is_submodule(s.module, orig_name):
-                        self.imported_symbols[_sk] = {
-                            # _join_import_member: same canonical member-module
-                            # string find_imports compiled the submodule under —
-                            # consumers (including the coroutine emitter's
-                            # bound-module generator resolution) key off THIS
-                            # value, so it must match the temp_gen's own
-                            # module_name byte for byte (a bare-relative
-                            # `from . import strutil` means '.strutil', never
-                            # '..strutil').
-                            'module': gimple_ctypes._join_import_member(s.module, orig_name),
-                            'return_type': 'unknown',
-                        }
-                        self._module_alias_names.add(_sk)
-                        return
-                    if _sib_qualifier and not sym_info:
-                        if not s.wildcard:
-                            self._unresolved_import_aliases.add(_sk)
-                        return
-                    if isinstance(sym_info, str):
-                        self.imported_symbols[_sk] = {
-                            'module': s.module, 'original_name': orig_name,
-                            'return_type': sym_info, 'parameters': [],
-                            'signature': f"{sym_info} {_sk} (void)"
-                        }
-                        self.func_return_types[_sk] = sym_info
-                    elif isinstance(sym_info, dict):
-                        sym_info = dict(sym_info)
-                        sym_info['module'] = s.module
-                        sym_info['original_name'] = orig_name
-                        self.imported_symbols[_sk] = sym_info
-                        _ret_changed = False
-                        if orig_name.startswith('_'):
-                            pass
-                        elif _sib_is_local_project and sym_info.get('return_type'):
-                            _resolved_ret = self._resolve_sibling_param_ctype(
-                                s.module, sym_info['return_type'])
-                            if _resolved_ret:
-                                sym_info['c_return_type'] = _resolved_ret
-                                _ret_changed = True
-                        if 'c_return_type' in sym_info:
-                            self.func_return_types[_sk] = sym_info['c_return_type']
-                        if sym_info.get('variadic'):
-                            if _ret_changed:
-                                sym_info['signature'] = (
-                                    f"{sym_info.get('c_return_type', 'int64_t')} "
-                                    f"{orig_name} (...)")
-                        elif (_sib_is_local_project and not orig_name.startswith('_')
-                                and sym_info.get('c_parameters') is not None
-                                and len(sym_info.get('parameters') or []) == len(sym_info['c_parameters'])
-                                and (sym_info.get('parameters') or _ret_changed)):
-                            _new_c_params = []
-                            _params_changed = False
-                            for (_p_name, _p_raw_type), _c_param in zip(
-                                    sym_info.get('parameters') or [],
-                                    sym_info['c_parameters']):
-                                _resolved_ctype = self._resolve_sibling_param_ctype(
-                                    s.module, _p_raw_type)
-                                if _resolved_ctype:
-                                    _c_name = (_c_param.split()[-1]
-                                               if _c_param.strip() else _p_name)
-                                    _new_c_params.append(f"{_resolved_ctype} {_c_name}")
-                                    _params_changed = True
-                                else:
-                                    _new_c_params.append(_c_param)
-                            if _params_changed or _ret_changed:
-                                sym_info['c_parameters'] = _new_c_params
-                                _c_ret = sym_info.get('c_return_type', 'int64_t')
-                                _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
-                                sym_info['signature'] = f"{_c_ret} {orig_name} ({_param_str})"
-                        if _sib_qualifier and 'c_parameters' in sym_info:
-                            self.func_param_types[_sk] = [
-                                ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
-                                for cp in (sym_info.get('c_parameters') or [])
-                            ]
-                    if _sib_qualifier and sym_info:
-                        if self.do_imports:
-                            _qual = (s.module.replace('.', '_')
-                                     .replace('-', '_'))
-                        else:
-                            _qual = _sib_qualifier
-                        # BUG-2026-024: snapshot THIS import's param ctypes
-                        # under (home_qualifier, as_referenced_name) BEFORE
-                        # anything else can overwrite the shared bare-name
-                        # slot — a later sibling module's inline compile
-                        # registers its own same-named function into
-                        # func_param_types[bare] (mod.computer.network's
-                        # get_energy(n: ComputerNetwork) clobbering
-                        # mod.computer.computer_case's get_energy(c:
-                        # ComputerCase) after this line wrote the Case
-                        # shape), and _overload_suffix's shared-slot tier
-                        # then hashes the WRONG sibling for every one of
-                        # this module's call sites. The snapshot is keyed by
-                        # home module, so same-named siblings land under
-                        # different keys and nothing oscillates; lookup goes
-                        # through _imported_def_pts, which walks the SAME
-                        # tier order _func_qualifier uses, so the qualifier
-                        # half and suffix half of one mangled symbol always
-                        # mean the same binding. Preferred source is the
-                        # defining module's own FunctionDef resolved via
-                        # THIS gen's _signature_ctypes (the definition
-                        # side's exact resolver — export-table c_parameters
-                        # can carry int64_t placeholders for struct params,
-                        # which hashed a DIFFERENT suffix than the
-                        # definition); falls back to the already-populated
-                        # slot.
-                        try:
-                            _pts_snap = None
-                            for _fs in (self._parsed_import(s.module)[2] or []):
-                                if isinstance(_fs, FunctionDef) and _fs.name == name:
-                                    _pts_snap = self._signature_ctypes(_fs.params, _fs)
-                                    break
-                        except Exception:
-                            _pts_snap = None
-                        if not _pts_snap:
-                            _pts_snap = self.func_param_types.get(_sk)
-                        if _pts_snap is not None:
-                            self._imported_home_param_types[_pair_key(_qual, _sk)] = list(_pts_snap)
-                        self._note_own_func_home(_sk, _qual)
                 try:
                     if not s.names:
                         for _wc_key in exports:   # not `.items()` — 2-tuple unpack boxes the key on the self-hosted path
-                            _register_sym(_wc_key, _wc_key, exports[_wc_key])
+                            _register_sym(self, s, _wc_key, _wc_key, exports[_wc_key], _sib_qualifier, _sib_is_local_project)
                     else:
-                        for _fip17 in gimple_ctypes._fromimport_names(s):
-                            name = _as_str(_fip17[0])
-                            alias = _as_str(_fip17[1])
+                        for _fip17 in (getattr(s, 'name_alias_strs', None) or []):
+                            _rs_nm = gimple_ctypes._fi_name(_fip17)
+                            alias = gimple_ctypes._fi_alias(_fip17)
                             # `_as_str` on the ternary: without it the
                             # self-hosted backend erased `sym_name` to
                             # int64_t, so `_register_sym`'s `self.imported_
@@ -2724,8 +2743,8 @@ def gen_module_impl(self, stmts):
                             # `sorted(imported_symbols.keys())` (the
                             # `/* from .<mod> */` re-export extern block)
                             # then ordered by ADDRESS, differently each run.
-                            sym_name = _as_str(alias if alias else name)
-                            sym_info = exports.get(name, {})
+                            sym_name = _as_str(alias if alias else _rs_nm)
+                            sym_info = exports.get(_rs_nm, {})
                             # Genuine overload (2+ `def <name>(...)` in the
                             # exporting module's own source, distinguished
                             # only by parameter TYPE — `exports`/`sym_info`
@@ -2758,7 +2777,7 @@ def gen_module_impl(self, stmts):
                                 if _ov_path:
                                     _ov_src = open(_ov_path).read()
                                     if len(re.findall(
-                                            rf'\b(?:fn|def)\s+{re.escape(name)}\s*\(',
+                                            rf'\b(?:fn|def)\s+{re.escape(_rs_nm)}\s*\(',
                                             _ov_src)) > 1:
                                         self._imported_overloads.setdefault(sym_name, _ov_path)
                             except Exception:
@@ -2790,14 +2809,14 @@ def gen_module_impl(self, stmts):
                                 # '..sub', level 2) and never matched.
                                 _gmh_api = (
                                     self._generator_home_api.get(
-                                        s.module.replace('.', '_').replace('-', '_') + '::' + name)
+                                        s.module.replace('.', '_').replace('-', '_') + '::' + _rs_nm)
                                     or self._generator_home_api.get(
-                                        gimple_ctypes._join_import_member(s.module, name)
-                                        .replace('.', '_').replace('-', '_') + '::' + name))
+                                        gimple_ctypes._join_import_member(s.module, _rs_nm)
+                                        .replace('.', '_').replace('-', '_') + '::' + _rs_nm))
                                 if _gmh_api is not None:
                                     self._imported_generator_bindings[sym_name] = _gmh_api
                                     continue
-                            _register_sym(sym_name, name, sym_info)
+                            _register_sym(self, s, sym_name, _rs_nm, sym_info, _sib_qualifier, _sib_is_local_project)
                 except Exception:
                     _debug_note('error registering sibling module imports', s.module)
             else:
@@ -6044,7 +6063,7 @@ def gen_module_impl(self, stmts):
         *_util_stubs,
         '',
         '/* Struct ___new stubs (for Self(...) call sites) */',
-        *[f'int64_t {s}___new(...);' for s in sorted(self._self_ctor_stubs)],
+        *[f'int64_t {_as_str(s)}___new(...);' for s in sorted(self._self_ctor_stubs)],
         '',
         '/* Renamed C-reserved builtins called without import (e.g. abs→mojo_abs) */',
         *[f'{rt} {fn}(...);'
@@ -6174,8 +6193,12 @@ def gen_module_impl(self, stmts):
         if _ecname in self._LIBC_DECLARED and _ecname not in self._NEEDS_SELF_EXTERN:
             continue
         _eret, _eargs = self._external_protos[_ecname]
-        _argstr = ', '.join(_eargs) if _eargs else 'void'
-        parts.append(f'extern {_eret} {_ecname} ({_argstr});')
+        # `_eret` is the str return-type, but unpacking it out of the 2-slot
+        # tuple re-boxes the slot to int64_t on the self-hosted path -> the
+        # decl emitted `extern <decimal-address> chdir (...)`, address-ordered
+        # and different every run. `_as_str` re-tags the intact char* bits.
+        _argstr = ', '.join([_as_str(_ea) for _ea in _eargs]) if _eargs else 'void'
+        parts.append(f'extern {_as_str(_eret)} {_ecname} ({_argstr});')
 
     _module_globals_insert_idx = len(parts)
     if imported_code:
@@ -7074,7 +7097,8 @@ def gen_module_impl(self, stmts):
     # `mojo_set_add_str(NULL, ...)` the moment a `jit`/`jit.arm64` import
     # actually reached this branch.
     _emitted_unresolved_stub_syms = set()
-    for sym_name in sorted(self.imported_symbols.keys()):
+    _imp_syms = _as_dict(self.imported_symbols)
+    for sym_name in sorted(_imp_syms):
         # `_sn` — a FRESH `_as_str` view (the sorted() loop var is int64_t;
         # reassigning `sym_name` would re-widen it via whole-function
         # unification). The `< 0x10000` skip drops the rare non-pointer
@@ -7085,7 +7109,7 @@ def gen_module_impl(self, stmts):
         _sn = _as_str(sym_name)
         if _sn in hardcoded:
             continue
-        sym_info = self.imported_symbols[_sn]
+        sym_info = _as_dict(_imp_syms[_sn])
         if sym_info.get('return_type') == 'unknown':
             continue
         if _sn in inline_defined or _sn in self._global_inline_defs:
@@ -7115,7 +7139,7 @@ def gen_module_impl(self, stmts):
         safe = self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
-                ret_type = sym_info.get('c_return_type') or sym_info.get('return_type', 'int64_t')
+                ret_type = _as_str(sym_info.get('c_return_type')) or _as_str(sym_info.get('return_type', 'int64_t'))
                 if ret_type and ret_type != 'unknown' and not any(
                         c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
                     ret_type = self._resolve_type(ret_type)
@@ -7123,7 +7147,7 @@ def gen_module_impl(self, stmts):
                     ret_type = 'int64_t'
                 parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
             else:
-                signature = sym_info['signature']
+                signature = _as_str(sym_info['signature'])
                 orig_name = sym_info.get('original_name', _sn)
                 if safe != orig_name:
                     signature = re.sub(r'\b' + re.escape(orig_name) + r'\b', safe, signature, count=1)
@@ -7135,7 +7159,7 @@ def gen_module_impl(self, stmts):
                     signature = re.sub(r'\b' + _ckw + r'\b(?=\s*[,)])', f'_kw_{_ckw}', signature)
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
-            ret_type = sym_info.get('return_type', 'int64_t')
+            ret_type = _as_str(sym_info.get('return_type', 'int64_t'))
             ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
             if self.do_imports or self.link_imports:
                 if safe in _emitted_unresolved_stub_syms:

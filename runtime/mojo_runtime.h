@@ -264,6 +264,7 @@ int mojo_str_endswith_char(char *s, char c);
 int mojo_cstr_cmp(char *a, char *b);
 int mojo_str_contains(char *haystack, char *needle);
 int64_t mojo_str_find(char *s, char *needle);
+int64_t mojo_str_rfind(char *s, char *needle);
 int64_t mojo_str_find_from(char *s, char *needle, int64_t start);
 MojoList *mojo_str_split(char *s, char *sep);
 MojoList *mojo_str_splitlines(char *s);

@@ -1875,10 +1875,14 @@ def _lower_builtin_open(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lower_self_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    sname = getattr(gen, '_current_struct_name', None)
+    # Direct field access (not getattr): keeps `char *` on the self-hosted
+    # path so the `Name___new` stub decl / call symbol is the struct name,
+    # not a per-run heap address. `_current_struct_name` is always set (to
+    # "" when outside a method body) before any body lowering.
+    sname = _as_str(gen._current_struct_name)
     if sname:
         arg_pairs = [gen.lower_expr(a) for a in node.args]
-        gen._self_ctor_stubs.add(sname)
+        gen._self_ctor_stubs[sname] = True
         return 'int64_t', gen._call_expr('int64_t', f'{sname}___new', arg_pairs)
     for a in node.args: gen.lower_expr(a)
     return 'int64_t', gen._new_val('int64_t', '0  /* Self() constructor: no struct context */')
@@ -3084,12 +3088,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and all(t in _NUM for t, _ in arg_pairs)):
         op = '<' if fname_raw == 'min' else '>'
         def _as_i64(t, v):
-            return v if t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){v}')
-        acc = _as_i64(*arg_pairs[0])
-        for t, v in arg_pairs[1:]:
-            bv = _as_i64(t, v)
-            cond = gen._new_val('_Bool', f'{acc} {op} {bv}')
-            acc = gen._new_val('int64_t', f'{cond} ? {acc} : {bv}')
+            # `_as_str(v)`: `v` is a C-expr string, but reading it out of the
+            # 2-tuple (`arg_pairs[k][1]`) re-boxes the slot to int64_t on the
+            # self-hosted path, so `f'(int64_t){v}'` emitted `(int64_t)<addr>`
+            # (a live heap pointer as a GIMPLE integer constant) — different
+            # every run. Index, don't unpack, and re-tag the slot.
+            _v = _as_str(v)
+            return _v if t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+        acc = _as_i64(_as_str(arg_pairs[0][0]), arg_pairs[0][1])
+        for _ap in arg_pairs[1:]:
+            bv = _as_i64(_as_str(_ap[0]), _ap[1])
+            cond = gen._new_val('_Bool', f'{_as_str(acc)} {op} {bv}')
+            acc = gen._new_val('int64_t', f'{cond} ? {_as_str(acc)} : {bv}')
         return 'int64_t', acc
 
     # min/max over string-ish (char* and/or single-char) args → same
@@ -3115,13 +3125,14 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and all(t in _STRINGY for t, _ in arg_pairs)
             and any(t == 'char *' for t, _ in arg_pairs)):
         def _as_cstr(t, v):
+            _v = _as_str(v)  # slot re-boxed by tuple read; re-tag (see numeric fold above)
             if t == 'char *':
-                return v
-            return gen._call_expr('char *', 'mojo_char_to_str', [('char', v)])
-        acc = _as_cstr(*arg_pairs[0])
-        for t, v in arg_pairs[1:]:
-            cv = _as_cstr(t, v)
-            cmp_i = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', acc), ('char *', cv)])
+                return _v
+            return gen._call_expr('char *', 'mojo_char_to_str', [('char', _v)])
+        acc = _as_cstr(_as_str(arg_pairs[0][0]), arg_pairs[0][1])
+        for _ap in arg_pairs[1:]:
+            cv = _as_cstr(_as_str(_ap[0]), _ap[1])
+            cmp_i = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', _as_str(acc)), ('char *', cv)])
             cmp64 = gen._new_val('int64_t', f'(int64_t){cmp_i}')
             zero = gen._new_val('int64_t', '(int64_t)0')
             # cmp64 < 0 means acc sorts strictly before cv (acc is the
@@ -3132,7 +3143,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             # "keep acc on tie" behavior above.
             replace_op = '<' if fname_raw == 'max' else '>'
             cond = gen._new_val('_Bool', f'{cmp64} {replace_op} {zero}')
-            acc = gen._new_val('char *', f'{cond} ? {cv} : {acc}')
+            acc = gen._new_val('char *', f'{cond} ? {cv} : {_as_str(acc)}')
         return 'char *', acc
 
     # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)

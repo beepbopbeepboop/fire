@@ -996,6 +996,21 @@ int64_t mojo_str_find(char *s, char *needle) {
     return (int64_t)(found - s);
 }
 
+/* str.rfind(needle): index of the LAST occurrence of needle in s, or -1.
+ * Empty needle matches at strlen(s) (CPython: "ab".rfind("") == 2). */
+int64_t mojo_str_rfind(char *s, char *needle) {
+    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
+    if (!s || !needle) return -1;
+    int64_t nlen = (int64_t)strlen(needle);
+    int64_t slen = (int64_t)strlen(s);
+    if (nlen == 0) return slen;
+    if (nlen > slen) return -1;
+    for (int64_t i = slen - nlen; i >= 0; i--) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
+    }
+    return -1;
+}
+
 /* str.find(needle, start) with CPython semantics: negative start is relative
  * to the end (clamped to 0 after adjustment); start beyond the string length
  * is a guaranteed miss (-1); an empty needle matches at `start` itself, as

@@ -2801,6 +2801,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
             return 'int64_t', gen._call_expr('int64_t', 'mojo_str_find_from',
                 [('char *', cstr_ov), (sep_type, arg_vals[0]), ('int64_t', start_v)])
         return 'int64_t', gen._call_expr('int64_t', 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
+    if method == 'rfind' and arg_vals:
+        sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_str_rfind', [('char *', cstr_ov), (sep_type, arg_vals[0])])
     if method == 'index' and arg_vals:
         sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
         if len(arg_vals) >= 2:
