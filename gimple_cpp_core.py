@@ -912,6 +912,15 @@ def _cpp_reset_unit_state(gen):
     # stack.pop()`) reads its slots through the runtime list getters
     # rather than an invalid raw C++ `(value)[i]` subscript.
     gen._cpp_boxed_tuple_names = set()
+    # Per-unit map of local names bound by `it = iter(<list-expr>)` inside a
+    # compiled generator/coroutine body to a `(list_cpp_name, cursor_cpp_name)`
+    # pair. The list local holds the real `MojoList *`; the companion cursor
+    # local is an `int64_t` index threaded alongside it so `next(it)` /
+    # `next(it, default)` advance a genuine resumable position, and a later
+    # `for x in it:` continues from that position (real Python iterator
+    # semantics) rather than re-scanning from element 0. See
+    # bugs/CODEGEN_generator_function_Lib_ipaddress.md's `_find_address_range`.
+    gen._cpp_list_iter_cursor = {}
 
 
 def _cpp_sanitize_module_qualifier(mod: str) -> str:
@@ -2990,6 +2999,31 @@ def _cpp_expr(gen, e) -> str:
                 # call at the bottom of this block, an undeclared C++
                 # identifier ("'iter' was not declared in this scope").
                 return args[0]
+            if (fname == 'next' and len(e.args) in (1, 2)
+                    and not gen._locally_binds_name('next')
+                    and isinstance(e.args[0], gimple_ctypes.IdentExpr)
+                    and e.args[0].name in getattr(gen, '_cpp_list_iter_cursor', {})):
+                # `next(it)` / `next(it, default)` on a resumable list-iterator
+                # local (bound earlier by `it = iter(<list>)`, tracked in
+                # `_cpp_list_iter_cursor`). Reads the element at the cursor and
+                # post-increments it; exhaustion raises a tagged StopIteration
+                # `_MojoCppExc` (catchable by an enclosing try/except in this
+                # body, exactly like next() on a generator handle) unless a
+                # 2nd `default` argument is given, in which case that value is
+                # returned instead — real Python `next(it, default)` semantics.
+                _li = gen._cpp_list_iter_cursor[e.args[0].name]
+                _li_list = _li['list']
+                _li_cur = _li['cursor']
+                if len(e.args) == 2:
+                    _li_dflt = gen._cpp_expr(e.args[1])
+                    _li_miss = f"return (int64_t)({_li_dflt});"
+                else:
+                    _li_stop = gen._exc_type_id('StopIteration')
+                    _li_miss = (f"throw _MojoCppExc{{ (int64_t){_li_stop}, "
+                                f"nullptr, (void *)nullptr }};")
+                return (f"[&]() -> int64_t {{ if ({_li_cur} >= "
+                        f"mojo_list_len({_li_list})) {{ {_li_miss} }} "
+                        f"return mojo_list_get_int({_li_list}, {_li_cur}++); }}()")
             if fname == 'next' and len(e.args) == 1:
                 # next(<compiled-generator handle>) — a local assigned from a
                 # compiled generator's start-call (`lines =
@@ -3167,6 +3201,41 @@ def _cpp_expr(gen, e) -> str:
                         _cond = _call_truthy
                 return gen._cpp_build_container_from_iterable(
                     'list', e.args[1], _ctor_var, _elem, [_cond])
+            if (fname in ('min', 'max') and not e.kwargs
+                    and not gen._locally_binds_name(fname)):
+                # `min(iterable)` / `max(iterable)` reducing a single list
+                # argument, and the multi-arg `min(a, b, ...)` fold — neither
+                # existed in this coroutine-body emitter before (both fell to
+                # the bare-name-call refusal, or — worse — called the real
+                # runtime `mojo_min(void *)` with the wrong arity). The
+                # single-iterable form maps to `mojo_min`/`mojo_max` (a
+                # `MojoList *`-of-int64 reduce, matching the runtime helper's
+                # own contract). The multi-arg form is an inline ternary fold,
+                # mirroring the ordinary GIMPLE path's `_lower_call`.
+                if len(e.args) == 1:
+                    _mm_arg = e.args[0]
+                    _mm_ct = _cpp_receiver_ctype(gen, _mm_arg)
+                    _mm_is_iter = (
+                        _mm_ct in ('MojoList *', 'int64_t')
+                        or isinstance(_mm_arg, gimple_ctypes.Comprehension)
+                        or (isinstance(_mm_arg, gimple_ctypes.IdentExpr)
+                            and _mm_arg.name in getattr(gen, '_cpp_list_iter_cursor', {})))
+                    if _mm_is_iter:
+                        return f"mojo_{fname}((void *)({args[0]}))"
+                elif len(e.args) >= 2:
+                    _mv = gen._cpp_fresh_name("_mg_mm")
+                    _body = f"int64_t {_mv} = (int64_t)({args[0]}); "
+                    _ai = 1
+                    while _ai < len(args):
+                        _a = args[_ai]
+                        if fname == 'min':
+                            _cmp = f"_c < {_mv}"
+                        else:
+                            _cmp = f"_c > {_mv}"
+                        _body = _body + (f"{{ int64_t _c = (int64_t)({_a}); "
+                                         f"if ({_cmp}) {_mv} = _c; }} ")
+                        _ai = _ai + 1
+                    return f"[&]() -> int64_t {{ {_body}return {_mv}; }}()"
             if (fname == 'sorted' and e.args
                     and not gen._locally_binds_name('sorted')):
                 # `sorted(iterable)` / `sorted(iterable, key=..., reverse=
@@ -4541,6 +4610,33 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             gen._cpp_kw_param_renames[name] = cpp_name
         else:
             cpp_name = name
+        # `it = iter(<list-expr>)` — bind a real resumable list-iterator.
+        # The local holds the underlying `MojoList *`; a companion int64_t
+        # cursor local is threaded alongside so `next(it)` advances a genuine
+        # position and a later `for x in it:` resumes from it (see
+        # `_cpp_list_iter_cursor`). Only when the argument is statically a
+        # `MojoList *` (a declared list local/param, `self.<field>`, or a
+        # container-returning call) — anything else falls through to the
+        # identity `iter(x)` lowering unchanged.
+        if (isinstance(s.value, gimple_ctypes.CallExpr)
+                and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                and s.value.func.name == 'iter'
+                and len(s.value.args) == 1 and not s.value.kwargs
+                and not gen._locally_binds_name('iter')
+                and name not in declared):
+            _it_src = s.value.args[0]
+            _it_src_ct = _cpp_receiver_ctype(gen, _it_src)
+            if _it_src_ct in ('MojoList *', 'int64_t'):
+                _it_arg_e = gen._cpp_expr(_it_src)
+                _cursor = gen._cpp_fresh_name(f"_mg_itc_{cpp_name}")
+                declared[name] = 'MojoList *'
+                if gen._cpp_func_scope_decls is not None:
+                    gen._cpp_func_scope_decls.append(f"MojoList *{cpp_name};")
+                    gen._cpp_func_scope_decls.append(f"int64_t {_cursor};")
+                gen._cpp_list_iter_cursor[name] = {'list': cpp_name,
+                                                   'cursor': _cursor}
+                return [f"{indent}{cpp_name} = (MojoList *)({_it_arg_e});",
+                        f"{indent}{_cursor} = 0;"]
         # `g = <compiled-generator>(args)` — a generator CONSTRUCTION as the
         # assigned value: declare the local a real `MojoGenerator *` (the
         # opaque coroutine-handle type every drive symbol speaks), emit the
@@ -5419,6 +5515,30 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     Lowers to a C++ range-for or indexed loop over the iterable.
     Only supports iterable as a simple identifier or call expression."""
     target = s.target
+    # `for x in it:` where `it` is a resumable list-iterator local (bound by
+    # `it = iter(<list>)`, tracked in `_cpp_list_iter_cursor`) — continue from
+    # the shared cursor (which `next(it)` may already have advanced), and
+    # leave it exhausted afterward, matching real Python's single-pass
+    # iterator semantics. Must run BEFORE the generic bare-identifier list
+    # case below, which would restart the scan from element 0.
+    if (isinstance(target, str) and ',' not in target
+            and not s.else_body
+            and isinstance(s.iterable, gimple_ctypes.IdentExpr)
+            and s.iterable.name in getattr(gen, '_cpp_list_iter_cursor', {})):
+        _li = gen._cpp_list_iter_cursor[s.iterable.name]
+        _li_list = _li['list']
+        _li_cur = _li['cursor']
+        lines = []
+        if target not in declared:
+            declared[target] = 'int64_t'
+            lines.append(f"{indent}int64_t {target};")
+        lines.append(f"{indent}for (; {_li_cur} < mojo_list_len({_li_list}); "
+                     f"{_li_cur}++) {{")
+        lines.append(f"{indent}    {target} = mojo_list_get_int({_li_list}, {_li_cur});")
+        for inner in s.body:
+            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+        lines.append(f"{indent}}}")
+        return lines
     if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
         # `for (a, b) in enumerate(iterable):` — tuple-unpack loop target
         # (statistics.py's `for n, x in enumerate(iterable, start=1):`,

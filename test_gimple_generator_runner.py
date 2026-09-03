@@ -1404,6 +1404,48 @@ def main():
         print(x)
 """, "item0\nitem1\nitem2\n")
 
+    # Resumable list-iterator value model inside a generator body:
+    # `it = iter(xs)` binds a real cursor, `next(it)` advances it, a
+    # following `for x in it:` continues from where next() left off, and
+    # `next(it, default)` returns the default on exhaustion. Plus
+    # `min(iterable)`/`max(iterable)` and multi-arg `min(a, b, ...)`.
+    # Mirrors bugs/CODEGEN_generator_function_Lib_ipaddress.md's
+    # `_find_address_range` shape. Previously every one of these refused
+    # the whole module ("unresolved callee 'next(...)'" etc.).
+    test_generator_stdout("generator_list_iterator_cursor_and_minmax", """\
+def scan(xs):
+    it = iter(xs)
+    first = next(it)
+    yield first
+    for x in it:
+        yield x
+    yield next(it, -1)
+    yield min(xs)
+    yield max(xs)
+    yield min(8, 3, 5, 1, 9)
+
+def main():
+    for v in scan([10, 20, 30]):
+        print(v)
+""", "10\n20\n30\n-1\n10\n30\n1\n")
+
+    # StopIteration from an exhausted list-iterator's next() is a real
+    # tagged exception, catchable by an enclosing try/except in the body.
+    test_generator_stdout("generator_list_iterator_stopiteration_caught", """\
+def scan(xs):
+    it = iter(xs)
+    yield next(it)
+    try:
+        yield next(it)
+        yield next(it)
+    except StopIteration:
+        yield 999
+
+def main():
+    for v in scan([7]):
+        print(v)
+""", "7\n999\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
