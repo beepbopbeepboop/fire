@@ -1341,6 +1341,51 @@ def main():
         print(v)
 """, "10\n12\n14\n")
 
+    # Pop-time shape discrimination for a heterogeneous / tagged-union
+    # `stack` value model: a list holding both scalar elements and nested
+    # tuples, drained with `.pop()`, each popped value discriminated with
+    # `isinstance(top, tuple)` and (when a tuple) destructured via a
+    # tuple-unpack. Exercises: nested-container literal appended to a flat
+    # boxed list, `while <list>:` emptiness (not pointer-nullness),
+    # `<list>.pop()`, runtime `mojo_is_registered_list` discrimination,
+    # and a boxed-value tuple-unpack through the runtime list getters.
+    test_generator_stdout("generator_pops_heterogeneous_tagged_stack", """\
+def walker():
+    stack = [(1, 2)]
+    stack.append("leaf")
+    stack.append((3, 4))
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            a, b = top
+            yield a + b
+        else:
+            yield 99
+
+def main():
+    for x in walker():
+        print(x)
+""", "7\n99\n3\n")
+
+    # Second-level unpack: `marker, payload = stack.pop()` where `payload`
+    # is itself a boxed tuple needing its own unpack (the exact `_fwalk`
+    # shape from bugs/CODEGEN_generator_function_Lib_os.md — `action,
+    # value = stack.pop()` then `isroot, ... = value`).
+    test_generator_stdout("generator_pops_stack_two_level_tuple_unpack", """\
+def walker():
+    stack = []
+    stack.append((0, (10, 20, 30)))
+    stack.append((1, (40, 50, 60)))
+    while stack:
+        marker, payload = stack.pop()
+        x, y, z = payload
+        yield marker + x + y + z
+
+def main():
+    for v in walker():
+        print(v)
+""", "151\n60\n")
+
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

@@ -1,5 +1,72 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-03, worktree agent-aabd2cf376c9f0f42 — infrastructure increment: pop-time shape discrimination for a heterogeneous / tagged-union `stack` value model)
+
+Landed (`gimple_cpp_core.py`), the piece the older entries kept naming
+as the core blocker — recovering a *popped* element's shape:
+
+- **`<list-local>.pop()` / `.pop(i)`** in a coroutine body now lowers to
+  `mojo_list_pop` / `mojo_list_pop_at` (returns the raw `int64_t`-boxed
+  slot) instead of falling through to invalid C++ member-call syntax.
+- **`isinstance(top, tuple)`** — `tuple` was previously absent from the
+  isinstance type table, so the check folded to a constant `0` (silently
+  wrong: `walk`'s `if isinstance(top, tuple):` branch was dead). Added
+  `'tuple' -> ('MojoList *',)` (a tuple is boxed as a `MojoList *` in the
+  flat model) and a runtime `mojo_is_registered_list((int64_t)(top))`
+  discriminator for the genuinely-dynamic popped-box case, matching the
+  existing `list` handling.
+- **Tuple-unpack of a popped/boxed value** — `a, b = stack.pop()` and a
+  second-level `x, y, z = payload` (the exact `_fwalk` idiom: `action,
+  value = stack.pop()` then `isroot, dirfd, toppath, topname, entry =
+  value`). The value is cached once into a fresh local (a raw `.pop()`
+  mutates the stack, so it must not be re-evaluated per slot) and each
+  slot is read via `mojo_list_get_int((MojoList *)(box), i)`. Names bound
+  this way, plus a single-target `top = stack.pop()` / `t = other_boxed`,
+  are recorded in a new per-unit `_cpp_boxed_tuple_names` set so a later
+  unpack of them decomposes through the runtime getters rather than an
+  invalid raw `(v)[i]` subscript.
+- **`while <list>:`** now tests emptiness (`mojo_list_len(...) != 0`), not
+  pointer non-nullness — a `MojoList *` is essentially never NULL, so the
+  old raw `while (stack)` spun forever once drained. Same for
+  `while <dict>:` / `while <set>:`.
+- **Nested container literal appended** (`stack.append((a, b))`) now boxes
+  recursively via `_cpp_boxed_list_literal_expr`, like a nested element of
+  a list *literal* already did — previously emitted `(char *)({a, b})`.
+
+New end-to-end regression tests in `test_gimple_generator_runner.py`
+(`generator_pops_heterogeneous_tagged_stack`,
+`generator_pops_stack_two_level_tuple_unpack`) compile+link+run real
+binaries exercising all of the above.
+
+Effect on this file: `fwalk` (the driver generator) is no longer in the
+refusal list — it went from refused to accepted, because its body is
+exactly the pop/tag-dispatch/tuple-unpack shape this increment covers
+(`stack = [(_fwalk_walk, (...))]`, `while stack: yield from _fwalk(...)`,
+`finally: while stack: action, value = stack.pop(); if action ==
+_fwalk_close: close(value)`). Fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` now refuses on only
+`_fwalk` and `walk` (was `_fwalk, fwalk, walk`).
+
+**Still open, and genuinely separate large features — the concrete
+blockers for a full close:**
+- `_fwalk`: `stat(topname, ...)` returns a `stat_result` *structseq*
+  (`os.stat_result` — a named-tuple-ish C type with `.st_mode` etc.);
+  this codegen has no structseq value model. Also `scandir(topfd)`
+  yielding `DirEntry` objects with `.is_dir()` / `.stat()` / `.name` /
+  `.path` methods — an iterator-of-opaque-objects type with no
+  representation here.
+- `walk`: `for entry in scandir(top):` — same `DirEntry` iterator gap.
+
+Closing os.py needs real `os.scandir`/`DirEntry`/`os.stat_result`
+modeling (structseq + a directory-entry iterator type), which is a
+distinct project from the tagged-union stack work done here. Not
+attempted this session; that is the honest remaining scope.
+
+Gate clean on this increment: test_gimple 266/0, test_gimple_generator_
+runner 55/0, test_gimple_async_runner 38/0, module_cache 76/0,
+link_mode 3/0, check-selfhost pass, compile_stdlib 664 PASSED / 0
+unexpected, dylib 0 skips, bootstrap 180/180 byte-identical.
+
 ## Status (2026-09-03, worktree agent-a63a153b32e83eb46 — infrastructure increment: nested container literals now have a flat boxed representation in coroutine bodies)
 
 Landed (`gimple_cpp_core.py`): a nested list/tuple literal used as an

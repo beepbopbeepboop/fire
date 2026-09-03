@@ -902,6 +902,16 @@ def _cpp_reset_unit_state(gen):
     gen._cpp_fn_shape_cache = {}
     gen._cpp_local_container_shapes = {}
     gen._cpp_generator_var_api = {}
+    # Per-unit set of local names statically known to hold a *boxed
+    # tuple/list value* -- an `int64_t` slot whose bits are actually a
+    # `MojoList *` (this emitter's flat nested-container convention, see
+    # `_cpp_boxed_list_literal_expr`). Populated when a name is bound by
+    # unpacking a `<list-local>.pop()` result or from another already-
+    # boxed name, and consumed by the AssignStmt tuple-unpack branch so a
+    # second-level unpack (`a, b = value` after `marker, value =
+    # stack.pop()`) reads its slots through the runtime list getters
+    # rather than an invalid raw C++ `(value)[i]` subscript.
+    gen._cpp_boxed_tuple_names = set()
 
 
 def _cpp_sanitize_module_qualifier(mod: str) -> str:
@@ -2109,6 +2119,35 @@ def _cpp_expr(gen, e) -> str:
                     and e.func.obj.name in gen._cpp_declared):
                 _cont_name = e.func.obj.name
                 _cont_ct = gen._cpp_declared.get(_cont_name)
+                if (_cont_ct == 'MojoList *' and e.func.member == 'pop'
+                        and len(e.args) <= 1):
+                    # `<list-local>.pop()` / `.pop(i)` -- returns the raw
+                    # `int64_t`-boxed slot (a scalar, a `char *`'s bits, or
+                    # a nested `MojoList *`'s bits per this emitter's flat
+                    # boxed-container convention). Pop-time shape recovery
+                    # (`isinstance(top, tuple)` / a tuple-unpack of the
+                    # result) is handled by the isinstance lowering's
+                    # runtime `mojo_is_registered_list` discrimination and
+                    # the AssignStmt tuple-unpack branch respectively.
+                    if e.args:
+                        return f"mojo_list_pop_at({_cont_name}, (int64_t)({gen._cpp_expr(e.args[0])}))"
+                    return f"mojo_list_pop({_cont_name})"
+                if (_cont_ct == 'MojoList *' and e.func.member == 'append'
+                        and len(e.args) == 1
+                        and isinstance(e.args[0], (gimple_ctypes.ListExpr,
+                                                   gimple_ctypes.TupleExpr))):
+                    # A nested container literal appended to a flat boxed
+                    # list -- box it recursively into its own `MojoList *`
+                    # and store the pointer bits `int64_t`-boxed, exactly
+                    # as `_cpp_boxed_list_literal_expr` does for a nested
+                    # element of a list *literal*. Without this the generic
+                    # append branch below emitted `(char *)({3, 4})` -- a
+                    # raw C++ braced-init-list, invalid as a call argument.
+                    _bl = _cpp_boxed_list_literal_expr(gen, e.args[0])
+                    _reg = getattr(gen, '_cpp_list_local_elem_types', None)
+                    if _reg is not None and _reg.get(_cont_name) is None:
+                        _reg[_cont_name] = 'int64_t'
+                    return f"(mojo_list_append_int({_cont_name}, (int64_t)({_bl})), 0)"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'append'
                         and len(e.args) == 1):
                     _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -2839,6 +2878,7 @@ def _cpp_expr(gen, e) -> str:
                     'float': ('double', 'float', '__fp16'),
                     'bool':  ('_Bool',),
                     'list':  ('MojoList *',),
+                    'tuple': ('MojoList *',),
                     'dict':  ('MojoDict *',),
                     'set':   ('MojoSet *',),
                 }
@@ -2884,7 +2924,14 @@ def _cpp_expr(gen, e) -> str:
                         # builtins have no runtime marker on a bare box —
                         # honest always-false, matching the plain path's
                         # mojo_isinstance stub rather than guessing.
-                        if _tn == 'list':
+                        if _tn in ('list', 'tuple'):
+                            # A tuple is boxed as a `MojoList *` in this
+                            # flat coroutine-body model (see `_cpp_boxed_
+                            # list_literal_expr`), so both discriminate the
+                            # same way against a raw popped box. The static
+                            # branches above already resolve an unambiguous
+                            # operand; this is only the genuinely-dynamic
+                            # `stack.pop()` case.
                             _fmts.append("mojo_is_registered_list((int64_t)({v}))")
                         elif _tn == 'str':
                             _fmts.append("mojo_boxed_is_str((int64_t)({v}))")
@@ -4141,6 +4188,25 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             _tup_is_list_val = (_tup_is_list_call
                 or isinstance(s.value, gimple_ctypes.Comprehension)
                 or _tup_is_list_ident)
+            # Pop-time shape discrimination: unpacking a value popped off a
+            # heterogeneous/tagged-union stack (`marker, value =
+            # stack.pop()`, then a second-level `a, b, ... = value`). The
+            # popped/aliased slot is an `int64_t` box whose bits are a
+            # `MojoList *` (this emitter's flat nested-container
+            # convention). Both spellings decompose through the runtime
+            # list getters against that pointer -- but the value must be
+            # evaluated exactly once (a raw `.pop()` mutates the stack), so
+            # it is cached into a fresh local first, unlike the
+            # `_tup_is_list_val` cases above which re-format `_tup_val`.
+            _boxed_names = getattr(gen, '_cpp_boxed_tuple_names', None)
+            _tup_is_pop = (isinstance(s.value, gimple_ctypes.CallExpr)
+                and isinstance(s.value.func, gimple_ctypes.MemberExpr)
+                and s.value.func.member == 'pop'
+                and isinstance(s.value.func.obj, gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None
+                and gen._cpp_declared.get(s.value.func.obj.name) == 'MojoList *')
+            _tup_is_boxed_ident = (isinstance(s.value, gimple_ctypes.IdentExpr)
+                and _boxed_names is not None and s.value.name in _boxed_names)
             # A call to a name this codegen has no real signature for
             # (e.g. `tempfile.mkstemp(...)` -- real Python's own
             # tempfile module, unresolved by this compiler's tracked
@@ -4169,6 +4235,21 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and _tup_callee not in gen.func_return_types
                 and _tup_callee not in gen._KNOWN_SIGS)
             lines = []
+            if _tup_is_pop or _tup_is_boxed_ident:
+                _ubox = gen._cpp_fresh_name("_mg_unpack")
+                lines.append(f"{indent}int64_t {_ubox} = (int64_t)({_tup_val});")
+                for i, el in enumerate(s.target.elements):
+                    if not isinstance(el, gimple_ctypes.IdentExpr):
+                        continue
+                    if el.name not in declared:
+                        declared[el.name] = 'int64_t'
+                        lines.append(f"{indent}int64_t {el.name};")
+                    if _boxed_names is not None:
+                        _boxed_names.add(el.name)
+                    lines.append(
+                        f"{indent}{el.name} = mojo_list_get_int("
+                        f"(MojoList *)({_ubox}), {i});")
+                return lines
             if _tup_is_unresolved_call:
                 # Still emit the call itself (discarding its bogus
                 # scalar result) so any real side effect the actual
@@ -4541,6 +4622,23 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     reg = getattr(gen, '_cpp_list_local_elem_types', None)
                     if reg is not None:
                         reg[name] = _ret_elem
+            # `top = stack.pop()` / `top = other_boxed` -- remember that
+            # this scalar local carries a raw box that may be a nested
+            # `MojoList *` (a tuple pushed onto a heterogeneous stack), so
+            # a later `a, b = top` tuple-unpack decomposes it through the
+            # runtime list getters rather than an invalid `(top)[i]`.
+            _bn = getattr(gen, '_cpp_boxed_tuple_names', None)
+            if _bn is not None and ctype in ('int64_t', None):
+                if (isinstance(s.value, gimple_ctypes.CallExpr)
+                        and isinstance(s.value.func, gimple_ctypes.MemberExpr)
+                        and s.value.func.member == 'pop'
+                        and isinstance(s.value.func.obj, gimple_ctypes.IdentExpr)
+                        and gen._cpp_declared is not None
+                        and gen._cpp_declared.get(s.value.func.obj.name) == 'MojoList *'):
+                    _bn.add(name)
+                elif (isinstance(s.value, gimple_ctypes.IdentExpr)
+                        and s.value.name in _bn):
+                    _bn.add(name)
             # Hoist the declaration to the coroutine's top (function)
             # scope so a local first-assigned inside a `try:`/`for:` body
             # is still visible to a sibling `else:`/post-loop block (the
@@ -4591,8 +4689,19 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     if isinstance(s, gimple_ctypes.WhileStmt):
         lines = gen._cpp_hoist_walrus_decls(s.condition, declared, indent)
         cond = gen._cpp_expr(s.condition)
-        if _cpp_expr_static_ctype(gen, s.condition) == 'char *':
+        _cond_ct = _cpp_expr_static_ctype(gen, s.condition)
+        if _cond_ct == 'char *':
             cond = f"(mojo_strlen((char *)({cond})) != 0)"
+        elif _cond_ct == 'MojoList *':
+            # `while stack:` is Python emptiness, not pointer non-nullness
+            # (a `MojoList *` is basically never NULL, so a raw `while
+            # (stack)` would spin forever once drained). Real: a
+            # stack-driven generator's `while stack: top = stack.pop()`.
+            cond = f"(mojo_list_len((MojoList *)({cond})) != 0)"
+        elif _cond_ct == 'MojoDict *':
+            cond = f"(mojo_dict_len((MojoDict *)({cond})) != 0)"
+        elif _cond_ct == 'MojoSet *':
+            cond = f"(mojo_set_len((MojoSet *)({cond})) != 0)"
         if s.else_body:
             brk_var = gen._cpp_fresh_name("_mg_brk")
             lines.append(f"{indent}bool {brk_var} = false;")
