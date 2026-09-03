@@ -459,13 +459,25 @@ Layer 2.</p>
     fallback + unit test</td><td class="rec">DONE — 8/8 green (both backends, -O0/-O2)</td>
     <td><code>97bb029</code></td></tr>
 <tr><td>§5.3 Layer 2 — <code>mojo_coro.c</code> (coro-abi/1: new/resume/yield/return/
-    set_return/throw/destroy), escaped-exception boundary, exc-slice save/restore,
+    set_return/throw/destroy/env), escaped-exception boundary, exc-slice save/restore,
     guard-paged stacks, unit test</td>
     <td class="rec">DONE — 7 scenarios green (both backends, -O0/-O2); <code>make check-coro</code></td>
     <td><code>9664513</code></td></tr>
-<tr><td>§5.1 Phase 0 scoreboard — <code>test_coro_scoreboard.py</code></td><td>next</td><td>—</td></tr>
-<tr><td>§5.4 Layer 1 — <code>gimple_gen_coro.py</code> lowering, behind
-    <code>MOJO_CORO=stackswitch</code></td><td>in progress</td><td>—</td></tr>
+<tr><td>Layer 1 runtime shim — <code>mojo_coro_gen.c</code>: the int64_t-handle
+    Mojo-facing API (<code>__mojo_gen_new_N</code> / <code>_arg</code> / <code>_resume</code> /
+    <code>_value</code> / <code>_retval</code> / <code>_throw</code> / <code>_destroy</code>,
+    <code>__mojo_coro_yield_i</code>), <code>MojoGenerator</code> = MojoCoro + arg vector</td>
+    <td class="rec">DONE — range gen + send accumulator green (both backends, -O0/-O2)</td>
+    <td><code>39889fb</code></td></tr>
+<tr><td>§5.1 Phase 0 scoreboard — <code>test_coro_scoreboard.py</code></td>
+    <td class="rec">DONE (script) — baseline run in progress</td><td><code>7aad3e0</code></td></tr>
+<tr><td>§5.4 Layer 1 Python transform — <code>gimple_gen_coro.py</code>: AST pre-pass in
+    <code>_run_pipeline</code> (behind <code>MOJO_CORO=stackswitch</code>) that replaces a
+    generator FunctionDef with <code>__mgco_&lt;g&gt;_body</code> (yield/return rewrites,
+    lowered by the ordinary path) + the 4 <code>&lt;base&gt;_start/_resume/_value/_destroy</code>
+    trampolines, and registers <code>_generator_api[g]</code> so
+    for/next/yield-from consumers are unchanged</td>
+    <td>NEXT — the deep codegen integration; runtime substrate below it is done + proven</td><td>—</td></tr>
 <tr><td>§5.5 cutover · §5.6 delete C++ emitter + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
 </table>
 
