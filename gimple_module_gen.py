@@ -6287,9 +6287,7 @@ def gen_module_impl(self, stmts):
                         self._global_c_decl_types[check_name] = 'MojoSet *'
                         self._global_var_types[check_name] = 'MojoSet *'
         elif isinstance(stmt, ImportStmt):
-            for _tm0, _ta0 in _import_targets(stmt):
-                _tm = _as_str(_tm0); _ta = _as_str(_ta0)
-                local_name = _ta if _ta else _tm
+            for local_name in gimple_ctypes._import_local_names(stmt):
                 if local_name not in _declared_globals:
                     global_decls.append(f"int64_t {local_name};")
                     _declared_globals[local_name] = True
@@ -6643,9 +6641,7 @@ def gen_module_impl(self, stmts):
             self._global_var_types[stmt.name] = ctype
             self._global_c_decl_types[stmt.name] = ctype
         elif isinstance(stmt, ImportStmt):
-            for _tm0, _ta0 in _import_targets(stmt):
-                _tm = _as_str(_tm0); _ta = _as_str(_ta0)
-                local_name = _ta if _ta else _tm
+            for local_name in gimple_ctypes._import_local_names(stmt):
                 if local_name not in _declared_globals:
                     _declared_globals[local_name] = True
                     global_decls.append(f"int64_t {local_name};")

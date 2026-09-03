@@ -1073,6 +1073,26 @@ def _import_targets(node) -> list:
     return out
 
 
+def _import_local_names(node) -> list:
+    """The bound local name for each target of an ImportStmt — `alias or
+    module` — as a plain `list[str]`.
+
+    `_import_targets` returns `(module, alias)` tuples; a consumer that only
+    needs the local name and does `alias if alias else module` on the
+    UNPACKED tuple slots hits a self-hosted bug: the tuple's `None` alias
+    slot boxes to a stray non-NULL pointer, so the ternary picks it and the
+    "local name" becomes a decimal heap address (`int64_t <addr>;` fields in
+    `_root_toplev` for `import os` / `import ctypes`, different every run).
+    Reading `node.alias` DIRECTLY (not through a tuple) keeps `None` `None`.
+    Homogeneous `list[str]` return preserves each entry as `char *`."""
+    _al = _as_str(getattr(node, 'alias', None))
+    out = [_al if _al else _as_str(node.module)]
+    for _pair in (getattr(node, 'extra', None) or []):
+        _pa = _as_str(_pair[1])
+        out.append(_pa if _pa else _as_str(_pair[0]))
+    return out
+
+
 def _fi_name(entry) -> str:
     """Name half of a `name|alias` composite (FromImportStmt.name_alias_strs)."""
     _s = _as_str(entry)
