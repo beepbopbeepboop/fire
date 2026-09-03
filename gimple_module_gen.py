@@ -6652,6 +6652,16 @@ def gen_module_impl(self, stmts):
                         self._global_to_module[local_name] = current_mod_name
 
     for gname in sorted(_declared_globals):   # dict keys -> content-sorted (deterministic field order); see decl above
+        # Defensive: an erased global NAME (self-hosted backend handed back a
+        # pointer where a `char *` name was expected) stringifies to a decimal
+        # address — `int64_t 50789022240;` is invalid C anyway, and being a
+        # live heap address it reshuffles every run. Never emit a struct field
+        # whose name isn't a C identifier. (Real cause for `import os`/`ctypes`
+        # here still unfound; the marker global is unused so dropping it is
+        # harmless — matches the stubbed compiled `os`/`ctypes` behaviour.)
+        _gn0 = _as_str(gname)
+        if not _gn0 or not (_gn0[0] == '_' or _gn0[0].isalpha()):
+            continue
         if gname in self._global_var_types:
             g_mtype = self._global_var_types[gname]
             # Own-overlay first: the field decl must use the SAME
