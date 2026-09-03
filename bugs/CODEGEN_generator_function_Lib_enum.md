@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (updated 2026-09-03 — re-verified structural, not attempted)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: byte-identical
+refusal set — `_iter_member_`, `_iter_member_by_def_`, `_iter_member_by_value_`
+all refused for referencing `cls` in an unsupported way. A recent sweep asked
+whether this was a narrow `cls`-binding gap in the coroutine-body emitter; it
+is not. The bodies need `cls._flag_mask_` / `cls._value2member_map_`, which
+exist ONLY through `EnumMeta.__new__`'s dynamic `classdict[...] = ...`
+metaclass machinery plus post-construction mutation — never as literal
+class-body assignments — so `_cls_refs_supported` correctly has no redirect
+target, and stubbing them would silently miscompile (`_flag_mask_ = 0` → every
+Flag iteration yields nothing). Feature-sized dynamic-metaclass-attribute
+modeling. No code change; doc stays open.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

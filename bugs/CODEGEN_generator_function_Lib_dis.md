@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-09-03 — re-verified structural, not attempted)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: byte-identical
+single refusal — `_get_instructions_bytes` on `Positions(*next(co_positions,
+()))`. A recent sweep hoped the remaining `*`/`**`-unpack blockers were narrow
+value-representation issues; this one is not — it stacks (a) no representation
+for a dynamically `collections.namedtuple`-constructed type, (b) `*`-unpack of
+a call-argument into a dynamic callee, and (c) `co.co_positions()` native
+code-object introspection. Even without the spread the function is
+uncompilable (`code[offset]` byte indexing, `_cache_format` dict, `arg_resolver`
+object). The `**kwargs`-forward helper widened to `char *` gap params this
+session (see `bugs/CODEGEN_generator_function_Lib_codecs.md`) does not apply
+here. No code change for this file; doc stays open.
+
 ## Status (re-verified 2026-08-26, later same day — root cause of the file's own remaining blocker precisely restated; STRUCTURAL, not attempted)
 
 Re-confirmed via fresh isolated repro: `_get_instructions_bytes` refuses

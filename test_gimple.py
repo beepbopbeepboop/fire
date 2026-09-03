@@ -2311,6 +2311,75 @@ def main():
 
     test_generator_simple_shape_compiles_via_cpp_path()
 
+    # `**kwargs`-forward inside a coroutine body with a `char *` (string)
+    # "gap" parameter between the given positional args and the callee's
+    # own `**kwargs` slot. `_cpp_try_kwargs_forward_call` used to bail
+    # (return None -> honest whole-module refusal) unless every gap param
+    # was `int64_t`; it now also lowers a `char *` gap slot via the same
+    # runtime-lookup approach (the dict slot's value bits ARE the char*,
+    # so mojo_dict_pop_int returns them, just cast) with a genuine
+    # `mojo_dict_contains ? pop : static-default` resolution — never a
+    # blind default-pad. This shape (a string kwarg forwarded through a
+    # generator) previously refused; it now compiles.
+    def test_generator_kwargs_forward_str_gap_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def target(a, label="hi", **kwargs):
+    return a
+
+def gen(n, **kwargs):
+    i = 0
+    while i < n:
+        yield target(i, **kwargs)
+        i = i + 1
+
+def main():
+    for x in gen(3):
+        print(x)
+"""
+        name = "generator_kwargs_forward_str_gap_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if 'char *_kwgap' not in cpp_src or 'mojo_dict_contains' not in cpp_src:
+            print(f"FAIL  {name}: generated .cpp missing char* kwargs-gap lowering")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_kwargs_forward_str_gap_compiles_via_cpp_path()
+
     # Parameter-support step: a generator taking parameters (`start`,
     # `count`) now compiles via the same C++20-coroutine path instead of
     # hitting the honest whole-module refusal — mirrors
