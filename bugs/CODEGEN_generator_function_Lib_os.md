@@ -1,5 +1,40 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-03, worktree agent-a63a153b32e83eb46 — infrastructure increment: nested container literals now have a flat boxed representation in coroutine bodies)
+
+Landed (`gimple_cpp_core.py`): a nested list/tuple literal used as an
+element of a list/tuple literal in a compiled generator/coroutine body
+now lowers to a flat, real runtime value instead of raising
+`_UnsupportedGeneratorShape`. New helper `_cpp_boxed_list_literal_expr`
+builds a `MojoList *` in which every element is stored `int64_t`-boxed:
+a nested container recurses to its own `MojoList *` and is boxed as
+`(int64_t)` of that pointer (the same boxed-pointer convention every
+container-typed local in this emitter already uses); scalars box
+directly; strings box through `mojo_str`. Wired into both
+`_cpp_list_literal_arg_expr` (call-argument position) and
+`_cpp_container_literal_init` (`x = [...]` assignment RHS). Nested
+dict/set literals still refuse (no flat model).
+
+Effect on this file: `fwalk`'s generator now compiles — its
+`stack = [(_fwalk_walk, (True, dir_fd, top, top, None))]` (a list
+literal whose one element is a `(int, tuple)` pair) was `fwalk`'s first
+blocker. Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`
+now refuses on only `_fwalk` and `walk` (was `_fwalk, fwalk, walk`).
+
+This is the flat *substrate* for the tagged-union / heterogeneous
+`stack` value model the wider `_fwalk`/`walk` blockers need — it gives
+nested literals a representation. Still missing: discriminating a
+*popped* element back into its shape (`isinstance(top, tuple)` /
+tuple-unpack at pop) — so a generator that only CONSTRUCTS such a
+literal now compiles past this point, while `_fwalk` (which pops and
+destructures the stack) still refuses later, now on `stat(...)`
+(needs structseq modeling) and its own pop-time destructuring.
+
+Gate clean on this increment: test_gimple 265/0, test_generators 17/0,
+gimple_generator_runner 53/0, module_cache 76/0, link_mode 3/0,
+check-selfhost pass, compile_stdlib 664 PASSED / 0 unexpected, dylib
+0 skips, bootstrap byte-identical.
+
 ## Status (2026-09-03, worktree agent-aa666b3e6a5da3cf2 — infrastructure increment: `_LIBC_SIGS` callee resolution threaded into coroutine bodies)
 
 Landed: the coroutine-body `CallExpr` resolver in `gimple_cpp_core.py`

@@ -156,10 +156,23 @@ def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list
     """
     elem_reg = getattr(gen, '_cpp_list_local_elem_types', None)
     if isinstance(value_node, gimple_ctypes.ListExpr):
+        # A nested list/tuple literal as an element: flat boxed
+        # representation (see _cpp_boxed_list_literal_expr). Dict/set
+        # nesting still has no flat model here.
+        if any(isinstance(el, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr))
+               for el in value_node.elements):
+            if any(isinstance(el, (gimple_ctypes.DictExpr, gimple_ctypes.SetExpr))
+                   for el in value_node.elements):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    "a nested dict/set literal has no representation as a "
+                    "list element in this coroutine-body model")
+            boxed = _cpp_boxed_list_literal_expr(gen, value_node)
+            if elem_reg is not None:
+                elem_reg[name] = 'int64_t'
+            return [f"{indent}{name} = {boxed};"]
         etype = None
         for el in value_node.elements:
-            if isinstance(el, (gimple_ctypes.ListExpr, gimple_ctypes.DictExpr,
-                               gimple_ctypes.SetExpr, gimple_ctypes.TupleExpr)):
+            if isinstance(el, (gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     "a nested container literal has no representation as a "
                     "list element in this coroutine-body model")
@@ -1053,6 +1066,41 @@ def _cpp_emit_generator_start_expr(gen, call, api):
     return f"{base}_start({', '.join(cargs)})"
 
 
+def _cpp_boxed_list_literal_expr(gen, lit):
+    """Build a `MojoList *` from a list/tuple LITERAL whose elements are NOT
+    all one scalar type -- specifically the case where one or more elements
+    is ITSELF a nested list/tuple literal (`stack = [(_fwalk_walk, (True,
+    dir_fd, top, top, None))]` in Lib/os.py's `fwalk`). Every element is
+    stored int64_t-boxed: a nested container recurses to its own
+    `MojoList *` and is boxed as `(int64_t)` of that pointer (the same
+    boxed-pointer convention every container-typed local in this emitter
+    already uses -- see `_cpp_in_link`'s `MojoList *` case and the boxed
+    reads in `_cpp_expr_static_ctype`); a scalar element boxes directly.
+    String elements box through `mojo_str`'s pointer so a later unboxed
+    read can still recover them.
+
+    This is the flat substrate for the heterogeneous-container value model
+    the CODEGEN_generator_function_Lib_* family needs (os.py's `_fwalk`
+    `stack` of `(marker, payload)` pairs). It gives nested literals a
+    representation; discriminating a popped element back into its shape
+    (`isinstance(top, tuple)` / tuple-unpack at pop) is still future work,
+    so a generator that only CONSTRUCTS such a literal now compiles past
+    this point, while one that pops-and-destructures still refuses later."""
+    elems = lit.elements
+    tmp = gen._cpp_fresh_name("_mg_box")
+    parts = [f"MojoList *{tmp} = mojo_list_new ();"]
+    for el in elems:
+        if isinstance(el, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+            child = _cpp_boxed_list_literal_expr(gen, el)
+            parts.append(f" mojo_list_append_int({tmp}, (int64_t)({child}));")
+        elif isinstance(el, gimple_ctypes.StringLiteral):
+            parts.append(f" mojo_list_append_str({tmp}, {gen._cpp_expr(el)});")
+        else:
+            parts.append(f" mojo_list_append_int({tmp}, (int64_t)({gen._cpp_expr(el)}));")
+    return (f"[&]() -> MojoList * {{ " + "".join(parts)
+            + f" return {tmp}; }}()")
+
+
 def _cpp_list_literal_arg_expr(gen, lit):
     """A list/tuple LITERAL at a call-argument position, as ONE MojoList*-
     valued C++ expression: `mojo_list_new ()` for the empty literal,
@@ -1071,6 +1119,11 @@ def _cpp_list_literal_arg_expr(gen, lit):
     elems = lit.elements
     if not elems:
         return 'mojo_list_new ()'
+    # A nested container literal as an element -> flat boxed representation
+    # (see _cpp_boxed_list_literal_expr).
+    if any(isinstance(el, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr))
+           for el in elems):
+        return _cpp_boxed_list_literal_expr(gen, lit)
     kinds = []
     for el in elems:
         if isinstance(el, gimple_ctypes.StringLiteral):
