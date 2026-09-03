@@ -3909,6 +3909,17 @@ def gen_module_impl(self, stmts):
                         self._cpp_early_global_names.add(_ia if _ia else _in)
             elif isinstance(_gi, AssignStmt) and isinstance(_gi.target, IdentExpr):
                 self._cpp_early_global_names.add(_gi.target.name)
+                # Module-level `X = Y` identifier alias to a plain module
+                # function (`fspath = _fspath` in Lib/os.py, guarded by an
+                # `if not _exists('fspath'):` — hence handled here in the
+                # nested scan, which also covers the bare top-level case).
+                # Recorded so a `X(...)` call in a compiled generator/
+                # coroutine body resolves to Y's real symbol instead of the
+                # honest "unresolved callee" refusal.
+                if (isinstance(_gi.value, IdentExpr)
+                        and _gi.value.name in self._cpp_module_fn_names
+                        and _gi.target.name not in self._cpp_module_fn_names):
+                    self._cpp_module_fn_aliases[_gi.target.name] = _gi.value.name
             elif isinstance(_gi, TryStmt):
                 _scan_cpp_nested_imports(_gi.body or [])
                 for _h in (_gi.handlers or []):

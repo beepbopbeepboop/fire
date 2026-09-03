@@ -1,5 +1,43 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-03, worktree agent-a3653091edce795d4 — real partial forward progress landed; first refusal layer removed, tagged-union layer now the exposed blocker)
+
+Landed: **module-level function-alias resolution in compiled
+generator/coroutine bodies.** A module-level `X = Y` rebinding where `Y`
+is itself a plain-`def` module function (Lib/os.py's `if not
+_exists('fspath'): fspath = _fspath`) is now recorded into
+`GimpleGen._cpp_module_fn_aliases` by `gimple_module_gen.py`'s module
+scan (both the top-level pass and the nested if/try-guarded
+`_scan_cpp_nested_imports` pass — os.py's alias is inside an `if`), and
+`gimple_cpp_core.py`'s coroutine-body `CallExpr` resolver rewrites
+`fname` through that map before its module-function branches run, so
+`fspath(top)` resolves to `_fspath`'s real symbol instead of raising the
+honest "unresolved callee 'fspath(...)'" refusal. General fix — any
+compiled generator calling an aliased module function benefits.
+
+Effect on this file: `walk`/`_fwalk`/`fwalk`'s refusal reason has moved
+past the `fspath` symptom. Fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` now refuses on:
+- `walk`: `unsupported for-loop iterable type: CallExpr` (`for entry in
+  scandir(top):` — `scandir` is a `from posix import *` name with no
+  module-level `def`, plus its result is an iterator of `DirEntry`)
+- `_fwalk`: `a nested container literal has no representation as a list
+  element in this coroutine-body model`
+  (`stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))` — a
+  tuple whose 2nd slot is itself a 4-tuple) and still `close(...)`
+  (another `from posix import *` name).
+
+This is the genuine tagged-union / heterogeneous-`stack` layer the
+older entries below diagnosed — still open, still feature-sized. Two
+concrete prerequisites now clearly separated from it: (1)
+`from posix import *` callee resolution for coroutine bodies (`scandir`,
+`close`, `open`, `stat`, ... — the ordinary GIMPLE path's `_LIBC_SIGS`
+/`_KNOWN_SIGS`/star-import machinery is not consulted by the coroutine
+emitter), (2) nested-container list elements. Gate run clean on the
+landed increment (test_gimple 265/0, module_cache/link_mode 76/0,
+link-mode 3/0, check-selfhost pass, compile_stdlib 664 PASSED / 0
+unexpected, dylib 0 skips, bootstrap <pending/‑>). No regression.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

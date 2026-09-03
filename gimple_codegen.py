@@ -868,6 +868,14 @@ class GimpleGen:
         # fspath) and the set of names needing a variadic extern in the .cpp.
         self._cpp_module_fn_names: set[str] = set()
         self._cpp_module_variadic_func_refs: set[str] = set()
+        # Module-level `X = Y` aliases where Y is itself a module-level
+        # function (`fspath = _fspath` in Lib/os.py — a conditional
+        # rebinding of a name to a plain-`def` fallback). A call to `X(...)`
+        # inside a compiled generator/coroutine body resolves through this
+        # map to Y's real symbol instead of hitting the honest
+        # "unresolved callee" refusal. Only simple identifier-to-identifier
+        # aliases are recorded; a name reassigned to anything else is not.
+        self._cpp_module_fn_aliases: dict[str, str] = {}
         # Per-function refusal reason recorded whenever a generator/async
         # unit compile attempt raises _UnsupportedGeneratorShape (keyed by
         # the function's Python name, first reason wins). Surfaced in

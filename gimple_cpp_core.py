@@ -2560,6 +2560,16 @@ def _cpp_expr(gen, e) -> str:
             return f"{obj}.{e.func.member}({args})"
         if isinstance(e.func, gimple_ctypes.IdentExpr):
             fname = e.func.name
+            # Module-level `X = Y` identifier alias to a plain module
+            # function (`fspath = _fspath` in Lib/os.py) — resolve to the
+            # target name so the module-function call branches below fire
+            # instead of the honest "unresolved callee" refusal. Only ever
+            # rebinds to another module-level function name (see
+            # gimple_module_gen.py's scan), never to a generator/async unit.
+            _fn_aliases = getattr(gen, '_cpp_module_fn_aliases', None)
+            if (_fn_aliases and fname in _fn_aliases
+                    and (gen._cpp_declared is None or fname not in gen._cpp_declared)):
+                fname = _fn_aliases[fname]
             # A call to a COMPILED GENERATOR this whole-program compile knows
             # (same-module defined earlier, an aliased `from M import gen_fn`
             # binding, or — since relative imports resolve — a foreign
