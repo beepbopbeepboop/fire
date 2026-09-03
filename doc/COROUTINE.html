@@ -452,15 +452,22 @@ convention (<code>doc/ABI.md</code>). No Python, no <code>mojo_coro.c</code>. A 
 <code>__builtin_coro_*</code> lowering of the six primitives is a drop-in replacement for
 Layer 2.</p>
 
-<h2>8. Immediate next steps</h2>
-<ol>
-<li>Phase 0 spike: <code>runtime/mojo_coro_ctx_aarch64.S</code> +
-    <code>runtime/test_mojo_coro_ctx.c</code>, prove the switch on M5.</li>
-<li><code>test_coro_scoreboard.py</code> capturing the current (pre-change) status of every
-    coroutine-gated bug source.</li>
-<li>Phase 1–2: <code>mojo_coro.c</code> on the primitive, C-level end-to-end generator test.</li>
-<li>Phase 3: <code>gimple_gen_coro.py</code>, behind <code>MOJO_CORO=stackswitch</code>.</li>
-</ol>
+<h2>8. Progress</h2>
+<table>
+<tr><th>Phase</th><th>State</th><th>Commits</th></tr>
+<tr><td>§5.2 Layer 3 — <code>mojo_coro_ctx.h</code> + aarch64 <code>.S</code> + ucontext
+    fallback + unit test</td><td class="rec">DONE — 8/8 green (both backends, -O0/-O2)</td>
+    <td><code>97bb029</code></td></tr>
+<tr><td>§5.3 Layer 2 — <code>mojo_coro.c</code> (coro-abi/1: new/resume/yield/return/
+    set_return/throw/destroy), escaped-exception boundary, exc-slice save/restore,
+    guard-paged stacks, unit test</td>
+    <td class="rec">DONE — 7 scenarios green (both backends, -O0/-O2); <code>make check-coro</code></td>
+    <td><code>9664513</code></td></tr>
+<tr><td>§5.1 Phase 0 scoreboard — <code>test_coro_scoreboard.py</code></td><td>next</td><td>—</td></tr>
+<tr><td>§5.4 Layer 1 — <code>gimple_gen_coro.py</code> lowering, behind
+    <code>MOJO_CORO=stackswitch</code></td><td>in progress</td><td>—</td></tr>
+<tr><td>§5.5 cutover · §5.6 delete C++ emitter + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
+</table>
 
 </body>
 </html>
