@@ -1201,7 +1201,14 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # After *args, continue to catch any trailing `out` params that also
             # appear in the definition and must match the forward declaration.
         elif i == 0 and pn == 'self' and self_struct:
-            out.append(f"{self_struct} *")
+            # `_as_str`: `self_struct` arrives through a parameter that
+            # defaults to None, so the self-hosted backend types it int64_t.
+            # `f"{self_struct} *"` then formats the struct name's `char *`
+            # bits as a DECIMAL and stores `"45740546496 *"` into
+            # `func_param_types[method]` — every later `({that}){self}`
+            # receiver cast in the generated C is then a raw heap address
+            # (`_t34 = (45740546496 *)self;`), invalid and ASLR-unstable.
+            out.append(f"{_as_str(self_struct)} *")
         elif i == 0 and _selfhost_gen_self_param_ctype(gen, pn, pt, node):
             out.append('GimpleGen *')
         elif (self_struct and isinstance(pt, str) and pt.split('[', 1)[0].strip() == self_struct
@@ -1218,7 +1225,7 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # List/Dict/Set/Span's own real implementation — `other`
             # needs the real struct pointer so `other->_len` etc. resolve
             # against the actual fields, not the runtime's builtin ones.
-            out.append(f"{self_struct} *")
+            out.append(f"{_as_str(self_struct)} *")
         else:
             # Method context: consult the method's QUALIFIED
             # "Struct_method" inferred-param entry (usage-based inference
@@ -1288,7 +1295,7 @@ def _fixed_param_ctypes(gen, params, node, self_struct=None) -> list:
         if pn.startswith('*'):
             break
         if i == 0 and pn == 'self' and self_struct:
-            out.append(f"{self_struct} *")
+            out.append(f"{_as_str(self_struct)} *")  # see _signature_ctypes
         else:
             out.append(gen._param_ctype(pn, pt, node))
     return out
