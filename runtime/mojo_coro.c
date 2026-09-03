@@ -293,6 +293,14 @@ __mojo_coro_return_value(MojoCoro *c)
     return c->ret_box;
 }
 
+/* The opaque env pointer passed to __mojo_coro_new -- Layer 1's shim
+   (mojo_coro_gen.c) uses it to reach a body's stashed arguments. */
+void *
+__mojo_coro_env(MojoCoro *c)
+{
+    return c ? c->env : 0;
+}
+
 /* internal companion to the getter above -- the lowered `return e` calls
    this then falls off the body. Part of coro-abi/1. */
 void

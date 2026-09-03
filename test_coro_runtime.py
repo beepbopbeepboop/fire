@@ -24,6 +24,8 @@ CC = os.environ.get('CC', 'cc')
 TESTS = [
     ('layer3-ctx', 'test_mojo_coro_ctx.c', []),
     ('layer2-coro', 'test_mojo_coro.c', ['mojo_coro.c', 'test_mojo_coro_exc_stub.c']),
+    ('layer1-shim', 'test_mojo_coro_gen.c',
+     ['mojo_coro_gen.c', 'mojo_coro.c', 'test_mojo_coro_exc_stub.c']),
 ]
 
 # Layer 3 backends to validate.
