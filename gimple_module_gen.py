@@ -26,7 +26,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _sms_key, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -2580,10 +2580,16 @@ def gen_module_impl(self, stmts):
                 self._toplevel_dep_init_modules.append(_sib_qualifier)
             if exports is not None:
                 def _register_sym(sym_name, orig_name, sym_info):
-                    if sym_name in self.struct_field_types:
+                    # Fresh `_as_str` view — a lifted-closure param whose
+                    # `_infer_param_types` guess is int64_t would make every
+                    # `self.imported_symbols[sym_name] = ...` below store the
+                    # `char *` bits as a DECIMAL dict key (address-ordered
+                    # `sorted(keys())` in the re-export extern block).
+                    _sk = _as_str(sym_name)
+                    if _sk in self.struct_field_types:
                         return
                     if not s.wildcard and self._from_import_name_is_submodule(s.module, orig_name):
-                        self.imported_symbols[sym_name] = {
+                        self.imported_symbols[_sk] = {
                             # _join_import_member: same canonical member-module
                             # string find_imports compiled the submodule under —
                             # consumers (including the coroutine emitter's
@@ -2595,24 +2601,24 @@ def gen_module_impl(self, stmts):
                             'module': gimple_ctypes._join_import_member(s.module, orig_name),
                             'return_type': 'unknown',
                         }
-                        self._module_alias_names.add(sym_name)
+                        self._module_alias_names.add(_sk)
                         return
                     if _sib_qualifier and not sym_info:
                         if not s.wildcard:
-                            self._unresolved_import_aliases.add(sym_name)
+                            self._unresolved_import_aliases.add(_sk)
                         return
                     if isinstance(sym_info, str):
-                        self.imported_symbols[sym_name] = {
+                        self.imported_symbols[_sk] = {
                             'module': s.module, 'original_name': orig_name,
                             'return_type': sym_info, 'parameters': [],
-                            'signature': f"{sym_info} {sym_name} (void)"
+                            'signature': f"{sym_info} {_sk} (void)"
                         }
-                        self.func_return_types[sym_name] = sym_info
+                        self.func_return_types[_sk] = sym_info
                     elif isinstance(sym_info, dict):
                         sym_info = dict(sym_info)
                         sym_info['module'] = s.module
                         sym_info['original_name'] = orig_name
-                        self.imported_symbols[sym_name] = sym_info
+                        self.imported_symbols[_sk] = sym_info
                         _ret_changed = False
                         if orig_name.startswith('_'):
                             pass
@@ -2623,7 +2629,7 @@ def gen_module_impl(self, stmts):
                                 sym_info['c_return_type'] = _resolved_ret
                                 _ret_changed = True
                         if 'c_return_type' in sym_info:
-                            self.func_return_types[sym_name] = sym_info['c_return_type']
+                            self.func_return_types[_sk] = sym_info['c_return_type']
                         if sym_info.get('variadic'):
                             if _ret_changed:
                                 sym_info['signature'] = (
@@ -2653,7 +2659,7 @@ def gen_module_impl(self, stmts):
                                 _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
                                 sym_info['signature'] = f"{_c_ret} {orig_name} ({_param_str})"
                         if _sib_qualifier and 'c_parameters' in sym_info:
-                            self.func_param_types[sym_name] = [
+                            self.func_param_types[_sk] = [
                                 ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
                                 for cp in (sym_info.get('c_parameters') or [])
                             ]
@@ -2697,10 +2703,10 @@ def gen_module_impl(self, stmts):
                         except Exception:
                             _pts_snap = None
                         if not _pts_snap:
-                            _pts_snap = self.func_param_types.get(sym_name)
+                            _pts_snap = self.func_param_types.get(_sk)
                         if _pts_snap is not None:
-                            self._imported_home_param_types[(_qual, sym_name)] = list(_pts_snap)
-                        self._note_own_func_home(sym_name, _qual)
+                            self._imported_home_param_types[_pair_key(_qual, _sk)] = list(_pts_snap)
+                        self._note_own_func_home(_sk, _qual)
                 try:
                     if not s.names:
                         for _wc_key in exports:   # not `.items()` — 2-tuple unpack boxes the key on the self-hosted path
@@ -2709,7 +2715,16 @@ def gen_module_impl(self, stmts):
                         for _fip17 in gimple_ctypes._fromimport_names(s):
                             name = _as_str(_fip17[0])
                             alias = _as_str(_fip17[1])
-                            sym_name = alias if alias else name
+                            # `_as_str` on the ternary: without it the
+                            # self-hosted backend erased `sym_name` to
+                            # int64_t, so `_register_sym`'s `self.imported_
+                            # symbols[sym_name] = {...}` stringified the
+                            # `char *` bits as a DECIMAL and stored the
+                            # address as the dict key — every downstream
+                            # `sorted(imported_symbols.keys())` (the
+                            # `/* from .<mod> */` re-export extern block)
+                            # then ordered by ADDRESS, differently each run.
+                            sym_name = _as_str(alias if alias else name)
                             sym_info = exports.get(name, {})
                             # Genuine overload (2+ `def <name>(...)` in the
                             # exporting module's own source, distinguished

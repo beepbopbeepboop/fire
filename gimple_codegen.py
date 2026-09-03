@@ -1245,7 +1245,7 @@ class GimpleGen:
         # collide at link). Populated for local defs and imported Mojo functions;
         # every emission site routes the name through _func_csym for consistency.
         self._mangled_funcs: set[str] = set()
-        self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
+        self.imported_symbols: dict[str, dict] = {}  # symbol_name -> {module, original_name, return_type, c_return_type, signature, ...}
         # Subset of `imported_symbols` keys that are genuine MODULE/
         # NAMESPACE markers (`import X [as Y]`, or `from PKG import
         # submod` where `submod` names a real submodule FILE) — as
@@ -1576,7 +1576,7 @@ class GimpleGen:
         #   {'overload_id', 'param_names', 'param_ctypes' (excl self), 'min_arity', 'max_arity'}.
         # Populated from the CURRENT file's own AST only (same-file resolution);
         # a struct imported from elsewhere without local source has no entry here.
-        self._struct_method_signatures: dict[tuple, list] = {}
+        self._struct_method_signatures: dict[str, list] = {}  # _sms_key(struct, method) -> [candidate-overload dicts]
         # mangled C symbol -> full param C-type list (incl. self), for a
         # not-yet-emitted overload's forward-referenced call to be coerced
         # correctly by _emit_call. Deliberately kept separate from the shared
@@ -1854,8 +1854,8 @@ class GimpleGen:
         # _own_imported_func_home, then the shared _imported_func_home) so
         # the suffix and the qualifier halves of one mangled symbol can
         # never disagree about which entry they mean.
-        self._imported_home_param_types: dict = {}
-        # (sanitized home-module qualifier, fn name) -> [param ctypes] —
+        self._imported_home_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
+        # _pair_key(sanitized home-module qualifier, fn name) -> [param ctypes] —
         # the WHOLE-PROGRAM-SHARED definition-side truth for free-function
         # signatures, written ONLY by a unit that actually defines the name
         # (when its `_local_def_pts` resolves the FunctionDef it owns) and
@@ -1868,7 +1868,7 @@ class GimpleGen:
         # log_match's `group` to char * while _common.py's own definer had
         # no call sites and froze int64_t: two different overload suffixes
         # for one symbol — "implicit declaration of function" at g++).
-        self._home_def_param_types: dict = {}
+        self._home_def_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen

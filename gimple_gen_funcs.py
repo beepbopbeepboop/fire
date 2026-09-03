@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str,
+    Parser, py_tokenize, _as_str, _pair_key,
 )
 import ast_rewriter
 import regex_compile
@@ -299,7 +299,15 @@ def _gen_stmt_FromImportStmt(gen, node):
     for _fip2 in gimple_ctypes._fromimport_names(node):
         name = _as_str(_fip2[0])
         alias = _as_str(_fip2[1])
-        symbol_name = alias if alias else name
+        # `_as_str` on the ternary result: without it the self-hosted
+        # backend erased `symbol_name` to int64_t (whole-function
+        # unification off the `(_fi_home, symbol_name)` tuple key that used
+        # to live below), so `gen.imported_symbols[symbol_name] = {...}`
+        # stringified the `char *` bits as a DECIMAL and stored the address
+        # as the dict key — `sorted(imported_symbols.keys())` then ordered
+        # the `/* from .<mod> */` re-export externs by ADDRESS, differently
+        # every run.
+        symbol_name = _as_str(alias if alias else name)
         # A compiled free-function generator reached through a
         # function-body-scoped cross-module import: bind it exactly like
         # the top-level registration loop does (shared _generator_home_api,
@@ -499,7 +507,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                             for cp in _fi_cps
                         ]
                 if _fi_pts:
-                    gen._imported_home_param_types[(_fi_home, symbol_name)] = list(_fi_pts)
+                    gen._imported_home_param_types[_pair_key(_fi_home, symbol_name)] = list(_fi_pts)
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:
@@ -1515,7 +1523,7 @@ def _local_def_pts(gen, bare_name: str):
     _home_store = getattr(gen, '_home_def_param_types', None)
     if _home_store is not None:
         _q = getattr(gen, 'module_name', None) or ''
-        _home_store[(_q.replace('.', '_').replace('-', '_'), bare_name)] = list(pts)
+        _home_store[_pair_key(_q.replace('.', '_').replace('-', '_'), bare_name)] = list(pts)
     return pts
 
 
@@ -1590,11 +1598,11 @@ def _imported_def_pts(gen, bare_name: str):
     for q in candidate_quals:
         _sq = _sanitize(q)
         if _def_store:
-            pts = _def_store.get((_sq, bare_name))
+            pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
         if store:
-            pts = store.get((_sq, bare_name))
+            pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
     return None
