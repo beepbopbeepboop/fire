@@ -3297,6 +3297,16 @@ def _cpp_expr(gen, e) -> str:
                         gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)):
                 cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
                 return f"{cpp_fname}({', '.join(args)})"
+            # A call to a nested NON-CAPTURING sync helper `def` that
+            # `_cpp_compile_nested_sync_helpers` (gimple_cpp_async.py)
+            # already compiled into a `static` C++ function ahead of this
+            # coroutine's `{impl}` — resolve to its real symbol. Registered
+            # only for helpers that fully lowered with an agreeing scalar/
+            # string/container return type, so this is exactly as safe as
+            # calling any module-level function here.
+            _nhs = getattr(gen, '_cpp_nested_helper_syms', None)
+            if _nhs and fname in _nhs:
+                return f"{_nhs[fname]}({', '.join(args)})"
             # `ast_rewriter.py`'s idiom-rewrite rules (os.environ.get/[]/
             # `in`, platform.system()/machine(), subprocess.run(...) and
             # its .returncode/.stdout/.stderr, sys.stdin.read()) all lower
@@ -4579,6 +4589,14 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     if isinstance(s, gimple_ctypes.ContinueStmt):
         return [f"{indent}continue;"]
     if isinstance(s, gimple_ctypes.ReturnStmt):
+        if gen._cpp_emit_kind == 'helper':
+            # A nested non-capturing sync helper `def` compiled as a
+            # plain `static` C++ function (see
+            # `_cpp_compile_nested_sync_helpers`) — `return` is an
+            # ordinary function return, NOT a generator's `co_return`.
+            if s.value is None:
+                return [f"{indent}return;"]
+            return [f"{indent}return {gen._cpp_expr(s.value)};"]
         if gen._cpp_emit_kind == 'async':
             # Step B's whole target shape: `return <scalar-expr>` is how
             # this narrow async function's one result gets produced —

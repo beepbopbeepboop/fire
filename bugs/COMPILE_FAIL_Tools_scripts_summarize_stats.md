@@ -4,6 +4,31 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-09-03 — nested non-capturing sync-helper coroutine codegen LANDED as shared infra; this file still refused, narrower reason)
+
+Implemented real compilation of nested NON-capturing sync `def`s that are
+referenced as callees inside a compiled generator/coroutine body
+(`_cpp_compile_nested_sync_helpers` in `gimple_cpp_async.py`; `_cpp_expr`
+CallExpr resolution + a `'helper'` `_cpp_emit_kind` for plain-`return`
+lowering in `gimple_cpp_core.py`). Such a helper is emitted as a
+standalone `static` C++ function ahead of the coroutine `{impl}` when it
+captures nothing from the enclosing scope, takes only scalar/string/
+container params (annotation → call-site inference → body-usage
+inference), has an agreeing statically-inferred scalar/string/container
+return type, and contains no further nested `def`. Verified end-to-end
+(gcc `.c` + g++ `.cpp`) by `test_gimple.py`'s new
+`generator_nested_noncapturing_helper_compiles_via_cpp_path`.
+
+This file is NOT closed by that: `calc_histogram_table` /
+`calc_specialization_table` (the two remaining unresolved callees) each
+have the shape `def calc_X(...): def calc(stats): ...; return calc` —
+they RETURN a nested closure that captures their own params. That is the
+genuinely feature-sized "callable value / closure compilation" case the
+new helper compiler deliberately excludes (a helper whose body contains a
+further nested `def` is skipped). So the generator stays honestly refused
+on those two callees. No regression — `mojo.py build` behaviour on this
+file is byte-identical to before.
+
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical refusal, unchanged
 
 Fresh `python3 mojo.py build .../Tools/scripts/summarize_stats.py`

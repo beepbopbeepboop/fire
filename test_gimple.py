@@ -2583,18 +2583,23 @@ def main():
     test_generator_forward_consumption_chain_compiles_via_cpp_path()
 
     # A generator body calling an UNRESOLVABLE callee — a nested `def`
-    # local to the generator (this scalar coroutine-body model has no
-    # closure compilation), a Python builtin with no coroutine-body
-    # lowering (map/filter), or a foreign-module struct constructor —
-    # must refuse honestly via _UnsupportedGeneratorShape, NOT emit a
-    # bare undeclared C++ identifier that only fails later inside g++
-    # ("'X' was not declared in this scope"). Real shape:
-    # importlib/metadata/__init__.py's Sectioned.read /
-    # Distribution._convert_egg_info_reqs_to_simple_reqs.
+    # local to the generator that CAPTURES an enclosing local (this
+    # scalar coroutine-body model has no closure compilation), a Python
+    # builtin with no coroutine-body lowering (map/filter), or a
+    # foreign-module struct constructor — must refuse honestly via
+    # _UnsupportedGeneratorShape, NOT emit a bare undeclared C++
+    # identifier that only fails later inside g++ ("'X' was not declared
+    # in this scope"). Real shape: importlib/metadata/__init__.py's
+    # Sectioned.read / Distribution._convert_egg_info_reqs_to_simple_reqs.
+    # (A nested `def` that captures NOTHING is now compiled as a
+    # standalone `static` C++ helper — see
+    # `generator_nested_noncapturing_helper_compiles_via_cpp_path` below
+    # and `_cpp_compile_nested_sync_helpers`.)
     test_raises("generator_unresolved_callee_honest_refusal", """\
 def outer(items):
+    scale = len(items)
     def helper(x):
-        return x
+        return x * scale
     for section in items:
         yield helper(section)
 
@@ -2602,6 +2607,61 @@ def main():
     for x in outer([1, 2]):
         print(x)
 """, "Unsupported shape(s): outer: a call to unresolved callee 'helper(...)'")
+
+    # A nested NON-capturing sync `def` referenced as a callee inside a
+    # generator body IS compiled — as a standalone `static` C++ function
+    # emitted ahead of the coroutine `{impl}` — and the whole module
+    # compiles cleanly through both gcc (.c) and g++ (.cpp).
+    def test_generator_nested_noncapturing_helper_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def gen_it():
+    def label(n):
+        return "n=" + str(n)
+
+    def tag(s):
+        return "<" + label(len(s)) + ">"
+
+    for i in range(3):
+        yield tag("abc")
+
+def main():
+    for x in gen_it():
+        print(x)
+"""
+        try:
+            c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+                src, do_imports=False, filename="gen_nested_helper.py")
+        except Exception as e:
+            print(f"FAIL  generator_nested_noncapturing_helper_compiles_via_cpp_path: "
+                  f"raised {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        if "_h_label" not in cpp_code or "_h_tag" not in cpp_code:
+            print("FAIL  generator_nested_noncapturing_helper_compiles_via_cpp_path: "
+                  "expected `_h_label`/`_h_tag` helper symbols in the .cpp")
+            _FAIL += 1
+            return
+        import tempfile, subprocess
+        cp = tempfile.NamedTemporaryFile("w", suffix=".cpp", delete=False)
+        cp.write(cpp_code); cp.close()
+        try:
+            from build_config import find_gxx
+            r = subprocess.run([find_gxx(), '-std=c++20', '-fsyntax-only',
+                                f'-I{_RUNTIME_INC}', cp.name],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                print("PASS  generator_nested_noncapturing_helper_compiles_via_cpp_path")
+                _PASS += 1
+            else:
+                print("FAIL  generator_nested_noncapturing_helper_compiles_via_cpp_path")
+                for line in r.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(cp.name)
+
+    test_generator_nested_noncapturing_helper_compiles_via_cpp_path()
 
     # The one legitimate bare-name call shape must KEEP working: a call
     # through a DECLARED callable-value local (`std::function` supports
