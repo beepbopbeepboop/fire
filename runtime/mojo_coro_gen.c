@@ -92,11 +92,27 @@ __mojo_gen_arg(int64_t coro, int64_t idx)
     return g->args[idx];
 }
 
-/* yield e -- returns the value sent in by the next resume. */
+/* yield e -- returns the value sent in by the next resume. Typed variants
+   so gimple_gen_coro can pass a char* / double straight through without a
+   codegen-inserted cast; all funnel to the one int64_t-box yield. */
 int64_t
 __mojo_coro_yield_i(int64_t coro, int64_t v)
 {
     return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, v);
+}
+
+int64_t
+__mojo_coro_yield_p(int64_t coro, void *v)
+{
+    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, (int64_t)(uintptr_t)v);
+}
+
+int64_t
+__mojo_coro_yield_d(int64_t coro, double v)
+{
+    int64_t bits;
+    __builtin_memcpy(&bits, &v, sizeof bits);
+    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, bits);
 }
 
 void

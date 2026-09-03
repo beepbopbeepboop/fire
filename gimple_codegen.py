@@ -215,6 +215,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     # A3 stack-switch coroutine shim (runtime/mojo_coro_gen.c) — called
     # from a generator's lowered `__mgco_<g>_body` (gimple_gen_coro.py).
     '__mojo_coro_yield_i':   'int64_t',
+    '__mojo_coro_yield_p':   'int64_t',
+    '__mojo_coro_yield_d':   'int64_t',
     '__mojo_gen_arg':        'int64_t',
     '__mojo_gen_set_return': 'void',
 }

@@ -30,9 +30,11 @@ import mojo_compiler as N
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
 
-YIELD_SHIM   = '__mojo_coro_yield_i'
+YIELD_SHIM   = {'i': '__mojo_coro_yield_i', 'p': '__mojo_coro_yield_p',
+                'd': '__mojo_coro_yield_d'}
 ARG_SHIM     = '__mojo_gen_arg'
 SETRET_SHIM  = '__mojo_gen_set_return'
+_KIND_CTYPE  = {'i': 'int64_t', 'p': 'char *', 'd': 'double'}
 
 
 def enabled() -> bool:
@@ -59,6 +61,42 @@ def _walk(node):
 _SCALARISH = {'Int', 'Int64', 'Int32', 'Bool', 'String', 'StringLiteral', '', None}
 
 
+def _yield_kind(expr) -> str | None:
+    """Best-effort C kind of a yielded value: 'i' int/bool, 'p' string
+    pointer, 'd' float. None == genuinely can't tell (treated as 'i')."""
+    if expr is None:
+        return 'i'
+    if isinstance(expr, (N.StringLiteral, N.TstringLiteral)):
+        return 'p'
+    if isinstance(expr, N.FloatLiteral):
+        return 'd'
+    if isinstance(expr, (N.IntLiteral, N.BoolLiteral)):
+        return 'i'
+    if isinstance(expr, N.BinaryOp):
+        lk, rk = _yield_kind(expr.left), _yield_kind(expr.right)
+        if 'p' in (lk, rk):
+            return 'p'
+        if 'd' in (lk, rk):
+            return 'd'
+        return 'i'
+    return None
+
+
+def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
+    kinds = set()
+    for n in _walk(fn):
+        if isinstance(n, N.YieldExpr):
+            k = _yield_kind(n.value)
+            if k is not None:
+                kinds.add(k)
+    kinds.discard(None)
+    if not kinds:
+        return 'i', ''
+    if len(kinds) == 1:
+        return next(iter(kinds)), ''
+    return None, f'heterogeneous yield kinds {sorted(kinds)} (v0)'
+
+
 def _eligible(fn: N.FunctionDef) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
@@ -76,6 +114,9 @@ def _eligible(fn: N.FunctionDef) -> tuple[bool, str]:
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
         return False, 'kwonly params (v0)'
+    kind, why = _generator_value_kind(fn)
+    if kind is None:
+        return False, why
     return True, ''
 
 
@@ -89,32 +130,33 @@ def _call(fn_name: str, args: list) -> N.CallExpr:
     return N.CallExpr(func=_c_ident(fn_name), args=list(args))
 
 
-def _rewrite_expr(node, cvar: str):
-    """Recursively replace YieldExpr with a call to the yield shim. Returns
-    the (possibly new) node."""
+def _rewrite_expr(node, cvar: str, kind: str):
+    """Recursively replace YieldExpr with a call to the kind-specific yield
+    shim. Returns the (possibly new) node."""
     if node is None or not hasattr(node, '__dict__'):
         return node
     if isinstance(node, N.YieldExpr):
-        val = _rewrite_expr(node.value, cvar) if node.value is not None else N.IntLiteral(value=0)
-        return _call(YIELD_SHIM, [_c_ident(cvar), val])
+        val = (_rewrite_expr(node.value, cvar, kind) if node.value is not None
+               else N.IntLiteral(value=0))
+        return _call(YIELD_SHIM[kind], [_c_ident(cvar), val])
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
         if isinstance(v, list):
-            setattr(node, k, [_rewrite_expr(x, cvar) if hasattr(x, '__dict__') else x
+            setattr(node, k, [_rewrite_expr(x, cvar, kind) if hasattr(x, '__dict__') else x
                               for x in v])
         elif hasattr(v, '__dict__'):
-            setattr(node, k, _rewrite_expr(v, cvar))
+            setattr(node, k, _rewrite_expr(v, cvar, kind))
     return node
 
 
-def _rewrite_stmts(stmts: list, cvar: str) -> list:
+def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
     out = []
     for s in stmts:
         if isinstance(s, N.ReturnStmt):
             if s.value is not None:
                 out.append(N.ExprStmt(value=_call(SETRET_SHIM,
-                                                  [_c_ident(cvar), _rewrite_expr(s.value, cvar)])))
+                                                  [_c_ident(cvar), _rewrite_expr(s.value, cvar, kind)])))
             out.append(N.ReturnStmt(value=None))
             continue
         # recurse into compound-statement bodies
@@ -123,11 +165,11 @@ def _rewrite_stmts(stmts: list, cvar: str) -> list:
                 continue
             if isinstance(v, list) and v and all(hasattr(x, '__dict__') for x in v) \
                     and _looks_like_stmt_list(v):
-                setattr(s, k, _rewrite_stmts(v, cvar))
+                setattr(s, k, _rewrite_stmts(v, cvar, kind))
             elif isinstance(v, list):
-                setattr(s, k, [_rewrite_expr(x, cvar) if hasattr(x, '__dict__') else x for x in v])
+                setattr(s, k, [_rewrite_expr(x, cvar, kind) if hasattr(x, '__dict__') else x for x in v])
             elif hasattr(v, '__dict__'):
-                setattr(s, k, _rewrite_expr(v, cvar))
+                setattr(s, k, _rewrite_expr(v, cvar, kind))
         out.append(s)
     return out
 
@@ -182,6 +224,8 @@ def _mojo_to_c_type(ann: str) -> str:
 def _lower_one(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
     base = f'__mgco_{fn.name}'
     body_name = f'{base}_body'
+    kind, _ = _generator_value_kind(fn)
+    kind = kind or 'i'
 
     # prologue: var p_i = __mojo_gen_arg(__c, i)
     prologue = []
@@ -189,7 +233,7 @@ def _lower_one(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
         prologue.append(N.VarDecl(name=pname, type_ann=None,
                                   value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
 
-    new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
+    new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind)
     # a plain function returning nothing
     body_fd = N.FunctionDef(
         name=body_name,
@@ -205,7 +249,8 @@ def _lower_one(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
         'base': base,
         'body_name': body_name,
         'params': [_mojo_to_c_type(a) for _n, a in fn.params],
-        'value_ctype': 'int64_t',   # v0
+        'value_ctype': _KIND_CTYPE[kind],
+        'value_kind': kind,
         'nargs': len(fn.params),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
@@ -228,6 +273,7 @@ extern int64_t __mojo_gen_resume (int64_t, int64_t);
 extern int64_t __mojo_gen_value (int64_t);
 extern void    __mojo_gen_destroy (int64_t);
 extern void    {body_name} (int64_t);
+/* value_kind={value_kind} */
 
 MojoGenerator *{base}_start ({start_params}) {{
   int64_t __g = __mojo_gen_new_{nargs} ((int64_t)(&{body_name}){arg_fwd});
@@ -236,8 +282,8 @@ MojoGenerator *{base}_start ({start_params}) {{
 _Bool {base}_resume (MojoGenerator *__g) {{
   return (_Bool)__mojo_gen_resume ((int64_t)__g, 0);
 }}
-int64_t {base}_value (MojoGenerator *__g) {{
-  return __mojo_gen_value ((int64_t)__g);
+{value_ctype} {base}_value (MojoGenerator *__g) {{
+  return {value_unbox};
 }}
 void {base}_destroy (MojoGenerator *__g) {{
   __mojo_gen_destroy ((int64_t)__g);
@@ -248,12 +294,22 @@ void {base}_destroy (MojoGenerator *__g) {{
 def emit_c(meta_entry: dict) -> str:
     n = meta_entry['nargs']
     params = meta_entry['params']
+    kind = meta_entry.get('value_kind', 'i')
+    vct = _KIND_CTYPE[kind]
     start_params = ', '.join(f'{ct} __a{i}' for i, ct in enumerate(params)) or 'void'
     arg_fwd = ''.join(f', (int64_t)__a{i}' for i in range(n))
     new_params = ', '.join(['int64_t'] + ['int64_t'] * n)
+    if kind == 'p':
+        value_unbox = f'({vct})__mojo_gen_value ((int64_t)__g)'
+    elif kind == 'd':
+        value_unbox = ('({ double __d; long long __b = __mojo_gen_value ((int64_t)__g); '
+                       '__builtin_memcpy(&__d, &__b, sizeof __d); __d; })')
+    else:
+        value_unbox = '__mojo_gen_value ((int64_t)__g)'
     return _C_TRAMPOLINE_TMPL.format(
         name=meta_entry['name'], base=meta_entry['base'],
-        body_name=meta_entry['body_name'], nargs=n,
+        body_name=meta_entry['body_name'], nargs=n, value_kind=kind,
+        value_ctype=vct, value_unbox=value_unbox,
         start_params=start_params, arg_fwd=arg_fwd, new_params=new_params,
     )
 
