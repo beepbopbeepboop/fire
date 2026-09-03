@@ -6268,7 +6268,7 @@ def gen_module_impl(self, stmts):
                             '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
     _dispatch_set_names = {'_CMP_OPS'}
     _dispatch_names = _dispatch_dict_names | _dispatch_set_names
-    _declared_globals = set()
+    _declared_globals = {}  # dict not set: self-hosted `sorted(<set>)` at the field-order loop below sorts boxed str slots by ADDRESS (nondeterministic _<mod>_toplev field order in --dump-full); dict keys sort by content via mojo_dict_sorted_keys
     all_scan = stmts
     for stmt in all_scan:
         if isinstance(stmt, FromImportStmt):
@@ -6278,12 +6278,12 @@ def gen_module_impl(self, stmts):
                 for check_name in (orig_name, local_name):
                     if check_name in _dispatch_dict_names and check_name not in _declared_globals:
                         global_decls.append(f"MojoDict * {check_name};")
-                        _declared_globals.add(check_name)
+                        _declared_globals[check_name] = True
                         self._global_c_decl_types[check_name] = 'MojoDict *'
                         self._global_var_types[check_name] = 'MojoDict *'
                     elif check_name in _dispatch_set_names and check_name not in _declared_globals:
                         global_decls.append(f"MojoSet * {check_name};")
-                        _declared_globals.add(check_name)
+                        _declared_globals[check_name] = True
                         self._global_c_decl_types[check_name] = 'MojoSet *'
                         self._global_var_types[check_name] = 'MojoSet *'
         elif isinstance(stmt, ImportStmt):
@@ -6292,7 +6292,7 @@ def gen_module_impl(self, stmts):
                 local_name = _ta if _ta else _tm
                 if local_name not in _declared_globals:
                     global_decls.append(f"int64_t {local_name};")
-                    _declared_globals.add(local_name)
+                    _declared_globals[local_name] = True
                     self._global_var_types[local_name] = 'int64_t'
                     if local_name not in self._global_to_module:
                         self._global_to_module[local_name] = current_mod_name
@@ -6514,7 +6514,7 @@ def gen_module_impl(self, stmts):
             gname = stmt.name
             if gname in _declared_globals:
                 continue
-            _declared_globals.add(gname)
+            _declared_globals[gname] = True
             if stmt.type_ann and stmt.value is None:
                 _resolved = self._resolve_type(stmt.type_ann)
                 self._global_var_types[gname] = _resolved
@@ -6618,14 +6618,14 @@ def gen_module_impl(self, stmts):
             gname = stmt.target.name
             if gname in _declared_globals:
                 continue
-            _declared_globals.add(gname)
+            _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
         elif (isinstance(stmt, ComptimeVarStmt)
                 and isinstance(stmt.value, (ListExpr, TupleExpr))):
             gname = stmt.target
             if gname in _declared_globals:
                 continue
-            _declared_globals.add(gname)
+            _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
         elif isinstance(stmt, MultiAssignStmt):
             for _tgt in stmt.targets:
@@ -6634,10 +6634,10 @@ def gen_module_impl(self, stmts):
                 gname = _tgt.name
                 if gname in _declared_globals:
                     continue
-                _declared_globals.add(gname)
+                _declared_globals[gname] = True
                 _gscan_declare_global(gname, stmt.value)
         elif isinstance(stmt, VarDecl) and stmt.name not in _declared_globals:
-            _declared_globals.add(stmt.name)
+            _declared_globals[stmt.name] = True
             ctype = self._resolve_type(stmt.type_ann) if stmt.type_ann else 'int64_t'
             global_decls.append(f"{ctype} {stmt.name};")
             self._global_var_types[stmt.name] = ctype
@@ -6647,14 +6647,14 @@ def gen_module_impl(self, stmts):
                 _tm = _as_str(_tm0); _ta = _as_str(_ta0)
                 local_name = _ta if _ta else _tm
                 if local_name not in _declared_globals:
-                    _declared_globals.add(local_name)
+                    _declared_globals[local_name] = True
                     global_decls.append(f"int64_t {local_name};")
                     self._global_var_types[local_name] = 'int64_t'
                     self._global_c_decl_types[local_name] = 'int64_t'
                     if local_name not in self._global_to_module:
                         self._global_to_module[local_name] = current_mod_name
 
-    for gname in sorted(_declared_globals):   # sorted: deterministic field order for bootstrap
+    for gname in sorted(_declared_globals):   # dict keys -> content-sorted (deterministic field order); see decl above
         if gname in self._global_var_types:
             g_mtype = self._global_var_types[gname]
             # Own-overlay first: the field decl must use the SAME
