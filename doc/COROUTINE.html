@@ -472,13 +472,20 @@ Layer 2.</p>
 <tr><td>§5.1 Phase 0 scoreboard — <code>test_coro_scoreboard.py</code></td>
     <td class="rec">DONE (script) — baseline run in progress</td><td><code>7aad3e0</code></td></tr>
 <tr><td>§5.4 Layer 1 Python transform — <code>gimple_gen_coro.py</code>: AST pre-pass in
-    <code>_run_pipeline</code> (behind <code>MOJO_CORO=stackswitch</code>) that replaces a
-    generator FunctionDef with <code>__mgco_&lt;g&gt;_body</code> (yield/return rewrites,
-    lowered by the ordinary path) + the 4 <code>&lt;base&gt;_start/_resume/_value/_destroy</code>
-    trampolines, and registers <code>_generator_api[g]</code> so
-    for/next/yield-from consumers are unchanged</td>
-    <td>NEXT — the deep codegen integration; runtime substrate below it is done + proven</td><td>—</td></tr>
-<tr><td>§5.5 cutover · §5.6 delete C++ emitter + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
+    <code>_run_pipeline</code> (behind <code>MOJO_CORO=stackswitch</code>). Replaces an
+    eligible generator FunctionDef with a plain <code>__mgco_&lt;g&gt;_body</code>
+    (yield/return rewrites; params → <code>__mojo_gen_arg</code> prologue) that the
+    <strong>ordinary broad codegen lowers</strong> + 4 C trampolines; registers
+    <code>_generator_api[g]</code> + <code>_supported_generators</code> so for/next/yield-from
+    consumers are unchanged. <code>mojo.py</code>/<code>driver.py</code> link the runtime.</td>
+    <td class="rec">VERTICAL SLICE WORKING — <code>for x in rng(2,6)</code> → 2 3 4 5 and a
+    squares(5) sum → 30 via real stack-switch coroutines through the ordinary path;
+    default path byte-unchanged (test_gimple 266/0)</td><td><code>73f8701</code></td></tr>
+<tr><td>Layer 1 scope expansion — typed/string/tuple yields (box+unbox), <code>yield from</code>,
+    <code>.send()</code>, generator methods, generics, then async</td>
+    <td>NEXT — each a well-scoped increment on the proven slice</td><td>—</td></tr>
+<tr><td>§5.5 cutover (scoreboard diff, <code>git rm</code> closed reports) · §5.6 delete
+    <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
 </table>
 
 </body>
