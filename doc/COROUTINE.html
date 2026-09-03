@@ -481,8 +481,12 @@ Layer 2.</p>
     <td class="rec">VERTICAL SLICE WORKING — <code>for x in rng(2,6)</code> → 2 3 4 5 and a
     squares(5) sum → 30 via real stack-switch coroutines through the ordinary path;
     default path byte-unchanged (test_gimple 266/0)</td><td><code>73f8701</code></td></tr>
-<tr><td>Layer 1 scope expansion — typed/string/tuple yields (box+unbox), <code>yield from</code>,
-    <code>.send()</code>, generator methods, generics, then async</td>
+<tr><td>Layer 1 — typed yields: int / string / float value kinds (heuristic from yield
+    exprs; heterogeneous falls through). Kind-specific <code>__mojo_coro_yield_{i,p,d}</code>
+    shims; <code>&lt;base&gt;_value</code> emits the real type + unbox.</td>
+    <td class="rec">DONE — <code>for w in words()</code> → alpha beta gamma</td><td><code>1dca618</code></td></tr>
+<tr><td>Layer 1 scope expansion — <code>yield from</code>, <code>.send()</code>, tuple yields,
+    generator methods, generics, then async</td>
     <td>NEXT — each a well-scoped increment on the proven slice</td><td>—</td></tr>
 <tr><td>§5.5 cutover (scoreboard diff, <code>git rm</code> closed reports) · §5.6 delete
     <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
