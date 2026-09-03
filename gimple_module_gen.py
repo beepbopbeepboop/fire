@@ -2690,15 +2690,19 @@ def gen_module_impl(self, stmts):
     # a `from X import Y` already set for the same local name.
     for s in stmts:
         if isinstance(s, ImportStmt):
-            for _im_mod0, _im_alias0 in _import_targets(s):
-                _im_mod = _as_str(_im_mod0)
-                _im_alias = _as_str(_im_alias0)
-                if _im_alias:
-                    _im_local = _im_alias
-                elif '.' in _im_mod:
+            # `(module, local-name)` with DIRECT field reads for the primary
+            # target (`s.module` / `s.alias`), not a `for _m,_a in
+            # _import_targets` unpack whose boxed `None` alias slot comes back
+            # a stray truthy pointer -> `imported_symbols[<decimal addr>]`.
+            _im_prim_alias = _as_str(s.alias)
+            _im_pairs = [(_as_str(s.module),
+                          _im_prim_alias if _im_prim_alias else _as_str(s.module))]
+            for _ex in (getattr(s, 'extra', None) or []):
+                _ex_a = _as_str(_ex[1])
+                _im_pairs.append((_as_str(_ex[0]), _ex_a if _ex_a else _as_str(_ex[0])))
+            for _im_mod, _im_local in _im_pairs:
+                if _im_local == _im_mod and '.' in _im_mod:
                     _im_local = _im_mod[:_im_mod.index('.')]
-                else:
-                    _im_local = _im_mod
                 if _im_local not in self.imported_symbols:
                     self.imported_symbols[_im_local] = {
                         'module': _im_mod,
@@ -5564,16 +5568,13 @@ def gen_module_impl(self, stmts):
     def _scan_try_imports(stmt_list):
         for _s in stmt_list:
             if isinstance(_s, ImportStmt):
-                for _tm0, _ta0 in _import_targets(_s):
-                    # `_as_str` into fresh locals: the tuple slots erase to
-                    # int64_t on the self-hosted path, so `_global_var_types
-                    # [_local]` would stringify the char* pointer into a
-                    # decimal dict key (the top-level `import os/sys/re/...`
-                    # module-marker globals then never made it into the
-                    # `_root_toplev` struct).
-                    _tm = _as_str(_tm0)
-                    _ta = _as_str(_ta0)
-                    _local = _ta if _ta else _tm
+                # `_import_local_names`, NOT `for _tm0,_ta0 in _import_targets`:
+                # unpacking the `(module, alias)` tuple re-boxes the `None`
+                # alias slot to a stray truthy pointer, so `_ta if _ta else _tm`
+                # picked it and `_global_var_types[<decimal addr>]` -> the
+                # `import os`/`import ctypes` module-marker globals landed in
+                # `_root_toplev` as address-named fields, different every run.
+                for _local in gimple_ctypes._import_local_names(_s):
                     if _local not in self._global_var_types:
                         self._global_var_types[_local] = 'int64_t'
                         self._global_c_decl_types[_local] = 'int64_t'

@@ -1085,7 +1085,7 @@ def _import_local_names(node) -> list:
     `_root_toplev` for `import os` / `import ctypes`, different every run).
     Reading `node.alias` DIRECTLY (not through a tuple) keeps `None` `None`.
     Homogeneous `list[str]` return preserves each entry as `char *`."""
-    _al = _as_str(getattr(node, 'alias', None))
+    _al = _as_str(node.alias)  # DIRECT field access, not getattr (getattr erases to int64_t -> stray truthy value)
     out = [_al if _al else _as_str(node.module)]
     for _pair in (getattr(node, 'extra', None) or []):
         _pa = _as_str(_pair[1])
