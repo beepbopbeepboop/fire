@@ -868,6 +868,12 @@ class GimpleGen:
         # fspath) and the set of names needing a variadic extern in the .cpp.
         self._cpp_module_fn_names: set[str] = set()
         self._cpp_module_variadic_func_refs: set[str] = set()
+        # C-stdlib / POSIX names (keys of `_LIBC_SIGS`) called from this
+        # module's compiled generator/coroutine bodies — each gets a
+        # self-emitted `extern "C"` prototype in the .cpp preamble (see
+        # gen_module), mirroring `_ensure_libc_self_extern` on the
+        # ordinary path.
+        self._cpp_libc_sig_refs: set[str] = set()
         # Module-level `X = Y` aliases where Y is itself a module-level
         # function (`fspath = _fspath` in Lib/os.py — a conditional
         # rebinding of a name to a plain-`def` fallback). A call to `X(...)`
@@ -2487,7 +2493,7 @@ class GimpleGen:
         # in isolation has no <fcntl.h> in its preamble and no other call
         # site to inherit an extern from, so it hit "implicit declaration of
         # function 'fcntl'" on every cold-CAS-cache stdlib build.
-        'dup', 'pipe', 'fcntl',
+        'dup', 'pipe', 'fcntl', 'close',
         # fork/waitpid/execv: headers (<unistd.h>/<sys/wait.h>) not in our prelude,
         # so _emit_stdlib_import_externs must not skip them (the new
         # _LIBC_DECLARED check would otherwise suppress them).
@@ -2546,7 +2552,7 @@ class GimpleGen:
         'remove', 'rename', 'access', 'stat', 'lstat', 'fstat', 'unlink', 'rmdir',
         'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown',
         'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork',
-        'ioctl', 'fcntl', 'dup', 'dup2', 'pipe',
+        'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'close',
         # Random functions
         'rand', 'srand', 'random', 'srandom',
         # Standard library utility
@@ -2648,6 +2654,9 @@ class GimpleGen:
         # self-emitted extern instead of an implicit declaration.
         'mkdir': ('int', ['char *', 'int']),
         'rmdir': ('int', ['char *']),
+        # POSIX fd close (<unistd.h>, not in prelude) — used bare inside
+        # Lib/os.py's `_fwalk` generator via `from posix import *`.
+        'close': ('int', ['int']),
         'execve': ('int', ['char *', 'char *', 'char *']),
         'unsetenv': ('int', ['char *']),
     }

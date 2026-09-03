@@ -3343,6 +3343,24 @@ def _cpp_expr(gen, e) -> str:
                     'mojo_subprocess_run', 'mojo_subprocess_returncode',
                     'mojo_subprocess_stdout', 'mojo_subprocess_stderr'):
                 return f"{fname}({', '.join(args)})"
+            # A call to a C-stdlib / POSIX function with a curated, known
+            # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
+            # generator (Lib/os.py's `_fwalk`, reached via
+            # `from posix import *`). The ordinary (non-coroutine) GIMPLE
+            # path already trusts `_LIBC_SIGS` to emit a bare call plus a
+            # self-emitted `extern "C"` prototype for exactly these names
+            # (see `_ensure_libc_self_extern` / `_NEEDS_SELF_EXTERN`); do
+            # the same here rather than fall through to the honest refusal
+            # below. `_cpp_libc_sig_refs` drives the matching preamble
+            # `extern "C"` declaration in gen_module. As safe as the
+            # ordinary path calling the same name — the signature is the
+            # curated one, not one inferred from lowered argument values.
+            _libc_sig = gen._LIBC_SIGS.get(fname)
+            if _libc_sig is not None:
+                _lsr = getattr(gen, '_cpp_libc_sig_refs', None)
+                if _lsr is not None:
+                    _lsr.add(fname)
+                return f"{fname}({', '.join(args)})"
             # Everything else reaching this point would be emitted as a
             # bare, undeclared C++ identifier call — which g++ always
             # rejects ("'X' was not declared in this scope") or, worse,

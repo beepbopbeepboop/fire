@@ -1,5 +1,41 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-03, worktree agent-aa666b3e6a5da3cf2 — infrastructure increment: `_LIBC_SIGS` callee resolution threaded into coroutine bodies)
+
+Landed: the coroutine-body `CallExpr` resolver in `gimple_cpp_core.py`
+now consults `GimpleGen._LIBC_SIGS` before the honest
+"unresolved callee" refusal. A bare call to a C-stdlib / POSIX name with
+a curated signature (e.g. `close(fd)` inside `_fwalk`, reached via
+`from posix import *`) now emits the real call plus a self-emitted
+`extern "C"` prototype in the .cpp preamble (new
+`GimpleGen._cpp_libc_sig_refs` set, consumed by `gen_module`), exactly
+as `_ensure_libc_self_extern`/`_NEEDS_SELF_EXTERN` already do for the
+ordinary GIMPLE path — the signature is the curated one, not inferred
+from lowered args, so it is as safe as the ordinary path calling the
+same name. `close` was added to `_LIBC_SIGS`/`_LIBC_DECLARED`/
+`_NEEDS_SELF_EXTERN` (`int close(int)`, `<unistd.h>` not in prelude).
+General fix — any compiled generator calling a known libc function
+benefits.
+
+Effect on this file: `_fwalk`'s `close(...)` refusal is gone. Fresh
+isolated `compile_to_gimple_with_cpp(do_imports=False)` now refuses on:
+- `_fwalk`: `stat(...)` (another `from posix import *` name — but
+  `os.stat` returns a `stat_result` structseq, NOT an int/pointer, so
+  it has no honest `_LIBC_SIGS` entry; needs real structseq modeling,
+  not the libc-sig shortcut) AND still the nested-container-literal
+  blocker (`stack.append((_fwalk_yield, (toppath, dirs, nondirs,
+  topfd)))`).
+- `walk`: `for entry in scandir(top):` — `scandir` yields `DirEntry`
+  objects, an iterator type with no representation here.
+- `fwalk`: same as `_fwalk`.
+
+Remaining blockers unchanged from below: (1) `scandir`/`stat` need real
+iterator / structseq value modeling (not a plain libc call), (2)
+nested-container list elements, (3) the tagged-union / heterogeneous-
+`stack` representation. Gate clean on this increment: test_gimple 265/0,
+module_cache 76/0, link_mode 3/0, check-selfhost pass, compile_stdlib
+664 PASSED / 0 unexpected, dylib 0 skips, bootstrap 180/180 byte-identical.
+
 ## Status (2026-09-03, worktree agent-a3653091edce795d4 — real partial forward progress landed; first refusal layer removed, tagged-union layer now the exposed blocker)
 
 Landed: **module-level function-alias resolution in compiled

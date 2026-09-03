@@ -7732,6 +7732,18 @@ def gen_module_impl(self, stmts):
             for _vfn in sorted(self._cpp_module_variadic_func_refs):
                 cpp_parts.append(f'extern "C" int64_t {_vfn} (...);')
             cpp_parts.append('')
+        if self._cpp_libc_sig_refs:
+            cpp_parts.append('/* Self-emitted extern "C" prototypes for C-stdlib /')
+            cpp_parts.append('   POSIX functions called from this module\'s compiled')
+            cpp_parts.append('   generator bodies (headers not in the prelude). */')
+            for _lname in sorted(self._cpp_libc_sig_refs):
+                _lret, _lparams = self._LIBC_SIGS[_lname]
+                _lret_cpp = _lret.replace('_Bool', 'bool')
+                _lparam_str = ', '.join(
+                    p if p != '_Bool' else 'bool' for p in _lparams) or 'void'
+                cpp_parts.append(
+                    f'extern "C" {_lret_cpp} {_lname} ({_lparam_str});')
+            cpp_parts.append('')
         if self._cpp_class_attr_refs:
             cpp_parts.append('/* Extern declarations for class-level')
             cpp_parts.append('   attribute globals (`cls.<attr>`) read by this')
