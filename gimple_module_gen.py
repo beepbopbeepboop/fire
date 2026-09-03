@@ -6177,8 +6177,14 @@ def gen_module_impl(self, stmts):
             parts.append(f'#ifndef {_toplev_guard}')
             parts.append(f'#define {_toplev_guard}')
             parts.append(f'typedef struct {struct_name} {{')
-            for _kf_name, _kf_ctype, _ in _known_fields:
-                parts.append(f'  {_kf_ctype} {_c_field_name(_kf_name)};')
+            for _kf in _known_fields:
+                # Index, don't unpack: reading `_kf_ctype`/`_kf_name` out of the
+                # 3-tuple re-boxes the str slots to int64_t on the self-hosted
+                # path, so the field decl came out `<addr> ANY;` — a live heap
+                # pointer as the C type, different every run (only visible in the
+                # multi-module `--dump-full` closure, where OTHER modules' toplev
+                # structs are emitted). Broke stage2-vs-stage3 bootstrap identity.
+                parts.append(f'  {_as_str(_kf[1])} {_c_field_name(_as_str(_kf[0]))};')
             parts.append(f'}} {struct_name};')
             parts.append('#endif')
             parts.append(f'extern struct {struct_name} {global_var};')
@@ -7748,8 +7754,8 @@ def gen_module_impl(self, stmts):
                 cpp_parts.append(f'typedef struct {_mt} {{')
                 for _gl in self._module_globals.get(
                         'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):
-                    _gct = _gl[1].replace('_Bool', 'bool')
-                    _gfname = _c_field_name(_gl[0])
+                    _gct = _as_str(_gl[1]).replace('_Bool', 'bool')
+                    _gfname = _c_field_name(_as_str(_gl[0]))
                     if _gfname in _CPP_KEYWORD_FIELDS:
                         _gfname = f"_kw_{_gfname}"
                     cpp_parts.append(f'  {_gct} {_gfname};')
