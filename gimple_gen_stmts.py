@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _as_str,
+    _as_str, _pair_key,
 )
 import regex_compile
 import mlir
@@ -639,7 +639,7 @@ def _gen_stmt_AssignStmt(gen, node):
             gen._dict_val_types[tname] = _dv
         folded = gen._try_const_fold_str(node.value)
         if folded is not None:
-            gen._const_str_locals[(gen.current_func_name, tname)] = folded
+            gen._const_str_locals[_pair_key(gen.current_func_name, tname)] = folded
         # Write to module struct when `global x` was declared in this function.
         # Always target THIS module's own struct (self._current_module_ctx),
         # never `_global_to_module.get(tname)` — that map is a SHARED,

@@ -147,7 +147,15 @@ def _lower_EllipsisLiteral(gen, node) -> tuple[str, str]:
 
 
 def _lower_StringLiteral(gen, node):
-    val = node.value
+    # `_as_str`: on the self-hosted path a `StringLiteral` reached as a boxed
+    # list element (e.g. `node.args[1]` inside `_lower_builtin_getattr`, after
+    # only an `isinstance` narrowing) has its `.value` read typed as int64_t,
+    # so the real `char *` bits flow through `_c_escape`/`_intern_string` as a
+    # number and land in the string pool as a raw heap ADDRESS —
+    # `static char * _slit_NNNN = "34658719648";` — which is both wrong and
+    # different every run (ASLR). Re-tagging the value as `str` here recovers
+    # it. CPython identity.
+    val = _as_str(node.value)
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
         return gen._lower_IdentExpr(gimple_ctypes.IdentExpr(name=val))

@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _as_str,
+    _as_str, _pair_key,
 )
 import regex_compile
 import mlir
@@ -254,7 +254,7 @@ def _try_const_fold_str(gen, expr) -> str | None:
     if isinstance(expr, gimple_ctypes.StringLiteral):
         return expr.value
     if isinstance(expr, gimple_ctypes.IdentExpr):
-        return gen._const_str_locals.get((gen.current_func_name, expr.name))
+        return gen._const_str_locals.get(_pair_key(gen.current_func_name, expr.name))
     if isinstance(expr, gimple_ctypes.BinaryOp) and expr.op == '+':
         lv = gen._try_const_fold_str(expr.left)
         rv = gen._try_const_fold_str(expr.right)

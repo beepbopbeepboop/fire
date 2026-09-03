@@ -1143,8 +1143,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (_fattrs_g and isinstance(node.args[0], gimple_ctypes.IdentExpr)
                 and node.args[0].name in _fattrs_g
                 and isinstance(node.args[1], gimple_ctypes.StringLiteral)
-                and node.args[1].value in _fattrs_g[node.args[0].name]):
-            mangled = _fattrs_g[node.args[0].name][node.args[1].value]
+                and _as_str(node.args[1].value) in _fattrs_g[node.args[0].name]):
+            mangled = _fattrs_g[node.args[0].name][_as_str(node.args[1].value)]
             gtype = gen._global_var_types.get(mangled, 'int64_t')
             return gtype, gen._new_val(gtype, mangled)
         # A5: `getattr(s, 'elifs', [])` / `getattr(handler, 'body', None)`
@@ -1160,7 +1160,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # defensive `getattr(s, 'elifs', [])` pattern) is substituted.
         if (isinstance(node.args[1], gimple_ctypes.StringLiteral)
                 and len(node.args) in (2, 3)):
-            _attr = node.args[1].value
+            # `_as_str`: `node.args[1]` is a boxed MojoList element, so the
+            # self-hosted backend types this `.value` read as int64_t. The
+            # bits are the real `char *`, but `f'"{_attr}"'` below then
+            # formats the POINTER as a quoted decimal and interns it — the
+            # generated C gets `_mojo_dispatch_getattr(obj, "40424334336")`
+            # (a per-run heap address, invalid, and different every run).
+            _attr = _as_str(node.args[1].value)
             # `_known_field_type` resolves `_attr`'s C type ONLY when
             # every struct across the WHOLE-PROGRAM-shared `struct_
             # field_types` that happens to have a field of this bare

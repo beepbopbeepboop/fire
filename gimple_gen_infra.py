@@ -26,6 +26,7 @@ from mojo_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _as_set, _as_int, _ptr_slot_in_range,
+    _as_ident_node, _as_member_node,
 )
 import regex_compile
 import mlir
@@ -35,6 +36,12 @@ import gimple_exprtypes
 import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
+
+# Separator for `function_calls`' `name<sep>index` composite strings — see
+# `analyze_param_usage`. U+001F (ASCII Unit Separator): never appears in a
+# function identifier or a decimal integer, and unlike NUL it survives
+# `mojo_str_cat` on the self-hosted path.
+_FC_SEP = '\x1f'
 
 def _exc_type_id(gen, name: str) -> int:
     """The tag for an exception class name: a hash of the name, not a
@@ -847,8 +854,18 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         param_types = list(param_types[:-1]) + ['MojoList *']
 
     coerced_args = []
-    for i, (atype, aval) in enumerate(arg_pairs):
-        ptype = param_types[i] if i < len(param_types) else atype
+    for i, _apair in enumerate(arg_pairs):
+        # `_as_str` on every unpacked slot — a `(ctype, varname)` tuple boxes
+        # BOTH slots to int64_t on the self-hosted path, and `ctype` here is
+        # C TYPE TEXT: an erased one reaches the `f'({ptype}){aval}'` casts
+        # below as the string's own heap ADDRESS, so the emitted C carried
+        # `_t34 = (33394789424 *)self;` for a `(Parser *)self` receiver cast
+        # — invalid, and different on every run (ASLR). Same chokepoint idea
+        # as `_new_temp`/`_safe_coerce_emit`/`_declare_var`, one level up at
+        # the coercion loop that feeds them.
+        atype = _as_str(_apair[0])
+        aval = _as_str(_apair[1])
+        ptype = _as_str(param_types[i]) if i < len(param_types) else atype
         # Check if int64_t actually contains a pointer (stored in _actual_types or _global_var_types)
         actual_atype = atype
         if atype == 'int64_t':
@@ -1403,7 +1420,16 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         # keep builtin-container method names out of the struct-field
         # match (see BUILTIN_CONTAINER_METHODS above).
         called_methods: set = set()
-        function_calls = []  # List of (function_name, arg_index)
+        # Each entry is `function_name + _FC_SEP + str(arg_index)` — a
+        # composite STRING, deliberately NOT a `(name, idx)` 2-tuple: a
+        # tuple round-trips its `str` slot through an int64_t box on the
+        # self-hosted path, after which `name == 'isinstance'` compared a
+        # pointer to a string (and SIGSEGV'd in `_str_hash` when the pointer
+        # was a small erased value). `_FC_SEP` is U+001F, not `\x00`: NUL
+        # would be swallowed by `mojo_str_cat`'s `strlen`, collapsing the
+        # separator on the compiled path so `.split()` could not recover the
+        # index.
+        function_calls = []
         # The boolean usage signals live in ONE mutable dict rather than as
         # separate `nonlocal` scalars: the nested `scan_expr`/`scan_nodes`/
         # `_track_derivation` closures mutate them, and a container captured
@@ -1601,10 +1627,11 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             elif isinstance(expr, gimple_ctypes.CallExpr):
                 # Track which functions this parameter is passed to
                 if isinstance(expr.func, gimple_ctypes.IdentExpr):
-                    func_name = expr.func.name
+                    func_name = _as_ident_node(expr.func).name
                     for i, arg in enumerate(expr.args):
-                        if isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == param_name:
-                            function_calls.append((func_name, i))
+                        if (isinstance(arg, gimple_ctypes.IdentExpr)
+                                and _as_ident_node(arg).name == param_name):
+                            function_calls.append(_as_str(func_name) + _FC_SEP + str(i))
                 elif isinstance(expr.func, gimple_ctypes.MemberExpr):
                     # Method-call evidence is recognized through a SLICE or
                     # SUBSCRIPT of the param too (`s[:-1].split(",")`,
@@ -1643,12 +1670,15 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         if expr.func.member in BUILTIN_CONTAINER_METHODS:
                             called_methods.add(expr.func.member)
                     # Handle re.sub(pattern, fn, src) → src (index 2) is char*
-                    if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
-                            and expr.func.obj.name == 're'
-                            and expr.func.member == 'sub'
+                    _efunc = _as_member_node(expr.func)
+                    if (isinstance(_efunc.obj, gimple_ctypes.IdentExpr)
+                            and _as_ident_node(_efunc.obj).name == 're'
+                            and _efunc.member == 'sub'
                             and len(expr.args) >= 3):
-                        if isinstance(expr.args[2], gimple_ctypes.IdentExpr) and expr.args[2].name == param_name:
-                            function_calls.append(('__re_sub_src', 2))
+                        _a2 = expr.args[2]
+                        if (isinstance(_a2, gimple_ctypes.IdentExpr)
+                                and _as_ident_node(_a2).name == param_name):
+                            function_calls.append('__re_sub_src' + _FC_SEP + '2')
                     # os.path.*(param, ...) — basename/splitext/expanduser/
                     # abspath/dirname/exists/join all take char* path
                     # arguments (see the os.path.* block in lower_expr).
@@ -1672,7 +1702,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                                 'abspath', 'dirname', 'exists', 'join')):
                         for i, arg in enumerate(expr.args):
                             if isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == param_name:
-                                function_calls.append(('__os_path_arg', i))
+                                function_calls.append('__os_path_arg' + _FC_SEP + str(i))
                 scan_expr(expr.func)
                 for arg in expr.args:
                     scan_expr(arg)
@@ -1887,7 +1917,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # consecutive runs.
             is_polymorphic = False
             for _fc in function_calls:
-                if _as_str(_fc[0]) == 'isinstance' and _as_int(_fc[1]) == 0:
+                _fcp = _as_str(_fc).split(_FC_SEP)
+                if _fcp[0] == 'isinstance' and int(_fcp[1]) == 0:
                     is_polymorphic = True
                     break
             if is_polymorphic:
@@ -1955,7 +1986,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
-                for func_name, arg_index in function_calls:
+                # `function_calls` holds `name<_FC_SEP>idx` composite STRINGS,
+                # not `(name, idx)` tuples — a tuple round-trips its `str`
+                # slot through an int64_t box on the self-hosted path, after
+                # which `func_name == '__re_sub_src'` compared a pointer to a
+                # string and `gen._KNOWN_SIGS.get(func_name)` keyed a dict on
+                # a pointer decimal (and, when that pointer was a small erased
+                # value, SIGSEGV'd in `_str_hash`). The inferred ctype of e.g.
+                # `py_tokenize.replace_multiline_strings`'s `src` then flipped
+                # `char *` ↔ `int64_t` from run to run.
+                for _fc in function_calls:
+                    _fcp = _as_str(_fc).split(_FC_SEP)
+                    func_name = _fcp[0]
+                    arg_index = int(_fcp[1])
                     # re.sub src argument (index 2) is always char*
                     if func_name == '__re_sub_src':
                         inferred[pname] = 'char *'

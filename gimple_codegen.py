@@ -1491,7 +1491,7 @@ class GimpleGen:
         self._struct_home_cache: dict = {}           # (module, name) -> defining-module ref | None, memo for _find_struct_home_module (breaks re-export cycles)
         self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
         self._dataclass_fields_vars: set = set()     # for-loop vars bound from dataclasses.fields(x) — f.name is f itself (set/cleared per loop)
-        self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
+        self._const_str_locals: dict[str, str] = {}  # _pair_key(func_name, var_name) → compile-time-folded string constant
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._struct_method_names: dict[str, set[str]] = {}  # struct name -> {real method names}, see its own population site's docstring
         # struct name -> {@property getter names} (the subset of

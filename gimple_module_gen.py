@@ -474,28 +474,30 @@ def _emit_reflection_dispatch(self, parts):
     for _sanx in self._struct_allocs_needed:
         if _ptr_slot_in_range(_sanx):
             _san_str.add(_as_str(_sanx))
-    # A SET, not a list, purely so `sorted()` below sorts by string CONTENT.
-    # `sorted(<MojoList *>)` only reaches `mojo_list_sorted_str` when the
-    # backend has recorded the list's element type as `char *`; with the
-    # element type unknown it falls through to the generic `mojo_sorted`,
-    # which orders by the raw int64_t payload — i.e. by heap ADDRESS for a
-    # list of strings. `sorted(<MojoSet *>)` goes to `mojo_set_sorted`,
-    # which checks the slot tags and sorts string slots with
-    # `mojo_list_sorted_str` regardless of what the backend inferred.
+    # Iterate `struct_field_types`' keys in CONTENT order and filter in
+    # place — the result list is already sorted, no trailing `sorted()`.
     #
-    # That mattered a great deal: these names drive the order the reflection
-    # emitter walks structs, which drives the order string literals are
-    # interned into `_str_pool`, which numbers every `_slit_N` in the whole
-    # output. Under ASLR the addresses move per run, so the SAME binary on
-    # the SAME input produced a differently-numbered string pool and ~30k
-    # differing lines. The entries are dict KEYS, so they are already
-    # unique and a set changes nothing else.
-    _rs_names = set()
-    for _rsk in self.struct_field_types.keys():
+    # `sorted(self.struct_field_types)` (the dict itself, not `.keys()`)
+    # lowers to `mojo_dict_sorted_keys` → `mojo_list_sorted_str`, a genuine
+    # string-content sort — the container-type dispatch in `_lower_sorted`
+    # keys on `MojoDict *`, which `.keys()` would have already unwrapped. An
+    # earlier revision built `_rs_names` as a `set()` and did
+    # `sorted(_rs_names)` to reach `mojo_set_sorted` instead — but this
+    # compiler stores these boxed `char *` names through the set's INT view,
+    # so every slot carries `tag == 0` and `mojo_set_sorted` sorted them as
+    # raw int64_t ADDRESSES and handed back pointer-ints; the reflection
+    # emit loop's `self.struct_field_types.get(sn)` then missed on every one
+    # and silently skipped ALL the `_mojo_repr_*`/`_mojo_getattr_*` helpers
+    # (regressed struct_def/class_methods in test_ab_shim).
+    #
+    # Ordering here is load-bearing: it drives the struct walk order, hence
+    # the `_str_pool` intern order, hence every `_slit_N` in the output.
+    _rs_names = []
+    for _rsk in sorted(self.struct_field_types):
         _rsk = _as_str(_rsk)
         if _rsk in _es_str and _rsk in _san_str:
-            _rs_names.add(_rsk)
-    reflect_structs = sorted(_rs_names)
+            _rs_names.append(_rsk)
+    reflect_structs = _rs_names
     refl_parts = []
     # The structs this loop actually EMITS helpers for. Every dispatch table
     # below is driven from this list rather than re-deriving the same
