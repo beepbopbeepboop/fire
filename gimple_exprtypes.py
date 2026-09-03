@@ -668,7 +668,7 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
-        if e.func.name in ('str', 'repr', 'os.path.join', 'os.path.basename',
+        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename',
                            'os.path.dirname', 'os.path.splitext'):
             return 'char *'
         # `len()`/`ord()` always return a plain int regardless of their

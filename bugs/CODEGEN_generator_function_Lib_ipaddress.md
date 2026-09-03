@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (2026-09-03 — coroutine-body infra landed; this file's 3 refused generators unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+`_find_address_range` (`next(it)` on a plain external iterator),
+`subnets` (`every yield must carry a value...` — yields str/tuple across
+sites plus needs `IPv4Network`/`IPv6Network` name resolution and a
+struct-object-keyed dict), and `summarize_address_range` (`min(...)`
+over an iterable) all still refused, byte-identical reasons to the
+entries below. Each is independently feature-sized; none attempted this
+session. General coroutine-body infra landed this session (`var x =
+<expr>` VarDecl lowering; type-dispatched `String(x)`/`str(x)` for
+body-built strings — see the imaplib doc's 2026-09-03 entry) does not
+reach these blockers. Doc stays open.
+
 ## Status (re-verified 2026-08-26, later same day — full current blocker set precisely enumerated; all STRUCTURAL, not attempted)
 
 Fresh re-verify: `_collapse_addresses_internal`'s own `list(...)` gap

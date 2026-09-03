@@ -1,5 +1,28 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (2026-09-03 — coroutine-body infra landed (VarDecl + body-built strings); this file NOT closed, blocked on cross-method tuple-return coherence)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: `burst`
+still refused, `every yield must carry a value, and all values must
+agree on one scalar type`. Root cause is unchanged from the entries
+below — `burst` yields both `Idler.__next__(self)` (a real 2-tuple
+return, now typed `MojoList *` at the yield site) and `response` from
+`while response := self._pop(interval, None)` where `_pop` returns
+tuples across multiple return paths and no tuple-return-type
+representation exists for an ordinary (non-generator) function. That
+cross-method coherence gap is genuinely feature-sized and was not
+attempted this session.
+
+This session DID land general compiled-generator/coroutine-body infra
+that several of these generator docs need: `var x = <expr>` (Mojo
+`VarDecl`) is now lowered inside a coroutine body (it was a hard
+refusal), and `String(x)`/`str(x)` in a coroutine body is now
+type-dispatched (`mojo_str_from_int`/`mojo_repr_float`/char* passthrough)
+so a string assembled from a numeric part before being yielded compiles
+and runs correctly (previously `String(0)` mis-stringified to `"None"`).
+Full gate clean (test_gimple 266, generator/async runners, check-selfhost,
+compile_stdlib 0 unexpected, dylib 0 skip, link-mode). Doc stays open.
+
 ## Status (updated 2026-08-26, later same day — the exact symmetric fix this doc anticipated LANDED; blocker (2) resolved into the predicted mixed-yield refusal; ADVANCED, not closed)
 
 Implemented the fix the 2026-08-26 (opencode-genlib2) entry below already

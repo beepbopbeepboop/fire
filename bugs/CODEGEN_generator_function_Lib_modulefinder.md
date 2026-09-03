@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (2026-09-03, later — coroutine-body infra landed; still blocked on the 3 stacked gaps enumerated below)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+`scan_opcodes` still refused (`every yield must carry a value...`). The
+3 stacked, independently feature-sized gaps enumerated in the 2026-08-11
+entry (nested variable-arity tuple slot; bound-method-as-value generator
+consumer; tag-discriminated variable-shape unpack) are all unchanged;
+none was attempted this session. General coroutine-body infra landed
+this session (`var x = <expr>` VarDecl lowering; type-dispatched
+`String(x)`/`str(x)` for body-built strings) — see the imaplib doc's
+2026-09-03 entry — but none of it touches this file's blockers. Doc
+stays open.
+
 ## Status (2026-09-03, worktree agent-aabd2cf376c9f0f42 — checked against the pop-time shape-discrimination increment; NOT closed by it)
 
 The `stack.pop()` / `isinstance(x, tuple)` / boxed-value tuple-unpack

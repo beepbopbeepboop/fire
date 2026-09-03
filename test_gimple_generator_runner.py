@@ -1387,6 +1387,23 @@ def main():
 """, "151\n60\n")
 
 
+    # `var`-declared local (Mojo VarDecl) inside a generator body, plus a
+    # string built in the body from a numeric part via String(i) and
+    # concatenation — the compiled coroutine emitter used to hard-refuse
+    # the VarDecl outright ("unsupported statement in generator body:
+    # VarDecl") and, once that was lowered, mis-stringify String(0) as
+    # "None" (mojo_str's pointer heuristic reads 0 as NULL).
+    test_generator_stdout("generator_vardecl_string_built_in_body", """\
+def gen_str(n):
+    for i in range(n):
+        var s = "item" + String(i)
+        yield s
+
+def main():
+    for x in gen_str(3):
+        print(x)
+""", "item0\nitem1\nitem2\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

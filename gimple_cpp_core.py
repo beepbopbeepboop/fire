@@ -2748,8 +2748,33 @@ def _cpp_expr(gen, e) -> str:
                 # container/string pointer — exactly what this emitter's
                 # locals hold.
                 return f"mojo_len((int64_t)({args[0]}))"
-            if (fname == 'str' and len(e.args) == 1
-                    and not gen._locally_binds_name('str')):
+            if (fname in ('str', 'String') and len(e.args) == 1
+                    and not gen._locally_binds_name(fname)):
+                # `str(x)` / Mojo's `String(x)` stringification. Dispatch
+                # by the argument's static ctype: a genuinely numeric
+                # value (int64_t/_Bool, incl. a small-int loop index
+                # `String(i)` built in the body) must go through
+                # `mojo_str_from_int` — `mojo_str`'s pointer heuristic
+                # mis-reads a small integer like 0 as NULL ("None") — a
+                # double through `mojo_str_from_double`; a char* is
+                # already a string (passthrough); anything untracked
+                # keeps `mojo_str`'s flexible fallback.
+                _sarg = e.args[0]
+                _sct = None
+                try:
+                    _sct = gimple_exprtypes._infer_simple_expr_ctype(
+                        _sarg, gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api,
+                        fn_return_types=_cpp_trusted_fn_return_types(gen))
+                except Exception:
+                    _sct = None
+                if _sct in ('int64_t', '_Bool', 'bool', 'int'):
+                    return f"mojo_str_from_int((int64_t)({args[0]}))"
+                if _sct == 'double':
+                    return f"mojo_repr_float((double)({args[0]}))"
+                if _sct == 'char *':
+                    return f"((char *)({args[0]}))"
                 return f"mojo_str((void *)({args[0]}))"
             if (fname == 'int' and len(e.args) == 1
                     and not gen._locally_binds_name('int')):
@@ -4668,6 +4693,50 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         if name in gen._cpp_mut_capture_names:
             return [f"{indent}*{cpp_name} = {val};"]
         return [f"{indent}{cpp_name} = {val};"]
+    if isinstance(s, gimple_ctypes.VarDecl):
+        # Mojo `var x = <expr>` / `var x: T = <expr>` inside a compiled
+        # generator/coroutine body. Semantically this is a plain local
+        # binding — identical to `x = <expr>` for a first-seen name —
+        # so it is lowered by delegating to the AssignStmt handler
+        # above with a synthesized plain-identifier target, reusing all
+        # of its container-literal / struct-ctor / generator-handle /
+        # func-scope-hoist machinery rather than duplicating any of it.
+        # A bare `var x: T` with no initializer just declares the local
+        # (function scope, matching every other local in this model);
+        # its ctype comes from `_infer_simple_expr_ctype` on the
+        # annotation when resolvable, else the int64_t default every
+        # other unknown-type local already gets.
+        if not isinstance(s.name, str):
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "unsupported VarDecl target in generator body")
+        if s.value is not None:
+            return gen._cpp_stmt(
+                gimple_ctypes.AssignStmt(
+                    target=gimple_ctypes.IdentExpr(name=s.name),
+                    value=s.value, type_ann=s.type_ann),
+                declared, indent)
+        name = s.name
+        if name in gen._cpp_kw_param_renames:
+            cpp_name = gen._cpp_kw_param_renames[name]
+        elif name in gimple_ctypes._C_KEYWORDS or name in gimple_ctypes._CPP_KEYWORD_FIELDS or name in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
+            cpp_name = f"_kw_{name}"
+            gen._cpp_kw_param_renames[name] = cpp_name
+        else:
+            cpp_name = name
+        if name not in declared:
+            ctype = None
+            if s.type_ann is not None:
+                ctype = gimple_exprtypes._infer_simple_expr_ctype(
+                    s.type_ann, declared, getattr(gen, '_cpp_gen_self_fields', None),
+                    gen._async_api,
+                    fn_return_types=_cpp_trusted_fn_return_types(gen))
+            if ctype is None:
+                ctype = 'int64_t'
+            declared[name] = ctype
+            if gen._cpp_func_scope_decls is not None:
+                gen._cpp_func_scope_decls.append(
+                    f"{gimple_exprtypes._c_to_cpp_scalar_type(ctype)} {cpp_name};")
+        return []
     if isinstance(s, gimple_ctypes.AugAssignStmt):
         if not isinstance(s.target, gimple_ctypes.IdentExpr) or s.target.name not in declared:
             # self.field += val  →  self->field = self->field op val
