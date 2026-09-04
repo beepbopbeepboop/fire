@@ -2190,18 +2190,6 @@ def gen_module_impl(self, stmts):
                         self._class_attrs[s.name][aname] = mangled
                         v = field.value
                         ctype = _class_attr_ctype(v)
-                        if ctype is None and isinstance(v, IdentExpr):
-                            # `_FLOAT = _GD_FLOAT` — a class attr aliasing a
-                            # module-scope / imported container global (the
-                            # `TypeLattice._SIGNED/_FLOAT/...` membership
-                            # tables). Resolve the alias's container type so
-                            # `cls._FLOAT` reads emit `_classattr_..._FLOAT`
-                            # rather than dynamic-getattr -> a compile-time
-                            # id() constant baked into the C (nondeterministic).
-                            _alias_t = (self._global_var_types.get(v.name)
-                                        or self._global_var_types.get(aname))
-                            if _alias_t in ('MojoDict *', 'MojoList *', 'MojoSet *'):
-                                ctype = _alias_t
                         if ctype is not None:
                             self._global_var_types[mangled] = ctype
                             cur = self.struct_field_types[s.name].get(aname)
