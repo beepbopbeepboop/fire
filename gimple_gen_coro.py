@@ -328,6 +328,39 @@ def _async_awaits_ok(fn: N.FunctionDef) -> bool:
     return ok == total
 
 
+_LOCK_CTORS = {'BlockingScopedLock', 'BlockingSpinLock'}
+
+
+def _is_lock_with(node) -> bool:
+    """`with BlockingScopedLock(lock):` / `BlockingSpinLock(...)` -- this
+    runtime is strictly single-threaded/cooperative (a coroutine only ever
+    yields control at an explicit suspension point; nothing interleaves
+    between two statements with none in between), so a scoped mutual-
+    exclusion guard around a body with NO suspension point inside it is a
+    provable no-op and can be elided entirely, mirroring the existing
+    cpp-path treatment (test_async_with_lock_guard.py) exactly, including
+    its safety rule: refuse (never silently elide) if the body contains a
+    real suspension point, where a different coroutine genuinely could
+    run during the wait."""
+    return (isinstance(node, N.WithStmt) and len(node.items) == 1
+            and node.items[0].alias is None
+            and isinstance(node.items[0].expr, N.CallExpr)
+            and isinstance(node.items[0].expr.func, N.IdentExpr)
+            and node.items[0].expr.func.name in _LOCK_CTORS)
+
+
+def _lock_with_body_suspends(node) -> bool:
+    return any(isinstance(x, (N.AwaitExpr, N.YieldExpr, N.YieldFromExpr))
+              for s in node.body for x in _walk(s))
+
+
+def _lock_withs_ok(fn: N.FunctionDef) -> bool:
+    for n in _walk(fn):
+        if isinstance(n, N.WithStmt) and _is_lock_with(n) and _lock_with_body_suspends(n):
+            return False
+    return True
+
+
 def _async_for_ok(fn: N.FunctionDef) -> bool:
     """Every `async for x in <iter>:` must target a plain single name and
     iterate a plain call to a bare top-level name -- the only shape
@@ -367,6 +400,8 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False) -> tuple[boo
         return False, 'await in an unhandled shape (v0)'
     if not _async_for_ok(fn):
         return False, 'async for in an unhandled shape (v0)'
+    if not _lock_withs_ok(fn):
+        return False, 'with <lock>: containing a suspension point (unsafe to elide)'
     return True, ''
 
 
@@ -530,6 +565,12 @@ def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
             body = _rewrite_async_stmts([_deep_copy_stmt(b) for b in s.body], cvar)
             out.extend(_async_for_drive_stmts(cvar, s.target, s.iterable, body))
             continue
+        if _is_lock_with(s):
+            # provable no-op in this strictly single-threaded/cooperative
+            # runtime (gated by _lock_withs_ok at eligibility) -- elide
+            # the guard, keep the body.
+            out.extend(_rewrite_async_stmts([_deep_copy_stmt(b) for b in s.body], cvar))
+            continue
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _rewrite_async_stmts(h.body, cvar)
@@ -588,6 +629,9 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
                 and _await_target_name(s.iterable) is not None):
             body = _rewrite_async_gen_stmts([_deep_copy_stmt(b) for b in s.body], cvar)
             out.extend(_async_for_drive_stmts(cvar, s.target, s.iterable, body, forward=_forward_tagged))
+            continue
+        if _is_lock_with(s):
+            out.extend(_rewrite_async_gen_stmts([_deep_copy_stmt(b) for b in s.body], cvar))
             continue
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
