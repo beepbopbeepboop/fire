@@ -225,3 +225,38 @@ __mojo_gen_destroy(int64_t gen)
     __mojo_coro_destroy(g->coro);
     free(g);
 }
+
+/* ── async def / await bridge (runtime/mojo_async_sched.c) ────────────── */
+#include "mojo_wd.h"
+
+extern uint64_t __mojo_async_now_ns(void);
+extern void     __mojo_async_run(MojoCoro *c);
+
+/* `await asyncio.sleep(secs)` -- called from inside a lowered async body
+   with its own __c; suspends until secs have elapsed. */
+void
+__mojo_async_await_sleep(int64_t coro, double secs)
+{
+    uint64_t wake = __mojo_async_now_ns() + (uint64_t)(secs * 1e9);
+    __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_SLEEP, (int64_t)wake));
+}
+
+/* `asyncio.run(f())`'s bridge: genHandle is the MojoGenerator f() already
+   constructed (via the ordinary __mgco_f_start call, routed there because
+   f is registered in _generator_api). Drive its underlying MojoCoro to
+   completion through the scheduler, then make the handle's own bookkeeping
+   agree (so a subsequent __mojo_gen_retval(genHandle) reads the right
+   value) -- __mojo_async_run resumes the raw MojoCoro directly (bypassing
+   MojoGen's own resume/value tracking, which only matters for the
+   intermediate wait-descriptor forwarding, not the final result: the body
+   itself already stored the real return box on the MojoCoro via
+   __mojo_gen_set_return -> __mojo_coro_set_return). */
+void
+__mojo_async_run_gen(int64_t genHandle)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
+    if (!g || g->done) return;
+    __mojo_async_run(g->coro);
+    g->retval = __mojo_coro_return_value(g->coro);
+    g->done = 1;
+}

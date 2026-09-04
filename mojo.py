@@ -448,7 +448,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
             _arch_src = ('mojo_coro_ctx_aarch64.S'
                          if _plat.machine().lower() in ('arm64', 'aarch64')
                          else 'mojo_coro_ctx_generic.c')
-            for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', _arch_src):
+            for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', 'mojo_async_sched.c', _arch_src):
                 _co = f"{basename}_{os.path.splitext(_cs)[0]}.o"
                 _cc = [_GCC_BIN, *cg_flags, '-I', runtime_dir, '-c', '-o', _co,
                        os.path.join(runtime_dir, _cs)]

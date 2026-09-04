@@ -159,7 +159,7 @@ def compile_program(input_file, src, output=None, run=True,
         _arch = ('mojo_coro_ctx_aarch64.S'
                  if platform.machine().lower() in ('arm64', 'aarch64')
                  else 'mojo_coro_ctx_generic.c')
-        for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', _arch):
+        for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', 'mojo_async_sched.c', _arch):
             _p = os.path.join(RUNTIME, _cs)
             _key = cas.module_key(open(_p).read(), [], gcc, _plain + (_cs,))
 
