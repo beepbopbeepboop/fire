@@ -63,7 +63,8 @@ def _walk(node):
             yield from _walk(v)
 
 
-_SCALARISH = {'Int', 'Int64', 'Int32', 'Bool', 'String', 'StringLiteral', '', None}
+_SCALARISH = {'Int', 'Int64', 'Int32', 'Bool', 'String', 'StringLiteral', '', None,
+             'int', 'bool', 'str', 'float'}
 
 
 def _yield_kind(expr) -> str | None:
@@ -751,8 +752,10 @@ _CVAR = '__c'
 
 def _mojo_to_c_type(ann: str) -> str:
     return {
-        'Int': 'int64_t', 'Int64': 'int64_t', 'Int32': 'int64_t',
-        'Bool': '_Bool', 'String': 'char *', 'StringLiteral': 'char *',
+        'Int': 'int64_t', 'Int64': 'int64_t', 'Int32': 'int64_t', 'int': 'int64_t',
+        'Bool': '_Bool', 'bool': '_Bool',
+        'String': 'char *', 'StringLiteral': 'char *', 'str': 'char *',
+        'float': 'double',
         '': 'int64_t', None: 'int64_t',
     }.get(ann, 'int64_t')
 
