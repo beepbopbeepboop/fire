@@ -34,6 +34,7 @@ typedef struct MojoGen {
     void    (*body)(int64_t /* coro handle */);
     int64_t   args[MOJO_GEN_MAX_ARGS];
     int       nargs;
+    int       is_method;   /* args[0] is a `self`/`cls` pointer passed as arg 2 */
     int64_t   value;      /* last yielded box */
     int64_t   retval;     /* return box once done */
     int       done;
@@ -41,25 +42,39 @@ typedef struct MojoGen {
 } MojoGen;
 
 /* The trampoline Layer 2 actually enters (void(MojoCoro*, void*)); it
-   forwards to the Mojo-lowered body with an int64_t handle. */
+   forwards to the Mojo-lowered body with an int64_t coro handle, plus (for
+   a generator METHOD) the receiver pointer as a real 2nd argument so the
+   ordinary codegen can type `self` as `Struct *`. */
 static void
 mgen_thunk(MojoCoro *c, void *env)
 {
     MojoGen *g = (MojoGen *)env;
-    g->body((int64_t)(uintptr_t)c);
+    if (g->is_method) {
+        ((void (*)(int64_t, void *))g->body)((int64_t)(uintptr_t)c,
+                                             (void *)(uintptr_t)g->args[0]);
+    } else {
+        g->body((int64_t)(uintptr_t)c);
+    }
+}
+
+static int64_t
+mgen_new_impl(void (*body)(int64_t), const int64_t *args, int n, int is_method)
+{
+    MojoGen *g = (MojoGen *)calloc(1, sizeof *g);
+    if (!g) return 0;
+    g->body      = body;
+    g->nargs     = n;
+    g->is_method = is_method;
+    for (int i = 0; i < n && i < MOJO_GEN_MAX_ARGS; i++) g->args[i] = args[i];
+    g->coro = __mojo_coro_new(mgen_thunk, g, 0);
+    if (!g->coro) { free(g); return 0; }
+    return (int64_t)(uintptr_t)g;
 }
 
 static int64_t
 mgen_new(void (*body)(int64_t), const int64_t *args, int n)
 {
-    MojoGen *g = (MojoGen *)calloc(1, sizeof *g);
-    if (!g) return 0;
-    g->body  = body;
-    g->nargs = n;
-    for (int i = 0; i < n && i < MOJO_GEN_MAX_ARGS; i++) g->args[i] = args[i];
-    g->coro = __mojo_coro_new(mgen_thunk, g, 0);
-    if (!g->coro) { free(g); return 0; }
-    return (int64_t)(uintptr_t)g;
+    return mgen_new_impl(body, args, n, 0);
 }
 
 int64_t __mojo_gen_new_0(int64_t body)
@@ -82,6 +97,20 @@ int64_t __mojo_gen_new_5(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64
 
 int64_t __mojo_gen_new_6(int64_t body, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5)
 { int64_t a[6] = { a0,a1,a2,a3,a4,a5 }; return mgen_new((void (*)(int64_t))(uintptr_t)body, a, 6); }
+
+/* Method variants: a0 is the receiver pointer (self/cls), passed to the
+   body as a real 2nd argument; a1.. are the ordinary params. */
+int64_t __mojo_gen_new_m0(int64_t body, int64_t self)
+{ int64_t a[1] = { self }; return mgen_new_impl((void (*)(int64_t))(uintptr_t)body, a, 1, 1); }
+
+int64_t __mojo_gen_new_m1(int64_t body, int64_t self, int64_t a1)
+{ int64_t a[2] = { self, a1 }; return mgen_new_impl((void (*)(int64_t))(uintptr_t)body, a, 2, 1); }
+
+int64_t __mojo_gen_new_m2(int64_t body, int64_t self, int64_t a1, int64_t a2)
+{ int64_t a[3] = { self, a1, a2 }; return mgen_new_impl((void (*)(int64_t))(uintptr_t)body, a, 3, 1); }
+
+int64_t __mojo_gen_new_m3(int64_t body, int64_t self, int64_t a1, int64_t a2, int64_t a3)
+{ int64_t a[4] = { self, a1, a2, a3 }; return mgen_new_impl((void (*)(int64_t))(uintptr_t)body, a, 4, 1); }
 
 /* Called from inside the body (via __c) to read a stashed argument. */
 int64_t

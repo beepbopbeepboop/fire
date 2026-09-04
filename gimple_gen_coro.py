@@ -107,7 +107,7 @@ def _yield_from_ok(fn: N.FunctionDef) -> bool:
     return total == bare
 
 
-def _eligible(fn: N.FunctionDef) -> tuple[bool, str]:
+def _eligible(fn: N.FunctionDef, struct_name: str | None = None) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
@@ -116,8 +116,13 @@ def _eligible(fn: N.FunctionDef) -> tuple[bool, str]:
         return False, 'decorated'
     if not _yield_from_ok(fn):
         return False, 'yield from with return-value capture (v0)'
-    # v0: params must be simple positional scalars (or none)
-    for pname, pann in fn.params:
+    params = fn.params
+    if struct_name is not None:
+        if not params or params[0][0] != 'self':
+            return False, 'generator method without a plain `self` first param (v0)'
+        params = params[1:]   # self is typed by the codegen from the annotation
+    # v0: remaining params must be simple positional scalars (or none)
+    for pname, pann in params:
         if pann not in _SCALARISH:
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
@@ -226,14 +231,27 @@ def lower(stmts: list) -> tuple[list, list]:
         return stmts, []
     out = []
     meta = []
+    method_bodies = []
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             ok, _why = _eligible(s)
             if ok:
                 out.append(_lower_one(s, meta))
                 continue
+        if isinstance(s, N.StructDef):
+            _kept = []
+            for m in s.methods:
+                if (isinstance(m, N.FunctionDef) and getattr(m, 'is_generator', False)
+                        and _eligible(m, struct_name=s.name)[0]):
+                    method_bodies.append(_lower_one(m, meta, struct_name=s.name))
+                    # drop the generator method from the struct: gen_module's
+                    # Phase 2a skips _supported_generator_methods anyway, and
+                    # the body now lives as a top-level function
+                else:
+                    _kept.append(m)
+            s.methods = _kept
         out.append(s)
-    return out, meta
+    return out + method_bodies, meta
 
 
 _CVAR = '__c'
@@ -247,37 +265,50 @@ def _mojo_to_c_type(ann: str) -> str:
     }.get(ann, 'int64_t')
 
 
-def _lower_one(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
-    base = f'__mgco_{fn.name}'
+def _lower_one(fn: N.FunctionDef, meta: list,
+               struct_name: str | None = None) -> N.FunctionDef:
+    is_method = struct_name is not None
+    base = (f'__mgco_{struct_name}_{fn.name}' if is_method
+            else f'__mgco_{fn.name}')
     body_name = f'{base}_body'
     kind, _ = _generator_value_kind(fn)
     kind = kind or 'i'
 
-    # prologue: var p_i = __mojo_gen_arg(__c, i)
+    real_params = fn.params[1:] if is_method else fn.params
+    # arg 0 is `self` for a method (a real typed body param), so ordinary
+    # params start at __mojo_gen_arg index 1; else index 0.
+    arg_base = 1 if is_method else 0
     prologue = []
-    for i, (pname, _pann) in enumerate(fn.params):
+    for i, (pname, _pann) in enumerate(real_params):
         prologue.append(N.VarDecl(name=pname, type_ann=None,
-                                  value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
+                                  value=_call(ARG_SHIM, [_c_ident(_CVAR),
+                                                         N.IntLiteral(value=arg_base + i)])))
 
     new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind)
-    # a plain function returning nothing
+    body_params = [(_CVAR, 'Int')]
+    if is_method:
+        body_params.append(('self', struct_name))
     body_fd = N.FunctionDef(
         name=body_name,
-        params=[(_CVAR, 'Int')],
+        params=body_params,
         return_type=None,
         body=new_body,
     )
     body_fd.is_generator = False
     body_fd.is_async = False
 
+    c_params = ([f'{struct_name} *'] if is_method else []) + \
+               [_mojo_to_c_type(a) for _n, a in real_params]
     meta.append({
         'name': fn.name,
+        'struct': struct_name,
+        'is_method': is_method,
         'base': base,
         'body_name': body_name,
-        'params': [_mojo_to_c_type(a) for _n, a in fn.params],
+        'params': c_params,
+        'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
-        'nargs': len(fn.params),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd
@@ -294,15 +325,15 @@ def _deep_copy_stmt(node):
 
 _C_TRAMPOLINE_TMPL = """
 /* --- stack-switch coroutine trampolines for generator {name!r} --- */
-extern int64_t __mojo_gen_new_{nargs} ({new_params});
+extern int64_t {new_fn} ({new_params});
 extern int64_t __mojo_gen_resume (int64_t, int64_t);
 extern int64_t __mojo_gen_value (int64_t);
 extern void    __mojo_gen_destroy (int64_t);
-extern void    {body_name} (int64_t);
+extern void    {body_name} (int64_t{body_extra});
 /* value_kind={value_kind} */
 
 MojoGenerator *{base}_start ({start_params}) {{
-  int64_t __g = __mojo_gen_new_{nargs} ((int64_t)(&{body_name}){arg_fwd});
+  int64_t __g = {new_fn} ((int64_t)(&{body_name}){arg_fwd});
   return (MojoGenerator *)__g;
 }}
 _Bool {base}_resume (MojoGenerator *__g) {{
@@ -319,12 +350,16 @@ void {base}_destroy (MojoGenerator *__g) {{
 
 def emit_c(meta_entry: dict) -> str:
     n = meta_entry['nargs']
-    params = meta_entry['params']
+    params = meta_entry['params']            # includes leading 'Struct *' for a method
+    is_method = meta_entry.get('is_method')
     kind = meta_entry.get('value_kind', 'i')
     vct = _KIND_CTYPE[kind]
+    nslots = len(params)                     # start-fn arg count (self + real args)
     start_params = ', '.join(f'{ct} __a{i}' for i, ct in enumerate(params)) or 'void'
-    arg_fwd = ''.join(f', (int64_t)__a{i}' for i in range(n))
-    new_params = ', '.join(['int64_t'] + ['int64_t'] * n)
+    arg_fwd = ''.join(f', (int64_t)__a{i}' for i in range(nslots))
+    new_params = ', '.join(['int64_t'] + ['int64_t'] * nslots)
+    new_fn = (f'__mojo_gen_new_m{nslots - 1}' if is_method
+              else f'__mojo_gen_new_{nslots}')
     if kind == 'p':
         value_unbox = f'({vct})__mojo_gen_value ((int64_t)__g)'
     elif kind == 'd':
@@ -332,10 +367,11 @@ def emit_c(meta_entry: dict) -> str:
                        '__builtin_memcpy(&__d, &__b, sizeof __d); __d; })')
     else:
         value_unbox = '__mojo_gen_value ((int64_t)__g)'
+    body_extra = f', {meta_entry["struct"]} *' if is_method else ''
     return _C_TRAMPOLINE_TMPL.format(
         name=meta_entry['name'], base=meta_entry['base'],
-        body_name=meta_entry['body_name'], nargs=n, value_kind=kind,
-        value_ctype=vct, value_unbox=value_unbox,
+        body_name=meta_entry['body_name'], new_fn=new_fn, value_kind=kind,
+        value_ctype=vct, value_unbox=value_unbox, body_extra=body_extra,
         start_params=start_params, arg_fwd=arg_fwd, new_params=new_params,
     )
 
@@ -358,10 +394,13 @@ def register(gen, meta: list) -> None:
         }
         if m.get('defaults'):
             api['defaults'] = m['defaults']
-        gen._generator_api[m['name']] = api
-        # mark as a "supported generator" so gen_module skips ordinary
-        # emission for the bare name and emits the extern decl block
-        gen._supported_generators[m['name']] = None
+        if m.get('is_method'):
+            gen._generator_method_api[(m['struct'], m['name'])] = api
+            gen._supported_generator_methods[(m['struct'], m['name'])] = None
+        else:
+            gen._generator_api[m['name']] = api
+            # skip ordinary emission for the bare name + emit the extern block
+            gen._supported_generators[m['name']] = None
         # the body must keep its exact name (the trampoline calls it) --
         # opt it out of overload-suffix mangling
         gen._extra_no_mangle.add(m['body_name'])
