@@ -204,6 +204,12 @@ def _is_asyncio_sleep_call(node) -> bool:
             and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
 
 
+def _is_asyncio_sock_recv_call(node) -> bool:
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member == 'sock_recv' and len(node.args) == 1
+            and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
+
+
 def _is_asyncio_run_call(node) -> bool:
     return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
             and node.func.member == 'run' and len(node.args) == 1
@@ -222,7 +228,8 @@ def _await_target_name(node) -> str | None:
 
 def _await_stmt_ok(s) -> bool:
     inner = s.value.value
-    return _is_asyncio_sleep_call(inner) or _await_target_name(inner) is not None
+    return (_is_asyncio_sleep_call(inner) or _is_asyncio_sock_recv_call(inner)
+            or _await_target_name(inner) is not None)
 
 
 def _async_awaits_ok(fn: N.FunctionDef) -> bool:
@@ -283,6 +290,13 @@ def _await_drive_stmts(cvar: str, inner) -> tuple[list, object]:
         secs = _rewrite_async_expr(inner.args[0], cvar)
         stmts = [N.ExprStmt(value=_call('__mojo_async_await_sleep', [_c_ident(cvar), secs]))]
         return stmts, N.IntLiteral(value=0)
+    if _is_asyncio_sock_recv_call(inner):
+        fd = _rewrite_async_expr(inner.args[0], cvar)
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_sock_recv', [_c_ident(cvar), fd]))]
+        return stmts, _c_ident(rv)
     name = _await_target_name(inner)
     args = [_rewrite_async_expr(a, cvar) for a in inner.args]
     _AW_COUNTER[0] += 1
@@ -714,6 +728,8 @@ def register(gen, meta: list) -> None:
     # is_async entry would miss it).
     gen.func_param_types.setdefault('__mojo_async_await_sleep', ['int64_t', 'double'])
     gen.func_return_types.setdefault('__mojo_async_await_sleep', 'void')
+    gen.func_param_types.setdefault('__mojo_async_await_sock_recv', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_await_sock_recv', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_retval', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_retval', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])

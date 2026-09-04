@@ -5850,6 +5850,7 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_tuple_box_7 (int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_8 (int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);',
             'extern void    __mojo_async_await_sleep (int64_t, double);',
+            'extern int64_t __mojo_async_await_sock_recv (int64_t, int64_t);',
             'extern int64_t __mojo_gen_retval (int64_t);',
             'extern void    __mojo_async_run_gen (int64_t);',
           ) if getattr(self, '_stackswitch_coro_c_units', None) else ()),

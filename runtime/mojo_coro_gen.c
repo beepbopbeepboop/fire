@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Layer 2 also needs a way to hand a body its stashed args: */
 extern void *__mojo_coro_env(MojoCoro *c);   /* defined in mojo_coro.c (added) */
@@ -239,6 +240,21 @@ __mojo_async_await_sleep(int64_t coro, double secs)
 {
     uint64_t wake = __mojo_async_now_ns() + (uint64_t)(secs * 1e9);
     __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_SLEEP, (int64_t)wake));
+}
+
+/* `await asyncio.sock_recv(fd)` -- reads ONE byte once fd is readable,
+   matching the existing cpp-path _mojoasync_SockRecvAwaiter exactly:
+   returns the byte value on success, -1 on EOF (peer closed), -2 on a
+   real read error. */
+int64_t
+__mojo_async_await_sock_recv(int64_t coro, int64_t fd)
+{
+    __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_READ, fd));
+    unsigned char c;
+    ssize_t n = read((int)fd, &c, 1);
+    if (n == 1) return (int64_t)c;
+    if (n == 0) return (int64_t)-1;
+    return (int64_t)-2;
 }
 
 /* `asyncio.run(f())`'s bridge: genHandle is the MojoGenerator f() already
