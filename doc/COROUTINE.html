@@ -589,10 +589,27 @@ none of the three statement rewriters recursed into a <code>TryStmt</code>'s
 <code>except:</code> handler bodies at all (a real, previously-latent gap since session
 start), so a <code>return</code>/<code>await</code>/<code>yield</code> inside a handler was
 silently left un-rewritten.</p>
+<p><strong><code>with BlockingScopedLock</code>/<code>BlockingSpinLock</code>: DONE</strong> —
+this runtime is strictly single-threaded/cooperative (a coroutine only yields at an
+explicit <code>await</code>), so a lock guard around a body with no suspension point
+inside is a <em>provable</em> no-op and is elided entirely; a guard whose body DOES
+contain an <code>await</code> is honestly refused, never silently elided (matching the
+existing cpp-path safety rule exactly). Verified standalone (param-based, not a captured
+outer local — see gap below): guard elided, correct value; await-inside-lock case
+correctly refused.</p>
 <p><strong>Still cpp-path-only</strong> (not yet ported — <code>gimple_cpp_async.py</code>
-stays live for these): locks/<code>async with</code>, detached async
-(<code>_take_handle()</code> / GPU device-context dispatch), nested async closures held
-across multiple call sites (beyond the create_task wrapper idiom already covered above).</p>
+stays live for these):</p>
+<ul>
+<li><strong>Mutable transitive closure capture into a nested async function</strong> — the
+    real test suite's own lock-guard cases mutate a variable declared in the ENCLOSING
+    ordinary function (`rawCounter += 1` from inside `@parameter async def inc():`), which
+    needs detecting free variables, boxing them, and threading them as extra hidden args so
+    the enclosing function sees the mutation back. Not built; a real prerequisite for the
+    full lock-guard tests (the elision mechanism itself is verified independently, above).
+    Also blocks general "nested async closures" beyond the create_task wrapper idiom
+    (which needs no capture — its `wrapper()` only reads ordinary top-level names).</li>
+<li>Detached async (<code>_take_handle()</code> / GPU device-context dispatch).</li>
+</ul>
 
 <h2>9. Bug-by-bug status (2026-09-04, <code>test_coro_bugs.py</code>)</h2>
 <p>Isolated compile (<code>compile_to_gimple_with_cpp</code>, no link) + real
