@@ -396,18 +396,30 @@ def _render_struct_typedef_body(struct_name, fields):
     return lines
 
 
-def _collect_import_modules(modules_to_compile, node_list):
+def _collect_import_modules(modules_to_compile: dict, node_list):
     """Populate `modules_to_compile` with every module named by an import
     anywhere in `node_list` — top level and nested inside function bodies,
     if/try/loop blocks. Deliberately a module-level function taking the
     accumulator explicitly rather than a nested closure over it: on the
     self-hosted (compiled) path a recursive nested function's capture of a
-    mutable set was unreliable, so `--dump-full` silently saw only the
-    module's own top-level imports and emitted a truncated closure."""
+    mutable set/dict was unreliable, so `--dump-full` silently saw only the
+    module's own top-level imports and emitted a truncated closure.
+
+    `modules_to_compile: dict` is an EXPLICIT annotation, not decoration:
+    this parameter used to be a `set` (`.add(...)` at every call site), and
+    the caller changed it to a `dict` (`[...] = True`) for deterministic
+    `sorted()` order — but the two-hop call chain
+    (`gen_module_impl` -> `_collect_import_modules` ->
+    `_collect_import_modules_rec`) left the self-hosted param-type inference
+    for this bare, unannotated parameter still defaulting to its old
+    container shape. `modules_to_compile[key] = True` inside
+    `_collect_import_modules_rec` then lowered as a LIST subscript
+    assignment (`mojo_list_set_int` with `key`'s pointer value used as the
+    index) -> SIGBUS, wildly out of bounds. The annotation pins the ctype."""
     _collect_import_modules_rec(modules_to_compile, node_list, 0)
 
 
-def _collect_import_modules_rec(modules_to_compile, node_list, _depth):
+def _collect_import_modules_rec(modules_to_compile: dict, node_list, _depth: int):
     # Depth cap: on the self-hosted path a mis-lowered `isinstance(stmt,
     # (WhileStmt, ForStmt, TryStmt))` tuple-isinstance or an aliased `.body`
     # can make this recurse without bound (observed as a multi-GB memory
