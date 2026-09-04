@@ -1135,6 +1135,11 @@ class GimpleGen:
         # _supported_async/_async_api exactly.
         self._supported_async_gen: dict[str, FunctionDef] = {}
         self._async_gen_api: dict[str, dict] = {}
+        # Declared here (not lazily `gen._x = []` in gimple_gen_coro) so the
+        # frozen self-host GimpleGen struct has the field — else `--dump-full`
+        # of a source that emits a stack-switch coroutine hits
+        # "'GimpleGen' has no member named '_stackswitch_coro_c_units'".
+        self._stackswitch_coro_c_units: list = []
         # Set (and always cleared in a finally) by _gen_cpp_async_unit for
         # the duration of ONE async function's body translation — lets the
         # SHARED _cpp_stmt/_cpp_expr whitelist emitter (reused from the
