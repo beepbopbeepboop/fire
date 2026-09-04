@@ -150,6 +150,36 @@ __mojo_gen_set_return(int64_t coro, int64_t v)
     __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, v);
 }
 
+/* `yield (a, b, ...)` -- box the slots into a MojoList (each stored as its
+   raw int64_t bits, exactly the convention _emit_generator_tuple_unpack
+   reads back via mojo_list_get_{int,str,...}) and hand the list pointer
+   bits to the yield as one int64_t. */
+extern void   *mojo_list_new(void);
+extern void    mojo_list_append_int(void *, int64_t);
+
+static int64_t
+tuple_box(const int64_t *slots, int n)
+{
+    void *l = mojo_list_new();
+    for (int i = 0; i < n; i++) mojo_list_append_int(l, slots[i]);
+    return (int64_t)(uintptr_t)l;
+}
+
+int64_t __mojo_tuple_box_2(int64_t a, int64_t b)
+{ int64_t s[2] = { a, b }; return tuple_box(s, 2); }
+int64_t __mojo_tuple_box_3(int64_t a, int64_t b, int64_t c)
+{ int64_t s[3] = { a, b, c }; return tuple_box(s, 3); }
+int64_t __mojo_tuple_box_4(int64_t a, int64_t b, int64_t c, int64_t d)
+{ int64_t s[4] = { a, b, c, d }; return tuple_box(s, 4); }
+int64_t __mojo_tuple_box_5(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e)
+{ int64_t s[5] = { a, b, c, d, e }; return tuple_box(s, 5); }
+int64_t __mojo_tuple_box_6(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f)
+{ int64_t s[6] = { a, b, c, d, e, f }; return tuple_box(s, 6); }
+int64_t __mojo_tuple_box_7(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g)
+{ int64_t s[7] = { a, b, c, d, e, f, g }; return tuple_box(s, 7); }
+int64_t __mojo_tuple_box_8(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
+{ int64_t s[8] = { a, b, c, d, e, f, g, h }; return tuple_box(s, 8); }
+
 /* resume: 1 = produced a value (read via __mojo_gen_value), 0 = done. On an
    uncaught exception in the body, __mojo_coro_resume re-raises here (live
    stack) -- so a 0 return is always genuine exhaustion by the time we see

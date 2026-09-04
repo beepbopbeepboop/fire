@@ -32,7 +32,7 @@ _MODE = 'stackswitch'
 
 ARG_SHIM     = '__mojo_gen_arg'
 SETRET_SHIM  = '__mojo_gen_set_return'
-_KIND_CTYPE  = {'i': 'int64_t', 'p': 'char *', 'd': 'double'}
+_KIND_CTYPE  = {'i': 'int64_t', 'p': 'char *', 'd': 'double', 'tuple': 'MojoList *'}
 
 
 def _yield_shim(kind: str) -> str:
@@ -91,17 +91,58 @@ def _yield_kind(expr) -> str | None:
     return None
 
 
-def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
-    kinds = set()
+_KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'p': 'char *', 'd': 'double', None: 'int64_t'}
+
+
+def _generator_tuple_slots(fn: N.FunctionDef):
+    """If every `yield` in `fn` yields a tuple LITERAL of the same arity,
+    return the per-slot C type list; else None. Used only when
+    _generator_value_kind says 'tuple'."""
+    shapes = []
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
-            kinds.add(_yield_kind(n.value))
+            if not isinstance(n.value, N.TupleExpr):
+                return None
+            shapes.append(tuple(_yield_kind(e) for e in n.value.elements))
+    if not shapes:
+        return None
+    ar = len(shapes[0])
+    if any(len(s) != ar for s in shapes):
+        return None
+    slots = []
+    for i in range(ar):
+        kinds = {s[i] for s in shapes}
+        kinds.discard(None)
+        if len(kinds) > 1:
+            return None            # inconsistent slot type across yields
+        k = next(iter(kinds)) if kinds else None
+        if k == 'tuple':
+            return None            # nested tuple in a slot -- not v0
+        slots.append(_KIND_TO_SLOT_CTYPE[k])
+    return slots
+
+
+def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
+    kinds = set()
+    has_tuple = has_nontuple = False
+    for n in _walk(fn):
+        if isinstance(n, N.YieldExpr):
+            k = _yield_kind(n.value)
+            kinds.add(k)
+            if k == 'tuple':
+                has_tuple = True
+            else:
+                has_nontuple = True
         elif isinstance(n, N.YieldFromExpr):
-            kinds.add(None)   # delegate kind unknown -> 'i' default, coerced
-    if 'tuple' in kinds:
-        return None, 'tuple yield (v0)'
+            kinds.add(None)
+            has_nontuple = True
+    if has_tuple and has_nontuple:
+        return None, 'mixed tuple / non-tuple yields (v0)'
+    if has_tuple:
+        return ('tuple', '') if _generator_tuple_slots(fn) is not None \
+            else (None, 'tuple yield with inconsistent shape (v0)')
     if 'd' in kinds and (kinds - {'d', None}):
-        return None, f'mixed float / non-float yields {sorted(k for k in kinds if k)} (v0)'
+        return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:
         return 'd', ''
     if 'p' in kinds:
@@ -161,6 +202,10 @@ def _rewrite_expr(node, cvar: str, kind: str):
     if node is None or not hasattr(node, '__dict__'):
         return node
     if isinstance(node, N.YieldExpr):
+        if kind == 'tuple' and isinstance(node.value, N.TupleExpr):
+            els = [_rewrite_expr(e, cvar, kind) for e in node.value.elements]
+            boxed = _call(f'__mojo_tuple_box_{len(els)}', els)
+            return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
         val = (_rewrite_expr(node.value, cvar, kind) if node.value is not None
                else N.IntLiteral(value=0))
         return _call(_yield_shim(kind), [_c_ident(cvar), val])
@@ -321,6 +366,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
+        'tuple_slot_ctypes': _generator_tuple_slots(fn) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd
@@ -374,6 +420,8 @@ def emit_c(meta_entry: dict) -> str:
               else f'__mojo_gen_new_{nslots}')
     if kind == 'p':
         value_unbox = f'({vct})__mojo_gen_value ((int64_t)__g)'
+    elif kind == 'tuple':
+        value_unbox = '(MojoList *)__mojo_gen_value ((int64_t)__g)'
     elif kind == 'd':
         value_unbox = ('({ double __d; long long __b = __mojo_gen_value ((int64_t)__g); '
                        '__builtin_memcpy(&__d, &__b, sizeof __d); __d; })')
@@ -403,12 +451,15 @@ def register(gen, meta: list) -> None:
     gen.func_param_types.setdefault('__mojo_coro_yield_d', ['int64_t', 'double'])
     gen.func_param_types.setdefault('__mojo_gen_arg', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_gen_set_return', ['int64_t', 'int64_t'])
+    for _k in range(2, 9):
+        gen.func_param_types.setdefault(f'__mojo_tuple_box_{_k}', ['int64_t'] * _k)
+        gen.func_return_types.setdefault(f'__mojo_tuple_box_{_k}', 'int64_t')
     for m in meta:
         api = {
             'base': m['base'],
             'value_ctype': m['value_ctype'],
             'params': m['params'],
-            'tuple_slot_ctypes': None,
+            'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'has_return_value': True,
         }
         if m.get('defaults'):

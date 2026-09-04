@@ -33,3 +33,26 @@ void mojo_raise(void)
     if (_mojo_exc_top < 0) { abort(); }
     longjmp(_mojo_exc_stack[_mojo_exc_top], 1);
 }
+
+/* minimal MojoList so mojo_coro_gen.c's __mojo_tuple_box_* link in the
+   unit test (the real build links runtime/mojo_runtime.c) */
+typedef struct { int64_t *d; int n, cap; } _TestList;
+void *mojo_list_new(void)
+{
+    _TestList *l = calloc(1, sizeof *l);
+    return l;
+}
+void mojo_list_append_int(void *lp, int64_t v)
+{
+    _TestList *l = lp;
+    if (l->n == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 4;
+        l->d = realloc(l->d, l->cap * sizeof(int64_t));
+    }
+    l->d[l->n++] = v;
+}
+int64_t mojo_list_get_int(void *lp, int64_t i)
+{
+    _TestList *l = lp;
+    return (i >= 0 && i < l->n) ? l->d[i] : 0;
+}
