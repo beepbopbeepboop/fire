@@ -524,15 +524,43 @@ async coroutine yields at <code>await</code>) + <code>gimple_gen_coro.py</code>'
 asyncio.sleep(.05); return 42</code> + <code>asyncio.run(f())</code> → 42; a two-level
 <code>await</code> chain (outer awaits leaf, leaf sleeps 20ms, outer doubles the result) →
 20. <code>check-coro</code> 16/16.</p>
-<p><strong>v0 scope</strong> — free async functions, scalar params, <code>await</code> only
-as a bare/assigned statement targeting <code>asyncio.sleep</code> or a plain-name async
-call. <strong>NOT yet ported</strong> (still cpp-path-only): sockets
-(<code>asyncio.sock_recv</code> etc.), locks/<code>async with</code>, exceptions crossing an
-<code>await</code>, async generators, detached async (<code>_take_handle()</code> /
-GPU device-context dispatch), nested async closures. These are real, separately-sized
-pieces of the existing 38-case <code>test_gimple_async_runner.py</code> suite — <strong>the
-cpp path (<code>gimple_cpp_async.py</code>) must stay live for these until each is ported</strong>;
-deleting it now would regress real working functionality.</p>
+<p><strong>Since v0, verified against the REAL expected outputs of
+<code>test_gimple_async_runner.py</code>'s own cases</strong> (not just "it compiles") —
+every one byte-for-byte matching what the existing cpp-path suite asserts:</p>
+<ul>
+<li><b>Real socket I/O</b> — <code>await asyncio.sock_recv(fd)</code>
+    (<code>__mojo_async_await_sock_recv</code>, reusing the scheduler's kqueue reactor
+    <code>MOJO_WD_READ</code> primitive); verified via a standalone fork+delayed-pipe-write
+    harness (real suspend-until-readable, correct byte).</li>
+<li><b>Async generators</b> (<code>async def f(): await …; yield …</code>, consumed via
+    <code>async for</code>) — needed a Layer-2 addition: a TAGGED yield channel
+    (<code>__mojo_coro_yield_tagged</code> + a <code>last_wd</code> flag) so a real
+    <code>yield</code> and an <code>await</code>'s forwarded wait-descriptor, sharing one
+    physical suspend channel, can be told apart by the consumer. Verified: two real sleeps
+    between yields accumulated via <code>async for</code> → 3; an early <code>break</code>
+    after 2 of 4 yields → 30 with wall-clock confirming only 2 sleeps ran (clean
+    abandonment); a parametrized async generator <code>f(10)</code> → 21.
+    <span class="note" style="display:inline">Caught and fixed a real bug here</span> —
+    <code>__mojo_async_await_sleep</code>/<code>_sock_recv</code> initially used the
+    UNTAGGED yield, so their wait-descriptor was silently misread as the generator's own
+    yielded value the first time a suspend happened inside one, corrupting the
+    accumulation; found immediately because the test asserted the real numeric result, not
+    just successful compilation.</li>
+<li><b>Exceptions</b> — raised-and-caught internally, raised inside an <em>awaited callee</em>
+    and caught by the awaiter's own <code>try/except</code>, and raised inside an async
+    generator and caught by the <code>async for</code> caller (→ 101) — all compose for
+    free with the pre-existing generic exception-boundary mechanism (Layer 2's setjmp/
+    longjmp discipline doesn't care how many ordinary C stack frames — including the
+    scheduler's own — sit between raise and catch). An exception escaping ALL the way out
+    of <code>asyncio.run(f())</code> uncaught, caught by <em>ordinary</em> ordinary code's
+    own <code>try/except</code> around the call, verified byte-for-byte
+    (<code>"caught\nboom\n"</code>).</li>
+</ul>
+<p><strong>Still cpp-path-only</strong> (not yet ported — <code>gimple_cpp_async.py</code>
+stays live for these): <code>asyncio.create_task</code>/<code>Task</code>/concurrent
+tasks (Step I — real concurrency beyond a sequential await chain), locks/
+<code>async with</code>, detached async (<code>_take_handle()</code> / GPU
+device-context dispatch), nested async closures.</p>
 
 <h2>9. Bug-by-bug status (2026-09-04, <code>test_coro_bugs.py</code>)</h2>
 <p>Isolated compile (<code>compile_to_gimple_with_cpp</code>, no link) + real
