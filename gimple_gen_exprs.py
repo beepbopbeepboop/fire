@@ -2232,6 +2232,23 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     return gen._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
 
 
+def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
+                          _ov_a: str, _ov_b: str) -> tuple:
+    """Emit a set-op call and carry a known element type onto the result —
+    `sorted(a_set - b_set)` / `for x in (a | b):` otherwise binds `x` as
+    boxed int64_t (a real self-host miscompile). Module-level, not a nested
+    closure inside `_lower_binary_tail`: as a lifted closure its `gen`
+    capture typed int64_t and `gen._call_expr(...)`'s returned temp NAME
+    erased to a decimal address (`MojoList * (49784941744);` locals in the
+    lifted `_lower_binary_tail__set_op`, different every --dump-full run)."""
+    _res = gen._call_expr('MojoSet *', _fn,
+                          [('MojoSet *', _la), ('MojoSet *', _lb)])
+    _e = gen._elem_of(_ov_a) or gen._elem_of(_ov_b)
+    if _e and _e != 'int64_t':
+        gen._elem_types[_res] = _e
+    return 'MojoSet *', _res
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -2716,27 +2733,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         if t == 'MojoSet *':
             return v
         return gen._new_val('MojoSet *', f'(MojoSet *){gen._ensure_local(t, v)}')
-    def _set_op(_fn, _la, _lb, _ov_a, _ov_b):
-        """Emit a set-op call and carry a known element type onto the
-        result — `sorted(a_set - b_set)` / `for x in (a | b):` otherwise
-        binds `x` as boxed int64_t (a real self-host miscompile:
-        `sorted(self._funcptr_builtins_needed - self._emitted_funcptr_
-        builtins)` -> `c_name[0]` on a char* pointer via mojo_list_get_int
-        -> segfault)."""
-        _res = gen._call_expr('MojoSet *', _fn,
-                              [('MojoSet *', _la), ('MojoSet *', _lb)])
-        _e = gen._elem_of(_ov_a) or gen._elem_of(_ov_b)
-        if _e and _e != 'int64_t':
-            gen._elem_types[_res] = _e
-        return 'MojoSet *', _res
     if op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
-        return _set_op('mojo_set_union', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_union', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
     # For - on set types, use runtime difference, not C subtraction
     if op == '-' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return _set_op('mojo_set_difference', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_difference', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
     # For & on set types, use runtime intersection, not C bitwise &
     if op == '&' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return _set_op('mojo_set_intersection', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_intersection', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
     # For ^ on set types, symmetric difference = (a - b) | (b - a).
     # No dedicated runtime entry; compose from difference + union.
     if op == '^' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
