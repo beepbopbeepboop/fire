@@ -556,11 +556,43 @@ every one byte-for-byte matching what the existing cpp-path suite asserts:</p>
     own <code>try/except</code> around the call, verified byte-for-byte
     (<code>"caught\nboom\n"</code>).</li>
 </ul>
+<p><strong>Step I — <code>create_task</code>/<code>create_raising_task</code>/<code>Task</code>/
+<code>RaisingTask</code>/<code>.wait()</code>: DONE</strong>, verified against all 5 of the real
+test suite's own literal sources (unmodified — <code>raises</code>, <code>Error(...)</code>,
+the <code>^</code> transfer sigil, <code>from std.runtime.asyncrt import …</code> included):</p>
+<ul>
+<li><code>create_task(f(...))</code>/<code>create_raising_task(f(...))</code> are a pure
+    passthrough to <code>f(...)</code> itself — v0 has no real inter-task concurrency (each
+    task drives fully to completion the moment <code>.wait()</code> is called, exactly like
+    <code>asyncio.run</code>), and an uncaught exception already re-raises through
+    <code>__mojo_coro_resume</code>'s existing contract regardless of Task vs RaisingTask, so
+    no separate Task representation is needed at all.</li>
+<li><code>&lt;task&gt;.wait()</code> / <code>&lt;task&gt;^.wait()</code> and
+    <code>await &lt;task&gt;^</code> (an already-constructed handle, not a fresh call) both
+    reuse the SAME generic <code>__mojo_gen_resume</code>/<code>_value</code>/<code>_destroy</code>
+    shims (identical regardless of which function produced the handle) that make a held
+    handle awaitable at all.</li>
+<li>A <code>@parameter async def wrapper():</code> local to an ordinary function
+    (<code>create_task</code>'s wrapper idiom) is hoisted and lowered with a base qualified
+    by its enclosing function's name, so two different enclosing functions each defining
+    their own same-named <code>wrapper</code> don't collide.</li>
+<li>Verified outputs match exactly: basic wrapper → 30; raising-task success/error → 30 /
+    "intentional error from async task" / 1; keyword-argument await + create_raising_task
+    composition → 42/42/1; held-task chained await → 15; same-named nested helpers in two
+    scopes → 2/200 (not 200/200).</li>
+</ul>
+<p>Three real bugs were found and fixed proving this (documented in their commits): the
+sleep/sock_recv untagged-yield corruption (above), a same-named-nested-helper collision
+from unwrapping <code>create_task(...)</code> before applying the per-scope rename, a
+keyword-argument await target silently dropping its argument, and — the most structural —
+none of the three statement rewriters recursed into a <code>TryStmt</code>'s
+<code>except:</code> handler bodies at all (a real, previously-latent gap since session
+start), so a <code>return</code>/<code>await</code>/<code>yield</code> inside a handler was
+silently left un-rewritten.</p>
 <p><strong>Still cpp-path-only</strong> (not yet ported — <code>gimple_cpp_async.py</code>
-stays live for these): <code>asyncio.create_task</code>/<code>Task</code>/concurrent
-tasks (Step I — real concurrency beyond a sequential await chain), locks/
-<code>async with</code>, detached async (<code>_take_handle()</code> / GPU
-device-context dispatch), nested async closures.</p>
+stays live for these): locks/<code>async with</code>, detached async
+(<code>_take_handle()</code> / GPU device-context dispatch), nested async closures held
+across multiple call sites (beyond the create_task wrapper idiom already covered above).</p>
 
 <h2>9. Bug-by-bug status (2026-09-04, <code>test_coro_bugs.py</code>)</h2>
 <p>Isolated compile (<code>compile_to_gimple_with_cpp</code>, no link) + real
