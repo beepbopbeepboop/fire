@@ -6095,23 +6095,33 @@ def gen_module_impl(self, stmts):
     if not self.module_name and self._current_filename:
         our_mod = os.path.splitext(os.path.basename(self._current_filename))[0]
 
-    all_modules_to_declare = set()
+    # dict not set: `sorted(all_modules_to_declare)` below drives the
+    # `extern struct _<mod>_toplev` block order in a --dump-full closure;
+    # self-hosted `sorted(<set>)` sorts boxed str slots by ADDRESS, so the
+    # whole block (and everything after it) reshuffled every run.
+    all_modules_to_declare = {}
 
     if our_mod != "root":
-        all_modules_to_declare.add("root")
+        all_modules_to_declare["root"] = True
 
-    all_modules_to_declare.update(self._module_globals.keys())
+    for _mgk in self._module_globals:
+        all_modules_to_declare[_as_str(_mgk)] = True
 
     all_scan_for_mods = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
     for _ms in all_scan_for_mods:
         if isinstance(_ms, ImportStmt):
-            for _mn, _ in _import_targets(_ms):
+            _im_mods = [_as_str(_ms.module)]
+            _ms_extra = _ms.extra
+            if _ms_extra and len(_ms_extra) > 0:
+                for _ex in _ms_extra:
+                    _im_mods.append(_as_str(_ex[0]))
+            for _mn in _im_mods:
                 if _mn and not _mn.startswith('_'):
-                    all_modules_to_declare.add(_mn)
+                    all_modules_to_declare[_mn] = True
         elif isinstance(_ms, FromImportStmt):
-            _mn = _ms.module
+            _mn = _as_str(_ms.module)
             if _mn and not _mn.startswith('_') and '.' not in _mn:
-                all_modules_to_declare.add(_mn)
+                all_modules_to_declare[_mn] = True
 
     if self._current_filename:
         parts.append(f'#line 1 "{self._current_filename}"')
@@ -6152,11 +6162,15 @@ def gen_module_impl(self, stmts):
         self._emitted_singletons.add('type_name_table')
         parts.append("static char * _mojo_type_name (int64_t tag)")
         parts.append("{")
-        _type_name_set = set(self.struct_field_types)
+        # dict not set: `sorted(<set>)` self-hosted is address order, so the
+        # `_mojo_type_name` if-arm sequence reshuffled every --dump-full run.
+        _type_name_set = {}
+        for _tnk in self.struct_field_types:
+            _type_name_set[_as_str(_tnk)] = True
         for _dspk in _STMT_DISPATCH.keys():
-            _type_name_set.add('' + _dspk)
+            _type_name_set['' + _dspk] = True
         for _dspk in _EXPR_DISPATCH.keys():
-            _type_name_set.add('' + _dspk)
+            _type_name_set['' + _dspk] = True
         for _tn in sorted(_type_name_set):
             _tn_s = '' + _tn
             parts.append(f"  if (tag == {_struct_type_id(_tn_s)}) return \"{_tn_s}\";")
