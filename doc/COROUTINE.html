@@ -485,8 +485,20 @@ Layer 2.</p>
     exprs; heterogeneous falls through). Kind-specific <code>__mojo_coro_yield_{i,p,d}</code>
     shims; <code>&lt;base&gt;_value</code> emits the real type + unbox.</td>
     <td class="rec">DONE — <code>for w in words()</code> → alpha beta gamma</td><td><code>1dca618</code></td></tr>
-<tr><td>Layer 1 scope expansion — <code>yield from</code>, <code>.send()</code>, tuple yields,
-    generator methods, generics, then async</td>
+<tr><td>Layer 1 — bare <code>yield from</code> → for-loop desugar (nested coroutines on
+    separate stacks); cross-module generators (sibling-module lowering hook in
+    <code>_compile_imported_module</code>)</td>
+    <td class="rec">DONE — <code>outer(){yield 100; yield from inner(3); yield 200}</code> →
+    100 0 1 2 200; <code>from gmod import counted</code> cross-module build works</td>
+    <td><code>7b741f4</code> <code>602a563</code></td></tr>
+<tr><td>Scoreboard (<code>CORO_SB_FAST=1</code>, isolated compile): v0 vs cpp</td>
+    <td class="rec">7 improved, 0 regressed — codecs/dis/gettext/pickletools/pkgutil/
+    test_dbm/tokenize generators now lower through the ordinary codegen (tokenize:
+    37 <code>__mgco_</code> sites in 263 KB of C) instead of the cpp path refusing</td>
+    <td><code>60bc008</code></td></tr>
+<tr><td>Layer 1 scope expansion — generator <strong>methods</strong> (<code>self</code>),
+    container params/yields, tuple yields, generics, then async. (Needed to turn the
+    remaining 12 <code>compile-fail</code> modules + full-build parity.)</td>
     <td>NEXT — each a well-scoped increment on the proven slice</td><td>—</td></tr>
 <tr><td>§5.5 cutover (scoreboard diff, <code>git rm</code> closed reports) · §5.6 delete
     <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
