@@ -30,11 +30,16 @@ import mojo_compiler as N
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
 
-YIELD_SHIM   = {'i': '__mojo_coro_yield_i', 'p': '__mojo_coro_yield_p',
-                'd': '__mojo_coro_yield_d'}
 ARG_SHIM     = '__mojo_gen_arg'
 SETRET_SHIM  = '__mojo_gen_set_return'
 _KIND_CTYPE  = {'i': 'int64_t', 'p': 'char *', 'd': 'double'}
+
+
+def _yield_shim(kind: str) -> str:
+    # int/pointer both go through the int64_t yield -- _emit_call coerces a
+    # char*/pointer arg to int64_t via the registered param types. Only a
+    # genuine double needs the bitcast variant.
+    return '__mojo_coro_yield_d' if kind == 'd' else '__mojo_coro_yield_i'
 
 
 def enabled() -> bool:
@@ -62,10 +67,14 @@ _SCALARISH = {'Int', 'Int64', 'Int32', 'Bool', 'String', 'StringLiteral', '', No
 
 
 def _yield_kind(expr) -> str | None:
-    """Best-effort C kind of a yielded value: 'i' int/bool, 'p' string
-    pointer, 'd' float. None == genuinely can't tell (treated as 'i')."""
+    """Best-effort C kind of a yielded value: 'i' int/bool/pointer (the
+    yield call always coerces to int64_t, so 'i' vs 'p' only affects the
+    <base>_value RETURN type), 'p' string pointer, 'd' float, 'tuple' a
+    tuple literal (not handled yet). None == can't tell (treated as 'i')."""
     if expr is None:
         return 'i'
+    if isinstance(expr, N.TupleExpr):
+        return 'tuple'
     if isinstance(expr, (N.StringLiteral, N.TstringLiteral)):
         return 'p'
     if isinstance(expr, N.FloatLiteral):
@@ -86,15 +95,18 @@ def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
     kinds = set()
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
-            k = _yield_kind(n.value)
-            if k is not None:
-                kinds.add(k)
-    kinds.discard(None)
-    if not kinds:
-        return 'i', ''
-    if len(kinds) == 1:
-        return next(iter(kinds)), ''
-    return None, f'heterogeneous yield kinds {sorted(kinds)} (v0)'
+            kinds.add(_yield_kind(n.value))
+        elif isinstance(n, N.YieldFromExpr):
+            kinds.add(None)   # delegate kind unknown -> 'i' default, coerced
+    if 'tuple' in kinds:
+        return None, 'tuple yield (v0)'
+    if 'd' in kinds and (kinds - {'d', None}):
+        return None, f'mixed float / non-float yields {sorted(k for k in kinds if k)} (v0)'
+    if 'd' in kinds:
+        return 'd', ''
+    if 'p' in kinds:
+        return 'p', ''
+    return 'i', ''
 
 
 def _yield_from_ok(fn: N.FunctionDef) -> bool:
@@ -151,7 +163,7 @@ def _rewrite_expr(node, cvar: str, kind: str):
     if isinstance(node, N.YieldExpr):
         val = (_rewrite_expr(node.value, cvar, kind) if node.value is not None
                else N.IntLiteral(value=0))
-        return _call(YIELD_SHIM[kind], [_c_ident(cvar), val])
+        return _call(_yield_shim(kind), [_c_ident(cvar), val])
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
@@ -186,7 +198,7 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
             it = _rewrite_expr(s.value.value, cvar, kind)
             out.append(N.ForStmt(
                 target=tgt, iterable=it,
-                body=[N.ExprStmt(value=_call(YIELD_SHIM[kind],
+                body=[N.ExprStmt(value=_call(_yield_shim(kind),
                                              [_c_ident(cvar), _c_ident(tgt)]))],
                 else_body=None, is_async=False))
             continue
@@ -384,6 +396,13 @@ def register(gen, meta: list) -> None:
     units = getattr(gen, '_stackswitch_coro_c_units', None)
     if units is None:
         units = gen._stackswitch_coro_c_units = []
+    # Declared param types for the body-called shims so _emit_call coerces a
+    # char*/pointer/double yield value to the int64_t the shim takes,
+    # instead of emitting a raw "makes integer from pointer" call.
+    gen.func_param_types.setdefault('__mojo_coro_yield_i', ['int64_t', 'int64_t'])
+    gen.func_param_types.setdefault('__mojo_coro_yield_d', ['int64_t', 'double'])
+    gen.func_param_types.setdefault('__mojo_gen_arg', ['int64_t', 'int64_t'])
+    gen.func_param_types.setdefault('__mojo_gen_set_return', ['int64_t', 'int64_t'])
     for m in meta:
         api = {
             'base': m['base'],
