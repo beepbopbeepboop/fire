@@ -2445,12 +2445,18 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
         return arg_pairs
     if not (arg_pairs and arg_pairs[0][0] == 'MojoList *'):
         return arg_pairs
-    _lst_v = arg_pairs[0][1]
+    # `_as_str`: `arg_pairs[0][1]` (the spread list's C-expr) and each
+    # `expected_params` element re-box to int64_t when read out of a tuple /
+    # `enumerate` pair on the self-hosted path — the emitted
+    # `mojo_list_get_int (<list>, i)` list handle and the `(<ptype>)<raw>`
+    # cast type then came out as decimal heap addresses, different every run.
+    _lst_v = _as_str(arg_pairs[0][1])
     _dflts = gen._func_param_defaults.get(fname) or \
         gen._func_param_defaults.get(fname_raw) or []
     _first_dflt = len(expected_params) - len(_dflts)
     _expanded: list = []
-    for _pos, _ptype in enumerate(expected_params):
+    for _pos in range(len(expected_params)):
+        _ptype = _as_str(expected_params[_pos])
         _idx64 = gen._new_val('int64_t', f"(int64_t){_pos}")
         _len64 = gen._call_expr('int64_t', 'mojo_list_len',
                                  [('MojoList *', _lst_v)])
