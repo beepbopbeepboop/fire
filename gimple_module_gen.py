@@ -417,7 +417,7 @@ def _collect_import_modules_rec(modules_to_compile, node_list, _depth):
         return
     for stmt in node_list:
         if isinstance(stmt, FromImportStmt):
-            modules_to_compile.add(stmt.module)
+            modules_to_compile[_as_str(stmt.module)] = True
             for _fip14 in gimple_ctypes._fromimport_names(stmt):
                 _fn = _as_str(_fip14[0])
                 # _join_import_member, not a blind f"{module}.{name}": for a
@@ -425,7 +425,7 @@ def _collect_import_modules_rec(modules_to_compile, node_list, _depth):
                 # the separator dot would double-count the depth. The joined
                 # string must be EXACTLY what _module_candidate_paths resolves
                 # and what the temp_gen's module_name/qualifier derive from.
-                modules_to_compile.add(gimple_ctypes._join_import_member(stmt.module, _fn))
+                modules_to_compile[_as_str(gimple_ctypes._join_import_member(stmt.module, _fn))] = True
         elif isinstance(stmt, ImportStmt):
             # Read `stmt.module` DIRECTLY (a char* field, exactly like the
             # FromImportStmt branch above), not via `_import_targets(stmt)`
@@ -434,9 +434,11 @@ def _collect_import_modules_rec(modules_to_compile, node_list, _depth):
             # POINTER was stored via mojo_set_add_int and every later
             # `name in modules_to_compile` missed — the compiled --dump-full
             # then emitted a truncated transitive closure.
-            modules_to_compile.add(_as_str(stmt.module))
-            for _ex in (getattr(stmt, 'extra', None) or []):
-                modules_to_compile.add(_as_str(_ex[0]))
+            modules_to_compile[_as_str(stmt.module)] = True
+            _mtc_extra = stmt.extra
+            if _mtc_extra and len(_mtc_extra) > 0:
+                for _ex in _mtc_extra:
+                    modules_to_compile[_as_str(_ex[0])] = True
         elif isinstance(stmt, FunctionDef):
             _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
         elif isinstance(stmt, IfStmt):
@@ -1268,7 +1270,7 @@ def gen_module_impl(self, stmts):
     imported_code = []
     imported_stmts = []
     if self.do_imports:
-        modules_to_compile = set()
+        modules_to_compile = {}  # dict not set: `sorted(<set>)` self-hosted is address order -> nondeterministic module COMPILE order in --dump-full (whole modules emitted vs stubbed run to run; also feeds the OOM per comment below)
         _collect_import_modules(modules_to_compile, stmts)
 
         # Cross-module generator scalar contracts (pre-pass, MUST run
