@@ -504,12 +504,52 @@ Layer 2.</p>
     <td class="rec">DONE — <code>struct Counter{{fn values(self):…yield i*2}}</code> →
     0 2 4 6. Isolated-compile scoreboard <strong>17 improved, 0 regressed</strong> (was 7)</td>
     <td><code>21af936</code></td></tr>
-<tr><td>Layer 1 scope expansion — decorated (<code>@classmethod</code>/<code>@staticmethod</code>)
-    generators, container params/yields, tuple yields, generics, then async</td>
-    <td>NEXT</td><td>—</td></tr>
+<tr><td>Layer 1 — reject tuple-literal yields (were miscompiling); coerce pointer/string
+    yield values to int64_t via <code>func_param_types</code> + <code>_emit_call</code></td>
+    <td class="rec">DONE</td><td><code>aa57869</code></td></tr>
 <tr><td>§5.5 cutover (scoreboard diff, <code>git rm</code> closed reports) · §5.6 delete
     <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
 </table>
+
+<h2>9. Bug-by-bug status (2026-09-03, <code>test_coro_bugs.py</code>)</h2>
+<p>Isolated compile (<code>compile_to_gimple_with_cpp</code>, no link) + real
+<code>gcc -fgimple -fsyntax-only</code> of the generated C, across the 28 buildable
+generator/coroutine bug sources in <code>bugs/</code> &amp; <code>bugs/hard/</code>:</p>
+<table>
+<tr><th>Outcome</th><th>Count</th><th>Modules / meaning</th></tr>
+<tr><td class="rec">LOWERED — generator codegen works, C syntax-checks</td><td>6</td>
+    <td>codecs, pkgutil, shelve, symtable, tempfile, tokenize (37 <code>__mgco_</code> sites).
+    Module-level generator codegen is <strong>fixed</strong> for these; full build/run
+    gated only on unrelated issues.</td></tr>
+<tr><td>CFAIL — generators lowered, but the generated C has a type error</td><td>8</td>
+    <td><b>New consumer-side gaps</b> exposed by lowering more generators than the cpp path
+    ever accepted: <code>set()</code>/<code>list()</code>/<code>tuple()</code> over a
+    stack-switch generator handle (dis, gettext); method-call arity in a lowered body
+    (ipaddress <code>_BaseNetwork__address_class</code>, tarfile <code>__create_header</code>);
+    <code>string_cst</code> conversion (imaplib). Plus pre-existing non-generator errors
+    (subprocess, test_dbm <code>mojo_open</code> clash, turtle).</td></tr>
+<tr><td>RAISE — falls through to the cpp path, which refuses (→ module runs from source,
+    same as before this work)</td><td>11</td>
+    <td><b>tuple yields</b> — modulefinder, pickletools, weakref, save_env, test_string
+    (<code>yield (a,b,…)</code>, the single biggest remaining generator feature);
+    <b><code>@classmethod</code> generators</b> — enum (<code>cls</code> + the
+    <code>cls._flag_mask_</code> dynamic-metaclass gap);
+    <b>async generators / <code>async def</code></b> — test__code_definitions, test_frame;
+    <b>generator-as-value</b> — glob (<code>self.select_exists</code> bare ref);
+    <b>decorated</b> (<code>@contextmanager</code>) — ensurepip; non-generator — mailbox.</td></tr>
+</table>
+<p><strong>Prioritised remaining Layer-1 work</strong> (by modules unblocked):</p>
+<ol>
+<li><strong>Tuple yields</strong> (<code>yield (a,b,c)</code>) — box into a <code>MojoList*</code>,
+    register <code>tuple_slot_ctypes</code>, the existing tuple-unpack consumer does the rest. ~5 modules.</li>
+<li><strong>Generator handle as a general iterable</strong> — <code>set/list/tuple/sorted(gen())</code>.
+    Consumer-side; the <code>for</code>/<code>next</code> path already works.</li>
+<li><strong><code>@classmethod</code> / <code>@staticmethod</code> generators</strong> — staticmethod is
+    free-function-shaped; classmethod needs the <code>cls</code> placeholder (+ enum's dynamic attrs separately).</li>
+<li><strong>Lowered-body method-call arity</strong> (ipaddress, tarfile) — an ordinary-path bug the
+    generator body newly exercises; fix in the ordinary path.</li>
+<li><strong><code>x = yield from</code></strong> return-value capture; then <strong>async</strong> (its own project).</li>
+</ol>
 
 </body>
 </html>
