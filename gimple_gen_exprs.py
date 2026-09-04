@@ -3769,7 +3769,15 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._emit(f"  {t} = 0;")
         return 'int', t
 
-    res = gen._new_val(res_type, f"{res_new} ()")
+    # `_as_str`: `_new_val` returns a C-expr/temp-name STRING. When
+    # `_lower_comprehension` is reached through a caller whose own `gen`
+    # param the self-hosted backend erased to int64_t (e.g.
+    # `_lower_external_call`'s comprehension-built
+    # `arg_pairs = [gen.lower_expr(a) for a in node.args]`), that returned
+    # name came back a decimal heap address — the container got DECLARED
+    # with that address as its C identifier (`MojoList * (36016041152);`),
+    # different every run. Re-tag so the char* bits survive.
+    res = _as_str(gen._new_val(res_type, f"{res_new} ()"))
 
     # `for i, x in enumerate(seq)` / `enumerate(seq, start)` inside a
     # comprehension's `for` clause — a genuinely separate lowering path
