@@ -496,10 +496,17 @@ Layer 2.</p>
     test_dbm/tokenize generators now lower through the ordinary codegen (tokenize:
     37 <code>__mgco_</code> sites in 263 KB of C) instead of the cpp path refusing</td>
     <td><code>60bc008</code></td></tr>
-<tr><td>Layer 1 scope expansion — generator <strong>methods</strong> (<code>self</code>),
-    container params/yields, tuple yields, generics, then async. (Needed to turn the
-    remaining 12 <code>compile-fail</code> modules + full-build parity.)</td>
-    <td>NEXT — each a well-scoped increment on the proven slice</td><td>—</td></tr>
+<tr><td>Layer 1 — generator <strong>methods</strong>: body becomes top-level
+    <code>__mgco_&lt;S&gt;_&lt;m&gt;_body(int64_t __c, S *self)</code> — <code>self</code> a
+    real typed C param so <code>self.field</code> lowers; <code>__mojo_gen_new_m0..m3</code>
+    + method-aware thunk; api → <code>_generator_method_api</code> so the existing
+    <code>obj.m()</code> consumer is unchanged</td>
+    <td class="rec">DONE — <code>struct Counter{{fn values(self):…yield i*2}}</code> →
+    0 2 4 6. Isolated-compile scoreboard <strong>17 improved, 0 regressed</strong> (was 7)</td>
+    <td><code>21af936</code></td></tr>
+<tr><td>Layer 1 scope expansion — decorated (<code>@classmethod</code>/<code>@staticmethod</code>)
+    generators, container params/yields, tuple yields, generics, then async</td>
+    <td>NEXT</td><td>—</td></tr>
 <tr><td>§5.5 cutover (scoreboard diff, <code>git rm</code> closed reports) · §5.6 delete
     <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
 </table>
