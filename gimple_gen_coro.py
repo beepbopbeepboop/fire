@@ -217,20 +217,67 @@ def _is_asyncio_run_call(node) -> bool:
             and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
 
 
+def _unwrap_transfer(node):
+    """Strip a leading `^` transfer sigil (`task^`)."""
+    if isinstance(node, N.UnaryOp) and node.op == '^':
+        return node.operand
+    return node
+
+
+def _is_create_task_call(node) -> bool:
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr)
+            and node.func.name in ('create_task', 'create_raising_task'))
+
+
+def _is_task_wait_call(node, task_vars: set) -> bool:
+    if not (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member == 'wait' and not node.args):
+        return False
+    obj = _unwrap_transfer(node.func.obj)
+    return isinstance(obj, N.IdentExpr) and obj.name in task_vars
+
+
 def _await_target_name(node) -> str | None:
-    """If `node` is a plain call to a bare top-level name (the only await
-    target v0 forwards -- trusting the callee is itself eligible; if it
-    isn't, the emitted call to a nonexistent __mgco_<name>_start just
+    """If `node` is a plain call to a bare top-level name (the only fresh
+    await target v0 forwards -- trusting the callee is itself eligible; if
+    it isn't, the emitted call to a nonexistent __mgco_<name>_start just
     fails to link, caught by the gate, not a silent miscompile)."""
     if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr):
         return node.func.name
     return None
 
 
-def _await_stmt_ok(s) -> bool:
+def _await_held_handle(node):
+    """`await task^` / `await task` -- awaiting an ALREADY-CONSTRUCTED
+    coroutine handle (e.g. one held from create_task/create_raising_task),
+    as opposed to a fresh `f(args)` call. Returns the handle IdentExpr, or
+    None."""
+    u = _unwrap_transfer(node)
+    return u if isinstance(u, N.IdentExpr) else None
+
+
+def _await_stmt_ok(s, task_vars: set) -> bool:
     inner = s.value.value
-    return (_is_asyncio_sleep_call(inner) or _is_asyncio_sock_recv_call(inner)
-            or _await_target_name(inner) is not None)
+    if _is_asyncio_sleep_call(inner) or _is_asyncio_sock_recv_call(inner):
+        return True
+    if _await_target_name(inner) is not None:
+        return True
+    h = _await_held_handle(inner)
+    return h is not None and h.name in task_vars
+
+
+def _scan_task_vars(fn: N.FunctionDef) -> set:
+    """Local vars this function's own body binds from `create_task`/
+    `create_raising_task` -- the only handles `await <var>^` may target."""
+    tv = set()
+    for s in _walk(fn):
+        if (isinstance(s, (N.AssignStmt, N.VarDecl))
+                and _is_create_task_call(getattr(s, 'value', None))):
+            name = s.name if isinstance(s, N.VarDecl) else (
+                s.target.name if isinstance(s.target, N.IdentExpr) else None)
+            if name:
+                tv.add(name)
+    return tv
 
 
 def _async_awaits_ok(fn: N.FunctionDef) -> bool:
@@ -238,11 +285,13 @@ def _async_awaits_ok(fn: N.FunctionDef) -> bool:
     Assign/VarDecl's value, with a recognized inner shape -- the only
     forms _rewrite_async_stmts desugars. Anything else (nested inside a
     larger expression, or an unrecognized callee shape) => ineligible."""
+    task_vars = _scan_task_vars(fn)
     total = sum(1 for n in _walk(fn) if isinstance(n, N.AwaitExpr))
     ok = 0
     for s in _walk(fn):
-        if isinstance(s, (N.ExprStmt, N.AssignStmt, N.VarDecl)) \
-                and isinstance(getattr(s, 'value', None), N.AwaitExpr) and _await_stmt_ok(s):
+        if isinstance(s, (N.ExprStmt, N.AssignStmt, N.VarDecl, N.ReturnStmt)) \
+                and isinstance(getattr(s, 'value', None), N.AwaitExpr) \
+                and _await_stmt_ok(s, task_vars):
             ok += 1
     return ok == total
 
@@ -355,17 +404,26 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
                            value=_call('__mojo_async_await_sock_recv', [_c_ident(cvar), fd]))]
         return stmts, _c_ident(rv)
     name = _await_target_name(inner)
-    args = [_rewrite_async_expr(a, cvar) for a in inner.args]
+    if name is not None:
+        # fresh `await f(args)` -- construct via f's own _start (the only
+        # name-specific step; everything after is generic).
+        args = [_rewrite_async_expr(a, cvar) for a in inner.args]
+        h_expr = _call(f'__mgco_{name}_start', args)
+    else:
+        # `await task^` / `await task` -- an already-constructed handle
+        # (e.g. held from create_task/create_raising_task); ownership
+        # transfers to this drive loop, which destroys it when done.
+        h_expr = _rewrite_async_expr(_unwrap_transfer(inner), cvar)
     _AW_COUNTER[0] += 1
     h = f'__ah{_AW_COUNTER[0]}'
     rv = f'__ar{_AW_COUNTER[0]}'
-    stmts = [N.VarDecl(name=h, type_ann=None, value=_call(f'__mgco_{name}_start', args))]
-    loop_body = [forward(cvar, _call(f'__mgco_{name}_value', [_c_ident(h)]))]
-    stmts.append(N.WhileStmt(condition=_call(f'__mgco_{name}_resume', [_c_ident(h)]),
+    stmts = [N.VarDecl(name=h, type_ann=None, value=h_expr)]
+    loop_body = [forward(cvar, _call('__mojo_gen_value', [_c_ident(h)]))]
+    stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), N.IntLiteral(value=0)]),
                              body=loop_body, else_body=None))
     stmts.append(N.VarDecl(name=rv, type_ann=None,
                            value=_call('__mojo_gen_retval', [_c_ident(h)])))
-    stmts.append(N.ExprStmt(value=_call(f'__mgco_{name}_destroy', [_c_ident(h)])))
+    stmts.append(N.ExprStmt(value=_call('__mojo_gen_destroy', [_c_ident(h)])))
     return stmts, _c_ident(rv)
 
 
@@ -382,24 +440,30 @@ def _async_for_drive_stmts(cvar: str, target: str, iterable, body, forward=_forw
     h = f'__afh{_AW_COUNTER[0]}'
     stmts = [N.VarDecl(name=h, type_ann=None, value=_call(f'__mgco_{name}_start', args))]
     inner_body = [
-        forward(cvar, _call(f'__mgco_{name}_value', [_c_ident(h)])),
+        forward(cvar, _call('__mojo_gen_value', [_c_ident(h)])),
         N.ContinueStmt(),
     ]
     if_wd = N.IfStmt(
-        condition=_call(f'__mgco_{name}_last_yield_was_wd', [_c_ident(h)]),
+        condition=_call('__mojo_gen_last_yield_was_wd', [_c_ident(h)]),
         then_body=inner_body, elifs=[], else_body=None)
     bind = N.AssignStmt(target=N.IdentExpr(name=target),
-                        value=_call(f'__mgco_{name}_value', [_c_ident(h)]))
+                        value=_call('__mojo_gen_value', [_c_ident(h)]))
     loop_body = [if_wd, bind] + body
-    stmts.append(N.WhileStmt(condition=_call(f'__mgco_{name}_resume', [_c_ident(h)]),
+    stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), N.IntLiteral(value=0)]),
                              body=loop_body, else_body=None))
-    stmts.append(N.ExprStmt(value=_call(f'__mgco_{name}_destroy', [_c_ident(h)])))
+    stmts.append(N.ExprStmt(value=_call('__mojo_gen_destroy', [_c_ident(h)])))
     return stmts
 
 
 def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
     out = []
     for s in stmts:
+        if isinstance(s, N.ReturnStmt) and isinstance(s.value, N.AwaitExpr):
+            drive, rv = _await_drive_stmts(cvar, s.value.value)
+            out.extend(drive)
+            out.append(N.ExprStmt(value=_call(SETRET_SHIM, [_c_ident(cvar), rv])))
+            out.append(N.ReturnStmt(value=None))
+            continue
         if isinstance(s, N.ReturnStmt):
             if s.value is not None:
                 out.append(N.ExprStmt(value=_call(SETRET_SHIM,
@@ -444,6 +508,12 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
     await-forward on the SAME channel with is_wd=1 -- see mojo_coro.h."""
     out = []
     for s in stmts:
+        if isinstance(s, N.ReturnStmt) and isinstance(s.value, N.AwaitExpr):
+            drive, rv = _await_drive_stmts(cvar, s.value.value, forward=_forward_tagged)
+            out.extend(drive)
+            out.append(N.ExprStmt(value=_call(SETRET_SHIM, [_c_ident(cvar), rv])))
+            out.append(N.ReturnStmt(value=None))
+            continue
         if isinstance(s, N.ReturnStmt):
             if s.value is not None:
                 out.append(N.ExprStmt(value=_call(SETRET_SHIM,
@@ -533,20 +603,26 @@ def _lower_one_async(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
     return body_fd
 
 
-def _rewrite_asyncio_run(node, cvar: str | None):
-    """`asyncio.run(f(...))` anywhere (typically a plain, non-async
-    caller like `main`): construct f's coroutine (its bare call already
-    routes through __mgco_f_start via _generator_api registration -- see
-    register()), drive it to completion, and replace the whole expression
-    with its return value. `cvar` is the enclosing coroutine's own __c
-    when this appears inside another lowered body (None for an ordinary
-    function), threaded through only so a nested case does not crash --
-    asyncio.run() genuinely blocking inside a coroutine body is not a v0
-    shape (kept out by _async_awaits_ok not recognizing it as an await
-    target, so this path is only reached from ordinary, non-coroutine
-    function bodies in practice)."""
+def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set):
+    """Whole-module expression rewrite for the three ways ordinary code
+    drives a compiled coroutine to completion and blocks for its result:
+      - `asyncio.run(f(...))`
+      - `create_task(f(...))` / `create_raising_task(f(...))` -- v0 has no
+        real concurrency between separate tasks (each is driven fully to
+        completion the moment `.wait()` is called, exactly like
+        asyncio.run), so this is a pure passthrough: replaced with `f(...)`
+        itself (already routes to __mgco_f_start via _generator_api).
+      - `<task>.wait()` / `<task>^.wait()` on a var seen bound from one of
+        the above (task_vars) -- drive-to-completion + read the result.
+        An uncaught exception in the task re-raises here for free (the
+        same __mojo_coro_resume contract every other consumer relies on),
+        so RaisingTask vs Task needs no separate representation.
+    `cvar`/task_vars are threaded through only so a nested case (not a v0
+    shape -- kept out by eligibility) does not crash."""
     if node is None or not hasattr(node, '__dict__'):
         return node, []
+    if _is_create_task_call(node):
+        return _rewrite_asyncio_run(node.args[0], cvar, task_vars)
     pre = []
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
@@ -555,54 +631,74 @@ def _rewrite_asyncio_run(node, cvar: str | None):
             newv = []
             for x in v:
                 if hasattr(x, '__dict__'):
-                    nx, npre = _rewrite_asyncio_run(x, cvar)
+                    nx, npre = _rewrite_asyncio_run(x, cvar, task_vars)
                     pre.extend(npre)
                     newv.append(nx)
                 else:
                     newv.append(x)
             setattr(node, k, newv)
         elif hasattr(v, '__dict__'):
-            nv, npre = _rewrite_asyncio_run(v, cvar)
+            nv, npre = _rewrite_asyncio_run(v, cvar, task_vars)
             pre.extend(npre)
             setattr(node, k, nv)
-    if _is_asyncio_run_call(node):
-        call_expr, cpre = _rewrite_asyncio_run(node.args[0], cvar)
-        pre.extend(cpre)
+    if _is_asyncio_run_call(node) or _is_task_wait_call(node, task_vars):
         _AW_COUNTER[0] += 1
         h = f'__arun{_AW_COUNTER[0]}'
         rv = f'__arunv{_AW_COUNTER[0]}'
-        pre.append(N.VarDecl(name=h, type_ann=None, value=call_expr))
-        pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
+        if _is_asyncio_run_call(node):
+            call_expr, cpre = _rewrite_asyncio_run(node.args[0], cvar, task_vars)
+            pre.extend(cpre)
+            pre.append(N.VarDecl(name=h, type_ann=None, value=call_expr))
+            pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
+        else:
+            # `<task>.wait()` -- task_expr is already a live handle (the
+            # var create_task's passthrough left it bound to); reuse it
+            # directly instead of introducing a redundant copy.
+            task_expr = _unwrap_transfer(node.func.obj)
+            pre.append(N.VarDecl(name=h, type_ann=None, value=task_expr))
+            pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
         pre.append(N.VarDecl(name=rv, type_ann=None,
                              value=_call('__mojo_gen_retval', [_c_ident(h)])))
         return _c_ident(rv), pre
     return node, pre
 
 
-def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None) -> list:
+def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | None = None) -> list:
     out = []
     for s in stmts:
         if isinstance(s, N.FunctionDef):
-            s.body = _rewrite_asyncio_run_stmts(s.body, cvar)
+            fn_task_vars = _scan_task_vars(s) if not getattr(s, 'is_generator', False) \
+                and not getattr(s, 'is_async', False) else set()
+            s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars)
             out.append(s)
+            continue
+        tv = task_vars or set()
+        if (isinstance(s, (N.AssignStmt, N.VarDecl)) and _is_create_task_call(s.value)):
+            # passthrough: `var task = create_task(f(...))` -> `var task = f(...)`
+            new_val, pre = _rewrite_asyncio_run(s.value.args[0], cvar, tv)
+            out.extend(pre)
+            if isinstance(s, N.VarDecl):
+                out.append(N.VarDecl(name=s.name, type_ann=None, value=new_val))
+            else:
+                out.append(N.AssignStmt(target=s.target, value=new_val))
             continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
             if isinstance(v, list) and v and _looks_like_stmt_list(v):
-                setattr(s, k, _rewrite_asyncio_run_stmts(v, cvar))
+                setattr(s, k, _rewrite_asyncio_run_stmts(v, cvar, tv))
             elif isinstance(v, list):
                 newv = []
                 for x in v:
                     if hasattr(x, '__dict__'):
-                        nx, pre = _rewrite_asyncio_run(x, cvar)
+                        nx, pre = _rewrite_asyncio_run(x, cvar, tv)
                         out.extend(pre)
                         newv.append(nx)
                     else:
                         newv.append(x)
                 setattr(s, k, newv)
             elif hasattr(v, '__dict__'):
-                nv, pre = _rewrite_asyncio_run(v, cvar)
+                nv, pre = _rewrite_asyncio_run(v, cvar, tv)
                 out.extend(pre)
                 setattr(s, k, nv)
         out.append(s)
@@ -911,6 +1007,16 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_async_await_sock_recv', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_retval', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_retval', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_gen_resume', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_resume', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_gen_value', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_value', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_gen_destroy', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_destroy', 'void')
+    gen.func_param_types.setdefault('__mojo_gen_last_yield_was_wd', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_last_yield_was_wd', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_gen_yield_tagged', ['int64_t', 'int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_yield_tagged', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_run_gen', 'void')
     for m in meta:
