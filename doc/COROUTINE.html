@@ -511,6 +511,29 @@ Layer 2.</p>
     <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
 </table>
 
+<h2>8b. Async — v0 landed (2026-09-04)</h2>
+<p><code>async def</code>/<code>await</code>/<code>asyncio.run</code> now compile through
+the SAME stack-switch substrate as generators (commit <code>4a0ee76</code>):
+<code>runtime/mojo_async_sched.c</code> (plain-C port of <code>mojo_async_runtime.cpp</code>'s
+ready-queue/timer-heap/kqueue reactor, resuming via <code>__mojo_coro_resume</code> instead
+of the C++20 coroutine-handle ABI) + <code>runtime/mojo_wd.h</code> (the wait-descriptor an
+async coroutine yields at <code>await</code>) + <code>gimple_gen_coro.py</code>'s
+<code>await</code>/<code>asyncio.run</code> desugar (structurally the same
+"forward-upward-via-yield" shape as generator <code>yield from</code>).</p>
+<p><strong>Verified on real compiled output:</strong> <code>async def f(): await
+asyncio.sleep(.05); return 42</code> + <code>asyncio.run(f())</code> → 42; a two-level
+<code>await</code> chain (outer awaits leaf, leaf sleeps 20ms, outer doubles the result) →
+20. <code>check-coro</code> 16/16.</p>
+<p><strong>v0 scope</strong> — free async functions, scalar params, <code>await</code> only
+as a bare/assigned statement targeting <code>asyncio.sleep</code> or a plain-name async
+call. <strong>NOT yet ported</strong> (still cpp-path-only): sockets
+(<code>asyncio.sock_recv</code> etc.), locks/<code>async with</code>, exceptions crossing an
+<code>await</code>, async generators, detached async (<code>_take_handle()</code> /
+GPU device-context dispatch), nested async closures. These are real, separately-sized
+pieces of the existing 38-case <code>test_gimple_async_runner.py</code> suite — <strong>the
+cpp path (<code>gimple_cpp_async.py</code>) must stay live for these until each is ported</strong>;
+deleting it now would regress real working functionality.</p>
+
 <h2>9. Bug-by-bug status (2026-09-04, <code>test_coro_bugs.py</code>)</h2>
 <p>Isolated compile (<code>compile_to_gimple_with_cpp</code>, no link) + real
 <code>gcc -fgimple -fsyntax-only</code> of the generated C, across the 28 buildable
