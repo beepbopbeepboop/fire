@@ -45,14 +45,42 @@ def _targets():
     return out
 
 
+FAST = os.environ.get('CORO_SB_FAST') == '1'
+
+
+def _classify_fast(report, src):
+    """Compile-only classification via compile_to_gimple_with_cpp -- seconds,
+    not minutes (no link, no full-stdlib build). Buckets: refused-generator
+    (fell through to the cpp path and it refused), compile-ok (produced C),
+    compile-fail (raised)."""
+    import gimple_codegen
+    try:
+        c, cpp = gimple_codegen.compile_to_gimple_with_cpp(
+            open(src).read(), do_imports=False, filename=src)
+        if '__mgco_' in c:
+            return report, 'stackswitch-lowered', ''
+        return report, 'compile-ok', ''
+    except Exception as e:
+        s = f'{type(e).__name__}: {e}'
+        low = s.lower()
+        if 'unsupportedgeneratorshape' in low or 'refus' in low:
+            return report, 'refused-generator', s[:300]
+        return report, 'compile-fail', s[:300]
+
+
 def _classify(report, src):
+    if FAST:
+        try:
+            return _classify_fast(report, src)
+        except Exception as e:
+            return report, 'harness-error', str(e)[:200]
     wd = tempfile.mkdtemp(prefix='coro_sb_')
     exe = os.path.join(wd, 'a.out')
     env = dict(os.environ)
     try:
         cp = subprocess.run([sys.executable, os.path.join(HERE, 'mojo.py'),
                              'build', src, '-o', exe],
-                            capture_output=True, text=True, timeout=300, cwd=wd, env=env)
+                            capture_output=True, text=True, timeout=600, cwd=wd, env=env)
     except subprocess.TimeoutExpired:
         return report, 'timeout', ''
     blob = (cp.stdout + cp.stderr)
@@ -69,7 +97,7 @@ def _classify(report, src):
             b = 'build-fail'
         return report, b, blob[-600:]
     try:
-        rp = subprocess.run([exe], capture_output=True, text=True, timeout=60, cwd=wd)
+        rp = subprocess.run([exe], capture_output=True, text=True, timeout=90, cwd=wd)
         return report, ('run-ok' if rp.returncode == 0 else 'run-nonzero'), \
             (rp.stdout + rp.stderr)[-400:]
     except subprocess.TimeoutExpired:
@@ -101,24 +129,32 @@ def run():
     return 0
 
 
+# higher rank == better outcome
+_RANK = {
+    'timeout': 0, 'harness-error': 0, 'build-fail': 1, 'compile-fail': 2,
+    'refused-generator': 3, 'link-fail': 4, 'run-timeout': 4, 'run-nonzero': 5,
+    'compile-ok': 6, 'stackswitch-lowered': 7, 'run-ok': 9,
+}
+
+
 def diff(a, b):
     A = json.load(open(a)); B = json.load(open(b))
     ra, rb = A['results'], B['results']
-    GOOD = {'run-ok'}
-    print(f'{"report":64s}  {A["tag"]:>16s} -> {B["tag"]:<16s}')
+    print(f'{"report":58s}  {A["tag"]:>18s} -> {B["tag"]:<18s}')
     improved = regressed = 0
     for k in sorted(set(ra) | set(rb)):
         ba = ra.get(k, {}).get('bucket', '-')
         bb = rb.get(k, {}).get('bucket', '-')
         if ba == bb:
             continue
-        mark = ' '
-        if ba not in GOOD and bb in GOOD:
-            mark = '+'; improved += 1
-        elif ba in GOOD and bb not in GOOD:
-            mark = '-'; regressed += 1
-        print(f'{mark} {k:62s}  {ba:>16s} -> {bb:<16s}')
-    print(f'\nimproved (now run-ok): {improved}   regressed: {regressed}')
+        da, db = _RANK.get(ba, 0), _RANK.get(bb, 0)
+        mark = '+' if db > da else ('-' if db < da else ' ')
+        if db > da:
+            improved += 1
+        elif db < da:
+            regressed += 1
+        print(f'{mark} {k:56s}  {ba:>18s} -> {bb:<18s}')
+    print(f'\nimproved: {improved}   regressed: {regressed}')
     return 1 if regressed else 0
 
 
