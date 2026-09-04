@@ -122,6 +122,25 @@ __mojo_gen_arg(int64_t coro, int64_t idx)
     return g->args[idx];
 }
 
+/* async-generator body: yield e -> is_wd=0, await's wait-descriptor ->
+   is_wd=1, on the SAME channel (see mojo_coro.h). The consuming `async
+   for` reads back __mojo_gen_last_yield_was_wd(coro) right after a
+   resume to tell them apart. */
+int64_t
+__mojo_gen_yield_tagged(int64_t coro, int64_t val, int64_t is_wd)
+{
+    return __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro, val, (int)is_wd);
+}
+
+/* Takes a MojoGenerator handle (like _resume/_value/_destroy), not a raw
+   MojoCoro -- consistent with every other <base>_* consumer entry point. */
+int64_t
+__mojo_gen_last_yield_was_wd(int64_t genHandle)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
+    return (g && g->coro) ? __mojo_coro_last_yield_was_wd(g->coro) : 0;
+}
+
 /* yield e -- returns the value sent in by the next resume. Typed variants
    so gimple_gen_coro can pass a char* / double straight through without a
    codegen-inserted cast; all funnel to the one int64_t-box yield. */
@@ -239,7 +258,7 @@ void
 __mojo_async_await_sleep(int64_t coro, double secs)
 {
     uint64_t wake = __mojo_async_now_ns() + (uint64_t)(secs * 1e9);
-    __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_SLEEP, (int64_t)wake));
+    __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_SLEEP, (int64_t)wake), 1);
 }
 
 /* `await asyncio.sock_recv(fd)` -- reads ONE byte once fd is readable,
@@ -249,7 +268,7 @@ __mojo_async_await_sleep(int64_t coro, double secs)
 int64_t
 __mojo_async_await_sock_recv(int64_t coro, int64_t fd)
 {
-    __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_READ, fd));
+    __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_READ, fd), 1);
     unsigned char c;
     ssize_t n = read((int)fd, &c, 1);
     if (n == 1) return (int64_t)c;

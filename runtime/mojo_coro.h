@@ -51,6 +51,17 @@ int64_t  __mojo_coro_yield(MojoCoro *c, int64_t val_box);
 /* The return box. Valid only after _resume/_throw returned 0. */
 int64_t  __mojo_coro_return_value(MojoCoro *c);
 
+/* Like __mojo_coro_yield, but also records whether this suspension is a
+   real user value (is_wd=0) or a wait-descriptor being forwarded upward
+   for the scheduler (is_wd=1) -- needed only by an ASYNC GENERATOR body,
+   which mixes real `yield` values with `await`'s wait-descriptors on the
+   same channel; __mojo_coro_last_yield_was_wd reads it back right after
+   the matching _resume/_throw returns 1. A plain generator or plain
+   async function never mixes the two, so they keep using
+   __mojo_coro_yield and this flag is simply unread for them. */
+int64_t  __mojo_coro_yield_tagged(MojoCoro *c, int64_t val_box, int is_wd);
+int      __mojo_coro_last_yield_was_wd(MojoCoro *c);
+
 /* Internal companion to the getter: the lowered `return e` calls this then
    falls off the body. Part of coro-abi/1 (Layer 1 emits it, not user
    code). */

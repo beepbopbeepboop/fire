@@ -5853,6 +5853,8 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_async_await_sock_recv (int64_t, int64_t);',
             'extern int64_t __mojo_gen_retval (int64_t);',
             'extern void    __mojo_async_run_gen (int64_t);',
+            'extern int64_t __mojo_gen_yield_tagged (int64_t, int64_t, int64_t);',
+            'extern int64_t __mojo_gen_last_yield_was_wd (int64_t);',
           ) if getattr(self, '_stackswitch_coro_c_units', None) else ()),
         '/* Disable security wrappers: sprintf/snprintf/memcpy/memmove/memset/',
         '   strcpy/strncpy/strcat/strncat macros expand to nested',
@@ -7167,6 +7169,8 @@ def gen_module_impl(self, stmts):
             parts.append(f"extern _Bool {_base}_resume (MojoGenerator *);")
             parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")
             parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
+            if _api.get('is_async_gen'):
+                parts.append(f"extern _Bool {_base}_last_yield_was_wd (MojoGenerator *);")
         parts.append('')
     _needs_async_runtime_h = bool(
         len(self._supported_async) or len(self._supported_async_closures)
