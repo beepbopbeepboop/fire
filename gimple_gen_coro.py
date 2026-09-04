@@ -97,6 +97,16 @@ def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
     return None, f'heterogeneous yield kinds {sorted(kinds)} (v0)'
 
 
+def _yield_from_ok(fn: N.FunctionDef) -> bool:
+    """True iff every YieldFromExpr in the body sits directly as an
+    ExprStmt's value (bare `yield from it`) -- the only shape v0 desugars.
+    `x = yield from it` (return-value capture) is not handled yet."""
+    total = sum(1 for n in _walk(fn) if isinstance(n, N.YieldFromExpr))
+    bare = sum(1 for n in _walk(fn)
+               if isinstance(n, N.ExprStmt) and isinstance(n.value, N.YieldFromExpr))
+    return total == bare
+
+
 def _eligible(fn: N.FunctionDef) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
@@ -104,10 +114,8 @@ def _eligible(fn: N.FunctionDef) -> tuple[bool, str]:
         return False, 'comptime params'
     if getattr(fn, 'decorators', None):
         return False, 'decorated'
-    # v0: no `yield from`, no nested generator defs, no yield in a nested def
-    for n in _walk(fn):
-        if isinstance(n, N.YieldFromExpr):
-            return False, 'yield from (v0)'
+    if not _yield_from_ok(fn):
+        return False, 'yield from with return-value capture (v0)'
     # v0: params must be simple positional scalars (or none)
     for pname, pann in fn.params:
         if pann not in _SCALARISH:
@@ -150,6 +158,9 @@ def _rewrite_expr(node, cvar: str, kind: str):
     return node
 
 
+_yf_counter = [0]
+
+
 def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
     out = []
     for s in stmts:
@@ -158,6 +169,21 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
                 out.append(N.ExprStmt(value=_call(SETRET_SHIM,
                                                   [_c_ident(cvar), _rewrite_expr(s.value, cvar, kind)])))
             out.append(N.ReturnStmt(value=None))
+            continue
+        if isinstance(s, N.ExprStmt) and isinstance(s.value, N.YieldFromExpr):
+            # bare `yield from it`  ->  for __yfN in it: __mojo_coro_yield_k(__c, __yfN)
+            # the ordinary codegen lowers the for-loop over `it` (another
+            # generator, a list, a range, ...); if `it` is itself a
+            # stack-switch generator this just nests coroutine calls on
+            # separate stacks -- no special handling.
+            _yf_counter[0] += 1
+            tgt = f'__yf{_yf_counter[0]}'
+            it = _rewrite_expr(s.value.value, cvar, kind)
+            out.append(N.ForStmt(
+                target=tgt, iterable=it,
+                body=[N.ExprStmt(value=_call(YIELD_SHIM[kind],
+                                             [_c_ident(cvar), _c_ident(tgt)]))],
+                else_body=None, is_async=False))
             continue
         # recurse into compound-statement bodies
         for k, v in list(vars(s).items()):
