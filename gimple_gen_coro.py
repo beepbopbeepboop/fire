@@ -309,13 +309,22 @@ def _async_for_ok(fn: N.FunctionDef) -> bool:
     return True
 
 
-def _eligible_async_common(fn: N.FunctionDef) -> tuple[bool, str]:
-    """Checks shared by a plain `async def` and an async GENERATOR."""
+def _eligible_async_common(fn: N.FunctionDef, nested: bool = False) -> tuple[bool, str]:
+    """Checks shared by a plain `async def` and an async GENERATOR.
+    `nested=True` (a `@parameter async def` local to an ordinary function,
+    e.g. create_task's wrapper idiom) allows the `@parameter` decorator
+    specifically -- it's a compile-time-only marker in this codegen, not
+    a runtime behavior change -- while a top-level def stays refused for
+    ANY decorator."""
     if not fn.is_async:
         return False, 'not async'
     if getattr(fn, 'comptime_params', None):
         return False, 'comptime params'
-    if getattr(fn, 'decorators', None):
+    decorators = getattr(fn, 'decorators', None) or []
+    if nested:
+        if any(d != 'parameter' for d in decorators):
+            return False, 'decorated (v0 allows only @parameter on a nested async def)'
+    elif decorators:
         return False, 'decorated'
     for pname, pann in fn.params:
         if pann not in _SCALARISH:
@@ -329,13 +338,13 @@ def _eligible_async_common(fn: N.FunctionDef) -> tuple[bool, str]:
     return True, ''
 
 
-def _eligible_async(fn: N.FunctionDef) -> tuple[bool, str]:
+def _eligible_async(fn: N.FunctionDef, nested: bool = False) -> tuple[bool, str]:
     if any(isinstance(n, (N.YieldExpr, N.YieldFromExpr)) for n in _walk(fn)):
         return False, 'async generator -- use _eligible_async_gen'
-    return _eligible_async_common(fn)
+    return _eligible_async_common(fn, nested=nested)
 
 
-def _eligible_async_gen(fn: N.FunctionDef) -> tuple[bool, str]:
+def _eligible_async_gen(fn: N.FunctionDef, nested: bool = False) -> tuple[bool, str]:
     if not any(isinstance(n, N.YieldExpr) for n in _walk(fn)):
         return False, 'no yield'
     if any(isinstance(n, N.YieldFromExpr) for n in _walk(fn)):
@@ -352,7 +361,7 @@ def _eligible_async_gen(fn: N.FunctionDef) -> tuple[bool, str]:
             return False, '`x = yield ...` in an async generator (v0)'
         if isinstance(s, N.VarDecl) and isinstance(s.value, N.YieldExpr):
             return False, '`var x = yield ...` in an async generator (v0)'
-    return _eligible_async_common(fn)
+    return _eligible_async_common(fn, nested=nested)
 
 
 def _rewrite_async_expr(node, cvar: str):
@@ -558,8 +567,8 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
     return out
 
 
-def _lower_one_async_gen(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
-    base = f'__mgco_{fn.name}'
+def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None) -> N.FunctionDef:
+    base = base or f'__mgco_{fn.name}'
     body_name = f'{base}_body'
     prologue = []
     for i, (pname, _pann) in enumerate(fn.params):
@@ -581,8 +590,8 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
     return body_fd
 
 
-def _lower_one_async(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
-    base = f'__mgco_{fn.name}'
+def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None) -> N.FunctionDef:
+    base = base or f'__mgco_{fn.name}'
     body_name = f'{base}_body'
     prologue = []
     for i, (pname, _pann) in enumerate(fn.params):
@@ -603,7 +612,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list) -> N.FunctionDef:
     return body_fd
 
 
-def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set):
+def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict | None = None):
     """Whole-module expression rewrite for the three ways ordinary code
     drives a compiled coroutine to completion and blocks for its result:
       - `asyncio.run(f(...))`
@@ -621,8 +630,19 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set):
     shape -- kept out by eligibility) does not crash."""
     if node is None or not hasattr(node, '__dict__'):
         return node, []
+    local_map = local_map or {}
     if _is_create_task_call(node):
-        return _rewrite_asyncio_run(node.args[0], cvar, task_vars)
+        inner = node.args[0]
+        if isinstance(inner, N.CallExpr) and isinstance(inner.func, N.IdentExpr) \
+                and inner.func.name in local_map:
+            # a LOCAL nested `@parameter async def` (create_task's
+            # wrapper idiom) -- bypass the generic _generator_api name
+            # dispatch entirely (two different enclosing functions may
+            # each have their own same-named nested helper) and call its
+            # qualified _start directly.
+            args = [_rewrite_asyncio_run(a, cvar, task_vars, local_map)[0] for a in inner.args]
+            return _call(f'{local_map[inner.func.name]}_start', args), []
+        return _rewrite_asyncio_run(inner, cvar, task_vars, local_map)
     pre = []
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
@@ -631,14 +651,14 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set):
             newv = []
             for x in v:
                 if hasattr(x, '__dict__'):
-                    nx, npre = _rewrite_asyncio_run(x, cvar, task_vars)
+                    nx, npre = _rewrite_asyncio_run(x, cvar, task_vars, local_map)
                     pre.extend(npre)
                     newv.append(nx)
                 else:
                     newv.append(x)
             setattr(node, k, newv)
         elif hasattr(v, '__dict__'):
-            nv, npre = _rewrite_asyncio_run(v, cvar, task_vars)
+            nv, npre = _rewrite_asyncio_run(v, cvar, task_vars, local_map)
             pre.extend(npre)
             setattr(node, k, nv)
     if _is_asyncio_run_call(node) or _is_task_wait_call(node, task_vars):
@@ -646,7 +666,7 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set):
         h = f'__arun{_AW_COUNTER[0]}'
         rv = f'__arunv{_AW_COUNTER[0]}'
         if _is_asyncio_run_call(node):
-            call_expr, cpre = _rewrite_asyncio_run(node.args[0], cvar, task_vars)
+            call_expr, cpre = _rewrite_asyncio_run(node.args[0], cvar, task_vars, local_map)
             pre.extend(cpre)
             pre.append(N.VarDecl(name=h, type_ann=None, value=call_expr))
             pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
@@ -663,19 +683,30 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set):
     return node, pre
 
 
-def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | None = None) -> list:
+def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | None = None,
+                               local_map: dict | None = None, local_maps: dict | None = None) -> list:
+    lmaps = local_maps or {}
+    lm = local_map or {}
     out = []
     for s in stmts:
         if isinstance(s, N.FunctionDef):
-            fn_task_vars = _scan_task_vars(s) if not getattr(s, 'is_generator', False) \
-                and not getattr(s, 'is_async', False) else set()
-            s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars)
+            fn_ordinary = not getattr(s, 'is_generator', False) and not getattr(s, 'is_async', False)
+            fn_task_vars = _scan_task_vars(s) if fn_ordinary else set()
+            fn_lm = lmaps.get(s.name, {}) if fn_ordinary else {}
+            s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars, fn_lm, lmaps)
             out.append(s)
             continue
         tv = task_vars or set()
         if (isinstance(s, (N.AssignStmt, N.VarDecl)) and _is_create_task_call(s.value)):
             # passthrough: `var task = create_task(f(...))` -> `var task = f(...)`
-            new_val, pre = _rewrite_asyncio_run(s.value.args[0], cvar, tv)
+            # (pass the FULL create_task(...) node, not the pre-unwrapped
+            # inner call -- _rewrite_asyncio_run's own _is_create_task_call
+            # branch is what applies `lm`'s qualified-name rewrite for a
+            # local nested helper; skipping straight to the inner call
+            # bypassed that and let a bare `wrapper()` fall through to the
+            # global _generator_api dispatch instead, which collides
+            # across scopes for same-named nested helpers.)
+            new_val, pre = _rewrite_asyncio_run(s.value, cvar, tv, lm)
             out.extend(pre)
             if isinstance(s, N.VarDecl):
                 out.append(N.VarDecl(name=s.name, type_ann=None, value=new_val))
@@ -686,19 +717,19 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             if k in ('line', 'col'):
                 continue
             if isinstance(v, list) and v and _looks_like_stmt_list(v):
-                setattr(s, k, _rewrite_asyncio_run_stmts(v, cvar, tv))
+                setattr(s, k, _rewrite_asyncio_run_stmts(v, cvar, tv, lm, lmaps))
             elif isinstance(v, list):
                 newv = []
                 for x in v:
                     if hasattr(x, '__dict__'):
-                        nx, pre = _rewrite_asyncio_run(x, cvar, tv)
+                        nx, pre = _rewrite_asyncio_run(x, cvar, tv, lm)
                         out.extend(pre)
                         newv.append(nx)
                     else:
                         newv.append(x)
                 setattr(s, k, newv)
             elif hasattr(v, '__dict__'):
-                nv, pre = _rewrite_asyncio_run(v, cvar, tv)
+                nv, pre = _rewrite_asyncio_run(v, cvar, tv, lm)
                 out.extend(pre)
                 setattr(s, k, nv)
         out.append(s)
@@ -839,8 +870,52 @@ def lower(stmts: list) -> tuple[list, list]:
             s.methods = _kept
         out.append(s)
     out = out + method_bodies
-    out = _rewrite_asyncio_run_stmts(out, None)
+    out, nested_bodies, local_maps = _hoist_nested_async(out, meta)
+    out = out + nested_bodies
+    out = _rewrite_asyncio_run_stmts(out, None, local_maps=local_maps)
     return out, meta
+
+
+def _hoist_nested_async(stmts: list, meta: list):
+    """A `@parameter async def wrapper(): ...` local to an ordinary
+    function (the create_task(wrapper()) idiom) is lowered exactly like a
+    top-level one, EXCEPT its base is qualified by the enclosing function's
+    name (`__mgco_<outer>_<wrapper>`) -- two different enclosing functions
+    may each define their own nested helper with the SAME bare name (a
+    real shape this project's test suite specifically covers), so a flat
+    `_generator_api`-style registration would collide. Returns
+    (stmts_with_nested_defs_removed, hoisted_body_defs,
+    {enclosing_fn_name: {nested_name: qualified_base}})."""
+    hoisted = []
+    local_maps: dict[str, dict[str, str]] = {}
+    for s in stmts:
+        if not (isinstance(s, N.FunctionDef) and not getattr(s, 'is_generator', False)
+                and not getattr(s, 'is_async', False)):
+            continue
+        rename = {}
+        kept = []
+        for inner in s.body:
+            if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
+                base = f'__mgco_{s.name}_{inner.name}'
+                if any(isinstance(n, N.YieldExpr) for n in _walk(inner)):
+                    ok, _why = _eligible_async_gen(inner, nested=True)
+                    if ok:
+                        hoisted.append(_lower_one_async_gen(inner, meta, base=base))
+                        meta[-1]['nested'] = True
+                        rename[inner.name] = base
+                        continue
+                else:
+                    ok, _why = _eligible_async(inner, nested=True)
+                    if ok:
+                        hoisted.append(_lower_one_async(inner, meta, base=base))
+                        meta[-1]['nested'] = True
+                        rename[inner.name] = base
+                        continue
+            kept.append(inner)
+        s.body = kept
+        if rename:
+            local_maps[s.name] = rename
+    return stmts, hoisted, local_maps
 
 
 _CVAR = '__c'
@@ -1033,6 +1108,18 @@ def register(gen, meta: list) -> None:
         if m.get('is_method'):
             gen._generator_method_api[(m['struct'], m['name'])] = api
             gen._supported_generator_methods[(m['struct'], m['name'])] = None
+        elif m.get('nested'):
+            # A local `@parameter async def` (create_task's wrapper idiom):
+            # every reference is rewritten directly to its qualified
+            # `{base}_start` name by gimple_gen_coro's own local_map (two
+            # different enclosing functions may reuse the same bare name),
+            # so this must NOT be keyed by the bare name in the shared
+            # _generator_api namespace -- keyed by the qualified base
+            # instead, solely so gen_module's extern-decl preamble block
+            # (which just iterates _generator_api.values()) still declares
+            # these trampolines. There is no top-level def with this bare
+            # name to skip emitting, so _supported_generators is untouched.
+            gen._generator_api[m['base']] = api
         else:
             gen._generator_api[m['name']] = api
             # skip ordinary emission for the bare name + emit the extern block
