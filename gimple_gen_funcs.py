@@ -962,6 +962,59 @@ def _selfhost_gimplegen_field_types(gg_cls) -> dict:
     return _fields
 
 
+def _dvt_val_cts(_ann):
+    if not isinstance(_ann, str):
+        return None
+    _s = _ann.strip()
+    if not ((_s.startswith('dict[') or _s.startswith('Dict['))
+            and _s.endswith(']')):
+        return None
+    _inner = _s[_s.index('[') + 1:-1]
+    _parts = gimple_ctypes._split_top_level_commas(_inner)
+    if len(_parts) != 2:
+        return None
+    _vann = _parts[1].strip()
+    _outer = _selfhost_ann_ctype(_vann)
+    if _outer is None:
+        _outer = 'int64_t'
+    _nested = None
+    if _outer == 'MojoDict *':
+        _nv = _dvt_val_cts(_vann)
+        if _nv is not None:
+            _nested = _nv[0]
+    elif _outer in ('MojoList *', 'MojoSet *'):
+        # `dict[K, list[E]]` / `dict[K, set[E]]` — E, so `d.get(k)[i]`
+        # / `for x in d.get(k)` reads with the right accessor instead
+        # of boxing (e.g. `func_param_types: dict[str, list[str]]` ->
+        # `func_param_types.get(fn)[0]` must be a real `char *`, not a
+        # pointer-decimal cast target).
+        _vbase = _vann.split('[', 1)[0].strip()
+        if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
+            _einner = _vann[_vann.index('[') + 1:_vann.rindex(']')].strip()
+            _eparts = gimple_ctypes._split_top_level_commas(_einner)
+            if len(_eparts) == 1 and _eparts[0].strip():
+                _ec = _selfhost_ann_ctype(_eparts[0].strip())
+                if _ec is not None and _ec != 'int64_t':
+                    _nested = _ec
+    return (_outer, _nested)
+
+
+
+def _dvt_consider(_out, _tgt, _ann):
+    _fname = None
+    if (isinstance(_tgt, MemberExpr) and isinstance(_tgt.obj, IdentExpr)
+            and _tgt.obj.name == 'self'):
+        _fname = _tgt.member
+    elif isinstance(_tgt, IdentExpr):
+        _fname = _tgt.name
+    if _fname is None or _fname in _out:
+        return
+    _r = _dvt_val_cts(_ann)
+    if _r is not None:
+        _out[_fname] = (_r[0], _r[1], str(_ann).strip())
+
+
+
 def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
     """`{field_name: (outer_val_ctype, nested_val_ctype_or_None, raw_ann)}` for every
     `class GimpleGen` instance/class field annotated `dict[K, V]` (or
@@ -980,64 +1033,15 @@ def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
     if gg_cls is None:
         return _out
 
-    def _val_cts(_ann):
-        if not isinstance(_ann, str):
-            return None
-        _s = _ann.strip()
-        if not ((_s.startswith('dict[') or _s.startswith('Dict['))
-                and _s.endswith(']')):
-            return None
-        _inner = _s[_s.index('[') + 1:-1]
-        _parts = gimple_ctypes._split_top_level_commas(_inner)
-        if len(_parts) != 2:
-            return None
-        _vann = _parts[1].strip()
-        _outer = _selfhost_ann_ctype(_vann)
-        if _outer is None:
-            _outer = 'int64_t'
-        _nested = None
-        if _outer == 'MojoDict *':
-            _nv = _val_cts(_vann)
-            if _nv is not None:
-                _nested = _nv[0]
-        elif _outer in ('MojoList *', 'MojoSet *'):
-            # `dict[K, list[E]]` / `dict[K, set[E]]` — E, so `d.get(k)[i]`
-            # / `for x in d.get(k)` reads with the right accessor instead
-            # of boxing (e.g. `func_param_types: dict[str, list[str]]` ->
-            # `func_param_types.get(fn)[0]` must be a real `char *`, not a
-            # pointer-decimal cast target).
-            _vbase = _vann.split('[', 1)[0].strip()
-            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
-                _einner = _vann[_vann.index('[') + 1:_vann.rindex(']')].strip()
-                _eparts = gimple_ctypes._split_top_level_commas(_einner)
-                if len(_eparts) == 1 and _eparts[0].strip():
-                    _ec = _selfhost_ann_ctype(_eparts[0].strip())
-                    if _ec is not None and _ec != 'int64_t':
-                        _nested = _ec
-        return (_outer, _nested)
-
-    def _consider(_tgt, _ann):
-        _fname = None
-        if (isinstance(_tgt, MemberExpr) and isinstance(_tgt.obj, IdentExpr)
-                and _tgt.obj.name == 'self'):
-            _fname = _tgt.member
-        elif isinstance(_tgt, IdentExpr):
-            _fname = _tgt.name
-        if _fname is None or _fname in _out:
-            return
-        _r = _val_cts(_ann)
-        if _r is not None:
-            _out[_fname] = (_r[0], _r[1], str(_ann).strip())
-
     for _fld in getattr(gg_cls, 'fields', []):
         if isinstance(_fld, AssignStmt):
-            _consider(_fld.target, getattr(_fld, 'type_ann', None))
+            _dvt_consider(_out, _fld.target, getattr(_fld, 'type_ann', None))
         elif isinstance(_fld, VarDecl) and _fld.name:
-            _consider(IdentExpr(_fld.name), getattr(_fld, 'type_ann', None))
+            _dvt_consider(_out, IdentExpr(_fld.name), getattr(_fld, 'type_ann', None))
     for _m in getattr(gg_cls, 'methods', []):
         for _n in gimple_exprtypes._walk_ast(_m.body):
             if isinstance(_n, AssignStmt) and getattr(_n, 'type_ann', None):
-                _consider(_n.target, str(_n.type_ann))
+                _dvt_consider(_out, _n.target, str(_n.type_ann))
     return _out
 
 

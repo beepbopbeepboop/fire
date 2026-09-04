@@ -2232,6 +2232,17 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     return gen._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
 
 
+def _lb_as_set(gen, t: str, v: str) -> str:
+    """Coerce (type, value) to a `MojoSet *` C-expr. Module-level, not a
+    nested closure in `_lower_binary_tail`: as a lifted closure its `gen`
+    capture typed int64_t, so `gen._new_val(...)` / `gen._ensure_local(...)`
+    returned an erased temp NAME -> `MojoList * (37459640688);` locals in
+    the lifted `_lower_binary_tail__as_set`, different every --dump-full run."""
+    if t == 'MojoSet *':
+        return v
+    return gen._new_val('MojoSet *', f'(MojoSet *){gen._ensure_local(t, v)}')
+
+
 def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
                           _ov_a: str, _ov_b: str) -> tuple:
     """Emit a set-op call and carry a known element type onto the result —
@@ -2729,22 +2740,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # For | on set/list/dict pointer types, use runtime union, not C bitwise |.
     # An empty `{}` operand lowers to MojoDict*; coerce such pointer operands
     # to MojoSet* so GIMPLE's strict pointer typing accepts the call.
-    def _as_set(t, v):
-        if t == 'MojoSet *':
-            return v
-        return gen._new_val('MojoSet *', f'(MojoSet *){gen._ensure_local(t, v)}')
     if op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
-        return _lower_binary_set_op(gen, 'mojo_set_union', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_union', _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv), lv, rv)
     # For - on set types, use runtime difference, not C subtraction
     if op == '-' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return _lower_binary_set_op(gen, 'mojo_set_difference', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_difference', _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv), lv, rv)
     # For & on set types, use runtime intersection, not C bitwise &
     if op == '&' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return _lower_binary_set_op(gen, 'mojo_set_intersection', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_intersection', _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv), lv, rv)
     # For ^ on set types, symmetric difference = (a - b) | (b - a).
     # No dedicated runtime entry; compose from difference + union.
     if op == '^' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        a, b = _as_set(lt, lv), _as_set(rt, rv)
+        a, b = _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv)
         ab = gen._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', a), ('MojoSet *', b)])
         ba = gen._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', b), ('MojoSet *', a)])
         return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_union',
