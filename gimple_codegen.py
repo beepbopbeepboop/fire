@@ -3740,15 +3740,33 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     if _coro_meta:
         _ggc.register(gen, _coro_meta)
     gen._current_filename = filename
-    # Self-hosting bootstrap: when compiling this compiler's own entry point
-    # as a transitive closure (`python3 mojo.py build mojo.py`, `--dump-full
-    # mojo.py`, `make bootstrap` stage 1, `make check-selfhost`), seed the
-    # GimpleGen registry so the extracted backend helpers can be typed.
-    # do_imports/link only, and only for mojo.py / mojo_main.py under the
-    # compiler's own source dir — never for `--dump <userfile>` or a
-    # compile_stdlib.py worker.
+    # Self-hosting bootstrap: when compiling this compiler's own source as a
+    # transitive closure (`python3 mojo.py build mojo.py`, `--dump-full
+    # mojo.py`, `--dump-full mojo_compiler.py`, `make bootstrap` stage 1,
+    # `make check-selfhost`), seed the GimpleGen registry so the extracted
+    # backend helpers can be typed. do_imports/link only, and only for a
+    # file directly under the compiler's own source dir — never for
+    # `--dump <userfile>` or a compile_stdlib.py worker.
+    #
+    # Originally gated to `basename in ('mojo.py', 'mojo_main.py')` only —
+    # too narrow: `--dump-full mojo_compiler.py`'s transitive closure also
+    # reaches gimple_gen_exprs.py (e.g. `_lb_as_set`/`_lower_binary_set_op`,
+    # hoisted module-level helpers taking `gen` as their first param per
+    # `_selfhost_gen_self_param_ctype`'s own documented convention), but
+    # with `filename == 'mojo_compiler.py'` the registration above never
+    # ran, so `_selfhost_gimplegen_registered` stayed False for the WHOLE
+    # compile and every such `gen` param fell through to generic inference
+    # -> int64_t. Confirmed via the emitted C signature itself:
+    # `char * _lb_as_set_895aa2 (int64_t gen, char * t, char * v)` instead
+    # of the expected `GimpleGen * gen`. Every subsequent `gen._new_val(...)`
+    # /`gen._ensure_local(...)` call inside such a function then went
+    # through dynamic dispatch, and the erased int64_t `gen` value (an
+    # ASLR heap address, printed as decimal digits) leaked into a later
+    # `_declare_var`/cast site as if it were a real C name/expression —
+    # `MojoList * (37459640688);`, different every run. Any entry point
+    # under this compiler's own source dir can reach the backend, so the
+    # directory check alone (no basename restriction) is the correct gate.
     if ((do_imports or link_mode) and filename
-            and os.path.basename(filename) in ('mojo.py', 'mojo_main.py')
             and os.path.abspath(os.path.dirname(filename)) == _SELFHOST_DIR):
         _selfhost_register_gimplegen(gen)
     # Seed the self-import guard with the ROOT file's own identity — see
