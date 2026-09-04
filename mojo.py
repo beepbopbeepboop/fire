@@ -439,6 +439,25 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
                 extra_objs.append(sibling_obj)
                 cxx_link = True
 
+        # A3 stack-switch coroutine runtime (doc/COROUTINE.html): the
+        # generated .c calls __mgco_<g>_* / __mojo_coro_* / __mojo_gen_*
+        # whenever gimple_gen_coro lowered a generator this way. Compile +
+        # link the small runtime (Layer 1 shim + Layer 2 + arch Layer 3).
+        if '__mgco_' in c_code or '__mojo_coro_yield_i' in c_code:
+            import platform as _plat
+            _arch_src = ('mojo_coro_ctx_aarch64.S'
+                         if _plat.machine().lower() in ('arm64', 'aarch64')
+                         else 'mojo_coro_ctx_generic.c')
+            for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', _arch_src):
+                _co = f"{basename}_{os.path.splitext(_cs)[0]}.o"
+                _cc = [_GCC_BIN, *cg_flags, '-I', runtime_dir, '-c', '-o', _co,
+                       os.path.join(runtime_dir, _cs)]
+                _r = subprocess.run(_cc, capture_output=True, text=True)
+                if _r.returncode != 0:
+                    print(f"coro runtime compile failed ({_cs}): {_r.stderr}", file=sys.stderr)
+                    return False
+                extra_objs.append(_co)
+
         # Link executable with CPython runtime
         exe_file = output if output else basename
         # Get Python library path

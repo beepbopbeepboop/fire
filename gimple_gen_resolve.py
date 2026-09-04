@@ -656,6 +656,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._struct_method_names = gen._struct_method_names
                 _register_closure_struct_inits(gen, stmts)
 
+                # A3 stack-switch coroutine lowering for this SIBLING module
+                # too (mirrors _run_pipeline's own call). Without it, a
+                # generator defined in an imported module still goes through
+                # the gimple_cpp_* path while the root module's went through
+                # gimple_gen_coro -- a split that leaves the client .c
+                # referencing symbols nobody defines.
+                import gimple_gen_coro as _ggc
+                stmts, _ss_meta = _ggc.lower(stmts)
+                if _ss_meta:
+                    _ggc.register(temp_gen, _ss_meta)
+
                 code = temp_gen.gen_module(stmts)
 
                 # Link mode's 4th coroutine-code source: a PLAIN (non-

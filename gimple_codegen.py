@@ -212,6 +212,13 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'py_tokenize':           'MojoList *',
     'Parser':             'Parser *',    # Parser() constructor
     'Interpreter':        'Interpreter *',
+    # A3 stack-switch coroutine shim (runtime/mojo_coro_gen.c) — called
+    # from a generator's lowered `__mgco_<g>_body` (gimple_gen_coro.py).
+    '__mojo_coro_yield_i':   'int64_t',
+    '__mojo_coro_yield_p':   'int64_t',
+    '__mojo_coro_yield_d':   'int64_t',
+    '__mojo_gen_arg':        'int64_t',
+    '__mojo_gen_set_return': 'void',
 }
 
 
@@ -3718,7 +3725,15 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     _emitted_unresolved_stub_syms.clear()
     tokens = py_tokenize(mojo_src)
     stmts = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
+    # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
+    # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
+    # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
+    # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
+    import gimple_gen_coro as _ggc
+    stmts, _coro_meta = _ggc.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
+    if _coro_meta:
+        _ggc.register(gen, _coro_meta)
     gen._current_filename = filename
     # Self-hosting bootstrap: when compiling this compiler's own entry point
     # as a transitive closure (`python3 mojo.py build mojo.py`, `--dump-full

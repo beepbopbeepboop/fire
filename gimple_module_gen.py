@@ -5873,6 +5873,13 @@ def gen_module_impl(self, stmts):
         '#include <mojo_zlib.h>',
         '#include <mojo_ssl.h>',
         '#include <mojo_ncurses.h>',
+        *(( '/* A3 stack-switch coroutine shim (runtime/mojo_coro_gen.c) */',
+            'extern int64_t __mojo_coro_yield_i (int64_t, int64_t);',
+            'extern int64_t __mojo_coro_yield_p (int64_t, void *);',
+            'extern int64_t __mojo_coro_yield_d (int64_t, double);',
+            'extern int64_t __mojo_gen_arg (int64_t, int64_t);',
+            'extern void    __mojo_gen_set_return (int64_t, int64_t);',
+          ) if getattr(self, '_stackswitch_coro_c_units', None) else ()),
         '/* Disable security wrappers: sprintf/snprintf/memcpy/memmove/memset/',
         '   strcpy/strncpy/strcat/strncat macros expand to nested',
         '   __builtin___*_chk calls which GIMPLE rejects (confirmed for memcpy:',
@@ -7937,6 +7944,16 @@ def gen_module_impl(self, stmts):
             cpp_parts.append(unit)
             cpp_parts.append('')
         self.generated_cpp = '\n'.join(cpp_parts)
+
+    # A3 stack-switch coroutine trampolines (gimple_gen_coro.register): plain
+    # C, emitted straight into this module's .c/.ci output — the generator
+    # body itself was injected as an ordinary FunctionDef and is already
+    # lowered among the function defs above; these 4 tiny <base>_* symbols
+    # bridge it to the runtime shim (runtime/mojo_coro_gen.c).
+    _ss_units = getattr(self, '_stackswitch_coro_c_units', None)
+    if _ss_units:
+        parts.append('')
+        parts.extend(_ss_units)
 
     return self._dedup_variadic_externs(parts)
 
