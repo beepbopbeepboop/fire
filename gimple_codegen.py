@@ -3763,11 +3763,29 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # through dynamic dispatch, and the erased int64_t `gen` value (an
     # ASLR heap address, printed as decimal digits) leaked into a later
     # `_declare_var`/cast site as if it were a real C name/expression —
-    # `MojoList * (37459640688);`, different every run. Any entry point
-    # under this compiler's own source dir can reach the backend, so the
-    # directory check alone (no basename restriction) is the correct gate.
-    if ((do_imports or link_mode) and filename
-            and os.path.abspath(os.path.dirname(filename)) == _SELFHOST_DIR):
+    # `MojoList * (37459640688);`, different every run.
+    #
+    # Broadened once already to "any entry point under this compiler's own
+    # source dir" via `os.path.abspath(os.path.dirname(filename)) ==
+    # _SELFHOST_DIR` — but a BARE relative `filename` (e.g. literally
+    # "mojo_compiler.py", exactly what `mojo --dump-full mojo_compiler.py`
+    # passes) has an EMPTY `os.path.dirname`, so that comparison silently
+    # depended on the process's CWD matching `_SELFHOST_DIR` byte-for-byte
+    # AND on the self-hosted (compiled, MOJO_NO_SHIM=1) runtime's own
+    # `os.path.abspath`/`os.path.dirname`/`==` implementations agreeing
+    # with CPython's — fragile in a way that could silently fail on the
+    # exact self-hosted path this feature exists for. Dropped that
+    # dirname/equality dependency entirely: `_selfhost_register_gimplegen`
+    # is cheap (mtime-cached) and a harmless no-op when `_SELFHOST_DIR`
+    # doesn't actually contain a `class GimpleGen` (i.e. this project isn't
+    # the compiler's own source at all) — see `_selfhost_load_gimplegen_
+    # class`. The REAL narrowing already happens per-file, robustly, in
+    # `_selfhost_gen_self_param_ctype` (only applies to an unannotated
+    # `gen`/`self` first param in a `.py` file whose OWN `_current_filename`
+    # resolves under `_SELFHOST_DIR`) — this top-level gate only needs to
+    # avoid the (near-zero) cost of registering for an ordinary user/stdlib
+    # compile, not to reproduce that per-file check.
+    if do_imports or link_mode:
         _selfhost_register_gimplegen(gen)
     # Seed the self-import guard with the ROOT file's own identity — see
     # `_compiling_file_paths`'s declaration for why this is needed (a bare
