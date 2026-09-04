@@ -198,6 +198,38 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None) -> tuple[bool, 
 
 _AW_COUNTER = [0]
 
+# name -> [param names in order], for every top-level async/generator def
+# in the module CURRENTLY being lowered -- populated fresh at the start of
+# each lower() call (never carries over between modules) so a keyword-
+# argument await/create_task target (`await f(should_fail=True)`) can be
+# resolved to the right positional slot. Same-module only, matching
+# _await_target_name's own "bare top-level name" scope.
+_PARAM_NAMES: dict[str, list[str]] = {}
+
+
+def _resolve_call_args(name: str, node, cvar: str) -> list:
+    """Positional args, in order, for a call to `name(...)` -- resolving
+    any keyword arguments via _PARAM_NAMES when known. Falls back to
+    positional-only (kwargs dropped) if `name` wasn't seen -- the emitted
+    call then has the wrong arity, caught by the compile/link gate, not a
+    silent miscompile (same trust-the-gate posture _await_target_name
+    itself documents)."""
+    args = list(node.args)
+    kwargs = list(getattr(node, 'kwargs', None) or [])
+    if not kwargs:
+        return [_rewrite_async_expr(a, cvar) for a in args]
+    params = _PARAM_NAMES.get(name)
+    if not params:
+        return [_rewrite_async_expr(a, cvar) for a in args]
+    resolved = [None] * len(params)
+    for i, a in enumerate(args):
+        resolved[i] = a
+    for k, v in kwargs:
+        if k in params:
+            resolved[params.index(k)] = v
+    return [_rewrite_async_expr(a, cvar) if a is not None else N.IntLiteral(value=0)
+            for a in resolved]
+
 
 def _is_asyncio_sleep_call(node) -> bool:
     return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
@@ -416,7 +448,7 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
     if name is not None:
         # fresh `await f(args)` -- construct via f's own _start (the only
         # name-specific step; everything after is generic).
-        args = [_rewrite_async_expr(a, cvar) for a in inner.args]
+        args = _resolve_call_args(name, inner, cvar)
         h_expr = _call(f'__mgco_{name}_start', args)
     else:
         # `await task^` / `await task` -- an already-constructed handle
@@ -444,7 +476,7 @@ def _async_for_drive_stmts(cvar: str, target: str, iterable, body, forward=_forw
     which may `break`/`continue` the very same while loop, matching real
     Python `async for` semantics)."""
     name = _await_target_name(iterable)
-    args = [_rewrite_async_expr(a, cvar) for a in (iterable.args if iterable else [])]
+    args = _resolve_call_args(name, iterable, cvar) if iterable else []
     _AW_COUNTER[0] += 1
     h = f'__afh{_AW_COUNTER[0]}'
     stmts = [N.VarDecl(name=h, type_ann=None, value=_call(f'__mgco_{name}_start', args))]
@@ -498,6 +530,9 @@ def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
             body = _rewrite_async_stmts([_deep_copy_stmt(b) for b in s.body], cvar)
             out.extend(_async_for_drive_stmts(cvar, s.target, s.iterable, body))
             continue
+        if isinstance(s, N.TryStmt):
+            for h in (s.handlers or []):
+                h.body = _rewrite_async_stmts(h.body, cvar)
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -554,6 +589,9 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
             body = _rewrite_async_gen_stmts([_deep_copy_stmt(b) for b in s.body], cvar)
             out.extend(_async_for_drive_stmts(cvar, s.target, s.iterable, body, forward=_forward_tagged))
             continue
+        if isinstance(s, N.TryStmt):
+            for h in (s.handlers or []):
+                h.body = _rewrite_async_gen_stmts(h.body, cvar)
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -797,6 +835,9 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
                                              [_c_ident(cvar), _c_ident(tgt)]))],
                 else_body=None, is_async=False))
             continue
+        if isinstance(s, N.TryStmt):
+            for h in (s.handlers or []):
+                h.body = _rewrite_stmts(h.body, cvar, kind)
         # recurse into compound-statement bodies
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
@@ -836,6 +877,11 @@ def lower(stmts: list) -> tuple[list, list]:
     """
     if not enabled():
         return stmts, []
+    _PARAM_NAMES.clear()
+    for s in stmts:
+        if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
+                                             or getattr(s, 'is_async', False)):
+            _PARAM_NAMES[s.name] = [p for p, _a in s.params]
     out = []
     meta = []
     method_bodies = []
