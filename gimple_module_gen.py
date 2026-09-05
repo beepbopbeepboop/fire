@@ -7203,10 +7203,20 @@ def gen_module_impl(self, stmts):
         # `_C_TRAMPOLINE_TMPL` blocks that also declare it live at the
         # BOTTOM of the file, after every ordinary function body (so after
         # this reference), and this symbol has no per-generator dependency
-        # of its own (`__mojo_gen_destroy` already had one via that same
-        # template, incidentally early enough there, but not guaranteed --
-        # this decl doesn't rely on that ordering either).
+        # of its own. `__mojo_gen_destroy` (the paired destroy_fn half,
+        # BUILTIN_VALUE_MAP's `_coro_destroy_fn` substitution) is declared
+        # alongside it here too: it was ASSUMED to already be in scope via
+        # the `_stackswitch_coro_c_units`-gated extern block above, which
+        # is true whenever this TU's OWN top-level generator/async lowers
+        # through gimple_gen_coro -- but a module whose ONLY coroutine
+        # content is a NESTED async closure (hoisted, e.g. device_context.
+        # mojo's enqueue_cpu_function wrapper) can reference `_coro_destroy_
+        # fn` as a function-pointer value with `_stackswitch_coro_c_units`
+        # still empty, leaving `__mojo_gen_destroy` genuinely undeclared
+        # ("did you mean '__mojo_gen_resume_once'?").
         parts.append('extern void __mojo_gen_resume_once (int64_t);')
+        if not any('__mojo_gen_destroy' in p for p in parts[:-1]):
+            parts.append('extern void __mojo_gen_destroy (int64_t);')
     _needs_async_runtime_h = bool(
         len(self._supported_async) or len(self._supported_async_closures)
         or len(self._nested_async_api)

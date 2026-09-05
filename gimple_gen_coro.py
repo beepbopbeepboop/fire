@@ -2,8 +2,11 @@
 (doc/COROUTINE.html §5.4).
 
 An AST pre-pass, run in gimple_codegen._run_pipeline right after
-ast_rewriter.rewrite, gated by MOJO_CORO=stackswitch. For each eligible
-top-level generator FunctionDef `g` it:
+ast_rewriter.rewrite. This is the DEFAULT generator/async backend as of
+doc/COROUTINE.html §5.5 (the cutover) -- MOJO_CORO=cpp opts back into the
+old gimple_cpp_*.py C++20-coroutine emitter for one release as a
+differential oracle; MOJO_CORO=stackswitch (or simply unset) selects this
+path. For each eligible top-level generator FunctionDef `g` it:
 
   * replaces `g` in the module statement list with `__mgco_<g>_body`, a
     plain (non-generator) FunctionDef whose body is g's body with only
@@ -47,6 +50,7 @@ import gimple_ctypes
 
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
+_OLD_MODE = 'cpp'
 
 ARG_SHIM     = '__mojo_gen_arg'
 SETRET_SHIM  = '__mojo_gen_set_return'
@@ -61,7 +65,11 @@ def _yield_shim(kind: str) -> str:
 
 
 def enabled() -> bool:
-    return os.environ.get(_ENV) == _MODE
+    # §5.5 cutover: stack-switch is now the DEFAULT (unset, or explicitly
+    # MOJO_CORO=stackswitch) -- MOJO_CORO=cpp is the escape hatch back to
+    # the old gimple_cpp_*.py C++20-coroutine emitter, kept live for one
+    # release as a differential oracle (doc/COROUTINE.html §5.5/§5.6).
+    return os.environ.get(_ENV, _MODE) != _OLD_MODE
 
 
 # ── eligibility ─────────────────────────────────────────────────────────
@@ -770,6 +778,24 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
         h = f'__arun{_AW_COUNTER[0]}'
         rv = f'__arunv{_AW_COUNTER[0]}'
         if _is_asyncio_run_call(node):
+            # `asyncio.run(...)` only has a defined meaning for a BARE CALL
+            # to a supported compiled async function -- anything else (a
+            # plain variable, a literal, an arbitrary expression) has no
+            # generator/coroutine handle to drive. Without this check, a
+            # non-call argument passed straight through the generic
+            # recursive rewrite below unchanged, and got wrapped as if it
+            # WERE a real handle (`__arun1 = x; __mojo_async_run_gen
+            # (__arun1);`) -- a genuine silent miscompile (the raw int/
+            # whatever value reinterpreted as a `MojoGenerator *` at
+            # runtime), not merely a test-expectation mismatch. Refuse
+            # honestly instead, matching every other unsupported shape in
+            # this file's own "cannot compile module" convention.
+            if not isinstance(node.args[0], N.CallExpr):
+                raise RuntimeError(
+                    "cannot compile module: asyncio.run(...) requires a "
+                    "bare call to a supported compiled async function as "
+                    "its argument -- got a non-call expression, which has "
+                    "no coroutine handle to drive")
             call_expr, cpre = _rewrite_asyncio_run(node.args[0], cvar, task_vars, local_map)
             pre.extend(cpre)
             pre.append(N.VarDecl(name=h, type_ann=None, value=call_expr))
@@ -1447,6 +1473,17 @@ def register(gen, meta: list) -> None:
         }
         if m.get('defaults'):
             api['defaults'] = m['defaults']
+            # `_emit_generator_start_call` (gimple_gen_calls.py) pads a
+            # caller's missing trailing args from `gen._func_param_defaults
+            # [f"{base}_start"]`, exactly like the cpp path's own
+            # `_register_free_generator` populates for a cpp-lowered
+            # generator (gimple_module_gen.py) -- this stackswitch path
+            # only ever set `api['defaults']` (consulted nowhere) and
+            # never this key, so a generator called with fewer args than
+            # declared (`def prod(n, step=10): ...` called as `prod(3)`)
+            # padded the missing slot with a typed zero instead of the
+            # real default, silently miscompiling every such call.
+            gen._func_param_defaults[f"{m['base']}_start"] = m['defaults']
         if m.get('is_method'):
             gen._generator_method_api[(m['struct'], m['name'])] = api
             gen._supported_generator_methods[(m['struct'], m['name'])] = None

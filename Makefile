@@ -7,6 +7,21 @@
 # ── Paths ────────────────────────────────────────────────────────────────────
 RUNTIME_SRC  = runtime/mojo_runtime.c
 RUNTIME_HDR  = runtime/mojo_runtime.h
+# A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the default
+# generator/async backend now, gimple_gen_coro.py) — needed by stage2/mojo's
+# own hardcoded link recipe below whenever the self-hosted compiler's OWN
+# source (mojo_compiler.py/myinterpreter.py/...) contains a generator/async
+# function, exactly like driver.py's compile_program / build_stdlib_dylib.py
+# already needed the identical fix (both `-undefined dynamic_lookup`-style
+# paths only surface a missing symbol as a runtime dyld crash, never a link
+# error — this one DOES fail at link time since stage2/mojo's link is a
+# plain static executable, no dynamic lookup fallback). Plain C, no
+# -fgimple needed (mirrors mojo_runtime.c's own presence in this same list
+# — gcc's -fgimple only forces the strict frontend for a `.ci`-shaped
+# translation unit, not for ordinary C sources compiled alongside it).
+CORO_ARCH_SRC = $(shell test "$$(uname -m)" = "arm64" -o "$$(uname -m)" = "aarch64" \
+                  && echo runtime/mojo_coro_ctx_aarch64.S || echo runtime/mojo_coro_ctx_generic.c)
+CORO_RUNTIME_SRC = runtime/mojo_coro.c runtime/mojo_coro_gen.c runtime/mojo_async_sched.c $(CORO_ARCH_SRC)
 STDLIB_DYLIB = build/libmojostdlib.dylib
 MOJO_CLI     = build/mojo
 # The canonical source that all three stages compile
@@ -246,14 +261,15 @@ mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
 # falls back on safely. Inert for the STOCK (shimmed) bootstrap path —
 # stage2/mojo's own compiled functions never run there at all, only
 # under MOJO_NO_SHIM=1.
-stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR)
+stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/mojo.ci ==="
-	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime -x c \
+	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
-	    stage1/mojo.ci \
-	    $(RUNTIME_SRC)
+	    -x c stage1/mojo.ci \
+	    -x none $(RUNTIME_SRC) \
+	    $(CORO_RUNTIME_SRC)
 	@chmod +x stage2/mojo
 	@echo "✓ stage2/mojo ready"
 

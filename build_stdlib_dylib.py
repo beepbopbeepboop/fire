@@ -539,6 +539,40 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             return open(o, 'rb').read()
         async_rt_o, _ = cas.get_or_build(async_rt_key, '.o', _build_async_rt_obj)
         objs.append(async_rt_o)
+
+        # A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the
+        # default backend now, gimple_gen_coro.py): the same "fold in
+        # unconditionally" treatment as mojo_async_runtime.cpp just above,
+        # for the identical reason -- a stdlib module compiled with a
+        # generator/async function/nested async closure (e.g. std/gpu/
+        # host/device_context.mojo's enqueue_cpu_function, hoisted as a
+        # nested async closure) emits real CALLS to __mojo_coro_*/
+        # __mojo_gen_*/__mojo_box_*, and with `-undefined dynamic_lookup`
+        # below the DYLIB LINK doesn't catch a missing one either -- it
+        # only surfaces as a `dyld: symbol not found` crash the first time
+        # any program actually calls into that stdlib code, even a program
+        # with no coroutine of its own (confirmed via a hand-verified
+        # repro: a plain `def g(x): return x` / `print(g(3.5))` program,
+        # no generator/async anywhere in it, crashed with `symbol not
+        # found ... '___mojo_gen_destroy'` purely from linking against
+        # this dylib). Plain C + one arch-specific file, all -fgimple-free
+        # (unlike mojo_runtime.o, these use ordinary strict C / asm).
+        _ss_cflags = ('-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
+        _ss_arch = ('mojo_coro_ctx_aarch64.S'
+                    if platform.machine().lower() in ('arm64', 'aarch64')
+                    else 'mojo_coro_ctx_generic.c')
+        for _ss_name in ('mojo_coro.c', 'mojo_coro_gen.c', 'mojo_async_sched.c', _ss_arch):
+            _ss_src = os.path.join(RUNTIME, _ss_name)
+            _ss_key = 'rtobj/' + cas._hash(
+                'mojo-ss-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+                cas.toolchain_fingerprint(gcc, _ss_cflags), open(_ss_src).read(), _ss_name)
+
+            def _build_ss_obj(_ss_src=_ss_src, _ss_name=_ss_name):
+                o = os.path.join(workdir, os.path.splitext(_ss_name)[0] + '.o')
+                subprocess.run([gcc, *_ss_cflags, '-c', '-o', o, _ss_src], check=True)
+                return open(o, 'rb').read()
+            _ss_o, _ = cas.get_or_build(_ss_key, '.o', _build_ss_obj)
+            objs.append(_ss_o)
         rt_path = None
 
     if extra_exports:
@@ -672,14 +706,24 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
     for the same reason build()'s production dylib path does — a compiled
     stdlib module (test or production) can reference these via
     `_coro_resume_fn`/`_coro_destroy_fn` used as bare values, or define a
-    compiled async function/closure, independent of link_runtime mode."""
+    compiled async function/closure, independent of link_runtime mode. Since
+    §5.5 (doc/COROUTINE.html) made the A3 stack-switch backend the default,
+    also folds in the stack-switch runtime (mojo_coro.c/mojo_coro_gen.c/
+    mojo_async_sched.c + the arch context-switch file) for the identical
+    reason — see build()'s own matching comment for the hand-verified crash
+    this fixes."""
     gcc = gcc or find_gcc()
     gxx = find_gxx()
     src = open(os.path.join(RUNTIME, 'mojo_runtime.c')).read()
     async_src = open(os.path.join(RUNTIME, 'mojo_async_runtime.cpp')).read()
+    ss_arch = ('mojo_coro_ctx_aarch64.S'
+               if platform.machine().lower() in ('arm64', 'aarch64')
+               else 'mojo_coro_ctx_generic.c')
+    ss_names = ('mojo_coro.c', 'mojo_coro_gen.c', 'mojo_async_sched.c', ss_arch)
+    ss_srcs = [open(os.path.join(RUNTIME, n)).read() for n in ss_names]
     key = 'rtdylib/' + cas._hash(
-        'mojo-rtdylib-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, flags), src, async_src)
+        'mojo-rtdylib-v3', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(gcc, flags), src, async_src, *ss_srcs)
     out = cas.path_for(key, '.dylib')
     if not os.path.exists(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -690,7 +734,13 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
         async_o = os.path.join(wd, 'mojo_async_runtime.o')
         subprocess.run([gxx, '-std=c++20', '-fPIC', f'-I{RUNTIME}', '-c', '-o', async_o,
                         os.path.join(RUNTIME, 'mojo_async_runtime.cpp')], check=True)
-        subprocess.run(_dylink(gcc, out, [o, async_o], undefined=False, link_driver=gxx),
+        ss_objs = []
+        for n in ss_names:
+            so = os.path.join(wd, os.path.splitext(n)[0] + '.o')
+            subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', so,
+                            os.path.join(RUNTIME, n)], check=True)
+            ss_objs.append(so)
+        subprocess.run(_dylink(gcc, out, [o, async_o] + ss_objs, undefined=False, link_driver=gxx),
                        check=True)
     return out
 
