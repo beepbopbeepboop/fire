@@ -3815,27 +3815,38 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # `_declare_var`/cast site as if it were a real C name/expression —
     # `MojoList * (37459640688);`, different every run.
     #
-    # Broadened once already to "any entry point under this compiler's own
+    # Broadened once (0116978) to "any entry point under this compiler's own
     # source dir" via `os.path.abspath(os.path.dirname(filename)) ==
-    # _SELFHOST_DIR` — but a BARE relative `filename` (e.g. literally
-    # "mojo_compiler.py", exactly what `mojo --dump-full mojo_compiler.py`
-    # passes) has an EMPTY `os.path.dirname`, so that comparison silently
-    # depended on the process's CWD matching `_SELFHOST_DIR` byte-for-byte
-    # AND on the self-hosted (compiled, MOJO_NO_SHIM=1) runtime's own
-    # `os.path.abspath`/`os.path.dirname`/`==` implementations agreeing
-    # with CPython's — fragile in a way that could silently fail on the
-    # exact self-hosted path this feature exists for. Dropped that
-    # dirname/equality dependency entirely: `_selfhost_register_gimplegen`
-    # is cheap (mtime-cached) and a harmless no-op when `_SELFHOST_DIR`
-    # doesn't actually contain a `class GimpleGen` (i.e. this project isn't
-    # the compiler's own source at all) — see `_selfhost_load_gimplegen_
-    # class`. The REAL narrowing already happens per-file, robustly, in
-    # `_selfhost_gen_self_param_ctype` (only applies to an unannotated
-    # `gen`/`self` first param in a `.py` file whose OWN `_current_filename`
-    # resolves under `_SELFHOST_DIR`) — this top-level gate only needs to
-    # avoid the (near-zero) cost of registering for an ordinary user/stdlib
-    # compile, not to reproduce that per-file check.
-    if do_imports or link_mode:
+    # _SELFHOST_DIR`, then (66e3475) broadened AGAIN to unconditional
+    # (do_imports/link_mode only, no filename check at all) reasoning that
+    # `_selfhost_register_gimplegen` is a "harmless no-op" when this project
+    # isn't the compiler's own source — WRONG when this repo genuinely IS
+    # the compiler's own source (every dev checkout): the unconditional
+    # version registered GimpleGen as an `_imported_typedef_structs` entry
+    # for EVERY compile in this repo, including trivial unrelated test
+    # programs — confirmed as a real regression via test_module_cache.py's
+    # test_stage1_extern_boundary, a two-line Mojo program that started
+    # failing with "unknown type name 'DispatchSolver'" (a compiler-
+    # INTERNAL type from gimple_solvers.py, leaking into the OUTPUT of an
+    # unrelated user program's compile because GimpleGen's own registered
+    # methods reference it).
+    #
+    # The directory-only check ALSO isn't safe by itself: a synthetic test
+    # filename like 'client.mojo' (test_module_cache.py's own
+    # compile_to_gimple_linked(client, filename='client.mojo') call, no
+    # real path at all) has an empty os.path.dirname, so
+    # os.path.abspath(os.path.dirname('client.mojo')) resolves to the
+    # process's CWD — which IS `_SELFHOST_DIR` whenever a test is run from
+    # the repo root, exactly where these tests are always run from. The
+    # directory check alone therefore still matched this same regression.
+    # Basename allowlisting is the one dimension that correctly separates
+    # "genuinely one of the compiler's own named entry files" from "any
+    # relative-looking filename that happens to share this process's CWD" —
+    # restored it, just widened to also cover 'mojo_compiler.py' (the
+    # actual motivating case for broadening this at all).
+    if ((do_imports or link_mode) and filename
+            and os.path.basename(filename) in ('mojo.py', 'mojo_main.py', 'mojo_compiler.py')
+            and os.path.abspath(os.path.dirname(filename)) == _SELFHOST_DIR):
         _selfhost_register_gimplegen(gen)
     # Seed the self-import guard with the ROOT file's own identity — see
     # `_compiling_file_paths`'s declaration for why this is needed (a bare
