@@ -134,7 +134,68 @@ def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
         _FAIL += 1
 
 
+def test_generator_c_compiles(name: str, mojo_src: str):
+    """Emit the generator module's C and assert it passes `gcc -fgimple
+    -fsyntax-only` -- a regression guard for shapes that used to be
+    A3-eligible but emitted BROKEN C (a miscompile), and are now honestly
+    refused (falling through to the cpp path) instead."""
+    global _PASS, _FAIL
+    try:
+        c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
+        wd = tempfile.mkdtemp(prefix='mojo_gen_cc_')
+        cp = os.path.join(wd, 'prog.c')
+        with open(cp, 'w') as f:
+            f.write(c_code)
+        r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w',
+                            '-fsyntax-only', cp],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: gcc -fgimple errors:\n{r.stderr}")
+            _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def run_tests():
+    # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
+    # generator method that CALLS the result of a `@property` getter
+    # (`self._address_class(x)` -- `_address_class` is a @property returning
+    # a class object, then invoked). This used to be A3-eligible and lowered
+    # `self._address_class(x)` as a direct method call `Net__address_class(
+    # self, x)` (arity 2 vs the getter's 1) -- broken C. Now honestly
+    # refused; the emitted .c must compile cleanly.
+    test_generator_c_compiles("generator_calls_property_getter_result", """\
+struct Addr:
+    var v: Int
+    fn __init__(out self, v: Int):
+        self.v = v
+
+struct Net:
+    var lo: Int
+    var hi: Int
+    fn __init__(out self, lo: Int, hi: Int):
+        self.lo = lo
+        self.hi = hi
+    @property
+    fn _address_class(self) -> Addr:
+        return Addr(0)
+    fn hosts(self):
+        var x = self.lo
+        while x <= self.hi:
+            yield self._address_class(x)
+            x = x + 1
+
+def main():
+    n = Net(1, 3)
+    for h in n.hosts():
+        print(h.v)
+""")
+
+
     # The exact target shape from the Milestone B writeup: a parameterless
     # generator with a plain while-loop/yield/increment body, consumed by an
     # ordinary `for x in counter(): print(x)` loop. Confirms the whole

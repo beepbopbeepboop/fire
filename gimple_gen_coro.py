@@ -394,6 +394,67 @@ def _lambdas_ok(fn: N.FunctionDef) -> bool:
     return True
 
 
+def _own_property_names(struct_def) -> set:
+    """Names of `@property` getter methods directly on `struct_def`."""
+    out = set()
+    for m in getattr(struct_def, 'methods', []) or []:
+        if isinstance(m, N.FunctionDef) and 'property' in (getattr(m, 'decorators', None) or []):
+            out.add(m.name)
+    return out
+
+
+# struct name -> set of @property getter names, INCLUDING those inherited
+# from base classes defined in the same module. Populated fresh at the top
+# of each lower() call (this pre-pass runs before GimpleGen /
+# self._struct_property_names exist).
+_PROP_NAMES: dict[str, set] = {}
+
+
+def _seed_prop_names(stmts: list) -> None:
+    _PROP_NAMES.clear()
+    defs = {s.name: s for s in stmts if isinstance(s, N.StructDef)}
+    for name, sd in defs.items():
+        seen = set()
+        stack = [name]
+        acc = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in defs:
+                continue
+            seen.add(cur)
+            acc |= _own_property_names(defs[cur])
+            for b in (getattr(defs[cur], 'bases', None) or []):
+                bn = b if isinstance(b, str) else getattr(b, 'name', None)
+                if bn:
+                    stack.append(bn)
+        _PROP_NAMES[name] = acc
+
+
+def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def) -> bool:
+    """Refuse a generator method whose body *calls* the result of a
+    `@property` getter -- `self.<prop>(args)` where `<prop>` is a property
+    (Lib/ipaddress.py's `self._address_class(x)`: `_address_class` is a
+    `@property` returning a class object, then invoked to construct an
+    address). The ordinary call-lowering the A3 body shares mis-lowers this
+    as a direct method call `Struct__prop(self, args)` (arity 2 vs the
+    getter's 1) -- broken C, a real miscompile. No support for a
+    property-returned callable value exists; refuse honestly so the module
+    falls through to the cpp path's own refusal instead of emitting broken
+    code."""
+    if struct_def is None:
+        return True
+    props = _PROP_NAMES.get(struct_name) or _own_property_names(struct_def)
+    if not props:
+        return True
+    for n in _walk(fn):
+        if (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
+                and isinstance(n.func.obj, N.IdentExpr)
+                and n.func.obj.name in ('self', 'cls')
+                and n.func.member in props):
+            return False
+    return True
+
+
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None) -> tuple[bool, str]:
     if fn.is_async:
@@ -406,6 +467,8 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'yield from with return-value capture (v0)'
     if not _lambdas_ok(fn):
         return False, 'lambda with *args/**kwargs or a default parameter'
+    if not _property_call_ok(fn, struct_name, struct_def):
+        return False, 'calls the result of a @property getter (v0)'
     params = fn.params
     if struct_name is not None:
         if not params or params[0][0] != 'self':
@@ -1185,6 +1248,7 @@ def lower(stmts: list) -> tuple[list, list]:
     if not enabled():
         return stmts, []
     _PARAM_NAMES.clear()
+    _seed_prop_names(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
                                              or getattr(s, 'is_async', False)):

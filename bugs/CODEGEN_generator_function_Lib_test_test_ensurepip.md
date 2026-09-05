@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (2026-09-05 — cluster D re-examined under A3; no safe incremental step, unchanged)
+
+Re-examined during the C/D/E cluster pass. Fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)`: byte-identical refusal —
+`fake_pip: unsupported statement in generator body: StructDef`.
+
+`fake_pip` is a `@contextmanager` generator, so it is refused at the A3
+eligibility gate (`decorated`) and falls to the cpp path, whose statement
+lowering has no `StructDef` case — an honest refusal. Supporting the
+nested `class FakePip(): __version__ = version` still needs the full
+3-piece design scoped in the 2026-08-12 entry below (hoist the nested
+`StructDef` into module-wide struct discovery; a generator-body-scoped
+variant of class-attribute seeding that captures an enclosing-frame local;
+a zero-arg allocate-and-seed construction path for a bare
+class-attribute-only body with no `__init__`). None of the three has a
+useful standalone incremental step — a partial (e.g. hoisting only) leaves
+`FakePip()` still refused with no behavior change. Feature-sized, single
+instance; not attempted this pass. Doc stays open.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster D)
 
 `fake_pip` (a `@contextmanager` generator) still refused:
