@@ -3443,8 +3443,20 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # Prefer the pinned libc signature for the prototype so a self-emitted
         # extern (e.g. `int pipe(int *)`) matches the coerced call args rather
         # than the raw int64_t-lowered argument types.
-        _proto_params = (gen._LIBC_SIGS[cname][1] if cname in gen._LIBC_SIGS
-                         else [at for (at, _) in arg_pairs])
+        #
+        # `[at for (at, _) in arg_pairs]` — a tuple-unpack IN THE COMPREHENSION
+        # FOR-CLAUSE — is the established tuple-boxing bug pattern (a 2-tuple
+        # unpack re-boxes an element to int64_t even if it started as char*):
+        # confirmed here via a real --dump-full mojo.py determinism diff
+        # showing `MojoList * (53615097216);` / `(53615097216) = (MojoList
+        # *)_t237;` at this exact line (an erased comprehension-result NAME
+        # printed as a decimal address, invalid C, different every run).
+        # Index instead of unpacking, mirroring this codebase's other
+        # `for (_, v) in pairs` -> indexed-loop fixes.
+        if cname in gen._LIBC_SIGS:
+            _proto_params = gen._LIBC_SIGS[cname][1]
+        else:
+            _proto_params = [_as_str(_ap[0]) for _ap in arg_pairs]
         gen._external_protos[cname] = (ret_ct, _proto_params)
     # Track param types for coercion, even if not emitting declaration
     if cname not in gen.func_param_types:
