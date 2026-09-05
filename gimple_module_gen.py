@@ -7325,9 +7325,21 @@ def gen_module_impl(self, stmts):
     # handle outside the enclosing function's own `{base}_start` call.
     if self._supported_generators or self._generator_method_api or self._generator_api:
         parts.append('typedef struct MojoGenerator MojoGenerator;')
+        # `self._generator_api: dict[str, dict] = {}` (and `_generator_
+        # method_api`'s matching declaration) has a bare `dict` nested-value
+        # annotation, not `dict[str, dict[str, str]]` — the same "no nested-
+        # value-type hint" gap fixed for `_class_attrs` earlier this
+        # session. Confirmed via a real --dump-full mojo.py determinism
+        # diff: `extern MojoGenerator *55158457152_start (void);` — an
+        # erased dict VALUE ('base') printed as a decimal address and
+        # spliced directly into a symbol name, invalid C, different every
+        # run. `_as_str`-guard the extracted fields at the read site
+        # (the dict's own VALUES are a genuinely mixed-type dict —
+        # `base`/`value_ctype` are str, `params` is a list — so a single
+        # `dict[str, str]` reparameterization wouldn't fit every field).
         for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
-            _base, _vct = _api['base'], _api['value_ctype']
-            _gptypes = ', '.join(_api.get('params') or []) or 'void'
+            _base, _vct = _as_str(_api['base']), _as_str(_api['value_ctype'])
+            _gptypes = ', '.join(_as_str(_p) for _p in (_api.get('params') or [])) or 'void'
             parts.append(f"extern MojoGenerator *{_base}_start ({_gptypes});")
             parts.append(f"extern _Bool {_base}_resume (MojoGenerator *);")
             parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")
