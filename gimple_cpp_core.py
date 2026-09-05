@@ -786,6 +786,70 @@ def _cpp_percent_format(gen, node) -> str | None:
     return acc if acc is not None else '""'
 
 
+def _cfcs_shape_of(gen, depth: int, shapes: set, expr, locals_shape: dict):
+    """Hoisted out of `_cpp_fn_container_shape` (was a recursive nested
+    closure) — the lifted-closure-env determinism fix this session is full
+    of. `shapes` (set) / `locals_shape` (dict) threaded and annotated."""
+    if expr is None:
+        return None
+    if isinstance(expr, gimple_ctypes.DictExpr):
+        return 'dict'
+    if isinstance(expr, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr,
+                         gimple_ctypes.Comprehension)):
+        return 'list'
+    if isinstance(expr, gimple_ctypes.TupleExpr):
+        return 'list'
+    if isinstance(expr, gimple_ctypes.TernaryExpr):
+        a = _cfcs_shape_of(gen, depth, shapes, getattr(expr, 'then_val', None), locals_shape)
+        b = _cfcs_shape_of(gen, depth, shapes, getattr(expr, 'else_val', None), locals_shape)
+        return a if a == b else None
+    if isinstance(expr, gimple_ctypes.IdentExpr):
+        if expr.name == 'None':
+            return None
+        return locals_shape.get(expr.name)
+    if isinstance(expr, gimple_ctypes.CallExpr):
+        f = expr.func
+        if isinstance(f, gimple_ctypes.MemberExpr):
+            if f.member in ('groupdict', 'items', 'copy') and not expr.args:
+                return 'dict' if f.member in ('groupdict', 'items') else None
+            if f.member == 'split':
+                return 'list'
+            return None
+        if isinstance(f, gimple_ctypes.IdentExpr):
+            if f.name == 'sorted' or f.name == 'dict':
+                return 'list' if f.name == 'sorted' else 'dict'
+            sub = _cpp_fn_container_shape(gen, f.name, depth + 1)
+            if sub:
+                shapes.add(sub)
+            return None
+    return None
+
+
+def _cfcs_scan(gen, depth: int, shapes: set, stmts, locals_shape: dict) -> None:
+    """Hoisted out of `_cpp_fn_container_shape` — see `_cfcs_shape_of`."""
+    for st in stmts:
+        if isinstance(st, gimple_ctypes.AssignStmt) and isinstance(st.target, gimple_ctypes.IdentExpr):
+            sh = _cfcs_shape_of(gen, depth, shapes, st.value, locals_shape)
+            if sh:
+                locals_shape[st.target.name] = sh
+        elif isinstance(st, gimple_ctypes.ReturnStmt):
+            sh = _cfcs_shape_of(gen, depth, shapes, st.value, locals_shape)
+            if sh:
+                shapes.add(sh)
+        elif isinstance(st, gimple_ctypes.IfStmt):
+            _cfcs_scan(gen, depth, shapes, st.then_body or [], dict(locals_shape))
+            for _, elif_body in (st.elifs or []):
+                _cfcs_scan(gen, depth, shapes, elif_body or [], dict(locals_shape))
+            if st.else_body:
+                _cfcs_scan(gen, depth, shapes, st.else_body, dict(locals_shape))
+        elif isinstance(st, gimple_ctypes.TryStmt):
+            _cfcs_scan(gen, depth, shapes, st.body or [], dict(locals_shape))
+            for h in (st.handlers or []):
+                _cfcs_scan(gen, depth, shapes, h.body or [], dict(locals_shape))
+            if st.else_body:
+                _cfcs_scan(gen, depth, shapes, st.else_body, dict(locals_shape))
+
+
 def _cpp_fn_container_shape(gen, fname: str, depth: int = 0) -> str | None:
     """'dict' / 'list' when EVERY value-returning exit of module-level
     function `fname` provably produces that container kind (never both), by
@@ -814,65 +878,7 @@ def _cpp_fn_container_shape(gen, fname: str, depth: int = 0) -> str | None:
     if fn_ast is None:
         return None
     shapes: set = set()
-
-    def _shape_of(expr, locals_shape: dict):
-        if expr is None:
-            return None
-        if isinstance(expr, gimple_ctypes.DictExpr):
-            return 'dict'
-        if isinstance(expr, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr,
-                             gimple_ctypes.Comprehension)):
-            return 'list'
-        if isinstance(expr, gimple_ctypes.TupleExpr):
-            return 'list'
-        if isinstance(expr, gimple_ctypes.TernaryExpr):
-            a = _shape_of(getattr(expr, 'then_val', None), locals_shape)
-            b = _shape_of(getattr(expr, 'else_val', None), locals_shape)
-            return a if a == b else None
-        if isinstance(expr, gimple_ctypes.IdentExpr):
-            if expr.name == 'None':
-                return None
-            return locals_shape.get(expr.name)
-        if isinstance(expr, gimple_ctypes.CallExpr):
-            f = expr.func
-            if isinstance(f, gimple_ctypes.MemberExpr):
-                if f.member in ('groupdict', 'items', 'copy') and not expr.args:
-                    return 'dict' if f.member in ('groupdict', 'items') else None
-                if f.member == 'split':
-                    return 'list'
-                return None
-            if isinstance(f, gimple_ctypes.IdentExpr):
-                if f.name == 'sorted' or f.name == 'dict':
-                    return 'list' if f.name == 'sorted' else 'dict'
-                sub = _cpp_fn_container_shape(gen, f.name, depth + 1)
-                if sub:
-                    shapes.add(sub)
-                return None
-        return None
-
-    def _scan(stmts, locals_shape: dict):
-        for st in stmts:
-            if isinstance(st, gimple_ctypes.AssignStmt) and isinstance(st.target, gimple_ctypes.IdentExpr):
-                sh = _shape_of(st.value, locals_shape)
-                if sh:
-                    locals_shape[st.target.name] = sh
-            elif isinstance(st, gimple_ctypes.ReturnStmt):
-                sh = _shape_of(st.value, locals_shape)
-                if sh:
-                    shapes.add(sh)
-            elif isinstance(st, gimple_ctypes.IfStmt):
-                _scan(st.then_body or [], dict(locals_shape))
-                for _, elif_body in (st.elifs or []):
-                    _scan(elif_body or [], dict(locals_shape))
-                if st.else_body:
-                    _scan(st.else_body, dict(locals_shape))
-            elif isinstance(st, gimple_ctypes.TryStmt):
-                _scan(st.body or [], dict(locals_shape))
-                for h in (st.handlers or []):
-                    _scan(h.body or [], dict(locals_shape))
-                if st.else_body:
-                    _scan(st.else_body, dict(locals_shape))
-    _scan(fn_ast.body, {})
+    _cfcs_scan(gen, depth, shapes, fn_ast.body, {})
     # `next(iter(shapes))` avoided deliberately: this module is itself
     # compiled by the self-hosting `make check-selfhost` pass, whose
     # plain-C `next()` lowering only understands a MojoGenerator* operand

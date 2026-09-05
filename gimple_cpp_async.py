@@ -975,6 +975,26 @@ _HELPER_FREE_BUILTINS = frozenset({
 })
 
 
+def _hbn_add_target(bound: set, t) -> None:
+    """Hoisted out of `_helper_bound_names` (was a recursive nested
+    closure) — the lifted-closure-env determinism fix. `bound` (set)
+    threaded and annotated."""
+    if isinstance(t, str):
+        s = t.strip()
+        if s.startswith('(') and s.endswith(')'):
+            for part in s[1:-1].split(','):
+                part = part.strip().lstrip('*').strip()
+                if part:
+                    bound.add(part)
+        elif s:
+            bound.add(s.lstrip('*').strip())
+    elif isinstance(t, gimple_ctypes.IdentExpr):
+        bound.add(t.name)
+    elif isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        for e in t.elements:
+            _hbn_add_target(bound, e)
+
+
 def _helper_bound_names(body: list) -> set:
     """Names locally bound anywhere in `body` (a nested helper's own body,
     not crossing into deeper `def`s) — assignment / augmented-assignment /
@@ -983,34 +1003,18 @@ def _helper_bound_names(body: list) -> set:
     captures."""
     bound: set = set()
 
-    def _add_target(t):
-        if isinstance(t, str):
-            s = t.strip()
-            if s.startswith('(') and s.endswith(')'):
-                for part in s[1:-1].split(','):
-                    part = part.strip().lstrip('*').strip()
-                    if part:
-                        bound.add(part)
-            elif s:
-                bound.add(s.lstrip('*').strip())
-        elif isinstance(t, gimple_ctypes.IdentExpr):
-            bound.add(t.name)
-        elif isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-            for e in t.elements:
-                _add_target(e)
-
     for n in gimple_exprtypes._walk_own_body(body):
         if isinstance(n, gimple_ctypes.AssignStmt):
-            _add_target(n.target)
+            _hbn_add_target(bound, n.target)
         elif isinstance(n, gimple_ctypes.AugAssignStmt):
-            _add_target(n.target)
+            _hbn_add_target(bound, n.target)
         elif isinstance(n, gimple_ctypes.MultiAssignStmt):
             for t in (n.targets or []):
-                _add_target(t)
+                _hbn_add_target(bound, t)
         elif isinstance(n, gimple_ctypes.WalrusExpr):
             bound.add(n.name)
         elif isinstance(n, gimple_ctypes.ForStmt):
-            _add_target(n.target)
+            _hbn_add_target(bound, n.target)
         elif isinstance(n, gimple_ctypes.VarDecl):
             bound.add(n.name)
         elif isinstance(n, gimple_ctypes.WithStmt):
