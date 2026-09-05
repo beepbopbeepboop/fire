@@ -5066,7 +5066,16 @@ def gen_module_impl(self, stmts):
                     enriched_scope[bstmt.name] = t
                     self.var_types[bstmt.name] = t
         self.var_types = _saved_vt2
-        _sibling_cis: list = []   # (inner.name, ci, {names this ci calls})
+        # Parallel structures instead of a list-of-3-tuples: a tuple element
+        # indexed on the self-hosted compiled path erases to `int64_t`, and
+        # the third field here (the set of names each sibling calls) then
+        # can't be iterated (`mojo_unsupported_iter` at the sibling-merge
+        # loop, silently zeroing out the shared-env grouping under
+        # MOJO_NO_SHIM=1). `_sib_calls_flat` maps sibling name -> its called
+        # names joined on NUL, so the merge pass re-`split`s a fresh local
+        # list-of-str that iterates cleanly.
+        _sibling_names: list = []
+        _sib_calls_flat: dict = {}   # inner.name -> "\x00"-joined called names
         for stmt in _all_stmts_nonfunc(body):
             if not isinstance(stmt, FunctionDef):
                 continue
@@ -5156,7 +5165,9 @@ def gen_module_impl(self, stmts):
             if outer_name not in self._all_closures:
                 self._all_closures[outer_name] = {}
             self._all_closures[outer_name][inner.name] = ci
-            _sibling_cis.append((inner.name, ci, set(_called_names)))
+            _sibling_names.append(_as_str(inner.name))
+            _sib_calls_flat[_as_str(inner.name)] = '\x00'.join(
+                sorted(_as_str(_cnm) for _cnm in _called_names))
             if inner.return_type is not None:
                 self.func_return_types[lifted] = self._resolve_type(inner.return_type)
             else:
@@ -5183,21 +5194,19 @@ def gen_module_impl(self, stmts):
         # each connected call-group ONE shared env struct holding the UNION
         # of the group's captures, so any member can call any other by
         # passing its own (now identical-layout) env through.
-        if len(_sibling_cis) > 1:
-            # Index the 3-tuples, don't unpack in the set-comp / for-clause
-            # — the tuple-boxing bug (boxed `_n`/`_m` make `_m in
-            # _names_here` unreliable and flip the shared-env grouping).
+        if len(_sibling_names) > 1:
             _names_here: set = set()
-            for _sc0 in _sibling_cis:
-                _names_here.add(_as_str(_sc0[0]))
+            for _sc0 in _sibling_names:
+                _names_here.add(_as_str(_sc0))
             _adj: dict[str, list] = {}
             for _n in _names_here:
                 _adj[_as_str(_n)] = []
-            for _sc1 in _sibling_cis:
-                _n = _as_str(_sc1[0])
-                for _m0 in _sc1[2]:
+            for _nk, _cf in _sib_calls_flat.items():
+                _n = _as_str(_nk)
+                _cf = _as_str(_cf)
+                for _m0 in _cf.split('\x00'):
                     _m = _as_str(_m0)
-                    if _m in _names_here and _m != _n:
+                    if _m and _m in _names_here and _m != _n:
                         if _m not in _adj[_n]:
                             _adj[_n].append(_m)
                         if _n not in _adj[_m]:
