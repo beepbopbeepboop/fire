@@ -2779,6 +2779,21 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             gen._elaborated_externs.append(_stub_decl)
     if fname in gen._KNOWN_SIGS:
         ret_type = gen._KNOWN_SIGS[fname][0]
+    elif fname in gen._LIBC_SIGS and fname_raw not in gen.func_return_types:
+        # A bare (unrenamed) libc call reaching this generic dispatch --
+        # e.g. os.py's `unlink(name)`/`mkdir(name, mode)` -- otherwise
+        # keeps the `int64_t` default set above, but the real libc
+        # signature (`_LIBC_SIGS`, already consulted for the self-
+        # emitted extern/prototype and for `_emit_call`'s argument
+        # coercion) may declare a narrower C return type (e.g. `int`).
+        # Assigning that call's actual `int` result into an `int64_t`-
+        # declared GIMPLE temp is an invalid conversion GCC's `-fgimple`
+        # frontend rejects outright ("invalid conversion in gimple
+        # call") -- found via `unlink`'s real 4-byte `int` return
+        # colliding with this default (save_env.py's
+        # restore_urllib_requests__url_tempfiles). Only applies when no
+        # local Mojo definition of the same bare name shadows it.
+        ret_type = gen._LIBC_SIGS[fname][0]
 
     # A renamed C-reserved *builtin* passthrough (e.g. calling libm exp2 with
     # no local def) needs a variadic extern. But if there's a local Mojo def of

@@ -3011,7 +3011,16 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         if _sn and (_sn in gen.struct_field_types
                     or f'{_sn}_{method}' in gen.func_return_types):
             struct_name = _sn
-            _is_cls_receiver = True
+            # `cls.a_staticmethod(...)` inside a @classmethod: unlike an
+            # ordinary/classmethod target, a @staticmethod takes NO
+            # implicit receiver at all — `cls` here is just the lookup
+            # path, not an argument. Without this check every such call
+            # (e.g. tarfile.py's `TarInfo.create_pax_header`, a
+            # @classmethod, calling `cls._create_header(...)`, a
+            # @staticmethod) got `cls` wrongly prepended as arg 0,
+            # producing "too many arguments; expected N, have N+1".
+            _is_cls_receiver = (
+                f"{_sn}_{gimple_ctypes._safe_name(method)}" not in gen._static_methods)
         else:
             struct_name = gimple_exprtypes._struct_name_of(ot)
     else:

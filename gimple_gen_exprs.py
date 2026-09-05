@@ -1757,7 +1757,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _ga_ret = gen.func_return_types.get(
                 f"{struct_name}_{gimple_ctypes._safe_name('__getattr__')}",
                 'int64_t')
-            _ga_attr = gen._new_val('char *', f'"{node.member}"')
+            # Route through the shared string pool (`_intern_string`), same
+            # as `_lower_StringLiteral` -- a raw `char * _tN = "debug";`
+            # GIMPLE assignment is a `char[N]`-to-`char *` conversion
+            # `-fgimple` rejects outright ("non-trivial conversion in
+            # 'string_cst'"), unlike a call argument (whose coercion loop
+            # in `_emit_call` already does this same conversion for a
+            # bare `"..."` value); `_new_val`'s direct assignment has no
+            # such coercion. Found via imaplib.py's IMAP4.__getattr__
+            # dispatch (`self.debug`/`self._idle_capture` falling through
+            # to this branch on the IMAP4_stream subclass).
+            _ga_attr = gen._new_val(
+                'char *', gen._intern_string(gimple_ctypes._c_escape(node.member)))
             raw = gen._call_expr(_ga_ret, _ga_csym,
                                   [(ot, ov), ('char *', _ga_attr)])
             return _ga_ret, raw
