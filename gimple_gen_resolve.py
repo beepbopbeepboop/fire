@@ -1387,7 +1387,18 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
         val.lstrip('-').replace('.','',1).isdigit())  # All numeric strings including single digits
     needs_temp = is_field or is_deref or is_addressed
 
-    def _simple_emit(dest: str, v: str, s: str, d: str):
+    if needs_temp:
+        t = gen._new_temp(dst)
+        _sce_simple_emit(gen, t, val, src, dst)
+        gen._emit(f'  {lhs} = {t};')
+    else:
+        _sce_simple_emit(gen, lhs, val, src, dst)
+
+
+def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
+    """Hoisted out of `_safe_coerce_emit` (was a nested closure showing the
+    lifted-closure-env call-site arity flip) — `gen` threaded."""
+    if True:
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
         if s == d:
             if d == 'int64_t' and v.lstrip('-').isdigit():
@@ -1451,13 +1462,6 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
             # (e.g. a _slit_ string literal). Load it first.
             v = gen._ensure_local(s, v)
             gen._emit(f'  {dest} = ({d}){v};')
-
-    if needs_temp:
-        t = gen._new_temp(dst)
-        _simple_emit(t, val, src, dst)
-        gen._emit(f'  {lhs} = {t};')
-    else:
-        _simple_emit(lhs, val, src, dst)
 
 
 def _param_safe_name(gen, bare: str) -> str:

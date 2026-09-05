@@ -1286,6 +1286,26 @@ def _tuple_unpack_slot_elems(gen, it_val: str, nslots: int) -> list:
     return elems
 
 
+def _gfl_declare_target_name(gen, shadow_name, vn: str, se: str) -> None:
+    """Hoisted out of `_gen_for_list` (recursive nested closure) — the
+    lifted-closure-env determinism fix; `gen`/`shadow_name` threaded."""
+    if vn.startswith('(') and vn.endswith(')'):
+        for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
+            _gfl_declare_target_name(gen, shadow_name, _nv, 'int64_t')
+    else:
+        gen._declare_var(vn, se, force=(vn == shadow_name))
+
+
+def _gfd_flatten_target(gen, vn: str, acc: list) -> None:
+    """Hoisted out of `_gen_for_dict` (recursive nested closure) — see
+    `_gfl_declare_target_name`. `acc` (list) threaded and annotated."""
+    if vn.startswith('(') and vn.endswith(')'):
+        for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
+            _gfd_flatten_target(gen, _nv, acc)
+    else:
+        acc.append(vn)
+
+
 def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
     # Handle tuple unpacking: for (a, b) in list_of_tuples:
     is_tuple = var.startswith('(') and var.endswith(')')
@@ -1313,16 +1333,10 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # assigns them from opaque boxed pairs, matching the pre-typed-
         # slots behavior for that shape).
         slot_elems = _tuple_unpack_slot_elems(gen, it_val, len(var_names))
-        def _declare_target_name(vn, se):
-            if vn.startswith('(') and vn.endswith(')'):
-                for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
-                    _declare_target_name(_nv, 'int64_t')
-            else:
-                gen._declare_var(vn, se, force=(vn == shadow_name))
         for _fli in range(len(var_names)):
             _fl_vn = _as_str(var_names[_fli])
             _fl_se = _as_str(slot_elems[_fli]) if _fli < len(slot_elems) else 'int64_t'
-            _declare_target_name(_fl_vn, _fl_se)
+            _gfl_declare_target_name(gen, shadow_name, _fl_vn, _fl_se)
     else:
         var_names = None
         gen._declare_var(var, _as_str(elem) if elem is not None else elem, force=(var == shadow_name))
@@ -1579,15 +1593,9 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # Flatten any nested tuple target the same way _gen_for_list does
         # (a naive split turned `(k, (a, b))` into the bogus fragments
         # `(a` / `b)`, declared verbatim — hard C syntax errors).
-        def _flatten(vn, acc):
-            if vn.startswith('(') and vn.endswith(')'):
-                for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
-                    _flatten(_nv, acc)
-            else:
-                acc.append(vn)
         _flat = []
         for vn in var_names:
-            _flatten(vn, _flat)
+            _gfd_flatten_target(gen, vn, _flat)
         var_names = _flat
         # First var is the KEY (char*); the rest are value slots, always
         # 0/NULL in this runtime's dict-key iteration. Declare the value
