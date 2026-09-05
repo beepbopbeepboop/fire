@@ -956,7 +956,7 @@ def _gmi_prefold_toplevel_comptime(self, _node_list):
                 _gmi_prefold_toplevel_comptime(self, getattr(_h, 'body', None) or [])
 
 
-def _gmi_find_comptime_one(self, _node_list, _target, _out):
+def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. This one had DEFAULT PARAMETERS bound to
     captured values (`_target=_iname, _out=_found`) — exactly the shape
@@ -1050,13 +1050,21 @@ def _gmi_collect_return_values(acc_rt: list, stmts2) -> None:
                     _gmi_collect_return_values(acc_rt, hb)
 
 
-def _gmi_has_unresolved_base(_struct_bases_map, _all_struct_names, _memo, _name, _stack):
+def _gmi_has_unresolved_base(_struct_bases_map: dict, _all_struct_names: set,
+                             _memo: dict, _name, _stack: list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; the memo dict, the name set, and the
     cycle-guard `_stack` (a LIST, not a frozenset — `_stack | {_name}` set
     union with a literal crashed the self-hosted backend the same way the
     `_coro_generic_names` set-intersection did; list concat is reliable)
-    are threaded explicitly."""
+    are threaded explicitly. EXPLICIT param annotations are load-bearing:
+    the hoisted function's body uses `_memo[_name]`/`_name in _memo` with
+    no dict-literal or `.items()` signal anywhere, so without `_memo: dict`
+    the self-hosted backend inferred it as a LIST and `_memo[_name] =
+    result` lowered to `mojo_list_set_int` -> Bus error (lldb-confirmed).
+    The original nested closure inherited the type from the enclosing
+    `_unresolved_base_memo: dict = {}` declaration; a hoisted param has no
+    such context."""
     if _name in _memo:
         return _memo[_name]
     if _name in _stack:
