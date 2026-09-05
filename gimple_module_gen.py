@@ -984,6 +984,51 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out):
                 _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
 
 
+def _gmi_collect_global_stmts(stmt_list) -> list:
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Recursive; pure (no captured state)."""
+    result = []
+    for _gs in stmt_list:
+        result.append(_gs)
+        if isinstance(_gs, TryStmt):
+            result.extend(_gmi_collect_global_stmts(_gs.body or []))
+            for _h in (_gs.handlers or []):
+                result.extend(_gmi_collect_global_stmts(getattr(_h, 'body', []) or []))
+            result.extend(_gmi_collect_global_stmts(_gs.else_body or [] if isinstance(_gs.else_body, list) else []))
+            result.extend(_gmi_collect_global_stmts(_gs.finally_body or [] if isinstance(_gs.finally_body, list) else []))
+        elif isinstance(_gs, IfStmt):
+            result.extend(_gmi_collect_global_stmts(_gs.then_body or []))
+            result.extend(_gmi_collect_global_stmts(_gs.else_body or []))
+    return result
+
+
+def _gmi_scan_func_body_for_self_attr(self, fname, body):
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Recursive; only captures self."""
+    for _fstmt in body:
+        if (isinstance(_fstmt, AssignStmt)
+                and isinstance(_fstmt.target, MemberExpr)
+                and isinstance(_fstmt.target.obj, IdentExpr)
+                and _fstmt.target.obj.name == fname):
+            attr = _fstmt.target.member
+            self._func_attrs.setdefault(fname, {})
+            if attr not in self._func_attrs[fname]:
+                mangled = f"_funcattr_{fname}__{attr}"
+                self._func_attrs[fname][attr] = mangled
+                self._global_var_types.setdefault(mangled, 'int64_t')
+                self._global_c_decl_types.setdefault(mangled, 'int64_t')
+        elif isinstance(_fstmt, FunctionDef):
+            pass  # a nested def's own `f.attr` (if any) is scanned when THAT def is visited below
+        elif isinstance(_fstmt, IfStmt):
+            _gmi_scan_func_body_for_self_attr(self, fname, _fstmt.then_body)
+            for _, _eb in _fstmt.elifs:
+                _gmi_scan_func_body_for_self_attr(self, fname, _eb)
+            if _fstmt.else_body:
+                _gmi_scan_func_body_for_self_attr(self, fname, _fstmt.else_body)
+        elif isinstance(_fstmt, (WhileStmt, ForStmt, TryStmt)):
+            _gmi_scan_func_body_for_self_attr(self, fname, _fstmt.body)
+
+
 def _gmi_collect_return_values(acc_rt: list, stmts2) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; the accumulator list is threaded."""
@@ -3142,33 +3187,9 @@ def gen_module_impl(self, stmts):
 
     _own_top_level_func_names = {s.name for s in stmts if isinstance(s, FunctionDef)}
 
-    def _scan_func_body_for_self_attr(fname, body):
-        for _fstmt in body:
-            if (isinstance(_fstmt, AssignStmt)
-                    and isinstance(_fstmt.target, MemberExpr)
-                    and isinstance(_fstmt.target.obj, IdentExpr)
-                    and _fstmt.target.obj.name == fname):
-                attr = _fstmt.target.member
-                self._func_attrs.setdefault(fname, {})
-                if attr not in self._func_attrs[fname]:
-                    mangled = f"_funcattr_{fname}__{attr}"
-                    self._func_attrs[fname][attr] = mangled
-                    self._global_var_types.setdefault(mangled, 'int64_t')
-                    self._global_c_decl_types.setdefault(mangled, 'int64_t')
-            elif isinstance(_fstmt, FunctionDef):
-                pass  # a nested def's own `f.attr` (if any) is scanned when THAT def is visited below
-            elif isinstance(_fstmt, IfStmt):
-                _scan_func_body_for_self_attr(fname, _fstmt.then_body)
-                for _, _eb in _fstmt.elifs:
-                    _scan_func_body_for_self_attr(fname, _eb)
-                if _fstmt.else_body:
-                    _scan_func_body_for_self_attr(fname, _fstmt.else_body)
-            elif isinstance(_fstmt, (WhileStmt, ForStmt, TryStmt)):
-                _scan_func_body_for_self_attr(fname, _fstmt.body)
-
     for s in stmts:
         if isinstance(s, FunctionDef) and s.name in _own_top_level_func_names:
-            _scan_func_body_for_self_attr(s.name, s.body)
+            _gmi_scan_func_body_for_self_attr(self, s.name, s.body)
 
     def _scan_module_level_for_func_attrs(body):
         """`f.attr = value` written at MODULE level (not inside `f`'s own
@@ -6474,20 +6495,6 @@ def gen_module_impl(self, stmts):
                         'return_type': 'unknown',
                     }
                 self._module_alias_names.add(local_name)
-    def _collect_global_stmts(stmt_list):
-        result = []
-        for _gs in stmt_list:
-            result.append(_gs)
-            if isinstance(_gs, TryStmt):
-                result.extend(_collect_global_stmts(_gs.body or []))
-                for _h in (_gs.handlers or []):
-                    result.extend(_collect_global_stmts(getattr(_h, 'body', []) or []))
-                result.extend(_collect_global_stmts(_gs.else_body or [] if isinstance(_gs.else_body, list) else []))
-                result.extend(_collect_global_stmts(_gs.finally_body or [] if isinstance(_gs.finally_body, list) else []))
-            elif isinstance(_gs, IfStmt):
-                result.extend(_collect_global_stmts(_gs.then_body or []))
-                result.extend(_collect_global_stmts(_gs.else_body or []))
-        return result
 
     all_global_scan = stmts
 
@@ -6653,7 +6660,7 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[gname] = 'int64_t'
                 self._global_c_decl_types[gname] = 'int64_t'
 
-    for stmt in _collect_global_stmts(all_global_scan):
+    for stmt in _gmi_collect_global_stmts(all_global_scan):
         if isinstance(stmt, VarDecl):
             gname = stmt.name
             if gname in _declared_globals:
@@ -6831,7 +6838,7 @@ def gen_module_impl(self, stmts):
                 c_type = 'void *' if (g_mtype and g_mtype.endswith(' *')) else (
                     g_mtype if g_mtype and g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *', 'char *') else 'int64_t')
             init_code = '0'
-            for stmt in _collect_global_stmts(all_global_scan):
+            for stmt in _gmi_collect_global_stmts(all_global_scan):
                 if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr) and stmt.target.name == gname:
                     init_code = _extract_init_expr(stmt.value)
                     break
