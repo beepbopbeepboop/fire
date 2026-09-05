@@ -3269,7 +3269,18 @@ def _gen_stmt_TryStmt(gen, node):
         gen._declare_var(exc_type_t, 'int64_t')
         gen._emit(f"  {exc_type_t} = mojo_exc_type_get ();")
 
-        handler_bbs = {id(h): gen._new_bb() for h in handlers}
+        # Plain loop, not `{id(h): gen._new_bb() for h in handlers}` — a
+        # dict comprehension with int keys (`id(h)`) and str VALUES: the
+        # self-hosted backend didn't track the value type, so a later
+        # `handler_bbs[id(h)]` read came back an erased int64_t (the bb-
+        # name string's address) and emitted `goto <decimal address>;` —
+        # invalid C, different every run (confirmed via a real --dump-full
+        # mojo.py determinism diff at myinterpreter.py:634's `except
+        # (GeneratorExit, StopIteration):`). Build it explicitly and
+        # `_as_str`-guard every read.
+        handler_bbs: dict = {}
+        for _hbb in handlers:
+            handler_bbs[id(_hbb)] = gen._new_bb()
         bb_no_match = gen._new_bb()
 
         # A bare int literal (e.g. `== 12345`) defaults to plain `int`
@@ -3327,13 +3338,13 @@ def _gen_stmt_TryStmt(gen, node):
             if i + 1 < n_typed:
                 next_bb = gen._new_bb()
             else:
-                next_bb = handler_bbs[id(bare[0])] if bare else bb_no_match
-            gen._emit(f"  if ({is_match}) goto {handler_bbs[id(h)]}; else goto {next_bb};")
+                next_bb = _as_str(handler_bbs[id(bare[0])]) if bare else bb_no_match
+            gen._emit(f"  if ({is_match}) goto {_as_str(handler_bbs[id(h)])}; else goto {next_bb};")
             if i + 1 < n_typed:
                 gen._emit_label(next_bb)
 
         for h in typed + bare[:1]:
-            gen._emit_label(handler_bbs[id(h)])
+            gen._emit_label(_as_str(handler_bbs[id(h)]))
             gen._emit_except_handler(h, node, bb_after)
 
         gen._emit_label(bb_no_match)
