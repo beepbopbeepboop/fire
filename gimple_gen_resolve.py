@@ -1352,9 +1352,22 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     # (int64_t)0;` is invalid GIMPLE, `t = (int64_t)0; *count = t;`
     # is not).
     is_deref = lhs.startswith('*')
+    # A bare identifier LHS naming a local `_seed_addressed_locals` has
+    # flagged (its address gets taken somewhere in this function via
+    # `UnsafePointer(to=x)` — see that pass's docstring): needs the
+    # IDENTICAL "coerce into a register temp first, then a plain (no
+    # embedded cast) store" treatment as a struct-field/deref LHS, for
+    # the same underlying `-fgimple` reason — a cast expression's result
+    # can't be stored directly into an ADDRESSABLE variable either, not
+    # just through a COMPONENT_REF/INDIRECT_REF (confirmed via std/gpu/
+    # host/device_context.mojo's `var result: Int32 = 0` — an initial
+    # cast-assignment INTO an addressed local, happening before its own
+    # `UnsafePointer(to=result)` a few lines later — see bugs/CODEGEN_
+    # unsafepointer_to_kwarg_dropped.md).
+    is_addressed = lhs in getattr(gen, '_addressed_locals', ())
     val_is_literal = val.startswith('"') or val.startswith("'") or (
         val.lstrip('-').replace('.','',1).isdigit())  # All numeric strings including single digits
-    needs_temp = is_field or is_deref
+    needs_temp = is_field or is_deref or is_addressed
 
     def _simple_emit(dest: str, v: str, s: str, d: str):
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast

@@ -3476,6 +3476,8 @@ class GimpleGen:
         return ginf._write_dest(self, name)
     def _seed_mut_captured_local_types(self, func_name: str):
         return ginf._seed_mut_captured_local_types(self, func_name)
+    def _seed_addressed_locals(self, body: list):
+        return ginf._seed_addressed_locals(self, body)
     def _emit_mut_local_box_allocs(self):
         return ginf._emit_mut_local_box_allocs(self)
     def _new_jbp_temp(self) -> str:
@@ -3570,6 +3572,8 @@ class GimpleGen:
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:
         return ginf._scalar_arg_is_addressable_local(self, aval)
+    def _addressable_to_target(self, ctype: str, aval: str) -> bool:
+        return ginf._addressable_to_target(self, ctype, aval)
     def _strided_data_ptr(self, pt: str, pv: str) -> str:
         return grsl._strided_data_ptr(self, pt, pv)
     def _safe_coerce_emit(self, src: str, dst: str, val: str, lhs: str) -> None:
