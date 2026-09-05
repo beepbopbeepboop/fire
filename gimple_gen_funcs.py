@@ -3024,6 +3024,52 @@ def _resolve_sibling_param_ctype(gen, module: str, raw_ptype) -> str | None:
     return None
 
 
+def _ris_base(ann) -> str:
+    """Hoisted out of `_register_imported_structs` — see `_ris_collect`'s
+    docstring for why."""
+    return ann.split('[', 1)[0].split('.')[0].strip() if isinstance(ann, str) else ''
+
+
+def _ris_collect(params_by_struct: dict, fn) -> None:
+    """Hoisted out of `_register_imported_structs` (module-level, not a
+    nested, RECURSIVE closure mutating a captured dict) — a real
+    --dump-full mojo.py determinism diff showed `_register_imported_
+    structs__collect (_env__collect, _t60);` on one run vs `..., 0);` (an
+    extra, spurious trailing argument) on another for the IDENTICAL call
+    site — the lifted-closure env for this closure's own recursive self-
+    calls carried an inconsistent apparent arity, the same class of bug
+    already fixed for `_locally_bound_names`'s `walk` this session (and
+    with the same fix: thread the captured mutable dict as an explicit
+    parameter instead)."""
+    for _pn, _pt in (getattr(fn, 'params', None) or []):
+        b = _ris_base(_pt)
+        if b:
+            params_by_struct.setdefault(b, set()).add(
+                gimple_ctypes._strip_mojo_param_modifiers(_pn.lstrip('*')))
+    # Nested `def`s (e.g. a raises-helper closure declared inside a
+    # test function, typed on an imported struct) live inside the
+    # enclosing statement's body/orelse/handler blocks, not at
+    # top-level — walk those too (iteratively: a nested generator
+    # calling itself doesn't survive self-host closure-lifting) so
+    # their typed params count too.
+    _worklist = [getattr(fn, 'body', None)]
+    while _worklist:
+        _blk = _worklist.pop()
+        for _st in (_blk or []):
+            if isinstance(_st, gimple_ctypes.FunctionDef):
+                _ris_collect(params_by_struct, _st)
+            for _attr in ('body', 'orelse', 'finally_body'):
+                _sub = getattr(_st, _attr, None)
+                if isinstance(_sub, list):
+                    _worklist.append(_sub)
+            _handlers = getattr(_st, 'handlers', None)
+            if isinstance(_handlers, list):
+                for _h in _handlers:
+                    _hb = getattr(_h, 'body', None)
+                    if isinstance(_hb, list):
+                        _worklist.append(_hb)
+
+
 def _register_imported_structs(gen, stmts) -> None:
     """dylib mode: register a concrete imported struct's field layout + queue
     its typedef, for a struct used as a parameter type whose field is
@@ -3051,43 +3097,12 @@ def _register_imported_structs(gen, stmts) -> None:
     # coincidental `.field`/`.method(` on some other object).
     params_by_struct: dict = {}
 
-    def _base(ann):
-        return ann.split('[', 1)[0].split('.')[0].strip() if isinstance(ann, str) else ''
-
-    def _collect(fn):
-        for _pn, _pt in (getattr(fn, 'params', None) or []):
-            b = _base(_pt)
-            if b:
-                params_by_struct.setdefault(b, set()).add(
-                    gimple_ctypes._strip_mojo_param_modifiers(_pn.lstrip('*')))
-        # Nested `def`s (e.g. a raises-helper closure declared inside a
-        # test function, typed on an imported struct) live inside the
-        # enclosing statement's body/orelse/handler blocks, not at
-        # top-level — walk those too (iteratively: a nested generator
-        # calling itself doesn't survive self-host closure-lifting) so
-        # their typed params count too.
-        _worklist = [getattr(fn, 'body', None)]
-        while _worklist:
-            _blk = _worklist.pop()
-            for _st in (_blk or []):
-                if isinstance(_st, gimple_ctypes.FunctionDef):
-                    _collect(_st)
-                for _attr in ('body', 'orelse', 'finally_body'):
-                    _sub = getattr(_st, _attr, None)
-                    if isinstance(_sub, list):
-                        _worklist.append(_sub)
-                _handlers = getattr(_st, 'handlers', None)
-                if isinstance(_handlers, list):
-                    for _h in _handlers:
-                        _hb = getattr(_h, 'body', None)
-                        if isinstance(_hb, list):
-                            _worklist.append(_hb)
     for st in stmts:
         if isinstance(st, gimple_ctypes.FunctionDef):
-            _collect(st)
+            _ris_collect(params_by_struct, st)
         elif isinstance(st, gimple_ctypes.StructDef):
             for m in st.methods:
-                _collect(m)
+                _ris_collect(params_by_struct, m)
     param_type_names = set(params_by_struct)
 
     # Local variable names directly assigned from a constructor call to
