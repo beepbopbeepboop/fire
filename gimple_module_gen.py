@@ -5093,7 +5093,16 @@ def gen_module_impl(self, stmts):
                         inner_assign_targets.add(tgt)
                     elif hasattr(tgt, 'name'):
                         inner_assign_targets.add(tgt.name)
-            inner_declared = ({pn for pn, _ in inner.params}
+            # `{_p[0] for _p in inner.params}` not `{pn for pn, _ in ...}`
+            # — tuple-unpack-in-set-comprehension boxing bug: a boxed `pn`
+            # fails to subtract a real param name from `free` below, so
+            # the param leaks in as a spurious capture and the closure's
+            # env struct allocation flips (`_alloc_X_env()` vs `(X *)0`)
+            # run to run — a dominant --dump-full mojo.py nondeterminism.
+            _ipn: set = set()
+            for _p in inner.params:
+                _ipn.add(_as_str(_p[0]))
+            inner_declared = (_ipn
                               | _declared_vars_body(inner.body)
                               | inner_assign_targets)
             outer_params = set(outer_scope.keys())
@@ -5159,15 +5168,19 @@ def gen_module_impl(self, stmts):
         # of the group's captures, so any member can call any other by
         # passing its own (now identical-layout) env through.
         if len(_sibling_cis) > 1:
-            _names_here = {n for n, _, _ in _sibling_cis}
-            # Undirected sibling call graph (flat — no nested helper: this
-            # runs inside gen_module_impl's own nested `_scan_for_closures`
-            # and the self-host backend can't lift a 3-deep closure).
-            _adj: dict = {}
+            # Index the 3-tuples, don't unpack in the set-comp / for-clause
+            # — the tuple-boxing bug (boxed `_n`/`_m` make `_m in
+            # _names_here` unreliable and flip the shared-env grouping).
+            _names_here: set = set()
+            for _sc0 in _sibling_cis:
+                _names_here.add(_as_str(_sc0[0]))
+            _adj: dict[str, list] = {}
             for _n in _names_here:
-                _adj[_n] = []
-            for _n, _ci_x, _cn in _sibling_cis:
-                for _m in _cn:
+                _adj[_as_str(_n)] = []
+            for _sc1 in _sibling_cis:
+                _n = _as_str(_sc1[0])
+                for _m0 in _sc1[2]:
+                    _m = _as_str(_m0)
                     if _m in _names_here and _m != _n:
                         if _m not in _adj[_n]:
                             _adj[_n].append(_m)
@@ -5177,26 +5190,28 @@ def gen_module_impl(self, stmts):
             for _start in sorted(_names_here):
                 if _start in _seen_names:
                     continue
-                _stack = [_start]
-                _members = []
+                _stack: list = [_start]
+                _members: list = []
                 while _stack:
-                    _cur = _stack.pop()
+                    _cur = _as_str(_stack.pop())
                     if _cur in _seen_names:
                         continue
                     _seen_names.add(_cur)
                     _members.append(_cur)
-                    for _nb in _adj[_cur]:
+                    for _nb0 in _adj[_cur]:
+                        _nb = _as_str(_nb0)
                         if _nb not in _seen_names:
                             _stack.append(_nb)
                 if len(_members) < 2:
                     continue
                 _member_cis = [self._all_closures[outer_name][_m] for _m in _members]
-                _merged_caps: dict = {}
+                _merged_caps: dict[str, str] = {}
                 _merged_mut: list = []
                 for _mci in _member_cis:
-                    for _cv, _ct in _mci.captures:
+                    for _cap in _mci.captures:  # index, not unpack — tuple-boxing bug
+                        _cv = _as_str(_cap[0])
                         if _cv not in _merged_caps:
-                            _merged_caps[_cv] = _ct
+                            _merged_caps[_cv] = _as_str(_cap[1])
                     for _mn in (getattr(_mci, 'mut_names', None) or []):
                         if _mn not in _merged_mut:
                             _merged_mut.append(_mn)
@@ -5316,7 +5331,9 @@ def gen_module_impl(self, stmts):
                 _sub_closures = self._all_closures.get(_ci.lifted_name, {})
                 if not _sub_closures:
                     continue
-                _ci_param_names = {pn for pn, _ in _ci.inner_def.params}
+                _ci_param_names: set = set()  # index, not unpack — tuple-boxing bug
+                for _cipp in _ci.inner_def.params:
+                    _ci_param_names.add(_as_str(_cipp[0]))
                 _ci_local_assigns = set()
                 for _bstmt in _ci.inner_def.body:
                     if isinstance(_bstmt, AssignStmt) and isinstance(_bstmt.target, IdentExpr):
