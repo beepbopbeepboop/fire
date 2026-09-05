@@ -770,6 +770,20 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     repo (the self-hosting bootstrap is always this compiler's own Python
     source — no `.mojo` file is ever part of it), and only when `GimpleGen`
     is actually a registered struct in this compile."""
+    # TEMPORARY diagnostic, gated by MOJO_DEBUG_SELFHOST_GEN: logs which
+    # condition below rejected a gen/self-first-param function, and the
+    # _current_filename context at the time — used to root-cause why only
+    # ~12/345 such functions actually get typed GimpleGen* in a real
+    # --dump-full mojo.py build (see dumpfull-determinism-progress memory).
+    # Remove once that investigation concludes.
+    _dbg = gimple_ctypes.os.environ.get('MOJO_DEBUG_SELFHOST_GEN')
+    def _dbgprint(_reason):
+        if _dbg:
+            import sys as _sys
+            print(f"SELFHOST_GEN_CTYPE reject={_reason} fn={getattr(node, 'name', '?')} "
+                  f"cf={getattr(gen, '_current_filename', None)!r} "
+                  f"registered={getattr(gen, '_selfhost_gimplegen_registered', False)!r}",
+                  file=_sys.stderr)
     if ptype is not None:
         return None
     bare = pname.lstrip('*')
@@ -780,13 +794,16 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
         return None
     cf = getattr(gen, '_current_filename', None)
     if not cf or not cf.endswith('.py'):
+        _dbgprint('no_cf')
         return None
     base = gimple_ctypes.os.path.basename(cf)
     if not base.startswith('gimple'):
+        _dbgprint('bad_basename')
         return None
     cur_abs = gimple_ctypes.os.path.abspath(cf)
     sd = gimple_codegen._SELFHOST_DIR
     if not (cur_abs == sd or cur_abs.startswith(sd + '/')):
+        _dbgprint('bad_dir')
         return None
     # Fires only once the GimpleGen registry pre-pass has run for this
     # (shared) compile — see _selfhost_register_gimplegen in gimple_codegen
@@ -798,7 +815,9 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     # "silently stubbed" for hard arity / pointer-vs-int errors at every
     # `self.<method>()` call site.
     if not getattr(gen, '_selfhost_gimplegen_registered', False):
+        _dbgprint('not_registered')
         return None
+    _dbgprint('OK')
     return 'GimpleGen *'
 
 
