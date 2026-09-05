@@ -1134,6 +1134,39 @@ def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
             found[fn] = 'int'
 
 
+def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
+                                _emitted_env_allocs: set, ci, outer_name) -> None:
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Recursive (emits sub-closures depth-first).
+    The `func_parts` LIST and the two `_emitted_*` SETS are threaded and
+    annotated per the hoist GOTCHA; `outer_name` was a `= None` default,
+    now an explicit required arg (the default-param shape is exactly what
+    produces the call-site arity flip)."""
+    if ci.lifted_name in _emitted_closures:
+        return
+    _emitted_closures.add(ci.lifted_name)
+    for sub_ci in self._all_closures.get(ci.lifted_name, {}).values():
+        _gmi_emit_closure_recursive(self, func_parts, _emitted_closures,
+                                    _emitted_env_allocs, sub_ci, ci.lifted_name)
+    if ci.env_struct and ci.env_struct not in _emitted_env_allocs:
+        _emitted_env_allocs.add(ci.env_struct)
+        alloc_fn = f"_alloc_{ci.env_struct}"
+        func_parts.append(
+            f"{ci.env_struct} * __GIMPLE {alloc_fn} (void)\n"
+            f"{{\n"
+            f"  {ci.env_struct} * _e;\n"
+            f"  void * _vp;\n"
+            f"\nbb_2:\n"
+            f"  _vp = malloc (sizeof({ci.env_struct}));\n"
+            f"  _e = ({ci.env_struct} *) _vp;\n"
+            f"  return _e;\n"
+            f"}}"
+        )
+        func_parts.append('')
+    func_parts.append(self._gen_lifted_closure(ci, outer_name))
+    func_parts.append('')
+
+
 def _gmi_self_member(expr):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Pure. MemberExpr's `.member` name iff its
@@ -5758,31 +5791,6 @@ def gen_module_impl(self, stmts):
     # allocator must be emitted exactly once (a second definition is a hard
     # C redefinition error).
 
-    def _emit_closure_recursive(ci, outer_name: str = None) -> None:
-        """Emit sub-closures first (depth-first), then this closure's allocator + body."""
-        if ci.lifted_name in _emitted_closures:
-            return
-        _emitted_closures.add(ci.lifted_name)
-        for sub_ci in self._all_closures.get(ci.lifted_name, {}).values():
-            _emit_closure_recursive(sub_ci, ci.lifted_name)
-        if ci.env_struct and ci.env_struct not in _emitted_env_allocs:
-            _emitted_env_allocs.add(ci.env_struct)
-            alloc_fn = f"_alloc_{ci.env_struct}"
-            func_parts.append(
-                f"{ci.env_struct} * __GIMPLE {alloc_fn} (void)\n"
-                f"{{\n"
-                f"  {ci.env_struct} * _e;\n"
-                f"  void * _vp;\n"
-                f"\nbb_2:\n"
-                f"  _vp = malloc (sizeof({ci.env_struct}));\n"
-                f"  _e = ({ci.env_struct} *) _vp;\n"
-                f"  return _e;\n"
-                f"}}"
-            )
-            func_parts.append('')
-        func_parts.append(self._gen_lifted_closure(ci, outer_name))
-        func_parts.append('')
-
     toplevel_stmts = []
 
     _toplevel_types = (AssignStmt, AugAssignStmt, ExprStmt,
@@ -5831,7 +5839,7 @@ def gen_module_impl(self, stmts):
             self._collect_body_import_bindings(stmt.body, _func_outer_scope)
             try:
                 for ci in self._all_closures.get(stmt.name, {}).values():
-                    _emit_closure_recursive(ci, stmt.name)
+                    _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, stmt.name)
                 self._lambda_parts = []
                 func_parts.append(self.gen_func(stmt))
             finally:
@@ -5859,7 +5867,7 @@ def gen_module_impl(self, stmts):
                 _method_outer_scope = self._push_import_scope()
                 self._collect_body_import_bindings(m.body, _method_outer_scope)
                 for ci in self._all_closures.get(method_outer_name, {}).values():
-                    _emit_closure_recursive(ci, method_outer_name)
+                    _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
                 self._lambda_parts = []
                 func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                 func_parts.append('')
