@@ -1,11 +1,27 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-abshim \
+        check-coro \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 RUNTIME_SRC  = runtime/mojo_runtime.c
 RUNTIME_HDR  = runtime/mojo_runtime.h
+# A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the default
+# generator/async backend now, gimple_gen_coro.py) — needed by stage2/mojo's
+# own hardcoded link recipe below whenever the self-hosted compiler's OWN
+# source (mojo_compiler.py/myinterpreter.py/...) contains a generator/async
+# function, exactly like driver.py's compile_program / build_stdlib_dylib.py
+# already needed the identical fix (both `-undefined dynamic_lookup`-style
+# paths only surface a missing symbol as a runtime dyld crash, never a link
+# error — this one DOES fail at link time since stage2/mojo's link is a
+# plain static executable, no dynamic lookup fallback). Plain C, no
+# -fgimple needed (mirrors mojo_runtime.c's own presence in this same list
+# — gcc's -fgimple only forces the strict frontend for a `.ci`-shaped
+# translation unit, not for ordinary C sources compiled alongside it).
+CORO_ARCH_SRC = $(shell test "$$(uname -m)" = "arm64" -o "$$(uname -m)" = "aarch64" \
+                  && echo runtime/mojo_coro_ctx_aarch64.S || echo runtime/mojo_coro_ctx_generic.c)
+CORO_RUNTIME_SRC = runtime/mojo_coro.c runtime/mojo_coro_gen.c runtime/mojo_async_sched.c $(CORO_ARCH_SRC)
 STDLIB_DYLIB = build/libmojostdlib.dylib
 MOJO_CLI     = build/mojo
 # The canonical source that all three stages compile
@@ -123,6 +139,18 @@ check-linkmode: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py driv
 		--extra test_link_mode.py \
 		-- python3 test_link_mode.py
 
+# ── check-coro: the A3 stack-switch coroutine runtime (doc/COROUTINE.html) ───
+# Standalone C unit tests for Layer 3 (context switch) and Layer 2 (coroutine
+# runtime), each run against every Layer 3 backend at -O0 and -O2.
+check-coro: runtime/mojo_coro.c runtime/mojo_coro.h runtime/mojo_coro_ctx.h \
+            runtime/mojo_coro_ctx_aarch64.S runtime/mojo_coro_ctx_generic.c \
+            runtime/test_mojo_coro.c runtime/test_mojo_coro_ctx.c \
+            runtime/test_mojo_coro_exc_stub.c test_coro_runtime.py
+	python3 checked_run.py check-coro --extra test_coro_runtime.py \
+		--extra runtime/mojo_coro.c --extra runtime/mojo_coro_ctx_aarch64.S \
+		--extra runtime/mojo_coro_ctx_generic.c \
+		-- python3 test_coro_runtime.py
+
 # Run all stdlib test and benchmark files through both the interpreter
 # (mojo.py run) and the JIT compiler (mojo.py --jit).
 check-stdlib: mojo_compiler.py
@@ -233,14 +261,15 @@ mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
 # falls back on safely. Inert for the STOCK (shimmed) bootstrap path —
 # stage2/mojo's own compiled functions never run there at all, only
 # under MOJO_NO_SHIM=1.
-stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR)
+stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/mojo.ci ==="
-	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime -x c \
+	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
-	    stage1/mojo.ci \
-	    $(RUNTIME_SRC)
+	    -x c stage1/mojo.ci \
+	    -x none $(RUNTIME_SRC) \
+	    $(CORO_RUNTIME_SRC)
 	@chmod +x stage2/mojo
 	@echo "✓ stage2/mojo ready"
 
@@ -404,9 +433,33 @@ build/system.o: mojo.ci
 build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
 
-build/mojo: build/system.o build/mojo_runtime.o
+# A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the default
+# generator/async backend now) — this dev build has the identical gap
+# stage2/mojo's own recipe had (see CORO_RUNTIME_SRC's own comment above):
+# mojo.py's own source has a generator (e.g. gimple_gen_coro.py's `_walk`),
+# so `build/system.o` genuinely references __mojo_coro_yield_i/__mgco_*
+# once compiled, with nothing on this link line to satisfy it.
+build/mojo_coro.o: runtime/mojo_coro.c
 	@mkdir -p build
-	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/mojo_runtime.o
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+build/mojo_coro_gen.o: runtime/mojo_coro_gen.c
+	@mkdir -p build
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+build/mojo_async_sched.o: runtime/mojo_async_sched.c
+	@mkdir -p build
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+build/mojo_coro_ctx.o: $(CORO_ARCH_SRC)
+	@mkdir -p build
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+CORO_RUNTIME_OBJS = build/mojo_coro.o build/mojo_coro_gen.o build/mojo_async_sched.o build/mojo_coro_ctx.o
+
+build/mojo: build/system.o build/mojo_runtime.o $(CORO_RUNTIME_OBJS)
+	@mkdir -p build
+	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/mojo_runtime.o $(CORO_RUNTIME_OBJS)
 	@chmod +x $@
 	@echo "build/mojo linked successfully"
 

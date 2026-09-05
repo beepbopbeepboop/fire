@@ -1,5 +1,181 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-03, worktree agent-aabd2cf376c9f0f42 — infrastructure increment: pop-time shape discrimination for a heterogeneous / tagged-union `stack` value model)
+
+Landed (`gimple_cpp_core.py`), the piece the older entries kept naming
+as the core blocker — recovering a *popped* element's shape:
+
+- **`<list-local>.pop()` / `.pop(i)`** in a coroutine body now lowers to
+  `mojo_list_pop` / `mojo_list_pop_at` (returns the raw `int64_t`-boxed
+  slot) instead of falling through to invalid C++ member-call syntax.
+- **`isinstance(top, tuple)`** — `tuple` was previously absent from the
+  isinstance type table, so the check folded to a constant `0` (silently
+  wrong: `walk`'s `if isinstance(top, tuple):` branch was dead). Added
+  `'tuple' -> ('MojoList *',)` (a tuple is boxed as a `MojoList *` in the
+  flat model) and a runtime `mojo_is_registered_list((int64_t)(top))`
+  discriminator for the genuinely-dynamic popped-box case, matching the
+  existing `list` handling.
+- **Tuple-unpack of a popped/boxed value** — `a, b = stack.pop()` and a
+  second-level `x, y, z = payload` (the exact `_fwalk` idiom: `action,
+  value = stack.pop()` then `isroot, dirfd, toppath, topname, entry =
+  value`). The value is cached once into a fresh local (a raw `.pop()`
+  mutates the stack, so it must not be re-evaluated per slot) and each
+  slot is read via `mojo_list_get_int((MojoList *)(box), i)`. Names bound
+  this way, plus a single-target `top = stack.pop()` / `t = other_boxed`,
+  are recorded in a new per-unit `_cpp_boxed_tuple_names` set so a later
+  unpack of them decomposes through the runtime getters rather than an
+  invalid raw `(v)[i]` subscript.
+- **`while <list>:`** now tests emptiness (`mojo_list_len(...) != 0`), not
+  pointer non-nullness — a `MojoList *` is essentially never NULL, so the
+  old raw `while (stack)` spun forever once drained. Same for
+  `while <dict>:` / `while <set>:`.
+- **Nested container literal appended** (`stack.append((a, b))`) now boxes
+  recursively via `_cpp_boxed_list_literal_expr`, like a nested element of
+  a list *literal* already did — previously emitted `(char *)({a, b})`.
+
+New end-to-end regression tests in `test_gimple_generator_runner.py`
+(`generator_pops_heterogeneous_tagged_stack`,
+`generator_pops_stack_two_level_tuple_unpack`) compile+link+run real
+binaries exercising all of the above.
+
+Effect on this file: `fwalk` (the driver generator) is no longer in the
+refusal list — it went from refused to accepted, because its body is
+exactly the pop/tag-dispatch/tuple-unpack shape this increment covers
+(`stack = [(_fwalk_walk, (...))]`, `while stack: yield from _fwalk(...)`,
+`finally: while stack: action, value = stack.pop(); if action ==
+_fwalk_close: close(value)`). Fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` now refuses on only
+`_fwalk` and `walk` (was `_fwalk, fwalk, walk`).
+
+**Still open, and genuinely separate large features — the concrete
+blockers for a full close:**
+- `_fwalk`: `stat(topname, ...)` returns a `stat_result` *structseq*
+  (`os.stat_result` — a named-tuple-ish C type with `.st_mode` etc.);
+  this codegen has no structseq value model. Also `scandir(topfd)`
+  yielding `DirEntry` objects with `.is_dir()` / `.stat()` / `.name` /
+  `.path` methods — an iterator-of-opaque-objects type with no
+  representation here.
+- `walk`: `for entry in scandir(top):` — same `DirEntry` iterator gap.
+
+Closing os.py needs real `os.scandir`/`DirEntry`/`os.stat_result`
+modeling (structseq + a directory-entry iterator type), which is a
+distinct project from the tagged-union stack work done here. Not
+attempted this session; that is the honest remaining scope.
+
+Gate clean on this increment: test_gimple 266/0, test_gimple_generator_
+runner 55/0, test_gimple_async_runner 38/0, module_cache 76/0,
+link_mode 3/0, check-selfhost pass, compile_stdlib 664 PASSED / 0
+unexpected, dylib 0 skips, bootstrap 180/180 byte-identical.
+
+## Status (2026-09-03, worktree agent-a63a153b32e83eb46 — infrastructure increment: nested container literals now have a flat boxed representation in coroutine bodies)
+
+Landed (`gimple_cpp_core.py`): a nested list/tuple literal used as an
+element of a list/tuple literal in a compiled generator/coroutine body
+now lowers to a flat, real runtime value instead of raising
+`_UnsupportedGeneratorShape`. New helper `_cpp_boxed_list_literal_expr`
+builds a `MojoList *` in which every element is stored `int64_t`-boxed:
+a nested container recurses to its own `MojoList *` and is boxed as
+`(int64_t)` of that pointer (the same boxed-pointer convention every
+container-typed local in this emitter already uses); scalars box
+directly; strings box through `mojo_str`. Wired into both
+`_cpp_list_literal_arg_expr` (call-argument position) and
+`_cpp_container_literal_init` (`x = [...]` assignment RHS). Nested
+dict/set literals still refuse (no flat model).
+
+Effect on this file: `fwalk`'s generator now compiles — its
+`stack = [(_fwalk_walk, (True, dir_fd, top, top, None))]` (a list
+literal whose one element is a `(int, tuple)` pair) was `fwalk`'s first
+blocker. Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`
+now refuses on only `_fwalk` and `walk` (was `_fwalk, fwalk, walk`).
+
+This is the flat *substrate* for the tagged-union / heterogeneous
+`stack` value model the wider `_fwalk`/`walk` blockers need — it gives
+nested literals a representation. Still missing: discriminating a
+*popped* element back into its shape (`isinstance(top, tuple)` /
+tuple-unpack at pop) — so a generator that only CONSTRUCTS such a
+literal now compiles past this point, while `_fwalk` (which pops and
+destructures the stack) still refuses later, now on `stat(...)`
+(needs structseq modeling) and its own pop-time destructuring.
+
+Gate clean on this increment: test_gimple 265/0, test_generators 17/0,
+gimple_generator_runner 53/0, module_cache 76/0, link_mode 3/0,
+check-selfhost pass, compile_stdlib 664 PASSED / 0 unexpected, dylib
+0 skips, bootstrap byte-identical.
+
+## Status (2026-09-03, worktree agent-aa666b3e6a5da3cf2 — infrastructure increment: `_LIBC_SIGS` callee resolution threaded into coroutine bodies)
+
+Landed: the coroutine-body `CallExpr` resolver in `gimple_cpp_core.py`
+now consults `GimpleGen._LIBC_SIGS` before the honest
+"unresolved callee" refusal. A bare call to a C-stdlib / POSIX name with
+a curated signature (e.g. `close(fd)` inside `_fwalk`, reached via
+`from posix import *`) now emits the real call plus a self-emitted
+`extern "C"` prototype in the .cpp preamble (new
+`GimpleGen._cpp_libc_sig_refs` set, consumed by `gen_module`), exactly
+as `_ensure_libc_self_extern`/`_NEEDS_SELF_EXTERN` already do for the
+ordinary GIMPLE path — the signature is the curated one, not inferred
+from lowered args, so it is as safe as the ordinary path calling the
+same name. `close` was added to `_LIBC_SIGS`/`_LIBC_DECLARED`/
+`_NEEDS_SELF_EXTERN` (`int close(int)`, `<unistd.h>` not in prelude).
+General fix — any compiled generator calling a known libc function
+benefits.
+
+Effect on this file: `_fwalk`'s `close(...)` refusal is gone. Fresh
+isolated `compile_to_gimple_with_cpp(do_imports=False)` now refuses on:
+- `_fwalk`: `stat(...)` (another `from posix import *` name — but
+  `os.stat` returns a `stat_result` structseq, NOT an int/pointer, so
+  it has no honest `_LIBC_SIGS` entry; needs real structseq modeling,
+  not the libc-sig shortcut) AND still the nested-container-literal
+  blocker (`stack.append((_fwalk_yield, (toppath, dirs, nondirs,
+  topfd)))`).
+- `walk`: `for entry in scandir(top):` — `scandir` yields `DirEntry`
+  objects, an iterator type with no representation here.
+- `fwalk`: same as `_fwalk`.
+
+Remaining blockers unchanged from below: (1) `scandir`/`stat` need real
+iterator / structseq value modeling (not a plain libc call), (2)
+nested-container list elements, (3) the tagged-union / heterogeneous-
+`stack` representation. Gate clean on this increment: test_gimple 265/0,
+module_cache 76/0, link_mode 3/0, check-selfhost pass, compile_stdlib
+664 PASSED / 0 unexpected, dylib 0 skips, bootstrap 180/180 byte-identical.
+
+## Status (2026-09-03, worktree agent-a3653091edce795d4 — real partial forward progress landed; first refusal layer removed, tagged-union layer now the exposed blocker)
+
+Landed: **module-level function-alias resolution in compiled
+generator/coroutine bodies.** A module-level `X = Y` rebinding where `Y`
+is itself a plain-`def` module function (Lib/os.py's `if not
+_exists('fspath'): fspath = _fspath`) is now recorded into
+`GimpleGen._cpp_module_fn_aliases` by `gimple_module_gen.py`'s module
+scan (both the top-level pass and the nested if/try-guarded
+`_scan_cpp_nested_imports` pass — os.py's alias is inside an `if`), and
+`gimple_cpp_core.py`'s coroutine-body `CallExpr` resolver rewrites
+`fname` through that map before its module-function branches run, so
+`fspath(top)` resolves to `_fspath`'s real symbol instead of raising the
+honest "unresolved callee 'fspath(...)'" refusal. General fix — any
+compiled generator calling an aliased module function benefits.
+
+Effect on this file: `walk`/`_fwalk`/`fwalk`'s refusal reason has moved
+past the `fspath` symptom. Fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` now refuses on:
+- `walk`: `unsupported for-loop iterable type: CallExpr` (`for entry in
+  scandir(top):` — `scandir` is a `from posix import *` name with no
+  module-level `def`, plus its result is an iterator of `DirEntry`)
+- `_fwalk`: `a nested container literal has no representation as a list
+  element in this coroutine-body model`
+  (`stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))` — a
+  tuple whose 2nd slot is itself a 4-tuple) and still `close(...)`
+  (another `from posix import *` name).
+
+This is the genuine tagged-union / heterogeneous-`stack` layer the
+older entries below diagnosed — still open, still feature-sized. Two
+concrete prerequisites now clearly separated from it: (1)
+`from posix import *` callee resolution for coroutine bodies (`scandir`,
+`close`, `open`, `stat`, ... — the ordinary GIMPLE path's `_LIBC_SIGS`
+/`_KNOWN_SIGS`/star-import machinery is not consulted by the coroutine
+emitter), (2) nested-container list elements. Gate run clean on the
+landed increment (test_gimple 265/0, module_cache/link_mode 76/0,
+link-mode 3/0, check-selfhost pass, compile_stdlib 664 PASSED / 0
+unexpected, dylib 0 skips, bootstrap <pending/‑>). No regression.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

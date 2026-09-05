@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Compiled Coroutine-Body Codegen — Strategy &amp; Plan</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: .2rem; }
+  h3 { margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; font-size: .92em; vertical-align: top; }
+  th { background: #f0f0f0; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .86em; }
+  .note { background: #fffbe6; border-left: 4px solid #f0c000; padding: .6rem 1rem; margin: 1rem 0; }
+  .danger { background: #ffecec; border-left: 4px solid #c00; padding: .6rem 1rem; margin: 1rem 0; }
+  .win { background: #eaffea; border-left: 4px solid #2c2; padding: .6rem 1rem; margin: 1rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+  .rec { font-weight: bold; color: #067; }
+</style>
+</head>
+<body>
+
+<h1>Compiled Coroutine-Body Codegen — Strategy &amp; Plan</h1>
+<p><strong>Status:</strong> <span class="rec">APPROVED 2026-09-03 — building Option A3.</span>
+Supersedes the ad-hoc "widen the C++ emitter one node at a time" approach that produced 8
+infra commits (<code>e554064..133742c</code>) this session without fully closing a single
+bug report. Decision &amp; layered plan in §4–§5; backend bolt-in contract for the deferred
+GCC frontend work in §7.</p>
+
+<p><strong>Goal (unchanged):</strong> professional, high-performance native codegen for
+Mojo generators (<code>yield</code>) and <code>async def</code>/<code>await</code>,
+with the same language breadth the ordinary compiled path already has (it compiles
+the entire 664-file stdlib tree clean).</p>
+
+<h2>1. The problem, precisely</h2>
+
+<p>The compiler has <strong>two independent lowerings</strong> of Mojo function bodies:</p>
+
+<table>
+<tr><th></th><th>Ordinary path</th><th>Coroutine-body path</th></tr>
+<tr><td>Files</td>
+    <td><code>gimple_codegen.py</code>, <code>gimple_gen_*.py</code>, <code>gimple_module_gen.py</code> (~30k lines)</td>
+    <td><code>gimple_cpp_core.py</code> (7.3k) + <code>gimple_cpp_async.py</code> (2.9k) = <strong>~10.2k lines</strong></td></tr>
+<tr><td>Target language</td>
+    <td>GNU C in <code>-fgimple</code> dialect (three-address, explicitly typed)</td>
+    <td>C++20 text, using <code>co_yield</code>/<code>co_await</code> + a hand-emitted <code>promise_type</code></td></tr>
+<tr><td>Value model</td>
+    <td>Full: every stdlib type, generics, closures, RTTI, tuple-keyed dicts, structseq, …</td>
+    <td>Scalar-centric: <code>int64_t</code>, <code>char *</code>, <code>double</code>, <code>_Bool</code>, plus ad-hoc <code>MojoList *</code> boxing bolted on incrementally</td></tr>
+<tr><td>Coverage</td>
+    <td>664/664 stdlib files compile</td>
+    <td>Refuses (<code>_UnsupportedGeneratorShape</code>) on most non-trivial generators; ~40 open bug reports</td></tr>
+<tr><td>How a function reaches it</td>
+    <td>default</td>
+    <td><code>fn.is_generator</code> or <code>fn.is_async</code> → <code>_gen_cpp_generator_unit()</code> in <code>gimple_module_gen.py</code>; on refusal the whole module falls back to source/interpreter</td></tr>
+</table>
+
+<p><strong>Every open bug in <code>bugs/</code> and <code>bugs/hard/</code> is the same bug:</strong>
+the second lowering does not implement some AST shape that the first lowering handles
+fine. This session's 9 investigation agents confirmed it — including for the
+<em>non-generator</em> <code>COMPILE_FAIL_*</code> cluster (socket, contextlib, collections,
+zipfile, ctypes, the whole Tools/c-analyzer set), which all also refuse inside a
+coroutine body. The <code>__module__</code>-derived bug titles are mostly stale.</p>
+
+<div class="danger">
+<strong>Root cause is architectural, not a pile of small gaps.</strong> Widening
+<code>gimple_cpp_core.py</code> node-by-node is an unbounded task: it is re-deriving,
+in a second codebase, the language coverage that took years to build in the first.
+Each bug report needs 2–6 independent value-representation features stacked before it
+reaches exit 0. The 8 commits this session moved real infrastructure and cut refused-generator
+counts (e.g. <code>ipaddress</code> 4→2, <code>os.walk</code>'s <code>fwalk</code> now compiles)
+but closed zero reports. That ratio does not improve with more of the same.
+</div>
+
+<h2>2. What is <em>not</em> the problem</h2>
+<ul>
+<li><strong>The "compile both and link" pipeline is fine and live.</strong>
+    <code>driver.py</code> <code>_build</code> / <code>compile_linked</code> already compile the
+    coroutine <code>.cpp</code> with <code>g++</code>, link it beside the <code>-fgimple</code>
+    C objects with a C++-aware final driver, and content-address the result. Nothing to
+    "resurrect" — <code>MojoGenerator *</code> = a type-erased <code>std::coroutine_handle&lt;&gt;</code>
+    address, and <code>runtime/mojo_async_runtime.{h,cpp}</code> already has the event loop,
+    timer heap, and fd-wait machinery. The plumbing works; the <em>emitter</em> is the bottleneck.</li>
+<li><strong>Linking C and C++ is fine.</strong> The toolchain split (<code>gcc</code> for
+    <code>-fgimple</code> units, <code>g++</code> for coroutine units and the final link) is
+    already implemented and gated.</li>
+</ul>
+
+<h2>3. The options</h2>
+
+<h3>Option A — Lower coroutines to plain C as an AST pre-pass (one lowering)</h3>
+<p>Desugar a generator / <code>async def</code> into ordinary Mojo-level constructs
+<em>before</em> the normal codegen sees it, so the single broad GIMPLE path lowers
+everything and the C++ emitter is deleted. Three sub-variants differ only in the
+suspend mechanism:</p>
+
+<table>
+<tr><th></th><th>A1 — thread per generator</th><th>A2 — CPS / state machine</th><th>A3 — stack-switch coroutine</th></tr>
+<tr><td>Mechanism</td>
+    <td>generator body runs on its own pthread; <code>yield</code> = post value + wait on a
+        semaphore; strict cooperative handoff (only one side runs at a time)</td>
+    <td>transform body into a re-entrant <code>switch</code>/computed-<code>goto</code> state
+        machine over a heap frame struct holding all locals + a resume-point int</td>
+    <td>generator body runs on a small heap stack; <code>yield</code> = register-save +
+        stack-pointer swap (aarch64 asm, ~10 ns), à la libaco / boost.context</td></tr>
+<tr><td>Language coverage</td>
+    <td class="rec">100% immediately — the body is just ordinary code on its own stack</td>
+    <td>high, but the transform has real hard cases (yield in nested loop, in expression
+        position, across try/finally, <code>yield from</code>)</td>
+    <td class="rec">100% immediately — same as A1</td></tr>
+<tr><td>Perf cost per <code>yield</code></td>
+    <td>~0.5–1 µs context switch; ~8–64 KB stack per <em>live</em> generator</td>
+    <td class="rec">a few loads + an indirect jump; frame is exactly the locals</td>
+    <td>~10 ns; ~4–16 KB stack per live generator</td></tr>
+<tr><td>Implementation size</td>
+    <td class="rec">~small: a runtime shim + a thin lowering; mirrors the interpreter's
+        existing <code>_ThreadedGenerator</code></td>
+    <td>large: the transform is the classic hard part of every generator compiler</td>
+    <td>medium: per-arch asm (aarch64 for M5, x86-64 for CI) + a thin lowering</td></tr>
+<tr><td>Precedent in this repo</td>
+    <td class="rec"><code>myinterpreter.py</code> already ships exactly this
+        (<code>_ThreadedGenerator</code>, thread + Event handoff)</td>
+    <td>—</td>
+    <td>—</td></tr>
+<tr><td>Deletes <code>gimple_cpp_*</code>?</td>
+    <td colspan="3" class="rec">Yes — all ~10.2k lines of the second lowering, and the
+        <code>_UnsupportedGeneratorShape</code> fallback maze with it</td></tr>
+</table>
+
+<p>A1 and A3 are the <em>same lowering</em> with a swappable primitive: "run the body to
+the next suspension point on a side context, marshal the yielded value across." Start
+with A1 (portable, trivially debuggable, matches the interpreter), swap in A3's
+stack-switch primitive later for perf without touching the lowering or the language
+coverage. <code>async</code>/<code>await</code> is the same transform with the suspension
+returning to the <code>mojo_async_runtime</code> event loop instead of the caller.</p>
+
+<div class="note">
+<strong>Cooperative-only threading keeps the "single-threaded runtime" invariant honest.</strong>
+Generator threads never run concurrently with each other or with the main thread — every
+<code>yield</code>/<code>resume</code> is a strict baton pass. No shared-data locking is
+introduced; the runtime's grep-confirmed lock-free assumptions hold. (This is precisely
+the interpreter's current model.)
+</div>
+
+<h3>Option B — Feed the ordinary lowering into the C++ emitter</h3>
+<p>Keep C++ coroutines for frame/suspend; stop hand-writing expression/statement lowering
+by having <code>_cpp_stmt</code>/<code>_cpp_expr</code> call the same logic the ordinary
+path uses. <strong>Blocked:</strong> the ordinary path emits GIMPLE tuples, not C++
+expressions, and <code>g++</code> does not accept <code>-fgimple</code>. There is no cheap
+bridge; making the C++ emitter consume GIMPLE <em>is</em> Option C.</p>
+
+<h3>Option C — Coroutine-lowering pass in the GNU Mojo frontend (the endgame)</h3>
+<p><code>~/net/gcc</code> (branch <code>mrs-mojo</code>) has a real GCC Mojo frontend:
+<code>gcc/mojo/</code> ~4.9k lines plus <code>mojo-gimple-bridge.cc</code> (a C/Python
+GIMPLE-builder FFI). GCC's middle-end already carries the coroutine machinery the C++
+frontend drives — the ramp/resume/destroy split and the <code>__builtin_coro_*</code>
+intrinsics. A Mojo-frontend coroutine pass modelled on <code>gcc/cp/coroutines.cc</code>
+(5.6k lines) would drive the same builtins from Mojo GENERIC/GIMPLE.</p>
+<ul>
+<li><strong>Upside:</strong> native, fully optimized, LTO-transparent coroutines; no textual
+    C++; retires the Python C++ emitter <em>and</em> is a step toward retiring the
+    printf-GIMPLE approach entirely.</li>
+<li><strong>Cost:</strong> the specialized worktree layout described below; building GCC;
+    real frontend/middle-end work. Weeks–months, one dedicated owner.</li>
+<li><strong>Worktree layout required:</strong> a clean <code>master</code> tree +
+    Iain's M5 port (mainline GCC does not target Apple M5 — <code>mrs-m5</code> adds it) as
+    the base, then a fresh feature-development branch in its own worktree. Do <em>not</em>
+    develop this on <code>mrs-mojo</code> directly.</li>
+</ul>
+
+<h3>Option D — LTO across the C/C++ boundary</h3>
+<p>Compile every unit (<code>-fgimple</code> C and coroutine C++) with <code>-flto</code> so
+the cross-language boundary dissolves at link time: a single-client coroutine's frame ops
+get inlined into its C caller, giving "the appearance of coroutines in C" in the final
+binary. <strong>Orthogonal:</strong> it improves codegen quality for whatever the emitter
+produces, but does not add one line of language coverage. Worth doing on its own merits
+and compatible with A, C, or the status quo.</p>
+
+<h3>Option E — "just compile both" path</h3>
+<p>Already implemented and live (§2). Nothing to do.</p>
+
+<h2>4. Decision (2026-09-03)</h2>
+
+<div class="win">
+<p><strong>Selected: Option A3 — stack-switch coroutines, in-tree.</strong> One lowering
+(the ordinary broad GIMPLE path), a small architecture-isolated context-switch primitive,
+and a narrow backend seam so the GCC Mojo-frontend implementation (Option C, deferred to a
+separate effort) can later be bolted in <em>under the same contract</em> without touching
+the lowering or any consumer.</p>
+<ul>
+<li><strong>100% language coverage</strong> — a generator/async body runs as ordinary code
+    on its own stack; the ordinary codegen lowers it, so everything that compiles the
+    stdlib works.</li>
+<li><strong>Most of the performance</strong> — a <code>yield</code> is a register-save +
+    stack-pointer swap (~10 ns on aarch64), not a µs-scale thread hop.</li>
+<li><strong>Stays in this tree</strong> — no libpthread dependency, no GCC build, no second
+    toolchain beyond what generic-instantiation C++ already needs.</li>
+<li><strong>Deletes ~10.2k lines</strong> — <code>gimple_cpp_core.py</code> +
+    <code>gimple_cpp_async.py</code> and the <code>_UnsupportedGeneratorShape</code>
+    fallback maze.</li>
+</ul>
+<p><strong>Deferred to a separate effort (the other AI): Option C</strong> — the GCC Mojo
+frontend coroutine pass. This plan's job is to make that a <em>clean bolt-in</em>: see
+§7, the backend ABI. <strong>Option D (LTO)</strong> stays an independent, any-time
+codegen-quality workstream.</p>
+</div>
+
+<h2>5. Architecture — three layers, three seams</h2>
+
+<pre>  Mojo AST (generator / async def)
+        │
+   ┌────▼─────────────────────────────────────────────┐
+   │  LAYER 1  Lowering            gimple_gen_coro.py  │   arch-independent, backend-independent
+   │  · env struct + trampoline + factory             │   emits calls to the LAYER-2 primitive names only
+   │  · yield / yield from / return / await rewrites   │
+   └────┬─────────────────────────────────────────────┘
+        │   emits: __mojo_coro_new / _resume / _yield / _return_value / _throw / _destroy
+   ┌────▼─────────────────────────────────────────────┐   ◄── SEAM A (backend ABI, §7)
+   │  LAYER 2  Coroutine runtime   runtime/mojo_coro.c │   arch-independent C
+   │  · MojoCoro lifecycle, status, box/unbox,         │
+   │    exception hand-in, GeneratorExit unwind        │
+   │  · async: suspension target = mojo_async_runtime  │
+   └────┬─────────────────────────────────────────────┘
+        │   calls: mojo_fcontext make / jump / ontop
+   ┌────▼─────────────────────────────────────────────┐   ◄── SEAM B (fcontext ABI, §5.3)
+   │  LAYER 3  Context switch                          │   THE ONLY arch-specific code
+   │  runtime/mojo_coro_ctx.h  (prototypes)            │
+   │  runtime/mojo_coro_ctx_aarch64.S   ← M5, now      │
+   │  runtime/mojo_coro_ctx_x86_64.S    ← CI, Phase 5  │
+   │  runtime/mojo_coro_ctx_generic.c   ← ucontext fallback (portability escape hatch)
+   └──────────────────────────────────────────────────┘</pre>
+
+<p><strong>Seam A</strong> (Layer 1 ↔ Layer 2) is the bolt-in point for Option C: the GCC
+Mojo frontend supplies its own Layer 2 that lowers the six <code>__mojo_coro_*</code>
+primitives to <code>__builtin_coro_*</code> instead of calls into <code>mojo_coro.c</code>.
+Layer 1 does not change. <strong>Seam B</strong> (Layer 2 ↔ Layer 3) is the x86-64 port
+point: one new <code>.S</code> file implementing three functions.</p>
+
+<h3>5.1  Phase 0 — spike &amp; acceptance scoreboard (0.5–1 day)</h3>
+<ul>
+<li>Hand-write Layer 3 (aarch64) + a 40-line <code>MojoCoro</code> and drive one real
+    generator end-to-end in C (no compiler changes) — prove the switch works on M5.</li>
+<li>Freeze the acceptance suite: <code>test_gimple_generator_runner.py</code> (58),
+    <code>test_gimple_async_runner.py</code> (38), plus <code>test_coro_scoreboard.py</code>
+    — runs every <code>bugs/CODEGEN_generator_*</code> and coroutine-gated
+    <code>COMPILE_FAIL_*</code> source through <code>mojo.py build</code> + run and records
+    compile/link/run status. Monotonic non-regression from here on.</li>
+</ul>
+
+<h3>5.2  Phase 1 — Layer 3, context switch (<code>runtime/mojo_coro_ctx_aarch64.S</code>)</h3>
+<p>The boost.context / libaco <code>fcontext</code> ABI — the minimal, proven shape.
+Written from the AAPCS64 spec (callee-saved <code>x19–x28</code>, <code>x29/x30</code>,
+<code>v8–v15</code>, <code>sp</code>), not copied, to keep provenance clean.</p>
+<pre>/* runtime/mojo_coro_ctx.h  --  SEAM B : the entire arch-specific surface */
+typedef void *mojo_fctx_t;                 /* opaque: saved SP at top of some stack */
+typedef struct { mojo_fctx_t from; void *data; } mojo_xfer_t;
+
+/* build a context at the top of [stack, stack+size) that enters fn(xfer) on first jump */
+mojo_fctx_t mojo_make_fctx(void *stack_top, size_t size, void (*fn)(mojo_xfer_t));
+/* save current context, switch to `to`, deliver `data`; returns when jumped back to */
+mojo_xfer_t mojo_jump_fctx(mojo_fctx_t to, void *data);
+/* jump to `to` but first run fn on `to`'s stack — used for unwind-on-destroy */
+mojo_xfer_t mojo_ontop_fctx(mojo_fctx_t to, void *data, mojo_xfer_t (*fn)(mojo_xfer_t));</pre>
+<p>~80 lines aarch64. No heap, no libc, no OS calls — pure register shuffling. Unit-tested
+in isolation (<code>runtime/test_mojo_coro_ctx.c</code>) before anything above it exists.</p>
+
+<h3>5.3  Phase 2 — Layer 2, coroutine runtime (<code>runtime/mojo_coro.c</code>)</h3>
+<p>Arch-independent C on top of Seam B. Public API = Seam A (callable from
+<code>-fgimple</code>):</p>
+<pre>typedef struct MojoCoro MojoCoro;
+
+/* stack: mmap'd with a guard page; size from MOJO_CORO_STACK env or a 256 KB default */
+MojoCoro *__mojo_coro_new(void (*body)(MojoCoro *, void *env), void *env, size_t stack);
+/* 1 = suspended at a yield (*out = yielded box); 0 = body returned (*out = return box) */
+int       __mojo_coro_resume(MojoCoro *c, int64_t send_box, int64_t *out);
+/* called only from inside `body`: hands `val` to the resumer, returns the next send box  */
+int64_t   __mojo_coro_yield(MojoCoro *c, int64_t val);
+int64_t   __mojo_coro_return_value(MojoCoro *c);
+/* inject a typed exception at the suspension point; same return contract as _resume       */
+int       __mojo_coro_throw(MojoCoro *c, void *exc, int64_t *out);
+/* if still live, resume it with a GeneratorExit sentinel so with/finally unwind, then free */
+void      __mojo_coro_destroy(MojoCoro *c);</pre>
+<ul>
+<li><strong>Strictly one-at-a-time.</strong> Exactly one of {resumer, body} runs at any
+    moment — a baton pass, never concurrency. The runtime's grep-confirmed
+    "single-threaded, no locks" invariant is preserved; no user data is ever shared across
+    a race.</li>
+<li><strong>Values</strong> are one <code>int64_t</code> box (scalar bits or a pointer) —
+    the universal tagged box the ordinary path already uses for <code>Variant</code>/RTTI.
+    Layer 1 records the concrete yield/return type in <code>_generator_api</code> (already
+    has <code>_generator_yield_ctype</code>) so consumers unbox at the right type.</li>
+<li><strong>Exceptions.</strong> The trampoline wraps <code>body()</code> in the existing
+    typed-exception landing pad; an escaped exception is stashed and re-raised from
+    <code>__mojo_coro_resume</code> in the resumer's context.
+    <code>__mojo_coro_throw</code> stashes then resumes; <code>__mojo_coro_yield</code>'s
+    return path checks the stash and raises in the body's context.</li>
+<li><strong>GeneratorExit / destroy.</strong> <code>__mojo_coro_destroy</code> on a live
+    coroutine uses <code>mojo_ontop_fctx</code> to raise a private <code>_MojoGenClose</code>
+    at the suspension point so <code>with</code> / <code>try-finally</code> run, mirroring
+    CPython's <code>GeneratorExit</code>. Then unmaps the stack.</li>
+<li><strong>async.</strong> Same object; for an <code>async def</code> the "resumer" is the
+    <code>mojo_async_runtime</code> scheduler. <code>await x</code> drives <code>x</code>'s
+    handle, then <code>__mojo_coro_yield</code>s a "not ready, wake me on E" token the loop
+    understands (reusing the timer-heap / fd-wait facilities already in
+    <code>mojo_async_runtime.h</code>). Async generators use both rewrites.</li>
+</ul>
+
+<h3>5.4  Phase 3 — Layer 1, lowering (<code>gimple_gen_coro.py</code>)</h3>
+<p>For <code>fn g(p0, p1) -&gt; T</code> containing <code>yield</code> (arch- and
+backend-independent; emits only the Seam-A names):</p>
+<ul>
+<li><strong>Env struct</strong> <code>__g_env { P0 p0; P1 p1; }</code> — arguments only.
+    Body locals live on the coroutine's real stack (the point of A3): no frame struct, no
+    escape analysis, no per-local hoisting.</li>
+<li><strong>Trampoline</strong> <code>void __g_body(MojoCoro *__c, void *__e)</code>:
+    unpack <code>__e</code> → real params, then the <em>original body, lowered by the
+    ordinary path</em>, with only these local rewrites:
+    <ul>
+    <li><code>yield e</code> → <code>__mojo_coro_yield(__c, __box&lt;T&gt;(e))</code>
+        (statement position: discard result)</li>
+    <li><code>x = yield e</code> / <code>x = (yield e)</code> →
+        <code>x = __unbox(__mojo_coro_yield(__c, __box&lt;T&gt;(e)))</code></li>
+    <li><code>yield from it</code> → <code>for __v in it: __send =
+        __mojo_coro_yield(__c, __v)</code> with <code>.send()</code>/<code>.throw()</code>
+        forwarding and <code>StopIteration.value</code> capture</li>
+    <li><code>return e</code> → <code>__c-&gt;ret = __box&lt;T&gt;(e); return;</code></li>
+    <li><code>await e</code> (async) → the drive-then-suspend sequence in §5.3</li>
+    </ul>
+    No control-flow transformation — nested loops, <code>try/finally</code>, <code>with</code>,
+    <code>match</code>, comprehensions containing <code>yield</code> all Just Work because
+    they are lowered by the ordinary path on a real stack.</li>
+<li><strong>Factory</strong> <code>MojoGenerator *g(p0, p1)</code>: heap a <code>__g_env</code>,
+    <code>__mojo_coro_new(__g_body, env, 0)</code>, wrap in <em>today's exact</em>
+    <code>MojoGenerator *</code> handle. Every consumer — <code>for x in g(...)</code>,
+    <code>next()</code>, <code>.send()</code>, <code>_generator_api</code>, cross-module
+    <code>__mojo_reflect</code> — is byte-for-byte unchanged.</li>
+</ul>
+
+<h3>5.5  Phase 4 — cutover</h3>
+<ul>
+<li>Route <code>is_generator</code>/<code>is_async</code> to <code>gimple_gen_coro</code>
+    by default; keep the C++ emitter reachable behind <code>MOJO_CORO=cpp</code> for one
+    release as a differential oracle (<code>MOJO_CORO=stackswitch</code> is the default).</li>
+<li>Run the Phase 0 scoreboard. A previously-refused generator that still fails is now a
+    real <em>ordinary-path</em> bug, exposed — fix it there, where the fix helps all code.</li>
+<li><code>git rm</code> every <code>bugs/</code> report that now builds + runs; rewrite the
+    Status of any that remain with the true (ordinary-path) cause.</li>
+</ul>
+
+<h3>5.6  Phase 5 — delete the parallel implementation + x86-64 port</h3>
+<ul>
+<li>Remove <code>gimple_cpp_core.py</code>, <code>gimple_cpp_async.py</code>,
+    <code>_UnsupportedGeneratorShape</code> + fallback branches, the
+    <code>_supported_generators</code>/<code>_unsupported_generator_names</code> split, and
+    the coroutine-only C++ companion-build steps in <code>driver.py</code> /
+    <code>monomorphize.py</code>. Net ≈ −10k lines.</li>
+<li>Add <code>runtime/mojo_coro_ctx_x86_64.S</code> (Seam B, ~90 lines, SysV callee-saved
+    set) so CI hosts run the same path as M5. Nothing above Layer 3 changes.
+    <code>runtime/mojo_coro_ctx_generic.c</code> (ucontext) is the fallback for any third
+    arch until it gets its own <code>.S</code>.</li>
+</ul>
+
+<h3>Quality gate (every phase, per CLAUDE.md)</h3>
+<p><code>make check-linkmode</code> · <code>make check-selfhost</code> · from-scratch stdlib
+dylib (0 <code>skip</code>) · <code>python3 compile_stdlib.py</code> (unexpected count must
+not rise) · <code>make bootstrap</code> (180/180 byte-identical). Plus: Layer 3 has its own
+C unit test; the Phase 0 scoreboard is monotonic non-regressing.</p>
+
+<h3>Risks &amp; mitigations</h3>
+<table>
+<tr><th>Risk</th><th>Mitigation</th></tr>
+<tr><td>aarch64 asm correctness (register set, red zone, frame-pointer chain for lldb)</td>
+    <td>Layer 3 is ~80 lines against a written spec, unit-tested in isolation in Phase 0/1
+        before anything depends on it. Keep a valid <code>x29</code> chain + CFI directives
+        so <code>lldb</code> backtraces cross the switch.</td></tr>
+<tr><td>Stack sizing — a deep body (regex, AST walk) overflows a small coroutine stack</td>
+    <td>Default 256 KB, guard page below (SIGSEGV not silent corruption), overridable via
+        <code>MOJO_CORO_STACK</code>. Document; revisit with a growable-stack strategy only
+        if a real workload needs it.</td></tr>
+<tr><td>Exception unwinding across the switch (landing pad in body, catch in resumer)</td>
+    <td>The trampoline owns the body's top-level landing pad; only a plain
+        <code>int64_t</code> + a stashed <code>void *exc</code> ever cross the switch — the
+        unwinder never runs <em>through</em> a context jump.</td></tr>
+<tr><td><code>make bootstrap</code> byte-identity</td>
+    <td>Deterministic mangling for <code>__g_env</code>/<code>__g_body</code> (source-order
+        index, like existing generic instantiations). The compiler's own source has few
+        compiled-path generators — verify in Phase 3 immediately.</td></tr>
+<tr><td>async regressions vs the working C++20-coroutine async path</td>
+    <td><code>MOJO_CORO=cpp</code> oracle + the 38 async runner cases gate every phase;
+        async cutover can lag generator cutover by a phase if needed.</td></tr>
+<tr><td>Option C bolt-in drifts from this design</td>
+    <td>Seam A is version-stamped and spec'd in §7 with exact semantics + the
+        <code>MojoGenerator *</code> handle ABI; Layer 1 emits only those six names.</td></tr>
+</table>
+
+<h2>6. Option D (LTO) — independent workstream</h2>
+<p>Add <code>-flto -ffat-lto-objects</code> to the C/C++ compile + link steps (fat objects
+keep the CAS usable as plain <code>.o</code>). Measure size/runtime on the benchmark
+suite. Landable before, during, or after A3 — it touches only <code>driver.py</code> /
+<code>build_config.py</code> flag sets, not codegen.</p>
+
+<h2>7. Seam A — the backend ABI (the Option C bolt-in contract)</h2>
+<p>Version <strong>coro-abi/1</strong>. Layer 1 emits exactly these six primitives and
+nothing else that is coroutine-specific. A backend is any implementation of them. The
+in-tree backend is <code>runtime/mojo_coro.c</code> (§5.3); the GCC Mojo-frontend backend
+(Option C) recognizes the same six as intrinsics and lowers them to
+<code>__builtin_coro_*</code>.</p>
+<table>
+<tr><th>Primitive</th><th>Semantics (identical across backends)</th></tr>
+<tr><td><code>MojoCoro *__mojo_coro_new(body, env, stack)</code></td>
+    <td>Create a suspended coroutine. <code>body</code> is <code>void(MojoCoro*, void*)</code>;
+        <code>env</code> is an opaque heap pointer the caller owns until the coroutine is
+        destroyed; <code>stack</code> 0 = backend default. No code runs yet.</td></tr>
+<tr><td><code>int __mojo_coro_resume(c, send_box, int64_t *out)</code></td>
+    <td>Run <code>c</code> from its suspension point (first call: from the top of
+        <code>body</code>; <code>send_box</code> ignored on the first call). Returns 1 and
+        sets <code>*out</code> to the yielded box if it hit <code>__mojo_coro_yield</code>;
+        returns 0 and sets <code>*out</code> to the return box if <code>body</code>
+        returned. If <code>body</code> raised, re-raises in the caller's context.
+        Precondition: <code>c</code> is suspended (not running, not done).</td></tr>
+<tr><td><code>int64_t __mojo_coro_yield(c, val_box)</code></td>
+    <td>Callable only lexically within <code>body</code>. Suspends <code>c</code>, delivers
+        <code>val_box</code> to the matching <code>_resume</code>/<code>_throw</code>.
+        Returns the next <code>send_box</code>. May raise (a pending
+        <code>_throw</code>/<code>_destroy</code> exception) instead of returning.</td></tr>
+<tr><td><code>int64_t __mojo_coro_return_value(c)</code></td>
+    <td>Valid only after <code>_resume</code>/<code>_throw</code> returned 0. The return
+        box.</td></tr>
+<tr><td><code>int __mojo_coro_throw(c, void *exc, int64_t *out)</code></td>
+    <td>Like <code>_resume</code> but the suspended <code>__mojo_coro_yield</code> raises
+        <code>exc</code> (a typed-exception object) instead of returning a send value. Same
+        return contract.</td></tr>
+<tr><td><code>void __mojo_coro_destroy(c)</code></td>
+    <td>If <code>c</code> is suspended, resume it once with a <code>_MojoGenClose</code>
+        raised at the suspension point (so <code>finally</code>/<code>with</code> run);
+        swallow <code>_MojoGenClose</code> and <code>StopIteration</code> escaping that
+        unwind, propagate anything else. Then release all backend resources. Idempotent on
+        an already-done coroutine.</td></tr>
+</table>
+<p><strong>Handle ABI:</strong> the factory returns today's <code>MojoGenerator *</code>
+(a <code>__mojo_reflect</code>-visible opaque). Its <code>next/send/throw/close</code>
+entry points forward 1:1 to <code>_resume/_resume/_throw/_destroy</code>. Unchanged from
+the current C++20-coroutine implementation — that is what makes the backend swap invisible
+to every consumer.</p>
+<p><strong>Reverse direction (for the Option C context):</strong> the GCC frontend needs,
+from this side, only (a) this table's semantics, (b) the <code>MojoGenerator *</code>
+handle layout (documented in <code>runtime/mojo_async_runtime.h</code>), and (c) the box
+convention (<code>doc/ABI.md</code>). No Python, no <code>mojo_coro.c</code>. A conforming
+<code>__builtin_coro_*</code> lowering of the six primitives is a drop-in replacement for
+Layer 2.</p>
+
+<h2>8. Progress</h2>
+<table>
+<tr><th>Phase</th><th>State</th><th>Commits</th></tr>
+<tr><td>§5.2 Layer 3 — <code>mojo_coro_ctx.h</code> + aarch64 <code>.S</code> + ucontext
+    fallback + unit test</td><td class="rec">DONE — 8/8 green (both backends, -O0/-O2)</td>
+    <td><code>97bb029</code></td></tr>
+<tr><td>§5.3 Layer 2 — <code>mojo_coro.c</code> (coro-abi/1: new/resume/yield/return/
+    set_return/throw/destroy/env), escaped-exception boundary, exc-slice save/restore,
+    guard-paged stacks, unit test</td>
+    <td class="rec">DONE — 7 scenarios green (both backends, -O0/-O2); <code>make check-coro</code></td>
+    <td><code>9664513</code></td></tr>
+<tr><td>Layer 1 runtime shim — <code>mojo_coro_gen.c</code>: the int64_t-handle
+    Mojo-facing API (<code>__mojo_gen_new_N</code> / <code>_arg</code> / <code>_resume</code> /
+    <code>_value</code> / <code>_retval</code> / <code>_throw</code> / <code>_destroy</code>,
+    <code>__mojo_coro_yield_i</code>), <code>MojoGenerator</code> = MojoCoro + arg vector</td>
+    <td class="rec">DONE — range gen + send accumulator green (both backends, -O0/-O2)</td>
+    <td><code>39889fb</code></td></tr>
+<tr><td>§5.1 Phase 0 scoreboard — <code>test_coro_scoreboard.py</code></td>
+    <td class="rec">DONE (script) — baseline run in progress</td><td><code>7aad3e0</code></td></tr>
+<tr><td>§5.4 Layer 1 Python transform — <code>gimple_gen_coro.py</code>: AST pre-pass in
+    <code>_run_pipeline</code> (behind <code>MOJO_CORO=stackswitch</code>). Replaces an
+    eligible generator FunctionDef with a plain <code>__mgco_&lt;g&gt;_body</code>
+    (yield/return rewrites; params → <code>__mojo_gen_arg</code> prologue) that the
+    <strong>ordinary broad codegen lowers</strong> + 4 C trampolines; registers
+    <code>_generator_api[g]</code> + <code>_supported_generators</code> so for/next/yield-from
+    consumers are unchanged. <code>mojo.py</code>/<code>driver.py</code> link the runtime.</td>
+    <td class="rec">VERTICAL SLICE WORKING — <code>for x in rng(2,6)</code> → 2 3 4 5 and a
+    squares(5) sum → 30 via real stack-switch coroutines through the ordinary path;
+    default path byte-unchanged (test_gimple 266/0)</td><td><code>73f8701</code></td></tr>
+<tr><td>Layer 1 — typed yields: int / string / float value kinds (heuristic from yield
+    exprs; heterogeneous falls through). Kind-specific <code>__mojo_coro_yield_{i,p,d}</code>
+    shims; <code>&lt;base&gt;_value</code> emits the real type + unbox.</td>
+    <td class="rec">DONE — <code>for w in words()</code> → alpha beta gamma</td><td><code>1dca618</code></td></tr>
+<tr><td>Layer 1 — bare <code>yield from</code> → for-loop desugar (nested coroutines on
+    separate stacks); cross-module generators (sibling-module lowering hook in
+    <code>_compile_imported_module</code>)</td>
+    <td class="rec">DONE — <code>outer(){yield 100; yield from inner(3); yield 200}</code> →
+    100 0 1 2 200; <code>from gmod import counted</code> cross-module build works</td>
+    <td><code>7b741f4</code> <code>602a563</code></td></tr>
+<tr><td>Scoreboard (<code>CORO_SB_FAST=1</code>, isolated compile): v0 vs cpp</td>
+    <td class="rec">7 improved, 0 regressed — codecs/dis/gettext/pickletools/pkgutil/
+    test_dbm/tokenize generators now lower through the ordinary codegen (tokenize:
+    37 <code>__mgco_</code> sites in 263 KB of C) instead of the cpp path refusing</td>
+    <td><code>60bc008</code></td></tr>
+<tr><td>Layer 1 — generator <strong>methods</strong>: body becomes top-level
+    <code>__mgco_&lt;S&gt;_&lt;m&gt;_body(int64_t __c, S *self)</code> — <code>self</code> a
+    real typed C param so <code>self.field</code> lowers; <code>__mojo_gen_new_m0..m3</code>
+    + method-aware thunk; api → <code>_generator_method_api</code> so the existing
+    <code>obj.m()</code> consumer is unchanged</td>
+    <td class="rec">DONE — <code>struct Counter{{fn values(self):…yield i*2}}</code> →
+    0 2 4 6. Isolated-compile scoreboard <strong>17 improved, 0 regressed</strong> (was 7)</td>
+    <td><code>21af936</code></td></tr>
+<tr><td>Layer 1 — reject tuple-literal yields (were miscompiling); coerce pointer/string
+    yield values to int64_t via <code>func_param_types</code> + <code>_emit_call</code></td>
+    <td class="rec">DONE</td><td><code>aa57869</code></td></tr>
+<tr><td>§5.5 cutover (scoreboard diff, <code>git rm</code> closed reports) · §5.6 delete
+    <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
+</table>
+
+<h2>8b. Async — v0 landed (2026-09-04)</h2>
+<p><code>async def</code>/<code>await</code>/<code>asyncio.run</code> now compile through
+the SAME stack-switch substrate as generators (commit <code>4a0ee76</code>):
+<code>runtime/mojo_async_sched.c</code> (plain-C port of <code>mojo_async_runtime.cpp</code>'s
+ready-queue/timer-heap/kqueue reactor, resuming via <code>__mojo_coro_resume</code> instead
+of the C++20 coroutine-handle ABI) + <code>runtime/mojo_wd.h</code> (the wait-descriptor an
+async coroutine yields at <code>await</code>) + <code>gimple_gen_coro.py</code>'s
+<code>await</code>/<code>asyncio.run</code> desugar (structurally the same
+"forward-upward-via-yield" shape as generator <code>yield from</code>).</p>
+<p><strong>Verified on real compiled output:</strong> <code>async def f(): await
+asyncio.sleep(.05); return 42</code> + <code>asyncio.run(f())</code> → 42; a two-level
+<code>await</code> chain (outer awaits leaf, leaf sleeps 20ms, outer doubles the result) →
+20. <code>check-coro</code> 16/16.</p>
+<p><strong>Since v0, verified against the REAL expected outputs of
+<code>test_gimple_async_runner.py</code>'s own cases</strong> (not just "it compiles") —
+every one byte-for-byte matching what the existing cpp-path suite asserts:</p>
+<ul>
+<li><b>Real socket I/O</b> — <code>await asyncio.sock_recv(fd)</code>
+    (<code>__mojo_async_await_sock_recv</code>, reusing the scheduler's kqueue reactor
+    <code>MOJO_WD_READ</code> primitive); verified via a standalone fork+delayed-pipe-write
+    harness (real suspend-until-readable, correct byte).</li>
+<li><b>Async generators</b> (<code>async def f(): await …; yield …</code>, consumed via
+    <code>async for</code>) — needed a Layer-2 addition: a TAGGED yield channel
+    (<code>__mojo_coro_yield_tagged</code> + a <code>last_wd</code> flag) so a real
+    <code>yield</code> and an <code>await</code>'s forwarded wait-descriptor, sharing one
+    physical suspend channel, can be told apart by the consumer. Verified: two real sleeps
+    between yields accumulated via <code>async for</code> → 3; an early <code>break</code>
+    after 2 of 4 yields → 30 with wall-clock confirming only 2 sleeps ran (clean
+    abandonment); a parametrized async generator <code>f(10)</code> → 21.
+    <span class="note" style="display:inline">Caught and fixed a real bug here</span> —
+    <code>__mojo_async_await_sleep</code>/<code>_sock_recv</code> initially used the
+    UNTAGGED yield, so their wait-descriptor was silently misread as the generator's own
+    yielded value the first time a suspend happened inside one, corrupting the
+    accumulation; found immediately because the test asserted the real numeric result, not
+    just successful compilation.</li>
+<li><b>Exceptions</b> — raised-and-caught internally, raised inside an <em>awaited callee</em>
+    and caught by the awaiter's own <code>try/except</code>, and raised inside an async
+    generator and caught by the <code>async for</code> caller (→ 101) — all compose for
+    free with the pre-existing generic exception-boundary mechanism (Layer 2's setjmp/
+    longjmp discipline doesn't care how many ordinary C stack frames — including the
+    scheduler's own — sit between raise and catch). An exception escaping ALL the way out
+    of <code>asyncio.run(f())</code> uncaught, caught by <em>ordinary</em> ordinary code's
+    own <code>try/except</code> around the call, verified byte-for-byte
+    (<code>"caught\nboom\n"</code>).</li>
+</ul>
+<p><strong>Step I — <code>create_task</code>/<code>create_raising_task</code>/<code>Task</code>/
+<code>RaisingTask</code>/<code>.wait()</code>: DONE</strong>, verified against all 5 of the real
+test suite's own literal sources (unmodified — <code>raises</code>, <code>Error(...)</code>,
+the <code>^</code> transfer sigil, <code>from std.runtime.asyncrt import …</code> included):</p>
+<ul>
+<li><code>create_task(f(...))</code>/<code>create_raising_task(f(...))</code> are a pure
+    passthrough to <code>f(...)</code> itself — v0 has no real inter-task concurrency (each
+    task drives fully to completion the moment <code>.wait()</code> is called, exactly like
+    <code>asyncio.run</code>), and an uncaught exception already re-raises through
+    <code>__mojo_coro_resume</code>'s existing contract regardless of Task vs RaisingTask, so
+    no separate Task representation is needed at all.</li>
+<li><code>&lt;task&gt;.wait()</code> / <code>&lt;task&gt;^.wait()</code> and
+    <code>await &lt;task&gt;^</code> (an already-constructed handle, not a fresh call) both
+    reuse the SAME generic <code>__mojo_gen_resume</code>/<code>_value</code>/<code>_destroy</code>
+    shims (identical regardless of which function produced the handle) that make a held
+    handle awaitable at all.</li>
+<li>A <code>@parameter async def wrapper():</code> local to an ordinary function
+    (<code>create_task</code>'s wrapper idiom) is hoisted and lowered with a base qualified
+    by its enclosing function's name, so two different enclosing functions each defining
+    their own same-named <code>wrapper</code> don't collide.</li>
+<li>Verified outputs match exactly: basic wrapper → 30; raising-task success/error → 30 /
+    "intentional error from async task" / 1; keyword-argument await + create_raising_task
+    composition → 42/42/1; held-task chained await → 15; same-named nested helpers in two
+    scopes → 2/200 (not 200/200).</li>
+</ul>
+<p>Three real bugs were found and fixed proving this (documented in their commits): the
+sleep/sock_recv untagged-yield corruption (above), a same-named-nested-helper collision
+from unwrapping <code>create_task(...)</code> before applying the per-scope rename, a
+keyword-argument await target silently dropping its argument, and — the most structural —
+none of the three statement rewriters recursed into a <code>TryStmt</code>'s
+<code>except:</code> handler bodies at all (a real, previously-latent gap since session
+start), so a <code>return</code>/<code>await</code>/<code>yield</code> inside a handler was
+silently left un-rewritten.</p>
+<p><strong><code>with BlockingScopedLock</code>/<code>BlockingSpinLock</code>: DONE</strong> —
+this runtime is strictly single-threaded/cooperative (a coroutine only yields at an
+explicit <code>await</code>), so a lock guard around a body with no suspension point
+inside is a <em>provable</em> no-op and is elided entirely; a guard whose body DOES
+contain an <code>await</code> is honestly refused, never silently elided (matching the
+existing cpp-path safety rule exactly). Verified standalone (param-based, not a captured
+outer local — see gap below): guard elided, correct value; await-inside-lock case
+correctly refused.</p>
+<p><strong>Still cpp-path-only</strong> (not yet ported — <code>gimple_cpp_async.py</code>
+stays live for these):</p>
+<ul>
+<li><strong>Mutable transitive closure capture into a nested async function</strong> — the
+    real test suite's own lock-guard cases mutate a variable declared in the ENCLOSING
+    ordinary function (`rawCounter += 1` from inside `@parameter async def inc():`), which
+    needs detecting free variables, boxing them, and threading them as extra hidden args so
+    the enclosing function sees the mutation back. Not built; a real prerequisite for the
+    full lock-guard tests (the elision mechanism itself is verified independently, above).
+    Also blocks general "nested async closures" beyond the create_task wrapper idiom
+    (which needs no capture — its `wrapper()` only reads ordinary top-level names).</li>
+<li>Detached async (<code>_take_handle()</code> / GPU device-context dispatch).</li>
+</ul>
+
+<h2>9. Bug-by-bug status (2026-09-04, <code>test_coro_bugs.py</code>)</h2>
+<p>Isolated compile (<code>compile_to_gimple_with_cpp</code>, no link) + real
+<code>gcc -fgimple -fsyntax-only</code> of the generated C, across the 28 buildable
+generator/coroutine bug sources in <code>bugs/</code> &amp; <code>bugs/hard/</code>. State
+after Layer-1 through tuple yields (<code>7519215</code>):</p>
+<table>
+<tr><th>Outcome</th><th>Count</th><th>Modules / meaning</th></tr>
+<tr><td class="rec">LOWERED — generator codegen works, C syntax-checks</td><td>7</td>
+    <td>codecs, ftplib, pkgutil, shelve, symtable, tempfile, tokenize.
+    Module-level generator codegen is <strong>fixed</strong> for these; a full build/run is
+    gated only on unrelated issues.</td></tr>
+<tr><td>CFAIL — generators lowered, generated C has a type error</td><td>10</td>
+    <td><b>New consumer/ordinary-path gaps</b> the lowered bodies newly exercise:
+    generator-handle / list-return typing through <code>set()</code> etc. (dis, gettext);
+    method-call arity in a lowered body (ipaddress, tarfile); <code>string_cst</code> conv
+    (imaplib); <code>non-register as LHS</code> (weakref); missing <code>&lt;unistd.h&gt;</code>
+    for <code>unlink</code> (save_env). Plus pre-existing non-generator errors (subprocess,
+    test_dbm, turtle).</td></tr>
+<tr><td>RAISE — falls through to the cpp path, which refuses (→ module runs from source,
+    same as before this work)</td><td>9</td>
+    <td><b>nested / inconsistent tuple yields</b> — modulefinder <code>scan_opcodes</code>,
+    pickletools <code>_genops</code>, test_string <code>parse</code>
+    (<code>yield (a,(b,c))</code> etc.);
+    <b><code>@classmethod</code> generators</b> — enum (+ the
+    <code>cls._flag_mask_</code> dynamic-metaclass gap);
+    <b>async generators / <code>async def</code></b> — test__code_definitions, test_frame;
+    <b>generator-as-value</b> — glob (<code>self.select_exists</code> bare ref);
+    <b>decorated</b> (<code>@contextmanager</code>) — ensurepip; non-generator — mailbox.</td></tr>
+<tr><td>COMPILE — C ok, no eligible generator (or generator false-positive)</td><td>2</td>
+    <td>test_random_things, test_faulthandler</td></tr>
+</table>
+<p><strong>Done:</strong> scalar / string / float yields · bare <code>yield from</code> ·
+cross-module · generator methods (<code>self</code>) · <strong>tuple yields</strong>
+(flat, consistent arity).</p>
+<p><strong>Prioritised remaining Layer-1 work</strong> (by modules unblocked):</p>
+<ol>
+<li><strong>Fix the 10 CFAILs</strong> — mostly small ordinary-path / consumer typing fixes the
+    newly-lowered bodies expose (generator handle through <code>set/list/tuple</code>;
+    method-call arity; a missing runtime header include). Each ≈ 1 module.</li>
+<li><strong>Nested / variable-shape tuple yields</strong> — <code>yield (what, (a, b))</code>
+    (modulefinder, pickletools, test_string). Needs the boxed-tuple slot itself to hold a boxed tuple.</li>
+<li><strong><code>@staticmethod</code> (easy) / <code>@classmethod</code> generators</strong>
+    (enum — classmethod placeholder + dynamic-attr work separately).</li>
+<li><strong>Generator-as-value</strong> (glob); <strong><code>x = yield from</code></strong> capture.</li>
+<li><strong>Async</strong> generators / <code>async def</code> — its own project.</li>
+</ol>
+
+</body>
+</html>

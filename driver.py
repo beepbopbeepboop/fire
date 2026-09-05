@@ -149,6 +149,29 @@ def compile_program(input_file, src, output=None, run=True,
     objects = list(objects)
     if cpp_code:
         objects.append(_build_client_cpp_object(cpp_code, gcc, objflags))
+
+    # A3 stack-switch coroutine runtime (doc/COROUTINE.html): CAS-build and
+    # link the small Layer 1 shim + Layer 2 + arch Layer 3 whenever the
+    # generated client .c references them (gimple_gen_coro lowered a
+    # generator this way). Plain C / asm — NOT -fgimple.
+    if '__mgco_' in c_code or '__mojo_coro_yield_i' in c_code:
+        _plain = ('-fPIC', f'-I{RUNTIME}') + flags
+        _arch = ('mojo_coro_ctx_aarch64.S'
+                 if platform.machine().lower() in ('arm64', 'aarch64')
+                 else 'mojo_coro_ctx_generic.c')
+        for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', 'mojo_async_sched.c', _arch):
+            _p = os.path.join(RUNTIME, _cs)
+            _key = cas.module_key(open(_p).read(), [], gcc, _plain + (_cs,))
+
+            def _mk(_p=_p):
+                import tempfile as _tf
+                _d = _tf.mkdtemp(prefix='mojo_coro_')
+                _o = os.path.join(_d, 'x.o')
+                subprocess.run([gcc, *_plain, '-c', '-o', _o, _p], check=True,
+                               capture_output=True)
+                return open(_o, 'rb').read()
+
+            objects.append(cas.get_or_build(_key, '.o', _mk)[0])
     # The stdlib dylib already has runtime/mojo_async_runtime.cpp's own
     # symbols folded in unconditionally (build_stdlib_dylib.py's own
     # production-dylib link step) — a downstream client needing async

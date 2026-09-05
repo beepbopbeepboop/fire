@@ -35,6 +35,87 @@ import gimple_exprtypes
 import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
+# gimple_gen_coro is reached via `gimple_codegen.gimple_gen_coro` below,
+# not a separate import of its own here -- see gimple_codegen.py's own
+# module-level `import gimple_gen_coro` and its comment on why a
+# function-local import (the pattern this used to follow) caused a real
+# self-hosted whole-program redefinition collision.
+
+def _lbn_target_names(t) -> list:
+    """Hoisted out of `_locally_bound_names` (module-level, not a nested
+    closure) — see `_lbn_walk`'s docstring for why."""
+    if isinstance(t, gimple_ctypes.IdentExpr):
+        return [t.name]
+    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        names = []
+        for e in t.elements:
+            names.extend(_lbn_target_names(e))
+        return names
+    return []
+
+
+def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
+    """Hoisted out of `_locally_bound_names` (module-level, not a nested,
+    RECURSIVE closure mutating two captured sets) — a real --dump-full
+    mojo.py crash (SIGSEGV in mojo_set_update -> mojo_set_add_str ->
+    _set_slot_str -> _str_hash, address 0x1) traced here via lldb: the
+    lifted-closure env carrying `bound`/`global_declared` across this
+    closure's OWN recursive self-calls wasn't reliably allocated/valid at
+    every recursion depth. Threading both sets as explicit parameters
+    (mutated in place, same as any ordinary Python call) sidesteps the
+    lifted-closure machinery entirely."""
+    for node in nodes or []:
+        if isinstance(node, gimple_ctypes.GlobalStmt):
+            global_declared.update(node.names)
+        elif isinstance(node, gimple_ctypes.AssignStmt):
+            bound.update(_lbn_target_names(node.target))
+        elif isinstance(node, gimple_ctypes.MultiAssignStmt):
+            for t in node.targets:
+                bound.update(_lbn_target_names(t))
+        elif isinstance(node, gimple_ctypes.AugAssignStmt):
+            bound.update(_lbn_target_names(node.target))
+        elif isinstance(node, gimple_ctypes.VarDecl):
+            bound.add(node.name)
+        elif isinstance(node, gimple_ctypes.ForStmt):
+            bound.update(_lbn_target_names(node.target))
+            _lbn_walk(bound, global_declared, node.body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+        elif isinstance(node, gimple_ctypes.WhileStmt):
+            _lbn_walk(bound, global_declared, node.body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+        elif isinstance(node, gimple_ctypes.IfStmt):
+            _lbn_walk(bound, global_declared, node.then_body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+            for _, elif_body in (node.elifs or []):
+                _lbn_walk(bound, global_declared, elif_body)
+        elif isinstance(node, gimple_ctypes.TryStmt):
+            _lbn_walk(bound, global_declared, node.body)
+            for h in (node.handlers or []):
+                _lbn_walk(bound, global_declared, h.body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+            if node.finally_body:
+                _lbn_walk(bound, global_declared, node.finally_body)
+        elif isinstance(node, gimple_ctypes.WithStmt):
+            for item in (node.items or []):
+                _al = item.alias
+                if _al is not None:
+                    # `isinstance(_al, str)` is unreliable in the
+                    # self-hosted backend (WithItem.alias is typed
+                    # `object` -> int64_t -> the isinstance stub says
+                    # False for a real `char *`, then `_al.name` on the
+                    # bare string "f" raises AttributeError). Check for
+                    # the node case explicitly; everything else is the
+                    # string alias.
+                    if isinstance(_al, gimple_ctypes.IdentExpr):
+                        bound.add(_al.name)
+                    else:
+                        bound.add(_as_str(_al))
+            _lbn_walk(bound, global_declared, node.body)
+
 
 def _locally_bound_names(gen, body: list, params: list = None) -> set:
     """Names bound as a LOCAL variable anywhere in this statement list,
@@ -62,70 +143,7 @@ def _locally_bound_names(gen, body: list, params: list = None) -> set:
     for pname, _ in (params or []):
         bound.add(pname.lstrip('*'))
 
-    def _target_names(t):
-        if isinstance(t, gimple_ctypes.IdentExpr):
-            return [t.name]
-        if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-            names = []
-            for e in t.elements:
-                names.extend(_target_names(e))
-            return names
-        return []
-
-    def walk(nodes):
-        for node in nodes or []:
-            if isinstance(node, gimple_ctypes.GlobalStmt):
-                global_declared.update(node.names)
-            elif isinstance(node, gimple_ctypes.AssignStmt):
-                bound.update(_target_names(node.target))
-            elif isinstance(node, gimple_ctypes.MultiAssignStmt):
-                for t in node.targets:
-                    bound.update(_target_names(t))
-            elif isinstance(node, gimple_ctypes.AugAssignStmt):
-                bound.update(_target_names(node.target))
-            elif isinstance(node, gimple_ctypes.VarDecl):
-                bound.add(node.name)
-            elif isinstance(node, gimple_ctypes.ForStmt):
-                bound.update(_target_names(node.target))
-                walk(node.body)
-                if node.else_body:
-                    walk(node.else_body)
-            elif isinstance(node, gimple_ctypes.WhileStmt):
-                walk(node.body)
-                if node.else_body:
-                    walk(node.else_body)
-            elif isinstance(node, gimple_ctypes.IfStmt):
-                walk(node.then_body)
-                if node.else_body:
-                    walk(node.else_body)
-                for _, elif_body in (node.elifs or []):
-                    walk(elif_body)
-            elif isinstance(node, gimple_ctypes.TryStmt):
-                walk(node.body)
-                for h in (node.handlers or []):
-                    walk(h.body)
-                if node.else_body:
-                    walk(node.else_body)
-                if node.finally_body:
-                    walk(node.finally_body)
-            elif isinstance(node, gimple_ctypes.WithStmt):
-                for item in (node.items or []):
-                    _al = item.alias
-                    if _al is not None:
-                        # `isinstance(_al, str)` is unreliable in the
-                        # self-hosted backend (WithItem.alias is typed
-                        # `object` -> int64_t -> the isinstance stub says
-                        # False for a real `char *`, then `_al.name` on the
-                        # bare string "f" raises AttributeError). Check for
-                        # the node case explicitly; everything else is the
-                        # string alias.
-                        if isinstance(_al, gimple_ctypes.IdentExpr):
-                            bound.add(_al.name)
-                        else:
-                            bound.add(_as_str(_al))
-                walk(node.body)
-
-    walk(body)
+    _lbn_walk(bound, global_declared, body)
     return bound - global_declared
 
 
@@ -655,6 +673,16 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._struct_init_defaults = gen._struct_init_defaults
                 temp_gen._struct_method_names = gen._struct_method_names
                 _register_closure_struct_inits(gen, stmts)
+
+                # A3 stack-switch coroutine lowering for this SIBLING module
+                # too (mirrors _run_pipeline's own call). Without it, a
+                # generator defined in an imported module still goes through
+                # the gimple_cpp_* path while the root module's went through
+                # gimple_gen_coro -- a split that leaves the client .c
+                # referencing symbols nobody defines.
+                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
+                if _ss_meta:
+                    gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
 
                 code = temp_gen.gen_module(stmts)
 
@@ -1342,11 +1370,35 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     # (int64_t)0;` is invalid GIMPLE, `t = (int64_t)0; *count = t;`
     # is not).
     is_deref = lhs.startswith('*')
+    # A bare identifier LHS naming a local `_seed_addressed_locals` has
+    # flagged (its address gets taken somewhere in this function via
+    # `UnsafePointer(to=x)` — see that pass's docstring): needs the
+    # IDENTICAL "coerce into a register temp first, then a plain (no
+    # embedded cast) store" treatment as a struct-field/deref LHS, for
+    # the same underlying `-fgimple` reason — a cast expression's result
+    # can't be stored directly into an ADDRESSABLE variable either, not
+    # just through a COMPONENT_REF/INDIRECT_REF (confirmed via std/gpu/
+    # host/device_context.mojo's `var result: Int32 = 0` — an initial
+    # cast-assignment INTO an addressed local, happening before its own
+    # `UnsafePointer(to=result)` a few lines later — see bugs/CODEGEN_
+    # unsafepointer_to_kwarg_dropped.md).
+    is_addressed = lhs in getattr(gen, '_addressed_locals', ())
     val_is_literal = val.startswith('"') or val.startswith("'") or (
         val.lstrip('-').replace('.','',1).isdigit())  # All numeric strings including single digits
-    needs_temp = is_field or is_deref
+    needs_temp = is_field or is_deref or is_addressed
 
-    def _simple_emit(dest: str, v: str, s: str, d: str):
+    if needs_temp:
+        t = gen._new_temp(dst)
+        _sce_simple_emit(gen, t, val, src, dst)
+        gen._emit(f'  {lhs} = {t};')
+    else:
+        _sce_simple_emit(gen, lhs, val, src, dst)
+
+
+def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
+    """Hoisted out of `_safe_coerce_emit` (was a nested closure showing the
+    lifted-closure-env call-site arity flip) — `gen` threaded."""
+    if True:
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
         if s == d:
             if d == 'int64_t' and v.lstrip('-').isdigit():
@@ -1410,13 +1462,6 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
             # (e.g. a _slit_ string literal). Load it first.
             v = gen._ensure_local(s, v)
             gen._emit(f'  {dest} = ({d}){v};')
-
-    if needs_temp:
-        t = gen._new_temp(dst)
-        _simple_emit(t, val, src, dst)
-        gen._emit(f'  {lhs} = {t};')
-    else:
-        _simple_emit(lhs, val, src, dst)
 
 
 def _param_safe_name(gen, bare: str) -> str:
@@ -2218,7 +2263,12 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 else:
                     targets = [node.target]
                     elem_types = [gen._quick_type(node.value)]
-                for target, vtype in zip(targets, elem_types):
+                # Index both lists in parallel — `for target, vtype in
+                # zip(targets, elem_types)` unpacks a zip 2-tuple, the
+                # established boxing bug.
+                for _zi in range(min(len(targets), len(elem_types))):
+                    target = targets[_zi]
+                    vtype = _as_str(elem_types[_zi])
                     if isinstance(target, gimple_ctypes.IdentExpr):
                         vname = _as_str(target.name)
                         if vname not in inferred:
@@ -2244,8 +2294,8 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 collect_assigned_types(node.then_body)
                 if node.else_body:
                     collect_assigned_types(node.else_body)
-                for _, elif_body in node.elifs:
-                    collect_assigned_types(elif_body)
+                for _elif in node.elifs:  # index, not unpack — tuple-boxing bug
+                    collect_assigned_types(_elif[1])
             elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
                 collect_assigned_types(node.body)
                 if node.else_body:

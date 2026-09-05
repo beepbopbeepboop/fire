@@ -416,6 +416,10 @@ class FromImportStmt:
     wildcard: bool = False
     line: int = 0
     col: int = 0
+    # Parser-built flat list[str]: `name` or `name|alias`. `names`' tuples
+    # box their str slots to int64_t self-hosted. Read via gimple_ctypes._fi_name
+    # / _fi_alias.
+    name_alias_strs: list = field(default_factory=list)
 
 @dataclass
 class IfStmt:
@@ -1381,6 +1385,13 @@ def _as_funcdef_node(e: object) -> FunctionDef:
     return e
 
 
+def _as_member_node(e: object) -> MemberExpr:
+    """See _as_ident_node: static MemberExpr view of a boxed handle, so a
+    following `.obj` / `.member` read compiles to a direct field load rather
+    than a `_mojo_dispatch_getattr` on an int64_t."""
+    return e
+
+
 def _sms_key(struct_name: object, method: object) -> str:
     """Composite string key for `_struct_method_signatures`.
 
@@ -1400,12 +1411,29 @@ def _sms_key(struct_name: object, method: object) -> str:
 
     A string key hashes by content on both paths.
     """
+    return _pair_key(struct_name, method)
+
+
+def _pair_key(a: object, b: object) -> str:
+    """Content-hashed composite key for a dict that would otherwise be keyed
+    by the 2-tuple `(a, b)`. See `_sms_key` for the full rationale — in short,
+    a tuple key hashes by CONTENTS under CPython but by the tuple's heap
+    ADDRESS once self-hosted, so stores and lookups miss (or spuriously hit a
+    reused address), which makes the compiled compiler's output depend on the
+    allocator and differ run to run.
+    """
     # None-safe: `_as_str` is a CPython identity function, so `_as_str(None)`
     # is None and a bare concatenation would raise. Several call sites test
-    # membership for a receiver whose struct is not resolved yet.
-    _s = struct_name if struct_name is not None else ''
-    _m = method if method is not None else ''
-    return _as_str(_s) + '\x00' + _as_str(_m)
+    # membership for a key whose first half is not resolved yet.
+    _a = a if a is not None else ''
+    _b = b if b is not None else ''
+    # `\x00` separator, matching `_sms_key`'s long-standing form. On the
+    # compiled path `mojo_str_cat` is `strlen`-based so the NUL collapses and
+    # the key is a bare `a+b` concat — still a stable content key as long as
+    # every store and lookup goes through here (they do). A caller that needs
+    # to SPLIT the halves back out on the self-hosted path must use its own
+    # non-NUL separator instead (see `gimple_gen_infra._FC_SEP`).
+    return _as_str(_a) + '\x00' + _as_str(_b)
 
 
 def _as_str(e: object) -> str:
@@ -1425,6 +1453,13 @@ def _as_set(e: object) -> set:
 
 def _as_list(e: object) -> list:
     """`MojoList *` view — the list sibling of `_as_set`/`_as_str`."""
+    return e
+
+
+def _as_dict(e: object) -> dict:
+    """`MojoDict *` view of a value the compiled backend erased to int64_t
+    (e.g. `self.<dict-field>` where `_lower_MemberExpr` lost the declared
+    `dict[...]` ctype). CPython identity."""
     return e
 
 
@@ -2281,6 +2316,7 @@ class Parser:
             self._advance()
             paren_import = True
         names = []
+        _nas = []
         # Parse first name, skipping any leading newlines in parenthesized imports
         if paren_import:
             while self._peek().kind == "NEWLINE": self._advance()
@@ -2295,6 +2331,7 @@ class Parser:
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
         names.append((name, alias))
+        _nas.append((name + '|' + alias) if alias else name)
         # Parse remaining names
         while True:
             if paren_import:
@@ -2315,7 +2352,9 @@ class Parser:
             if self._is_kw("as"):
                 self._advance(); alias = self._ident()
             names.append((name, alias))
-        return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
+            _nas.append((name + '|' + alias) if alias else name)
+        return FromImportStmt(module=module, names=names, wildcard=False,
+                              name_alias_strs=_nas, line=t.line, col=t.col)
 
     def _parse_var_decl(self):
         self._expect("KW", 'var')

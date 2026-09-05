@@ -147,7 +147,15 @@ def _lower_EllipsisLiteral(gen, node) -> tuple[str, str]:
 
 
 def _lower_StringLiteral(gen, node):
-    val = node.value
+    # `_as_str`: on the self-hosted path a `StringLiteral` reached as a boxed
+    # list element (e.g. `node.args[1]` inside `_lower_builtin_getattr`, after
+    # only an `isinstance` narrowing) has its `.value` read typed as int64_t,
+    # so the real `char *` bits flow through `_c_escape`/`_intern_string` as a
+    # number and land in the string pool as a raw heap ADDRESS —
+    # `static char * _slit_NNNN = "34658719648";` — which is both wrong and
+    # different every run (ASLR). Re-tagging the value as `str` here recovers
+    # it. CPython identity.
+    val = _as_str(node.value)
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
         return gen._lower_IdentExpr(gimple_ctypes.IdentExpr(name=val))
@@ -503,6 +511,17 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._c_names:
         cname = gen._c_names[name]
     if name in gen.var_types:
+        if name in gen._addressed_locals:
+            # This local's address was taken (`UnsafePointer(to=name)`,
+            # see `_lower_call`'s handling of that shape) -- `-fgimple`
+            # rejects using the now-addressable C variable directly as a
+            # bare register operand (a raw `return name;`, or as the RHS
+            # of certain unary/cast assignments) anywhere else in this
+            # SAME function, even a plain read. Load it into a fresh
+            # register temp first; a plain register-to-register copy of
+            # an addressable variable is fine (only a raw, unmaterialized
+            # use of the variable ITSELF is rejected).
+            return ctype, gen._new_val(ctype, cname)
         return ctype, cname
     # A nested function (closure) referenced as a VALUE (`return add`,
     # `var f = add`, `foo(add)`) — materialize a first-class callable
@@ -1586,6 +1605,27 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # is a 'non-trivial conversion in integer_cst' error (same
             # reason _new_val special-cases int64_t constants).
             return '_Bool', gen._new_val('_Bool', '(_Bool)1' if mv else '(_Bool)0')
+    # `.mut` on a raw UnsafePointer/OwnedPointer/ArcPointer/Pointer
+    # receiver (`ot` a real pointer, its pointee NOT a known struct with
+    # actual fields — a plain scalar-pointee UnsafePointer, e.g.
+    # `UnsafePointer(to=x)` for `x: Int`): real Mojo's `mut` is a
+    # compile-time origin-mutability parameter this codegen has no
+    # general tracking for anywhere except Span's own narrow `_span_mut_
+    # params` table above. Before `UnsafePointer(to=x)`/`Pointer(to=x)`
+    # produced a real typed pointer (see bugs/CODEGEN_unsafepointer_to_
+    # kwarg_dropped.md), this member read reached the generic dynamic/
+    # boxed dispatch fallback on an opaque int64_t and "compiled" only
+    # because everything there is untyped — genuinely a real pointer now,
+    # `.mut` has no matching struct field to read, which is a hard GCC
+    # error ("request for member 'mut' in something not a structure or
+    # union"), not merely a silent wrong value. Honestly approximated as
+    # a fixed `True` (this codegen's existing origin-tracking scope
+    # already stops at Span; a fully general mutable-origin model for
+    # every raw pointer is a separate, larger feature) rather than left
+    # to hard-fail the whole file's compile — confirmed via test/memory/
+    # unsafe_pointer/test_unsafe_pointer.mojo.
+    if node.member == 'mut' and ot.endswith(' *') and struct_name not in gen.struct_field_types:
+        return '_Bool', gen._new_val('_Bool', '(_Bool)1')
     field_map = gen.struct_field_types.get(struct_name, {})
     # pathlib.Path attribute reads on a value this codegen represents as
     # its char* path string. A Path-representing value reaches here as a
@@ -1749,7 +1789,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _ga_ret = gen.func_return_types.get(
                 f"{struct_name}_{gimple_ctypes._safe_name('__getattr__')}",
                 'int64_t')
-            _ga_attr = gen._new_val('char *', f'"{node.member}"')
+            # Route through the shared string pool (`_intern_string`), same
+            # as `_lower_StringLiteral` -- a raw `char * _tN = "debug";`
+            # GIMPLE assignment is a `char[N]`-to-`char *` conversion
+            # `-fgimple` rejects outright ("non-trivial conversion in
+            # 'string_cst'"), unlike a call argument (whose coercion loop
+            # in `_emit_call` already does this same conversion for a
+            # bare `"..."` value); `_new_val`'s direct assignment has no
+            # such coercion. Found via imaplib.py's IMAP4.__getattr__
+            # dispatch (`self.debug`/`self._idle_capture` falling through
+            # to this branch on the IMAP4_stream subclass).
+            _ga_attr = gen._new_val(
+                'char *', gen._intern_string(gimple_ctypes._c_escape(node.member)))
             raw = gen._call_expr(_ga_ret, _ga_csym,
                                   [(ot, ov), ('char *', _ga_attr)])
             return _ga_ret, raw
@@ -2222,6 +2273,52 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             rt, rv = gmp._auto_invoke_bound_method_value(gen, rv)
 
     return gen._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
+
+
+def _lb_as_set(gen, t: str, v: str) -> str:
+    """Coerce (type, value) to a `MojoSet *` C-expr. Module-level, not a
+    nested closure in `_lower_binary_tail`: as a lifted closure its `gen`
+    capture typed int64_t, so `gen._new_val(...)` / `gen._ensure_local(...)`
+    returned an erased temp NAME -> `MojoList * (37459640688);` locals in
+    the lifted `_lower_binary_tail__as_set`, different every --dump-full run.
+
+    Hoisting to module level (this function) does NOT by itself fix the
+    erasure: `_selfhost_gen_self_param_ctype`'s convention only actually
+    resolves `gen` to a real `GimpleGen *` for a small minority of the
+    ~330 extracted backend functions (confirmed empirically — of 345
+    gen/self-first-param functions in a real `--dump-full mojo.py` build,
+    only 12 got `GimpleGen *`; the other 333, this one included, still
+    compile `gen` as plain `int64_t`) — some pre-existing ordering gap
+    between when a function's forward declaration is computed and when
+    `_selfhost_gimplegen_registered` becomes visible on whichever temp_gen
+    is doing the compiling, orthogonal to which top-level entry point
+    triggered the build. Fixing that ordering gap for real is a separate,
+    much larger undertaking; the direct, local fix is the same chokepoint
+    guard used everywhere else in this codebase: `_as_str` every value
+    that came back through a call on a `gen` whose static type isn't
+    trustworthy, before it can be embedded in emitted C text."""
+    if t == 'MojoSet *':
+        return v
+    return _as_str(gen._new_val('MojoSet *', f'(MojoSet *){_as_str(gen._ensure_local(t, v))}'))
+
+
+def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
+                          _ov_a: str, _ov_b: str) -> tuple:
+    """Emit a set-op call and carry a known element type onto the result —
+    `sorted(a_set - b_set)` / `for x in (a | b):` otherwise binds `x` as
+    boxed int64_t (a real self-host miscompile). Module-level, not a nested
+    closure inside `_lower_binary_tail`: as a lifted closure its `gen`
+    capture typed int64_t and `gen._call_expr(...)`'s returned temp NAME
+    erased to a decimal address (`MojoList * (49784941744);` locals in the
+    lifted `_lower_binary_tail__set_op`, different every --dump-full run).
+    See `_lb_as_set`'s docstring: hoisting alone doesn't fix this — `gen`
+    stays `int64_t` here too, so `_res` needs the same `_as_str` guard."""
+    _res = _as_str(gen._call_expr('MojoSet *', _fn,
+                          [('MojoSet *', _la), ('MojoSet *', _lb)]))
+    _e = gen._elem_of(_ov_a) or gen._elem_of(_ov_b)
+    if _e and _e != 'int64_t':
+        gen._elem_types[_res] = _e
+    return 'MojoSet *', _res
 
 
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
@@ -2704,35 +2801,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # For | on set/list/dict pointer types, use runtime union, not C bitwise |.
     # An empty `{}` operand lowers to MojoDict*; coerce such pointer operands
     # to MojoSet* so GIMPLE's strict pointer typing accepts the call.
-    def _as_set(t, v):
-        if t == 'MojoSet *':
-            return v
-        return gen._new_val('MojoSet *', f'(MojoSet *){gen._ensure_local(t, v)}')
-    def _set_op(_fn, _la, _lb, _ov_a, _ov_b):
-        """Emit a set-op call and carry a known element type onto the
-        result — `sorted(a_set - b_set)` / `for x in (a | b):` otherwise
-        binds `x` as boxed int64_t (a real self-host miscompile:
-        `sorted(self._funcptr_builtins_needed - self._emitted_funcptr_
-        builtins)` -> `c_name[0]` on a char* pointer via mojo_list_get_int
-        -> segfault)."""
-        _res = gen._call_expr('MojoSet *', _fn,
-                              [('MojoSet *', _la), ('MojoSet *', _lb)])
-        _e = gen._elem_of(_ov_a) or gen._elem_of(_ov_b)
-        if _e and _e != 'int64_t':
-            gen._elem_types[_res] = _e
-        return 'MojoSet *', _res
     if op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
-        return _set_op('mojo_set_union', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_union', _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv), lv, rv)
     # For - on set types, use runtime difference, not C subtraction
     if op == '-' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return _set_op('mojo_set_difference', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_difference', _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv), lv, rv)
     # For & on set types, use runtime intersection, not C bitwise &
     if op == '&' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        return _set_op('mojo_set_intersection', _as_set(lt, lv), _as_set(rt, rv), lv, rv)
+        return _lower_binary_set_op(gen, 'mojo_set_intersection', _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv), lv, rv)
     # For ^ on set types, symmetric difference = (a - b) | (b - a).
     # No dedicated runtime entry; compose from difference + union.
     if op == '^' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-        a, b = _as_set(lt, lv), _as_set(rt, rv)
+        a, b = _lb_as_set(gen, lt, lv), _lb_as_set(gen, rt, rv)
         ab = gen._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', a), ('MojoSet *', b)])
         ba = gen._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', b), ('MojoSet *', a)])
         return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_union',
@@ -2942,19 +3022,35 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     # `full_spec` keeps the flags/width/precision text (e.g. '%08.3f')
     # so sprintf below reproduces them; only the conversion character
     # needs any Python->C translation.
+    # Build literal runs by SLICING `fmt_text` (`fmt_text[lit_start:i]`),
+    # NOT by `buf.append(c)` + `''.join(buf)` — a list of single `char`s
+    # joined on the self-hosted backend produced an erased/garbage string
+    # that then compiled to `mojo_str_cat (<decimal address>, ...)` in
+    # emitted C (gimple_cpp_core.py:2934's `"..." % (_tid,)`), different
+    # every --dump-full mojo.py run. `%%` (an escaped percent) is the one
+    # case a plain slice can't represent verbatim, so those runs are
+    # accumulated in `esc_buf` (a str, concatenated — not a char list)
+    # and flushed as their own 'lit' part.
     parts = []
-    buf = []
+    lit_start = 0
+    esc_buf = ''
     i, n = 0, len(fmt_text)
     while i < n:
         c = fmt_text[i]
         if c != '%':
-            buf.append(c); i += 1
+            i += 1
             continue
+        # hit a '%': flush the pending literal run
+        _run = fmt_text[lit_start:i]
         if i + 1 < n and fmt_text[i + 1] == '%':
-            buf.append('%'); i += 2
+            esc_buf = esc_buf + _run + '%'
+            i += 2
+            lit_start = i
             continue
-        if buf:
-            parts.append(('lit', ''.join(buf))); buf = []
+        _lit = esc_buf + _run
+        if _lit:
+            parts.append(('lit', _lit))
+        esc_buf = ''
         spec_start = i
         i += 1
         # Flags, width, precision. Dynamic width/precision ('%*d') isn't
@@ -2966,8 +3062,10 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
         if i < n:
             i += 1
         parts.append(('spec', fmt_text[spec_start:i], conv))
-    if buf:
-        parts.append(('lit', ''.join(buf)))
+        lit_start = i
+    _tail = esc_buf + fmt_text[lit_start:n]
+    if _tail:
+        parts.append(('lit', _tail))
 
     n_specs = sum(1 for p in parts if p[0] == 'spec')
     if n_specs != len(rhs_exprs):
@@ -2984,15 +3082,22 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     acc_val = None
     for part in parts:
         if part[0] == 'lit':
-            text = part[1]
+            # `_as_str`: `part` is a 2-tuple stored in a list; reading
+            # `part[1]` back re-boxes the text to int64_t on the self-
+            # hosted path, and `_intern_string(_c_escape(<boxed>))` then
+            # produced an erased `_slit` reference (a decimal address) —
+            # `mojo_str_cat (<address>, ...)` in the emitted C, different
+            # every --dump-full mojo.py run.
+            text = _as_str(part[1])
             if not text:
                 continue
-            part_val = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text)))
+            part_val = _as_str(gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text))))
         else:
-            _, full_spec, conv = part
+            full_spec = _as_str(part[1])
+            conv = _as_str(part[2])
             et, ev = gen.lower_expr(rhs_exprs[arg_i])
             arg_i += 1
-            part_val = gen._format_percent_spec(full_spec, conv, et, ev)
+            part_val = _as_str(gen._format_percent_spec(full_spec, conv, et, ev))
         acc_val = part_val if acc_val is None else gen._new_val(
             'char *', f'mojo_str_cat ({acc_val}, {part_val})')
     if acc_val is None:
@@ -3363,8 +3468,20 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # Prefer the pinned libc signature for the prototype so a self-emitted
         # extern (e.g. `int pipe(int *)`) matches the coerced call args rather
         # than the raw int64_t-lowered argument types.
-        _proto_params = (gen._LIBC_SIGS[cname][1] if cname in gen._LIBC_SIGS
-                         else [at for (at, _) in arg_pairs])
+        #
+        # `[at for (at, _) in arg_pairs]` — a tuple-unpack IN THE COMPREHENSION
+        # FOR-CLAUSE — is the established tuple-boxing bug pattern (a 2-tuple
+        # unpack re-boxes an element to int64_t even if it started as char*):
+        # confirmed here via a real --dump-full mojo.py determinism diff
+        # showing `MojoList * (53615097216);` / `(53615097216) = (MojoList
+        # *)_t237;` at this exact line (an erased comprehension-result NAME
+        # printed as a decimal address, invalid C, different every run).
+        # Index instead of unpacking, mirroring this codebase's other
+        # `for (_, v) in pairs` -> indexed-loop fixes.
+        if cname in gen._LIBC_SIGS:
+            _proto_params = gen._LIBC_SIGS[cname][1]
+        else:
+            _proto_params = [_as_str(_ap[0]) for _ap in arg_pairs]
         gen._external_protos[cname] = (ret_ct, _proto_params)
     # Track param types for coercion, even if not emitting declaration
     if cname not in gen.func_param_types:
@@ -3373,7 +3490,12 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif cname in gen._external_protos:
             gen.func_param_types[cname] = gen._external_protos[cname][1]
         else:
-            gen.func_param_types[cname] = [at for (at, _) in arg_pairs]
+            # Same tuple-unpack-in-comprehension-for-clause bug as the
+            # `_proto_params` fix a few lines up (4d922cc) — a second,
+            # separate occurrence in this same function, missed the first
+            # time and confirmed via a real --dump-full mojo.py determinism
+            # diff still pinpointing this exact line.
+            gen.func_param_types[cname] = [_as_str(_ap[0]) for _ap in arg_pairs]
 
     if ret_ct == 'void':
         gen._emit_call('', '', cname, arg_pairs)
@@ -3400,15 +3522,23 @@ def _lower_mlir_mem(gen, kind: str, arg_pairs: list) -> tuple[str, str]:
     store  (val, addr)   -> *addr = val          (statement; yields 0)
     offset (ptr, idx)    -> _mojo_at_T(ptr, idx)  (GIMPLE-legal pointer add)
     """
+    # Index arg_pairs[i][0]/[1] directly rather than tuple-unpacking a
+    # subscript result (`at, av = arg_pairs[0]`) — the established boxing
+    # bug: a 2-tuple unpack re-boxes an element to int64_t even if it
+    # started as char*/a pointer. Confirmed here via a real --dump-full
+    # mojo.py determinism diff pinpointing this exact function (inlined
+    # into _lower_external_call_2dbb98) as a source of `MojoList *
+    # (<address>);` / `_t48 = (MojoList *)<address>;` — different every run.
     if kind == 'load':
-        at, av = arg_pairs[0]
+        at, av = _as_str(arg_pairs[0][0]), _as_str(arg_pairs[0][1])
         pt, pv = gen._as_ptr(at, av)
         et = gimple_ctypes._elem_type(pt)
         t = gen._new_val(et, f"*{pv}")
         return et, t
 
     if kind == 'store':
-        (vt, vv), (at, av) = arg_pairs[0], arg_pairs[1]
+        vt, vv = _as_str(arg_pairs[0][0]), _as_str(arg_pairs[0][1])
+        at, av = _as_str(arg_pairs[1][0]), _as_str(arg_pairs[1][1])
         pt, pv = gen._as_ptr(at, av)
         et = gimple_ctypes._elem_type(pt)
         sv = vv
@@ -3421,7 +3551,8 @@ def _lower_mlir_mem(gen, kind: str, arg_pairs: list) -> tuple[str, str]:
 
     # offset / array.gep: ptr + idx via the _mojo_at_ helper (pointer
     # arithmetic is illegal inside __GIMPLE).
-    (pt0, pv0), (it, iv) = arg_pairs[0], arg_pairs[1]
+    pt0, pv0 = _as_str(arg_pairs[0][0]), _as_str(arg_pairs[0][1])
+    it, iv = _as_str(arg_pairs[1][0]), _as_str(arg_pairs[1][1])
     pt, pv = gen._as_ptr(pt0, pv0)
     et = gimple_ctypes._elem_type(pt)
     cn = gimple_ctypes._c_id(et)
@@ -3750,7 +3881,15 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._emit(f"  {t} = 0;")
         return 'int', t
 
-    res = gen._new_val(res_type, f"{res_new} ()")
+    # `_as_str`: `_new_val` returns a C-expr/temp-name STRING. When
+    # `_lower_comprehension` is reached through a caller whose own `gen`
+    # param the self-hosted backend erased to int64_t (e.g.
+    # `_lower_external_call`'s comprehension-built
+    # `arg_pairs = [gen.lower_expr(a) for a in node.args]`), that returned
+    # name came back a decimal heap address — the container got DECLARED
+    # with that address as its C identifier (`MojoList * (36016041152);`),
+    # different every run. Re-tag so the char* bits survive.
+    res = _as_str(gen._new_val(res_type, f"{res_new} ()"))
 
     # `for i, x in enumerate(seq)` / `enumerate(seq, start)` inside a
     # comprehension's `for` clause — a genuinely separate lowering path

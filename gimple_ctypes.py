@@ -1073,6 +1073,45 @@ def _import_targets(node) -> list:
     return out
 
 
+def _import_local_names(node) -> list:
+    """The bound local name for each target of an ImportStmt — `alias or
+    module` — as a plain `list[str]`.
+
+    `_import_targets` returns `(module, alias)` tuples; a consumer that only
+    needs the local name and does `alias if alias else module` on the
+    UNPACKED tuple slots hits a self-hosted bug: the tuple's `None` alias
+    slot boxes to a stray non-NULL pointer, so the ternary picks it and the
+    "local name" becomes a decimal heap address (`int64_t <addr>;` fields in
+    `_root_toplev` for `import os` / `import ctypes`, different every run).
+    Reading `node.alias` DIRECTLY (not through a tuple) keeps `None` `None`.
+    Homogeneous `list[str]` return preserves each entry as `char *`."""
+    _al = _as_str(node.alias)  # DIRECT field access, not getattr (getattr erases to int64_t -> stray truthy value)
+    out = [_al if _al else _as_str(node.module)]
+    for _pair in (getattr(node, 'extra', None) or []):
+        _pa = _as_str(_pair[1])
+        out.append(_pa if _pa else _as_str(_pair[0]))
+    return out
+
+
+def _fi_name(entry) -> str:
+    """Name half of a `name|alias` composite (FromImportStmt.name_alias_strs)."""
+    _s = _as_str(entry)
+    _i = _s.find('|')
+    return _s[:_i] if _i >= 0 else _s
+
+
+def _fi_alias(entry) -> str:
+    """Alias half of a `name|alias` composite, or None when unaliased."""
+    _s = _as_str(entry)
+    _i = _s.find('|')
+    if _i < 0:
+        return None
+    _a = _s[_i + 1:]
+    if _a:
+        return _a
+    return None
+
+
 def _fromimport_names(node) -> list:
     """`[(name, alias|None), ...]` for a FromImportStmt, every slot
     `_as_str`-viewed — `FromImportStmt.names` is `list[(str, str|None)]` but
@@ -1301,7 +1340,15 @@ def _used_idents_node(node) -> set[str]:
         return r
     if isinstance(node, DictExpr):
         r2: set = set()
-        for k, v in node.pairs: r2 |= _used_idents_node(k) | _used_idents_node(v)
+        # Index the pair, don't unpack it in the for-clause — the
+        # established tuple-boxing bug. A wrong/boxed `k`/`v` here silently
+        # drops idents from the result set, which (via
+        # gimple_module_gen.py's _scan_for_closures `free = used - ...`)
+        # makes a nested closure's capture set — and therefore its env
+        # struct allocation (`_alloc_X_env()` vs `(X *)0`) — flip run to
+        # run, a dominant --dump-full mojo.py nondeterminism source.
+        for _kv in node.pairs:
+            r2 |= _used_idents_node(_kv[0]) | _used_idents_node(_kv[1])
         return r2
     if isinstance(node, Comprehension):
         r3 = _used_idents_node(node.element)
@@ -1338,8 +1385,8 @@ def _used_idents_node(node) -> set[str]:
     if isinstance(node, IfStmt):
         r5 = _used_idents_node(node.condition)
         for s in node.then_body: r5 |= _used_idents_node(s)
-        for _, eb in node.elifs:
-            for s in eb: r5 |= _used_idents_node(s)
+        for _elif in node.elifs:  # index, don't unpack — tuple-boxing bug
+            for s in _elif[1]: r5 |= _used_idents_node(s)
         if node.else_body:
             for s in node.else_body: r5 |= _used_idents_node(s)
         return r5
@@ -1428,7 +1475,7 @@ def _declared_vars_body(stmts) -> set[str]:
             result |= _declared_vars_body(node.body)
         elif isinstance(node, IfStmt):
             result |= _declared_vars_body(node.then_body)
-            for _, eb in node.elifs: result |= _declared_vars_body(eb)
+            for _elif in node.elifs: result |= _declared_vars_body(_elif[1])  # index, not unpack
             if node.else_body: result |= _declared_vars_body(node.else_body)
         elif isinstance(node, (WhileStmt, WithStmt)):
             result |= _declared_vars_body(node.body)

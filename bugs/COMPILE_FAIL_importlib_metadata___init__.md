@@ -1,5 +1,33 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (2026-09-03 — nested non-capturing sync-helper coroutine codegen LANDED; this file still refused)
+
+Implemented real compilation of nested NON-capturing sync `def`s
+referenced as callees inside a compiled coroutine body
+(`_cpp_compile_nested_sync_helpers`, `gimple_cpp_async.py` — see the
+matching entry in `bugs/COMPILE_FAIL_Tools_scripts_summarize_stats.md`
+for the full description and the new `test_gimple.py` coverage).
+
+This file's `_convert_egg_info_reqs_to_simple_reqs` is NOT closed by it.
+Its nested helpers `url_req_space(req)` / `quoted_marker(section)` /
+`make_condition(name)` capture nothing, but their sole call sites pass
+`section.value` / `section.name` where `section` is the generator's
+`for section in sections:` loop variable and `sections` is an
+unannotated parameter (fed at runtime by `Sectioned.read`, whose element
+type is not threaded here). So the helper-parameter type cannot be
+pinned to `char *` from the call site, and `_infer_param_types`'s
+body-usage signal for `req`/`section` (`x in req`, `section or ''`,
+`section.partition(':')`) isn't strong enough on its own — the helper is
+conservatively skipped rather than emitted with a guessed parameter type
+(which would be an invalid-conversion g++ hard-fail with no fallback).
+Closing it needs struct-typed-loop-variable field typing threaded into
+the nested-helper parameter inference. `Sectioned.read` remains blocked
+on `filter_(...)` (a bare callable PARAMETER — the separately-documented
+"harder mechanism" case). A full `mojo.py build` now also surfaces
+downstream `Counter[...] = ...` / `OrderedDict[...] = ...` subscript-store
+gaps in transitively-imported `collections`. No regression.
+
+
 ## Status (updated 2026-08-26, this session — real `filter(func, iterable)` coroutine-body codegen ADDED; `Sectioned.read`'s `map(...)` gap (already independently fixed by a prior commit this same day, `9c0e7a8`) confirmed gone, `filter(...)` gap now also gone, module still doesn't compile — TWO real, narrower blockers remain)
 
 Master had JUST landed real `map(func, iterable)` coroutine-body codegen

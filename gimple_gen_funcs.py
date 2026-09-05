@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str,
+    Parser, py_tokenize, _as_str, _as_dict, _pair_key,
 )
 import ast_rewriter
 import regex_compile
@@ -299,7 +299,15 @@ def _gen_stmt_FromImportStmt(gen, node):
     for _fip2 in gimple_ctypes._fromimport_names(node):
         name = _as_str(_fip2[0])
         alias = _as_str(_fip2[1])
-        symbol_name = alias if alias else name
+        # `_as_str` on the ternary result: without it the self-hosted
+        # backend erased `symbol_name` to int64_t (whole-function
+        # unification off the `(_fi_home, symbol_name)` tuple key that used
+        # to live below), so `gen.imported_symbols[symbol_name] = {...}`
+        # stringified the `char *` bits as a DECIMAL and stored the address
+        # as the dict key — `sorted(imported_symbols.keys())` then ordered
+        # the `/* from .<mod> */` re-export externs by ADDRESS, differently
+        # every run.
+        symbol_name = _as_str(alias if alias else name)
         # A compiled free-function generator reached through a
         # function-body-scoped cross-module import: bind it exactly like
         # the top-level registration loop does (shared _generator_home_api,
@@ -499,7 +507,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                             for cp in _fi_cps
                         ]
                 if _fi_pts:
-                    gen._imported_home_param_types[(_fi_home, symbol_name)] = list(_fi_pts)
+                    gen._imported_home_param_types[_pair_key(_fi_home, symbol_name)] = list(_fi_pts)
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:
@@ -758,10 +766,36 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     `GimpleGen *` struct pointer restores static field/method resolution.
 
     Narrow by construction: only an UNANNOTATED FIRST parameter named exactly
-    `gen`/`self`, only while compiling a `.py` file named `gimple*` under this
-    repo (the self-hosting bootstrap is always this compiler's own Python
-    source — no `.mojo` file is ever part of it), and only when `GimpleGen`
-    is actually a registered struct in this compile."""
+    `gen`/`self`, only for a function that IS actually one of this
+    compiler's own extracted backend helpers, and only when `GimpleGen`
+    is actually a registered struct in this compile.
+
+    Originally checked `gen._current_filename`'s basename/directory instead
+    of the function-name-index membership below — WRONG: `gen` here is
+    WHICHEVER temp_gen happens to currently be compiling SOME file, not
+    necessarily the file `node` (the function whose param we're typing) was
+    itself defined in. A direct measurement (MOJO_DEBUG_SELFHOST_GEN,
+    instrumenting the old file-based check) on a real `--dump-full mojo.py`
+    run showed every single rejection was `bad_basename` — meaning this
+    function gets asked to type a gen/self param belonging to a
+    gimple_gen_*.py-defined helper WHILE `gen._current_filename` is set to
+    some OTHER, non-"gimple"-prefixed file (mojo_compiler.py, module_
+    loader.py, myinterpreter.py, mojo.py, ...) that merely REFERENCES that
+    helper — e.g. during a signature/forward-decl computation triggered
+    from that other file's own compile, which then gets cached (`func_
+    param_types` etc, shared dicts, first-computation-wins) and never
+    recomputed once the helper's OWN home-file compile runs. Measured
+    effect: only ~12 of 345 gen/self-first-param functions ended up typed
+    `GimpleGen *` in the final output despite `_selfhost_gimplegen_
+    registered` being True and the directory check passing on EVERY single
+    call (only `bad_basename` ever fired) — confirming the file-identity
+    check, not the registration-timing, was the actual gap.
+    `_selfhost_extracted_fn_index()` already answers "is this function name
+    one of the ones actually found, by a genuine `gimple_*.py` file scan, to
+    have an unannotated gen/self first param" — independent of whichever
+    gen happens to be asking. Using that instead fixes the false rejections
+    without weakening the check at all (a name NOT in that index still
+    correctly returns None)."""
     if ptype is not None:
         return None
     bare = pname.lstrip('*')
@@ -770,15 +804,7 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     ps = getattr(node, 'params', None) or []
     if not ps or ps[0][0].lstrip('*') != bare:
         return None
-    cf = getattr(gen, '_current_filename', None)
-    if not cf or not cf.endswith('.py'):
-        return None
-    base = gimple_ctypes.os.path.basename(cf)
-    if not base.startswith('gimple'):
-        return None
-    cur_abs = gimple_ctypes.os.path.abspath(cf)
-    sd = gimple_codegen._SELFHOST_DIR
-    if not (cur_abs == sd or cur_abs.startswith(sd + '/')):
+    if getattr(node, 'name', None) not in _selfhost_extracted_fn_index():
         return None
     # Fires only once the GimpleGen registry pre-pass has run for this
     # (shared) compile — see _selfhost_register_gimplegen in gimple_codegen
@@ -883,14 +909,30 @@ def _selfhost_scan_gimplegen_extra_fields() -> dict:
                 continue
             _p0 = _fn.params[0][0].lstrip('*')
             for _n in gimple_exprtypes._walk_ast(_fn.body):
-                if not (isinstance(_n, AssignStmt)
-                        and isinstance(_n.target, MemberExpr)
-                        and isinstance(_n.target.obj, IdentExpr)
-                        and _n.target.obj.name == _p0):
+                # A chained assignment (`units = gen._stackswitch_coro_c_
+                # units = []`, gimple_gen_coro.py's own lazy-init idiom)
+                # parses as MultiAssignStmt (multiple `targets`), not
+                # AssignStmt (one `target`) -- missing this case here left
+                # `_stackswitch_coro_c_units` (and any other field first
+                # bound this way) undetected, so `gen`/`self` stayed typed
+                # as an opaque struct with no such member, and a real
+                # self-hosted compile of the module doing the chained
+                # assignment failed to resolve it ("'GimpleGen' has no
+                # member named ...").
+                if isinstance(_n, MultiAssignStmt):
+                    _targets = _n.targets
+                elif isinstance(_n, AssignStmt):
+                    _targets = [_n.target]
+                else:
                     continue
-                _ct = _selfhost_literal_ctype(_n.value)
-                if _ct is not None:
-                    _selfhost_merge_field(_fields, _n.target.member, _ct)
+                for _tgt in _targets:
+                    if not (isinstance(_tgt, MemberExpr)
+                            and isinstance(_tgt.obj, IdentExpr)
+                            and _tgt.obj.name == _p0):
+                        continue
+                    _ct = _selfhost_literal_ctype(_n.value)
+                    if _ct is not None:
+                        _selfhost_merge_field(_fields, _tgt.member, _ct)
     _SELFHOST_EXTRA_FIELD_CACHE['k'] = (_key, _fields)
     return _fields
 
@@ -905,7 +947,15 @@ def _selfhost_gimplegen_field_types(gg_cls) -> dict:
     This is what a nested temp_gen that never sees `class GimpleGen`'s
     StructDef in its own `stmts`/`imported_stmts` registers into the shared
     `struct_field_types['GimpleGen']` so `self`/`gen` params can be typed."""
-    _fields: dict = dict(_selfhost_scan_gimplegen_extra_fields())
+    # Not `dict(_selfhost_scan_gimplegen_extra_fields())` — the self-hosted
+    # backend's dict-copy-constructor is unreliable for this shape (same
+    # class of bug as gimple_module_gen.py's matching fix, e8598e1):
+    # rebuild via an indexed loop + _as_str instead of trusting dict() to
+    # preserve key/value C types across the copy.
+    _fields: dict = {}
+    _sf_src = _selfhost_scan_gimplegen_extra_fields()
+    for _sfk in _sf_src:
+        _fields[_as_str(_sfk)] = _as_str(_sf_src[_sfk])
     if gg_cls is None:
         return _fields
     # class-body attrs (`_KNOWN_SIGS = {...}`, `_cpp_kwfwd_counter = 0`, ...)
@@ -954,6 +1004,59 @@ def _selfhost_gimplegen_field_types(gg_cls) -> dict:
     return _fields
 
 
+def _dvt_val_cts(_ann):
+    if not isinstance(_ann, str):
+        return None
+    _s = _ann.strip()
+    if not ((_s.startswith('dict[') or _s.startswith('Dict['))
+            and _s.endswith(']')):
+        return None
+    _inner = _s[_s.index('[') + 1:-1]
+    _parts = gimple_ctypes._split_top_level_commas(_inner)
+    if len(_parts) != 2:
+        return None
+    _vann = _parts[1].strip()
+    _outer = _selfhost_ann_ctype(_vann)
+    if _outer is None:
+        _outer = 'int64_t'
+    _nested = None
+    if _outer == 'MojoDict *':
+        _nv = _dvt_val_cts(_vann)
+        if _nv is not None:
+            _nested = _nv[0]
+    elif _outer in ('MojoList *', 'MojoSet *'):
+        # `dict[K, list[E]]` / `dict[K, set[E]]` — E, so `d.get(k)[i]`
+        # / `for x in d.get(k)` reads with the right accessor instead
+        # of boxing (e.g. `func_param_types: dict[str, list[str]]` ->
+        # `func_param_types.get(fn)[0]` must be a real `char *`, not a
+        # pointer-decimal cast target).
+        _vbase = _vann.split('[', 1)[0].strip()
+        if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
+            _einner = _vann[_vann.index('[') + 1:_vann.rindex(']')].strip()
+            _eparts = gimple_ctypes._split_top_level_commas(_einner)
+            if len(_eparts) == 1 and _eparts[0].strip():
+                _ec = _selfhost_ann_ctype(_eparts[0].strip())
+                if _ec is not None and _ec != 'int64_t':
+                    _nested = _ec
+    return (_outer, _nested)
+
+
+
+def _dvt_consider(_out, _tgt, _ann):
+    _fname = None
+    if (isinstance(_tgt, MemberExpr) and isinstance(_tgt.obj, IdentExpr)
+            and _tgt.obj.name == 'self'):
+        _fname = _tgt.member
+    elif isinstance(_tgt, IdentExpr):
+        _fname = _tgt.name
+    if _fname is None or _fname in _out:
+        return
+    _r = _dvt_val_cts(_ann)
+    if _r is not None:
+        _out[_fname] = (_r[0], _r[1], str(_ann).strip())
+
+
+
 def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
     """`{field_name: (outer_val_ctype, nested_val_ctype_or_None, raw_ann)}` for every
     `class GimpleGen` instance/class field annotated `dict[K, V]` (or
@@ -972,64 +1075,15 @@ def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
     if gg_cls is None:
         return _out
 
-    def _val_cts(_ann):
-        if not isinstance(_ann, str):
-            return None
-        _s = _ann.strip()
-        if not ((_s.startswith('dict[') or _s.startswith('Dict['))
-                and _s.endswith(']')):
-            return None
-        _inner = _s[_s.index('[') + 1:-1]
-        _parts = gimple_ctypes._split_top_level_commas(_inner)
-        if len(_parts) != 2:
-            return None
-        _vann = _parts[1].strip()
-        _outer = _selfhost_ann_ctype(_vann)
-        if _outer is None:
-            _outer = 'int64_t'
-        _nested = None
-        if _outer == 'MojoDict *':
-            _nv = _val_cts(_vann)
-            if _nv is not None:
-                _nested = _nv[0]
-        elif _outer in ('MojoList *', 'MojoSet *'):
-            # `dict[K, list[E]]` / `dict[K, set[E]]` — E, so `d.get(k)[i]`
-            # / `for x in d.get(k)` reads with the right accessor instead
-            # of boxing (e.g. `func_param_types: dict[str, list[str]]` ->
-            # `func_param_types.get(fn)[0]` must be a real `char *`, not a
-            # pointer-decimal cast target).
-            _vbase = _vann.split('[', 1)[0].strip()
-            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
-                _einner = _vann[_vann.index('[') + 1:_vann.rindex(']')].strip()
-                _eparts = gimple_ctypes._split_top_level_commas(_einner)
-                if len(_eparts) == 1 and _eparts[0].strip():
-                    _ec = _selfhost_ann_ctype(_eparts[0].strip())
-                    if _ec is not None and _ec != 'int64_t':
-                        _nested = _ec
-        return (_outer, _nested)
-
-    def _consider(_tgt, _ann):
-        _fname = None
-        if (isinstance(_tgt, MemberExpr) and isinstance(_tgt.obj, IdentExpr)
-                and _tgt.obj.name == 'self'):
-            _fname = _tgt.member
-        elif isinstance(_tgt, IdentExpr):
-            _fname = _tgt.name
-        if _fname is None or _fname in _out:
-            return
-        _r = _val_cts(_ann)
-        if _r is not None:
-            _out[_fname] = (_r[0], _r[1], str(_ann).strip())
-
     for _fld in getattr(gg_cls, 'fields', []):
         if isinstance(_fld, AssignStmt):
-            _consider(_fld.target, getattr(_fld, 'type_ann', None))
+            _dvt_consider(_out, _fld.target, getattr(_fld, 'type_ann', None))
         elif isinstance(_fld, VarDecl) and _fld.name:
-            _consider(IdentExpr(_fld.name), getattr(_fld, 'type_ann', None))
+            _dvt_consider(_out, IdentExpr(_fld.name), getattr(_fld, 'type_ann', None))
     for _m in getattr(gg_cls, 'methods', []):
         for _n in gimple_exprtypes._walk_ast(_m.body):
             if isinstance(_n, AssignStmt) and getattr(_n, 'type_ann', None):
-                _consider(_n.target, str(_n.type_ann))
+                _dvt_consider(_out, _n.target, str(_n.type_ann))
     return _out
 
 
@@ -1061,6 +1115,91 @@ def _selfhost_extracted_fn_index() -> dict:
     return _idx
 
 
+def _sgfs_fn_delegate_target(_m, _idx: dict):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` (module-level, not a
+    nested closure) — see that function's docstring for why: a nested
+    closure capturing `gen`/other locals from inside a function this big
+    is exactly the "lifted closure" shape that has repeatedly erased or
+    nondeterministically allocated its env struct elsewhere this session
+    (see gimple_gen_exprs.py's `_lb_as_set`/`_lower_binary_set_op`, and
+    this same bug class's own occurrence right here — confirmed via a real
+    --dump-full mojo.py determinism diff showing `_alloc_..._inferred_env
+    ()` vs `(...*)0` for the SAME call site across two runs)."""
+    _body = [s for s in _m.body
+             if not (isinstance(s, ExprStmt)
+                     and isinstance(s.value, StringLiteral))]
+    if (len(_body) == 1 and isinstance(_body[0], ReturnStmt)
+            and isinstance(_body[0].value, CallExpr)
+            and isinstance(_body[0].value.func, MemberExpr)
+            and isinstance(_body[0].value.func.obj, IdentExpr)):
+        return _idx.get(_body[0].value.func.member)
+    return None
+
+
+def _sgfs_inferred(gen, _inf_cache: dict, _fn):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
+    `_sgfs_fn_delegate_target`'s docstring."""
+    _k = id(_fn)
+    if _k not in _inf_cache:
+        try:
+            _inf_cache[_k] = gen._infer_param_types(_fn) or {}
+        except Exception:
+            _inf_cache[_k] = {}
+    return _inf_cache[_k]
+
+
+def _sgfs_param_ct(gen, _inf_cache: dict, _ann, _pn, _tgt_fn, _tgt_pn, _pos, _self_fn):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
+    `_sgfs_fn_delegate_target`'s docstring."""
+    if _ann is not None:
+        return gen._resolve_type(_ann)
+    if _tgt_fn is not None and _pos < len(_tgt_fn.params):
+        _ta = _tgt_fn.params[_pos][1]
+        if _ta is not None:
+            return gen._resolve_type(_ta)
+    _ct = _sgfs_inferred(gen, _inf_cache, _tgt_fn).get(_tgt_pn) if _tgt_fn is not None else None
+    if _ct is None:
+        _ct = _sgfs_inferred(gen, _inf_cache, _self_fn).get(_pn)
+    if _ct is not None:
+        return _ct
+    # A parameter's own default VALUE is type evidence (mirrors
+    # gimple_module_gen.py's method-param pass): `sentinel='...'` is
+    # `char *`, `is_self=False` is `_Bool`.
+    for _dsrc in (_self_fn, _tgt_fn):
+        if _dsrc is None:
+            continue
+        _dv = (getattr(_dsrc, 'param_defaults', None) or {}).get(
+            _self_fn is _dsrc and _pn or _tgt_pn)
+        if isinstance(_dv, StringLiteral):
+            return 'char *'
+        if isinstance(_dv, BoolLiteral):
+            return '_Bool'
+    return 'int64_t'
+
+
+def _sgfs_ret_ct(gen, _m, _tgt_fn):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
+    `_sgfs_fn_delegate_target`'s docstring."""
+    if getattr(_m, 'return_type', None) is not None:
+        return gen._resolve_type(_m.return_type)
+    if _tgt_fn is not None:
+        if getattr(_tgt_fn, 'return_type', None) is not None:
+            return gen._resolve_type(_tgt_fn.return_type)
+        try:
+            _r = gen._infer_return_type(_tgt_fn.body)
+            if _r:
+                return _r
+        except Exception:
+            pass
+    try:
+        _r = gen._infer_return_type(_m.body)
+        if _r:
+            return _r
+    except Exception:
+        pass
+    return 'int64_t'
+
+
 def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     """`{GimpleGen_<m>: (ret_ctype, [param_ctypes], [(pname, default_ast)])}` —
     a deterministic signature for every `class GimpleGen` method, computed
@@ -1071,22 +1210,17 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     Return/param types: the method's own annotation if it has one; else, for
     a one-line forwarding delegate `return <alias>.<fn>(self, ...)`, the
     extracted helper `<fn>`'s annotation at the same position; else
-    `int64_t`. `self` → `GimpleGen *`."""
+    `int64_t`. `self` → `GimpleGen *`.
+
+    The four helper closures this used to nest directly (`_fn_delegate_
+    target`, `_inferred`, `_param_ct`, `_ret_ct`) are now module-level
+    functions (`_sgfs_*`, above) taking `gen`/`_inf_cache`/`_idx` explicitly
+    — a real --dump-full mojo.py determinism diff caught one of them
+    (`_inferred`'s lifted-closure env) being allocated on one run and
+    replaced with a null pointer on another, for the identical call site."""
     if gg_cls is None:
         return {}
     _idx = _selfhost_extracted_fn_index()
-
-    def _fn_delegate_target(_m):
-        _body = [s for s in _m.body
-                 if not (isinstance(s, ExprStmt)
-                         and isinstance(s.value, StringLiteral))]
-        if (len(_body) == 1 and isinstance(_body[0], ReturnStmt)
-                and isinstance(_body[0].value, CallExpr)
-                and isinstance(_body[0].value.func, MemberExpr)
-                and isinstance(_body[0].value.func.obj, IdentExpr)):
-            return _idx.get(_body[0].value.func.member)
-        return None
-
     # Signal-based param inference for the extracted helpers and for a
     # method's own body. Run against the (nearly-empty struct_field_types)
     # root gen so the impure struct-field-shape-matching branch of
@@ -1095,67 +1229,12 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     # temp_gen.
     _inf_cache: dict = {}
 
-    def _inferred(_fn):
-        _k = id(_fn)
-        if _k not in _inf_cache:
-            try:
-                _inf_cache[_k] = gen._infer_param_types(_fn) or {}
-            except Exception:
-                _inf_cache[_k] = {}
-        return _inf_cache[_k]
-
-    def _param_ct(_ann, _pn, _tgt_fn, _tgt_pn, _pos, _self_fn):
-        if _ann is not None:
-            return gen._resolve_type(_ann)
-        if _tgt_fn is not None and _pos < len(_tgt_fn.params):
-            _ta = _tgt_fn.params[_pos][1]
-            if _ta is not None:
-                return gen._resolve_type(_ta)
-        _ct = _inferred(_tgt_fn).get(_tgt_pn) if _tgt_fn is not None else None
-        if _ct is None:
-            _ct = _inferred(_self_fn).get(_pn)
-        if _ct is not None:
-            return _ct
-        # A parameter's own default VALUE is type evidence (mirrors
-        # gimple_module_gen.py's method-param pass): `sentinel='...'` is
-        # `char *`, `is_self=False` is `_Bool`.
-        for _dsrc in (_self_fn, _tgt_fn):
-            if _dsrc is None:
-                continue
-            _dv = (getattr(_dsrc, 'param_defaults', None) or {}).get(
-                _self_fn is _dsrc and _pn or _tgt_pn)
-            if isinstance(_dv, StringLiteral):
-                return 'char *'
-            if isinstance(_dv, BoolLiteral):
-                return '_Bool'
-        return 'int64_t'
-
-    def _ret_ct(_m, _tgt_fn):
-        if getattr(_m, 'return_type', None) is not None:
-            return gen._resolve_type(_m.return_type)
-        if _tgt_fn is not None:
-            if getattr(_tgt_fn, 'return_type', None) is not None:
-                return gen._resolve_type(_tgt_fn.return_type)
-            try:
-                _r = gen._infer_return_type(_tgt_fn.body)
-                if _r:
-                    return _r
-            except Exception:
-                pass
-        try:
-            _r = gen._infer_return_type(_m.body)
-            if _r:
-                return _r
-        except Exception:
-            pass
-        return 'int64_t'
-
     _out: dict = {}
     for _m in gg_cls.methods:
         if _m.name == '__init__':
             continue
-        _tgt = _fn_delegate_target(_m)
-        _rc = _ret_ct(_m, _tgt)
+        _tgt = _sgfs_fn_delegate_target(_m, _idx)
+        _rc = _sgfs_ret_ct(gen, _m, _tgt)
         _pcs = []
         _has_star = False
         for _i, (_pn, _pt) in enumerate(_m.params):
@@ -1168,10 +1247,14 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
                 # delegate forwards self as its own arg 0, so target pos == _i
                 _tgt_pn = (_tgt.params[_i][0]
                            if _tgt is not None and _i < len(_tgt.params) else _pn)
-                _pcs.append(_param_ct(_pt, _pn, _tgt, _tgt_pn, _i, _m))
+                _pcs.append(_sgfs_param_ct(gen, _inf_cache, _pt, _pn, _tgt, _tgt_pn, _i, _m))
         if _has_star:
             continue   # variadic — leave to the normal passes
-        _dflts = [(pn, dv) for pn, dv in (getattr(_m, 'param_defaults', None) or {}).items()]
+        # Index arg_pairs[i][0]/[1] directly rather than tuple-unpacking a
+        # for-clause target (`for pn, dv in (...).items()`) — the
+        # established boxing bug.
+        _dflts = [(_pd_pair[0], _pd_pair[1])
+                  for _pd_pair in (getattr(_m, 'param_defaults', None) or {}).items()]
         _out[f'GimpleGen_{_m.name}'] = (_rc, _pcs, _dflts)
     return _out
 
@@ -1201,7 +1284,14 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # After *args, continue to catch any trailing `out` params that also
             # appear in the definition and must match the forward declaration.
         elif i == 0 and pn == 'self' and self_struct:
-            out.append(f"{self_struct} *")
+            # `_as_str`: `self_struct` arrives through a parameter that
+            # defaults to None, so the self-hosted backend types it int64_t.
+            # `f"{self_struct} *"` then formats the struct name's `char *`
+            # bits as a DECIMAL and stores `"45740546496 *"` into
+            # `func_param_types[method]` — every later `({that}){self}`
+            # receiver cast in the generated C is then a raw heap address
+            # (`_t34 = (45740546496 *)self;`), invalid and ASLR-unstable.
+            out.append(f"{_as_str(self_struct)} *")
         elif i == 0 and _selfhost_gen_self_param_ctype(gen, pn, pt, node):
             out.append('GimpleGen *')
         elif (self_struct and isinstance(pt, str) and pt.split('[', 1)[0].strip() == self_struct
@@ -1218,7 +1308,7 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # List/Dict/Set/Span's own real implementation — `other`
             # needs the real struct pointer so `other->_len` etc. resolve
             # against the actual fields, not the runtime's builtin ones.
-            out.append(f"{self_struct} *")
+            out.append(f"{_as_str(self_struct)} *")
         else:
             # Method context: consult the method's QUALIFIED
             # "Struct_method" inferred-param entry (usage-based inference
@@ -1288,7 +1378,7 @@ def _fixed_param_ctypes(gen, params, node, self_struct=None) -> list:
         if pn.startswith('*'):
             break
         if i == 0 and pn == 'self' and self_struct:
-            out.append(f"{self_struct} *")
+            out.append(f"{_as_str(self_struct)} *")  # see _signature_ctypes
         else:
             out.append(gen._param_ctype(pn, pt, node))
     return out
@@ -1508,7 +1598,7 @@ def _local_def_pts(gen, bare_name: str):
     _home_store = getattr(gen, '_home_def_param_types', None)
     if _home_store is not None:
         _q = getattr(gen, 'module_name', None) or ''
-        _home_store[(_q.replace('.', '_').replace('-', '_'), bare_name)] = list(pts)
+        _home_store[_pair_key(_q.replace('.', '_').replace('-', '_'), bare_name)] = list(pts)
     return pts
 
 
@@ -1583,11 +1673,11 @@ def _imported_def_pts(gen, bare_name: str):
     for q in candidate_quals:
         _sq = _sanitize(q)
         if _def_store:
-            pts = _def_store.get((_sq, bare_name))
+            pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
         if store:
-            pts = store.get((_sq, bare_name))
+            pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
     return None
@@ -2059,18 +2149,30 @@ def _func_csym(gen, bare_name: str) -> str:
     # exports (e.g. `from b import add as plus` mangling to `b_plus_<hash>`
     # here while b.mojo's own standalone compile emits `b_add_<hash>` —
     # "implicit declaration"/undefined-symbol, not just a naming quirk).
-    _imp_info = gen.imported_symbols.get(bare_name)
-    # `_as_str`: a dict VALUE slot erases to int64_t on the self-hosted
-    # path, so `_safe_name(_orig)` stringified the boxed pointer as a
-    # decimal — the source of the non-deterministic
-    # `extern int64_t <ptr> (...); /* from ... */` externs.
-    _orig = _as_str(_imp_info.get('original_name')) if _imp_info else None
-    base = gimple_ctypes._safe_name(_orig) if (_orig and _orig != bare_name) else gimple_ctypes._safe_name(bare_name)
+    # `_as_dict` at BOTH levels: `gen.imported_symbols` is `dict[str, dict]`
+    # but the self-hosted backend erases the OUTER field AND the nested
+    # `.get()` value to int64_t, so `_imp_info.get('original_name')` and
+    # `_safe_name(_orig)` stringified boxed pointers into decimal C
+    # identifiers — the `#ifndef _Users_..._<addr>` re-export guards and
+    # `extern <addr> <name>` decls, address-ordered / different every run.
+    _imp_info = _as_dict(_as_dict(gen.imported_symbols).get(bare_name))
+    _orig = _as_str(_as_dict(_imp_info).get('original_name')) if _imp_info else None
+    # `_as_str` on the ternary: the phi'd `base` local came back typed
+    # int64_t on the self-hosted path, so `f"{qualifier}_{base}"` below
+    # emitted `mojo_str_from_int(base)` — the guard/decl name became a
+    # decimal ADDRESS (`_Users_..._<addr>`, `extern <addr> <fn>`).
+    if _orig and _orig != bare_name:
+        base = _as_str(gimple_ctypes._safe_name(_orig))
+    else:
+        base = _as_str(gimple_ctypes._safe_name(bare_name))
     if not gen._func_mangleable(bare_name):
         return base
-    qualifier = gen._func_qualifier(bare_name)
-    qualified_base = f"{qualifier}_{base}" if qualifier else base
-    mangled = qualified_base + gen._overload_suffix(bare_name)
+    qualifier = _as_str(gen._func_qualifier(bare_name))
+    if qualifier:
+        qualified_base = qualifier + '_' + base
+    else:
+        qualified_base = base
+    mangled = qualified_base + _as_str(gen._overload_suffix(bare_name))
     # Mirror the param/return types under the mangled key so _emit_call's
     # argument coercion and return typing (keyed by the emitted name) still
     # work — func_param_types/func_return_types are keyed by the bare name.
@@ -2376,6 +2478,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._emit('  _mojo_classattr_init ();')
 
     gen._seed_mut_captured_local_types(node.name)
+    gen._seed_addressed_locals(node.body)
     # Allocate each heap-boxed ({mut}-captured) local's box once, here in
     # the prologue -- NOT lazily at its first-binding statement (the old
     # VarDecl-time scheme): real Python source's first binding is a plain
@@ -2921,6 +3024,52 @@ def _resolve_sibling_param_ctype(gen, module: str, raw_ptype) -> str | None:
     return None
 
 
+def _ris_base(ann) -> str:
+    """Hoisted out of `_register_imported_structs` — see `_ris_collect`'s
+    docstring for why."""
+    return ann.split('[', 1)[0].split('.')[0].strip() if isinstance(ann, str) else ''
+
+
+def _ris_collect(params_by_struct: dict, fn) -> None:
+    """Hoisted out of `_register_imported_structs` (module-level, not a
+    nested, RECURSIVE closure mutating a captured dict) — a real
+    --dump-full mojo.py determinism diff showed `_register_imported_
+    structs__collect (_env__collect, _t60);` on one run vs `..., 0);` (an
+    extra, spurious trailing argument) on another for the IDENTICAL call
+    site — the lifted-closure env for this closure's own recursive self-
+    calls carried an inconsistent apparent arity, the same class of bug
+    already fixed for `_locally_bound_names`'s `walk` this session (and
+    with the same fix: thread the captured mutable dict as an explicit
+    parameter instead)."""
+    for _pn, _pt in (getattr(fn, 'params', None) or []):
+        b = _ris_base(_pt)
+        if b:
+            params_by_struct.setdefault(b, set()).add(
+                gimple_ctypes._strip_mojo_param_modifiers(_pn.lstrip('*')))
+    # Nested `def`s (e.g. a raises-helper closure declared inside a
+    # test function, typed on an imported struct) live inside the
+    # enclosing statement's body/orelse/handler blocks, not at
+    # top-level — walk those too (iteratively: a nested generator
+    # calling itself doesn't survive self-host closure-lifting) so
+    # their typed params count too.
+    _worklist = [getattr(fn, 'body', None)]
+    while _worklist:
+        _blk = _worklist.pop()
+        for _st in (_blk or []):
+            if isinstance(_st, gimple_ctypes.FunctionDef):
+                _ris_collect(params_by_struct, _st)
+            for _attr in ('body', 'orelse', 'finally_body'):
+                _sub = getattr(_st, _attr, None)
+                if isinstance(_sub, list):
+                    _worklist.append(_sub)
+            _handlers = getattr(_st, 'handlers', None)
+            if isinstance(_handlers, list):
+                for _h in _handlers:
+                    _hb = getattr(_h, 'body', None)
+                    if isinstance(_hb, list):
+                        _worklist.append(_hb)
+
+
 def _register_imported_structs(gen, stmts) -> None:
     """dylib mode: register a concrete imported struct's field layout + queue
     its typedef, for a struct used as a parameter type whose field is
@@ -2948,43 +3097,12 @@ def _register_imported_structs(gen, stmts) -> None:
     # coincidental `.field`/`.method(` on some other object).
     params_by_struct: dict = {}
 
-    def _base(ann):
-        return ann.split('[', 1)[0].split('.')[0].strip() if isinstance(ann, str) else ''
-
-    def _collect(fn):
-        for _pn, _pt in (getattr(fn, 'params', None) or []):
-            b = _base(_pt)
-            if b:
-                params_by_struct.setdefault(b, set()).add(
-                    gimple_ctypes._strip_mojo_param_modifiers(_pn.lstrip('*')))
-        # Nested `def`s (e.g. a raises-helper closure declared inside a
-        # test function, typed on an imported struct) live inside the
-        # enclosing statement's body/orelse/handler blocks, not at
-        # top-level — walk those too (iteratively: a nested generator
-        # calling itself doesn't survive self-host closure-lifting) so
-        # their typed params count too.
-        _worklist = [getattr(fn, 'body', None)]
-        while _worklist:
-            _blk = _worklist.pop()
-            for _st in (_blk or []):
-                if isinstance(_st, gimple_ctypes.FunctionDef):
-                    _collect(_st)
-                for _attr in ('body', 'orelse', 'finally_body'):
-                    _sub = getattr(_st, _attr, None)
-                    if isinstance(_sub, list):
-                        _worklist.append(_sub)
-                _handlers = getattr(_st, 'handlers', None)
-                if isinstance(_handlers, list):
-                    for _h in _handlers:
-                        _hb = getattr(_h, 'body', None)
-                        if isinstance(_hb, list):
-                            _worklist.append(_hb)
     for st in stmts:
         if isinstance(st, gimple_ctypes.FunctionDef):
-            _collect(st)
+            _ris_collect(params_by_struct, st)
         elif isinstance(st, gimple_ctypes.StructDef):
             for m in st.methods:
-                _collect(m)
+                _ris_collect(params_by_struct, m)
     param_type_names = set(params_by_struct)
 
     # Local variable names directly assigned from a constructor call to
@@ -3934,6 +4052,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     mangled    = gen._struct_method_csym(struct_name, node.name, overload_id)
 
     gen._seed_mut_captured_local_types(gen.current_func_name)
+    gen._seed_addressed_locals(node.body)
     # Same prologue box-allocation contract as the plain-function path
     # above (see _emit_mut_local_box_allocs's docstring).
     gen._emit_mut_local_box_allocs()

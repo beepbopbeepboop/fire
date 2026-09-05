@@ -25,7 +25,8 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str, _as_set, _as_int, _ptr_slot_in_range,
+    Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range,
+    _as_ident_node, _as_member_node,
 )
 import regex_compile
 import mlir
@@ -35,6 +36,12 @@ import gimple_exprtypes
 import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
+
+# Separator for `function_calls`' `name<sep>index` composite strings — see
+# `analyze_param_usage`. U+001F (ASCII Unit Separator): never appears in a
+# function identifier or a decimal integer, and unlike NUL it survives
+# `mojo_str_cat` on the self-hosted path.
+_FC_SEP = '\x1f'
 
 def _exc_type_id(gen, name: str) -> int:
     """The tag for an exception class name: a hash of the name, not a
@@ -87,6 +94,29 @@ def _reset_func(gen, body: list = None, params: list = None):
     # only its (separately allocated) pointee is ever accessed
     # in-place.
     gen._boxed_mut_locals: dict[str, str] = {}
+    # Scalar locals/parameters whose address gets taken somewhere in this
+    # function via `UnsafePointer(to=x)` / `Pointer(to=x)` (see
+    # `_lower_call`'s handling of that plain-call keyword shape) --
+    # pre-populated by name (no type needed -- `_lower_IdentExpr` already
+    # computes ctype itself at read time) via `_seed_addressed_locals`
+    # BEFORE any statement in the body compiles, mirroring `_seed_mut_
+    # captured_local_types`'s identical whole-body-first-pass shape.
+    # Reset per function so a stale entry can never leak into an
+    # unrelated function's body. Every READ of a name in this set
+    # (`_lower_IdentExpr`) is materialized through a fresh register temp
+    # instead of handing back the now-addressable C variable directly --
+    # see that branch's own docstring for why (`-fgimple` rejects a
+    # stack local's address being taken anywhere in the function if that
+    # same local is also directly `return`ed/cast-assigned/read-without-
+    # materializing elsewhere -- confirmed to apply regardless of
+    # whether that other use is BEFORE or AFTER the address-of in
+    # program order, since GCC's addressability analysis is whole-
+    # function, not flow-sensitive: std/collections/list.mojo's SIMD
+    # `extend` reads `value.size` textually BEFORE its own `UnsafePointer
+    # (to=value)` a few lines later, and marking `_addressed_locals`
+    # only AT the address-of statement itself left that earlier read
+    # unprotected -- a real regression this whole-body pre-pass fixes).
+    gen._addressed_locals: set = set()
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
     # Set True by _gen_stmt_TryStmt / the with-__exit__ path in
@@ -786,6 +816,41 @@ def _scalar_arg_is_addressable_local(gen, aval) -> bool:
     return aval in gen.var_types
 
 
+def _addressable_to_target(gen, ctype: str, aval: str) -> bool:
+    """`UnsafePointer(to=x)`'s discriminator (see `_lower_call`'s handling
+    of that plain-call keyword shape in gimple_gen_calls.py) for whether
+    `aval` is a bare declared local/parameter whose address can safely be
+    taken. Deliberately NOT `_scalar_arg_is_addressable_local` (BUG-2026-
+    016's out-parameter-aliasing check): that helper's `_actual_types`/
+    `_global_var_types` exclusions exist to tell an opaque handle boxed
+    as `int64_t` apart from a genuine numeric local, which only matters
+    when `ctype == 'int64_t'` (the ambiguous erasure case) -- reusing it
+    unconditionally rejected every well-typed scalar PARAMETER whose
+    ctype isn't literally 'int64_t' (any UInt64/Float64/Int32/… param
+    gets an `_actual_types` entry purely so OTHER dispatch sites can
+    recover its real type -- see the param-registration comment in
+    gimple_gen_funcs.py), silently falling through to a null pointer --
+    confirmed via std/sys/_amdgpu.mojo's `hsa_signal_add(sig: UInt64,
+    ...)`, `UnsafePointer(to=sig)`. A genuinely non-'int64_t' ctype can
+    never be a disguised opaque handle in the first place, so the
+    `_actual_types` exclusion only still applies for the ambiguous
+    'int64_t' case; `_global_var_types` stays excluded unconditionally
+    (a module global's own storage is the globals-struct FIELD, not a
+    plain C variable -- `&aval` would take the address of a same-named
+    but unrelated local shadow, not the real global)."""
+    if not isinstance(aval, str):
+        return False
+    if aval in gen._global_var_types:
+        return False
+    if ctype == 'int64_t' and aval in gen._actual_types:
+        return False
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', aval) is None:
+        return False
+    if re.fullmatch(r'_t\d+', aval) is not None:
+        return False
+    return aval in gen.var_types
+
+
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
@@ -847,8 +912,18 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         param_types = list(param_types[:-1]) + ['MojoList *']
 
     coerced_args = []
-    for i, (atype, aval) in enumerate(arg_pairs):
-        ptype = param_types[i] if i < len(param_types) else atype
+    for i, _apair in enumerate(arg_pairs):
+        # `_as_str` on every unpacked slot — a `(ctype, varname)` tuple boxes
+        # BOTH slots to int64_t on the self-hosted path, and `ctype` here is
+        # C TYPE TEXT: an erased one reaches the `f'({ptype}){aval}'` casts
+        # below as the string's own heap ADDRESS, so the emitted C carried
+        # `_t34 = (33394789424 *)self;` for a `(Parser *)self` receiver cast
+        # — invalid, and different on every run (ASLR). Same chokepoint idea
+        # as `_new_temp`/`_safe_coerce_emit`/`_declare_var`, one level up at
+        # the coercion loop that feeds them.
+        atype = _as_str(_apair[0])
+        aval = _as_str(_apair[1])
+        ptype = _as_str(param_types[i]) if i < len(param_types) else atype
         # Check if int64_t actually contains a pointer (stored in _actual_types or _global_var_types)
         actual_atype = atype
         if atype == 'int64_t':
@@ -1403,7 +1478,16 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         # keep builtin-container method names out of the struct-field
         # match (see BUILTIN_CONTAINER_METHODS above).
         called_methods: set = set()
-        function_calls = []  # List of (function_name, arg_index)
+        # Each entry is `function_name + _FC_SEP + str(arg_index)` — a
+        # composite STRING, deliberately NOT a `(name, idx)` 2-tuple: a
+        # tuple round-trips its `str` slot through an int64_t box on the
+        # self-hosted path, after which `name == 'isinstance'` compared a
+        # pointer to a string (and SIGSEGV'd in `_str_hash` when the pointer
+        # was a small erased value). `_FC_SEP` is U+001F, not `\x00`: NUL
+        # would be swallowed by `mojo_str_cat`'s `strlen`, collapsing the
+        # separator on the compiled path so `.split()` could not recover the
+        # index.
+        function_calls = []
         # The boolean usage signals live in ONE mutable dict rather than as
         # separate `nonlocal` scalars: the nested `scan_expr`/`scan_nodes`/
         # `_track_derivation` closures mutate them, and a container captured
@@ -1468,6 +1552,18 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         # there.
         aug_member_targets: set = set()
 
+        def _is_param_ident(e) -> bool:
+            """`e` is a bare read of this parameter. Routes the boxed AST
+            handle through `_as_ident_node` so `.name` is a direct field
+            load, not a `_mojo_dispatch_getattr` on an int64_t — an
+            unguarded `e.name == param_name` here compared a pointer to a
+            string and made the subscript / iteration / string-method
+            signals for e.g. `py_tokenize.replace_multiline_strings`'s
+            `src` register on some runs and not others, flipping the
+            param's ctype run to run."""
+            return (isinstance(e, gimple_ctypes.IdentExpr)
+                    and _as_ident_node(e).name == param_name)
+
         def _expr_mentions_param(e):
             """Does expression `e` involve `param_name` directly (a bare
             identifier read, or a subscript/slice OF one)? Deliberately
@@ -1476,7 +1572,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             extra shape widened here would widen what counts as "param
             flows into this sink" without adding real certainty."""
             if isinstance(e, gimple_ctypes.IdentExpr):
-                return e.name == param_name
+                return _as_ident_node(e).name == param_name
             if isinstance(e, gimple_ctypes.SliceExpr):
                 return (_expr_mentions_param(e.obj)
                         or (e.start is not None and _expr_mentions_param(e.start))
@@ -1524,7 +1620,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 # class of gap `len()` was already excluded from) and
                 # `sum(x**2 for x in values)` (this exact shape).
                 for gen in expr.generators:
-                    if isinstance(gen.iterable, gimple_ctypes.IdentExpr) and gen.iterable.name == param_name:
+                    if _is_param_ident(gen.iterable):
                         _F['is_iterated'] = True
                     scan_expr(gen.iterable)
                     for cond in (gen.conditions or []):
@@ -1537,7 +1633,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 base = expr.obj
                 while isinstance(base, gimple_ctypes.SubscriptExpr):
                     base = base.obj
-                if isinstance(base, gimple_ctypes.IdentExpr) and base.name == param_name:
+                if _is_param_ident(base):
                     _F['is_subscripted'] = True
                     if _expr_is_stringish(expr.index):
                         _F['is_str_key_subscripted'] = True
@@ -1547,15 +1643,15 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 scan_expr(expr.index)
             elif isinstance(expr, gimple_ctypes.SliceExpr):
                 # Slicing a param means it is an indexable sequence, same as subscript.
-                if isinstance(expr.obj, gimple_ctypes.IdentExpr) and expr.obj.name == param_name:
+                if _is_param_ident(expr.obj):
                     _F['is_subscripted'] = True
                     _F['is_nondict_key_subscripted'] = True
                 scan_expr(expr.obj)
                 if expr.start is not None: scan_expr(expr.start)
                 if expr.stop is not None: scan_expr(expr.stop)
             elif isinstance(expr, gimple_ctypes.MemberExpr):
-                if isinstance(expr.obj, gimple_ctypes.IdentExpr) and expr.obj.name == param_name:
-                    accessed_fields.add(expr.member)
+                if _is_param_ident(expr.obj):
+                    accessed_fields.add(_as_str(_as_member_node(expr).member))
                 scan_expr(expr.obj)
             elif isinstance(expr, gimple_ctypes.BinaryOp):
                 if expr.op == '==':
@@ -1582,15 +1678,13 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # to int64_t, so the coroutine body's co_yield hit
                     # "invalid conversion from 'int64_t' to 'char*'".
                     for _a, _b in ((expr.left, expr.right), (expr.right, expr.left)):
-                        _a_param = (isinstance(_a, gimple_ctypes.IdentExpr)
-                                    and _a.name == param_name)
-                        if not _a_param:
+                        if not _is_param_ident(_a):
                             continue
                         if _expr_is_stringish(_b):
                             _F['is_string_method'] = True
                         elif (isinstance(_b, gimple_ctypes.IdentExpr)
-                                and _b.name != param_name
-                                and _b.name in str_vars):
+                                and _as_ident_node(_b).name != param_name
+                                and _as_ident_node(_b).name in str_vars):
                             _F['is_string_method'] = True
                 scan_expr(expr.left)
                 scan_expr(expr.right)
@@ -1601,11 +1695,26 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             elif isinstance(expr, gimple_ctypes.CallExpr):
                 # Track which functions this parameter is passed to
                 if isinstance(expr.func, gimple_ctypes.IdentExpr):
-                    func_name = expr.func.name
+                    func_name = _as_ident_node(expr.func).name
                     for i, arg in enumerate(expr.args):
-                        if isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == param_name:
-                            function_calls.append((func_name, i))
+                        if (isinstance(arg, gimple_ctypes.IdentExpr)
+                                and _as_ident_node(arg).name == param_name):
+                            function_calls.append(_as_str(func_name) + _FC_SEP + str(i))
                 elif isinstance(expr.func, gimple_ctypes.MemberExpr):
+                    # `_as_member_node`: `expr.func` is a chained expr, which
+                    # the self-hosted backend does not narrow through
+                    # `isinstance`, so every `.obj`/`.member` read below would
+                    # otherwise lower to `_mojo_dispatch_getattr` on an
+                    # int64_t and compare a pointer to a string — the
+                    # `src.find(...)` string-method evidence for
+                    # `py_tokenize.replace_multiline_strings`'s `src` then
+                    # registered on some runs and not others, flipping the
+                    # param's ctype (char * <-> int64_t) run to run.
+                    _efunc = _as_member_node(expr.func)
+                    _efunc_obj = _efunc.obj
+                    _efunc_obj_name = (_as_ident_node(_efunc_obj).name
+                                       if isinstance(_efunc_obj, gimple_ctypes.IdentExpr)
+                                       else None)
                     # Method-call evidence is recognized through a SLICE or
                     # SUBSCRIPT of the param too (`s[:-1].split(",")`,
                     # ftplib.py's mlsd): Python str methods return strs, so
@@ -1616,39 +1725,38 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # whose only string evidence was indirect fell through
                     # to the subscript/slice default below and got inferred
                     # MojoList*.
-                    _meth_recv = expr.func.obj
+                    _meth_recv = _efunc_obj
                     while isinstance(_meth_recv, (gimple_ctypes.SubscriptExpr,
                                                   gimple_ctypes.SliceExpr)):
                         _meth_recv = _meth_recv.obj
                     # param.<str-only-method>(...) — see STRING_ONLY_METHODS
                     # comment above: unambiguous evidence param is a string,
                     # even if it's also subscripted elsewhere.
-                    if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
-                            and expr.func.obj.name == param_name
-                            and expr.func.member in STRING_ONLY_METHODS):
+                    if (_efunc_obj_name == param_name
+                            and _efunc.member in STRING_ONLY_METHODS):
                         _F['is_string_method'] = True
                     # <slice/subscript-of-param>.<str-only-method>(...) —
                     # the indirect twin just above.
-                    if (_meth_recv is not expr.func.obj
+                    if (_meth_recv is not _efunc_obj
                             and isinstance(_meth_recv, gimple_ctypes.IdentExpr)
-                            and _meth_recv.name == param_name
-                            and expr.func.member in STRING_ONLY_METHODS):
+                            and _as_ident_node(_meth_recv).name == param_name
+                            and _efunc.member in STRING_ONLY_METHODS):
                         _F['is_string_method'] = True
                     # param.<dict-only-method>(...) — same unambiguous
                     # "param is a dict" evidence (see DICT_ONLY_METHODS).
-                    if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
-                            and expr.func.obj.name == param_name):
-                        if expr.func.member in DICT_ONLY_METHODS:
+                    if _efunc_obj_name == param_name:
+                        if _efunc.member in DICT_ONLY_METHODS:
                             _F['is_dict_method'] = True
-                        if expr.func.member in BUILTIN_CONTAINER_METHODS:
-                            called_methods.add(expr.func.member)
+                        if _efunc.member in BUILTIN_CONTAINER_METHODS:
+                            called_methods.add(_efunc.member)
                     # Handle re.sub(pattern, fn, src) → src (index 2) is char*
-                    if (isinstance(expr.func.obj, gimple_ctypes.IdentExpr)
-                            and expr.func.obj.name == 're'
-                            and expr.func.member == 'sub'
+                    if (_efunc_obj_name == 're'
+                            and _efunc.member == 'sub'
                             and len(expr.args) >= 3):
-                        if isinstance(expr.args[2], gimple_ctypes.IdentExpr) and expr.args[2].name == param_name:
-                            function_calls.append(('__re_sub_src', 2))
+                        _a2 = expr.args[2]
+                        if (isinstance(_a2, gimple_ctypes.IdentExpr)
+                                and _as_ident_node(_a2).name == param_name):
+                            function_calls.append('__re_sub_src' + _FC_SEP + '2')
                     # os.path.*(param, ...) — basename/splitext/expanduser/
                     # abspath/dirname/exists/join all take char* path
                     # arguments (see the os.path.* block in lower_expr).
@@ -1663,16 +1771,17 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # the parameter held a real char* pointer throughout,
                     # just declared with the wrong C type, so print(x)
                     # showed a raw address instead of the string.
-                    elif (isinstance(expr.func.obj, gimple_ctypes.MemberExpr)
-                            and isinstance(expr.func.obj.obj, gimple_ctypes.IdentExpr)
-                            and expr.func.obj.obj.name == 'os'
-                            and expr.func.obj.member == 'path'
-                            and expr.func.member in (
+                    elif (isinstance(_efunc_obj, gimple_ctypes.MemberExpr)
+                            and isinstance(_as_member_node(_efunc_obj).obj, gimple_ctypes.IdentExpr)
+                            and _as_ident_node(_as_member_node(_efunc_obj).obj).name == 'os'
+                            and _as_member_node(_efunc_obj).member == 'path'
+                            and _efunc.member in (
                                 'basename', 'splitext', 'expanduser',
                                 'abspath', 'dirname', 'exists', 'join')):
                         for i, arg in enumerate(expr.args):
-                            if isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == param_name:
-                                function_calls.append(('__os_path_arg', i))
+                            if (isinstance(arg, gimple_ctypes.IdentExpr)
+                                    and _as_ident_node(arg).name == param_name):
+                                function_calls.append('__os_path_arg' + _FC_SEP + str(i))
                 scan_expr(expr.func)
                 for arg in expr.args:
                     scan_expr(arg)
@@ -1690,16 +1799,17 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 not a lone char)."""
                 if not isinstance(target, gimple_ctypes.IdentExpr):
                     return
+                _tname = _as_ident_node(target).name
                 if (isinstance(value, gimple_ctypes.SubscriptExpr)
                         and not isinstance(value.index, gimple_ctypes.SliceExpr)
                         and isinstance(value.obj, gimple_ctypes.IdentExpr)
-                        and value.obj.name in derived_from_param):
-                    single_char_vars.add(target.name)
-                    derived_from_param.add(target.name)
+                        and _as_ident_node(value.obj).name in derived_from_param):
+                    single_char_vars.add(_tname)
+                    derived_from_param.add(_tname)
                 elif (isinstance(value, gimple_ctypes.SliceExpr)
                         and isinstance(value.obj, gimple_ctypes.IdentExpr)
-                        and value.obj.name in derived_from_param):
-                    derived_from_param.add(target.name)
+                        and _as_ident_node(value.obj).name in derived_from_param):
+                    derived_from_param.add(_tname)
             for node in node_list:
                 if isinstance(node, gimple_ctypes.AssignStmt):
                     if isinstance(node.target, gimple_ctypes.TupleExpr) and isinstance(node.value, gimple_ctypes.TupleExpr):
@@ -1712,7 +1822,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         _track_derivation(node.target, node.value)
                     if (isinstance(node.target, gimple_ctypes.IdentExpr)
                             and isinstance(node.value, gimple_ctypes.StringLiteral)):
-                        str_vars.add(node.target.name)
+                        str_vars.add(_as_ident_node(node.target).name)
                     scan_expr(node.target)
                     scan_expr(node.value)
                 elif isinstance(node, gimple_ctypes.ExprStmt):
@@ -1733,7 +1843,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     if isinstance(node, gimple_ctypes.ForStmt):
                         # Detect `for x in <param>:` — evidence param is a list
                         it = node.iterable
-                        if isinstance(it, gimple_ctypes.IdentExpr) and it.name == param_name:
+                        if _is_param_ident(it):
                             _F['is_iterated'] = True
                         # `for name in ('A', 'B', ...):` — every element of
                         # an all-string-literal tuple/list/set literal is a
@@ -1833,7 +1943,17 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # during compilation — the same time-dependent-filter trap
             # Phase 2 already had to work around) and must therefore
             # still be recomputed fresh on every call.
-            _pu_key = (id(func), pname)
+            # `_pair_key(str(id(func)), pname)`, NOT `(id(func), pname)`. The
+            # 2-tuple form is keyed by the TUPLE's own heap address once
+            # self-hosted — a fresh allocation per `.get()` — so a lookup
+            # spuriously misses (or hits a stale unrelated entry, which fed
+            # mojo_compiler.py's `_emit_pair`'s `v` a `_value` field access
+            # it never makes -> inferred `_MojoPointerBase *`). `id(func)` is
+            # still address-based, but it is a within-run-stable per-object
+            # int used ONLY as a memo key here (never emitted), exactly like
+            # gimple_module_gen.py's own `_generator_fns[id(n)]` etc.;
+            # stringifying it makes the dict key on CONTENT, not tuple-address.
+            _pu_key = _pair_key(str(id(func)), pname)
             _pu_cached = gen._param_usage_scan_cache.get(_pu_key)
             if _pu_cached is not None:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
@@ -1887,7 +2007,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # consecutive runs.
             is_polymorphic = False
             for _fc in function_calls:
-                if _as_str(_fc[0]) == 'isinstance' and _as_int(_fc[1]) == 0:
+                _fcp = _as_str(_fc).split(_FC_SEP)
+                if _fcp[0] == 'isinstance' and int(_fcp[1]) == 0:
                     is_polymorphic = True
                     break
             if is_polymorphic:
@@ -1955,7 +2076,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
-                for func_name, arg_index in function_calls:
+                # `function_calls` holds `name<_FC_SEP>idx` composite STRINGS,
+                # not `(name, idx)` tuples — a tuple round-trips its `str`
+                # slot through an int64_t box on the self-hosted path, after
+                # which `func_name == '__re_sub_src'` compared a pointer to a
+                # string and `gen._KNOWN_SIGS.get(func_name)` keyed a dict on
+                # a pointer decimal (and, when that pointer was a small erased
+                # value, SIGSEGV'd in `_str_hash`). The inferred ctype of e.g.
+                # `py_tokenize.replace_multiline_strings`'s `src` then flipped
+                # `char *` ↔ `int64_t` from run to run.
+                for _fc in function_calls:
+                    _fcp = _as_str(_fc).split(_FC_SEP)
+                    func_name = _fcp[0]
+                    arg_index = int(_fcp[1])
                     # re.sub src argument (index 2) is always char*
                     if func_name == '__re_sub_src':
                         inferred[pname] = 'char *'
@@ -2220,6 +2353,40 @@ def _write_dest(gen, name: str) -> str:
         safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
         return f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
     return gen._cname(name)
+
+
+_POINTER_CTOR_NAMES = frozenset({'UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'})
+
+
+def _seed_addressed_locals(gen, body: list):
+    """Pre-scan `body` (BEFORE any statement in it compiles) for every
+    plain-call `UnsafePointer(to=x)` / `Pointer(to=x)` / `OwnedPointer(
+    to=x)` / `ArcPointer(to=x)` (the keyword-argument constructor shape
+    with no `[T]` subscript -- see `_lower_call`'s own handling of it in
+    gimple_gen_calls.py) whose `to=` target is a bare identifier, and
+    record that name in `self._addressed_locals` up front.
+
+    Must run as a genuine whole-body PRE-pass, not a mark-as-you-go step
+    at the address-of call site itself: `-fgimple`'s addressability
+    restriction is WHOLE-FUNCTION, not flow-sensitive, so a read of the
+    same name occurring TEXTUALLY BEFORE its own `UnsafePointer(to=...)`
+    call needs the exact same `_lower_IdentExpr` materialization
+    treatment as one occurring after (confirmed via std/collections/
+    list.mojo's SIMD `extend` overload, whose `assert count <= value.
+    size` reads `value` several lines before its own `UnsafePointer(to=
+    value)` -- marking only at the call site left that earlier read
+    unprotected, a real regression this pre-pass fixes). No type lookup
+    is needed here (unlike `_seed_mut_captured_local_types`'s heap-
+    boxing, which must declare a concrete pointee ctype up front):
+    `_lower_IdentExpr` already computes each name's ctype itself, at
+    the point it materializes a read of it."""
+    for node in gimple_exprtypes._walk_ast(body):
+        if not (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+                and node.func.name in _POINTER_CTOR_NAMES and not node.args):
+            continue
+        for k, v in (getattr(node, 'kwargs', None) or []):
+            if k == 'to' and isinstance(v, IdentExpr):
+                gen._addressed_locals.add(v.name)
 
 
 def _seed_mut_captured_local_types(gen, func_name: str):
@@ -2956,7 +3123,11 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
         gen._emit(f"  {t} = (int64_t)0;  /* mlir __mlir_op.{op}: deferred: unresolved struct index/layout */")
         return 'int64_t', t
 
-    arg_vals = [v for (_, v) in arg_pairs]
+    # Index arg_pairs[i][1] directly rather than tuple-unpacking a for-
+    # clause target (`for (_, v) in arg_pairs`) — the established boxing
+    # bug (a 2-tuple unpack re-boxes an element to int64_t even if it
+    # started as char*/a pointer).
+    arg_vals = [_ap[1] for _ap in arg_pairs]
     res = gimple_ctypes.mlir.lower_op(func.member, arg_vals, attr_members)
     if res is None:
         # Operands already evaluated; yield 0 so surrounding code still compiles.

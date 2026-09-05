@@ -1,5 +1,63 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (2026-09-03 — resumable list-iterator value model landed; `_find_address_range` no longer refused; refusal set 4 -> 2)
+
+Landed in `gimple_cpp_core.py` a genuine iterator-object value model for
+compiled generator/coroutine bodies (the gap the 2026-08-11 entry's
+finding (a) called for — "invent a genuine resumable-list-iterator
+representation ... an explicit index cursor threaded alongside the list"):
+
+- **`it = iter(<list-expr>)`** binds `it` to the underlying `MojoList *`
+  plus a companion `int64_t` cursor local (tracked in a new per-unit
+  `_cpp_list_iter_cursor` map). Fires when the argument is statically a
+  `MojoList *` / boxed-`int64_t` container.
+- **`next(it)`** reads `mojo_list_get_int(list, cur++)`; on exhaustion
+  throws a tagged `StopIteration` `_MojoCppExc` (catchable by an
+  enclosing try/except in this body). **`next(it, default)`** returns the
+  default instead. Both emitted as a single inline lambda expression.
+- **`for x in it:`** continues from the shared cursor (which `next(it)`
+  may already have advanced) and leaves it exhausted — real Python
+  single-pass semantics, not a restart from element 0.
+- **`min(iterable)` / `max(iterable)`** over a list -> `mojo_min` /
+  `mojo_max`; multi-arg **`min(a, b, ...)` / `max(...)`** -> inline
+  ternary/if fold. Neither existed in this emitter before.
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: the
+refused-generator list shrank from `_collapse_addresses_internal,
+_find_address_range, subnets, summarize_address_range` (4) to **`subnets,
+summarize_address_range` (2)**. `_find_address_range`'s
+`it = iter(addresses); first = last = next(it); for ip in it: ...`
+compiles through the coroutine path now.
+
+New end-to-end regression tests in `test_gimple_generator_runner.py`
+(`generator_list_iterator_cursor_and_minmax`,
+`generator_list_iterator_stopiteration_caught`) compile+link+run real
+binaries.
+
+**Still open for a full close of this file** (all unrelated to
+iterators): `subnets` yields heterogeneous types across sites (str +
+tuple) and needs `IPv4Network`/`IPv6Network` name resolution +
+struct-object-keyed dicts; `summarize_address_range` hits an unresolved
+`ip(...)` callee (address-class constructor). `_find_address_range`
+still won't LINK end-to-end because its loop body does `ip._ip` on a
+list element (the unannotated-param/struct-in-list int64_t-defaulting
+family), but it is no longer a generator-eligibility refusal. Doc stays
+open.
+
+## Status (2026-09-03 — coroutine-body infra landed; this file's 3 refused generators unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+`_find_address_range` (`next(it)` on a plain external iterator),
+`subnets` (`every yield must carry a value...` — yields str/tuple across
+sites plus needs `IPv4Network`/`IPv6Network` name resolution and a
+struct-object-keyed dict), and `summarize_address_range` (`min(...)`
+over an iterable) all still refused, byte-identical reasons to the
+entries below. Each is independently feature-sized; none attempted this
+session. General coroutine-body infra landed this session (`var x =
+<expr>` VarDecl lowering; type-dispatched `String(x)`/`str(x)` for
+body-built strings — see the imaplib doc's 2026-09-03 entry) does not
+reach these blockers. Doc stays open.
+
 ## Status (re-verified 2026-08-26, later same day — full current blocker set precisely enumerated; all STRUCTURAL, not attempted)
 
 Fresh re-verify: `_collapse_addresses_internal`'s own `list(...)` gap

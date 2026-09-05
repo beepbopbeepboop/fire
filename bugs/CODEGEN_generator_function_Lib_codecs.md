@@ -1,5 +1,37 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-09-03 — re-verified structural; `**kwargs`-forward helper widened to `char *` gap params as infrastructure, does NOT touch this file)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: byte-identical
+refusal — `iterdecode, iterencode` on the `*`/`**`-unpack call-argument guard
+at `getincrementalencoder(encoding)(errors, **kwargs)`. Re-confirmed the
+blocker is a **dynamically-obtained callee** (the class returned by
+`getincrementalencoder(encoding)`), whose real parameter names/defaults are
+not compile-time visible — genuinely structural, not a narrow
+value-representation issue as a recent sweep hoped. `dis.py`
+(`Positions(*next(co_positions, ()))` — a `*`-spread into a dynamically
+`collections.namedtuple`-constructed type + `co.co_positions()` code-object
+introspection) and `enum.py` (`cls._flag_mask_`/`cls._value2member_map_`,
+populated only through `EnumMeta.__new__`'s dynamic classdict machinery, never
+as class-body assignments) were re-verified the same way and are equally
+structural. None attempted.
+
+**Infrastructure that DID land** (`gimple_cpp_core.py`
+`_cpp_try_kwargs_forward_call`): the narrow, provably-safe `f(pos..., **kw)`
+forwarding helper for a **statically-known local free function** callee
+previously bailed (→ honest whole-module refusal) unless every "gap"
+parameter between the given positional args and the callee's own `**kwargs`
+slot was `int64_t`. It now also lowers a `char *` (string) gap slot via the
+same genuine `mojo_dict_contains ? mojo_dict_pop_int (cast to char*) : static
+default` runtime resolution — never a blind default-pad (the dict slot's
+value bits ARE the char*, so the existing pop primitive returns them). This
+does not help codecs/dis/enum (all dynamic/metaclass callees), but widens the
+`**kwargs`-forward mechanism the c-analyzer cluster's docs reference. Regression
+test `generator_kwargs_forward_str_gap_compiles_via_cpp_path` in
+`test_gimple.py`. Full gate green (linkmode 3/3, module_cache 76/76,
+test_gimple 266/266, check-selfhost clean, compile_stdlib 664/0/0, dylib 0
+skips, bootstrap 180/180).
+
 ## Status (updated 2026-08-26 — implemented real loop-as-expression codegen in the coroutine-body C++ emitter; UNAFFECTED for this file specifically (its own blocker is `**kwargs`-to-dynamic-callee), but the mechanism itself is a genuine widening — see the cross-references below for where it DID move the needle)
 
 A prior session's triage of this cluster found the single widest

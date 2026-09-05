@@ -1,76 +1,119 @@
-"""REAL behavioral test for Milestone B (C++20-coroutine generator codegen):
-compiles a Mojo generator function's dual output (.c/.ci via gcc -fgimple,
-.cpp via g++ -std=c++20) for real, links them together for real via
-mojo.py's link_executable(cxx=True) (Milestone A's plumbing), RUNS the
-resulting binary, and asserts on its ACTUAL stdout — mirrors
-test_gimple_runner.py's/test_mixed_cpp_link.py's shape, combined: this is
-the first test in the project to exercise gimple_codegen.py's new dual-
-translation-unit output end-to-end as a real dual-language build.
+"""REAL behavioral test for generator codegen: compiles a Mojo generator
+function's C output directly (doc/COROUTINE.html §5.5 cutover: this now
+goes through the A3 stack-switch backend by default, gimple_gen_coro.py,
+rather than the old cpp-path C++20-coroutine emitter -- MOJO_CORO=cpp
+still selects the old path for the shapes it still uniquely covers), links
+it against the small, do_imports=False-friendly A3 runtime object set
+(mirrors test_coro_nested_async_capture.py's own build helper -- these
+fixtures are self-contained, no stdlib imports, so there's no need to pay
+build_stdlib_dylib's ~664-module link cost per test the way a full `mojo.py
+build`/driver.compile_program invocation would), RUNS the resulting binary,
+and asserts on its ACTUAL stdout. Falls back to the cpp companion-unit link
+(g++, mojo_async_runtime.cpp) for the rarer shape not yet stack-switch-
+eligible.
 """
 import os
+import platform
 import subprocess
 import tempfile
 
-from build_config import find_gcc, find_gxx
 import gimple_codegen
-import mojo
+from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
-RUNTIME_C = os.path.join(RUNTIME_DIR, 'mojo_runtime.c')
+GCC = find_gcc()
+GXX = find_gxx()
+
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
+                 if platform.machine().lower() in ('arm64', 'aarch64')
+                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
+
+# Runtime object set for a stack-switch (A3) program: compiled ONCE, reused
+# by every test in this file (these never change across test cases).
+_SS_RUNTIME_SRCS = [
+    os.path.join(RUNTIME_DIR, 'mojo_runtime.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
+    _CORO_CTX_SRC,
+]
+_ss_runtime_objs_cache = None
+
+
+def _ss_runtime_objs(wd):
+    global _ss_runtime_objs_cache
+    if _ss_runtime_objs_cache is None:
+        objs = []
+        for i, src in enumerate(_SS_RUNTIME_SRCS):
+            o = os.path.join(wd, f'rt{i}.o')
+            r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', o, src],
+                                capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                raise RuntimeError(f"compile of {src} failed: {r.stderr}")
+            objs.append(o)
+        _ss_runtime_objs_cache = objs
+    return _ss_runtime_objs_cache
+
 
 _PASS = 0
 _FAIL = 0
 
 
 def _build_generator_program(mojo_src: str) -> str:
-    """Compile mojo_src (which must contain exactly one Milestone-B-
-    supported generator) to a real executable: .c/.ci -> gcc -fgimple -c,
-    .cpp -> g++ -std=c++20 -c, runtime -> gcc -c, then link all three via
-    mojo.py's link_executable(cxx=True) (g++ as the final link driver, so
-    the C++ standard library / coroutine-support symbols resolve). Returns
-    the path to the built executable."""
+    """Compile mojo_src (which must contain a supported generator) directly
+    and link it against the A3 stack-switch runtime (or the cpp path, for a
+    shape not yet stack-switch-eligible). Returns the exe path."""
+    wd = tempfile.mkdtemp(prefix='mojo_gen_runner_')
     c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
+    c_path = os.path.join(wd, 'prog.c')
+    with open(c_path, 'w') as f:
+        f.write(c_code)
+    exe = os.path.join(wd, 'prog.exe')
+
+    if '__mgco_' in c_code:
+        r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w', '-c', '-o',
+                            os.path.join(wd, 'prog.o'), c_path],
+                            capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
+        objs = [os.path.join(wd, 'prog.o')] + _ss_runtime_objs(wd)
+        r = subprocess.run([GCC, '-o', exe, *objs], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise RuntimeError(f"link failed: {r.stderr}")
+        os.chmod(exe, 0o755)
+        return exe
+
     if not cpp_code:
         raise RuntimeError(
             "expected a non-empty generated .cpp — this source doesn't "
-            "actually contain a Milestone-B-supported generator")
-
-    wd = tempfile.mkdtemp(prefix='mojo_gen_runner_')
-    c_path = os.path.join(wd, 'prog.c')
+            "actually contain a supported generator (neither stack-switch "
+            "nor cpp path lowered it)")
     cpp_path = os.path.join(wd, 'prog_gen.cpp')
-    with open(c_path, 'w') as f:
-        f.write(c_code)
     with open(cpp_path, 'w') as f:
         f.write(cpp_code)
-
-    c_o = os.path.join(wd, 'prog.o')
-    gen_o = os.path.join(wd, 'prog_gen.o')
-    runtime_o = os.path.join(wd, 'mojo_runtime.o')
-    exe = os.path.join(wd, 'prog.exe')
-
-    gcc = find_gcc()
-    gxx = find_gxx()
-
-    r = subprocess.run([gcc, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o', c_o, c_path],
+    r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o',
+                        os.path.join(wd, 'prog.o'), c_path],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}")
-
-    r = subprocess.run([gxx, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', gen_o, cpp_path],
+    r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o',
+                        os.path.join(wd, 'prog_gen.o'), cpp_path],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}")
-
-    r = subprocess.run([gcc, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
+    runtime_o = os.path.join(wd, 'mojo_runtime.o')
+    r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o,
+                        os.path.join(RUNTIME_DIR, 'mojo_runtime.c')],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"gcc compile of mojo_runtime.c failed: {r.stderr}")
-
-    r = mojo.link_executable([c_o, gen_o, runtime_o], exe, cxx=True)
+    import mojo
+    r = mojo.link_executable(
+        [os.path.join(wd, 'prog.o'), os.path.join(wd, 'prog_gen.o'), runtime_o],
+        exe, cxx=True)
     if r.returncode != 0:
         raise RuntimeError(f"link_executable(cxx=True) failed: {r.stderr}")
-
     os.chmod(exe, 0o755)
     return exe
 
@@ -1341,6 +1384,110 @@ def main():
         print(v)
 """, "10\n12\n14\n")
 
+    # Pop-time shape discrimination for a heterogeneous / tagged-union
+    # `stack` value model: a list holding both scalar elements and nested
+    # tuples, drained with `.pop()`, each popped value discriminated with
+    # `isinstance(top, tuple)` and (when a tuple) destructured via a
+    # tuple-unpack. Exercises: nested-container literal appended to a flat
+    # boxed list, `while <list>:` emptiness (not pointer-nullness),
+    # `<list>.pop()`, runtime `mojo_is_registered_list` discrimination,
+    # and a boxed-value tuple-unpack through the runtime list getters.
+    test_generator_stdout("generator_pops_heterogeneous_tagged_stack", """\
+def walker():
+    stack = [(1, 2)]
+    stack.append("leaf")
+    stack.append((3, 4))
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            a, b = top
+            yield a + b
+        else:
+            yield 99
+
+def main():
+    for x in walker():
+        print(x)
+""", "7\n99\n3\n")
+
+    # Second-level unpack: `marker, payload = stack.pop()` where `payload`
+    # is itself a boxed tuple needing its own unpack (the exact `_fwalk`
+    # shape from bugs/CODEGEN_generator_function_Lib_os.md — `action,
+    # value = stack.pop()` then `isroot, ... = value`).
+    test_generator_stdout("generator_pops_stack_two_level_tuple_unpack", """\
+def walker():
+    stack = []
+    stack.append((0, (10, 20, 30)))
+    stack.append((1, (40, 50, 60)))
+    while stack:
+        marker, payload = stack.pop()
+        x, y, z = payload
+        yield marker + x + y + z
+
+def main():
+    for v in walker():
+        print(v)
+""", "151\n60\n")
+
+
+    # `var`-declared local (Mojo VarDecl) inside a generator body, plus a
+    # string built in the body from a numeric part via String(i) and
+    # concatenation — the compiled coroutine emitter used to hard-refuse
+    # the VarDecl outright ("unsupported statement in generator body:
+    # VarDecl") and, once that was lowered, mis-stringify String(0) as
+    # "None" (mojo_str's pointer heuristic reads 0 as NULL).
+    test_generator_stdout("generator_vardecl_string_built_in_body", """\
+def gen_str(n):
+    for i in range(n):
+        var s = "item" + String(i)
+        yield s
+
+def main():
+    for x in gen_str(3):
+        print(x)
+""", "item0\nitem1\nitem2\n")
+
+    # Resumable list-iterator value model inside a generator body:
+    # `it = iter(xs)` binds a real cursor, `next(it)` advances it, a
+    # following `for x in it:` continues from where next() left off, and
+    # `next(it, default)` returns the default on exhaustion. Plus
+    # `min(iterable)`/`max(iterable)` and multi-arg `min(a, b, ...)`.
+    # Mirrors bugs/CODEGEN_generator_function_Lib_ipaddress.md's
+    # `_find_address_range` shape. Previously every one of these refused
+    # the whole module ("unresolved callee 'next(...)'" etc.).
+    test_generator_stdout("generator_list_iterator_cursor_and_minmax", """\
+def scan(xs):
+    it = iter(xs)
+    first = next(it)
+    yield first
+    for x in it:
+        yield x
+    yield next(it, -1)
+    yield min(xs)
+    yield max(xs)
+    yield min(8, 3, 5, 1, 9)
+
+def main():
+    for v in scan([10, 20, 30]):
+        print(v)
+""", "10\n20\n30\n-1\n10\n30\n1\n")
+
+    # StopIteration from an exhausted list-iterator's next() is a real
+    # tagged exception, catchable by an enclosing try/except in the body.
+    test_generator_stdout("generator_list_iterator_stopiteration_caught", """\
+def scan(xs):
+    it = iter(xs)
+    yield next(it)
+    try:
+        yield next(it)
+        yield next(it)
+    except StopIteration:
+        yield 999
+
+def main():
+    for v in scan([7]):
+        print(v)
+""", "7\n999\n")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

@@ -491,6 +491,64 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         t = gen._new_val('MojoDict *', 'mojo_dict_new ()')
         for a in node.args: gen.lower_expr(a)
         return 'MojoDict *', t
+    if (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.MemberExpr)
+            and node.func.obj.member in ('bitcast', 'unsafe_ptr_cast') and not node.args):
+        # `ptr.bitcast[T]()` / `ptr.unsafe_ptr_cast[T]()` on a raw
+        # UnsafePointer/Pointer/OwnedPointer/ArcPointer receiver — a
+        # genuine pointer REINTERPRET, not a no-op. The generic
+        # SubscriptExpr+MemberExpr routing just below this (shared with
+        # ordinary struct methods' comptime bracket-parameter threading)
+        # always stripped the bracket type entirely before forwarding to
+        # `_lower_method_call`/`_lower_pointer_method` (whose own
+        # `bitcast` case never saw it and could only pass the value
+        # through UNCHANGED, keeping the receiver's OWN ctype) — wrong
+        # whenever the receiver isn't already the requested type: e.g.
+        # `UnsafePointer(to=sig).bitcast[UnsafePointer[SomeStruct]]()`
+        # kept the ORIGINAL scalar pointer's ctype, so a later `[0].field`
+        # dereference on the (wrongly still-scalar-pointer) result
+        # mismatched (std/sys/_amdgpu.mojo's `hsa_signal_add`) — invisible
+        # before `UnsafePointer(to=x)` itself worked (see bugs/CODEGEN_
+        # unsafepointer_to_kwarg_dropped.md), since everything downstream
+        # was already uniformly bogus. Resolved here directly, before the
+        # generic bracket-stripping dispatch: a concrete target ctype
+        # (from a `[T]` naming a known scalar/struct/pointer type) gets a
+        # real cast; anything else (an opaque/unresolvable bracket) keeps
+        # today's harmless same-type pass-through.
+        _bc_ot, _bc_ov = gen.lower_expr(node.func.obj.obj)
+        if _bc_ot.endswith(' *') and _bc_ot not in gen._RUNTIME_PTRS:
+            _bc_idx = node.func.index
+            _bc_elems = _bc_idx.elements if isinstance(_bc_idx, gimple_ctypes.TupleExpr) else [_bc_idx]
+            _bc_ann = gen._type_expr_to_ann(_bc_elems[0]) if _bc_elems else None
+            _bc_target = gen._resolve_type(_bc_ann) if _bc_ann else None
+            # `_resolve_type` already special-cases a BARE struct name
+            # (BUG-2026-030: this codegen represents every struct VALUE
+            # as one level of pointer already) to `"StructName *"`
+            # directly — that pointer level IS the struct's own value
+            # representation, not a second indirection, so `bitcast[
+            # SomeStruct]()`'s result needs no MORE pointer depth added.
+            # A bracket type that's ITSELF a pointer-ctor annotation
+            # (`UnsafePointer[Float32, ...]`, `Pointer[...]`, …) is
+            # different: `_resolve_type` there ALSO gives one pointer
+            # level (its own `X *` value representation — matching
+            # `UnsafePointer[X]`'s own ctype), but `bitcast[UnsafePointer[
+            # X]]()` genuinely means "reinterpret as a pointer THAT
+            # HOLDS an `UnsafePointer[X]` value", i.e. a real SECOND
+            # level of indirection over that already-one-level value —
+            # unconditionally add one more `*` for this shape (confirmed
+            # via test/asyncrt/test_nested_device_pointer_kernel.mojo's
+            # `UnsafePointer(to=arg).bitcast[UnsafePointer[Float32,
+            # MutAnyOrigin]]()[]`, which needs `float **`, not `float *`,
+            # for the trailing `[]` deref to land on a real `float *`).
+            _bc_ptr_ctor_target = (
+                isinstance(_bc_ann, str) and '[' in _bc_ann
+                and _bc_ann.split('[', 1)[0].strip() in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'))
+            if _bc_target and _bc_ptr_ctor_target:
+                _bc_target = f'{_bc_target} *'
+            elif _bc_target and not _bc_target.endswith(' *') and _bc_target != 'void':
+                _bc_target = f'{_bc_target} *'
+            if _bc_target and _bc_target != _bc_ot:
+                return _bc_target, gen._new_val(_bc_target, f'({_bc_target}){_bc_ov}')
+            return _bc_ot, _bc_ov
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.MemberExpr):
         method_name = node.func.obj.member
         extra_args = []
@@ -554,6 +612,97 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         inner = gimple_ctypes.CallExpr(func=node.func.obj, args=list(node.args) + extra_args,
                          kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0))
         return gen._lower_method_call(inner)
+    # `UnsafePointer(to=x)` / `Pointer(to=x)` / `OwnedPointer(to=x)` /
+    # `ArcPointer(to=x)` — the PLAIN-CALL keyword-argument constructor shape
+    # (no `[T]` subscript), real Mojo's and this project's own
+    # myinterpreter.py `_MojoUnsafePointerType.__call__(self, to=None,
+    # **kwargs)` idiom for "address of a local". Previously this shape
+    # matched none of `_lower_call`'s dispatch branches (only the
+    # SubscriptExpr form `UnsafePointer[T](x)`, handled by
+    # `_lower_pointer_ctor` above, was recognized) and fell all the way to
+    # the generic "unresolved call" default, silently dropping the `to=`
+    # argument entirely and yielding a null/zero pointer with no diagnostic.
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer')
+            and not node.args):
+        _to_kwargs = getattr(node, 'kwargs', None) or []
+        _to_expr = next((v for k, v in _to_kwargs if k == 'to'), None)
+        if _to_expr is not None:
+            # A bare-identifier `to=` target is ALWAYS already in
+            # `_addressed_locals` by this point — `_seed_addressed_locals`
+            # pre-scans the WHOLE function body for every such call before
+            # any statement compiles (see its own docstring for why this
+            # must be a whole-body pre-pass, not marked lazily here at the
+            # call site). Resolved DIRECTLY to its raw C variable,
+            # bypassing `_lower_IdentExpr`'s own materialize-through-a-
+            # fresh-temp handling for that name (needed for ORDINARY value
+            # reads of an addressed local, see that branch's own
+            # docstring): taking `x`'s address needs `x`'s own identity,
+            # not the address of a throwaway temp holding a copy of its
+            # value at some other read site — a real, hand-hit segfault
+            # from a naive first version of this fix that only bypassed
+            # materialization for a name's SECOND `to=` occurrence.
+            if isinstance(_to_expr, gimple_ctypes.IdentExpr) and _to_expr.name in gen._addressed_locals:
+                at = gen._type_of(_to_expr.name)
+                av = gen._c_names.get(_to_expr.name, _to_expr.name)
+            else:
+                at, av = gen.lower_expr(_to_expr)
+            if at.endswith(' *'):
+                # `to=` names a struct-typed local/param/field: this
+                # codegen already erases `SomeStruct`-typed values straight
+                # to `SomeStruct *` (BUG-2026-030 — see _lower_pointer_ctor's
+                # own docstring), so the value in hand IS already "the
+                # address of the struct" — no separate address-of needed.
+                return at, av
+            # Scalar `to=`: need the real address of the C variable backing
+            # it. Only a genuine declared local/parameter (not an arbitrary
+            # expression's throwaway temp) is safely addressable this way.
+            # NOT `_scalar_arg_is_addressable_local` (BUG-2026-016's
+            # out-parameter-aliasing check): that helper excludes any name
+            # tracked in `_actual_types`/`_global_var_types` because ITS
+            # narrower purpose is telling an opaque-pointer-boxed-as-
+            # int64_t handle apart from a genuine numeric local when `at
+            # == 'int64_t'` — irrelevant here, since a struct/container
+            # pointer already returned via the `at.endswith(' *')` branch
+            # above, so reaching this point means `at` is ALREADY a
+            # concrete non-pointer scalar ctype (uint64_t, double, …).
+            # Reusing that helper wholesale rejected every well-typed
+            # scalar PARAMETER whose ctype isn't literally 'int64_t' (ANY
+            # UInt64/Float64/Int32/… parameter gets registered into
+            # `_actual_types` purely so OTHER dispatch sites can recover
+            # its real type — see the param-registration comment in
+            # gimple_gen_funcs.py — which made `_scalar_arg_is_addressable_
+            # local` treat it as a suspected disguised pointer and silently
+            # fall through to the null-pointer branch below instead —
+            # confirmed via std/sys/_amdgpu.mojo's `hsa_signal_add(sig:
+            # UInt64, ...)`, `UnsafePointer(to=sig)`).
+            if isinstance(_to_expr, gimple_ctypes.IdentExpr) and gen._addressable_to_target(at, av):
+                # `-fgimple` rejects a stack local's address being taken
+                # ANYWHERE in the function if that same local is also
+                # cast-assigned or directly `return`ed/read-raw elsewhere
+                # in the SAME function ("non-register as LHS of unary
+                # operation" / "invalid operand in return statement" —
+                # the identical restriction `_seed_mut_captured_local_
+                # types` documents and works around by heap-boxing for
+                # the `{mut}`-capture case). `_seed_addressed_locals`
+                # already pre-registered this name in `_addressed_locals`
+                # before this function's body started compiling, so
+                # `_lower_IdentExpr` materializes every OTHER read of it
+                # (before or after this statement) through a fresh
+                # register temp instead of handing back the now-
+                # addressable variable directly — sidesteps the
+                # restriction for the realistic "take address, mutate via
+                # callee, then read/return" idiom this constructor shape
+                # exists for, without needing this local's ctype known
+                # ahead of its own VarDecl (infeasible in general for an
+                # unannotated `var result = Self()` — see bugs/CODEGEN_
+                # unsafepointer_to_kwarg_dropped.md).
+                ptr_ctype = f'{at} *'
+                return ptr_ctype, gen._new_val(ptr_ctype, f'&{av}')
+            # Not a directly-addressable lvalue (e.g. a call-result temp) —
+            # an honest null pointer rather than aliasing dead storage.
+            ptr_ctype = f'{at} *'
+            return ptr_ctype, gen._new_val(ptr_ctype, f'({ptr_ctype})0')
     # Generic container constructors: List[T](...), Dict[K,V](...), Set[T](...), Optional[T](...)
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
         base = node.func.obj.name
@@ -1143,8 +1292,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (_fattrs_g and isinstance(node.args[0], gimple_ctypes.IdentExpr)
                 and node.args[0].name in _fattrs_g
                 and isinstance(node.args[1], gimple_ctypes.StringLiteral)
-                and node.args[1].value in _fattrs_g[node.args[0].name]):
-            mangled = _fattrs_g[node.args[0].name][node.args[1].value]
+                and _as_str(node.args[1].value) in _fattrs_g[node.args[0].name]):
+            mangled = _fattrs_g[node.args[0].name][_as_str(node.args[1].value)]
             gtype = gen._global_var_types.get(mangled, 'int64_t')
             return gtype, gen._new_val(gtype, mangled)
         # A5: `getattr(s, 'elifs', [])` / `getattr(handler, 'body', None)`
@@ -1160,7 +1309,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # defensive `getattr(s, 'elifs', [])` pattern) is substituted.
         if (isinstance(node.args[1], gimple_ctypes.StringLiteral)
                 and len(node.args) in (2, 3)):
-            _attr = node.args[1].value
+            # `_as_str`: `node.args[1]` is a boxed MojoList element, so the
+            # self-hosted backend types this `.value` read as int64_t. The
+            # bits are the real `char *`, but `f'"{_attr}"'` below then
+            # formats the POINTER as a quoted decimal and interns it — the
+            # generated C gets `_mojo_dispatch_getattr(obj, "40424334336")`
+            # (a per-run heap address, invalid, and different every run).
+            _attr = _as_str(node.args[1].value)
             # `_known_field_type` resolves `_attr`'s C type ONLY when
             # every struct across the WHOLE-PROGRAM-shared `struct_
             # field_types` that happens to have a field of this bare
@@ -1869,10 +2024,14 @@ def _lower_builtin_open(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lower_self_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    sname = getattr(gen, '_current_struct_name', None)
+    # Direct field access (not getattr): keeps `char *` on the self-hosted
+    # path so the `Name___new` stub decl / call symbol is the struct name,
+    # not a per-run heap address. `_current_struct_name` is always set (to
+    # "" when outside a method body) before any body lowering.
+    sname = _as_str(gen._current_struct_name)
     if sname:
         arg_pairs = [gen.lower_expr(a) for a in node.args]
-        gen._self_ctor_stubs.add(sname)
+        gen._self_ctor_stubs[sname] = True
         return 'int64_t', gen._call_expr('int64_t', f'{sname}___new', arg_pairs)
     for a in node.args: gen.lower_expr(a)
     return 'int64_t', gen._new_val('int64_t', '0  /* Self() constructor: no struct context */')
@@ -2374,9 +2533,16 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         fp_void = gen._new_val('void *', f'(void *){fp_raw}')
     else:
         fp_void = fp_raw
-    # Widen each arg to int64_t.
+    # Widen each arg to int64_t. Index the pair (`_ap[0]`/`_ap[1]`), don't
+    # unpack it in the for-clause (`for at, av in arg_pairs`) — the
+    # established boxing bug: a 2-tuple unpack re-boxes `av` to int64_t
+    # even when it was a char*/pointer, and the erased value then landed
+    # in `f'(int64_t){av}'` as a decimal address — confirmed via a real
+    # --dump-full mojo.py determinism diff at myinterpreter.py:1027's
+    # `return func(interpreter, *args, **kwargs)`.
     widened = []
-    for at, av in arg_pairs:
+    for _ap in arg_pairs:
+        at, av = _as_str(_ap[0]), _as_str(_ap[1])
         if at == 'int64_t':
             widened.append(av)
         else:
@@ -2435,12 +2601,18 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
         return arg_pairs
     if not (arg_pairs and arg_pairs[0][0] == 'MojoList *'):
         return arg_pairs
-    _lst_v = arg_pairs[0][1]
+    # `_as_str`: `arg_pairs[0][1]` (the spread list's C-expr) and each
+    # `expected_params` element re-box to int64_t when read out of a tuple /
+    # `enumerate` pair on the self-hosted path — the emitted
+    # `mojo_list_get_int (<list>, i)` list handle and the `(<ptype>)<raw>`
+    # cast type then came out as decimal heap addresses, different every run.
+    _lst_v = _as_str(arg_pairs[0][1])
     _dflts = gen._func_param_defaults.get(fname) or \
         gen._func_param_defaults.get(fname_raw) or []
     _first_dflt = len(expected_params) - len(_dflts)
     _expanded: list = []
-    for _pos, _ptype in enumerate(expected_params):
+    for _pos in range(len(expected_params)):
+        _ptype = _as_str(expected_params[_pos])
         _idx64 = gen._new_val('int64_t', f"(int64_t){_pos}")
         _len64 = gen._call_expr('int64_t', 'mojo_list_len',
                                  [('MojoList *', _lst_v)])
@@ -2773,6 +2945,21 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             gen._elaborated_externs.append(_stub_decl)
     if fname in gen._KNOWN_SIGS:
         ret_type = gen._KNOWN_SIGS[fname][0]
+    elif fname in gen._LIBC_SIGS and fname_raw not in gen.func_return_types:
+        # A bare (unrenamed) libc call reaching this generic dispatch --
+        # e.g. os.py's `unlink(name)`/`mkdir(name, mode)` -- otherwise
+        # keeps the `int64_t` default set above, but the real libc
+        # signature (`_LIBC_SIGS`, already consulted for the self-
+        # emitted extern/prototype and for `_emit_call`'s argument
+        # coercion) may declare a narrower C return type (e.g. `int`).
+        # Assigning that call's actual `int` result into an `int64_t`-
+        # declared GIMPLE temp is an invalid conversion GCC's `-fgimple`
+        # frontend rejects outright ("invalid conversion in gimple
+        # call") -- found via `unlink`'s real 4-byte `int` return
+        # colliding with this default (save_env.py's
+        # restore_urllib_requests__url_tempfiles). Only applies when no
+        # local Mojo definition of the same bare name shadows it.
+        ret_type = gen._LIBC_SIGS[fname][0]
 
     # A renamed C-reserved *builtin* passthrough (e.g. calling libm exp2 with
     # no local def) needs a variadic extern. But if there's a local Mojo def of
@@ -3078,12 +3265,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and all(t in _NUM for t, _ in arg_pairs)):
         op = '<' if fname_raw == 'min' else '>'
         def _as_i64(t, v):
-            return v if t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){v}')
-        acc = _as_i64(*arg_pairs[0])
-        for t, v in arg_pairs[1:]:
-            bv = _as_i64(t, v)
-            cond = gen._new_val('_Bool', f'{acc} {op} {bv}')
-            acc = gen._new_val('int64_t', f'{cond} ? {acc} : {bv}')
+            # `_as_str(v)`: `v` is a C-expr string, but reading it out of the
+            # 2-tuple (`arg_pairs[k][1]`) re-boxes the slot to int64_t on the
+            # self-hosted path, so `f'(int64_t){v}'` emitted `(int64_t)<addr>`
+            # (a live heap pointer as a GIMPLE integer constant) — different
+            # every run. Index, don't unpack, and re-tag the slot.
+            _v = _as_str(v)
+            return _v if t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+        acc = _as_i64(_as_str(arg_pairs[0][0]), arg_pairs[0][1])
+        for _ap in arg_pairs[1:]:
+            bv = _as_i64(_as_str(_ap[0]), _ap[1])
+            cond = gen._new_val('_Bool', f'{_as_str(acc)} {op} {bv}')
+            acc = gen._new_val('int64_t', f'{cond} ? {_as_str(acc)} : {bv}')
         return 'int64_t', acc
 
     # min/max over string-ish (char* and/or single-char) args → same
@@ -3109,13 +3302,14 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and all(t in _STRINGY for t, _ in arg_pairs)
             and any(t == 'char *' for t, _ in arg_pairs)):
         def _as_cstr(t, v):
+            _v = _as_str(v)  # slot re-boxed by tuple read; re-tag (see numeric fold above)
             if t == 'char *':
-                return v
-            return gen._call_expr('char *', 'mojo_char_to_str', [('char', v)])
-        acc = _as_cstr(*arg_pairs[0])
-        for t, v in arg_pairs[1:]:
-            cv = _as_cstr(t, v)
-            cmp_i = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', acc), ('char *', cv)])
+                return _v
+            return gen._call_expr('char *', 'mojo_char_to_str', [('char', _v)])
+        acc = _as_cstr(_as_str(arg_pairs[0][0]), arg_pairs[0][1])
+        for _ap in arg_pairs[1:]:
+            cv = _as_cstr(_as_str(_ap[0]), _ap[1])
+            cmp_i = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', _as_str(acc)), ('char *', cv)])
             cmp64 = gen._new_val('int64_t', f'(int64_t){cmp_i}')
             zero = gen._new_val('int64_t', '(int64_t)0')
             # cmp64 < 0 means acc sorts strictly before cv (acc is the
@@ -3126,7 +3320,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             # "keep acc on tie" behavior above.
             replace_op = '<' if fname_raw == 'max' else '>'
             cond = gen._new_val('_Bool', f'{cmp64} {replace_op} {zero}')
-            acc = gen._new_val('char *', f'{cond} ? {cv} : {acc}')
+            acc = gen._new_val('char *', f'{cond} ? {cv} : {_as_str(acc)}')
         return 'char *', acc
 
     # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)
@@ -4046,8 +4240,23 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             return elem, cast_t
         return 'int64_t', t
 
-    # Struct pointer subscript: Span[i] → Span->_data[i] etc.
-    if ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) in gen.struct_field_types:
+    # Struct pointer subscript: Span[i] → Span->_data[i] etc. Guarded to
+    # EXACTLY one level of pointer (`ot[:-2]` itself must not also end in
+    # ' *'): `_struct_name_of` strips every ' *' occurrence, not just
+    # one, so without this guard a genuine DOUBLE pointer (`amd_signal_t
+    # * *` — e.g. `UnsafePointer(to=x).bitcast[UnsafePointer[T]]()[]`'s
+    # own intermediate subscript, once `.bitcast[...]()` correctly
+    # returns a real two-level pointer type — see the `bitcast`/
+    # `unsafe_ptr_cast` handling in `_lower_call`) would ALSO match "bare
+    # struct name amd_signal_t", treating a pointer-to-pointer as
+    # Span-style struct sugar and mis-subscripting it (confirmed via
+    # std/sys/_amdgpu.mojo's `hsa_signal_add`). A real double pointer
+    # needs plain pointer-arithmetic dereference instead — falls through
+    # to the generic "p[i] via _mojo_at_ helper" case below, which
+    # already handles it correctly (strips exactly one level via
+    # `_elem_type`).
+    if (ot.endswith(' *') and not ot[:-2].endswith(' *')
+            and gimple_exprtypes._struct_name_of(ot) in gen.struct_field_types):
         tracked = gen._elem_types.get(ov)
         if tracked and tracked in gen.struct_field_types:
             # Span's hardcoded {_data, _len} model always assumes a raw
@@ -4085,9 +4294,29 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 return ftype, addr
             t = gen._new_val(et, f"*{addr}")
             return et, t
-        # Struct without pointer _data: return int64_t opaque handle
-        t = gen._new_val('int64_t', f"(int64_t){ov}")
-        return 'int64_t', t
+        # No `_data`/`data` sugar field on this struct: this is NOT a
+        # Span/List-style container providing `container[i]` sugar over
+        # its own internal buffer — it's genuine pointer-to-struct-array
+        # arithmetic, i.e. `p[i]` for a bare `p: UnsafePointer[T]` (or
+        # `OwnedPointer`/`ArcPointer`/`Pointer`) whose pointee type T
+        # simply doesn't happen to have a `_data` field. `p[i]` there
+        # means "the T at this address plus i elements" — kept as a
+        # `T *` (this codegen's universal "a struct value is always T *"
+        # convention, BUG-2026-030), NOT collapsed to an opaque int64_t
+        # handle, so a chained `.field` read/write off the result routes
+        # through the ordinary `ptr->member` path instead of falling to
+        # the dynamic/boxed `mojo_obj_getattr` fallback (which doesn't
+        # know this struct's real layout and raises "AttributeError:
+        # `<field>`" at runtime — see bugs/CODEGEN_struct_pointer_deref_
+        # field_access_crash.md; previously EVERY struct-typed
+        # UnsafePointer subscript without a `_data` field hit exactly
+        # this bug, since `_struct_data_field` only recognizes the
+        # Span/List sugar shape, not plain data structs).
+        cn = gimple_ctypes._c_id(ot[:-2])
+        gen._ptr_helpers_needed.add(ot[:-2])
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
+        return ot, addr
 
     # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
     et = gimple_ctypes._elem_type(ot)

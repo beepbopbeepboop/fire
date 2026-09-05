@@ -33,6 +33,7 @@ from mojo_compiler import (
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
+import gimple_gen_coro
 import regex_compile
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
@@ -212,6 +213,13 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'py_tokenize':           'MojoList *',
     'Parser':             'Parser *',    # Parser() constructor
     'Interpreter':        'Interpreter *',
+    # A3 stack-switch coroutine shim (runtime/mojo_coro_gen.c) — called
+    # from a generator's lowered `__mgco_<g>_body` (gimple_gen_coro.py).
+    '__mojo_coro_yield_i':   'int64_t',
+    '__mojo_coro_yield_p':   'int64_t',
+    '__mojo_coro_yield_d':   'int64_t',
+    '__mojo_gen_arg':        'int64_t',
+    '__mojo_gen_set_return': 'void',
 }
 
 
@@ -514,6 +522,12 @@ class GimpleGen:
         # key off it consistently instead of re-deriving "is this a
         # supported generator" in four different places.
         self._supported_generators: dict[str, FunctionDef] = {}
+        # A3 stack-switch coroutine trampolines gimple_gen_coro.register()
+        # emits as plain C (doc/COROUTINE.html) -- appended verbatim into
+        # this module's .c/.ci output by gen_module. Declared here (not
+        # just dynamically set) so the self-hosted compiler's own static
+        # field table for this class knows about it.
+        self._stackswitch_coro_c_units: list[str] = []
         # Name of every top-level generator/async function that FAILED to
         # translate (raised _UnsupportedGeneratorShape after exhausting all
         # retry passes) and was therefore stub-declared instead, under
@@ -868,6 +882,20 @@ class GimpleGen:
         # fspath) and the set of names needing a variadic extern in the .cpp.
         self._cpp_module_fn_names: set[str] = set()
         self._cpp_module_variadic_func_refs: set[str] = set()
+        # C-stdlib / POSIX names (keys of `_LIBC_SIGS`) called from this
+        # module's compiled generator/coroutine bodies — each gets a
+        # self-emitted `extern "C"` prototype in the .cpp preamble (see
+        # gen_module), mirroring `_ensure_libc_self_extern` on the
+        # ordinary path.
+        self._cpp_libc_sig_refs: set[str] = set()
+        # Module-level `X = Y` aliases where Y is itself a module-level
+        # function (`fspath = _fspath` in Lib/os.py — a conditional
+        # rebinding of a name to a plain-`def` fallback). A call to `X(...)`
+        # inside a compiled generator/coroutine body resolves through this
+        # map to Y's real symbol instead of hitting the honest
+        # "unresolved callee" refusal. Only simple identifier-to-identifier
+        # aliases are recorded; a name reassigned to anything else is not.
+        self._cpp_module_fn_aliases: dict[str, str] = {}
         # Per-function refusal reason recorded whenever a generator/async
         # unit compile attempt raises _UnsupportedGeneratorShape (keyed by
         # the function's Python name, first reason wins). Surfaced in
@@ -1114,6 +1142,11 @@ class GimpleGen:
         # _supported_async/_async_api exactly.
         self._supported_async_gen: dict[str, FunctionDef] = {}
         self._async_gen_api: dict[str, dict] = {}
+        # Declared here (not lazily `gen._x = []` in gimple_gen_coro) so the
+        # frozen self-host GimpleGen struct has the field — else `--dump-full`
+        # of a source that emits a stack-switch coroutine hits
+        # "'GimpleGen' has no member named '_stackswitch_coro_c_units'".
+        self._stackswitch_coro_c_units: list = []
         # Set (and always cleared in a finally) by _gen_cpp_async_unit for
         # the duration of ONE async function's body translation — lets the
         # SHARED _cpp_stmt/_cpp_expr whitelist emitter (reused from the
@@ -1152,7 +1185,21 @@ class GimpleGen:
         self._comptime_list_asts: dict = {}
         self._cb_statics: dict = {}
         self._cpp_reraise_stack: list = []
-        self._class_attrs: dict = {}
+        # `dict[str, dict[str, str]]`, not bare `dict`: struct name ->
+        # {attr name -> mangled C global}. A bare `dict` annotation gives
+        # the self-hosted backend no nested-value-type hint (mirrors
+        # `struct_field_types: dict[str, dict[str, str]]` a few lines up,
+        # which DOES carry one) — every real-struct write site
+        # (`self._class_attrs[s.name][aname] = mangled`, loop ~2198 in
+        # gimple_module_gen.py) happened to dodge this because "mojo_
+        # compiler.py" (the only entry point whose transitive closure ever
+        # recompiles itself as a NESTED import — see _run_pipeline's
+        # GimpleGen-registration comment) is the first build to reach the
+        # synthetic-GimpleGen-classattr registration branch through a
+        # fresh, never-before-exercised temp_gen recursion depth. There the
+        # inner dict's value type fell back to a generic default and the
+        # write lowered as `mojo_list_set_int`, SIGBUS. Confirmed via lldb.
+        self._class_attrs: dict[str, dict[str, str]] = {}
         self._func_attrs: dict = {}
         self._emitted_funcattr_decls: set = set()
         self._class_attr_inits: list = []
@@ -1231,7 +1278,7 @@ class GimpleGen:
         # collide at link). Populated for local defs and imported Mojo functions;
         # every emission site routes the name through _func_csym for consistency.
         self._mangled_funcs: set[str] = set()
-        self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
+        self.imported_symbols: dict[str, dict] = {}  # symbol_name -> {module, original_name, return_type, c_return_type, signature, ...}
         # Subset of `imported_symbols` keys that are genuine MODULE/
         # NAMESPACE markers (`import X [as Y]`, or `from PKG import
         # submod` where `submod` names a real submodule FILE) — as
@@ -1295,7 +1342,7 @@ class GimpleGen:
         # nested `def` call prepended a bogus empty env arg.
         self._closure_envs: dict[str, str] = {}   # inner fn name -> env var ('' if none)
         self._inner_func_name: str = ''           # original inner name (recursive-call detection)
-        self._self_ctor_stubs: set = set()  # struct names needing `Name___new` stubs (see _lower_self_ctor)
+        self._self_ctor_stubs: dict = {}  # struct names needing `Name___new` stubs (see _lower_self_ctor); dict-not-set so self-hosted `sorted(...)` keeps str keys (mojo_dict_sorted_keys), not address-ordered boxed slots
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
@@ -1491,7 +1538,7 @@ class GimpleGen:
         self._struct_home_cache: dict = {}           # (module, name) -> defining-module ref | None, memo for _find_struct_home_module (breaks re-export cycles)
         self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
         self._dataclass_fields_vars: set = set()     # for-loop vars bound from dataclasses.fields(x) — f.name is f itself (set/cleared per loop)
-        self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
+        self._const_str_locals: dict[str, str] = {}  # _pair_key(func_name, var_name) → compile-time-folded string constant
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._struct_method_names: dict[str, set[str]] = {}  # struct name -> {real method names}, see its own population site's docstring
         # struct name -> {@property getter names} (the subset of
@@ -1562,7 +1609,7 @@ class GimpleGen:
         #   {'overload_id', 'param_names', 'param_ctypes' (excl self), 'min_arity', 'max_arity'}.
         # Populated from the CURRENT file's own AST only (same-file resolution);
         # a struct imported from elsewhere without local source has no entry here.
-        self._struct_method_signatures: dict[tuple, list] = {}
+        self._struct_method_signatures: dict[str, list] = {}  # _sms_key(struct, method) -> [candidate-overload dicts]
         # mangled C symbol -> full param C-type list (incl. self), for a
         # not-yet-emitted overload's forward-referenced call to be coerced
         # correctly by _emit_call. Deliberately kept separate from the shared
@@ -1582,6 +1629,7 @@ class GimpleGen:
         self._module_global_inits: dict[str, dict[str, str]] = {}  # module_name -> {name -> init_code} (shared)
         self._global_to_module: dict[str, str] = {}  # global_name -> module_name (shared)
         self._current_module_ctx: str = ""  # current module name for global field access
+        self._current_struct_name: str = ""  # struct whose method body is being lowered (for Self() ctor); declared here so self-host keeps it `char *` — a `getattr` read erases it to int64_t and the `Name___new` stub decl came out as `<addr>___new`, nondeterministic
         self._global_var_types: dict[str, str] = {}  # module-level global name -> C type (persists across functions)
         self._global_c_decl_types: dict[str, str] = {}  # global name -> actual C declaration type (int64_t or pointer)
         # Phase C: Dispatch solver for static dispatch table planning
@@ -1840,8 +1888,8 @@ class GimpleGen:
         # _own_imported_func_home, then the shared _imported_func_home) so
         # the suffix and the qualifier halves of one mangled symbol can
         # never disagree about which entry they mean.
-        self._imported_home_param_types: dict = {}
-        # (sanitized home-module qualifier, fn name) -> [param ctypes] —
+        self._imported_home_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
+        # _pair_key(sanitized home-module qualifier, fn name) -> [param ctypes] —
         # the WHOLE-PROGRAM-SHARED definition-side truth for free-function
         # signatures, written ONLY by a unit that actually defines the name
         # (when its `_local_def_pts` resolves the FunctionDef it owns) and
@@ -1854,7 +1902,7 @@ class GimpleGen:
         # log_match's `group` to char * while _common.py's own definer had
         # no call sites and froze int64_t: two different overload suffixes
         # for one symbol — "implicit declaration of function" at g++).
-        self._home_def_param_types: dict = {}
+        self._home_def_param_types: dict[str, list] = {}  # _pair_key(sanitized-home-qualifier, fn-name) -> [param ctypes]
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -1885,6 +1933,23 @@ class GimpleGen:
         # exception object with no statically-known class name).
         self._exc_type_ids: dict[str, int] = {}
         self._exc_descendants: dict = {}
+        # Under the A3 stack-switch coroutine backend (MOJO_CORO=stackswitch),
+        # `_coro_resume_fn`/`_coro_destroy_fn` (std.gpu.host.DeviceContext's
+        # detached-async dispatch, device_context.mojo) must resolve to the
+        # stack-switch generic resume/destroy pair (__mojo_gen_resume_once/
+        # __mojo_gen_destroy, runtime/mojo_coro_gen.c — operating on a
+        # `MojoGenerator *` handle) instead of the cpp-path's C++20-coroutine
+        # pair (mojo_coro_resume_generic/destroy_generic, which expect a raw
+        # std::coroutine_handle<> address and would misinterpret a
+        # MojoGenerator* the same way). An instance override (not a class
+        # dict edit) so this never leaks into a cpp-path compile running in
+        # the same process. See bugs/hard/CODEGEN_coro_detached_async_
+        # take_handle.md and gimple_gen_coro.py's own resume_fn/destroy_fn
+        # docstring.
+        if gimple_gen_coro.enabled():
+            self.BUILTIN_VALUE_MAP = dict(GimpleGen.BUILTIN_VALUE_MAP)
+            self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
+            self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
@@ -1997,6 +2062,7 @@ class GimpleGen:
         'mojo_subprocess_stdout':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_subprocess_stderr':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
+        'mojo_str_rfind':        ('int64_t',   ['char *', 'char *']),
         'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
@@ -2470,7 +2536,7 @@ class GimpleGen:
     # Mojo wrapper definition (which would collide with the extern).
     _NEEDS_SELF_EXTERN = frozenset({
         'stat', 'lstat', 'fstat', 'access', 'unlink', 'rmdir', 'mkdir',
-        'symlink', 'readlink', 'link', 'chmod', 'chown', 'getcwd',
+        'symlink', 'readlink', 'link', 'chmod', 'chown', 'getcwd', 'chdir',
         'scalbf',
         # POSIX fd/process calls our prelude headers don't pull in → emit the
         # extern ourselves (using the _LIBC_SIGS prototype) to avoid implicit decls.
@@ -2479,7 +2545,7 @@ class GimpleGen:
         # in isolation has no <fcntl.h> in its preamble and no other call
         # site to inherit an extern from, so it hit "implicit declaration of
         # function 'fcntl'" on every cold-CAS-cache stdlib build.
-        'dup', 'pipe', 'fcntl',
+        'dup', 'pipe', 'fcntl', 'close',
         # fork/waitpid/execv: headers (<unistd.h>/<sys/wait.h>) not in our prelude,
         # so _emit_stdlib_import_externs must not skip them (the new
         # _LIBC_DECLARED check would otherwise suppress them).
@@ -2536,9 +2602,9 @@ class GimpleGen:
         'stderr', 'stdout', 'stdin',
         # Unix file/process functions (from <unistd.h>, <sys/stat.h>)
         'remove', 'rename', 'access', 'stat', 'lstat', 'fstat', 'unlink', 'rmdir',
-        'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown',
+        'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'chdir',
         'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork',
-        'ioctl', 'fcntl', 'dup', 'dup2', 'pipe',
+        'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'close',
         # Random functions
         'rand', 'srand', 'random', 'srandom',
         # Standard library utility
@@ -2640,6 +2706,18 @@ class GimpleGen:
         # self-emitted extern instead of an implicit declaration.
         'mkdir': ('int', ['char *', 'int']),
         'rmdir': ('int', ['char *']),
+        # POSIX fd close (<unistd.h>, not in prelude) — used bare inside
+        # Lib/os.py's `_fwalk` generator via `from posix import *`.
+        'close': ('int', ['int']),
+        # POSIX path ops (<unistd.h>, not in prelude) — reached bare via
+        # os_helper.unlink(...) / similar `from os import *`-style
+        # bindings inside a compiled generator (Lib/test/libregrtest/
+        # save_env.py's restore_urllib_requests__url_tempfiles).
+        'unlink': ('int', ['char *']),
+        'symlink': ('int', ['char *', 'char *']),
+        'readlink': ('int64_t', ['char *', 'char *', 'int64_t']),
+        'link': ('int', ['char *', 'char *']),
+        'chdir': ('int', ['char *']),
         'execve': ('int', ['char *', 'char *', 'char *']),
         'unsetenv': ('int', ['char *']),
     }
@@ -3436,6 +3514,8 @@ class GimpleGen:
         return ginf._write_dest(self, name)
     def _seed_mut_captured_local_types(self, func_name: str):
         return ginf._seed_mut_captured_local_types(self, func_name)
+    def _seed_addressed_locals(self, body: list):
+        return ginf._seed_addressed_locals(self, body)
     def _emit_mut_local_box_allocs(self):
         return ginf._emit_mut_local_box_allocs(self)
     def _new_jbp_temp(self) -> str:
@@ -3530,6 +3610,8 @@ class GimpleGen:
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:
         return ginf._scalar_arg_is_addressable_local(self, aval)
+    def _addressable_to_target(self, ctype: str, aval: str) -> bool:
+        return ginf._addressable_to_target(self, ctype, aval)
     def _strided_data_ptr(self, pt: str, pv: str) -> str:
         return grsl._strided_data_ptr(self, pt, pv)
     def _safe_coerce_emit(self, src: str, dst: str, val: str, lhs: str) -> None:
@@ -3699,17 +3781,71 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     _emitted_unresolved_stub_syms.clear()
     tokens = py_tokenize(mojo_src)
     stmts = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
+    # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
+    # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
+    # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
+    # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
+    stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
+    if _coro_meta:
+        gimple_gen_coro.register(gen, _coro_meta)
     gen._current_filename = filename
-    # Self-hosting bootstrap: when compiling this compiler's own entry point
-    # as a transitive closure (`python3 mojo.py build mojo.py`, `--dump-full
-    # mojo.py`, `make bootstrap` stage 1, `make check-selfhost`), seed the
-    # GimpleGen registry so the extracted backend helpers can be typed.
-    # do_imports/link only, and only for mojo.py / mojo_main.py under the
-    # compiler's own source dir — never for `--dump <userfile>` or a
-    # compile_stdlib.py worker.
+    # Self-hosting bootstrap: when compiling this compiler's own source as a
+    # transitive closure (`python3 mojo.py build mojo.py`, `--dump-full
+    # mojo.py`, `--dump-full mojo_compiler.py`, `make bootstrap` stage 1,
+    # `make check-selfhost`), seed the GimpleGen registry so the extracted
+    # backend helpers can be typed. do_imports/link only, and only for a
+    # file directly under the compiler's own source dir — never for
+    # `--dump <userfile>` or a compile_stdlib.py worker.
+    #
+    # Originally gated to `basename in ('mojo.py', 'mojo_main.py')` only —
+    # too narrow: `--dump-full mojo_compiler.py`'s transitive closure also
+    # reaches gimple_gen_exprs.py (e.g. `_lb_as_set`/`_lower_binary_set_op`,
+    # hoisted module-level helpers taking `gen` as their first param per
+    # `_selfhost_gen_self_param_ctype`'s own documented convention), but
+    # with `filename == 'mojo_compiler.py'` the registration above never
+    # ran, so `_selfhost_gimplegen_registered` stayed False for the WHOLE
+    # compile and every such `gen` param fell through to generic inference
+    # -> int64_t. Confirmed via the emitted C signature itself:
+    # `char * _lb_as_set_895aa2 (int64_t gen, char * t, char * v)` instead
+    # of the expected `GimpleGen * gen`. Every subsequent `gen._new_val(...)`
+    # /`gen._ensure_local(...)` call inside such a function then went
+    # through dynamic dispatch, and the erased int64_t `gen` value (an
+    # ASLR heap address, printed as decimal digits) leaked into a later
+    # `_declare_var`/cast site as if it were a real C name/expression —
+    # `MojoList * (37459640688);`, different every run.
+    #
+    # Broadened once (0116978) to "any entry point under this compiler's own
+    # source dir" via `os.path.abspath(os.path.dirname(filename)) ==
+    # _SELFHOST_DIR`, then (66e3475) broadened AGAIN to unconditional
+    # (do_imports/link_mode only, no filename check at all) reasoning that
+    # `_selfhost_register_gimplegen` is a "harmless no-op" when this project
+    # isn't the compiler's own source — WRONG when this repo genuinely IS
+    # the compiler's own source (every dev checkout): the unconditional
+    # version registered GimpleGen as an `_imported_typedef_structs` entry
+    # for EVERY compile in this repo, including trivial unrelated test
+    # programs — confirmed as a real regression via test_module_cache.py's
+    # test_stage1_extern_boundary, a two-line Mojo program that started
+    # failing with "unknown type name 'DispatchSolver'" (a compiler-
+    # INTERNAL type from gimple_solvers.py, leaking into the OUTPUT of an
+    # unrelated user program's compile because GimpleGen's own registered
+    # methods reference it).
+    #
+    # The directory-only check ALSO isn't safe by itself: a synthetic test
+    # filename like 'client.mojo' (test_module_cache.py's own
+    # compile_to_gimple_linked(client, filename='client.mojo') call, no
+    # real path at all) has an empty os.path.dirname, so
+    # os.path.abspath(os.path.dirname('client.mojo')) resolves to the
+    # process's CWD — which IS `_SELFHOST_DIR` whenever a test is run from
+    # the repo root, exactly where these tests are always run from. The
+    # directory check alone therefore still matched this same regression.
+    # Basename allowlisting is the one dimension that correctly separates
+    # "genuinely one of the compiler's own named entry files" from "any
+    # relative-looking filename that happens to share this process's CWD" —
+    # restored it, just widened to also cover 'mojo_compiler.py' (the
+    # actual motivating case for broadening this at all).
     if ((do_imports or link_mode) and filename
-            and os.path.basename(filename) in ('mojo.py', 'mojo_main.py')
+            and os.path.basename(filename) in ('mojo.py', 'mojo_main.py', 'mojo_compiler.py')
             and os.path.abspath(os.path.dirname(filename)) == _SELFHOST_DIR):
         _selfhost_register_gimplegen(gen)
     # Seed the self-import guard with the ROOT file's own identity — see

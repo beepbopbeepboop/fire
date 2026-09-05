@@ -1,5 +1,31 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (2026-09-03, later — coroutine-body infra landed; still blocked on the 3 stacked gaps enumerated below)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+`scan_opcodes` still refused (`every yield must carry a value...`). The
+3 stacked, independently feature-sized gaps enumerated in the 2026-08-11
+entry (nested variable-arity tuple slot; bound-method-as-value generator
+consumer; tag-discriminated variable-shape unpack) are all unchanged;
+none was attempted this session. General coroutine-body infra landed
+this session (`var x = <expr>` VarDecl lowering; type-dispatched
+`String(x)`/`str(x)` for body-built strings) — see the imaplib doc's
+2026-09-03 entry — but none of it touches this file's blockers. Doc
+stays open.
+
+## Status (2026-09-03, worktree agent-aabd2cf376c9f0f42 — checked against the pop-time shape-discrimination increment; NOT closed by it)
+
+The `stack.pop()` / `isinstance(x, tuple)` / boxed-value tuple-unpack
+infrastructure landed for `bugs/CODEGEN_generator_function_Lib_os.md`
+this session addresses gap #3 (tag-discriminated variable unpack) at the
+*consumer* level, but `scan_opcodes` still refuses strictly earlier —
+fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+`scan_opcodes: every 'yield' must carry a value, and all values must
+agree on one scalar type`. That is gap #1 (variable-arity nested-tuple
+*yield* boxing: `yield "store", (name,)` vs `yield "relative_import",
+(level, fromlist, name)`), which is upstream of anything the pop-time
+work touches and unchanged. Not closed. Doc stays open.
+
 ## Status (updated 2026-08-26, fresh independent re-derivation — confirmed unchanged, not just re-trusting the prior entry)
 
 Re-derived from scratch (fresh `compile_to_gimple_with_cpp(do_imports=False)`

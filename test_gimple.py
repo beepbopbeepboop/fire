@@ -27,6 +27,30 @@ def _check_gcc():
         sys.exit(0)
 
 
+import contextlib
+
+
+@contextlib.contextmanager
+def _force_cpp_coro():
+    """Force the OLD cpp-path C++20-coroutine emitter for the duration of
+    one test — doc/COROUTINE.html §5.5 made the A3 stack-switch backend
+    the default (gimple_gen_coro.py), so a test whose whole POINT is to
+    assert on cpp-path-specific generated text (co_await, _MojoCppExc,
+    the *_Awaiter promise machinery, ...) must explicitly opt back into
+    it via MOJO_CORO=cpp, the documented escape hatch — see the test's own
+    "_compiles_via_cpp_path" naming. Scoped (not a blanket module-level
+    env var) so it can't leak into any other test sharing this process."""
+    _prev = os.environ.get('MOJO_CORO')
+    os.environ['MOJO_CORO'] = 'cpp'
+    try:
+        yield
+    finally:
+        if _prev is None:
+            os.environ.pop('MOJO_CORO', None)
+        else:
+            os.environ['MOJO_CORO'] = _prev
+
+
 def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
     """Return (ok, c_src, stderr)."""
     c_src = compile_to_gimple(mojo_src)
@@ -2089,7 +2113,8 @@ def main():
 """
         name = "async_await_composition_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: unexpected exception: {e}")
             _FAIL += 1
@@ -2226,21 +2251,23 @@ def f():
     # Same MojoList*×char* hole, list-valued-expression flavor: `sorted(...)`
     # both infers AND emits a real `MojoList *`, so pairing it with a str
     # yield site is the same broken promise-type pick — same honest refusal.
-    test_raises("generator_mixed_str_and_list_expr_yield_honest_fallback", """\
+    with _force_cpp_coro():
+        test_raises("generator_mixed_str_and_list_expr_yield_honest_fallback", """\
 def f(items):
     yield 'abc'
     yield sorted(items)
-""", "generator function")
+        """, "generator function")
 
     # A DIRECT collection-literal yield value (`yield [1, 2]`) emits a raw
     # C++ braced-init-list (`co_yield {1, 2};`) that is not a valid co_yield
     # operand for ANY promise type — previously a guaranteed g++ failure
     # ("cannot convert '<brace-enclosed initializer list>' to 'MojoList*'").
     # Refuse honestly at the same single-source-of-truth chokepoint.
-    test_raises("generator_collection_literal_yield_honest_fallback", """\
+    with _force_cpp_coro():
+        test_raises("generator_collection_literal_yield_honest_fallback", """\
 def f():
     yield [1, 2]
-""", "generator function")
+        """, "generator function")
 
     # Milestone B positive case: the ONE generator shape this codegen now
     # actually compiles — no params, no try/except/with, no `yield from` —
@@ -2267,7 +2294,8 @@ def main():
 """
         name = "generator_simple_shape_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2311,6 +2339,76 @@ def main():
 
     test_generator_simple_shape_compiles_via_cpp_path()
 
+    # `**kwargs`-forward inside a coroutine body with a `char *` (string)
+    # "gap" parameter between the given positional args and the callee's
+    # own `**kwargs` slot. `_cpp_try_kwargs_forward_call` used to bail
+    # (return None -> honest whole-module refusal) unless every gap param
+    # was `int64_t`; it now also lowers a `char *` gap slot via the same
+    # runtime-lookup approach (the dict slot's value bits ARE the char*,
+    # so mojo_dict_pop_int returns them, just cast) with a genuine
+    # `mojo_dict_contains ? pop : static-default` resolution — never a
+    # blind default-pad. This shape (a string kwarg forwarded through a
+    # generator) previously refused; it now compiles.
+    def test_generator_kwargs_forward_str_gap_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def target(a, label="hi", **kwargs):
+    return a
+
+def gen(n, **kwargs):
+    i = 0
+    while i < n:
+        yield target(i, **kwargs)
+        i = i + 1
+
+def main():
+    for x in gen(3):
+        print(x)
+"""
+        name = "generator_kwargs_forward_str_gap_compiles_via_cpp_path"
+        try:
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if 'char *_kwgap' not in cpp_src or 'mojo_dict_contains' not in cpp_src:
+            print(f"FAIL  {name}: generated .cpp missing char* kwargs-gap lowering")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_kwargs_forward_str_gap_compiles_via_cpp_path()
+
     # Parameter-support step: a generator taking parameters (`start`,
     # `count`) now compiles via the same C++20-coroutine path instead of
     # hitting the honest whole-module refusal — mirrors
@@ -2339,7 +2437,8 @@ def main():
 """
         name = "generator_param_shape_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2425,7 +2524,8 @@ def main():
 """
         name = "generator_yield_from_delegation_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2533,7 +2633,8 @@ def main():
 """
         name = "generator_forward_consumption_chain_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2583,25 +2684,87 @@ def main():
     test_generator_forward_consumption_chain_compiles_via_cpp_path()
 
     # A generator body calling an UNRESOLVABLE callee — a nested `def`
-    # local to the generator (this scalar coroutine-body model has no
-    # closure compilation), a Python builtin with no coroutine-body
-    # lowering (map/filter), or a foreign-module struct constructor —
-    # must refuse honestly via _UnsupportedGeneratorShape, NOT emit a
-    # bare undeclared C++ identifier that only fails later inside g++
-    # ("'X' was not declared in this scope"). Real shape:
-    # importlib/metadata/__init__.py's Sectioned.read /
-    # Distribution._convert_egg_info_reqs_to_simple_reqs.
-    test_raises("generator_unresolved_callee_honest_refusal", """\
+    # local to the generator that CAPTURES an enclosing local (this
+    # scalar coroutine-body model has no closure compilation), a Python
+    # builtin with no coroutine-body lowering (map/filter), or a
+    # foreign-module struct constructor — must refuse honestly via
+    # _UnsupportedGeneratorShape, NOT emit a bare undeclared C++
+    # identifier that only fails later inside g++ ("'X' was not declared
+    # in this scope"). Real shape: importlib/metadata/__init__.py's
+    # Sectioned.read / Distribution._convert_egg_info_reqs_to_simple_reqs.
+    # (A nested `def` that captures NOTHING is now compiled as a
+    # standalone `static` C++ helper — see
+    # `generator_nested_noncapturing_helper_compiles_via_cpp_path` below
+    # and `_cpp_compile_nested_sync_helpers`.)
+    with _force_cpp_coro():
+        test_raises("generator_unresolved_callee_honest_refusal", """\
 def outer(items):
+    scale = len(items)
     def helper(x):
-        return x
+        return x * scale
     for section in items:
         yield helper(section)
 
 def main():
     for x in outer([1, 2]):
         print(x)
-""", "Unsupported shape(s): outer: a call to unresolved callee 'helper(...)'")
+        """, "Unsupported shape(s): outer: a call to unresolved callee 'helper(...)'")
+
+    # A nested NON-capturing sync `def` referenced as a callee inside a
+    # generator body IS compiled — as a standalone `static` C++ function
+    # emitted ahead of the coroutine `{impl}` — and the whole module
+    # compiles cleanly through both gcc (.c) and g++ (.cpp).
+    def test_generator_nested_noncapturing_helper_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def gen_it():
+    def label(n):
+        return "n=" + str(n)
+
+    def tag(s):
+        return "<" + label(len(s)) + ">"
+
+    for i in range(3):
+        yield tag("abc")
+
+def main():
+    for x in gen_it():
+        print(x)
+"""
+        try:
+            with _force_cpp_coro():
+                c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+                    src, do_imports=False, filename="gen_nested_helper.py")
+        except Exception as e:
+            print(f"FAIL  generator_nested_noncapturing_helper_compiles_via_cpp_path: "
+                  f"raised {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        if "_h_label" not in cpp_code or "_h_tag" not in cpp_code:
+            print("FAIL  generator_nested_noncapturing_helper_compiles_via_cpp_path: "
+                  "expected `_h_label`/`_h_tag` helper symbols in the .cpp")
+            _FAIL += 1
+            return
+        import tempfile, subprocess
+        cp = tempfile.NamedTemporaryFile("w", suffix=".cpp", delete=False)
+        cp.write(cpp_code); cp.close()
+        try:
+            from build_config import find_gxx
+            r = subprocess.run([find_gxx(), '-std=c++20', '-fsyntax-only',
+                                f'-I{_RUNTIME_INC}', cp.name],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                print("PASS  generator_nested_noncapturing_helper_compiles_via_cpp_path")
+                _PASS += 1
+            else:
+                print("FAIL  generator_nested_noncapturing_helper_compiles_via_cpp_path")
+                for line in r.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(cp.name)
+
+    test_generator_nested_noncapturing_helper_compiles_via_cpp_path()
 
     # The one legitimate bare-name call shape must KEEP working: a call
     # through a DECLARED callable-value local (`std::function` supports
@@ -2622,7 +2785,8 @@ def main():
 """
         name = "generator_callable_local_call_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2700,7 +2864,8 @@ main()
 """
         name = "generator_global_container_tuple_target_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2768,7 +2933,8 @@ main()
 """
         name = "generator_global_container_single_name_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2843,7 +3009,8 @@ main()
 """
         name = "generator_scalar_self_field_method_iter_zero_iter_stub"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -2909,7 +3076,8 @@ main()
     # B's "one consistent scalar type across every yield site" rule extends
     # naturally to `yield from` sites (see _yield_from_delegate_ctype), and
     # this must refuse rather than silently truncate/misinterpret bits.
-    test_raises("generator_yield_from_type_mismatch_honest_fallback", """\
+    with _force_cpp_coro():
+        test_raises("generator_yield_from_type_mismatch_honest_fallback", """\
 def inner():
     yield 1.5
 
@@ -2920,11 +3088,12 @@ def outer():
 def main():
     for x in outer():
         print(x)
-""", "generator function")
+        """, "generator function")
 
     # Still-out-of-scope: wrong argument count at the `yield from` call
     # site for a PARAMETERIZED sub-generator.
-    test_raises("generator_yield_from_argcount_mismatch_honest_fallback", """\
+    with _force_cpp_coro():
+        test_raises("generator_yield_from_argcount_mismatch_honest_fallback", """\
 def inner(a, b):
     yield a + b
 
@@ -2934,7 +3103,7 @@ def outer():
 def main():
     for x in outer():
         print(x)
-""", "generator function")
+        """, "generator function")
 
     # Milestone C step 3: generator METHODS on structs — the target shape
     # from that step's writeup, a method reading a scalar `self` field.
@@ -2963,7 +3132,8 @@ def main():
 """
         name = "generator_method_self_field_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3096,7 +3266,8 @@ def main():
 """
         name = "generator_assign_then_for_loop_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3176,7 +3347,8 @@ def main():
 """
         name = "generator_next_on_assigned_var_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3266,7 +3438,8 @@ def main():
 """
         name = "generator_param_from_call_boundary_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3338,7 +3511,8 @@ def main():
 """
         name = "generator_returned_from_function_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3495,7 +3669,8 @@ print(g("ab"))
         global _PASS, _FAIL
         import gimple_codegen
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3671,19 +3846,21 @@ def main():
     # can't `co_yield`) and a bare `raise` with no enclosing handler both
     # honestly fall back to the whole-module refusal, exactly like every
     # other out-of-scope shape in this file.
-    test_raises("generator_yield_in_finally_honest_fallback", """\
+    with _force_cpp_coro():
+        test_raises("generator_yield_in_finally_honest_fallback", """\
 def f():
     try:
         yield 1
     finally:
         yield 2
-""", "generator function")
+        """, "generator function")
 
-    test_raises("generator_bare_raise_outside_handler_honest_fallback", """\
+    with _force_cpp_coro():
+        test_raises("generator_bare_raise_outside_handler_honest_fallback", """\
 def f():
     raise
     yield 1
-""", "generator function")
+        """, "generator function")
 
     # `with` inside a generator body is still out of this milestone's scope
     # (needs its own __enter__/__exit__ codegen story) — confirms adding
@@ -3735,7 +3912,8 @@ def gen3():
 """
         name = "generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3820,7 +3998,8 @@ def main():
 """
         name = "async_simple_shape_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
             _FAIL += 1
@@ -3968,12 +4147,13 @@ async def f():
 
     # Two `return`s that don't agree on one consistent scalar type — the
     # async counterpart of generator_mixed_yield_types_honest_fallback.
-    test_raises("async_function_mixed_return_types_honest_fallback", """\
+    with _force_cpp_coro():
+        test_raises("async_function_mixed_return_types_honest_fallback", """\
 async def f():
     if True:
         return 1
     return 1.5
-""", "async function")
+        """, "async function")
 
     # ── Step C (compiled-path async/await codegen project): real `await`,
     # driven via an explicit `asyncio.run(...)` top-level bridge ──────────
@@ -4003,7 +4183,8 @@ def main():
 """
         name = "async_await_sleep_and_asyncio_run_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: unexpected exception: {e}")
             _FAIL += 1
@@ -4103,7 +4284,8 @@ def main():
 """
         name = "async_sock_recv_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: unexpected exception: {e}")
             _FAIL += 1
@@ -4239,7 +4421,8 @@ def main():
 """
         name = "async_await_composition_three_level_chain_compiles_via_cpp_path"
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: unexpected exception: {e}")
             _FAIL += 1
@@ -4325,7 +4508,8 @@ def main():
         global _PASS, _FAIL
         import gimple_codegen
         try:
-            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
         except Exception as e:
             print(f"FAIL  {name}: unexpected exception: {e}")
             _FAIL += 1
