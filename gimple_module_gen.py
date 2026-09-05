@@ -1199,7 +1199,16 @@ def _gmi_scan_for_closures(self, outer_name: str, outer_scope: dict, body: list)
                     inner_assign_targets.add(tgt)
                 elif hasattr(tgt, 'name'):
                     inner_assign_targets.add(tgt.name)
-        inner_declared = ({pn for pn, _ in inner.params}
+        # `{_p[0] for _p in inner.params}`, not `{pn for pn, _ in
+        # inner.params}` — the tuple-unpack-in-set-comprehension boxing
+        # bug: a boxed `pn` here silently fails to subtract a real param
+        # name from `free`, so that param name becomes a spurious capture
+        # and the closure's env struct gets allocated (vs NULL) run to
+        # run — a dominant --dump-full mojo.py env-alloc nondeterminism.
+        _inner_param_names: set = set()
+        for _p in inner.params:
+            _inner_param_names.add(_as_str(_p[0]))
+        inner_declared = (_inner_param_names
                           | _declared_vars_body(inner.body)
                           | inner_assign_targets)
         outer_params = set(outer_scope.keys())
@@ -1265,15 +1274,24 @@ def _gmi_scan_for_closures(self, outer_name: str, outer_scope: dict, body: list)
     # of the group's captures, so any member can call any other by
     # passing its own (now identical-layout) env through.
     if len(_sibling_cis) > 1:
-        _names_here = {n for n, _, _ in _sibling_cis}
-        # Undirected sibling call graph (flat — no nested helper: this
-        # runs inside gen_module_impl's own nested `_scan_for_closures`
-        # and the self-host backend can't lift a 3-deep closure).
+        # Index the 3-tuples, don't unpack them in a for-clause / set
+        # comprehension (`{n for n, _, _ in ...}`, `for _n, _ci_x, _cn in
+        # ...`) — the established tuple-boxing bug. Once this block was
+        # hoisted out of `_scan_for_closures` (no longer a closure) the
+        # boxed `_n`/`_m` names made `_m in _names_here` (a set-of-str
+        # contains) lower to `mojo_strlen` on an int64_t — a hard
+        # -Wint-conversion build failure.
+        _names_here: set = set()
+        for _sc0 in _sibling_cis:
+            _names_here.add(_as_str(_sc0[0]))
         _adj: dict = {}
         for _n in _names_here:
-            _adj[_n] = []
-        for _n, _ci_x, _cn in _sibling_cis:
-            for _m in _cn:
+            _adj[_as_str(_n)] = []
+        for _sc1 in _sibling_cis:
+            _n = _as_str(_sc1[0])
+            _cn = _sc1[2]
+            for _m0 in _cn:
+                _m = _as_str(_m0)
                 if _m in _names_here and _m != _n:
                     if _m not in _adj[_n]:
                         _adj[_n].append(_m)
@@ -1300,9 +1318,10 @@ def _gmi_scan_for_closures(self, outer_name: str, outer_scope: dict, body: list)
             _merged_caps: dict = {}
             _merged_mut: list = []
             for _mci in _member_cis:
-                for _cv, _ct in _mci.captures:
+                for _cap in _mci.captures:  # index, don't unpack — tuple-boxing bug
+                    _cv = _as_str(_cap[0])
                     if _cv not in _merged_caps:
-                        _merged_caps[_cv] = _ct
+                        _merged_caps[_cv] = _as_str(_cap[1])
                 for _mn in (getattr(_mci, 'mut_names', None) or []):
                     if _mn not in _merged_mut:
                         _merged_mut.append(_mn)
@@ -1316,32 +1335,36 @@ def _gmi_scan_for_closures(self, outer_name: str, outer_scope: dict, body: list)
                 _mci.env_struct = _shared_env
                 _mci.mut_names = _shared_mut
 
-    def _find_re_sub_callbacks(search_body, context_outer):
-        for stmt in search_body:
-            stmts_to_check = []
-            if isinstance(stmt, AssignStmt):
-                stmts_to_check.append(stmt.value)
-            elif isinstance(stmt, ExprStmt):
-                stmts_to_check.append(stmt.value)  # ExprStmt uses .value
-            elif hasattr(stmt, 'body'):
-                _find_re_sub_callbacks(getattr(stmt, 'body', []), context_outer)
-                for clause in ('orelse', 'handlers', 'finalbody'):
-                    _find_re_sub_callbacks(getattr(stmt, clause, []), context_outer)
-            for expr in stmts_to_check:
-                if not isinstance(expr, CallExpr):
-                    continue
-                func = expr.func
-                if (isinstance(func, MemberExpr)
-                        and isinstance(func.obj, IdentExpr)
-                        and func.obj.name == 're'
-                        and func.member == 'sub'
-                        and len(expr.args) >= 2):
-                    cb_arg = expr.args[1]
-                    if isinstance(cb_arg, IdentExpr):
-                        inner_map = self._all_closures.get(context_outer, {})
-                        if cb_arg.name in inner_map:
-                            inner_map[cb_arg.name].is_re_sub_callback = True
-    _find_re_sub_callbacks(body, outer_name)
+    _gmi_find_re_sub_callbacks(self, body, outer_name)
+
+
+def _gmi_find_re_sub_callbacks(self, search_body, context_outer) -> None:
+    """Hoisted out of `_gmi_scan_for_closures` (recursive nested closure) —
+    see `_gmi_prefold_toplevel_comptime`'s docstring."""
+    for stmt in search_body:
+        stmts_to_check = []
+        if isinstance(stmt, AssignStmt):
+            stmts_to_check.append(stmt.value)
+        elif isinstance(stmt, ExprStmt):
+            stmts_to_check.append(stmt.value)  # ExprStmt uses .value
+        elif hasattr(stmt, 'body'):
+            _gmi_find_re_sub_callbacks(self, getattr(stmt, 'body', []), context_outer)
+            for clause in ('orelse', 'handlers', 'finalbody'):
+                _gmi_find_re_sub_callbacks(self, getattr(stmt, clause, []), context_outer)
+        for expr in stmts_to_check:
+            if not isinstance(expr, CallExpr):
+                continue
+            func = expr.func
+            if (isinstance(func, MemberExpr)
+                    and isinstance(func.obj, IdentExpr)
+                    and func.obj.name == 're'
+                    and func.member == 'sub'
+                    and len(expr.args) >= 2):
+                cb_arg = expr.args[1]
+                if isinstance(cb_arg, IdentExpr):
+                    inner_map = self._all_closures.get(context_outer, {})
+                    if cb_arg.name in inner_map:
+                        inner_map[cb_arg.name].is_re_sub_callback = True
 
 
 def _gmi_all_stmts_nonfunc(stmts) -> list:
@@ -5317,7 +5340,9 @@ def gen_module_impl(self, stmts):
                 _sub_closures = self._all_closures.get(_ci.lifted_name, {})
                 if not _sub_closures:
                     continue
-                _ci_param_names = {pn for pn, _ in _ci.inner_def.params}
+                _ci_param_names: set = set()  # index, not unpack — tuple-boxing bug
+                for _cipp in _ci.inner_def.params:
+                    _ci_param_names.add(_as_str(_cipp[0]))
                 _ci_local_assigns = set()
                 for _bstmt in _ci.inner_def.body:
                     if isinstance(_bstmt, AssignStmt) and isinstance(_bstmt.target, IdentExpr):
