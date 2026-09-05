@@ -3492,15 +3492,23 @@ def _lower_mlir_mem(gen, kind: str, arg_pairs: list) -> tuple[str, str]:
     store  (val, addr)   -> *addr = val          (statement; yields 0)
     offset (ptr, idx)    -> _mojo_at_T(ptr, idx)  (GIMPLE-legal pointer add)
     """
+    # Index arg_pairs[i][0]/[1] directly rather than tuple-unpacking a
+    # subscript result (`at, av = arg_pairs[0]`) — the established boxing
+    # bug: a 2-tuple unpack re-boxes an element to int64_t even if it
+    # started as char*/a pointer. Confirmed here via a real --dump-full
+    # mojo.py determinism diff pinpointing this exact function (inlined
+    # into _lower_external_call_2dbb98) as a source of `MojoList *
+    # (<address>);` / `_t48 = (MojoList *)<address>;` — different every run.
     if kind == 'load':
-        at, av = arg_pairs[0]
+        at, av = _as_str(arg_pairs[0][0]), _as_str(arg_pairs[0][1])
         pt, pv = gen._as_ptr(at, av)
         et = gimple_ctypes._elem_type(pt)
         t = gen._new_val(et, f"*{pv}")
         return et, t
 
     if kind == 'store':
-        (vt, vv), (at, av) = arg_pairs[0], arg_pairs[1]
+        vt, vv = _as_str(arg_pairs[0][0]), _as_str(arg_pairs[0][1])
+        at, av = _as_str(arg_pairs[1][0]), _as_str(arg_pairs[1][1])
         pt, pv = gen._as_ptr(at, av)
         et = gimple_ctypes._elem_type(pt)
         sv = vv
@@ -3513,7 +3521,8 @@ def _lower_mlir_mem(gen, kind: str, arg_pairs: list) -> tuple[str, str]:
 
     # offset / array.gep: ptr + idx via the _mojo_at_ helper (pointer
     # arithmetic is illegal inside __GIMPLE).
-    (pt0, pv0), (it, iv) = arg_pairs[0], arg_pairs[1]
+    pt0, pv0 = _as_str(arg_pairs[0][0]), _as_str(arg_pairs[0][1])
+    it, iv = _as_str(arg_pairs[1][0]), _as_str(arg_pairs[1][1])
     pt, pv = gen._as_ptr(pt0, pv0)
     et = gimple_ctypes._elem_type(pt)
     cn = gimple_ctypes._c_id(et)
