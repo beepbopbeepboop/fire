@@ -1134,6 +1134,43 @@ def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
             found[fn] = 'int'
 
 
+def _gmi_all_stmts_nonfunc(stmts) -> list:
+    """Hoisted out of `gen_module_impl._scan_for_closures` (was a
+    2-level-deep nested closure) — see `_gmi_prefold_toplevel_comptime`'s
+    docstring. Recursive, pure. Returns a list of statements recursively
+    through control flow, NOT entering FunctionDef bodies. Explicit
+    per-node-type branches (not `getattr(s, <loop-var>)` + `isinstance`):
+    the self-hosted backend's `isinstance(<int64_t>, list)` stub is always
+    false, so a dynamic getattr keyed by a runtime attr name would make it
+    never recurse into any control flow."""
+    result = []
+    for s in stmts:
+        result.append(s)
+        if isinstance(s, FunctionDef):
+            continue
+        if isinstance(s, IfStmt):
+            result.extend(_gmi_all_stmts_nonfunc(s.then_body))
+            if s.else_body:
+                result.extend(_gmi_all_stmts_nonfunc(s.else_body))
+            for _cond, _eb in (s.elifs or []):
+                result.extend(_gmi_all_stmts_nonfunc(_eb))
+        elif isinstance(s, TryStmt):
+            result.extend(_gmi_all_stmts_nonfunc(s.body))
+            for _h in (s.handlers or []):
+                _hb = getattr(_h, 'body', None)
+                if _hb:
+                    result.extend(_gmi_all_stmts_nonfunc(_hb))
+            if s.else_body:
+                result.extend(_gmi_all_stmts_nonfunc(s.else_body))
+            if s.finally_body:
+                result.extend(_gmi_all_stmts_nonfunc(s.finally_body))
+        elif isinstance(s, (WhileStmt, ForStmt, WithStmt)):
+            result.extend(_gmi_all_stmts_nonfunc(s.body))
+            if isinstance(s, (WhileStmt, ForStmt)) and getattr(s, 'else_body', None):
+                result.extend(_gmi_all_stmts_nonfunc(s.else_body))
+    return result
+
+
 def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
                                 _emitted_env_allocs: set, ci, outer_name) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
@@ -4993,43 +5030,7 @@ def gen_module_impl(self, stmts):
 
     def _scan_for_closures(outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
-        def _all_stmts_nonfunc(stmts: list) -> list:
-            """Return a list of statements recursively through control flow,
-            not entering FunctionDef bodies. Explicit per-node-type branches
-            (NOT `getattr(s, <loop-var>)` + `isinstance(sub, list)`): a
-            dynamic getattr keyed by a runtime attr name yields int64_t, and
-            `isinstance(<int64_t>, list)` is the always-false runtime stub —
-            so the self-hosted backend never recursed into ANY control flow
-            and a deeply-nested `def` (e.g. mojo.py's `format_token` five
-            blocks down inside `main`) was never seen by the closure-lift
-            pre-pass."""
-            result = []
-            for s in stmts:
-                result.append(s)
-                if isinstance(s, FunctionDef):
-                    continue
-                if isinstance(s, IfStmt):
-                    result.extend(_all_stmts_nonfunc(s.then_body))
-                    if s.else_body:
-                        result.extend(_all_stmts_nonfunc(s.else_body))
-                    for _cond, _eb in (s.elifs or []):
-                        result.extend(_all_stmts_nonfunc(_eb))
-                elif isinstance(s, TryStmt):
-                    result.extend(_all_stmts_nonfunc(s.body))
-                    for _h in (s.handlers or []):
-                        _hb = getattr(_h, 'body', None)
-                        if _hb:
-                            result.extend(_all_stmts_nonfunc(_hb))
-                    if s.else_body:
-                        result.extend(_all_stmts_nonfunc(s.else_body))
-                    if s.finally_body:
-                        result.extend(_all_stmts_nonfunc(s.finally_body))
-                elif isinstance(s, (WhileStmt, ForStmt, WithStmt)):
-                    result.extend(_all_stmts_nonfunc(s.body))
-                    if isinstance(s, (WhileStmt, ForStmt)) and getattr(s, 'else_body', None):
-                        result.extend(_all_stmts_nonfunc(s.else_body))
-            return result
-
+        _all_stmts_nonfunc = _gmi_all_stmts_nonfunc
         enriched_scope = dict(outer_scope)
         _saved_vt2 = dict(self.var_types)
         self.var_types.update(outer_scope)
