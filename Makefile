@@ -433,9 +433,33 @@ build/system.o: mojo.ci
 build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
 
-build/mojo: build/system.o build/mojo_runtime.o
+# A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the default
+# generator/async backend now) — this dev build has the identical gap
+# stage2/mojo's own recipe had (see CORO_RUNTIME_SRC's own comment above):
+# mojo.py's own source has a generator (e.g. gimple_gen_coro.py's `_walk`),
+# so `build/system.o` genuinely references __mojo_coro_yield_i/__mgco_*
+# once compiled, with nothing on this link line to satisfy it.
+build/mojo_coro.o: runtime/mojo_coro.c
 	@mkdir -p build
-	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/mojo_runtime.o
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+build/mojo_coro_gen.o: runtime/mojo_coro_gen.c
+	@mkdir -p build
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+build/mojo_async_sched.o: runtime/mojo_async_sched.c
+	@mkdir -p build
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+build/mojo_coro_ctx.o: $(CORO_ARCH_SRC)
+	@mkdir -p build
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
+
+CORO_RUNTIME_OBJS = build/mojo_coro.o build/mojo_coro_gen.o build/mojo_async_sched.o build/mojo_coro_ctx.o
+
+build/mojo: build/system.o build/mojo_runtime.o $(CORO_RUNTIME_OBJS)
+	@mkdir -p build
+	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/mojo_runtime.o $(CORO_RUNTIME_OBJS)
 	@chmod +x $@
 	@echo "build/mojo linked successfully"
 
