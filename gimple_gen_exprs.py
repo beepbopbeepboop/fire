@@ -3465,7 +3465,12 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif cname in gen._external_protos:
             gen.func_param_types[cname] = gen._external_protos[cname][1]
         else:
-            gen.func_param_types[cname] = [at for (at, _) in arg_pairs]
+            # Same tuple-unpack-in-comprehension-for-clause bug as the
+            # `_proto_params` fix a few lines up (4d922cc) — a second,
+            # separate occurrence in this same function, missed the first
+            # time and confirmed via a real --dump-full mojo.py determinism
+            # diff still pinpointing this exact line.
+            gen.func_param_types[cname] = [_as_str(_ap[0]) for _ap in arg_pairs]
 
     if ret_ct == 'void':
         gen._emit_call('', '', cname, arg_pairs)

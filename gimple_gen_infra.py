@@ -3123,7 +3123,11 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
         gen._emit(f"  {t} = (int64_t)0;  /* mlir __mlir_op.{op}: deferred: unresolved struct index/layout */")
         return 'int64_t', t
 
-    arg_vals = [v for (_, v) in arg_pairs]
+    # Index arg_pairs[i][1] directly rather than tuple-unpacking a for-
+    # clause target (`for (_, v) in arg_pairs`) — the established boxing
+    # bug (a 2-tuple unpack re-boxes an element to int64_t even if it
+    # started as char*/a pointer).
+    arg_vals = [_ap[1] for _ap in arg_pairs]
     res = gimple_ctypes.mlir.lower_op(func.member, arg_vals, attr_members)
     if res is None:
         # Operands already evaluated; yield 0 so surrounding code still compiles.
