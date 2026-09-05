@@ -928,30 +928,66 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
         if _pts_snap is not None:
             self._imported_home_param_types[_pair_key(_qual, _sk)] = list(_pts_snap)
         self._note_own_func_home(_sk, _qual)
+def _gmi_prefold_toplevel_comptime(self, _node_list):
+    """Hoisted out of `gen_module_impl` (module-level, not a nested,
+    RECURSIVE closure) — a real --dump-full mojo.py determinism diff
+    showed this closure (and several siblings in the same ~8000-line
+    function) called with an inconsistent apparent arity across runs
+    (`f(env, x)` vs `f(env, x, 0)`), the lifted-closure-env instability
+    this session has fixed by hoisting everywhere else."""
+    for _cn in _node_list:
+        if isinstance(_cn, ComptimeVarStmt):
+            _cv = self._eval_const(_cn.value)
+            if _cv is not None:
+                self._comptime_vals.setdefault(_cn.target, _cv)
+            if isinstance(_cn.value, ListExpr):
+                self._comptime_list_asts.setdefault(_cn.target, _cn.value)
+        elif isinstance(_cn, IfStmt):
+            _gmi_prefold_toplevel_comptime(self, _cn.then_body or [])
+            if _cn.else_body:
+                _gmi_prefold_toplevel_comptime(self, _cn.else_body)
+            for _, _eb in (_cn.elifs or []):
+                _gmi_prefold_toplevel_comptime(self, _eb or [])
+        elif isinstance(_cn, (WhileStmt, ForStmt)):
+            _gmi_prefold_toplevel_comptime(self, _cn.body or [])
+        elif isinstance(_cn, TryStmt):
+            _gmi_prefold_toplevel_comptime(self, _cn.body or [])
+            for _h in (_cn.handlers or []):
+                _gmi_prefold_toplevel_comptime(self, getattr(_h, 'body', None) or [])
+
+
+def _gmi_find_comptime_one(self, _node_list, _target, _out):
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. This one had DEFAULT PARAMETERS bound to
+    captured values (`_target=_iname, _out=_found`) — exactly the shape
+    that made the call-site arity flip between `f(env, x)` and
+    `f(env, x, 0)` run to run. Explicit required params now."""
+    if _out:
+        return
+    for _cn in _node_list:
+        if isinstance(_cn, ComptimeVarStmt) and _cn.target == _target:
+            _cv = self._eval_const(_cn.value)
+            if _cv is not None:
+                _out['v'] = _cv
+            return
+        elif isinstance(_cn, IfStmt):
+            _gmi_find_comptime_one(self, _cn.then_body or [], _target, _out)
+            if _cn.else_body:
+                _gmi_find_comptime_one(self, _cn.else_body, _target, _out)
+            for _, _eb in (_cn.elifs or []):
+                _gmi_find_comptime_one(self, _eb or [], _target, _out)
+        elif isinstance(_cn, (WhileStmt, ForStmt)):
+            _gmi_find_comptime_one(self, _cn.body or [], _target, _out)
+        elif isinstance(_cn, TryStmt):
+            _gmi_find_comptime_one(self, _cn.body or [], _target, _out)
+            for _h in (_cn.handlers or []):
+                _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
+
+
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
     self._toplevel_dep_init_modules: list[str] = []
-    def _prefold_toplevel_comptime(_node_list):
-        for _cn in _node_list:
-            if isinstance(_cn, ComptimeVarStmt):
-                _cv = self._eval_const(_cn.value)
-                if _cv is not None:
-                    self._comptime_vals.setdefault(_cn.target, _cv)
-                if isinstance(_cn.value, ListExpr):
-                    self._comptime_list_asts.setdefault(_cn.target, _cn.value)
-            elif isinstance(_cn, IfStmt):
-                _prefold_toplevel_comptime(_cn.then_body or [])
-                if _cn.else_body:
-                    _prefold_toplevel_comptime(_cn.else_body)
-                for _, _eb in (_cn.elifs or []):
-                    _prefold_toplevel_comptime(_eb or [])
-            elif isinstance(_cn, (WhileStmt, ForStmt)):
-                _prefold_toplevel_comptime(_cn.body or [])
-            elif isinstance(_cn, TryStmt):
-                _prefold_toplevel_comptime(_cn.body or [])
-                for _h in (_cn.handlers or []):
-                    _prefold_toplevel_comptime(getattr(_h, 'body', None) or [])
-    _prefold_toplevel_comptime(stmts)
+    _gmi_prefold_toplevel_comptime(self, stmts)
     for _fis in stmts:
         if not isinstance(_fis, FromImportStmt):
             continue
@@ -968,28 +1004,7 @@ def gen_module_impl(self, stmts):
             if _isym in self._comptime_vals:
                 continue   # a same-named local binding always wins
             _found = {}
-            def _find_one(_node_list, _target=_iname, _out=_found):
-                if _out:
-                    return
-                for _cn in _node_list:
-                    if isinstance(_cn, ComptimeVarStmt) and _cn.target == _target:
-                        _cv = self._eval_const(_cn.value)
-                        if _cv is not None:
-                            _out['v'] = _cv
-                        return
-                    elif isinstance(_cn, IfStmt):
-                        _find_one(_cn.then_body or [], _target, _out)
-                        if _cn.else_body:
-                            _find_one(_cn.else_body, _target, _out)
-                        for _, _eb in (_cn.elifs or []):
-                            _find_one(_eb or [], _target, _out)
-                    elif isinstance(_cn, (WhileStmt, ForStmt)):
-                        _find_one(_cn.body or [], _target, _out)
-                    elif isinstance(_cn, TryStmt):
-                        _find_one(_cn.body or [], _target, _out)
-                        for _h in (_cn.handlers or []):
-                            _find_one(getattr(_h, 'body', None) or [], _target, _out)
-            _find_one(_imp_stmts)
+            _gmi_find_comptime_one(self, _imp_stmts, _iname, _found)
             if 'v' in _found:
                 self._comptime_vals[_isym] = _found['v']
     self._import_scope_stack.append({})
