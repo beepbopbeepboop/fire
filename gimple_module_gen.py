@@ -5853,7 +5853,7 @@ def gen_module_impl(self, stmts):
     for _ts in stmts:
         if isinstance(_ts, (AssignStmt, AugAssignStmt, ExprStmt, IfStmt, WhileStmt, ForStmt, TryStmt, WithStmt, PassStmt, BreakStmt, ContinueStmt, ReturnStmt, RaiseStmt, AssertStmt, VarDecl)):
             for _n in _walk_ast(_ts):
-                if isinstance(_n, CallExpr) and isinstance(_n.func, IdentExpr) and _n.func.name == 'main':
+                if isinstance(_n, CallExpr) and isinstance(_n.func, IdentExpr) and _as_str(_n.func.name) == 'main':
                     self._toplevel_calls_main = True
                     break
             if self._toplevel_calls_main:
