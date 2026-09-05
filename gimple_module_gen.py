@@ -984,6 +984,74 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out):
                 _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
 
 
+def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring."""
+    for _s in stmt_list:
+        if isinstance(_s, ImportStmt):
+            # `_import_local_names`, NOT `for _tm0,_ta0 in _import_targets`:
+            # unpacking the `(module, alias)` tuple re-boxes the `None`
+            # alias slot to a stray truthy pointer, so `_ta if _ta else _tm`
+            # picked it and `_global_var_types[<decimal addr>]` -> the
+            # `import os`/`import ctypes` module-marker globals landed in
+            # `_root_toplev` as address-named fields, different every run.
+            for _local in gimple_ctypes._import_local_names(_s):
+                if _local not in self._global_var_types:
+                    self._global_var_types[_local] = 'int64_t'
+                    self._global_c_decl_types[_local] = 'int64_t'
+                    if _local not in self._global_to_module:
+                        self._global_to_module[_local] = _phase17_mod
+        elif isinstance(_s, TryStmt):
+            _gmi_scan_try_imports(self, _phase17_mod, _s.body or [])
+            for _h in (_s.handlers or []):
+                _gmi_scan_try_imports(self, _phase17_mod, getattr(_h, 'body', []) or [])
+        elif isinstance(_s, IfStmt):
+            _gmi_scan_try_imports(self, _phase17_mod, _s.then_body or [])
+            if isinstance(_s.else_body, list):
+                _gmi_scan_try_imports(self, _phase17_mod, _s.else_body)
+
+
+def _gmi_scan_cpp_nested_imports(self, stmt_list):
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring."""
+    for _gi in stmt_list:
+        if isinstance(_gi, (ImportStmt, FromImportStmt)):
+            if isinstance(_gi, ImportStmt):
+                for _it_pair in _import_targets(_gi):
+                    _tm, _ta = _it_pair[0], _it_pair[1]
+                    self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
+            else:
+                # Same tuple-unpack fix as the top-level scan above
+                # (see that branch's comment) -- this is the nested
+                # (try/if-guarded import) sibling scan.
+                for _nm in getattr(_gi, 'names', []) or []:
+                    _in, _ia = _nm if isinstance(_nm, tuple) else (_nm, None)
+                    self._cpp_early_global_names.add(_ia if _ia else _in)
+        elif isinstance(_gi, AssignStmt) and isinstance(_gi.target, IdentExpr):
+            self._cpp_early_global_names.add(_gi.target.name)
+            # Module-level `X = Y` identifier alias to a plain module
+            # function (`fspath = _fspath` in Lib/os.py, guarded by an
+            # `if not _exists('fspath'):` — hence handled here in the
+            # nested scan, which also covers the bare top-level case).
+            # Recorded so a `X(...)` call in a compiled generator/
+            # coroutine body resolves to Y's real symbol instead of the
+            # honest "unresolved callee" refusal.
+            if (isinstance(_gi.value, IdentExpr)
+                    and _gi.value.name in self._cpp_module_fn_names
+                    and _gi.target.name not in self._cpp_module_fn_names):
+                self._cpp_module_fn_aliases[_gi.target.name] = _gi.value.name
+        elif isinstance(_gi, TryStmt):
+            _gmi_scan_cpp_nested_imports(self, _gi.body or [])
+            for _h in (_gi.handlers or []):
+                _gmi_scan_cpp_nested_imports(self, getattr(_h, 'body', []) or [])
+            if isinstance(getattr(_gi, 'finally_body', None), list):
+                _gmi_scan_cpp_nested_imports(self, _gi.finally_body)
+        elif isinstance(_gi, IfStmt):
+            _gmi_scan_cpp_nested_imports(self, _gi.then_body or [])
+            if isinstance(_gi.else_body, list):
+                _gmi_scan_cpp_nested_imports(self, _gi.else_body)
+
+
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
     self._toplevel_dep_init_modules: list[str] = []
@@ -4013,43 +4081,7 @@ def gen_module_impl(self, stmts):
             self._cpp_early_global_names.add(_gm_stmt.name)
             self._cpp_module_fn_names.add(_gm_stmt.name)
 
-    def _scan_cpp_nested_imports(stmt_list):
-        for _gi in stmt_list:
-            if isinstance(_gi, (ImportStmt, FromImportStmt)):
-                if isinstance(_gi, ImportStmt):
-                    for _tm, _ta in _import_targets(_gi):
-                        self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
-                else:
-                    # Same tuple-unpack fix as the top-level scan above
-                    # (see that branch's comment) -- this is the nested
-                    # (try/if-guarded import) sibling scan.
-                    for _nm in getattr(_gi, 'names', []) or []:
-                        _in, _ia = _nm if isinstance(_nm, tuple) else (_nm, None)
-                        self._cpp_early_global_names.add(_ia if _ia else _in)
-            elif isinstance(_gi, AssignStmt) and isinstance(_gi.target, IdentExpr):
-                self._cpp_early_global_names.add(_gi.target.name)
-                # Module-level `X = Y` identifier alias to a plain module
-                # function (`fspath = _fspath` in Lib/os.py, guarded by an
-                # `if not _exists('fspath'):` — hence handled here in the
-                # nested scan, which also covers the bare top-level case).
-                # Recorded so a `X(...)` call in a compiled generator/
-                # coroutine body resolves to Y's real symbol instead of the
-                # honest "unresolved callee" refusal.
-                if (isinstance(_gi.value, IdentExpr)
-                        and _gi.value.name in self._cpp_module_fn_names
-                        and _gi.target.name not in self._cpp_module_fn_names):
-                    self._cpp_module_fn_aliases[_gi.target.name] = _gi.value.name
-            elif isinstance(_gi, TryStmt):
-                _scan_cpp_nested_imports(_gi.body or [])
-                for _h in (_gi.handlers or []):
-                    _scan_cpp_nested_imports(getattr(_h, 'body', []) or [])
-                if isinstance(getattr(_gi, 'finally_body', None), list):
-                    _scan_cpp_nested_imports(_gi.finally_body)
-            elif isinstance(_gi, IfStmt):
-                _scan_cpp_nested_imports(_gi.then_body or [])
-                if isinstance(_gi.else_body, list):
-                    _scan_cpp_nested_imports(_gi.else_body)
-    _scan_cpp_nested_imports(stmts)
+    _gmi_scan_cpp_nested_imports(self, stmts)
 
     def _register_free_generator(s, cpp_text, base, value_ctype, param_ctypes):
         """Shared registration for one supported free-function generator
@@ -5646,30 +5678,9 @@ def gen_module_impl(self, stmts):
             self._elem_types[_gname] = _elt
             self._global_elem_types[_gname] = _elt
 
-    def _scan_try_imports(stmt_list):
-        for _s in stmt_list:
-            if isinstance(_s, ImportStmt):
-                # `_import_local_names`, NOT `for _tm0,_ta0 in _import_targets`:
-                # unpacking the `(module, alias)` tuple re-boxes the `None`
-                # alias slot to a stray truthy pointer, so `_ta if _ta else _tm`
-                # picked it and `_global_var_types[<decimal addr>]` -> the
-                # `import os`/`import ctypes` module-marker globals landed in
-                # `_root_toplev` as address-named fields, different every run.
-                for _local in gimple_ctypes._import_local_names(_s):
-                    if _local not in self._global_var_types:
-                        self._global_var_types[_local] = 'int64_t'
-                        self._global_c_decl_types[_local] = 'int64_t'
-                        if _local not in self._global_to_module:
-                            self._global_to_module[_local] = _phase17_mod
-            elif isinstance(_s, TryStmt):
-                _scan_try_imports(_s.body or [])
-                for _h in (_s.handlers or []):
-                    _scan_try_imports(getattr(_h, 'body', []) or [])
-            elif isinstance(_s, IfStmt):
-                _scan_try_imports(_s.then_body or [])
-                if isinstance(_s.else_body, list):
-                    _scan_try_imports(_s.else_body)
-    _scan_try_imports(stmts + (imported_stmts if (self.do_imports or self.link_imports) else []))
+    _gmi_scan_try_imports(
+        self, _phase17_mod,
+        stmts + (imported_stmts if (self.do_imports or self.link_imports) else []))
 
     _EARLY_DISPATCH_DICTS = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
                              '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
