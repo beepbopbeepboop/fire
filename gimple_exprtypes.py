@@ -1719,8 +1719,8 @@ def _used_idents_deep(node) -> set[str]:
         if isinstance(sub, list):
             for s in sub:
                 base |= _used_idents_deep(s)
-    for _cond, elif_body in getattr(node, 'elifs', []) or []:
-        for s in elif_body:
+    for _elif in getattr(node, 'elifs', []) or []:  # index, don't unpack — tuple-boxing bug
+        for s in _elif[1]:
             base |= _used_idents_deep(s)
     for handler in getattr(node, 'handlers', []) or []:
         hbody = getattr(handler, 'body', None)

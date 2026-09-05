@@ -1340,7 +1340,15 @@ def _used_idents_node(node) -> set[str]:
         return r
     if isinstance(node, DictExpr):
         r2: set = set()
-        for k, v in node.pairs: r2 |= _used_idents_node(k) | _used_idents_node(v)
+        # Index the pair, don't unpack it in the for-clause — the
+        # established tuple-boxing bug. A wrong/boxed `k`/`v` here silently
+        # drops idents from the result set, which (via
+        # gimple_module_gen.py's _scan_for_closures `free = used - ...`)
+        # makes a nested closure's capture set — and therefore its env
+        # struct allocation (`_alloc_X_env()` vs `(X *)0`) — flip run to
+        # run, a dominant --dump-full mojo.py nondeterminism source.
+        for _kv in node.pairs:
+            r2 |= _used_idents_node(_kv[0]) | _used_idents_node(_kv[1])
         return r2
     if isinstance(node, Comprehension):
         r3 = _used_idents_node(node.element)
@@ -1377,8 +1385,8 @@ def _used_idents_node(node) -> set[str]:
     if isinstance(node, IfStmt):
         r5 = _used_idents_node(node.condition)
         for s in node.then_body: r5 |= _used_idents_node(s)
-        for _, eb in node.elifs:
-            for s in eb: r5 |= _used_idents_node(s)
+        for _elif in node.elifs:  # index, don't unpack — tuple-boxing bug
+            for s in _elif[1]: r5 |= _used_idents_node(s)
         if node.else_body:
             for s in node.else_body: r5 |= _used_idents_node(s)
         return r5
@@ -1467,7 +1475,7 @@ def _declared_vars_body(stmts) -> set[str]:
             result |= _declared_vars_body(node.body)
         elif isinstance(node, IfStmt):
             result |= _declared_vars_body(node.then_body)
-            for _, eb in node.elifs: result |= _declared_vars_body(eb)
+            for _elif in node.elifs: result |= _declared_vars_body(_elif[1])  # index, not unpack
             if node.else_body: result |= _declared_vars_body(node.else_body)
         elif isinstance(node, (WhileStmt, WithStmt)):
             result |= _declared_vars_body(node.body)
