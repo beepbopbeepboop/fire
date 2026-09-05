@@ -1,5 +1,29 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: no longer refused, but MISCOMPILES, cluster E)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` no longer
+raises a generator refusal — all 8 generators
+(`_find_address_range`, `summarize_address_range`,
+`_collapse_addresses_internal`, `_BaseNetwork.hosts` / `.__iter__` /
+`.address_exclude` / `.subnets`, `IPv6Network.hosts`) lower through the
+A3 path. **However** `_BaseNetwork.__iter__` and `IPv6Network.hosts`
+emit broken C:
+
+```
+ipaddress.py:696: error: too many arguments to function '_BaseNetwork__address_class'; expected 1, have 2
+ipaddress.py:2351: error: too many arguments to function 'IPv6Network__address_class'; expected 1, have 2
+```
+
+`self._address_class(x)` — `_address_class` is a `@property` returning a
+class object, which is then *called* to construct an address. The
+compiled generator body lowers `self._address_class(x)` as a direct
+method call `_BaseNetwork__address_class(self, x)` (arity 2) instead of
+`(<property getter>(self))(x)`. This is **cluster E** (property that
+returns a callable, then invoked) — likely shared with the non-generator
+compiled path. Needs property-call detection in the generator-body
+call emitter.
+
 ## Status (2026-09-03 — resumable list-iterator value model landed; `_find_address_range` no longer refused; refusal set 4 -> 2)
 
 Landed in `gimple_cpp_core.py` a genuine iterator-object value model for

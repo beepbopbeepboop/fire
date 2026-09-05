@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster C)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` after the
+doc/COROUTINE.html §5.5 A3 stack-switch cutover:
+
+- `Flag.__iter__` and top-level `_iter_bits_lsb` now compile (they were
+  part of the old gate's wholesale refusal; the A3 path routes them
+  through ordinary gimple_gen_*.py codegen).
+- **Still refused:** `Flag._iter_member_`, `Flag._iter_member_by_def_`,
+  `Flag._iter_member_by_value_` — each is a `@classmethod` generator whose
+  body references `cls` in an unsupported way (not a class-level-attribute
+  read and not a call to a real compiled classmethod/staticmethod of the
+  enclosing class). This is **cluster C** (`@classmethod`/`cls` generator
+  bodies) — enum is currently the only file in the batch hitting it.
+  Needs `cls`-as-type-token threading into the A3 generator-body codegen.
+
 ## Status (updated 2026-09-03 — re-verified structural, not attempted)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: byte-identical

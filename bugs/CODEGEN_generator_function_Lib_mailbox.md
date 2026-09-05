@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: blocked by a non-generator module refusal)
+
+All 5 generators (`Mailbox.itervalues` / `.iteritems`,
+`Maildir.iterkeys`, `_singlefileMailbox.iterkeys`, `_ProxyFile.__iter__`)
+are now A3-**eligible** (`gimple_gen_coro._eligible` returns OK for each).
+But the module still fails to compile for a **non-generator** reason,
+raised before any generator body is reached:
+
+```
+cannot compile module: `Message[...] = ...` subscript store on user-defined
+struct 'Message' (no `__setitem__` method and no backing container field)
+```
+
+That is a separate codegen gap (subscript-store on a struct modelling a
+`dict`-subclass) — not part of the generator-codegen cluster. The
+generator bodies here cannot be verified end-to-end until it is fixed or
+worked around. Left open pending that; if picked up it likely wants its
+own `COMPILE_FAIL_Lib_mailbox.md`.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

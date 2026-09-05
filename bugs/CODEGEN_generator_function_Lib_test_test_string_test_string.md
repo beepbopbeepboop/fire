@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster B)
+
+`parse` (a generator method of a class `BarFormatter` defined *inside*
+the test method `test_override_parse`) still refused. It yields
+`(literal_text, field_name, format_spec, conversion)` 4-tuples whose
+slots are heterogeneous (`str`, `str`/`None`, `str`/`None`, `None`).
+This is **cluster B** (tagged / heterogeneous tuple yield value model),
+shared with `modulefinder`, `os.walk`, `pickletools._genops`. Also
+exercises a generator method on a function-nested class. Feature-sized;
+no incremental step this session.
+
 ## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, no evidence of change)
 
 Independent fresh re-verify, this session, against current master

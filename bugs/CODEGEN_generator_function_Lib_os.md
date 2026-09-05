@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, clusters A + B)
+
+`_Environ.__iter__` now compiles through the A3 path. **Still refused:**
+
+- `_fwalk`: `a call to unresolved callee 'stat(...)' ... in a compiled
+  generator/coroutine body`. `stat` reaches `os` via `from posix import *`
+  (a star import) so it is not a statically-known callee. **Cluster A**
+  (callable-value / unresolved-callee dispatch), shared with
+  `glob` (`match`), `pickletools` (`getpos`), `test/test_frame` (`nested`).
+- `walk`: `unsupported for-loop iterable type: CallExpr`, and its body
+  mixes tuple and non-tuple `yield`s (**cluster B**, the tagged tuple
+  yield value model — see `modulefinder`).
+
 ## Status (2026-09-03, worktree agent-aabd2cf376c9f0f42 — infrastructure increment: pop-time shape discrimination for a heterogeneous / tagged-union `stack` value model)
 
 Landed (`gimple_cpp_core.py`), the piece the older entries kept naming

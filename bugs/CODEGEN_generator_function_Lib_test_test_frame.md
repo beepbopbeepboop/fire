@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, clusters A + E)
+
+Small test file. Still refused:
+
+- `g`: `unsupported expression statement in generator body (BinaryOp)` —
+  a bare `1/0` expression statement (deliberate ZeroDivisionError) as a
+  generator-body statement.
+- `gen`: `a call to unresolved callee 'nested(...)'` — **cluster A**
+  (callable-value local; `nested` is a sibling nested def), shared with
+  `glob`/`os`/`pickletools`.
+- `t3`: `async` function whose `return` carries a non-scalar value.
+
+All three are narrow shapes distilled from CPython's own frame/generator
+regression tests; none has a shared high-impact fix beyond cluster A.
+
 ## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, unchanged)
 
 Independent fresh re-verify, this session, against current master

@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster D)
+
+`fake_pip` (a `@contextmanager` generator) still refused:
+
+```
+fake_pip: unsupported statement in generator body: StructDef.
+```
+
+The generator body defines a nested class (`StructDef` in the AST). This
+is **cluster D** (nested class/`StructDef` inside a generator body) —
+`fake_pip` is currently the only file hitting it. Needs nested-struct
+hoisting out of the generator body in the A3 codegen.
+
 ## Status (updated 2026-08-26 -- re-verified at current master `e60b9cd`, unchanged)
 
 Independent fresh re-verify, this session, against current master

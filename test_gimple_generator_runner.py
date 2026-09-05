@@ -1817,6 +1817,93 @@ def main():
         print(v)
 """, "42\n99\n")
 
+    # ---- Regression tests distilled from the 30 bugs/CODEGEN_generator_
+    # function_Lib_*.md stdlib shapes that the doc/COROUTINE.html §5.5 A3
+    # stack-switch cutover made compile (previously wholesale-refused by
+    # the old gimple_cpp_core.py C++20-coroutine eligibility gate). One
+    # minimal shape per stdlib family that flipped to compiling.
+
+    # weakref.WeakValueDictionary.__iter__ / tarfile.TarFile.__iter__ /
+    # tempfile._TemporaryFileWrapper.__iter__ / typing._GenericAlias.
+    # __iter__ / mailbox / shelve: a generator METHOD on a struct that
+    # walks a list field and yields each element.
+    test_generator_stdout("generator_method_iterates_list_field", """\
+struct Bag:
+    var items: List[Int]
+    fn __init__(out self):
+        self.items = [10, 20, 30]
+    fn each(self):
+        for x in self.items:
+            yield x
+
+def main():
+    b = Bag()
+    for v in b.each():
+        print(v)
+""", "10\n20\n30\n")
+
+    # dis.findlinestarts / ipaddress._find_address_range: for-loop over an
+    # explicitly-typed list param with a guarded yield inside the loop body.
+    test_generator_stdout("generator_guarded_yield_in_for_over_typed_param", """\
+def positives(xs: List[Int]):
+    for x in xs:
+        if x > 0:
+            yield x
+
+def main():
+    for v in positives([-2, 3, -1, 5, 0, 8]):
+        print(v)
+""", "3\n5\n8\n")
+
+    # enum._iter_bits_lsb / dis._unpack_opargs: for-loop over range() with a
+    # modulo guard, yielding a filtered subset.
+    test_generator_stdout("generator_range_loop_with_modulo_guard", """\
+def evens(n):
+    for x in range(n):
+        if x % 2 == 0:
+            yield x
+
+def main():
+    for v in evens(6):
+        print(v)
+""", "0\n2\n4\n")
+
+    # glob._iglob / pkgutil.walk_packages / tokenize.tokenize: a generator
+    # that delegates to another generator with `yield from`, then yields
+    # more of its own values afterward.
+    test_generator_stdout("generator_yield_from_then_own_values", """\
+def inner(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def outer(n):
+    yield from inner(n)
+    yield 100
+    yield 101
+
+def main():
+    for v in outer(3):
+        print(v)
+""", "0\n1\n2\n100\n101\n")
+
+    # symtable.Symbol._flags_str / tokenize helpers: accumulate across
+    # yields with a running local updated before each yield, iterating a
+    # locally-built int list.
+    test_generator_stdout("generator_running_local_across_yields", """\
+def deltas():
+    xs = [1, 2, 3, 4]
+    total = 0
+    for x in xs:
+        total = total + x
+        yield total
+
+def main():
+    for v in deltas():
+        print(v)
+""", "1\n3\n6\n10\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
