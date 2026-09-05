@@ -27,6 +27,7 @@ from mojo_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize,
+    _as_str,
 )
 import regex_compile
 import mlir
@@ -2932,8 +2933,7 @@ def _cpp_expr(gen, e) -> str:
                         # deterministic hash both sides agree on).
                         _tid = gimple_exprtypes._struct_type_id(_tn)
                         _fmts.append(
-                            "(mojo_read_type_tag((int64_t)({v})) "
-                            "== (int64_t)%d)" % (_tid,))
+                            "(mojo_read_type_tag((int64_t)({v})) == (int64_t)%d)" % (_tid,))
                         continue
                     if _tn not in _SCALAR_TYPE_MATCH:
                         # Unknown type name: plain-path parity (its
@@ -2977,6 +2977,11 @@ def _cpp_expr(gen, e) -> str:
                             _fmts.append("mojo_boxed_is_str((int64_t)({v}))")
                         else:
                             _fmts.append('0')
+                # `_as_str` each entry: `_fmts` holds string constants that
+                # erase to boxed int64_t under self-compile, so `.format()` /
+                # `'{v}' in f` / `' || '.join(...)` would splice a decimal
+                # address into the emitted C (`mojo_str_cat (<addr>, ...)`).
+                _fmts = [None if f is None else _as_str(f) for f in _fmts]
                 _cache_iife = (len(_fmts) > 1
                                and any(f is not None and '{v}' in f for f in _fmts)
                                and not isinstance(_obj, (gimple_ctypes.IdentExpr,

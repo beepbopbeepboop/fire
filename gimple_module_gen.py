@@ -5080,9 +5080,17 @@ def gen_module_impl(self, stmts):
             if inner.is_async and not inner.is_generator:
                 continue
             lifted    = f"{outer_name}_{inner.name}"
+            # `_as_str` each element: `_used_idents_node` returns a set whose
+            # str members erase to boxed int64_t under self-compile, so the
+            # `used - inner_declared` difference below misses a declared name
+            # (boxed vs clean str hash differently) — that name leaks into
+            # `free`, `_as_str(v)` then finds it in `enriched_scope`, and the
+            # closure gains a spurious capture whose env-struct allocation
+            # (`_alloc_X_env()` vs `(X *)0`) flips run to run.
             used      = set()
             for body_node in inner.body:
-                used |= _used_idents_node(body_node)
+                for _ui in _used_idents_node(body_node):
+                    used.add(_as_str(_ui))
             inner_assign_targets = set()
             for bstmt in _all_stmts_nonfunc(inner.body):
                 if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
@@ -5102,11 +5110,19 @@ def gen_module_impl(self, stmts):
             _ipn: set = set()
             for _p in inner.params:
                 _ipn.add(_as_str(_p[0]))
-            inner_declared = (_ipn
-                              | _declared_vars_body(inner.body)
-                              | inner_assign_targets)
-            outer_params = set(outer_scope.keys())
-            free_globals = set(self.func_return_types.keys()) - outer_params
+            inner_declared: set = set()
+            for _idv in (_ipn
+                         | _declared_vars_body(inner.body)
+                         | inner_assign_targets):
+                inner_declared.add(_as_str(_idv))
+            outer_params: set = set()
+            for _op in outer_scope.keys():
+                outer_params.add(_as_str(_op))
+            free_globals: set = set()
+            for _fg in self.func_return_types.keys():
+                _fg = _as_str(_fg)
+                if _fg not in outer_params:
+                    free_globals.add(_fg)
             free         = used - inner_declared - free_globals
             # `_as_str(v)`: elements of `sorted(free)` (a set-of-str) erase
             # to boxed int64_t under self-compile — without the static
