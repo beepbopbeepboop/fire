@@ -2060,13 +2060,27 @@ def gen_module_impl(self, stmts):
             and not any(isinstance(s, StructDef) and s.name == 'GimpleGen'
                         for s in (stmts + imported_stmts))):
         _gg_ft1 = self.struct_field_types['GimpleGen']
-        self._class_attrs.setdefault('GimpleGen', {})
+        # Mirror the proven-working pattern at loop 1274 (`self._class_attrs
+        # [s.name] = {}` then subscript-write through the fresh dict) rather
+        # than `.setdefault('GimpleGen', {})` + a double-subscript write in
+        # one expression (`self._class_attrs['GimpleGen'][_ca_n] = _ca_m`) —
+        # the latter crashed the self-hosted compiled backend with a SIGBUS
+        # inside `mojo_list_set_int`, confirmed via lldb: unlike loop 1274's
+        # shape, this one's inner dict never got a type-inferred `MojoDict *`
+        # container and the subscript write lowered as a LIST-index store
+        # instead. Only reachable once GimpleGen registration stopped being
+        # limited to mojo.py/mojo_main.py (see _run_pipeline's own registry
+        # gate) — `--dump-full mojo_compiler.py` is the first entry point
+        # to exercise this branch at all.
+        if 'GimpleGen' not in self._class_attrs:
+            self._class_attrs['GimpleGen'] = {}
+        _gg_ca_map = self._class_attrs['GimpleGen']
         for _caf in _gg_stmts.fields:
             if not (isinstance(_caf, AssignStmt) and isinstance(_caf.target, IdentExpr)):
                 continue
             _ca_n = _caf.target.name
             _ca_m = f"_classattr_GimpleGen__{_ca_n}"
-            self._class_attrs['GimpleGen'][_ca_n] = _ca_m
+            _gg_ca_map[_ca_n] = _ca_m
             _ca_ct = _class_attr_ctype(_caf.value)
             if _ca_ct is not None:
                 self._global_var_types[_ca_m] = _ca_ct
