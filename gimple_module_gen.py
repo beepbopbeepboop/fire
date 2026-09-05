@@ -984,6 +984,45 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out):
                 _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
 
 
+def _gmi_collect_return_values(acc_rt: list, stmts2) -> None:
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Recursive; the accumulator list is threaded."""
+    for _st in stmts2:
+        if isinstance(_st, FunctionDef):
+            continue
+        if isinstance(_st, ReturnStmt) and _st.value is not None:
+            acc_rt.append(_st.value)
+        else:
+            for attr in ('then_body', 'else_body', 'body', 'finally_body'):
+                sub = getattr(_st, attr, None)
+                if isinstance(sub, list):
+                    _gmi_collect_return_values(acc_rt, sub)
+            for _eb_cond, _eb_body in (getattr(_st, 'elifs', None) or []):
+                _gmi_collect_return_values(acc_rt, _eb_body)
+            for _h in (getattr(_st, 'handlers', None) or []):
+                hb = getattr(_h, 'body', None)
+                if isinstance(hb, list):
+                    _gmi_collect_return_values(acc_rt, hb)
+
+
+def _gmi_has_unresolved_base(_struct_bases_map, _all_struct_names, _memo, _name, _stack):
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Recursive; the memo dict and the two name sets
+    are threaded explicitly."""
+    if _name in _memo:
+        return _memo[_name]
+    if _name in _stack:
+        return False  # inheritance-cycle guard; shouldn't normally happen
+    result = False
+    for _b in _struct_bases_map.get(_name, ()):
+        if _b not in _all_struct_names or _gmi_has_unresolved_base(
+                _struct_bases_map, _all_struct_names, _memo, _b, _stack | {_name}):
+            result = True
+            break
+    _memo[_name] = result
+    return result
+
+
 def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""
@@ -2224,20 +2263,10 @@ def gen_module_impl(self, stmts):
     _struct_bases_map = {s.name: (getattr(s, 'bases', None) or [])
                           for s in all_struct_defs if isinstance(s, StructDef)}
     _unresolved_base_memo: dict = {}
-    def _has_unresolved_base(_name, _stack=frozenset()):
-        if _name in _unresolved_base_memo:
-            return _unresolved_base_memo[_name]
-        if _name in _stack:
-            return False  # inheritance-cycle guard; shouldn't normally happen
-        result = False
-        for _b in _struct_bases_map.get(_name, ()):
-            if _b not in _all_struct_names or _has_unresolved_base(_b, _stack | {_name}):
-                result = True
-                break
-        _unresolved_base_memo[_name] = result
-        return result
     self._structs_with_unresolved_base = {
-        _name for _name in _struct_bases_map if _has_unresolved_base(_name)
+        _name for _name in _struct_bases_map
+        if _gmi_has_unresolved_base(_struct_bases_map, _all_struct_names,
+                                   _unresolved_base_memo, _name, frozenset())
     }
     _merge_struct_inheritance(all_struct_defs)
     self._exc_descendants = _compute_exc_descendants(all_struct_defs)
@@ -4718,26 +4747,7 @@ def gen_module_impl(self, stmts):
         if not isinstance(_rf, FunctionDef):
             continue
         acc_rt = []
-
-        def _collect_rt(stmts2):
-            for _st in stmts2:
-                if isinstance(_st, FunctionDef):
-                    continue
-                if isinstance(_st, ReturnStmt) and _st.value is not None:
-                    acc_rt.append(_st.value)
-                else:
-                    for attr in ('then_body', 'else_body', 'body', 'finally_body'):
-                        sub = getattr(_st, attr, None)
-                        if isinstance(sub, list):
-                            _collect_rt(sub)
-                    for _eb_cond, _eb_body in (getattr(_st, 'elifs', None) or []):
-                        _collect_rt(_eb_body)
-                    for _h in (getattr(_st, 'handlers', None) or []):
-                        hb = getattr(_h, 'body', None)
-                        if isinstance(hb, list):
-                            _collect_rt(hb)
-
-        _collect_rt(_rf.body)
+        _gmi_collect_return_values(acc_rt, _rf.body)
         rt_prov = None
         for _rv in acc_rt:
             if (isinstance(_rv, CallExpr) and isinstance(_rv.func, IdentExpr)
