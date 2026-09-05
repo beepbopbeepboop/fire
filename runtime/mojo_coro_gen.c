@@ -267,6 +267,37 @@ __mojo_gen_resume_once(int64_t gen)
     (void)__mojo_gen_resume(gen, 0);
 }
 
+/* Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
+   async_closure_capture.md) -- v0: a plain int64_t heap box, one malloc'd
+   cell per captured outer local. Handles are plain int64_t (never a raw
+   pointer type), matching every other cross-boundary handle in this file,
+   so the -fgimple-compiled enclosing function and coroutine body can both
+   pass the handle around as an ordinary scalar. No free() -- the box's
+   lifetime is exactly one call of the enclosing (ordinary) function, and
+   this is a small, bounded, deliberate leak for v0 (same simplification
+   this codegen already accepts for other short-lived handles); a real
+   lifetime-tracked free is future work, not required for correctness of
+   the captured VALUE. */
+int64_t
+__mojo_box_new_i64(int64_t init)
+{
+    int64_t *p = (int64_t *)malloc(sizeof(int64_t));
+    if (p) *p = init;
+    return (int64_t)(uintptr_t)p;
+}
+
+int64_t
+__mojo_box_get_i64(int64_t box)
+{
+    return box ? *(int64_t *)(uintptr_t)box : 0;
+}
+
+void
+__mojo_box_set_i64(int64_t box, int64_t v)
+{
+    if (box) *(int64_t *)(uintptr_t)box = v;
+}
+
 /* ── async def / await bridge (runtime/mojo_async_sched.c) ────────────── */
 #include "mojo_wd.h"
 

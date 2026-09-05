@@ -5858,6 +5858,12 @@ def gen_module_impl(self, stmts):
             'extern void    __mojo_async_run_gen (int64_t);',
             'extern int64_t __mojo_gen_yield_tagged (int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_gen_last_yield_was_wd (int64_t);',
+            # Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_
+            # nested_async_closure_capture.md) -- v0 int-literal-local heap
+            # box; see gimple_gen_coro.py's _nested_async_capture_plan.
+            'extern int64_t __mojo_box_new_i64 (int64_t);',
+            'extern int64_t __mojo_box_get_i64 (int64_t);',
+            'extern void    __mojo_box_set_i64 (int64_t, int64_t);',
           ) if getattr(self, '_stackswitch_coro_c_units', None) else ()),
         '/* Disable security wrappers: sprintf/snprintf/memcpy/memmove/memset/',
         '   strcpy/strncpy/strcat/strncat macros expand to nested',

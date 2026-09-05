@@ -43,6 +43,7 @@ import mojo_compiler as N
 # instead of just renaming around it, per this project's own "consolidate
 # duplicates" convention.
 from gimple_exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call
+import gimple_ctypes
 
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
@@ -987,6 +988,215 @@ def lower(stmts: list) -> tuple[list, list]:
     return out, meta
 
 
+# ── nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
+# async_closure_capture.md) -- v0: a captured free variable must be one of
+# the ENCLOSING ordinary function's own top-level `var name = <int
+# literal>` locals (no type annotation, or `Int`/`int`); anything else
+# (a captured PARAMETER, a non-int-literal initializer, a capture that
+# crosses a SECOND closure boundary -- `caller()` invoking a nested async
+# def defined in a DIFFERENT enclosing function) is left ineligible and
+# falls through to the existing gimple_cpp_* C++20-coroutine path
+# unchanged, exactly like every other narrow eligibility gate in this
+# file. Represented as a heap box (an `int64_t` handle, never a raw
+# pointer type, matching every other cross-boundary handle this file
+# already uses) rather than `&local` -- mirrors the ordinary (non-async)
+# compiled path's own `{mut}`-capture convention (see gimple_gen_infra.
+# py's `_seed_mut_captured_local_types` docstring for why: `-fgimple`
+# rejects a stack local's address being taken anywhere in a function
+# that ALSO cast-assigns/returns that same local elsewhere) -- except
+# here the box is allocated via a plain runtime call
+# (`__mojo_box_new_i64`, runtime/mojo_coro_gen.c) instead of the ordinary
+# path's malloc-in-prologue, since this is a pure AST-to-AST rewrite with
+# no `gen`/type-inference access yet (this whole module runs BEFORE
+# GimpleGen is even constructed -- see the module docstring).
+_BOX_NEW = '__mojo_box_new_i64'
+_BOX_GET = '__mojo_box_get_i64'
+_BOX_SET = '__mojo_box_set_i64'
+
+
+def _outer_int_locals(outer: N.FunctionDef) -> dict:
+    """`{name: VarDecl}` for every top-level `var name = <int literal>`
+    (no type annotation, or `Int`/`int`) directly in `outer`'s own body --
+    the only outer-local shape v0's capture support can box."""
+    out = {}
+    for s in outer.body:
+        if (isinstance(s, N.VarDecl) and s.type_ann in (None, 'Int', 'int')
+                and isinstance(s.value, N.IntLiteral)):
+            out[s.name] = s
+    return out
+
+
+def _outer_all_locals(outer: N.FunctionDef) -> set:
+    """Every name `outer` itself binds (params + any locally-declared/
+    assigned name, any type) -- used only to detect whether a nested
+    async def captures ANYTHING from its enclosing scope at all, before
+    checking whether v0 can actually support that specific capture."""
+    return ({p for p, _a in outer.params}
+            | gimple_ctypes._declared_vars_body(outer.body))
+
+
+def _capture_scan_body(stmts: list) -> list:
+    """`stmts`, with every lock-with statement (`with BlockingScopedLock/
+    BlockingSpinLock(...):`) replaced by its own body inlined -- used ONLY
+    to feed free-variable detection below. `_rewrite_async_stmts` elides a
+    lock-with's context-manager expression ENTIRELY (see `_is_lock_with`),
+    so e.g. `with BlockingScopedLock(lock): ...` never actually references
+    `lock` in the compiled body -- without this, free-variable detection
+    would see `lock` as a "used" identifier and refuse the capture as an
+    unsupported (v0 int-only) capture even though the real compiled body
+    never touches it. Duplicate identifier collection for a node that
+    happens to get walked twice (this flattening's own recursion, plus
+    `_used_idents_node`'s later full walk of a still-nested construct
+    inside a KEPT statement) is harmless -- the caller only cares about
+    set membership."""
+    out = []
+    for s in stmts:
+        if _is_lock_with(s):
+            out.extend(_capture_scan_body(s.body))
+            continue
+        out.append(s)
+        for k, v in vars(s).items():
+            if k in ('line', 'col'):
+                continue
+            if isinstance(v, list) and v and _looks_like_stmt_list(v):
+                out.extend(_capture_scan_body(v))
+    return out
+
+
+def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> dict | None:
+    """`{}` if `inner` captures nothing from `outer` (the common case --
+    proceed exactly as before); a non-empty `{name: VarDecl}` are the
+    captures to box; `None` when `inner` captures something from `outer`
+    that v0 cannot support -- distinct from "no captures at all" so the
+    caller can refuse (fall through to the cpp path) instead of silently
+    compiling a body that references an unresolved bare name."""
+    all_outer = _outer_all_locals(outer)
+    used = set()
+    for b in _capture_scan_body(inner.body):
+        used |= gimple_ctypes._used_idents_node(b)
+    inner_declared = ({p for p, _a in inner.params}
+                       | gimple_ctypes._declared_vars_body(inner.body))
+    captured_names = (used - inner_declared) & all_outer
+    if not captured_names:
+        return {}
+    int_locals = _outer_int_locals(outer)
+    if captured_names - set(int_locals.keys()):
+        return None            # captures something v0 can't box -- refuse
+    return {n: int_locals[n] for n in captured_names}
+
+
+def _cap_rewrite_expr(node, box_names: dict):
+    """Replace every read of a captured name with `__mojo_box_get_i64
+    (<box-handle ident>)`. `box_names` maps the captured bare name to the
+    C identifier holding its box handle IN THIS SCOPE (the nested body's
+    own hidden parameter, or the enclosing function's own now-boxed
+    local -- same name, new meaning)."""
+    if node is None or not hasattr(node, '__dict__'):
+        return node
+    if isinstance(node, N.IdentExpr) and node.name in box_names:
+        return _call(_BOX_GET, [_c_ident(box_names[node.name])])
+    for k, v in list(vars(node).items()):
+        if k in ('line', 'col'):
+            continue
+        if isinstance(v, list):
+            setattr(node, k, [_cap_rewrite_expr(x, box_names) if hasattr(x, '__dict__') else x
+                              for x in v])
+        elif hasattr(v, '__dict__'):
+            setattr(node, k, _cap_rewrite_expr(v, box_names))
+    return node
+
+
+def _cap_rewrite_stmts(stmts: list, box_names: dict) -> list:
+    """Rewrite every read/write of a captured name (see _cap_rewrite_expr)
+    throughout `stmts`. Never descends into a nested FunctionDef -- a
+    further-nested closure resolves/handles its OWN captures separately
+    (and, critically, must not have this scope's box_names mapping
+    applied to whatever unrelated bare names it happens to also use)."""
+    out = []
+    for s in stmts:
+        if isinstance(s, N.FunctionDef):
+            out.append(s)
+            continue
+        if (isinstance(s, N.AssignStmt) and isinstance(s.target, N.IdentExpr)
+                and s.target.name in box_names):
+            val = _cap_rewrite_expr(s.value, box_names)
+            out.append(N.ExprStmt(value=_call(_BOX_SET, [_c_ident(box_names[s.target.name]), val])))
+            continue
+        if (isinstance(s, N.AugAssignStmt) and isinstance(s.target, N.IdentExpr)
+                and s.target.name in box_names):
+            bname = box_names[s.target.name]
+            cur = _call(_BOX_GET, [_c_ident(bname)])
+            rhs = _cap_rewrite_expr(s.value, box_names)
+            new_val = N.BinaryOp(op=s.op[:-1], left=cur, right=rhs)
+            out.append(N.ExprStmt(value=_call(_BOX_SET, [_c_ident(bname), new_val])))
+            continue
+        if isinstance(s, N.VarDecl) and s.name in box_names:
+            # A captured name re-declared in the SAME scope that captures
+            # it can't happen (shadowing would make it a distinct local,
+            # not a capture) -- guard rather than silently mis-rewrite.
+            out.append(s)
+            continue
+        if isinstance(s, N.TryStmt):
+            for h in (s.handlers or []):
+                h.body = _cap_rewrite_stmts(h.body, box_names)
+        for k, v in list(vars(s).items()):
+            if k in ('line', 'col'):
+                continue
+            if isinstance(v, list) and v and _looks_like_stmt_list(v):
+                setattr(s, k, _cap_rewrite_stmts(v, box_names))
+            elif isinstance(v, list):
+                setattr(s, k, [_cap_rewrite_expr(x, box_names) if hasattr(x, '__dict__') else x for x in v])
+            elif hasattr(v, '__dict__'):
+                setattr(s, k, _cap_rewrite_expr(v, box_names))
+        out.append(s)
+    return out
+
+
+def _find_calls_to(node, name: str, out: list):
+    """Every CallExpr(func=IdentExpr(name)) in `node`, never descending
+    into a nested FunctionDef (mirrors _cap_rewrite_stmts's own pruning
+    -- a further-nested closure's own calls are its own business)."""
+    if node is None or not hasattr(node, '__dict__'):
+        return
+    if isinstance(node, N.FunctionDef):
+        return
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) and node.func.name == name:
+        out.append(node)
+    for v in vars(node).values():
+        if isinstance(v, list):
+            for x in v:
+                if hasattr(x, '__dict__'):
+                    _find_calls_to(x, name, out)
+        elif hasattr(v, '__dict__'):
+            _find_calls_to(v, name, out)
+
+
+def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_map: dict):
+    """Wires a non-empty `_nested_async_capture_plan` result: boxes each
+    captured outer local (mutating its declaring VarDecl in place),
+    rewrites the REST of `outer`'s own body to read/write the box instead
+    of a plain scalar, rewrites `inner`'s body to read/write the SAME box
+    through a hidden trailing parameter, and appends that hidden
+    parameter (plain `Int`, so `_lower_one_async`'s ordinary
+    `__mojo_gen_arg` prologue binds it with zero further changes there)
+    to `inner.params`, plus a matching trailing argument at every call to
+    `inner.name` inside `outer`'s own body (create_task(wrapper()) and
+    the bare `wrapper()` detached-async idiom both already route through
+    the ordinary arg list from here on)."""
+    hidden = {n: f'__cap_{n}' for n in cap_map}
+    for name, decl in cap_map.items():
+        decl.value = _call(_BOX_NEW, [decl.value])
+    outer.body = _cap_rewrite_stmts(outer.body, {n: n for n in cap_map})
+    inner.body = _cap_rewrite_stmts(inner.body, hidden)
+    inner.params = list(inner.params) + [(hidden[n], 'Int') for n in cap_map]
+    calls: list = []
+    for st in outer.body:
+        _find_calls_to(st, inner.name, calls)
+    for call in calls:
+        for n in cap_map:
+            call.args.append(_c_ident(n))
+
+
 def _hoist_nested_async(stmts: list, meta: list):
     """A `@parameter async def wrapper(): ...` local to an ordinary
     function (the create_task(wrapper()) idiom) is lowered exactly like a
@@ -1016,12 +1226,16 @@ def _hoist_nested_async(stmts: list, meta: list):
                         rename[inner.name] = base
                         continue
                 else:
-                    ok, _why = _eligible_async(inner, nested=True)
-                    if ok:
-                        hoisted.append(_lower_one_async(inner, meta, base=base))
-                        meta[-1]['nested'] = True
-                        rename[inner.name] = base
-                        continue
+                    cap_map = _nested_async_capture_plan(inner, s)
+                    if cap_map is not None:
+                        ok, _why = _eligible_async(inner, nested=True)
+                        if ok:
+                            if cap_map:
+                                _apply_nested_async_capture(inner, s, cap_map)
+                            hoisted.append(_lower_one_async(inner, meta, base=base))
+                            meta[-1]['nested'] = True
+                            rename[inner.name] = base
+                            continue
             kept.append(inner)
         s.body = kept
         if rename:
@@ -1207,6 +1421,15 @@ def register(gen, meta: list) -> None:
     # above already has the exact destroy_fn shape needed as-is.
     gen.func_param_types.setdefault('__mojo_gen_resume_once', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_resume_once', 'void')
+    # Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
+    # async_closure_capture.md) -- v0 int-literal-local heap box, see
+    # _nested_async_capture_plan's own docstring.
+    gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])
+    gen.func_return_types.setdefault(_BOX_NEW, 'int64_t')
+    gen.func_param_types.setdefault(_BOX_GET, ['int64_t'])
+    gen.func_return_types.setdefault(_BOX_GET, 'int64_t')
+    gen.func_param_types.setdefault(_BOX_SET, ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault(_BOX_SET, 'void')
     gen.func_param_types.setdefault('__mojo_gen_last_yield_was_wd', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_last_yield_was_wd', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_yield_tagged', ['int64_t', 'int64_t', 'int64_t'])
