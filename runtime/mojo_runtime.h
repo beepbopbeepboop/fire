@@ -555,6 +555,8 @@ float  mojo_div_float(float a, float b);
 int64_t mojo_max(void *args);
 int64_t mojo_min(void *args);
 int64_t mojo_sum(void *args);
+double  mojo_max_double(void *args);
+double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
 void *mojo_sorted(void *iterable);
 void *mojo_reversed(void *iterable);

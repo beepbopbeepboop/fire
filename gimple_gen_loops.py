@@ -520,6 +520,19 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     if is_dataclass_fields_loop:
         gen._dataclass_fields_vars.add(var)
 
+    # `for x in it:` where `it` is a resumable list-iterator local (bound by
+    # `it = iter(<list>)`, tracked in `_list_iter_cursor`) — continue from the
+    # shared cursor (which `next(it)` may already have advanced) and leave it
+    # exhausted afterward, real Python single-pass iterator semantics. Must
+    # run BEFORE the generic lower_expr(node.iterable) below, which would
+    # treat `it` as a plain MojoList* and restart the scan from element 0.
+    if (isinstance(it, gimple_ctypes.IdentExpr)
+            and it.name in getattr(gen, '_list_iter_cursor', {})
+            and isinstance(var, str) and ',' not in var
+            and not getattr(node, 'else_body', None)):
+        _gen_for_list_iter_cursor(gen, node, var)
+        return
+
     try:
         it_type, it_val = gen.lower_expr(node.iterable)
     except Exception:
@@ -1129,6 +1142,16 @@ def _gen_for_enumerate(gen, node):
     if len(node.iterable.args) >= 2:
         _, start_raw = gen.lower_expr(node.iterable.args[1])
         start_val = gen._new_val('int64_t', f"(int64_t){start_raw}")
+
+    if lst_type == 'MojoGenerator *':
+        api = gen._generator_var_api.get(lst_val)
+        if api is not None:
+            _gen_for_enumerate_generator(
+                gen, node, lst_val, api, start_val,
+                destroy_after=isinstance(lst_arg, gimple_ctypes.CallExpr))
+            return
+        gimple_ctypes._debug_note(
+            'enumerate() over MojoGenerator* with no known api', lst_val)
 
     if lst_type == 'char *':
         _gen_for_enumerate_str(gen, node, lst_val, start_val)
@@ -2092,6 +2115,92 @@ def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
     if destroy_after:
         gen._emit(f"  {base}_destroy ({gen_val});")
     gen._emit("  mojo_raise ();")
+
+
+def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
+    """`for x in it:` over a resumable list-iterator local — see
+    `_gen_for_iter`'s call site. Resumes from the shared cursor and leaves
+    it exhausted."""
+    li = gen._list_iter_cursor[node.iterable.name]
+    lst, cur, elem = li['list'], li['cursor'], li['elem']
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
+    vct = {'str': 'char *', 'double': 'double'}.get(suf, 'int64_t')
+    gen._declare_var(var, vct)
+    n = gen._new_temp('int64_t')
+    gen._emit(f"  {n} = mojo_list_len ({lst});")
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond = gen._new_val('_Bool', f"{cur} < {n}")
+    gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    ev = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
+    gen._emit(f"  {gen._cname(var)} = {ev};")
+    gen.loop_stack.append((bb_post, bb_after))
+    for s in node.body:
+        gen.gen_stmt(s)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    nc = gen._new_val('int64_t', f"{cur} + (int64_t)1")
+    gen._emit(f"  {cur} = {nc};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+
+
+def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
+                                  start_val: str | None, destroy_after: bool) -> None:
+    """`for i, v in enumerate(<generator>[, start]):` — drive the generator
+    with the established `_resume`/`_value` "returns 2 things" convention
+    (mirrors `_gen_for_generator_iter`), threading a plain int64_t counter
+    for the index. Previously `_gen_for_enumerate` cast whatever the
+    iterable lowered to straight to `MojoList *` and read `mojo_list_len`/
+    `mojo_list_get_int` off a `MojoGenerator *` handle — uninitialized-
+    memory reads as loop bounds/values (garbage output, or an infinite
+    loop when the garbage looked like an always-true condition)."""
+    base, vct = api['base'], api['value_ctype']
+    target = node.target
+    if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
+        parts = gen._split_top_level_comma(target[1:-1])
+    else:
+        parts = [target, '_enum_val']
+    idx_var = parts[0] if parts else '_enum_i'
+    val_var = parts[1] if len(parts) >= 2 else '_enum_val'
+    gen._declare_var(idx_var, 'int64_t')
+    gen._declare_var(val_var, vct)
+    cidx = gen._cname(idx_var); cval = gen._cname(val_var)
+    ctr = gen._new_temp('int64_t')
+    gen._emit(f"  {ctr} = {start_val};" if start_val is not None
+              else f"  {ctr} = (int64_t)0;")
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb(); bb_check_exc = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond = gen._new_val('_Bool', f"{base}_resume ({gen_val})")
+    gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_check_exc};")
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    val = gen._new_val(vct, f"{base}_value ({gen_val})")
+    gen._emit(f"  {cidx} = {ctr};")
+    gen._emit(f"  {cval} = {val};")
+    gen.loop_stack.append((bb_post, bb_after))
+    for s in node.body:
+        gen.gen_stmt(s)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    nc = gen._new_val('int64_t', f"{ctr} + (int64_t)1")
+    gen._emit(f"  {ctr} = {nc};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_check_exc)
+    gen._emit_generator_pending_exc_check(gen_val, base, destroy_after, bb_after)
+    gen._emit_label(bb_after)
+    if destroy_after:
+        gen._emit(f"  {base}_destroy ({gen_val});")
 
 
 def _gen_for_struct_iter(gen, var: str, struct_type: str,

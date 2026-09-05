@@ -169,6 +169,19 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 k = _literal_kind(val)
             if k is None and val is not None:
                 k = _yield_kind(val)          # BinaryOp / literal fallthrough
+            # `it = iter(<list-local>)` — carry the source list's element
+            # kind onto the iterator local, so `yield next(it)` /
+            # `for x in it:` in the body resolve their yield-kind (string /
+            # float payloads would otherwise silently truncate to int64_t).
+            if (k is None and isinstance(val, N.CallExpr)
+                    and isinstance(val.func, N.IdentExpr) and val.func.name == 'iter'
+                    and len(val.args) == 1 and isinstance(val.args[0], N.IdentExpr)):
+                _src = val.args[0].name
+                _sv = env.get(_src)
+                if isinstance(_sv, tuple) and _sv[0] == 'list':
+                    k = _sv
+                elif len(list_elem.get(_src, ())) == 1:
+                    k = ('list', list(list_elem[_src])[0])
             if isinstance(k, tuple) and k[0] == 'list':
                 list_elem.setdefault(tgt, set()).add(k[1])
             elif isinstance(k, str):
@@ -259,6 +272,16 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         return env.get(f'self.{expr.member}')
     if isinstance(expr, N.SubscriptExpr) and isinstance(expr.obj, N.IdentExpr):
         v = env.get(expr.obj.name)
+        if isinstance(v, tuple) and v[0] == 'list':
+            return v[1]
+        return None
+    # `next(it)` / `next(it, default)` where `it` was bound by
+    # `it = iter(<list-local>)` — the element kind carried onto `it` in
+    # `_static_env` (as a ('list', kind) entry) is this expression's kind.
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
+            and expr.func.name == 'next' and expr.args
+            and isinstance(expr.args[0], N.IdentExpr)):
+        v = env.get(expr.args[0].name)
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
         return None

@@ -898,6 +898,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and isinstance(node.args[0], gimple_ctypes.Comprehension)
             and not gen._locally_binds_name('next')):
         return _lower_next_over_comprehension(gen, node)
+    # `next(it)` / `next(it, default)` on a resumable list-iterator local
+    # (bound earlier by `it = iter(<list>)`, tracked in `_list_iter_cursor`).
+    # Reads the element at the shared cursor and advances it; exhaustion
+    # raises a real tagged StopIteration via the SAME mojo_exc_type_set()/
+    # mojo_raise() path `raise StopIteration` and next()-on-a-generator use
+    # (so an enclosing `except StopIteration:` catches it), unless a 2nd
+    # `default` argument opts out — real Python `next(it, default)` semantics.
+    if (fname_raw == 'next' and 1 <= len(node.args) <= 2
+            and isinstance(node.args[0], gimple_ctypes.IdentExpr)
+            and node.args[0].name in getattr(gen, '_list_iter_cursor', {})
+            and not gen._locally_binds_name('next')):
+        return _lower_next_list_iter(gen, node)
     if fname_raw == 'next' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         at = gen._get_actual_type(at, av)
@@ -1737,6 +1749,39 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
     return 'int', t
+
+
+def _lower_next_list_iter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`next(it)` / `next(it, default)` where `it` is a resumable list-iterator
+    local (see `_try_bind_list_iter`). Advances the shared cursor; raises a
+    tagged StopIteration on exhaustion (1-arg) or yields `default` (2-arg)."""
+    li = gen._list_iter_cursor[node.args[0].name]
+    lst, cur, elem = li['list'], li['cursor'], li['elem']
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
+    vct = {'str': 'char *', 'double': 'double'}.get(suf, 'int64_t')
+    result = gen._new_temp(vct)
+    n = gen._new_val('int64_t', f"mojo_list_len ({lst})")
+    bb_ok = gen._new_bb(); bb_miss = gen._new_bb(); bb_merge = gen._new_bb()
+    cond = gen._new_val('_Bool', f"{cur} < {n}")
+    gen._emit(f"  if ({cond}) goto {bb_ok}; else goto {bb_miss};")
+    gen._emit_label(bb_ok)
+    ok = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
+    gen._safe_coerce_emit(vct, vct, ok, result)
+    nxt = gen._new_val('int64_t', f"{cur} + (int64_t)1")
+    gen._emit(f"  {cur} = {nxt};")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_miss)
+    if len(node.args) == 2:
+        # `default` only evaluated on the exhausted branch (real Python
+        # semantics — a non-trivial default expr must not run on a hit).
+        dt, dv = gen.lower_expr(node.args[1])
+        gen._safe_coerce_emit(dt, vct, dv, result)
+    else:
+        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+        gen._emit("  mojo_raise ();")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_merge)
+    return vct, result
 
 
 def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -3238,6 +3283,26 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         elif len(arg_pairs) == 3:
             fname = 'mojo_range3'
         return 'void *', gen._call_expr('void *', fname, arg_pairs)
+
+    # Single-arg min()/max() is ALWAYS the "reduce over an iterable" form in
+    # Python — the scalar form needs >= 2 positional args. Route it to the
+    # runtime mojo_min/mojo_max (which walk a MojoList*), before the scalar
+    # ternary-fold below, which would otherwise see the lone `int64_t`-boxed
+    # list handle as a "numeric arg" and hand it straight back unchanged
+    # (returning the list POINTER as the min/max value — garbage). Real in an
+    # A3 stack-switch generator body: `yield min(xs)` on an unannotated param.
+    if (fname_raw in ('min', 'max') and len(arg_pairs) == 1
+            and not gen._locally_binds_name(fname_raw)
+            and 'key' not in {k for k, _ in getattr(node, 'kwargs', []) or []}):
+        at, av = arg_pairs[0]
+        if at == 'MojoList *' or at in ('int', 'int64_t', 'void *'):
+            lp = (av if at == 'MojoList *'
+                  else gen._new_val('MojoList *', f"(MojoList *){gen._to_int64(at, av)}"))
+            if gen._elem_of(av) == 'double':
+                return 'double', gen._call_expr(
+                    'double', f"mojo_{fname_raw}_double", [('void *', lp)])
+            return 'int64_t', gen._call_expr(
+                'int64_t', f"mojo_{fname_raw}", [('void *', lp)])
 
     # min/max over scalar args → fold into nested ternaries (avoids the
     # mojo_min(void*) variadic-pack signature, which we don't emit packs for).

@@ -1489,6 +1489,59 @@ def main():
         print(v)
 """, "7\n999\n")
 
+    # bugs/hard/CODEGEN_coro_stackswitch_iterator_protocol_gaps.md — the A3
+    # stack-switch cutover routes a generator BODY through the ordinary
+    # codegen, which never had a real iter()/next() over a plain list
+    # (only the old cpp-path emitter did, in gimple_cpp_core.py). Below:
+    # a STRING-element list iterator (accessor kind picked from the list's
+    # tracked element type, not hard-coded to get_int), next(it, default)
+    # returning the default only on real exhaustion, and next(it, default)
+    # still yielding a real element while the cursor has more.
+    test_generator_stdout("generator_str_list_iterator_next_default", """\
+def scan():
+    xs = ["a", "b"]
+    it = iter(xs)
+    yield next(it)
+    yield next(it, "END")
+    yield next(it, "END")
+
+def main():
+    for s in scan():
+        print(s)
+""", "a\nb\nEND\n")
+
+    # enumerate(<generator>) with NO explicit start (0-based) — the
+    # zero-arg-start branch of the same _gen_for_enumerate_generator path.
+    test_generator_stdout("enumerate_generator_no_start", """\
+def src(n):
+    for i in range(n):
+        yield i * 10
+
+def numbered(n):
+    for i, v in enumerate(src(n)):
+        yield v + i
+
+def main():
+    for x in numbered(4):
+        print(x)
+""", "0\n11\n22\n33\n")
+
+    # A generator body that consumes its list arg with BOTH next() and a
+    # following `for x in it:` — the for-loop must resume from the cursor
+    # next() already advanced (single-pass), not restart from element 0.
+    test_generator_stdout("generator_list_iter_next_then_for_resumes", """\
+def scan(xs):
+    it = iter(xs)
+    first = next(it)
+    yield first
+    for x in it:
+        yield x
+
+def main():
+    for v in scan([1, 2, 3, 4]):
+        print(v)
+""", "1\n2\n3\n4\n")
+
     # ── yield-kind inference for identifier / self.field / list-local refs ──
     # (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md)
     # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare

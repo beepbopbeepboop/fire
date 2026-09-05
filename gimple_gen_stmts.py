@@ -209,7 +209,48 @@ def _annotation_dict_nested_val_type(gen, ann) -> str | None:
     return None
 
 
+def _try_bind_list_iter(gen, name, value):
+    """`it = iter(<list-expr>)` — bind `it` to the underlying list plus a
+    companion int64_t cursor temp so `next(it)` advances a genuine position
+    and a following `for x in it:` resumes from it (single-pass Python
+    iterator semantics), rather than modelling `iter()` as a bare identity
+    (which restarts every scan from element 0 and leaves `next()` with no
+    real lowering at all). Mirrors gimple_cpp_core.py's `_cpp_list_iter_
+    cursor` for the old cpp coroutine path; here it also covers an A3
+    stack-switch generator body, whose statements go through this ordinary
+    codegen. Returns True iff it claimed the assignment."""
+    if not (isinstance(name, str) and name and ',' not in name
+            and isinstance(value, CallExpr)
+            and isinstance(value.func, IdentExpr)
+            and value.func.name == 'iter'
+            and len(value.args) == 1 and not getattr(value, 'kwargs', None)
+            and not gen._locally_binds_name('iter')
+            and name not in gen.var_types
+            and name not in gen._global_var_types):
+        return False
+    at, av = gen.lower_expr(value.args[0])
+    at = gen._get_actual_type(at, av)
+    if at == 'MojoList *':
+        list_val = av
+    elif at in ('int', 'int64_t', 'void *'):
+        list_val = gen._new_val('MojoList *', f"(MojoList *){gen._to_int64(at, av)}")
+    else:
+        return False
+    elem = gen._elem_of(av)
+    gen._declare_var(name, 'MojoList *')
+    gen._emit(f"  {gen._write_dest(name)} = {list_val};")
+    cname = gen._cname(name)
+    cur = gen._new_temp('int64_t')
+    gen._emit(f"  {cur} = (int64_t)0;")
+    gen._list_iter_cursor[cname] = {'list': cname, 'cursor': cur, 'elem': elem}
+    if elem and elem != 'int64_t':
+        gen._elem_types[cname] = elem
+    return True
+
+
 def _gen_stmt_VarDecl(gen, node):
+    if node.value is not None and _try_bind_list_iter(gen, node.name, node.value):
+        return
     # `var name = value` where `name` is heap-boxed (some nested
     # closure captures it BY REFERENCE -- see _seed_mut_captured_
     # local_types's docstring): `_declare_var` already emitted the
@@ -559,6 +600,10 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
 
 
 def _gen_stmt_AssignStmt(gen, node):
+    if (isinstance(node.target, gimple_ctypes.IdentExpr)
+            and getattr(node, 'value', None) is not None
+            and _try_bind_list_iter(gen, node.target.name, node.value)):
+        return
     # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
     if isinstance(node.target, gimple_ctypes.TupleExpr):
         targets = node.target.elements

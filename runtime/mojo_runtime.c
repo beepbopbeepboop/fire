@@ -4334,6 +4334,32 @@ int64_t mojo_min(void *args) {
     return m;
 }
 
+/* min()/max() over a list this codegen tracks (via _elem_types) as holding
+ * doubles — the plain int64_t mojo_min/mojo_max above compare each slot's
+ * raw bit pattern, misordering negatives and non-representable magnitudes.
+ * Mirrors mojo_sum_double's identical "route through _elem_types" fix. */
+double mojo_max_double(void *args) {
+    MojoList *l = (MojoList *)args;
+    if (!l || l->len == 0) return 0.0;
+    double m = mojo_list_get_double(l, 0);
+    for (int64_t i = 1; i < l->len; i++) {
+        double v = mojo_list_get_double(l, i);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+double mojo_min_double(void *args) {
+    MojoList *l = (MojoList *)args;
+    if (!l || l->len == 0) return 0.0;
+    double m = mojo_list_get_double(l, 0);
+    for (int64_t i = 1; i < l->len; i++) {
+        double v = mojo_list_get_double(l, i);
+        if (v < m) m = v;
+    }
+    return m;
+}
+
 /* ── String/Number conversion (used directly in compiled code) ─────── */
 /* Backs both bare `int(s)` and `int(s, 0)` (gimple_codegen.py's _lower_call
  * drops the base argument entirely and always calls this) — so this must

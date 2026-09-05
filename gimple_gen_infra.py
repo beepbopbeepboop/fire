@@ -195,6 +195,13 @@ def _reset_func(gen, body: list = None, params: list = None):
     gen._dict_items_val_elems: dict[str, str] = {}
     gen._tuple_slot_types: dict[str, list] = {}
     gen._dict_item_pair_vars: dict[str, str] = {}
+    # `it = iter(<list>)` inside ordinary codegen (incl. an A3 stack-switch
+    # generator body): C-name of the iterator local -> {'list','cursor','elem'}.
+    # `next(it)` advances the shared int64_t cursor temp; a following
+    # `for x in it:` resumes from it (single-pass Python iterator semantics).
+    # Mirrors gimple_cpp_core.py's `_cpp_list_iter_cursor` for the old cpp
+    # coroutine path. Reset per function like the other body-local tables here.
+    gen._list_iter_cursor: dict = {}
     gen._span_mut_params: dict[str, bool]  = {}  # param/var name → literal Span/StringSlice mut=True/False
     # NOTE: _field_elem_types is intentionally NOT reset here — it stores
     # per-struct metadata that must persist across function boundaries
