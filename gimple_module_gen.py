@@ -7359,11 +7359,18 @@ def gen_module_impl(self, stmts):
         parts.append('extern void __mojo_gen_resume_once (int64_t);')
         if not any('__mojo_gen_destroy' in p for p in parts[:-1]):
             parts.append('extern void __mojo_gen_destroy (int64_t);')
+    # Named set, not an inline literal `{...}` inside the `&` expression:
+    # a real --dump-full mojo.py crash (SIGSEGV in mojo_set_intersection ->
+    # mojo_set_contains_str -> _str_hash, address 0x1) traced here via lldb
+    # once the gen/self-param typing fix (e4b06a1) stopped this whole
+    # boolean expression from being silently stubbed to a no-op — the
+    # inline set literal wasn't reliably allocated as a real MojoSet* in
+    # this specific "big boolean OR-chain" expression context.
+    _coro_generic_names: set = {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}
     _needs_async_runtime_h = bool(
         len(self._supported_async) or len(self._supported_async_closures)
         or len(self._nested_async_api)
-        or len(self._funcptr_builtins_needed
-              & {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'})
+        or len(self._funcptr_builtins_needed & _coro_generic_names)
         # A3 stack-switch "detached async" (bugs/hard/CODEGEN_coro_detached_
         # async_take_handle.md): `external_call["AsyncRT_DeviceContext_
         # enqueueHostFunction(Range)", ...]` is declared ONLY by this header
