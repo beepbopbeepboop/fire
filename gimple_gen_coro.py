@@ -93,11 +93,154 @@ _SCALARISH = {'Int', 'Int64', 'Int32', 'Bool', 'String', 'StringLiteral', '', No
              'int', 'bool', 'str', 'float'}
 
 
-def _yield_kind(expr) -> str | None:
+_FLOAT_ANNS  = {'Float64', 'Float32', 'Float16', 'Float', 'float', 'Float64Literal'}
+_STRING_ANNS = {'String', 'StringLiteral', 'StringSlice', 'str'}
+_INT_ANNS    = {'Int', 'Int64', 'Int32', 'Int16', 'Int8', 'UInt', 'UInt64', 'UInt32',
+                'Bool', 'int', 'bool'}
+
+
+def _ann_kind(ann) -> str | None:
+    """Map a (purely syntactic) parameter / field type annotation to a yield
+    C kind ('i'/'p'/'d'), or None when the annotation is missing or not a
+    recognised scalar. `ann` is normally the annotation *string* carried in
+    FunctionDef.params / VarDecl.type_ann, but tolerate an IdentExpr node."""
+    if ann is None:
+        return None
+    if not isinstance(ann, str):
+        ann = getattr(ann, 'name', None)
+        if not isinstance(ann, str):
+            return None
+    if ann in _FLOAT_ANNS:
+        return 'd'
+    if ann in _STRING_ANNS:
+        return 'p'
+    if ann in _INT_ANNS:
+        return 'i'
+    return None
+
+
+def _literal_kind(expr) -> str | None:
+    """Kind of a bare literal expression, or ('list', elem_kind) for a list
+    display of homogeneous literal elements. None when not a literal."""
+    if isinstance(expr, (N.StringLiteral, N.TstringLiteral)):
+        return 'p'
+    if isinstance(expr, N.FloatLiteral):
+        return 'd'
+    if isinstance(expr, (N.IntLiteral, N.BoolLiteral)):
+        return 'i'
+    if isinstance(expr, N.ListExpr):
+        eks = {_literal_kind(e) for e in expr.elements}
+        eks.discard(None)
+        if len(eks) == 1:
+            k = list(eks)[0]
+            if isinstance(k, str):
+                return ('list', k)
+    return None
+
+
+def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
+    """Best-effort, purely-syntactic name -> yield-kind map available to the
+    Layer-1 pre-pass (before GimpleGen / struct_field_types exist):
+
+      * `fn`'s own parameter type annotations         -> env['<param>']
+      * `fn`'s local `name = <literal>` / `name = [literals]` assignments
+                                                      -> env['<local>']
+      * for a generator METHOD, the enclosing struct's field types, taken
+        from class-body annotations and from `__init__`'s
+        `self.<f> = <annotated-param-or-literal>` assignments
+                                                      -> env['self.<field>']
+
+    Values are 'i'/'p'/'d', or ('list', elem_kind) for a list-typed local."""
+    env: dict = {}
+    for pname, pann in getattr(fn, 'params', []):
+        k = _ann_kind(pann)
+        if k is not None:
+            env[pname] = k
+    list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
+    for n in _walk(fn):
+        tgt = val = ann = None
+        if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
+            tgt, val, ann = n.target.name, n.value, getattr(n, 'type_ann', None)
+        elif isinstance(n, N.VarDecl):
+            tgt, val, ann = n.name, n.value, n.type_ann
+        if tgt is not None:
+            k = _ann_kind(ann)
+            if k is None:
+                k = _literal_kind(val)
+            if k is None and val is not None:
+                k = _yield_kind(val)          # BinaryOp / literal fallthrough
+            if isinstance(k, tuple) and k[0] == 'list':
+                list_elem.setdefault(tgt, set()).add(k[1])
+            elif isinstance(k, str):
+                env.setdefault(tgt, k)
+        # `<name>.append(<literal>)` refines a list-local's element kind
+        if (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
+                and n.func.member in ('append', 'insert')
+                and isinstance(n.func.obj, N.IdentExpr) and n.args):
+            ek = _literal_kind(n.args[-1])
+            if isinstance(ek, str):
+                list_elem.setdefault(n.func.obj.name, set()).add(ek)
+    for nm, eks in list_elem.items():
+        if len(eks) == 1 and nm not in env:
+            env[nm] = ('list', list(eks)[0])
+    # `for <v> in <list-local-or-literal>:` binds <v> to the element kind
+    for n in _walk(fn):
+        if not isinstance(n, N.ForStmt):
+            continue
+        tname = n.target.name if isinstance(n.target, N.IdentExpr) \
+            else (n.target if isinstance(n.target, str) else None)
+        if tname is None or tname in env:
+            continue
+        it = n.iterable
+        ek = None
+        if isinstance(it, N.IdentExpr):
+            v = env.get(it.name)
+            if isinstance(v, tuple) and v[0] == 'list':
+                ek = v[1]
+        else:
+            lk = _literal_kind(it)
+            if isinstance(lk, tuple) and lk[0] == 'list':
+                ek = lk[1]
+        if isinstance(ek, str):
+            env[tname] = ek
+    if struct_def is not None:
+        for f in getattr(struct_def, 'fields', []):
+            if isinstance(f, N.VarDecl):
+                k = _ann_kind(getattr(f, 'type_ann', None))
+                if k is not None:
+                    env[f'self.{f.name}'] = k
+        init = next((m for m in getattr(struct_def, 'methods', [])
+                     if isinstance(m, N.FunctionDef) and m.name == '__init__'), None)
+        if init is not None:
+            pann_by_name = {p: a for p, a in init.params}
+            for n in _walk(init):
+                if (isinstance(n, N.AssignStmt)
+                        and isinstance(n.target, N.MemberExpr)
+                        and isinstance(n.target.obj, N.IdentExpr)
+                        and n.target.obj.name == 'self'):
+                    fld = f'self.{n.target.member}'
+                    k = _ann_kind(getattr(n, 'type_ann', None))
+                    if k is None and isinstance(n.value, N.IdentExpr):
+                        k = _ann_kind(pann_by_name.get(n.value.name))
+                    if k is None:
+                        k = _literal_kind(n.value)
+                    if k is not None and not isinstance(k, tuple):
+                        env.setdefault(fld, k)
+    return env
+
+
+def _yield_kind(expr, env: dict | None = None) -> str | None:
     """Best-effort C kind of a yielded value: 'i' int/bool/pointer (the
     yield call always coerces to int64_t, so 'i' vs 'p' only affects the
     <base>_value RETURN type), 'p' string pointer, 'd' float, 'tuple' a
-    tuple literal (not handled yet). None == can't tell (treated as 'i')."""
+    tuple literal (not handled yet). None == can't tell (treated as 'i').
+
+    `env` (from `_static_env`) resolves a bare identifier / `self.<field>` /
+    `<list-local>[idx]` reference to a kind when a syntactic type source is
+    in reach -- without it those all fall through to None (== 'i'), which
+    silently truncated float/string yields (bugs/hard/CODEGEN_coro_
+    stackswitch_yield_kind_identifier_inference.md)."""
+    env = env or {}
     if expr is None:
         return 'i'
     if isinstance(expr, N.TupleExpr):
@@ -108,8 +251,28 @@ def _yield_kind(expr) -> str | None:
         return 'd'
     if isinstance(expr, (N.IntLiteral, N.BoolLiteral)):
         return 'i'
+    if isinstance(expr, N.IdentExpr):
+        v = env.get(expr.name)
+        return v if isinstance(v, str) else None
+    if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
+            and expr.obj.name == 'self':
+        return env.get(f'self.{expr.member}')
+    if isinstance(expr, N.SubscriptExpr) and isinstance(expr.obj, N.IdentExpr):
+        v = env.get(expr.obj.name)
+        if isinstance(v, tuple) and v[0] == 'list':
+            return v[1]
+        return None
+    if isinstance(expr, N.TernaryExpr):
+        tk, ek = _yield_kind(expr.then_val, env), _yield_kind(expr.else_val, env)
+        if tk == ek:
+            return tk
+        if 'p' in (tk, ek):
+            return 'p'
+        if 'd' in (tk, ek):
+            return 'd'
+        return None
     if isinstance(expr, N.BinaryOp):
-        lk, rk = _yield_kind(expr.left), _yield_kind(expr.right)
+        lk, rk = _yield_kind(expr.left, env), _yield_kind(expr.right, env)
         if 'p' in (lk, rk):
             return 'p'
         if 'd' in (lk, rk):
@@ -121,7 +284,7 @@ def _yield_kind(expr) -> str | None:
 _KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'p': 'char *', 'd': 'double', None: 'int64_t'}
 
 
-def _generator_tuple_slots(fn: N.FunctionDef):
+def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
     """If every `yield` in `fn` yields a tuple LITERAL of the same arity,
     return the per-slot C type list; else None. Used only when
     _generator_value_kind says 'tuple'."""
@@ -130,7 +293,7 @@ def _generator_tuple_slots(fn: N.FunctionDef):
         if isinstance(n, N.YieldExpr):
             if not isinstance(n.value, N.TupleExpr):
                 return None
-            shapes.append(tuple(_yield_kind(e) for e in n.value.elements))
+            shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
     if not shapes:
         return None
     ar = len(shapes[0])
@@ -152,12 +315,13 @@ def _generator_tuple_slots(fn: N.FunctionDef):
     return slots
 
 
-def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
+def _generator_value_kind(fn: N.FunctionDef,
+                          env: dict | None = None) -> tuple[str | None, str]:
     kinds = set()
     has_tuple = has_nontuple = False
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
-            k = _yield_kind(n.value)
+            k = _yield_kind(n.value, env)
             kinds.add(k)
             if k == 'tuple':
                 has_tuple = True
@@ -169,7 +333,7 @@ def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
     if has_tuple and has_nontuple:
         return None, 'mixed tuple / non-tuple yields (v0)'
     if has_tuple:
-        return ('tuple', '') if _generator_tuple_slots(fn) is not None \
+        return ('tuple', '') if _generator_tuple_slots(fn, env) is not None \
             else (None, 'tuple yield with inconsistent shape (v0)')
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
@@ -190,7 +354,8 @@ def _yield_from_ok(fn: N.FunctionDef) -> bool:
     return total == bare
 
 
-def _eligible(fn: N.FunctionDef, struct_name: str | None = None) -> tuple[bool, str]:
+def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
+              struct_def=None) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
@@ -210,7 +375,7 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None) -> tuple[bool, 
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
         return False, 'kwonly params (v0)'
-    kind, why = _generator_value_kind(fn)
+    kind, why = _generator_value_kind(fn, _static_env(fn, struct_def))
     if kind is None:
         return False, why
     return True, ''
@@ -998,8 +1163,9 @@ def lower(stmts: list) -> tuple[list, list]:
             _kept = []
             for m in s.methods:
                 if (isinstance(m, N.FunctionDef) and getattr(m, 'is_generator', False)
-                        and _eligible(m, struct_name=s.name)[0]):
-                    method_bodies.append(_lower_one(m, meta, struct_name=s.name))
+                        and _eligible(m, struct_name=s.name, struct_def=s)[0]):
+                    method_bodies.append(_lower_one(m, meta, struct_name=s.name,
+                                                   struct_def=s))
                     # drop the generator method from the struct: gen_module's
                     # Phase 2a skips _supported_generator_methods anyway, and
                     # the body now lives as a top-level function
@@ -1283,12 +1449,14 @@ def _mojo_to_c_type(ann: str) -> str:
 
 
 def _lower_one(fn: N.FunctionDef, meta: list,
-               struct_name: str | None = None) -> N.FunctionDef:
+               struct_name: str | None = None,
+               struct_def=None) -> N.FunctionDef:
     is_method = struct_name is not None
     base = (f'__mgco_{struct_name}_{fn.name}' if is_method
             else f'__mgco_{fn.name}')
     body_name = f'{base}_body'
-    kind, _ = _generator_value_kind(fn)
+    env = _static_env(fn, struct_def)
+    kind, _ = _generator_value_kind(fn, env)
     kind = kind or 'i'
 
     real_params = fn.params[1:] if is_method else fn.params
@@ -1326,7 +1494,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
-        'tuple_slot_ctypes': _generator_tuple_slots(fn) if kind == 'tuple' else None,
+        'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd

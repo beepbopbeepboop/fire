@@ -1489,6 +1489,72 @@ def main():
         print(v)
 """, "7\n999\n")
 
+    # ── yield-kind inference for identifier / self.field / list-local refs ──
+    # (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md)
+    # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare
+    # IdentExpr / `self.<field>` / `<list-local>[idx]` reference, so a
+    # Float64/String value yielded through one of those silently defaulted
+    # to int64_t and was truncated (float) or printed as a raw pointer
+    # value (string). _static_env now resolves them from purely-syntactic
+    # type sources available at pre-pass time.
+
+    # self.<field> whose type comes from __init__(self, base: Float64)
+    test_generator_stdout("generator_yields_self_float_field_plus_int", """\
+class Sampler:
+    def __init__(self, base: Float64):
+        self.base = base
+    def samples(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.base + i
+            i = i + 1
+
+def main():
+    s = Sampler(1.5)
+    for x in s.samples(3):
+        print(x)
+""", "1.5\n2.5\n3.5\n")
+
+    # bare identifier resolved from the generator's own param annotation
+    test_generator_stdout("generator_yields_string_param_identifier", """\
+def echo(s: String):
+    yield s
+    yield s
+
+def main():
+    for v in echo("hello"):
+        print(v)
+""", "hello\nhello\n")
+
+    # list-typed local: `xs = [<string literals>]`, `yield xs[i % 2]`
+    test_generator_stdout("generator_yields_string_list_local_subscript", """\
+def strs():
+    xs = ["alpha", "beta"]
+    i = 0
+    while i < 3:
+        yield xs[i % 2]
+        i = i + 1
+
+def main():
+    for s in strs():
+        print(s)
+""", "alpha\nbeta\nalpha\n")
+
+    # float local seeded from a float literal, yielded bare
+    test_generator_stdout("generator_yields_float_local_identifier", """\
+def ramp():
+    x = 0.5
+    i = 0
+    while i < 3:
+        yield x
+        x = x + 1.0
+        i = i + 1
+
+def main():
+    for v in ramp():
+        print(v)
+""", "0.5\n1.5\n2.5\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
