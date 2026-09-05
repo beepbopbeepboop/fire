@@ -380,8 +380,18 @@ def _render_struct_typedef_body(struct_name, fields):
     guard #define gen_module_impl's own caller appends separately."""
     lines = [f"typedef struct {struct_name} {{", f"  int64_t __mojo_type_id;"]
     if fields:
-        for field_name, field_type in fields.items():
-            ft = '' + field_type
+        # Index the dict's own keys, not `for field_name, field_type in
+        # fields.items():` — the established tuple-unpack-boxing bug this
+        # session's own fixes are full of (`.items()`'s 2-tuple result
+        # re-boxes an element to int64_t even if it started as char*):
+        # confirmed here as the exact source of `int64_t 49758922528;`
+        # struct-field declarations (an erased field NAME printed as a
+        # decimal address, invalid C) in the synthetic GimpleGen struct's
+        # extra-fields dict, different every --dump-full run.
+        for field_name in fields:
+            field_type = fields[field_name]
+            field_name = _as_str(field_name)
+            ft = '' + _as_str(field_type)
             if ft == f"{struct_name} *":
                 ft = f"struct {struct_name} *"
             safe_fn = _safe_field(field_name)
@@ -2009,7 +2019,16 @@ def gen_module_impl(self, stmts):
             and 'GimpleGen' not in self.struct_field_types
             and not any(isinstance(s, StructDef) and s.name == 'GimpleGen'
                         for s in (stmts + imported_stmts))):
-        _gg_ft0 = dict(getattr(self, '_selfhost_gimplegen_extra_fields', {}) or {})
+        # Rebuild via an indexed loop, not `dict(x)` — the self-hosted
+        # backend's dict-copy-constructor path is untested/unreliable for
+        # this shape (see `_render_struct_typedef_body`'s matching fix,
+        # same underlying erased-key class of bug); build the copy through
+        # explicit key iteration + `_as_str` instead of trusting `dict()`
+        # to preserve key/value C types across the copy.
+        _gg_src = getattr(self, '_selfhost_gimplegen_extra_fields', {}) or {}
+        _gg_ft0: dict = {}
+        for _gg_k in _gg_src:
+            _gg_ft0[_as_str(_gg_k)] = _as_str(_gg_src[_gg_k])
         self.struct_field_types['GimpleGen'] = _gg_ft0
         self._imported_struct_names.add('GimpleGen')
         self._struct_name_owner.setdefault('GimpleGen', _gg_stmts)
