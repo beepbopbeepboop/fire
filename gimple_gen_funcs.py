@@ -883,14 +883,30 @@ def _selfhost_scan_gimplegen_extra_fields() -> dict:
                 continue
             _p0 = _fn.params[0][0].lstrip('*')
             for _n in gimple_exprtypes._walk_ast(_fn.body):
-                if not (isinstance(_n, AssignStmt)
-                        and isinstance(_n.target, MemberExpr)
-                        and isinstance(_n.target.obj, IdentExpr)
-                        and _n.target.obj.name == _p0):
+                # A chained assignment (`units = gen._stackswitch_coro_c_
+                # units = []`, gimple_gen_coro.py's own lazy-init idiom)
+                # parses as MultiAssignStmt (multiple `targets`), not
+                # AssignStmt (one `target`) -- missing this case here left
+                # `_stackswitch_coro_c_units` (and any other field first
+                # bound this way) undetected, so `gen`/`self` stayed typed
+                # as an opaque struct with no such member, and a real
+                # self-hosted compile of the module doing the chained
+                # assignment failed to resolve it ("'GimpleGen' has no
+                # member named ...").
+                if isinstance(_n, MultiAssignStmt):
+                    _targets = _n.targets
+                elif isinstance(_n, AssignStmt):
+                    _targets = [_n.target]
+                else:
                     continue
-                _ct = _selfhost_literal_ctype(_n.value)
-                if _ct is not None:
-                    _selfhost_merge_field(_fields, _n.target.member, _ct)
+                for _tgt in _targets:
+                    if not (isinstance(_tgt, MemberExpr)
+                            and isinstance(_tgt.obj, IdentExpr)
+                            and _tgt.obj.name == _p0):
+                        continue
+                    _ct = _selfhost_literal_ctype(_n.value)
+                    if _ct is not None:
+                        _selfhost_merge_field(_fields, _tgt.member, _ct)
     _SELFHOST_EXTRA_FIELD_CACHE['k'] = (_key, _fields)
     return _fields
 

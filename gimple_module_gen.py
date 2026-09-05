@@ -7163,7 +7163,19 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
-    if self._supported_generators or self._generator_method_api:
+    # `self._generator_api` alone is not covered by `_supported_generators`/
+    # `_generator_method_api`: a NESTED `async def` (create_task's
+    # wrapper idiom, or the detached-async `var coro = wrapper()` idiom --
+    # see bugs/hard/CODEGEN_coro_detached_async_take_handle.md) is
+    # deliberately keyed straight into `_generator_api` under its qualified
+    # base name (register()'s own comment on why: there's no top-level def
+    # with its bare name for `_supported_generators` to skip emitting), so
+    # a module containing ONLY a nested async closure and no top-level
+    # generator/method previously got no `MojoGenerator` typedef or extern
+    # decls for its own trampolines at all — an implicit-declaration
+    # compile failure the moment anything (e.g. `_take_handle()`) used the
+    # handle outside the enclosing function's own `{base}_start` call.
+    if self._supported_generators or self._generator_method_api or self._generator_api:
         parts.append('typedef struct MojoGenerator MojoGenerator;')
         for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
             _base, _vct = _api['base'], _api['value_ctype']
@@ -7175,11 +7187,40 @@ def gen_module_impl(self, stmts):
             if _api.get('is_async_gen'):
                 parts.append(f"extern _Bool {_base}_last_yield_was_wd (MojoGenerator *);")
         parts.append('')
+    if '__mojo_gen_resume_once' in self._funcptr_builtins_needed:
+        # "Detached async"'s resume_fn half (bugs/hard/CODEGEN_coro_
+        # detached_async_take_handle.md) — a bare `(void *)` cast of this
+        # runtime symbol (runtime/mojo_coro_gen.c) is referenced as a
+        # function-pointer VALUE (`_coro_resume_fn`'s BUILTIN_VALUE_MAP
+        # substitution under MOJO_CORO=stackswitch), which needs a real
+        # declaration in scope at that reference — the per-generator
+        # `_C_TRAMPOLINE_TMPL` blocks that also declare it live at the
+        # BOTTOM of the file, after every ordinary function body (so after
+        # this reference), and this symbol has no per-generator dependency
+        # of its own (`__mojo_gen_destroy` already had one via that same
+        # template, incidentally early enough there, but not guaranteed --
+        # this decl doesn't rely on that ordering either).
+        parts.append('extern void __mojo_gen_resume_once (int64_t);')
     _needs_async_runtime_h = bool(
         len(self._supported_async) or len(self._supported_async_closures)
         or len(self._nested_async_api)
         or len(self._funcptr_builtins_needed
-              & {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}))
+              & {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'})
+        # A3 stack-switch "detached async" (bugs/hard/CODEGEN_coro_detached_
+        # async_take_handle.md): `external_call["AsyncRT_DeviceContext_
+        # enqueueHostFunction(Range)", ...]` is declared ONLY by this header
+        # (see _LIBC_DECLARED's matching entries in gimple_codegen.py) — it
+        # must be included even when the only coroutines in this TU are
+        # stack-switch ones (so `_supported_async`/`_nested_async_api`, the
+        # cpp-path's own bookkeeping, are both empty). Both names being
+        # `_LIBC_DECLARED` means they're deliberately kept OUT of
+        # `_external_protos` (see gimple_gen_exprs.py's `external_call`
+        # lowering) — `func_param_types` is the one bookkeeping dict that
+        # DOES get populated unconditionally for every external_call name,
+        # LIBC-declared or not, so it's the right signal here.
+        or bool(self.func_param_types.keys()
+                & {'AsyncRT_DeviceContext_enqueueHostFunction',
+                   'AsyncRT_DeviceContext_enqueueHostFunctionRange'}))
     if _needs_async_runtime_h and not (self._supported_async or self._supported_async_closures
                                         or self._nested_async_api):
         parts.append('typedef struct MojoAsync MojoAsync;')

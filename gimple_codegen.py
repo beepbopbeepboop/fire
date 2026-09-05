@@ -448,6 +448,18 @@ import gimple_cpp_core as gcc_
 import gimple_gen_exprs as gex
 import gimple_gen_infra as ginf
 import gimple_gen_resolve as grsl
+# Module-level (not function-local): a function-scoped `import gimple_gen_
+# coro as _ggc` inside `_run_pipeline` below, PLUS an identical one in
+# gimple_gen_resolve.py's `_compile_imported_module`, each independently
+# triggered the self-hosting bootstrap's whole-module inlining with no
+# shared "already inlined" bookkeeping between them -- gimple_gen_coro.py's
+# own top-level functions came out TWICE in the self-hosted `mojo.ci` (once
+# flat, once again through the "real imported module with its own globals
+# struct" path), a GCC "redefinition" error. Every other cross-file
+# `gimple_gen_*` import in this project is already module-level for
+# exactly this reason; matching that convention here (and in gimple_gen_
+# resolve.py) fixes it the same way.
+import gimple_gen_coro as _ggc
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
     BUILTIN_VALUE_MAP: dict[str, str] = {
@@ -1906,6 +1918,23 @@ class GimpleGen:
         # exception object with no statically-known class name).
         self._exc_type_ids: dict[str, int] = {}
         self._exc_descendants: dict = {}
+        # Under the A3 stack-switch coroutine backend (MOJO_CORO=stackswitch),
+        # `_coro_resume_fn`/`_coro_destroy_fn` (std.gpu.host.DeviceContext's
+        # detached-async dispatch, device_context.mojo) must resolve to the
+        # stack-switch generic resume/destroy pair (__mojo_gen_resume_once/
+        # __mojo_gen_destroy, runtime/mojo_coro_gen.c — operating on a
+        # `MojoGenerator *` handle) instead of the cpp-path's C++20-coroutine
+        # pair (mojo_coro_resume_generic/destroy_generic, which expect a raw
+        # std::coroutine_handle<> address and would misinterpret a
+        # MojoGenerator* the same way). An instance override (not a class
+        # dict edit) so this never leaks into a cpp-path compile running in
+        # the same process. See bugs/hard/CODEGEN_coro_detached_async_
+        # take_handle.md and gimple_gen_coro.py's own resume_fn/destroy_fn
+        # docstring.
+        if _ggc.enabled():
+            self.BUILTIN_VALUE_MAP = dict(GimpleGen.BUILTIN_VALUE_MAP)
+            self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
+            self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
@@ -3727,7 +3756,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
-    import gimple_gen_coro as _ggc
     stmts, _coro_meta = _ggc.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
     if _coro_meta:

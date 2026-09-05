@@ -26,6 +26,23 @@ from __future__ import annotations
 import os
 
 import mojo_compiler as N
+# `_is_asyncio_sleep_call`/`_is_asyncio_sock_recv_call` used to be defined
+# a second time here, byte-for-byte the same structural check as gimple_
+# exprtypes.py's own (the cpp-path's identical `asyncio.sleep`/`sock_recv`
+# call-shape recognizers) -- two top-level functions in two different
+# `.py` siblings sharing the exact same bare name collided under a single
+# self-hosted whole-program compile (mojo.py compiling its own source):
+# both got attributed to whichever module's `_compile_imported_module`
+# pass reached the shared-by-bare-name `_imported_func_home` entry FIRST,
+# so both ended up mangled to the SAME C symbol -- a GCC "redefinition"
+# error invisible to every other test (they never inline the whole
+# self-hosting closure the way `make check-selfhost`/`make bootstrap` do).
+# Reusing gimple_exprtypes.py's copy (its own is slightly stricter --
+# rejects a kwarg-form call, which this module's own args[0]-indexing
+# `_await_drive_stmts` needs anyway) fixes the collision at the root
+# instead of just renaming around it, per this project's own "consolidate
+# duplicates" convention.
+from gimple_exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call
 
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
@@ -116,7 +133,22 @@ def _generator_tuple_slots(fn: N.FunctionDef):
         kinds.discard(None)
         if len(kinds) > 1:
             return None            # inconsistent slot type across yields
-        k = next(iter(kinds)) if kinds else None
+        # `next(iter(kinds))` (the one-liner this replaces) hits self-
+        # hosted compilation's `next()` support (gimple_gen_calls.py),
+        # which only recognizes a Comprehension argument or a real
+        # `MojoGenerator *` handle -- `next(iter(<a set>))` falls through
+        # both and silently lowered to a call to a NEVER-DEFINED bare C
+        # `next` symbol, an undefined-symbol LINK failure only surfaced
+        # once `make check-selfhost`'s whole-program link actually reaches
+        # this function (invisible to every other test, since none of
+        # them link this compiler's own source). `kinds` has 0 or 1
+        # elements here (the `len(kinds) > 1` check above already ruled
+        # out more), so a plain loop extracts the same single element (or
+        # None) without needing next()/iter() at all.
+        k = None
+        for _k in kinds:
+            k = _k
+            break
         if k == 'tuple':
             return None            # nested tuple in a slot -- not v0
         slots.append(_KIND_TO_SLOT_CTYPE[k])
@@ -229,18 +261,6 @@ def _resolve_call_args(name: str, node, cvar: str) -> list:
             resolved[params.index(k)] = v
     return [_rewrite_async_expr(a, cvar) if a is not None else N.IntLiteral(value=0)
             for a in resolved]
-
-
-def _is_asyncio_sleep_call(node) -> bool:
-    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
-            and node.func.member == 'sleep' and len(node.args) == 1
-            and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
-
-
-def _is_asyncio_sock_recv_call(node) -> bool:
-    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
-            and node.func.member == 'sock_recv' and len(node.args) == 1
-            and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
 
 
 def _is_asyncio_run_call(node) -> bool:
@@ -708,6 +728,15 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
         An uncaught exception in the task re-raises here for free (the
         same __mojo_coro_resume contract every other consumer relies on),
         so RaisingTask vs Task needs no separate representation.
+      - a BARE call to a local nested helper (`var coro = wrapper()`,
+        with no `create_task`/`asyncio.run` wrapper at all) -- the
+        "detached async" idiom (bugs/hard/CODEGEN_coro_detached_async_
+        take_handle.md: device_context.mojo's `enqueue_cpu_function`/
+        `enqueue_cpu_range`, which construct the coroutine directly and
+        drive it via `_take_handle()` + an external C dispatch, never
+        `create_task`/`.wait()`). Same qualified-`_start` rewrite as the
+        create_task case, just without the create_task wrapper to unwrap
+        first.
     `cvar`/task_vars are threaded through only so a nested case (not a v0
     shape -- kept out by eligibility) does not crash."""
     if node is None or not hasattr(node, '__dict__'):
@@ -725,6 +754,10 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             args = [_rewrite_asyncio_run(a, cvar, task_vars, local_map)[0] for a in inner.args]
             return _call(f'{local_map[inner.func.name]}_start', args), []
         return _rewrite_asyncio_run(inner, cvar, task_vars, local_map)
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) \
+            and node.func.name in local_map:
+        args = [_rewrite_asyncio_run(a, cvar, task_vars, local_map)[0] for a in node.args]
+        return _call(f'{local_map[node.func.name]}_start', args), []
     pre = []
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
@@ -1086,6 +1119,7 @@ extern int64_t {new_fn} ({new_params});
 extern int64_t __mojo_gen_resume (int64_t, int64_t);
 extern int64_t __mojo_gen_value (int64_t);
 extern void    __mojo_gen_destroy (int64_t);
+extern void    __mojo_gen_resume_once (int64_t);
 extern void    {body_name} (int64_t{body_extra});
 /* value_kind={value_kind} */
 
@@ -1178,6 +1212,13 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_value', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_destroy', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_destroy', 'void')
+    # "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md)
+    # -- the resume_fn half of the `_coro_resume_fn`/`_coro_destroy_fn`
+    # pair BUILTIN_VALUE_MAP substitutes this for under MOJO_CORO=
+    # stackswitch (gimple_codegen.GimpleGen.__init__); `__mojo_gen_destroy`
+    # above already has the exact destroy_fn shape needed as-is.
+    gen.func_param_types.setdefault('__mojo_gen_resume_once', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_resume_once', 'void')
     gen.func_param_types.setdefault('__mojo_gen_last_yield_was_wd', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_last_yield_was_wd', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_yield_tagged', ['int64_t', 'int64_t', 'int64_t'])

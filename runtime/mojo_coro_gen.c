@@ -246,6 +246,27 @@ __mojo_gen_destroy(int64_t gen)
     free(g);
 }
 
+/* "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md):
+   the stack-switch equivalent of mojo_coro_resume_generic (runtime/
+   mojo_async_runtime.cpp) -- a `void (*)(int64_t)` resume primitive that
+   drives a coroutine ONE resume step, matching the signature
+   AsyncRT_DeviceContext_enqueueHostFunction(Range) (runtime/
+   mojo_async_runtime.h) expects for its resume_fn argument. Substituted in
+   for `_coro_resume_fn` by gimple_codegen.py's BUILTIN_VALUE_MAP override
+   when MOJO_CORO=stackswitch (gimple_gen_coro.py); `__mojo_gen_destroy`
+   above already has the exact `void (*)(int64_t)` shape needed for
+   `_coro_destroy_fn` as-is, so no separate wrapper is needed for that one.
+   Callers of this path only ever hand it a coroutine whose body has no
+   internal suspension point of its own (device_context.mojo's `wrapper()`
+   closures, gated by gimple_gen_coro's ordinary async eligibility -- no
+   `await` in the body), so one resume() always drives it to completion,
+   same honesty argument as the cpp-path stub. */
+void
+__mojo_gen_resume_once(int64_t gen)
+{
+    (void)__mojo_gen_resume(gen, 0);
+}
+
 /* ── async def / await bridge (runtime/mojo_async_sched.c) ────────────── */
 #include "mojo_wd.h"
 

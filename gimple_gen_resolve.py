@@ -35,6 +35,17 @@ import gimple_exprtypes
 import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
+# Module-level (not function-local): a function-scoped `import gimple_gen_
+# coro as _ggc` here and gimple_codegen.py's `_run_pipeline` each triggered
+# the self-hosting bootstrap's whole-module inlining independently, with no
+# shared "already inlined" bookkeeping between the two distinct call sites
+# -- gimple_gen_coro.py's own top-level functions came out TWICE in the
+# self-hosted `mojo.ci` (once flat, once again through the "real imported
+# module with its own globals struct" path), a GCC "redefinition" error.
+# Every other cross-file `gimple_gen_*` import in this project is already
+# module-level for exactly this reason; matching that convention here (and
+# in gimple_codegen.py) fixes it the same way.
+import gimple_gen_coro as _ggc
 
 def _locally_bound_names(gen, body: list, params: list = None) -> set:
     """Names bound as a LOCAL variable anywhere in this statement list,
@@ -662,7 +673,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the gimple_cpp_* path while the root module's went through
                 # gimple_gen_coro -- a split that leaves the client .c
                 # referencing symbols nobody defines.
-                import gimple_gen_coro as _ggc
                 stmts, _ss_meta = _ggc.lower(stmts)
                 if _ss_meta:
                     _ggc.register(temp_gen, _ss_meta)
