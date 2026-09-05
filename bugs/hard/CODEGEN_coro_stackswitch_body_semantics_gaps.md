@@ -3,17 +3,67 @@ via the §5.5 cutover's real behavioral test suite
 
 ## Status
 
+**Partially fixed 2026-09-05** (see per-issue markers below):
+
+- **#1 (`finally` in a loop over-runs its counter) — FIXED.**
+- **#2 (`finally` after a `yield` following an early consumer `break`) — FIXED.**
+  Both had the same single root cause in `gimple_gen_stmts.py`'s
+  `_gen_stmt_TryStmt` (NOT in `gimple_gen_coro.py` or the A3 runtime —
+  the try/finally lowering is plain ordinary codegen that the
+  stack-switch model runs verbatim on the coroutine's own real stack).
+  On the normal (no-exception, no-early-return) fall-through out of a
+  `try` body, control fell straight through the `bb_finally:` label
+  (running the finally body once) and THEN hit the `elif not
+  _had_terminal:` branch that re-ran the finally body inline — so every
+  plain `try: … finally: …` that fell off the end of its try body ran
+  its `finally` **twice**. Standalone that just double-counts whatever
+  the finally mutates (#1: `cleanups` 3→5); wrapped in a `while` loop
+  whose loop variable is bumped in the finally it also **skips loop
+  iterations** (#2: `i` jumps 0→2 in one pass, so the consumer's
+  `break` at `x == 2` fires before `1` is ever yielded). A
+  `try/else/finally` fall-through ran the finally **three** times
+  (fall-through into `bb_finally`, inline re-run, then again at the end
+  of the `else` block). Fixed by giving the normal path an explicit
+  jump over the early-return `finally` block to a single dedicated
+  normal-path `finally` landing pad (or straight to `bb_else`, which
+  runs the finally itself), so `finally` now runs exactly once on every
+  path. Regression tests: `generator_try_except_finally_runs_every_time`,
+  `generator_try_finally_survives_early_break` (the two repros below),
+  plus new `generator_try_else_finally_counts_once` and
+  `generator_try_finally_early_return_runs_once` in
+  `test_gimple_generator_runner.py`. Full CLAUDE.md gate (0–4) re-run
+  green; stdlib dylib skip count 0→0, `compile_stdlib.py` U-count
+  unchanged.
+
+- **#3 — NARROWED 2026-09-05.** The *lambda* half is fixed: the ordinary
+  codegen path lifts a `lambda` to a top-level C function, so a lambda
+  value stored in a local and called later now works for 0-/1-/2-param
+  lambdas, a lambda re-bound per if/else branch, and a lambda passed as
+  an argument (see `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
+  md`'s 2026-09-05 status + the new `generator_*_lambda_*` regression
+  tests). What remains is a **bound-method value** stored in a local
+  then called (`getpos = self.tell; ... getpos()`) — this is
+  codegen-wide (reproduces in a plain non-generator method, prints only
+  the lambda-branch result and silently drops the bound-method branch),
+  not generator-specific. Needs a real first-class bound-method-value
+  representation in the ordinary codegen path. `MOJO_CORO=cpp` remains a
+  correct fallback for that shape.
+
+- **#4 (heterogeneous `.pop()` + `isinstance` re-read each iteration) —
+  STILL OPEN.** Not attempted here (a narrower, likely single-site
+  `isinstance`/`.pop()` type-tag re-read bug — good next target).
+
+`MOJO_CORO=cpp` (escape hatch) remains a correct implementation for #3
+and #4; §5.6 (deleting the cpp emitter) should still wait on those two.
+
+--- original filing (2026-09-05) ---
+
 New, found 2026-09-05 running `test_gimple_generator_runner.py` against
 the §5.5 cutover (doc/COROUTINE.html — `MOJO_CORO=stackswitch` now
-default). Repros captured, some diagnosis, none root-caused to a specific
-line or fixed — filed together (distinct symptoms, likely distinct root
-causes, but all in the same "body semantics the old cpp-path coroutine
-emitter happened to get right independently" bucket as the sibling docs
-on yield-kind inference and iterator-protocol gaps). `MOJO_CORO=cpp`
-(escape hatch) unaffected — all four are real, previously-passing tests
-under the old cpp-path emitter.
+default). `MOJO_CORO=cpp` (escape hatch) unaffected — all four were
+real, previously-passing tests under the old cpp-path emitter.
 
-## 1. `finally` inside a loop over-runs its own counter
+## 1. `finally` inside a loop over-runs its own counter  — FIXED 2026-09-05
 
 ```mojo
 def gen_with_cleanup():
@@ -45,7 +95,7 @@ design goal that `try/finally` "just works" across a real suspend) —
 something about resuming back into the `try` after a `yield` appears to
 re-enter (or double-count) the `finally` on a later loop pass.
 
-## 2. `finally` after a `yield`, following an early consumer `break`
+## 2. `finally` after a `yield`, following an early consumer `break`  — FIXED 2026-09-05
 
 ```mojo
 def gen_finally_early_exit():

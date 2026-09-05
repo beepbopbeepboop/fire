@@ -1,4 +1,51 @@
-# HARD BUG: `lambda` expressions are entirely unsupported inside a compiled generator body
+# HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
+
+## Status (2026-09-05, A3 stack-switch cutover — mostly RESOLVED, one narrow shape left)
+
+The §5.5 A3 stack-switch cutover (doc/COROUTINE.html) changed the whole
+picture: a generator body now desugars to an ordinary function that goes
+through the normal `gimple_gen_*.py` codegen path, and that path lifts a
+`lambda` to a top-level C function (`_lower_LambdaExpr`). So the shapes
+the old `gimple_cpp_core.py` emitter could not represent now just work:
+
+- zero-argument lambda called through a local (`getpos = lambda: 0; ...
+  getpos()`) — **works** (occurrence #1, `Lib/pickletools.py`'s
+  `_genops`, no longer hits any lambda refusal).
+- one- and two-parameter lambda (`lambda m: m+1`, `lambda a, b: a+b`) —
+  **works**.
+- a lambda re-bound on each branch of an `if`/`else`, then called —
+  **works**.
+- a lambda passed directly as a call argument — **works**.
+
+Regression tests for all of the above:
+`generator_zero_arg_lambda_called`, `generator_one_arg_lambda_over_list`,
+`generator_two_arg_lambda_and_lambda_as_arg`,
+`generator_lambda_rebound_per_branch` in
+`test_gimple_generator_runner.py`.
+
+**Still open — occurrence #2 only** (`Tools/c-analyzer/c_common/
+fsutil.py`'s `iter_files`): `get_files = lambda *a, **k: _walk(*a,
+walk=_files, **k)` — a `*args`/`**kwargs`-forwarding lambda. The
+ordinary codegen path miscompiles this shape (broken forward
+declaration), and a `lambda` with a *default* parameter silently reads
+garbage for the defaulted slot. Both are now caught by a new
+eligibility guard in `gimple_gen_coro.py` (`_lambdas_ok`): a generator
+whose body contains a `lambda` with a starred or defaulted parameter is
+refused, falling through to the cpp path's own honest refusal instead
+of emitting broken/wrong C. Closing occurrence #2 for real needs the
+separate variadic-forwarding work tracked in
+`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md` —
+and, per the 2026-08-24 note below, `iter_files` has five further
+independently-refused generators regardless, so this alone would not
+unblock that file.
+
+Two other lambda-adjacent gaps found in the same pass are codegen-wide
+(reproduce in a plain non-generator function), so they are NOT this
+doc's scope: a `lambda` with a default parameter (garbage for the
+default), and `sorted(iterable, key=lambda ...)` silently ignoring
+`key=`. A bound-method value stored in a local then called
+(`getpos = self.tell; getpos()`) is likewise codegen-wide — tracked in
+`bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md` #3.
 
 ## Status (re-verified 2026-08-26, independent check against current master `e60b9cd` — unchanged)
 

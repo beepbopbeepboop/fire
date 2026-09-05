@@ -434,6 +434,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
 
+    # `UnsafePointer[T].alloc(n)` / `OwnedPointer[T].alloc(n)` etc. — the
+    # static heap-allocation constructor, whose receiver is the type
+    # subscript `UnsafePointer[T]` (a SubscriptExpr), not a value. Checked
+    # before the receiver is lowered: lowering `UnsafePointer[T]` as an
+    # ordinary subscript yields a bogus `mojo_list_get_int` temp and
+    # `.alloc()` then falls through to the generic scalar-method stub (see
+    # bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md).
+    if (func.member == 'alloc'
+            and isinstance(func.obj, gimple_ctypes.SubscriptExpr)
+            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)
+            and func.obj.obj.name in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer')):
+        return gen._lower_pointer_alloc(node)
+
     # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()` — like
     # the existing `sys.platform` comptime-constant special case just
     # below (obj.name == 'sys'), these are genuinely string-returning
@@ -627,6 +640,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 "back to interpreting this module from source instead")
         tg_api['base'] = api['base']
         tg_api['value_ctype'] = api['value_ctype']
+        if api.get('stackswitch'):
+            tg_api['stackswitch'] = True
         handle_i64 = gen._new_val('int64_t', f"(int64_t){handle}")
         gen._emit(f"  mojo_list_append_int ({_wait_obj.name}, {handle_i64});")
         return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
@@ -651,6 +666,34 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and func.member == 'wait' and not node.args):
         tg_api = gen._taskgroup_var_api[_wait_obj.name]
         list_expr = _wait_obj.name
+        if tg_api.get('stackswitch'):
+            # A3 stack-switch backend: each handle in the group is a
+            # MojoGenerator constructed (not scheduled) by its
+            # `{base}_start` call -- drive each to completion via
+            # `__mojo_async_run_gen` (the same drive the single-task
+            # stack-switch `.wait()` rewrite uses, see gimple_gen_coro.
+            # _rewrite_asyncio_run), then destroy it. No cpp-scheduler
+            # drain (`mojo_async_run_until_complete`) and no `{base}_
+            # translate_pending_exc` (the stack-switch trampoline emits
+            # neither) -- exception propagation matches the single-task
+            # stack-switch path exactly (via the resume contract).
+            len64 = gen._new_val('int64_t', f"mojo_list_len ({list_expr})")
+            idx64 = gen._new_val('int64_t', "(int64_t)0")
+            bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+            gen._emit(f"  goto {bb_cond};")
+            gen._emit_label(bb_cond)
+            cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
+            gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+            gen._emit_label(bb_body)
+            raw_h = gen._new_val('int64_t', f"mojo_list_get_int ({list_expr}, {idx64})")
+            gen._emit(f"  __mojo_async_run_gen ({raw_h});")
+            gen._emit(f"  __mojo_gen_destroy ({raw_h});")
+            one64 = gen._new_val('int64_t', "(int64_t)1")
+            nxt = gen._new_val('int64_t', f"{idx64} + {one64}")
+            gen._emit(f"  {idx64} = {nxt};")
+            gen._emit(f"  goto {bb_cond};")
+            gen._emit_label(bb_after)
+            return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
         gen._emit(f"  mojo_async_run_until_complete ();")
         if tg_api['base'] is not None:
             base = tg_api['base']
@@ -1629,6 +1672,65 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if ot == 'MojoBoundMethod *':
         ot, ov = _auto_invoke_bound_method_value(gen, ov)
     method = func.member
+
+    # ── Awaitable protocol (Future/Event) — sync (non-coroutine) call sites ──
+    # gimple_gen_coro.py's `_rewrite_async_expr` already rewrites
+    # `create_future()` / `Event()` / `.set_result(v)` / `.set()` / `.done()`
+    # / `.is_set()` / `.clear()` to the A3 runtime shims
+    # (runtime/mojo_coro_gen.c) INSIDE an async coroutine body. asyncio's own
+    # ORDINARY methods touch the very same int64_t handles from plain
+    # synchronous code — `Queue.put_nowait` → `_wakeup_next(waiters)` →
+    # `waiter.set_result(None)`, `Queue.__init__`'s `self._finished =
+    # Event()` / `self._finished.set()` — so the identical rewrite has to
+    # fire here too or the handle is treated as an unknown-method scalar
+    # stub and the two paths disagree (anchor: bugs/COMPILE_FAIL_asyncio_
+    # queues.md gap 1).
+    #
+    # Safety scoping:
+    #   * Only when this module actually emitted a stack-switch coroutine
+    #     unit (`_stackswitch_coro_c_units`) — that is exactly the condition
+    #     under which gimple_module_gen.py emits the `extern` decls for
+    #     these shims, and no coroutine-free module ever needs them.
+    #   * Never when the receiver is a compiled struct that itself defines a
+    #     same-named method (a real user class with its own `.set()` /
+    #     `.done()` still dispatches normally below).
+    # The Future/Event API names are otherwise unambiguous: no `.mojo`
+    # source and no non-asyncio stdlib module calls them (grep-confirmed),
+    # and the runtime shims are callable from any C context.
+    if (os.environ.get('MOJO_CORO', 'stackswitch') != 'cpp'
+            and getattr(gen, '_stackswitch_coro_c_units', None)
+            and not getattr(node, 'kwargs', None)):
+        _fut_sn = (gimple_exprtypes._struct_name_of(ot)
+                   if isinstance(ot, str) and ot.endswith(' *') else None)
+        _fut_user_method = bool(
+            _fut_sn and _fut_sn in gen.struct_field_types
+            and method in (gen.struct_field_types.get(_fut_sn) or ()))
+        if not _fut_user_method:
+            if method == 'create_future' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_new', [])
+            if method in ('Future', 'Event') and not node.args:
+                shim = '__mojo_event_new' if method == 'Event' else '__mojo_future_new'
+                return 'int64_t', gen._call_expr('int64_t', shim, [])
+            if method in ('set', 'clear') and not node.args:
+                shim = '__mojo_event_set' if method == 'set' else '__mojo_event_clear'
+                gen._emit_call('void', '', shim, [('int64_t', ov)])
+                return 'void', ''
+            if method == 'is_set' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_event_is_set', [('int64_t', ov)])
+            if method == 'done' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_done', [('int64_t', ov)])
+            if method == 'result' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_result', [('int64_t', ov)])
+            if method == 'set_result' and len(node.args) == 1:
+                # `set_result(None)` carries a 0 payload; the awaiting
+                # coroutine reads it back via __mojo_future_result. _emit_call
+                # runs the backend's standard →int64_t arg coercion (the same
+                # path the shim's registered int64_t param type drives on the
+                # async side).
+                _at, _av = gen.lower_expr(node.args[0])
+                gen._emit_call('void', '', '__mojo_future_set_result',
+                               [('int64_t', ov), (_at, _av)])
+                return 'void', ''
 
     # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct
     # enclosing the current classmethod (current_func_name is e.g.

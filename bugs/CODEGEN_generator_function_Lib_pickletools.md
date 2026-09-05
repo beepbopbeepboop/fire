@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, clusters A + B)
+
+`_genops` is the module's only generator. Still refused:
+
+```
+_genops: a call to unresolved callee 'getpos(...)' ... in a compiled
+generator/coroutine body
+```
+
+`getpos` is a local bound to either `data.tell` (a bound method) or
+`lambda: None`, then called — an opaque callable-value local
+(**cluster A**, shared with `glob`/`os`/`test_frame`). `_genops` also
+`yield opcode, arg, pos, getpos()` — a heterogeneous 4-tuple yield
+(**cluster B**, shared with `modulefinder`/`os.walk`/`test_string`).
+Both clusters are feature-sized; no incremental step landed this session.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

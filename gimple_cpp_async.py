@@ -36,6 +36,7 @@ import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
 import gimple_gen_exprs as gex
 import gimple_cpp_core as gcc_
+import gimple_gen_coro
 
 def _cpp_declared_type(gen, node) -> str | None:
     """C++ type of a node for `in`/`not in` dispatch, when it is a plain
@@ -2175,6 +2176,25 @@ def _resolve_and_start_task(gen, inner) -> tuple[str, dict] | None:
     one shared implementation, not two independently-maintained
     copies of this same, fairly intricate sequence."""
     _bracket_vals: dict = {}
+    # A3 stack-switch backend (MOJO_CORO=stackswitch): `create_task(f())`
+    # / `tg.create_task(f())` for a nested `@parameter async def` was
+    # already rewritten by gimple_gen_coro to a bare `{base}_start(args)`
+    # call (with any mutable-closure box handles already threaded onto
+    # `args`) -- the qualified base is registered in `gen._generator_api`
+    # (keyed by base, since a nested def's bare name is scoped). Construct
+    # the coroutine handle via that start call; the task is DRIVEN at
+    # `.wait()` time (`__mojo_async_run_gen`), not scheduled on the cpp
+    # scheduler, so there is nothing to schedule here.
+    if (gimple_gen_coro.enabled() and isinstance(inner, gimple_ctypes.CallExpr)
+            and isinstance(inner.func, gimple_ctypes.IdentExpr)
+            and inner.func.name.endswith('_start')
+            and inner.func.name[:-len('_start')] in getattr(gen, '_generator_api', {})):
+        _ss_base = inner.func.name[:-len('_start')]
+        _ss_g_api = gen._generator_api[_ss_base]
+        _t, _ss_handle = gen.lower_expr(inner)
+        return _ss_handle, {'base': _ss_base,
+                            'value_ctype': _ss_g_api.get('value_ctype', 'int64_t'),
+                            'stackswitch': True}
     if (isinstance(inner, gimple_ctypes.CallExpr) and isinstance(inner.func, gimple_ctypes.SubscriptExpr)
             and isinstance(inner.func.obj, gimple_ctypes.IdentExpr) and not getattr(inner, 'kwargs', None)):
         base_name = inner.func.obj.name

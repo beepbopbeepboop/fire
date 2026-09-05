@@ -113,6 +113,40 @@ static int reg_take(Reg *tab, int *n, int fd, MojoCoro **out)
     return 0;
 }
 
+/* ── future-wait table: (future handle -> parked outermost MojoCoro*) ──── */
+typedef struct { int64_t fut; MojoCoro *c; } FutWait;
+static FutWait *g_futwaits;
+static int g_futwaits_n, g_futwaits_cap;
+
+static void futwait_add(int64_t fut, MojoCoro *c)
+{
+    /* de-dup: a re-driven coro that re-parks on the same handle */
+    for (int i = 0; i < g_futwaits_n; i++)
+        if (g_futwaits[i].fut == fut && g_futwaits[i].c == c) return;
+    if (g_futwaits_n == g_futwaits_cap) {
+        g_futwaits_cap = g_futwaits_cap ? g_futwaits_cap * 2 : 16;
+        g_futwaits = realloc(g_futwaits, g_futwaits_cap * sizeof(*g_futwaits));
+    }
+    g_futwaits[g_futwaits_n++] = (FutWait){fut, c};
+}
+
+/* Called by __mojo_future_set_result / __mojo_event_set (mojo_coro_gen.c)
+   when a handle resolves: move every coroutine parked on it to ready. */
+void __mojo_async_notify_future(int64_t fut)
+{
+    int w = 0;
+    for (int i = 0; i < g_futwaits_n; i++) {
+        if (g_futwaits[i].fut == fut) {
+            ready_push(g_futwaits[i].c);
+        } else {
+            g_futwaits[w++] = g_futwaits[i];
+        }
+    }
+    g_futwaits_n = w;
+}
+
+int __mojo_async_futwaits_pending(void) { return g_futwaits_n > 0; }
+
 /* ── SEAM A ─────────────────────────────────────────────────────────── */
 
 void __mojo_async_init(void)
@@ -120,6 +154,7 @@ void __mojo_async_init(void)
     g_ready_n = g_ready_head = 0;
     g_timers_n = 0;
     g_nreads = g_nwrites = 0;
+    g_futwaits_n = 0;
     if (g_kq >= 0) { close(g_kq); g_kq = -1; }
 }
 
@@ -167,6 +202,14 @@ static void drive_once(MojoCoro *c)
         __mojo_async_register_read((int)payload, c);
     } else if (kind == MOJO_WD_WRITE) {
         __mojo_async_register_write((int)payload, c);
+    } else if (kind == MOJO_WD_FUTURE) {
+        /* Parked on a Future/Event handle (payload). Record it; the
+           handle's set_result/set will call __mojo_async_notify_future to
+           move `c` back to ready. If nothing ever resolves it and the loop
+           otherwise drains, the run loop terminates with the waiter still
+           parked (asyncio's "Event loop stopped before Future completed" --
+           a genuine program bug, no longer a hang). */
+        futwait_add(payload, c);
     } else {
         /* MOJO_WD_READY or unknown -- just reschedule immediately rather
            than drop the task. */

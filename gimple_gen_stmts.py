@@ -209,7 +209,48 @@ def _annotation_dict_nested_val_type(gen, ann) -> str | None:
     return None
 
 
+def _try_bind_list_iter(gen, name, value):
+    """`it = iter(<list-expr>)` — bind `it` to the underlying list plus a
+    companion int64_t cursor temp so `next(it)` advances a genuine position
+    and a following `for x in it:` resumes from it (single-pass Python
+    iterator semantics), rather than modelling `iter()` as a bare identity
+    (which restarts every scan from element 0 and leaves `next()` with no
+    real lowering at all). Mirrors gimple_cpp_core.py's `_cpp_list_iter_
+    cursor` for the old cpp coroutine path; here it also covers an A3
+    stack-switch generator body, whose statements go through this ordinary
+    codegen. Returns True iff it claimed the assignment."""
+    if not (isinstance(name, str) and name and ',' not in name
+            and isinstance(value, CallExpr)
+            and isinstance(value.func, IdentExpr)
+            and value.func.name == 'iter'
+            and len(value.args) == 1 and not getattr(value, 'kwargs', None)
+            and not gen._locally_binds_name('iter')
+            and name not in gen.var_types
+            and name not in gen._global_var_types):
+        return False
+    at, av = gen.lower_expr(value.args[0])
+    at = gen._get_actual_type(at, av)
+    if at == 'MojoList *':
+        list_val = av
+    elif at in ('int', 'int64_t', 'void *'):
+        list_val = gen._new_val('MojoList *', f"(MojoList *){gen._to_int64(at, av)}")
+    else:
+        return False
+    elem = gen._elem_of(av)
+    gen._declare_var(name, 'MojoList *')
+    gen._emit(f"  {gen._write_dest(name)} = {list_val};")
+    cname = gen._cname(name)
+    cur = gen._new_temp('int64_t')
+    gen._emit(f"  {cur} = (int64_t)0;")
+    gen._list_iter_cursor[cname] = {'list': cname, 'cursor': cur, 'elem': elem}
+    if elem and elem != 'int64_t':
+        gen._elem_types[cname] = elem
+    return True
+
+
 def _gen_stmt_VarDecl(gen, node):
+    if node.value is not None and _try_bind_list_iter(gen, node.name, node.value):
+        return
     # `var name = value` where `name` is heap-boxed (some nested
     # closure captures it BY REFERENCE -- see _seed_mut_captured_
     # local_types's docstring): `_declare_var` already emitted the
@@ -507,7 +548,11 @@ def _assign_target(gen, tgt, et, ev):
             gen._declare_var(tgt.name, hint or et)
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
-    elif isinstance(tgt, gimple_ctypes.TupleExpr):
+    elif isinstance(tgt, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        # A list-pattern target (`[a] = ...` / `[a, b] = ...`) is
+        # semantically identical to the tuple-pattern spelling (`a, = ...`
+        # / `a, b = ...`) — same `.elements` shape, same unpack — so it
+        # shares this branch exactly rather than a parallel implementation.
         # ev is itself an iterable; view it as a MojoList* and unpack by index.
         lp = ev if et == 'MojoList *' else gen._new_temp('MojoList *')
         if et != 'MojoList *':
@@ -559,8 +604,15 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
 
 
 def _gen_stmt_AssignStmt(gen, node):
+    if (isinstance(node.target, gimple_ctypes.IdentExpr)
+            and getattr(node, 'value', None) is not None
+            and _try_bind_list_iter(gen, node.target.name, node.value)):
+        return
     # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
-    if isinstance(node.target, gimple_ctypes.TupleExpr):
+    # A list-pattern target (`[a] = ...`, `[a, b] = ...`) is the same
+    # construct with the other Python spelling — identical `.elements`
+    # shape — and is decomposed by the identical logic below.
+    if isinstance(node.target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         targets = node.target.elements
         # Extended unpacking: one target may be starred (`*row, last =
         # data` / `first, *rest = data` — real Python syntax, parses as
@@ -614,8 +666,9 @@ def _gen_stmt_AssignStmt(gen, node):
                 sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
                 gen._assign_target(tgt, set_et, sev)
             return
-        if isinstance(node.value, gimple_ctypes.TupleExpr) and len(node.value.elements) == len(targets):
-            # RHS is a tuple literal — lower and assign each element individually
+        if isinstance(node.value, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)) \
+                and len(node.value.elements) == len(targets):
+            # RHS is a tuple/list literal — lower and assign each element individually
             for tgt, rhs_expr in zip(targets, node.value.elements):
                 et, ev = gen.lower_expr(rhs_expr)
                 gen._assign_target(tgt, et, ev)
@@ -3137,6 +3190,7 @@ def _gen_stmt_TryStmt(gen, node):
     _had_terminal = False
     _return_value = None
     _return_type = None
+    _saw_return = [False]   # list so the nested intercepted_emit can set it
     for s in node.body:
         # Temporarily override _emit to intercept return statements
         original_emit = gen._emit
@@ -3150,6 +3204,7 @@ def _gen_stmt_TryStmt(gen, node):
                     _return_type = 'int64_t'  # Simplified
                 else:
                     _return_value = None
+                _saw_return[0] = True
                 # An early return leaves the try block's protected region
                 # just as much as falling off the end of it does — it
                 # must pop the exception stack (_mojo_exc_top) the same
@@ -3195,28 +3250,56 @@ def _gen_stmt_TryStmt(gen, node):
             _had_terminal = True
             break
 
-    # Emit finally body
+    # Normal fall-through out of the try body: no exception, no early
+    # return. `finally` must run EXACTLY ONCE here, then control continues
+    # to the `else` clause (which runs its own `finally` afterwards) or
+    # straight to `bb_after`. Crucially this path must NOT fall into the
+    # early-return `finally` block emitted just below — jump over it.
+    # (The previous structure let control fall through the `bb_finally`
+    # label AND then re-run the finally body inline, so every plain
+    # `try: ... finally: ...` that fell off the end of its try body ran
+    # its finally twice — over-counting any counter the finally mutated,
+    # and, in a `while` loop around the try, skipping loop iterations.)
+    if not _had_terminal:
+        gen._emit("  mojo_exc_pop ();")
+        if bb_else:
+            gen._emit(f"  goto {bb_else};")
+        elif node.finally_body:
+            gen._emit(f"  goto {bb_finally_done};")
+        else:
+            gen._emit(f"  goto {bb_after};")
+
+    # Early-`return`-inside-try path: intercepted_emit rewrote each
+    # `return X` in the body to `mojo_exc_pop (); goto {bb_finally};`.
+    # Run `finally`, then perform the deferred return.
     if bb_finally:
         gen._emit_label(bb_finally)
         for s in node.finally_body:
             gen.gen_stmt(s)
-        gen._emit(f"  goto {bb_finally_done};")
+        if _return_value is not None:
+            gen._emit(f"  return {_return_value};")
+        elif _saw_return[0]:
+            # A valueless `return;` was intercepted in the try body. Only
+            # a void-returning body (a generator body is one) lowers a
+            # bare `return` to a literal `return;` — _gen_stmt_ReturnStmt
+            # already rewrites the non-void case to `return 0;`/a typed
+            # temp, which takes the branch above. So emitting `return;`
+            # here is correct and needed: it ends the (generator) body.
+            gen._emit("  return;")
+        else:
+            # Dead code: no `return` at all in the try body, so nothing
+            # jumps to bb_finally. Fall through to bb_after rather than
+            # emitting a bare `return;` that would fail -Wreturn-mismatch
+            # in a non-void function (real: device_graph.mojo's `region`).
+            gen._emit(f"  goto {bb_after};")
 
-    # After finally: do the actual return if needed. Only re-emit the
-    # return here when a finally deferred it (see intercepted_emit above)
-    # — without a finally_body, the interceptor already emitted the real
-    # return statement directly, and doing it again here would duplicate
-    # it (unreachable dead code, not a compile error, but still wrong).
-    if bb_finally_done:
+    # Normal-path `finally` landing pad (only when there is no `else`
+    # clause — with an `else`, bb_else runs the finally itself).
+    if not _had_terminal and node.finally_body and not bb_else:
         gen._emit_label(bb_finally_done)
-    if _had_terminal and _return_value is not None and node.finally_body:
-        gen._emit(f"  return {_return_value};")
-    elif not _had_terminal:
-        gen._emit("  mojo_exc_pop ();")
-        if bb_finally:
-            for s in node.finally_body:
-                gen.gen_stmt(s)
-        gen._emit(f"  goto {bb_else if bb_else else bb_after};")
+        for s in node.finally_body:
+            gen.gen_stmt(s)
+        gen._emit(f"  goto {bb_after};")
 
     # Reset terminal state for caller
     if not _had_terminal:

@@ -1,8 +1,62 @@
 # HARD BUG: A3 stack-switch coroutines have no mutable closure capture into a nested `async def`
 
-## Status (2026-09-04, partial fix landed — single-level capture works, cross-closure stress case still open)
+## Status (2026-09-05, cross-closure stress case (item 4) NOW LANDED)
 
-Items 1-3 below are DONE and verified end-to-end (real compile + link +
+Items 1-3 AND item 4 (the cross-closure `TaskGroup` stress shape) are
+DONE and verified end-to-end (real compile + link + run, real stdout)
+under `MOJO_CORO=stackswitch` — see `test_coro_nested_async_capture.py`
+(`test_simple_with_lock_guard_single_task`,
+`test_cross_closure_taskgroup_stress` for the 10,000-task shape,
+`test_cross_closure_single_scope_taskgroup`).
+
+Item 4 fix (2026-09-05):
+1. `_rewrite_asyncio_run_stmts` now MERGES the enclosing scope's active
+   local_map into a further-nested sibling function's own, instead of
+   discarding it — a hoisted nested async (`inc`) is still in lexical
+   scope inside a sibling `def caller()`, so `caller`'s own
+   `tg.create_task(inc())` gets the same qualified-`{base}_start` rename.
+2. `_thread_box_through_siblings` (new): after boxing a captured local,
+   every ordinary function nested in the enclosing scope that
+   transitively calls the hoisted async — or references a captured
+   local — receives each box handle as its own hidden trailing `Int`
+   param, its calls to the async / other threaded siblings get the
+   matching trailing argument, its own direct reads/writes of a
+   captured name are rewritten through the box, and the call to it from
+   the enclosing body forwards the enclosing scope's own box local.
+3. The A3 stack-switch `TaskGroup.create_task(...)` / `.wait()`
+   intrinsics: `_resolve_and_start_task` (gimple_cpp_async.py) now
+   recognizes a coro-rewritten `{base}_start(args)` call, and
+   `_lower_method_call`'s `tg.wait()` (gimple_gen_methods.py) gained a
+   stack-switch branch that drives each collected `MojoGenerator`
+   handle via `__mojo_async_run_gen` + `__mojo_gen_destroy` (no
+   cpp-scheduler drain, no `{base}_translate_pending_exc` — the
+   stack-switch trampoline emits neither; exception propagation matches
+   the single-task stack-switch `.wait()` path exactly). `test_taskgroup
+   .py` / `test_async_with_lock_guard.py` (cpp-path escape-hatch tests
+   whose harness links the cpp scheduler) now pin `MOJO_CORO=cpp`
+   explicitly.
+
+Full quality gate (steps 0-4) green: check-linkmode 3/3, check-selfhost
+1/1, from-scratch stdlib dylib (0 `skip` lines), compile_stdlib.py
+664/664 (0 unexpected), make bootstrap, plus test_gimple.py 266/0,
+test_module_cache.py 76/0, test_gimple_generator_runner.py 63/4 (4
+pre-existing), test_coro_nested_async_capture.py 4/0.
+
+### Remaining scope (v0 type limits — correctly REFUSED, not miscompiled)
+
+`gimple_cpp_async.py` (the C++20-coroutine path) must stay live for a
+capture that v0's int-literal-scalar box cannot represent —
+`_nested_async_capture_plan` returns `None` and the nested async is not
+hoisted (falls through to the cpp path unchanged, never a miscompile):
+a captured PARAMETER, a non-int-literal initializer, a float/string/
+struct capture, or a mutable outer capture into an async GENERATOR
+(this fix covers only the plain `async def` branch of
+`_hoist_nested_async`, not `_lower_one_async_gen`). These are genuine
+future work, all currently safe.
+
+### Original report (item 1-3 landing, 2026-09-04)
+
+Items 1-3 below were DONE and verified end-to-end (real compile + link +
 run, real stdout) against `test_async_with_lock_guard.py::
 test_simple_with_lock_guard_single_task`'s exact source (see
 `test_coro_nested_async_capture.py`, this project's own new test):
@@ -56,7 +110,7 @@ variables, since its own guard expression (e.g. `lock` in
 `BlockingScopedLock(lock)`) is elided entirely by `_rewrite_async_stmts`
 and must not be misdetected as a (v0-unsupported) capture.
 
-**Still open — item 4, the cross-closure case**
+**Item 4, the cross-closure case — LANDED 2026-09-05 (see Status above)**
 (`test_locks_mojo_shaped_10000_task_stress`):
 
 ```mojo

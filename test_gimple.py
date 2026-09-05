@@ -1326,6 +1326,28 @@ def nth_elem(p: UnsafePointer[Float64], n: Int) -> Float64:
     return q.load()
 """)
 
+    # 128b. UnsafePointer[T].alloc(n) — static heap allocation constructor.
+    # Regression: the `UnsafePointer[T]` type-subscript receiver used to be
+    # lowered as an ordinary value subscript and `.alloc(n)` fell through
+    # to the generic scalar-method stub, so `Int(...)` of the result read
+    # 0 (bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md).
+    test("unsafepointer_alloc_struct", """\
+struct Rec:
+    var tag: Int64
+    var val: Int64
+
+def make() -> Int:
+    var p = UnsafePointer[Rec].alloc(1)
+    p[0].tag = 1
+    var h = Int(p)
+    return h
+
+def make_buf() -> Int:
+    var b = UnsafePointer[Int64].alloc(8)
+    b[0] = 3
+    return Int(b)
+""")
+
     # ── Generics [T] type-param stripping (hard todo) ────────────────────
 
     # 129. Generic function — type params stripped, body works

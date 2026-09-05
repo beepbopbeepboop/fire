@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster B)
+
+`scan_opcodes` is the module's only generator. Still refused:
+
+```
+scan_opcodes: every `yield` must carry a value, and all values must agree
+on one scalar type (int64_t/double/_Bool).
+```
+
+`scan_opcodes` yields `("store", ...)` / `("import", ...)` / `("absolute_import", ...)`
+tuples of varying shape. This is **cluster B** (heterogeneous / tagged
+tuple yield value model), shared with `pickletools._genops`,
+`os.walk`, `test/test_string` `parse`. Genuinely feature-sized: needs a
+tagged-union yield value representation in the A3 generator codegen. No
+viable incremental step landed this session.
+
 ## Status (2026-09-03, later — coroutine-body infra landed; still blocked on the 3 stacked gaps enumerated below)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:

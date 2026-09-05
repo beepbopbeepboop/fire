@@ -1,5 +1,44 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (2026-09-05 — cluster C re-examined under A3; no safe incremental step, unchanged)
+
+Re-examined during the C/D/E cluster pass. Confirmed via fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)`: byte-identical refusal set
+(`_iter_member_`, `_iter_member_by_def_`, `_iter_member_by_value_`).
+
+The A3 path routes a generator body through ordinary `gimple_gen_*`
+codegen, which *does* already resolve `cls.<attr>` (class-body attribute)
+and `cls.<method>()` (real compiled classmethod) inside a classmethod — so
+a genuine, statically-declared `cls` usage would compile. enum.py's three
+methods do not have that shape: `cls._flag_mask_` / `cls._value2member_
+map_` are populated *only* by `EnumMeta.__new__`'s dynamic `classdict[...]
+= ...` metaclass machinery plus post-construction mutation, never as
+literal class-body assignments (root-caused repeatedly below). There is no
+redirect target, and stubbing them is a silent miscompile
+(`_flag_mask_ = 0` -> every Flag iteration yields nothing). Enabling the
+`@classmethod` generator through A3 without also modelling
+dynamic-metaclass-populated attributes just moves the same honest refusal
+from the eligibility gate into ordinary codegen — no net progress, and
+risk of the silent-miscompile failure mode. Feature-sized
+(dynamic-metaclass-attribute modeling); no safe incremental step. Not
+attempted this pass. Doc stays open.
+
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster C)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` after the
+doc/COROUTINE.html §5.5 A3 stack-switch cutover:
+
+- `Flag.__iter__` and top-level `_iter_bits_lsb` now compile (they were
+  part of the old gate's wholesale refusal; the A3 path routes them
+  through ordinary gimple_gen_*.py codegen).
+- **Still refused:** `Flag._iter_member_`, `Flag._iter_member_by_def_`,
+  `Flag._iter_member_by_value_` — each is a `@classmethod` generator whose
+  body references `cls` in an unsupported way (not a class-level-attribute
+  read and not a call to a real compiled classmethod/staticmethod of the
+  enclosing class). This is **cluster C** (`@classmethod`/`cls` generator
+  bodies) — enum is currently the only file in the batch hitting it.
+  Needs `cls`-as-type-token threading into the A3 generator-body codegen.
+
 ## Status (updated 2026-09-03 — re-verified structural, not attempted)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`: byte-identical

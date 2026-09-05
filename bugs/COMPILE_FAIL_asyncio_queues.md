@@ -1,5 +1,122 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (2026-09-05 — gap 1 of 3 CLOSED: sync-method-side Future/Event ops now lower; gaps 2 (Future-typed containers) and 3 (eager task scheduling) still open)
+
+Gap 1 from the entry below ("sync-method-side Future ops") is now
+implemented. `gimple_gen_methods.py`'s `_lower_method_call` grew an
+Awaitable-protocol hook that mirrors `gimple_gen_coro.py`'s
+async-body-only `_rewrite_async_expr` rewrite for ORDINARY (non-coroutine)
+call sites:
+
+- `<recv>.create_future()` → `__mojo_future_new()`
+- `<recv>.Event()` / `<recv>.Future()` → `__mojo_event_new()` /
+  `__mojo_future_new()`
+- `<recv>.set_result(v)` → `__mojo_future_set_result(recv, v)`
+- `<ev>.set()` / `.clear()` / `.is_set()` → `__mojo_event_set/_clear/_is_set`
+- `<fut>.done()` / `.result()` → `__mojo_future_done` / `__mojo_future_result`
+
+Scoping (keeps the synchronous compiled path for non-Future receivers
+untouched, so the stdlib gate stays clean):
+- only when `MOJO_CORO != cpp` AND this module actually emitted a
+  stack-switch coroutine unit (`gen._stackswitch_coro_c_units`) — exactly
+  the condition under which `gimple_module_gen.py` emits the `extern`
+  decls for these shims;
+- never when the receiver is a compiled struct that itself defines a
+  same-named method (a real user `.set()`/`.done()` still dispatches
+  normally). The Future/Event API names are otherwise unambiguous — no
+  `.mojo` source and no non-asyncio stdlib module calls them
+  (grep-confirmed).
+
+Regression test: `test_coro_future_await.py::test_sync_method_side_future_ops`
+(real compile+link+run — a sync struct method calls `create_future()` /
+`.set_result(37)`; an async consumer `await`s the handle and reads 42).
+
+Gate (all identical to the stage-1 baseline): test_gimple 267/0,
+test_module_cache 76/0, test_coro_runtime 20/20, test_coro_future_await
+3/3, compile_stdlib 664/0 (0 unexpected), stdlib dylib 0 skips,
+check-selfhost clean, check-linkmode 3/0, test_gimple_async_runner 2/36
+(pre-existing), test_gimple_generator_runner 80/4 (pre-existing).
+
+**Still open — gaps 2 and 3:**
+2. **Future/Event-typed struct fields + containers.** `self._getters =
+   collections.deque()` (no bracket param, no annotation) still resolves
+   to an opaque `int64_t` field rather than a `MojoList *`, so
+   `self._getters.popleft()` hits the `int64_t.popleft() stubbed`
+   fallback and does NOT round-trip the handle. `.set_result()` on the
+   popped value now lowers correctly (gap 1) but is handed garbage. Needs
+   RHS-driven field typing: `= collections.deque()` / `= deque[T]()` →
+   `MojoList *` field, and `= locks.Event()` → int64_t-handle field (the
+   latter mostly works already since `Event()` now yields `int64_t`).
+   Confirmed with a `deque[Int]`-field repro: the `.append`/`.set_result`
+   sites compile, the `.popleft` site stubs.
+3. **Eager task scheduling.** Unchanged from below — v0 `create_task` is
+   still a lazy passthrough (`_rewrite_asyncio_run`), so two sibling
+   tasks can't run concurrently and a producer can't wake a parked
+   consumer. Needs `create_task` to emit
+   `__mojo_async_schedule_ready(handle->coro)` and `await task^` /
+   `.wait()` to stop re-driving an already-scheduled task. The runtime
+   primitive (`__mojo_async_schedule_ready`, `__mojo_async_notify_future`)
+   already exists and is C-unit-tested.
+
+## Status (2026-09-05 — ADVANCED: the Awaitable/Future protocol now exists in the A3 runtime and the two await SHAPES this doc tracks now compile; NOT closed — three further gaps remain)
+
+Built the real Awaitable protocol on the A3 stack-switch coroutine
+substrate (the feature every prior entry deferred). Landed this pass:
+
+- **Runtime (`runtime/mojo_coro_gen.c` + `mojo_async_sched.c` +
+  `mojo_wd.h`)**: a heap-allocatable `MojoFuture` handle (plain int64_t,
+  like every other cross-boundary coro handle). `__mojo_future_new` /
+  `_set_result` / `_done` / `_result`; `__mojo_event_new` / `_set` /
+  `_is_set` / `_clear` (Event = a latching Future). `await` parks via a
+  new `MOJO_WD_FUTURE` wait-descriptor (payload = the handle), forwarded
+  upward through every enclosing await drive loop exactly like SLEEP/READ;
+  the scheduler records `(handle -> outermost coro)` in a wait table and
+  `__mojo_future_set_result` / `__mojo_event_set` call
+  `__mojo_async_notify_future` to move every parked waiter back onto the
+  ready queue. Real cross-coroutine wakeup + multi-waiter fan-out are
+  unit-tested at the C level in `runtime/test_mojo_future.c` (wired into
+  `test_coro_runtime.py`, 20/20).
+
+- **Codegen (`gimple_exprtypes.py` `_async_quick_eligible` /
+  `_await_call_ctype`; `gimple_gen_coro.py`; `gimple_module_gen.py`
+  externs)**: `_async_quick_eligible` no longer rejects `await <local
+  Future variable>` or `await <expr>.wait()` — the two shapes named all
+  over this doc. `_await_drive_stmts` lowers `await <future handle>` ->
+  `__mojo_async_await_future(__c, h)` and `await <ev>.wait()` ->
+  `__mojo_async_await_event_wait(__c, h)`. Inside an async body,
+  `create_future()` / `Event()` / `.set_result(v)` / `.set()` / `.done()`
+  / `.is_set()` rewrite to the shims (confined to async-coroutine-body
+  lowering — the synchronous compiled path is untouched).
+
+- **Tests**: `test_coro_future_await.py` (real compile+link+run):
+  `await <future>` returns the resolved result box; `await <ev>.wait()`
+  compiles and runs. `test_gimple.py` 267/0, `test_module_cache.py` 76/0,
+  `compile_stdlib.py` 664/0 (0 unexpected), stdlib dylib 0 skips,
+  `make check-selfhost` / `check-linkmode` clean.
+
+**Still missing before queues.py itself compiles+runs end-to-end:**
+1. **Sync-method-side Future ops.** `Queue.put_nowait` / `get_nowait` call
+   `getter.set_result(None)` from ORDINARY (non-async) methods; the
+   `.set_result` -> shim rewrite currently only fires inside async bodies.
+   Needs the same rewrite in the general method/call lowering
+   (`gimple_gen_methods.py` / `gimple_gen_calls.py`).
+2. **Future/Event-typed struct fields + containers.** `self._finished`
+   (an Event field), `self._getters: deque[Future]` — field-type
+   inference has to carry an int64_t-handle type for these, and
+   `self._getters.append(putter)` / `self._getters.popleft()` have to
+   round-trip the handle.
+3. **Eager task scheduling.** v0 `create_task` is a lazy passthrough (no
+   scheduler enqueue), so two sibling tasks can't actually run
+   concurrently — a producer can't wake a consumer that's already parked.
+   The runtime supports it (`__mojo_async_notify_future` +
+   `__mojo_async_schedule_ready`); the codegen needs create_task to emit
+   an eager `__mojo_async_schedule_ready(handle->coro)` AND `await task^`
+   to stop re-driving an already-scheduled task. Filed as the concrete
+   next step here rather than a separate doc since it's this feature's
+   own remaining half.
+
+Infrastructure committed; doc kept open.
+
 ## Status (re-verified 2026-08-26, this session, master fast-forwarded to `9c0e7a8` — DOCUMENTED-NOT-FIXED, unchanged)
 
 Fresh isolated `compile_to_gimple_with_cpp` probe of `Lib/asyncio/

@@ -93,11 +93,167 @@ _SCALARISH = {'Int', 'Int64', 'Int32', 'Bool', 'String', 'StringLiteral', '', No
              'int', 'bool', 'str', 'float'}
 
 
-def _yield_kind(expr) -> str | None:
+_FLOAT_ANNS  = {'Float64', 'Float32', 'Float16', 'Float', 'float', 'Float64Literal'}
+_STRING_ANNS = {'String', 'StringLiteral', 'StringSlice', 'str'}
+_INT_ANNS    = {'Int', 'Int64', 'Int32', 'Int16', 'Int8', 'UInt', 'UInt64', 'UInt32',
+                'Bool', 'int', 'bool'}
+
+
+def _ann_kind(ann) -> str | None:
+    """Map a (purely syntactic) parameter / field type annotation to a yield
+    C kind ('i'/'p'/'d'), or None when the annotation is missing or not a
+    recognised scalar. `ann` is normally the annotation *string* carried in
+    FunctionDef.params / VarDecl.type_ann, but tolerate an IdentExpr node."""
+    if ann is None:
+        return None
+    if not isinstance(ann, str):
+        ann = getattr(ann, 'name', None)
+        if not isinstance(ann, str):
+            return None
+    if ann in _FLOAT_ANNS:
+        return 'd'
+    if ann in _STRING_ANNS:
+        return 'p'
+    if ann in _INT_ANNS:
+        return 'i'
+    return None
+
+
+def _literal_kind(expr) -> str | None:
+    """Kind of a bare literal expression, or ('list', elem_kind) for a list
+    display of homogeneous literal elements. None when not a literal."""
+    if isinstance(expr, (N.StringLiteral, N.TstringLiteral)):
+        return 'p'
+    if isinstance(expr, N.FloatLiteral):
+        return 'd'
+    if isinstance(expr, (N.IntLiteral, N.BoolLiteral)):
+        return 'i'
+    if isinstance(expr, N.ListExpr):
+        eks = {_literal_kind(e) for e in expr.elements}
+        eks.discard(None)
+        if len(eks) == 1:
+            k = list(eks)[0]
+            if isinstance(k, str):
+                return ('list', k)
+    return None
+
+
+def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
+    """Best-effort, purely-syntactic name -> yield-kind map available to the
+    Layer-1 pre-pass (before GimpleGen / struct_field_types exist):
+
+      * `fn`'s own parameter type annotations         -> env['<param>']
+      * `fn`'s local `name = <literal>` / `name = [literals]` assignments
+                                                      -> env['<local>']
+      * for a generator METHOD, the enclosing struct's field types, taken
+        from class-body annotations and from `__init__`'s
+        `self.<f> = <annotated-param-or-literal>` assignments
+                                                      -> env['self.<field>']
+
+    Values are 'i'/'p'/'d', or ('list', elem_kind) for a list-typed local."""
+    env: dict = {}
+    for pname, pann in getattr(fn, 'params', []):
+        k = _ann_kind(pann)
+        if k is not None:
+            env[pname] = k
+    list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
+    for n in _walk(fn):
+        tgt = val = ann = None
+        if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
+            tgt, val, ann = n.target.name, n.value, getattr(n, 'type_ann', None)
+        elif isinstance(n, N.VarDecl):
+            tgt, val, ann = n.name, n.value, n.type_ann
+        if tgt is not None:
+            k = _ann_kind(ann)
+            if k is None:
+                k = _literal_kind(val)
+            if k is None and val is not None:
+                k = _yield_kind(val)          # BinaryOp / literal fallthrough
+            # `it = iter(<list-local>)` — carry the source list's element
+            # kind onto the iterator local, so `yield next(it)` /
+            # `for x in it:` in the body resolve their yield-kind (string /
+            # float payloads would otherwise silently truncate to int64_t).
+            if (k is None and isinstance(val, N.CallExpr)
+                    and isinstance(val.func, N.IdentExpr) and val.func.name == 'iter'
+                    and len(val.args) == 1 and isinstance(val.args[0], N.IdentExpr)):
+                _src = val.args[0].name
+                _sv = env.get(_src)
+                if isinstance(_sv, tuple) and _sv[0] == 'list':
+                    k = _sv
+                elif len(list_elem.get(_src, ())) == 1:
+                    k = ('list', list(list_elem[_src])[0])
+            if isinstance(k, tuple) and k[0] == 'list':
+                list_elem.setdefault(tgt, set()).add(k[1])
+            elif isinstance(k, str):
+                env.setdefault(tgt, k)
+        # `<name>.append(<literal>)` refines a list-local's element kind
+        if (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
+                and n.func.member in ('append', 'insert')
+                and isinstance(n.func.obj, N.IdentExpr) and n.args):
+            ek = _literal_kind(n.args[-1])
+            if isinstance(ek, str):
+                list_elem.setdefault(n.func.obj.name, set()).add(ek)
+    for nm, eks in list_elem.items():
+        if len(eks) == 1 and nm not in env:
+            env[nm] = ('list', list(eks)[0])
+    # `for <v> in <list-local-or-literal>:` binds <v> to the element kind
+    for n in _walk(fn):
+        if not isinstance(n, N.ForStmt):
+            continue
+        tname = n.target.name if isinstance(n.target, N.IdentExpr) \
+            else (n.target if isinstance(n.target, str) else None)
+        if tname is None or tname in env:
+            continue
+        it = n.iterable
+        ek = None
+        if isinstance(it, N.IdentExpr):
+            v = env.get(it.name)
+            if isinstance(v, tuple) and v[0] == 'list':
+                ek = v[1]
+        else:
+            lk = _literal_kind(it)
+            if isinstance(lk, tuple) and lk[0] == 'list':
+                ek = lk[1]
+        if isinstance(ek, str):
+            env[tname] = ek
+    if struct_def is not None:
+        for f in getattr(struct_def, 'fields', []):
+            if isinstance(f, N.VarDecl):
+                k = _ann_kind(getattr(f, 'type_ann', None))
+                if k is not None:
+                    env[f'self.{f.name}'] = k
+        init = next((m for m in getattr(struct_def, 'methods', [])
+                     if isinstance(m, N.FunctionDef) and m.name == '__init__'), None)
+        if init is not None:
+            pann_by_name = {p: a for p, a in init.params}
+            for n in _walk(init):
+                if (isinstance(n, N.AssignStmt)
+                        and isinstance(n.target, N.MemberExpr)
+                        and isinstance(n.target.obj, N.IdentExpr)
+                        and n.target.obj.name == 'self'):
+                    fld = f'self.{n.target.member}'
+                    k = _ann_kind(getattr(n, 'type_ann', None))
+                    if k is None and isinstance(n.value, N.IdentExpr):
+                        k = _ann_kind(pann_by_name.get(n.value.name))
+                    if k is None:
+                        k = _literal_kind(n.value)
+                    if k is not None and not isinstance(k, tuple):
+                        env.setdefault(fld, k)
+    return env
+
+
+def _yield_kind(expr, env: dict | None = None) -> str | None:
     """Best-effort C kind of a yielded value: 'i' int/bool/pointer (the
     yield call always coerces to int64_t, so 'i' vs 'p' only affects the
     <base>_value RETURN type), 'p' string pointer, 'd' float, 'tuple' a
-    tuple literal (not handled yet). None == can't tell (treated as 'i')."""
+    tuple literal (not handled yet). None == can't tell (treated as 'i').
+
+    `env` (from `_static_env`) resolves a bare identifier / `self.<field>` /
+    `<list-local>[idx]` reference to a kind when a syntactic type source is
+    in reach -- without it those all fall through to None (== 'i'), which
+    silently truncated float/string yields (bugs/hard/CODEGEN_coro_
+    stackswitch_yield_kind_identifier_inference.md)."""
+    env = env or {}
     if expr is None:
         return 'i'
     if isinstance(expr, N.TupleExpr):
@@ -108,8 +264,38 @@ def _yield_kind(expr) -> str | None:
         return 'd'
     if isinstance(expr, (N.IntLiteral, N.BoolLiteral)):
         return 'i'
+    if isinstance(expr, N.IdentExpr):
+        v = env.get(expr.name)
+        return v if isinstance(v, str) else None
+    if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
+            and expr.obj.name == 'self':
+        return env.get(f'self.{expr.member}')
+    if isinstance(expr, N.SubscriptExpr) and isinstance(expr.obj, N.IdentExpr):
+        v = env.get(expr.obj.name)
+        if isinstance(v, tuple) and v[0] == 'list':
+            return v[1]
+        return None
+    # `next(it)` / `next(it, default)` where `it` was bound by
+    # `it = iter(<list-local>)` — the element kind carried onto `it` in
+    # `_static_env` (as a ('list', kind) entry) is this expression's kind.
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
+            and expr.func.name == 'next' and expr.args
+            and isinstance(expr.args[0], N.IdentExpr)):
+        v = env.get(expr.args[0].name)
+        if isinstance(v, tuple) and v[0] == 'list':
+            return v[1]
+        return None
+    if isinstance(expr, N.TernaryExpr):
+        tk, ek = _yield_kind(expr.then_val, env), _yield_kind(expr.else_val, env)
+        if tk == ek:
+            return tk
+        if 'p' in (tk, ek):
+            return 'p'
+        if 'd' in (tk, ek):
+            return 'd'
+        return None
     if isinstance(expr, N.BinaryOp):
-        lk, rk = _yield_kind(expr.left), _yield_kind(expr.right)
+        lk, rk = _yield_kind(expr.left, env), _yield_kind(expr.right, env)
         if 'p' in (lk, rk):
             return 'p'
         if 'd' in (lk, rk):
@@ -121,7 +307,7 @@ def _yield_kind(expr) -> str | None:
 _KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'p': 'char *', 'd': 'double', None: 'int64_t'}
 
 
-def _generator_tuple_slots(fn: N.FunctionDef):
+def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
     """If every `yield` in `fn` yields a tuple LITERAL of the same arity,
     return the per-slot C type list; else None. Used only when
     _generator_value_kind says 'tuple'."""
@@ -130,7 +316,7 @@ def _generator_tuple_slots(fn: N.FunctionDef):
         if isinstance(n, N.YieldExpr):
             if not isinstance(n.value, N.TupleExpr):
                 return None
-            shapes.append(tuple(_yield_kind(e) for e in n.value.elements))
+            shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
     if not shapes:
         return None
     ar = len(shapes[0])
@@ -152,12 +338,13 @@ def _generator_tuple_slots(fn: N.FunctionDef):
     return slots
 
 
-def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
+def _generator_value_kind(fn: N.FunctionDef,
+                          env: dict | None = None) -> tuple[str | None, str]:
     kinds = set()
     has_tuple = has_nontuple = False
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
-            k = _yield_kind(n.value)
+            k = _yield_kind(n.value, env)
             kinds.add(k)
             if k == 'tuple':
                 has_tuple = True
@@ -169,7 +356,7 @@ def _generator_value_kind(fn: N.FunctionDef) -> tuple[str | None, str]:
     if has_tuple and has_nontuple:
         return None, 'mixed tuple / non-tuple yields (v0)'
     if has_tuple:
-        return ('tuple', '') if _generator_tuple_slots(fn) is not None \
+        return ('tuple', '') if _generator_tuple_slots(fn, env) is not None \
             else (None, 'tuple yield with inconsistent shape (v0)')
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
@@ -190,7 +377,86 @@ def _yield_from_ok(fn: N.FunctionDef) -> bool:
     return total == bare
 
 
-def _eligible(fn: N.FunctionDef, struct_name: str | None = None) -> tuple[bool, str]:
+def _lambdas_ok(fn: N.FunctionDef) -> bool:
+    """A `lambda` literal in the body is fine -- the desugared body is
+    ordinary code and the ordinary codegen path lifts it to a top-level C
+    function -- EXCEPT for shapes that path miscompiles: a `*args`/
+    `**kwargs` parameter (emits a broken forward declaration) or a
+    parameter with a default value (silently reads garbage for the
+    defaulted slot). Refuse those so the module falls through to the cpp
+    path's own honest refusal instead of emitting broken/wrong C.
+    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
+    for n in _walk(fn):
+        if isinstance(n, N.LambdaExpr):
+            for pname, pdefault in n.params:
+                if pname.startswith('*') or pdefault is not None:
+                    return False
+    return True
+
+
+def _own_property_names(struct_def) -> set:
+    """Names of `@property` getter methods directly on `struct_def`."""
+    out = set()
+    for m in getattr(struct_def, 'methods', []) or []:
+        if isinstance(m, N.FunctionDef) and 'property' in (getattr(m, 'decorators', None) or []):
+            out.add(m.name)
+    return out
+
+
+# struct name -> set of @property getter names, INCLUDING those inherited
+# from base classes defined in the same module. Populated fresh at the top
+# of each lower() call (this pre-pass runs before GimpleGen /
+# self._struct_property_names exist).
+_PROP_NAMES: dict[str, set] = {}
+
+
+def _seed_prop_names(stmts: list) -> None:
+    _PROP_NAMES.clear()
+    defs = {s.name: s for s in stmts if isinstance(s, N.StructDef)}
+    for name, sd in defs.items():
+        seen = set()
+        stack = [name]
+        acc = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in defs:
+                continue
+            seen.add(cur)
+            acc |= _own_property_names(defs[cur])
+            for b in (getattr(defs[cur], 'bases', None) or []):
+                bn = b if isinstance(b, str) else getattr(b, 'name', None)
+                if bn:
+                    stack.append(bn)
+        _PROP_NAMES[name] = acc
+
+
+def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def) -> bool:
+    """Refuse a generator method whose body *calls* the result of a
+    `@property` getter -- `self.<prop>(args)` where `<prop>` is a property
+    (Lib/ipaddress.py's `self._address_class(x)`: `_address_class` is a
+    `@property` returning a class object, then invoked to construct an
+    address). The ordinary call-lowering the A3 body shares mis-lowers this
+    as a direct method call `Struct__prop(self, args)` (arity 2 vs the
+    getter's 1) -- broken C, a real miscompile. No support for a
+    property-returned callable value exists; refuse honestly so the module
+    falls through to the cpp path's own refusal instead of emitting broken
+    code."""
+    if struct_def is None:
+        return True
+    props = _PROP_NAMES.get(struct_name) or _own_property_names(struct_def)
+    if not props:
+        return True
+    for n in _walk(fn):
+        if (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
+                and isinstance(n.func.obj, N.IdentExpr)
+                and n.func.obj.name in ('self', 'cls')
+                and n.func.member in props):
+            return False
+    return True
+
+
+def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
+              struct_def=None) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
@@ -199,6 +465,10 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None) -> tuple[bool, 
         return False, 'decorated'
     if not _yield_from_ok(fn):
         return False, 'yield from with return-value capture (v0)'
+    if not _lambdas_ok(fn):
+        return False, 'lambda with *args/**kwargs or a default parameter'
+    if not _property_call_ok(fn, struct_name, struct_def):
+        return False, 'calls the result of a @property getter (v0)'
     params = fn.params
     if struct_name is not None:
         if not params or params[0][0] != 'self':
@@ -210,7 +480,7 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None) -> tuple[bool, 
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
         return False, 'kwonly params (v0)'
-    kind, why = _generator_value_kind(fn)
+    kind, why = _generator_value_kind(fn, _static_env(fn, struct_def))
     if kind is None:
         return False, why
     return True, ''
@@ -234,6 +504,14 @@ _AW_COUNTER = [0]
 # resolved to the right positional slot. Same-module only, matching
 # _await_target_name's own "bare top-level name" scope.
 _PARAM_NAMES: dict[str, list[str]] = {}
+
+# Local/param names bound from create_task/create_raising_task in the async
+# def CURRENTLY being lowered -- set by _lower_one_async(_gen) before it
+# calls _rewrite_async_stmts, so _await_drive_stmts can tell an `await
+# <coro handle>` (generator-resume drive loop) from an `await <Future
+# handle>` (Awaitable-protocol waiter-list park). Same per-lower() lifetime
+# and single-threaded rationale as _PARAM_NAMES.
+_TASK_VARS: set = set()
 
 
 def _resolve_call_args(name: str, node, cvar: str) -> list:
@@ -305,14 +583,30 @@ def _await_held_handle(node):
     return u if isinstance(u, N.IdentExpr) else None
 
 
+def _is_future_wait_call(node) -> bool:
+    """`await <expr>.wait()` -- an Event.wait() bound-method call, no args.
+    Lowers onto __mojo_async_await_event_wait (the same Future waiter list).
+    `<expr>` must evaluate to an int64_t Event handle."""
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member == 'wait' and not node.args
+            and not getattr(node, 'kwargs', None))
+
+
 def _await_stmt_ok(s, task_vars: set) -> bool:
     inner = s.value.value
     if _is_asyncio_sleep_call(inner) or _is_asyncio_sock_recv_call(inner):
         return True
     if _await_target_name(inner) is not None:
         return True
+    if _is_future_wait_call(inner):
+        return True
     h = _await_held_handle(inner)
-    return h is not None and h.name in task_vars
+    if h is None:
+        return False
+    # `await task^`/`await task` where task came from create_task, OR
+    # `await <future handle>` (Awaitable protocol) -- a bare local/param
+    # name that isn't a known task var is treated as a Future handle.
+    return True
 
 
 def _scan_task_vars(fn: N.FunctionDef) -> set:
@@ -455,6 +749,35 @@ def _rewrite_async_expr(node, cvar: str):
     called on one."""
     if node is None or not hasattr(node, '__dict__'):
         return node
+    # Awaitable protocol: rewrite Future/Event operations to the A3 runtime
+    # shims (runtime/mojo_coro_gen.c). Confined to async-coroutine-body
+    # lowering -- the ordinary synchronous compiled path is untouched.
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr) \
+            and not getattr(node, 'kwargs', None):
+        _m = node.func.member
+        _obj = node.func.obj
+        if _m == 'set_result' and len(node.args) == 1:
+            return _call('__mojo_future_set_result',
+                         [_rewrite_async_expr(_obj, cvar),
+                          _rewrite_async_expr(node.args[0], cvar)])
+        if _m == 'create_future' and not node.args:
+            return _call('__mojo_future_new', [])
+        if _m == 'set' and not node.args:
+            return _call('__mojo_event_set', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'is_set' and not node.args:
+            return _call('__mojo_event_is_set', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'done' and not node.args:
+            return _call('__mojo_future_done', [_rewrite_async_expr(_obj, cvar)])
+        if _m in ('Future',) and not node.args:
+            return _call('__mojo_future_new', [])
+        if _m in ('Event',) and not node.args:
+            return _call('__mojo_event_new', [])
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) \
+            and not node.args and not getattr(node, 'kwargs', None):
+        if node.func.name == 'create_future':
+            return _call('__mojo_future_new', [])
+        if node.func.name == 'Event':
+            return _call('__mojo_event_new', [])
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
@@ -495,6 +818,26 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
         rv = f'__ar{_AW_COUNTER[0]}'
         stmts = [N.VarDecl(name=rv, type_ann=None,
                            value=_call('__mojo_async_await_sock_recv', [_c_ident(cvar), fd]))]
+        return stmts, _c_ident(rv)
+    # Awaitable protocol: `await <event>.wait()` -- park on the Event's
+    # waiter list (same list as a Future's; runtime/mojo_coro_gen.c).
+    if _is_future_wait_call(inner):
+        obj = _rewrite_async_expr(inner.func.obj, cvar)
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_event_wait', [_c_ident(cvar), obj]))]
+        return stmts, _c_ident(rv)
+    # Awaitable protocol: `await <future handle>` -- a bare local/param name
+    # that is NOT a create_task handle is a Future; park on its waiter list.
+    _hh = _await_held_handle(inner)
+    if (_hh is not None and _await_target_name(inner) is None
+            and _hh.name not in _TASK_VARS):
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_future',
+                                       [_c_ident(cvar), _c_ident(_hh.name)]))]
         return stmts, _c_ident(rv)
     name = _await_target_name(inner)
     if name is not None:
@@ -673,6 +1016,8 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None)
     for i, (pname, _pann) in enumerate(fn.params):
         prologue.append(N.VarDecl(name=pname, type_ann=None,
                                   value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
+    _TASK_VARS.clear()
+    _TASK_VARS.update(_scan_task_vars(fn))
     new_body = prologue + _rewrite_async_gen_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
     body_fd = N.FunctionDef(name=body_name, params=[(_CVAR, 'Int')], return_type=None, body=new_body)
     body_fd.is_generator = False
@@ -696,6 +1041,8 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None) -> 
     for i, (pname, _pann) in enumerate(fn.params):
         prologue.append(N.VarDecl(name=pname, type_ann=None,
                                   value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
+    _TASK_VARS.clear()
+    _TASK_VARS.update(_scan_task_vars(fn))
     new_body = prologue + _rewrite_async_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
     body_fd = N.FunctionDef(name=body_name, params=[(_CVAR, 'Int')], return_type=None, body=new_body)
     body_fd.is_generator = False
@@ -822,7 +1169,15 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
         if isinstance(s, N.FunctionDef):
             fn_ordinary = not getattr(s, 'is_generator', False) and not getattr(s, 'is_async', False)
             fn_task_vars = _scan_task_vars(s) if fn_ordinary else set()
-            fn_lm = lmaps.get(s.name, {}) if fn_ordinary else {}
+            # Merge the ENCLOSING scope's already-active local_map (`lm`)
+            # under this function's own entry, rather than discarding it --
+            # a hoisted nested async def (`inc`) defined in one function is
+            # still in lexical scope inside a FURTHER-nested sibling
+            # function (`caller`) of that same enclosing function, so
+            # `caller`'s own `tg.create_task(inc())` must see the same
+            # qualified-`{base}_start` rename. Matches real Python lexical
+            # scoping (an inner def sees every enclosing scope's bindings).
+            fn_lm = {**lm, **lmaps.get(s.name, {})} if fn_ordinary else {}
             s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars, fn_lm, lmaps)
             out.append(s)
             continue
@@ -970,6 +1325,7 @@ def lower(stmts: list) -> tuple[list, list]:
     if not enabled():
         return stmts, []
     _PARAM_NAMES.clear()
+    _seed_prop_names(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
                                              or getattr(s, 'is_async', False)):
@@ -998,8 +1354,9 @@ def lower(stmts: list) -> tuple[list, list]:
             _kept = []
             for m in s.methods:
                 if (isinstance(m, N.FunctionDef) and getattr(m, 'is_generator', False)
-                        and _eligible(m, struct_name=s.name)[0]):
-                    method_bodies.append(_lower_one(m, meta, struct_name=s.name))
+                        and _eligible(m, struct_name=s.name, struct_def=s)[0]):
+                    method_bodies.append(_lower_one(m, meta, struct_name=s.name,
+                                                   struct_def=s))
                     # drop the generator method from the struct: gen_module's
                     # Phase 2a skips _supported_generator_methods anyway, and
                     # the body now lives as a top-level function
@@ -1197,6 +1554,58 @@ def _find_calls_to(node, name: str, out: list):
             _find_calls_to(v, name, out)
 
 
+def _collect_nested_ordinary_funcs(stmts: list, out: dict) -> None:
+    """`out[name] = FunctionDef` for every ordinary (non-async, non-
+    generator) function nested ANYWHERE within `stmts`, descending
+    through nested scopes. Any hoisted async def is already gone from
+    the tree by the time this runs (`_hoist_nested_async` removed it)."""
+    for s in stmts:
+        if isinstance(s, N.FunctionDef):
+            if not getattr(s, 'is_async', False) and not getattr(s, 'is_generator', False):
+                out[s.name] = s
+                _collect_nested_ordinary_funcs(s.body, out)
+            continue
+        for k, v in vars(s).items():
+            if k in ('line', 'col'):
+                continue
+            if isinstance(v, list) and v and _looks_like_stmt_list(v):
+                _collect_nested_ordinary_funcs(v, out)
+
+
+def _fn_refs_captures(fn: N.FunctionDef, cap_names: set) -> bool:
+    """True if `fn`'s own body directly reads/writes one of `cap_names`
+    (not counting a deeper nested function's references, nor a name `fn`
+    itself re-declares/shadows)."""
+    used = set()
+    for b in _capture_scan_body(fn.body):
+        used |= gimple_ctypes._used_idents_node(b)
+    declared = ({p for p, _a in fn.params}
+                | gimple_ctypes._declared_vars_body(fn.body))
+    return bool((used - declared) & cap_names)
+
+
+def _hidden_box_name(n: str) -> str:
+    """The C identifier a threaded nested function receives the box
+    handle for captured local `n` under (its hidden trailing param)."""
+    return f'__cap_{n}'
+
+
+def _append_box_args(call, cap_map: dict) -> None:
+    """Append the box-handle hidden-param identifier as a trailing
+    IdentExpr argument to `call`, for each captured name. Builds the
+    name by string concatenation (not by subscripting a local dict
+    comprehension) so the self-hosted compiler infers it as `char *`."""
+    for n in cap_map:
+        call.args.append(_c_ident(_hidden_box_name(n)))
+
+
+def _append_cap_args(call, cap_map: dict) -> None:
+    """Append each captured NAME itself (the enclosing function's own
+    now-boxed local) as a trailing IdentExpr argument to `call`."""
+    for n in cap_map:
+        call.args.append(_c_ident(n))
+
+
 def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_map: dict):
     """Wires a non-empty `_nested_async_capture_plan` result: boxes each
     captured outer local (mutating its declaring VarDecl in place),
@@ -1208,19 +1617,100 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     to `inner.params`, plus a matching trailing argument at every call to
     `inner.name` inside `outer`'s own body (create_task(wrapper()) and
     the bare `wrapper()` detached-async idiom both already route through
-    the ordinary arg list from here on)."""
-    hidden = {n: f'__cap_{n}' for n in cap_map}
+    the ordinary arg list from here on).
+
+    Cross-closure case (the bug doc's item 4): when a FURTHER-nested
+    ordinary sibling function (`caller()`, defined alongside `inner`
+    inside `outer`) is the one that actually calls `inner` -- or itself
+    references a captured local, or calls another such function -- the
+    box handle(s) are threaded THROUGH that sibling too: it receives
+    each box as its own hidden trailing `Int` parameter, its calls to
+    `inner` / other threaded siblings get the matching trailing
+    argument, its own direct reads/writes of a captured name are
+    rewritten through the box, and the call to it from `outer`'s body
+    forwards `outer`'s own box local. This is the same
+    transitive-closure-through-an-ordinary-nested-function shape the
+    ordinary compiled path's own 2026-07-27 fix solved for plain
+    `{mut}` closures, done here as a pure AST rewrite over the plain
+    `int64_t` box handle."""
+    hidden = {n: _hidden_box_name(n) for n in cap_map}
     for name, decl in cap_map.items():
         decl.value = _call(_BOX_NEW, [decl.value])
     outer.body = _cap_rewrite_stmts(outer.body, {n: n for n in cap_map})
     inner.body = _cap_rewrite_stmts(inner.body, hidden)
-    inner.params = list(inner.params) + [(hidden[n], 'Int') for n in cap_map]
-    calls: list = []
+    inner.params = list(inner.params) + [(_hidden_box_name(n), "Int") for n in cap_map]
+
+    # ── transitive threading through ordinary nested sibling functions ──
+    _thread_box_through_siblings(inner.name, outer, cap_map, hidden, set(cap_map))
+
+
+def _fn_body_calls(fn: N.FunctionDef, name: str) -> list:
+    hits: list = []
+    for st in fn.body:
+        _find_calls_to(st, name, hits)
+    return hits
+
+
+def _thread_box_through_siblings(inner_name: str, outer: N.FunctionDef,
+                                 cap_map: dict, hidden: dict, cap_names: set) -> None:
+    """See `_apply_nested_async_capture`'s docstring, cross-closure case.
+    `inner_name` is the hoisted nested async's bare name; every ordinary
+    function nested in `outer` that (transitively) calls it or references
+    a captured local receives the box handle(s) as hidden trailing
+    params, with its calls and the call to it from `outer` given the
+    matching trailing arguments."""
+    nested_funcs: dict = {}
     for st in outer.body:
-        _find_calls_to(st, inner.name, calls)
-    for call in calls:
+        if (isinstance(st, N.FunctionDef) and not getattr(st, 'is_async', False)
+                and not getattr(st, 'is_generator', False)):
+            nested_funcs[st.name] = st
+            _collect_nested_ordinary_funcs(st.body, nested_funcs)
+    all_names: list = list(nested_funcs.keys())
+    needy: list = []
+    for fname in all_names:
+        fn = nested_funcs[fname]
+        if len(_fn_body_calls(fn, inner_name)) > 0 or _fn_refs_captures(fn, cap_names):
+            needy.append(fname)
+    changed = True
+    while changed:
+        changed = False
+        for fname in all_names:
+            if fname in needy:
+                continue
+            fn = nested_funcs[fname]
+            hit = False
+            for other in needy:
+                if len(_fn_body_calls(fn, other)) > 0:
+                    hit = True
+            if hit:
+                needy.append(fname)
+                changed = True
+    for fname in needy:
+        fn = nested_funcs[fname]
+        fn.body = _cap_rewrite_stmts(fn.body, hidden)
+        new_params: list = list(fn.params)
         for n in cap_map:
-            call.args.append(_c_ident(n))
+            new_params.append((_hidden_box_name(n), 'Int'))
+        fn.params = new_params
+        targets: list = [inner_name]
+        for other in needy:
+            targets.append(other)
+        for tgt in targets:
+            if tgt == fname:
+                continue
+            for call in _fn_body_calls(fn, tgt):
+                _append_box_args(call, cap_map)
+    # calls that live directly in `outer`'s own body (not inside a nested
+    # function) read `outer`'s own now-boxed local by name.
+    outer_targets: list = [inner_name]
+    for other in needy:
+        outer_targets.append(other)
+    for tgt in outer_targets:
+        hits: list = []
+        for st in outer.body:
+            _find_calls_to(st, tgt, hits)
+        for call in hits:
+            _append_cap_args(call, cap_map)
 
 
 def _hoist_nested_async(stmts: list, meta: list):
@@ -1283,12 +1773,14 @@ def _mojo_to_c_type(ann: str) -> str:
 
 
 def _lower_one(fn: N.FunctionDef, meta: list,
-               struct_name: str | None = None) -> N.FunctionDef:
+               struct_name: str | None = None,
+               struct_def=None) -> N.FunctionDef:
     is_method = struct_name is not None
     base = (f'__mgco_{N._as_str(struct_name)}_{N._as_str(fn.name)}' if is_method
             else f'__mgco_{N._as_str(fn.name)}')
     body_name = f'{base}_body'
-    kind, _ = _generator_value_kind(fn)
+    env = _static_env(fn, struct_def)
+    kind, _ = _generator_value_kind(fn, env)
     kind = kind or 'i'
 
     real_params = fn.params[1:] if is_method else fn.params
@@ -1326,7 +1818,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
-        'tuple_slot_ctypes': _generator_tuple_slots(fn) if kind == 'tuple' else None,
+        'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd
@@ -1462,6 +1954,27 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_yield_tagged', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_run_gen', 'void')
+    # Awaitable protocol: Future/Event handles (runtime/mojo_coro_gen.c).
+    gen.func_param_types.setdefault('__mojo_future_new', [])
+    gen.func_return_types.setdefault('__mojo_future_new', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_done', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_done', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_result', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_result', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_set_result', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_set_result', 'void')
+    gen.func_param_types.setdefault('__mojo_async_await_future', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_await_future', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_event_new', [])
+    gen.func_return_types.setdefault('__mojo_event_new', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_event_set', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_event_set', 'void')
+    gen.func_param_types.setdefault('__mojo_event_is_set', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_event_is_set', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_event_clear', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_event_clear', 'void')
+    gen.func_param_types.setdefault('__mojo_async_await_event_wait', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_await_event_wait', 'int64_t')
     for m in meta:
         api = {
             'base': m['base'],

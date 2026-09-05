@@ -196,6 +196,82 @@ def main() raises:
           out == "2\n", detail=repr(out))
 
 
+def test_cross_closure_taskgroup_stress():
+    """The bug doc's item 4 (also test_async_with_lock_guard.py::
+    test_locks_mojo_shaped_10000_task_stress's exact cpp-path source):
+    the nested `inc()` async closure is called from a DIFFERENT sibling
+    nested function (`caller()`), which builds a `TaskGroup`, creates
+    10,000 tasks across two same-named nested loops, and waits. The box
+    handle for the captured `rawCounter` must be threaded THROUGH
+    `caller()` (its own hidden param), forwarded to every `inc()` call
+    inside it, and forwarded at the `caller()` call site -- and the
+    stack-switch `TaskGroup.create_task(...)` / `.wait()` path must
+    drive every task to completion. Result read after `caller()`
+    returns must be exactly 10000."""
+    src = """\
+from std.runtime.asyncrt import TaskGroup
+
+
+def test_with_lock_stress() raises:
+    var lock = BlockingSpinLock()
+    var rawCounter = 0
+    comptime maxI = 100
+    comptime maxJ = 100
+
+    @parameter
+    async def inc():
+        with BlockingScopedLock(lock):
+            rawCounter += 1
+
+    def caller() raises:
+        var tg = TaskGroup()
+        for _ in range(0, maxI):
+            for _ in range(0, maxJ):
+                tg.create_task(inc())
+        tg.wait()
+
+    caller()
+    print(rawCounter)
+
+
+def main() raises:
+    test_with_lock_stress()
+"""
+    out = _build_and_run(src)
+    check("cross-closure TaskGroup 10,000-task stress -> 10000",
+          out == "10000\n", detail=repr(out))
+
+
+def test_cross_closure_single_scope_taskgroup():
+    """The simpler single-scope `TaskGroup` shape (the callee and the
+    group live in the SAME function): proves the stack-switch
+    `TaskGroup.create_task(...)`/`.wait()` intrinsics on their own,
+    independent of the further-nested sibling-function threading."""
+    src = """\
+from std.runtime.asyncrt import TaskGroup
+
+
+def test_tg() raises:
+    var counter = 0
+
+    @parameter
+    async def inc():
+        counter += 1
+
+    var tg = TaskGroup()
+    for _ in range(0, 100):
+        tg.create_task(inc())
+    tg.wait()
+    print(counter)
+
+
+def main() raises:
+    test_tg()
+"""
+    out = _build_and_run(src)
+    check("single-scope TaskGroup 100-task -> 100", out == "100\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

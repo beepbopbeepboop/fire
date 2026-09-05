@@ -181,6 +181,54 @@ def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){vp}")
 
 
+def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`UnsafePointer[T].alloc(n)` (also `OwnedPointer`/`ArcPointer`/`Pointer`)
+    — the static heap-allocation constructor. `node.func` is a MemberExpr
+    (`.alloc`) whose `.obj` is the SubscriptExpr `UnsafePointer[T]`.
+
+    Before this, the `UnsafePointer[T]` receiver was lowered as an ordinary
+    subscript (→ `mojo_list_get_int`) and `.alloc(n)` fell through to the
+    generic "unknown method on a scalar receiver" stub, which hands the
+    receiver value straight back — so the `.alloc()` result was a bogus
+    list-get temp. In-function field access through it happened to still
+    work in some shapes, but `Int(UnsafePointer[T].alloc(n))` read the
+    bogus temp (0) and any round-trip of that handle through `Int()` back
+    into a pointer produced a null deref. See
+    `bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md`.
+
+    Lowered to a per-element-type `_alloc_n_<T>` helper (plain C, emitted in
+    the preamble alongside `_alloc_<T>` / `_mojo_at_<T>`): a `calloc(n,
+    sizeof(T))` cast to `T *`, and — for a struct element type — every
+    element's leading `__mojo_type_id` header is set, so struct-pointer
+    field access (the sibling deref bug's fix, which reads that tag) keeps
+    working on `.alloc()`'d memory too.
+    """
+    sub = node.func.obj  # SubscriptExpr: UnsafePointer[T]
+    idx = sub.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    elem_ann = gen._type_expr_to_ann(elems[0]) if elems else None
+    base = sub.obj.name
+    # Same struct-vs-scalar erasure as _lower_pointer_ctor: `_resolve_type`
+    # already collapses `UnsafePointer[SomeStruct]` to a single `T *`.
+    ptr_ctype = gen._resolve_type(f"{base}[{elem_ann}]") if elem_ann else 'int64_t *'
+    if not ptr_ctype.endswith(' *'):
+        ptr_ctype = ptr_ctype + ' *'
+    elem_ctype = ptr_ctype[:-2].strip()
+    # Count argument. Real Mojo's `.alloc(count)` requires it; default to 1
+    # for the degenerate no-arg spelling rather than emit invalid C.
+    if node.args:
+        nt, nv = gen.lower_expr(node.args[0])
+        n_val = nv if nt == 'int64_t' else gen._new_val('int64_t', f'(int64_t){nv}')
+    else:
+        n_val = gen._new_val('int64_t', '(int64_t)1')
+    for a in node.args[1:]:
+        gen.lower_expr(a)
+    gen._ptr_alloc_n_needed.add(elem_ctype)
+    t = gen._new_temp(ptr_ctype)
+    gen._emit(f"  {t} = _alloc_n_{gimple_ctypes._c_id(elem_ctype)} ({n_val});")
+    return ptr_ctype, t
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
@@ -898,6 +946,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and isinstance(node.args[0], gimple_ctypes.Comprehension)
             and not gen._locally_binds_name('next')):
         return _lower_next_over_comprehension(gen, node)
+    # `next(it)` / `next(it, default)` on a resumable list-iterator local
+    # (bound earlier by `it = iter(<list>)`, tracked in `_list_iter_cursor`).
+    # Reads the element at the shared cursor and advances it; exhaustion
+    # raises a real tagged StopIteration via the SAME mojo_exc_type_set()/
+    # mojo_raise() path `raise StopIteration` and next()-on-a-generator use
+    # (so an enclosing `except StopIteration:` catches it), unless a 2nd
+    # `default` argument opts out — real Python `next(it, default)` semantics.
+    if (fname_raw == 'next' and 1 <= len(node.args) <= 2
+            and isinstance(node.args[0], gimple_ctypes.IdentExpr)
+            and node.args[0].name in getattr(gen, '_list_iter_cursor', {})
+            and not gen._locally_binds_name('next')):
+        return _lower_next_list_iter(gen, node)
     if fname_raw == 'next' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
         at = gen._get_actual_type(at, av)
@@ -1737,6 +1797,39 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
     return 'int', t
+
+
+def _lower_next_list_iter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`next(it)` / `next(it, default)` where `it` is a resumable list-iterator
+    local (see `_try_bind_list_iter`). Advances the shared cursor; raises a
+    tagged StopIteration on exhaustion (1-arg) or yields `default` (2-arg)."""
+    li = gen._list_iter_cursor[node.args[0].name]
+    lst, cur, elem = li['list'], li['cursor'], li['elem']
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
+    vct = {'str': 'char *', 'double': 'double'}.get(suf, 'int64_t')
+    result = gen._new_temp(vct)
+    n = gen._new_val('int64_t', f"mojo_list_len ({lst})")
+    bb_ok = gen._new_bb(); bb_miss = gen._new_bb(); bb_merge = gen._new_bb()
+    cond = gen._new_val('_Bool', f"{cur} < {n}")
+    gen._emit(f"  if ({cond}) goto {bb_ok}; else goto {bb_miss};")
+    gen._emit_label(bb_ok)
+    ok = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
+    gen._safe_coerce_emit(vct, vct, ok, result)
+    nxt = gen._new_val('int64_t', f"{cur} + (int64_t)1")
+    gen._emit(f"  {cur} = {nxt};")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_miss)
+    if len(node.args) == 2:
+        # `default` only evaluated on the exhausted branch (real Python
+        # semantics — a non-trivial default expr must not run on a hit).
+        dt, dv = gen.lower_expr(node.args[1])
+        gen._safe_coerce_emit(dt, vct, dv, result)
+    else:
+        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+        gen._emit("  mojo_raise ();")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_merge)
+    return vct, result
 
 
 def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -3255,6 +3348,26 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         elif len(arg_pairs) == 3:
             fname = 'mojo_range3'
         return 'void *', gen._call_expr('void *', fname, arg_pairs)
+
+    # Single-arg min()/max() is ALWAYS the "reduce over an iterable" form in
+    # Python — the scalar form needs >= 2 positional args. Route it to the
+    # runtime mojo_min/mojo_max (which walk a MojoList*), before the scalar
+    # ternary-fold below, which would otherwise see the lone `int64_t`-boxed
+    # list handle as a "numeric arg" and hand it straight back unchanged
+    # (returning the list POINTER as the min/max value — garbage). Real in an
+    # A3 stack-switch generator body: `yield min(xs)` on an unannotated param.
+    if (fname_raw in ('min', 'max') and len(arg_pairs) == 1
+            and not gen._locally_binds_name(fname_raw)
+            and 'key' not in {k for k, _ in getattr(node, 'kwargs', []) or []}):
+        at, av = arg_pairs[0]
+        if at == 'MojoList *' or at in ('int', 'int64_t', 'void *'):
+            lp = (av if at == 'MojoList *'
+                  else gen._new_val('MojoList *', f"(MojoList *){gen._to_int64(at, av)}"))
+            if gen._elem_of(av) == 'double':
+                return 'double', gen._call_expr(
+                    'double', f"mojo_{fname_raw}_double", [('void *', lp)])
+            return 'int64_t', gen._call_expr(
+                'int64_t', f"mojo_{fname_raw}", [('void *', lp)])
 
     # min/max over scalar args → fold into nested ternaries (avoids the
     # mojo_min(void*) variadic-pack signature, which we don't emit packs for).

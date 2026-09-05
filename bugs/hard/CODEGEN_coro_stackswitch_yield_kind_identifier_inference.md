@@ -3,12 +3,55 @@ defaults to int64_t, silently truncating float/string values
 
 ## Status
 
-New, found 2026-09-05 while running `test_gimple_generator_runner.py`'s
-real compile+link+run suite against the §5.5 cutover (`MOJO_CORO=
-stackswitch` now the default — see doc/COROUTINE.html §5.5). Traced to
-root cause; not fixed. `MOJO_CORO=cpp` (the escape hatch) is unaffected —
-these are real, previously-passing tests under the old cpp-path coroutine
-emitter.
+PARTIALLY FIXED 2026-09-05. The tractable, purely-syntactic half is
+landed; the fully-unannotated call-site-dependent half (repro 1) remains
+open as a distinct structural gap (see "Not fixed" below).
+
+Found 2026-09-05 while running `test_gimple_generator_runner.py`'s real
+compile+link+run suite against the §5.5 cutover (`MOJO_CORO=stackswitch`
+now the default — see doc/COROUTINE.html §5.5).
+
+### Fixed (commit — see Claude-Session)
+
+`gimple_gen_coro.py` gained `_static_env(fn, struct_def)` — a best-effort,
+purely-syntactic `name -> yield-kind` map built at pre-pass time from the
+type sources that ARE in reach before `GimpleGen` exists — and
+`_yield_kind(expr, env)` now consults it. Resolved shapes:
+
+* **bare identifier from the generator's own param annotation** —
+  `def echo(s: String): yield s` (repro-4-shaped; repro 2's `n: Int`
+  path).
+* **`self.<field>` from the enclosing struct** — class-body field
+  annotations AND `__init__`'s `self.<f> = <annotated-param | literal>`
+  assignments. Fixes repro 2 (`yield self.base + i`, `base: Float64`).
+* **local `name = <literal>` / `var name = <literal-or-string-concat>`** —
+  incl. `FloatLiteral`/`StringLiteral` and a `BinaryOp` fallthrough.
+* **list-typed locals** — `xs = [<homogeneous literals>]` and
+  `xs = []` refined by `xs.append(<literal>)` / `.insert(...)`; a
+  `yield xs[i]` subscript and a `for s in xs: yield s` loop-var binding
+  both resolve to the element kind. Fixes repro 3.
+
+`_eligible` / `_generator_value_kind` / `_generator_tuple_slots` /
+`_lower_one` all thread the env; `_eligible`/`_lower_one` gained an
+optional `struct_def` param so the method path passes the `StructDef`
+down.
+
+Beyond the 4 new regression tests in `test_gimple_generator_runner.py`,
+this also flipped 3 previously-failing suite cases to PASS
+(`generator_method_self_field_double`, `generator_str_list_local_
+roundtrip`, and the yield-kind half of `generator_vardecl_string_built_
+in_body` — that last one still fails on an *unrelated* general
+`"s" + String(int)` mis-stringification bug, reproducible outside any
+generator, not in this doc's scope).
+
+### Not fixed — the fully-unannotated case (repro 1)
+
+`def g(x): yield x` called `g(3.5)`, with no type anywhere in `g`'s own
+definition, still yields `3` (truncated). Resolving it needs per-call-site
+monomorphization of the generator or a boxed/tagged yield-value
+representation — a real feature, deliberately out of scope here (see the
+detailed analysis retained below). `MOJO_CORO=cpp` remains a correct
+escape hatch for this shape.
 
 ## Repro
 
@@ -123,14 +166,7 @@ old cpp-path coroutine emitter, which apparently modeled a generator's
 per-yield value type independently. `MOJO_CORO=cpp` remains a fully
 correct escape hatch for any Mojo program hitting this shape today.
 
-## Not attempted here
+## Still open
 
-The narrower, tractable half (annotated-param / `__init__`-typed
-`self.field` inference in `_yield_kind`) needs: threading `fn.params`'
-annotations and (for a method) the enclosing `StructDef`'s `__init__`
-assignments through `_eligible`/`_generator_value_kind`/`_yield_kind`'s
-call chain — a real but bounded plumbing change, not attempted in this
-session given the volume of other gaps this same cutover investigation
-surfaced (see the sibling docs on default-argument padding — FIXED this
-session — and iterator-protocol/`enumerate()`/try-finally/lambda-capture
-gaps, filed separately).
+Only the fully-unannotated case (repro 1) — see "Not fixed" under Status.
+The narrower tractable half described in this doc is now landed.

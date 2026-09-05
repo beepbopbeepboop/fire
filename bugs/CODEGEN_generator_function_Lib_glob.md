@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster A)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:
+
+- `_iglob`, `_glob2`, `_iterdir`, `_rlistdir`,
+  `_GlobberBase.select_exists` now compile through the A3 path.
+- **Still refused:** the nested generator functions `select_recursive`,
+  `select_recursive_step`, `select_wildcard` (defined inside
+  `_RecursiveGlobber.select_recursive` / `_WildcardGlobber.select_wildcard`).
+  Blocker: `a call to unresolved callee 'match(...)' ... in a compiled
+  generator/coroutine body`. `match` is a closure-captured callable value
+  (`self.compile(part)` — a bound `re.Pattern.match`), which the compiled
+  generator-body expression emitter cannot call. This is **cluster A**
+  (opaque / closure-captured callable-value dispatch in a generator body),
+  shared with `os._fwalk` (`stat`), `pickletools._genops` (`getpos`),
+  `test/test_frame` (`nested`). Needs a callable-value local model in the
+  A3 generator-body codegen.
+
 ## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
 
 Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,

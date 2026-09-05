@@ -134,7 +134,68 @@ def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
         _FAIL += 1
 
 
+def test_generator_c_compiles(name: str, mojo_src: str):
+    """Emit the generator module's C and assert it passes `gcc -fgimple
+    -fsyntax-only` -- a regression guard for shapes that used to be
+    A3-eligible but emitted BROKEN C (a miscompile), and are now honestly
+    refused (falling through to the cpp path) instead."""
+    global _PASS, _FAIL
+    try:
+        c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
+        wd = tempfile.mkdtemp(prefix='mojo_gen_cc_')
+        cp = os.path.join(wd, 'prog.c')
+        with open(cp, 'w') as f:
+            f.write(c_code)
+        r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w',
+                            '-fsyntax-only', cp],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: gcc -fgimple errors:\n{r.stderr}")
+            _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def run_tests():
+    # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
+    # generator method that CALLS the result of a `@property` getter
+    # (`self._address_class(x)` -- `_address_class` is a @property returning
+    # a class object, then invoked). This used to be A3-eligible and lowered
+    # `self._address_class(x)` as a direct method call `Net__address_class(
+    # self, x)` (arity 2 vs the getter's 1) -- broken C. Now honestly
+    # refused; the emitted .c must compile cleanly.
+    test_generator_c_compiles("generator_calls_property_getter_result", """\
+struct Addr:
+    var v: Int
+    fn __init__(out self, v: Int):
+        self.v = v
+
+struct Net:
+    var lo: Int
+    var hi: Int
+    fn __init__(out self, lo: Int, hi: Int):
+        self.lo = lo
+        self.hi = hi
+    @property
+    fn _address_class(self) -> Addr:
+        return Addr(0)
+    fn hosts(self):
+        var x = self.lo
+        while x <= self.hi:
+            yield self._address_class(x)
+            x = x + 1
+
+def main():
+    n = Net(1, 3)
+    for h in n.hosts():
+        print(h.v)
+""")
+
+
     # The exact target shape from the Milestone B writeup: a parameterless
     # generator with a plain while-loop/yield/increment body, consumed by an
     # ordinary `for x in counter(): print(x)` loop. Confirms the whole
@@ -819,6 +880,56 @@ def main():
         print(x)
 """, "0\n1\n")
 
+    # try/else/finally in a generator loop: on a normal (no-exception) pass
+    # the `else` clause runs, THEN `finally`, each exactly once per
+    # iteration. Regression guard for the fall-through path that used to
+    # run the finally body twice (once falling into the finally label,
+    # once again inline) — here it would have doubled BOTH `seen` and
+    # `done`.
+    test_generator_stdout("generator_try_else_finally_counts_once", """\
+def gen():
+    seen = 0
+    done = 0
+    i = 0
+    while i < 3:
+        try:
+            yield i
+        except KeyError:
+            seen = seen + 100
+        else:
+            seen = seen + 1
+        finally:
+            done = done + 1
+        i = i + 1
+    yield seen
+    yield done
+
+def main():
+    for x in gen():
+        print(x)
+""", "0\n1\n2\n3\n3\n")
+
+    # Early `return` out of a try body that has a `finally`, inside a
+    # generator: the finally must run exactly once on the way out and the
+    # generator then stops (StopIteration). Regression guard for the
+    # deferred-return path.
+    test_generator_stdout("generator_try_finally_early_return_runs_once", """\
+def gen():
+    n = 0
+    while True:
+        try:
+            if n == 2:
+                return
+            yield n
+        finally:
+            n = n + 1
+
+def main():
+    for x in gen():
+        print(x)
+    print("end")
+""", "0\n1\nend\n")
+
     # Re-raise (bare `raise` with no value) inside a handler — the exception
     # is caught internally, immediately re-raised, and propagates out
     # uncaught (no value is ever yielded) to the caller's own try/except.
@@ -1488,6 +1599,371 @@ def main():
     for v in scan([7]):
         print(v)
 """, "7\n999\n")
+
+    # bugs/hard/CODEGEN_coro_stackswitch_iterator_protocol_gaps.md — the A3
+    # stack-switch cutover routes a generator BODY through the ordinary
+    # codegen, which never had a real iter()/next() over a plain list
+    # (only the old cpp-path emitter did, in gimple_cpp_core.py). Below:
+    # a STRING-element list iterator (accessor kind picked from the list's
+    # tracked element type, not hard-coded to get_int), next(it, default)
+    # returning the default only on real exhaustion, and next(it, default)
+    # still yielding a real element while the cursor has more.
+    test_generator_stdout("generator_str_list_iterator_next_default", """\
+def scan():
+    xs = ["a", "b"]
+    it = iter(xs)
+    yield next(it)
+    yield next(it, "END")
+    yield next(it, "END")
+
+def main():
+    for s in scan():
+        print(s)
+""", "a\nb\nEND\n")
+
+    # enumerate(<generator>) with NO explicit start (0-based) — the
+    # zero-arg-start branch of the same _gen_for_enumerate_generator path.
+    test_generator_stdout("enumerate_generator_no_start", """\
+def src(n):
+    for i in range(n):
+        yield i * 10
+
+def numbered(n):
+    for i, v in enumerate(src(n)):
+        yield v + i
+
+def main():
+    for x in numbered(4):
+        print(x)
+""", "0\n11\n22\n33\n")
+
+    # A generator body that consumes its list arg with BOTH next() and a
+    # following `for x in it:` — the for-loop must resume from the cursor
+    # next() already advanced (single-pass), not restart from element 0.
+    test_generator_stdout("generator_list_iter_next_then_for_resumes", """\
+def scan(xs):
+    it = iter(xs)
+    first = next(it)
+    yield first
+    for x in it:
+        yield x
+
+def main():
+    for v in scan([1, 2, 3, 4]):
+        print(v)
+""", "1\n2\n3\n4\n")
+
+    # ── yield-kind inference for identifier / self.field / list-local refs ──
+    # (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md)
+    # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare
+    # IdentExpr / `self.<field>` / `<list-local>[idx]` reference, so a
+    # Float64/String value yielded through one of those silently defaulted
+    # to int64_t and was truncated (float) or printed as a raw pointer
+    # value (string). _static_env now resolves them from purely-syntactic
+    # type sources available at pre-pass time.
+
+    # self.<field> whose type comes from __init__(self, base: Float64)
+    test_generator_stdout("generator_yields_self_float_field_plus_int", """\
+class Sampler:
+    def __init__(self, base: Float64):
+        self.base = base
+    def samples(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.base + i
+            i = i + 1
+
+def main():
+    s = Sampler(1.5)
+    for x in s.samples(3):
+        print(x)
+""", "1.5\n2.5\n3.5\n")
+
+    # bare identifier resolved from the generator's own param annotation
+    test_generator_stdout("generator_yields_string_param_identifier", """\
+def echo(s: String):
+    yield s
+    yield s
+
+def main():
+    for v in echo("hello"):
+        print(v)
+""", "hello\nhello\n")
+
+    # list-typed local: `xs = [<string literals>]`, `yield xs[i % 2]`
+    test_generator_stdout("generator_yields_string_list_local_subscript", """\
+def strs():
+    xs = ["alpha", "beta"]
+    i = 0
+    while i < 3:
+        yield xs[i % 2]
+        i = i + 1
+
+def main():
+    for s in strs():
+        print(s)
+""", "alpha\nbeta\nalpha\n")
+
+    # float local seeded from a float literal, yielded bare
+    test_generator_stdout("generator_yields_float_local_identifier", """\
+def ramp():
+    x = 0.5
+    i = 0
+    while i < 3:
+        yield x
+        x = x + 1.0
+        i = i + 1
+
+def main():
+    for v in ramp():
+        print(v)
+""", "0.5\n1.5\n2.5\n")
+
+    # ── non-plain assignment targets inside a generator body ──────────
+    # (bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md)
+    # The A3 stack-switch path routes the desugared body through ordinary
+    # codegen, which handles self-field write, subscript write, and
+    # tuple/list-pattern unpack -- shapes the old cpp eligibility gate
+    # refused wholesale.
+    test_generator_stdout("generator_list_pattern_unpack_literal_rhs", """\
+def g():
+    yield 1
+    [x] = [42]
+    yield x
+
+def main():
+    for v in g():
+        print(v)
+""", "1\n42\n")
+
+    test_generator_stdout("generator_list_pattern_unpack_two_and_call_rhs", """\
+def src():
+    return [7, 8]
+
+def g():
+    [a, b] = src()
+    yield a
+    yield b
+    [c] = [99]
+    yield c
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n8\n99\n")
+
+    test_generator_stdout("generator_list_pattern_unpack_comprehension_rhs", """\
+def g():
+    yield 1
+    src = [10, 20, 30]
+    [first] = [w for w in src if w == 20]
+    yield first
+
+def main():
+    for v in g():
+        print(v)
+""", "1\n20\n")
+
+    test_generator_stdout("generator_self_field_write_between_yields", """\
+struct Counter:
+    var count: Int
+    fn __init__(out self):
+        self.count = 0
+    def gen(self):
+        yield self.count
+        self.count = 99
+        yield self.count
+
+def main():
+    c = Counter()
+    for v in c.gen():
+        print(v)
+""", "0\n99\n")
+
+    test_generator_stdout("generator_subscript_write_between_yields", """\
+def g(d):
+    yield d[0]
+    d[0] = 99
+    yield d[0]
+
+def main():
+    xs = [1, 2, 3]
+    for v in g(xs):
+        print(v)
+""", "1\n99\n")
+
+    # ── recursive `yield from` forwards extra positional + keyword-only
+    # arguments (bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_
+    # forwarding.md). The documented "too few arguments" / yield-type
+    # mismatch compile failures are gone on the A3 path.
+    test_generator_stdout("generator_recursive_yield_from_extra_positional_arg", """\
+def countdown(n, step=1):
+    if n <= 0:
+        return
+    yield n
+    yield from countdown(n - step, step)
+
+def main():
+    for v in countdown(5, 2):
+        print(v)
+""", "5\n3\n1\n")
+
+    test_generator_stdout("generator_recursive_yield_from_keyword_only_arg", """\
+def countdown(n, *, step=1):
+    if n <= 0:
+        return
+    yield n
+    yield from countdown(n - step, step=step)
+
+def main():
+    for v in countdown(5, 2 if False else 2):
+        print(v)
+""", "5\n3\n1\n")
+
+    # ── lambda literals inside a generator body ───────────────────────
+    # (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md) -- 0-, 1-
+    # and 2-parameter lambdas, a lambda re-bound on each branch of an
+    # if/else, and a lambda passed as a call argument all work via the
+    # ordinary codegen path's lambda lifting.
+    test_generator_stdout("generator_zero_arg_lambda_called", """\
+def g(n):
+    getpos = lambda: 7
+    i = 0
+    while i < n:
+        yield getpos()
+        i = i + 1
+
+def main():
+    for v in g(3):
+        print(v)
+""", "7\n7\n7\n")
+
+    test_generator_stdout("generator_one_arg_lambda_over_list", """\
+def g(xs):
+    f = lambda m: m + 1
+    for x in xs:
+        yield f(x)
+
+def main():
+    for v in g([10, 20, 30]):
+        print(v)
+""", "11\n21\n31\n")
+
+    test_generator_stdout("generator_two_arg_lambda_and_lambda_as_arg", """\
+def apply(fn, v):
+    return fn(v)
+
+def g(xs):
+    add = lambda a, b: a + b
+    for x in xs:
+        yield apply(lambda m: m * 2, add(x, 10))
+
+def main():
+    for v in g([1, 2, 3]):
+        print(v)
+""", "22\n24\n26\n")
+
+    test_generator_stdout("generator_lambda_rebound_per_branch", """\
+def g(pick):
+    if pick:
+        f = lambda: 42
+    else:
+        f = lambda: 99
+    yield f()
+
+def main():
+    for v in g(1):
+        print(v)
+    for v in g(0):
+        print(v)
+""", "42\n99\n")
+
+    # ---- Regression tests distilled from the 30 bugs/CODEGEN_generator_
+    # function_Lib_*.md stdlib shapes that the doc/COROUTINE.html §5.5 A3
+    # stack-switch cutover made compile (previously wholesale-refused by
+    # the old gimple_cpp_core.py C++20-coroutine eligibility gate). One
+    # minimal shape per stdlib family that flipped to compiling.
+
+    # weakref.WeakValueDictionary.__iter__ / tarfile.TarFile.__iter__ /
+    # tempfile._TemporaryFileWrapper.__iter__ / typing._GenericAlias.
+    # __iter__ / mailbox / shelve: a generator METHOD on a struct that
+    # walks a list field and yields each element.
+    test_generator_stdout("generator_method_iterates_list_field", """\
+struct Bag:
+    var items: List[Int]
+    fn __init__(out self):
+        self.items = [10, 20, 30]
+    fn each(self):
+        for x in self.items:
+            yield x
+
+def main():
+    b = Bag()
+    for v in b.each():
+        print(v)
+""", "10\n20\n30\n")
+
+    # dis.findlinestarts / ipaddress._find_address_range: for-loop over an
+    # explicitly-typed list param with a guarded yield inside the loop body.
+    test_generator_stdout("generator_guarded_yield_in_for_over_typed_param", """\
+def positives(xs: List[Int]):
+    for x in xs:
+        if x > 0:
+            yield x
+
+def main():
+    for v in positives([-2, 3, -1, 5, 0, 8]):
+        print(v)
+""", "3\n5\n8\n")
+
+    # enum._iter_bits_lsb / dis._unpack_opargs: for-loop over range() with a
+    # modulo guard, yielding a filtered subset.
+    test_generator_stdout("generator_range_loop_with_modulo_guard", """\
+def evens(n):
+    for x in range(n):
+        if x % 2 == 0:
+            yield x
+
+def main():
+    for v in evens(6):
+        print(v)
+""", "0\n2\n4\n")
+
+    # glob._iglob / pkgutil.walk_packages / tokenize.tokenize: a generator
+    # that delegates to another generator with `yield from`, then yields
+    # more of its own values afterward.
+    test_generator_stdout("generator_yield_from_then_own_values", """\
+def inner(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def outer(n):
+    yield from inner(n)
+    yield 100
+    yield 101
+
+def main():
+    for v in outer(3):
+        print(v)
+""", "0\n1\n2\n100\n101\n")
+
+    # symtable.Symbol._flags_str / tokenize helpers: accumulate across
+    # yields with a running local updated before each yield, iterating a
+    # locally-built int list.
+    test_generator_stdout("generator_running_local_across_yields", """\
+def deltas():
+    xs = [1, 2, 3, 4]
+    total = 0
+    for x in xs:
+        total = total + x
+        yield total
+
+def main():
+    for v in deltas():
+        print(v)
+""", "1\n3\n6\n10\n")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
