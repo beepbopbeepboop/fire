@@ -2046,7 +2046,21 @@ def gen_module_impl(self, stmts):
     # pure). Also union in the extracted-helper field writes.
     if _gg_sigs and 'GimpleGen' in self.struct_field_types:
         _gg_ft = self.struct_field_types['GimpleGen']
-        for _f, _c in (getattr(self, '_selfhost_gimplegen_extra_fields', {}) or {}).items():
+        # `for _f, _c in (...).items():` — a 2-tuple unpack IN THE FOR-
+        # CLAUSE — is the SAME established tuple-boxing bug pattern as
+        # gimple_gen_exprs.py's `[at for (at, _) in arg_pairs]` fix
+        # (4d922cc): this exact site, re-merging the SAME
+        # `_selfhost_gimplegen_extra_fields` dict into `_gg_ft` a second
+        # time, is why fixing only the earlier copy-construction
+        # (e8598e1) didn't stop the erased `int64_t <address>;` struct-
+        # field-name corruption — this later merge re-introduced it.
+        # Keep `.items()` itself (it's the only dict-vs-list signal for
+        # this `getattr(...)`-sourced value — see _render_struct_typedef_
+        # body's reverted attempt at dropping it, a42ee7e), just don't
+        # destructure the pair in the for-clause.
+        for _fc_pair in (getattr(self, '_selfhost_gimplegen_extra_fields', {}) or {}).items():
+            _f = _as_str(_fc_pair[0])
+            _c = _as_str(_fc_pair[1])
             _cur = _gg_ft.get(_f)
             if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _c.endswith(' *')):
                 _gg_ft[_f] = _c

@@ -929,7 +929,15 @@ def _selfhost_gimplegen_field_types(gg_cls) -> dict:
     This is what a nested temp_gen that never sees `class GimpleGen`'s
     StructDef in its own `stmts`/`imported_stmts` registers into the shared
     `struct_field_types['GimpleGen']` so `self`/`gen` params can be typed."""
-    _fields: dict = dict(_selfhost_scan_gimplegen_extra_fields())
+    # Not `dict(_selfhost_scan_gimplegen_extra_fields())` — the self-hosted
+    # backend's dict-copy-constructor is unreliable for this shape (same
+    # class of bug as gimple_module_gen.py's matching fix, e8598e1):
+    # rebuild via an indexed loop + _as_str instead of trusting dict() to
+    # preserve key/value C types across the copy.
+    _fields: dict = {}
+    _sf_src = _selfhost_scan_gimplegen_extra_fields()
+    for _sfk in _sf_src:
+        _fields[_as_str(_sfk)] = _as_str(_sf_src[_sfk])
     if gg_cls is None:
         return _fields
     # class-body attrs (`_KNOWN_SIGS = {...}`, `_cpp_kwfwd_counter = 0`, ...)
