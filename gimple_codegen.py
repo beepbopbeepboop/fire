@@ -1178,7 +1178,21 @@ class GimpleGen:
         self._comptime_list_asts: dict = {}
         self._cb_statics: dict = {}
         self._cpp_reraise_stack: list = []
-        self._class_attrs: dict = {}
+        # `dict[str, dict[str, str]]`, not bare `dict`: struct name ->
+        # {attr name -> mangled C global}. A bare `dict` annotation gives
+        # the self-hosted backend no nested-value-type hint (mirrors
+        # `struct_field_types: dict[str, dict[str, str]]` a few lines up,
+        # which DOES carry one) — every real-struct write site
+        # (`self._class_attrs[s.name][aname] = mangled`, loop ~2198 in
+        # gimple_module_gen.py) happened to dodge this because "mojo_
+        # compiler.py" (the only entry point whose transitive closure ever
+        # recompiles itself as a NESTED import — see _run_pipeline's
+        # GimpleGen-registration comment) is the first build to reach the
+        # synthetic-GimpleGen-classattr registration branch through a
+        # fresh, never-before-exercised temp_gen recursion depth. There the
+        # inner dict's value type fell back to a generic default and the
+        # write lowered as `mojo_list_set_int`, SIGBUS. Confirmed via lldb.
+        self._class_attrs: dict[str, dict[str, str]] = {}
         self._func_attrs: dict = {}
         self._emitted_funcattr_decls: set = set()
         self._class_attr_inits: list = []
