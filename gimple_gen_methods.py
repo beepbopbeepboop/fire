@@ -1673,6 +1673,65 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         ot, ov = _auto_invoke_bound_method_value(gen, ov)
     method = func.member
 
+    # ── Awaitable protocol (Future/Event) — sync (non-coroutine) call sites ──
+    # gimple_gen_coro.py's `_rewrite_async_expr` already rewrites
+    # `create_future()` / `Event()` / `.set_result(v)` / `.set()` / `.done()`
+    # / `.is_set()` / `.clear()` to the A3 runtime shims
+    # (runtime/mojo_coro_gen.c) INSIDE an async coroutine body. asyncio's own
+    # ORDINARY methods touch the very same int64_t handles from plain
+    # synchronous code — `Queue.put_nowait` → `_wakeup_next(waiters)` →
+    # `waiter.set_result(None)`, `Queue.__init__`'s `self._finished =
+    # Event()` / `self._finished.set()` — so the identical rewrite has to
+    # fire here too or the handle is treated as an unknown-method scalar
+    # stub and the two paths disagree (anchor: bugs/COMPILE_FAIL_asyncio_
+    # queues.md gap 1).
+    #
+    # Safety scoping:
+    #   * Only when this module actually emitted a stack-switch coroutine
+    #     unit (`_stackswitch_coro_c_units`) — that is exactly the condition
+    #     under which gimple_module_gen.py emits the `extern` decls for
+    #     these shims, and no coroutine-free module ever needs them.
+    #   * Never when the receiver is a compiled struct that itself defines a
+    #     same-named method (a real user class with its own `.set()` /
+    #     `.done()` still dispatches normally below).
+    # The Future/Event API names are otherwise unambiguous: no `.mojo`
+    # source and no non-asyncio stdlib module calls them (grep-confirmed),
+    # and the runtime shims are callable from any C context.
+    if (os.environ.get('MOJO_CORO', 'stackswitch') != 'cpp'
+            and getattr(gen, '_stackswitch_coro_c_units', None)
+            and not getattr(node, 'kwargs', None)):
+        _fut_sn = (gimple_exprtypes._struct_name_of(ot)
+                   if isinstance(ot, str) and ot.endswith(' *') else None)
+        _fut_user_method = bool(
+            _fut_sn and _fut_sn in gen.struct_field_types
+            and method in (gen.struct_field_types.get(_fut_sn) or ()))
+        if not _fut_user_method:
+            if method == 'create_future' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_new', [])
+            if method in ('Future', 'Event') and not node.args:
+                shim = '__mojo_event_new' if method == 'Event' else '__mojo_future_new'
+                return 'int64_t', gen._call_expr('int64_t', shim, [])
+            if method in ('set', 'clear') and not node.args:
+                shim = '__mojo_event_set' if method == 'set' else '__mojo_event_clear'
+                gen._emit_call('void', '', shim, [('int64_t', ov)])
+                return 'void', ''
+            if method == 'is_set' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_event_is_set', [('int64_t', ov)])
+            if method == 'done' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_done', [('int64_t', ov)])
+            if method == 'result' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_result', [('int64_t', ov)])
+            if method == 'set_result' and len(node.args) == 1:
+                # `set_result(None)` carries a 0 payload; the awaiting
+                # coroutine reads it back via __mojo_future_result. _emit_call
+                # runs the backend's standard →int64_t arg coercion (the same
+                # path the shim's registered int64_t param type drives on the
+                # async side).
+                _at, _av = gen.lower_expr(node.args[0])
+                gen._emit_call('void', '', '__mojo_future_set_result',
+                               [('int64_t', ov), (_at, _av)])
+                return 'void', ''
+
     # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct
     # enclosing the current classmethod (current_func_name is e.g.
     # `TypeLattice_join_all`). Without this, `cls` lowers to a boxed

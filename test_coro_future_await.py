@@ -146,6 +146,44 @@ def main():
           out == "7\n", detail=repr(out))
 
 
+def test_sync_method_side_future_ops():
+    """Gap 1 (bugs/COMPILE_FAIL_asyncio_queues.md): `create_future()` and
+    `.set_result(v)` reached from ORDINARY (non-coroutine) struct methods
+    lower onto the same A3 Future handle the async side awaits. Mirrors
+    asyncio.Queue.put_nowait -> _wakeup_next -> `waiter.set_result(None)`."""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    var v = await fut
+    return v + 5
+
+struct Box:
+    var f: Int
+    fn __init__(out self):
+        self.f = 0
+    fn _loop(self) -> Int:
+        return 0
+    fn make(mut self):
+        self.f = self._loop().create_future()
+    fn fire(mut self):
+        self.f.set_result(37)
+
+async def main_co() -> Int:
+    var b = Box()
+    b.make()
+    b.fire()
+    var r = await consumer(b.f)
+    return r
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("sync-method create_future()/.set_result() round-trip to await",
+          out == "42\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):
