@@ -1052,16 +1052,20 @@ def _gmi_collect_return_values(acc_rt: list, stmts2) -> None:
 
 def _gmi_has_unresolved_base(_struct_bases_map, _all_struct_names, _memo, _name, _stack):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
-    comptime`'s docstring. Recursive; the memo dict and the two name sets
+    comptime`'s docstring. Recursive; the memo dict, the name set, and the
+    cycle-guard `_stack` (a LIST, not a frozenset — `_stack | {_name}` set
+    union with a literal crashed the self-hosted backend the same way the
+    `_coro_generic_names` set-intersection did; list concat is reliable)
     are threaded explicitly."""
     if _name in _memo:
         return _memo[_name]
     if _name in _stack:
         return False  # inheritance-cycle guard; shouldn't normally happen
     result = False
+    _next_stack = _stack + [_name]
     for _b in _struct_bases_map.get(_name, ()):
         if _b not in _all_struct_names or _gmi_has_unresolved_base(
-                _struct_bases_map, _all_struct_names, _memo, _b, _stack | {_name}):
+                _struct_bases_map, _all_struct_names, _memo, _b, _next_stack):
             result = True
             break
     _memo[_name] = result
@@ -2311,7 +2315,7 @@ def gen_module_impl(self, stmts):
     self._structs_with_unresolved_base = {
         _name for _name in _struct_bases_map
         if _gmi_has_unresolved_base(_struct_bases_map, _all_struct_names,
-                                   _unresolved_base_memo, _name, frozenset())
+                                   _unresolved_base_memo, _name, [])
     }
     _merge_struct_inheritance(all_struct_defs)
     self._exc_descendants = _compute_exc_descendants(all_struct_defs)
