@@ -984,6 +984,186 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
                 _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
 
 
+def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> None:
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Recursive; `_append_hits` (dict) threaded and
+    annotated per the hoist GOTCHA."""
+    for _n in _node_list:
+        if (isinstance(_n, ExprStmt)
+                and isinstance(_n.value, CallExpr)
+                and isinstance(_n.value.func, MemberExpr)
+                and _n.value.func.member == 'append'
+                and isinstance(_n.value.func.obj, IdentExpr)
+                and len(_n.value.args) == 1):
+            _append_hits.setdefault(_n.value.func.obj.name, []).append(
+                self._quick_type(_n.value.args[0]))
+        if isinstance(_n, FunctionDef):
+            _saved = self.var_types
+            self.var_types = dict(_saved)
+            for _pname, _ptype in (_n.params or []):
+                if _ptype:
+                    self.var_types[_pname] = _mojo_type(_ptype)
+            for _lname, _ltype in self._infer_local_var_types(_n).items():
+                if _lname not in self.var_types:
+                    self.var_types[_lname] = _ltype
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+            self.var_types = _saved
+        elif isinstance(_n, IfStmt):
+            _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits)
+            if _n.else_body:
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
+            for _cond2, _ebody2 in (_n.elifs or []):
+                _gmi_phase17_collect_appends(self, _ebody2 or [], _append_hits)
+        elif isinstance(_n, (WhileStmt, ForStmt)):
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+            if getattr(_n, 'else_body', None):
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
+        elif isinstance(_n, TryStmt):
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+            for _h in (_n.handlers or []):
+                _gmi_phase17_collect_appends(self, getattr(_h, 'body', None) or [], _append_hits)
+            if isinstance(_n.else_body, list):
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
+            if isinstance(getattr(_n, 'finally_body', None), list):
+                _gmi_phase17_collect_appends(self, _n.finally_body, _append_hits)
+        elif isinstance(_n, WithStmt):
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+
+
+def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict) -> None:
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Not recursive (walks via _walk_ast), but a
+    lifted closure all the same; `param_types`/`found` (dicts) threaded
+    and annotated per the hoist GOTCHA, and the captured struct name is
+    passed as `_sname` instead of the whole StructDef."""
+    for node in _walk_ast(body):
+        if isinstance(node, AssignStmt):
+            fn = _gmi_self_member(node.target)
+            _existing_fn_ft = found.get(fn)
+            if fn is not None and (
+                    fn not in found
+                    or (_existing_fn_ft in ('int', 'int64_t')
+                        and _existing_fn_ft is not None)):
+                v = node.value
+                if isinstance(v, IdentExpr):
+                    ft = param_types.get(v.name, 'int64_t')
+                elif isinstance(v, IntLiteral):
+                    ft = 'int64_t'
+                elif isinstance(v, StringLiteral):
+                    ft = 'char *'
+                elif isinstance(v, BoolLiteral):
+                    ft = '_Bool'
+                elif isinstance(v, DictExpr):
+                    ft = 'MojoDict *'
+                elif isinstance(v, (ListExpr, TupleExpr)):
+                    ft = 'MojoList *'
+                elif isinstance(v, SetExpr):
+                    ft = 'MojoSet *'
+                elif isinstance(v, Comprehension):
+                    ft = {'list': 'MojoList *', 'set': 'MojoSet *',
+                          'dict': 'MojoDict *'}.get(v.kind, 'MojoList *')
+                elif isinstance(v, CallExpr):
+                    cfn = v.func
+                    cn = cfn.name if isinstance(cfn, IdentExpr) else ''
+                    if cn in ('list', 'DynamicVector', 'mojo_list_new'):
+                        ft = 'MojoList *'
+                    elif cn in ('dict', 'Dict', 'mojo_dict_new'):
+                        ft = 'MojoDict *'
+                    elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
+                        ft = 'MojoSet *'
+                    elif cn.startswith('_alloc_'):
+                        sname = cn[len('_alloc_'):]
+                        ft = sname + ' *'
+                    elif cn in self.struct_field_types:
+                        ft = cn + ' *'
+                    elif (isinstance(cfn, MemberExpr)
+                          and cfn.member in _STR_RETURNING_METHODS):
+                        ft = 'char *'
+                    elif (isinstance(cfn, MemberExpr)
+                          and cfn.member in _LIST_RETURNING_METHODS):
+                        ft = 'MojoList *'
+                    else:
+                        ft = 'int'
+                else:
+                    ft = 'int'
+                found[fn] = ft
+                # `self._str_pool: dict[str, str] = {}` in
+                # __init__: capture the dict VALUE type from the
+                # annotation so `for k, v in self._str_pool.
+                # items()` unpacks `v` as `char *`, not int64
+                # (int64 -> `str()` on the pointer -> garbage
+                # `_slit_N` names in the emitted string pool).
+                if ft == 'MojoDict *' and getattr(node, 'type_ann', None):
+                    _dv_sa = self._annotation_dict_val_type(node.type_ann)
+                    if _dv_sa is not None:
+                        self._field_dict_val_types.setdefault(
+                            _sname, {})[fn] = _dv_sa
+                # `self._struct_allocs_needed: set[str] = set()` /
+                # `self._x: list[Foo] = []` in __init__ — seed the
+                # element type from the annotation, mirroring the
+                # dict-value seed just above. Without it a later
+                # `for x in sorted(self._x):` / `for x in self._x:`
+                # left `x` boxed int64_t.
+                if (ft in ('MojoList *', 'MojoSet *')
+                        and getattr(node, 'type_ann', None)
+                        and '[' in str(node.type_ann)):
+                    _li_sa = gimple_ctypes._split_top_level_commas(
+                        str(node.type_ann).split('[', 1)[1].rstrip(']').strip())
+                    if _li_sa:
+                        _et_sa = self._resolve_type(_li_sa[0].strip())
+                        if _et_sa and _et_sa != 'int64_t':
+                            self._field_elem_types.setdefault(
+                                _sname, {})[fn] = _et_sa
+        elif isinstance(node, MultiAssignStmt):
+            for tgt in node.targets:
+                fn = _gmi_self_member(tgt)
+                if fn is not None and fn not in found:
+                    found[fn] = 'int'
+        elif isinstance(node, AugAssignStmt):
+            fn = _gmi_self_member(node.target)
+            if fn is not None and fn not in found:
+                found[fn] = 'int64_t'
+
+
+def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
+    """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
+    for node in _walk_ast(body):
+        fn = _gmi_self_member(node)
+        if (fn is not None and fn not in found and fn not in _method_names
+                and fn not in _PSEUDO_DUNDER_ATTRS):
+            found[fn] = 'int'
+
+
+def _gmi_self_member(expr):
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Pure. MemberExpr's `.member` name iff its
+    object is bare `self`."""
+    if (isinstance(expr, MemberExpr) and isinstance(expr.obj, IdentExpr)
+            and _as_str(expr.obj.name) == 'self'):
+        return _as_str(expr.member)
+    return None
+
+
+def _gmi_expr_provably_str(e) -> bool:
+    """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
+    comptime`'s docstring. Recursive, pure. Is `e` an expression whose
+    Python runtime value is provably a str? Sound transitive closure over
+    the two string-producing binary operators: `%`-format yields str
+    whenever the FORMAT (LHS) is a str literal, and `+` yields str
+    whenever EITHER operand is a str (str.__add__ rejects non-str
+    operands, so a literal str on either side proves both sides are str —
+    disambiguating this from list/tuple concatenation)."""
+    if isinstance(e, (StringLiteral, TstringLiteral)):
+        return True
+    if isinstance(e, BinaryOp):
+        if e.op == '%':
+            return _gmi_expr_provably_str(e.left)
+        if e.op == '+':
+            return (_gmi_expr_provably_str(e.left)
+                    or _gmi_expr_provably_str(e.right))
+    return False
+
+
 def _gmi_collect_global_stmts(stmt_list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; pure (no captured state)."""
@@ -2625,110 +2805,7 @@ def gen_module_impl(self, stmts):
                                         self._field_nested_elem_types.setdefault(
                                             s.name, {})[f_name] = _slot_ct
 
-            def _self_member(expr):
-                """MemberExpr's `.member` name iff its object is bare `self`."""
-                if (isinstance(expr, MemberExpr) and isinstance(expr.obj, IdentExpr)
-                        and _as_str(expr.obj.name) == 'self'):
-                    return _as_str(expr.member)
-                return None
-
-            def _collect_self_assigns(body, param_types, found):
-                for node in _walk_ast(body):
-                    if isinstance(node, AssignStmt):
-                        fn = _self_member(node.target)
-                        _existing_fn_ft = found.get(fn)
-                        if fn is not None and (
-                                fn not in found
-                                or (_existing_fn_ft in ('int', 'int64_t')
-                                    and _existing_fn_ft is not None)):
-                            v = node.value
-                            if isinstance(v, IdentExpr):
-                                ft = param_types.get(v.name, 'int64_t')
-                            elif isinstance(v, IntLiteral):
-                                ft = 'int64_t'
-                            elif isinstance(v, StringLiteral):
-                                ft = 'char *'
-                            elif isinstance(v, BoolLiteral):
-                                ft = '_Bool'
-                            elif isinstance(v, DictExpr):
-                                ft = 'MojoDict *'
-                            elif isinstance(v, (ListExpr, TupleExpr)):
-                                ft = 'MojoList *'
-                            elif isinstance(v, SetExpr):
-                                ft = 'MojoSet *'
-                            elif isinstance(v, Comprehension):
-                                ft = {'list': 'MojoList *', 'set': 'MojoSet *',
-                                      'dict': 'MojoDict *'}.get(v.kind, 'MojoList *')
-                            elif isinstance(v, CallExpr):
-                                cfn = v.func
-                                cn = cfn.name if isinstance(cfn, IdentExpr) else ''
-                                if cn in ('list', 'DynamicVector', 'mojo_list_new'):
-                                    ft = 'MojoList *'
-                                elif cn in ('dict', 'Dict', 'mojo_dict_new'):
-                                    ft = 'MojoDict *'
-                                elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
-                                    ft = 'MojoSet *'
-                                elif cn.startswith('_alloc_'):
-                                    sname = cn[len('_alloc_'):]
-                                    ft = sname + ' *'
-                                elif cn in self.struct_field_types:
-                                    ft = cn + ' *'
-                                elif (isinstance(cfn, MemberExpr)
-                                      and cfn.member in _STR_RETURNING_METHODS):
-                                    ft = 'char *'
-                                elif (isinstance(cfn, MemberExpr)
-                                      and cfn.member in _LIST_RETURNING_METHODS):
-                                    ft = 'MojoList *'
-                                else:
-                                    ft = 'int'
-                            else:
-                                ft = 'int'
-                            found[fn] = ft
-                            # `self._str_pool: dict[str, str] = {}` in
-                            # __init__: capture the dict VALUE type from the
-                            # annotation so `for k, v in self._str_pool.
-                            # items()` unpacks `v` as `char *`, not int64
-                            # (int64 -> `str()` on the pointer -> garbage
-                            # `_slit_N` names in the emitted string pool).
-                            if ft == 'MojoDict *' and getattr(node, 'type_ann', None):
-                                _dv_sa = self._annotation_dict_val_type(node.type_ann)
-                                if _dv_sa is not None:
-                                    self._field_dict_val_types.setdefault(
-                                        s.name, {})[fn] = _dv_sa
-                            # `self._struct_allocs_needed: set[str] = set()` /
-                            # `self._x: list[Foo] = []` in __init__ — seed the
-                            # element type from the annotation, mirroring the
-                            # dict-value seed just above. Without it a later
-                            # `for x in sorted(self._x):` / `for x in self._x:`
-                            # left `x` boxed int64_t.
-                            if (ft in ('MojoList *', 'MojoSet *')
-                                    and getattr(node, 'type_ann', None)
-                                    and '[' in str(node.type_ann)):
-                                _li_sa = gimple_ctypes._split_top_level_commas(
-                                    str(node.type_ann).split('[', 1)[1].rstrip(']').strip())
-                                if _li_sa:
-                                    _et_sa = self._resolve_type(_li_sa[0].strip())
-                                    if _et_sa and _et_sa != 'int64_t':
-                                        self._field_elem_types.setdefault(
-                                            s.name, {})[fn] = _et_sa
-                    elif isinstance(node, MultiAssignStmt):
-                        for tgt in node.targets:
-                            fn = _self_member(tgt)
-                            if fn is not None and fn not in found:
-                                found[fn] = 'int'
-                    elif isinstance(node, AugAssignStmt):
-                        fn = _self_member(node.target)
-                        if fn is not None and fn not in found:
-                            found[fn] = 'int64_t'
-
             _method_names = {m.name for m in s.methods}
-
-            def _collect_self_reads(body, found):
-                for node in _walk_ast(body):
-                    fn = _self_member(node)
-                    if (fn is not None and fn not in found and fn not in _method_names
-                            and fn not in _PSEUDO_DUNDER_ATTRS):
-                        found[fn] = 'int'
 
             already = set(self.struct_field_types[s.name].keys())
             for method in s.methods:
@@ -2752,7 +2829,7 @@ def gen_module_impl(self, stmts):
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
-                _collect_self_assigns(method.body, pm, new_fields)
+                _gmi_collect_self_assigns(self, s.name, method.body, pm, new_fields)
                 for _nf_k in new_fields:
                     fn = _as_str(_nf_k)
                     ft = _as_str(new_fields[_nf_k])
@@ -2776,7 +2853,7 @@ def gen_module_impl(self, stmts):
                 continue
             for method in s.methods:
                 read_fields = {}
-                _collect_self_reads(method.body, read_fields)
+                _gmi_collect_self_reads(_method_names, method.body, read_fields)
                 for fn, ft in read_fields.items():
                     if fn not in self.struct_field_types[s.name]:
                         _base_ft = None
@@ -3553,31 +3630,6 @@ def gen_module_impl(self, stmts):
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
 
-    def _expr_provably_str(e):
-        """Is `e` an expression whose Python runtime value is provably a
-        str? Sound transitive closure over the two string-producing binary
-        operators: `%`-format yields str whenever the FORMAT (LHS) is a
-        str literal, and `+` yields str whenever EITHER operand is a str —
-        str.__add__ rejects non-str operands with TypeError, so a literal
-        str on either side proves BOTH sides are strs (which is what
-        disambiguates this from list/tuple concatenation, the other
-        inhabitant of `+`). Lets call sites like
-        `self.sendcmd("OPTS MLST " + facts_joined + ";")` contribute real
-        char* evidence instead of silence — without which a method whose
-        ONLY call sites pass computed strings keeps its unannotated
-        parameter at the int64_t default (ftplib.py gap #1's exact shape,
-        reached once a module has no bare-literal call site to carry the
-        vote alone)."""
-        if isinstance(e, (StringLiteral, TstringLiteral)):
-            return True
-        if isinstance(e, BinaryOp):
-            if e.op == '%':
-                return _expr_provably_str(e.left)
-            if e.op == '+':
-                return (_expr_provably_str(e.left)
-                        or _expr_provably_str(e.right))
-        return False
-
     def _arg_scalar_type(caller_name, a, deep_str=False,
                          prefer_refined_param=False):
         """Observed scalar C type of one call argument, or None.
@@ -3610,7 +3662,7 @@ def gen_module_impl(self, stmts):
             return 'double'
         if isinstance(a, StringLiteral):
             return 'char *'
-        if deep_str and _expr_provably_str(a):
+        if deep_str and _gmi_expr_provably_str(a):
             return 'char *'
         if isinstance(a, IdentExpr):
             # `_as_str`: `caller_name` comes boxed from the `for caller_name,
@@ -5665,50 +5717,8 @@ def gen_module_impl(self, stmts):
                 self._global_to_module[_scan_stmt.target] = _phase17_mod
             _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value)
 
-    def _phase17_collect_appends(_node_list, _append_hits):
-        for _n in _node_list:
-            if (isinstance(_n, ExprStmt)
-                    and isinstance(_n.value, CallExpr)
-                    and isinstance(_n.value.func, MemberExpr)
-                    and _n.value.func.member == 'append'
-                    and isinstance(_n.value.func.obj, IdentExpr)
-                    and len(_n.value.args) == 1):
-                _append_hits.setdefault(_n.value.func.obj.name, []).append(
-                    self._quick_type(_n.value.args[0]))
-            if isinstance(_n, FunctionDef):
-                _saved = self.var_types
-                self.var_types = dict(_saved)
-                for _pname, _ptype in (_n.params or []):
-                    if _ptype:
-                        self.var_types[_pname] = _mojo_type(_ptype)
-                for _lname, _ltype in self._infer_local_var_types(_n).items():
-                    if _lname not in self.var_types:
-                        self.var_types[_lname] = _ltype
-                _phase17_collect_appends(_n.body or [], _append_hits)
-                self.var_types = _saved
-            elif isinstance(_n, IfStmt):
-                _phase17_collect_appends(_n.then_body or [], _append_hits)
-                if _n.else_body:
-                    _phase17_collect_appends(_n.else_body, _append_hits)
-                for _cond2, _ebody2 in (_n.elifs or []):
-                    _phase17_collect_appends(_ebody2 or [], _append_hits)
-            elif isinstance(_n, (WhileStmt, ForStmt)):
-                _phase17_collect_appends(_n.body or [], _append_hits)
-                if getattr(_n, 'else_body', None):
-                    _phase17_collect_appends(_n.else_body, _append_hits)
-            elif isinstance(_n, TryStmt):
-                _phase17_collect_appends(_n.body or [], _append_hits)
-                for _h in (_n.handlers or []):
-                    _phase17_collect_appends(getattr(_h, 'body', None) or [], _append_hits)
-                if isinstance(_n.else_body, list):
-                    _phase17_collect_appends(_n.else_body, _append_hits)
-                if isinstance(getattr(_n, 'finally_body', None), list):
-                    _phase17_collect_appends(_n.finally_body, _append_hits)
-            elif isinstance(_n, WithStmt):
-                _phase17_collect_appends(_n.body or [], _append_hits)
-
     _phase17_append_hits: dict = {}
-    _phase17_collect_appends(_phase17_stmts, _phase17_append_hits)
+    _gmi_phase17_collect_appends(self, _phase17_stmts, _phase17_append_hits)
     for _gname, _gargs in _phase17_append_hits.items():
         if self._global_var_types.get(_gname) != 'MojoList *':
             continue
