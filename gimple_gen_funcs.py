@@ -1115,6 +1115,91 @@ def _selfhost_extracted_fn_index() -> dict:
     return _idx
 
 
+def _sgfs_fn_delegate_target(_m, _idx: dict):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` (module-level, not a
+    nested closure) — see that function's docstring for why: a nested
+    closure capturing `gen`/other locals from inside a function this big
+    is exactly the "lifted closure" shape that has repeatedly erased or
+    nondeterministically allocated its env struct elsewhere this session
+    (see gimple_gen_exprs.py's `_lb_as_set`/`_lower_binary_set_op`, and
+    this same bug class's own occurrence right here — confirmed via a real
+    --dump-full mojo.py determinism diff showing `_alloc_..._inferred_env
+    ()` vs `(...*)0` for the SAME call site across two runs)."""
+    _body = [s for s in _m.body
+             if not (isinstance(s, ExprStmt)
+                     and isinstance(s.value, StringLiteral))]
+    if (len(_body) == 1 and isinstance(_body[0], ReturnStmt)
+            and isinstance(_body[0].value, CallExpr)
+            and isinstance(_body[0].value.func, MemberExpr)
+            and isinstance(_body[0].value.func.obj, IdentExpr)):
+        return _idx.get(_body[0].value.func.member)
+    return None
+
+
+def _sgfs_inferred(gen, _inf_cache: dict, _fn):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
+    `_sgfs_fn_delegate_target`'s docstring."""
+    _k = id(_fn)
+    if _k not in _inf_cache:
+        try:
+            _inf_cache[_k] = gen._infer_param_types(_fn) or {}
+        except Exception:
+            _inf_cache[_k] = {}
+    return _inf_cache[_k]
+
+
+def _sgfs_param_ct(gen, _inf_cache: dict, _ann, _pn, _tgt_fn, _tgt_pn, _pos, _self_fn):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
+    `_sgfs_fn_delegate_target`'s docstring."""
+    if _ann is not None:
+        return gen._resolve_type(_ann)
+    if _tgt_fn is not None and _pos < len(_tgt_fn.params):
+        _ta = _tgt_fn.params[_pos][1]
+        if _ta is not None:
+            return gen._resolve_type(_ta)
+    _ct = _sgfs_inferred(gen, _inf_cache, _tgt_fn).get(_tgt_pn) if _tgt_fn is not None else None
+    if _ct is None:
+        _ct = _sgfs_inferred(gen, _inf_cache, _self_fn).get(_pn)
+    if _ct is not None:
+        return _ct
+    # A parameter's own default VALUE is type evidence (mirrors
+    # gimple_module_gen.py's method-param pass): `sentinel='...'` is
+    # `char *`, `is_self=False` is `_Bool`.
+    for _dsrc in (_self_fn, _tgt_fn):
+        if _dsrc is None:
+            continue
+        _dv = (getattr(_dsrc, 'param_defaults', None) or {}).get(
+            _self_fn is _dsrc and _pn or _tgt_pn)
+        if isinstance(_dv, StringLiteral):
+            return 'char *'
+        if isinstance(_dv, BoolLiteral):
+            return '_Bool'
+    return 'int64_t'
+
+
+def _sgfs_ret_ct(gen, _m, _tgt_fn):
+    """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
+    `_sgfs_fn_delegate_target`'s docstring."""
+    if getattr(_m, 'return_type', None) is not None:
+        return gen._resolve_type(_m.return_type)
+    if _tgt_fn is not None:
+        if getattr(_tgt_fn, 'return_type', None) is not None:
+            return gen._resolve_type(_tgt_fn.return_type)
+        try:
+            _r = gen._infer_return_type(_tgt_fn.body)
+            if _r:
+                return _r
+        except Exception:
+            pass
+    try:
+        _r = gen._infer_return_type(_m.body)
+        if _r:
+            return _r
+    except Exception:
+        pass
+    return 'int64_t'
+
+
 def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     """`{GimpleGen_<m>: (ret_ctype, [param_ctypes], [(pname, default_ast)])}` —
     a deterministic signature for every `class GimpleGen` method, computed
@@ -1125,22 +1210,17 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     Return/param types: the method's own annotation if it has one; else, for
     a one-line forwarding delegate `return <alias>.<fn>(self, ...)`, the
     extracted helper `<fn>`'s annotation at the same position; else
-    `int64_t`. `self` → `GimpleGen *`."""
+    `int64_t`. `self` → `GimpleGen *`.
+
+    The four helper closures this used to nest directly (`_fn_delegate_
+    target`, `_inferred`, `_param_ct`, `_ret_ct`) are now module-level
+    functions (`_sgfs_*`, above) taking `gen`/`_inf_cache`/`_idx` explicitly
+    — a real --dump-full mojo.py determinism diff caught one of them
+    (`_inferred`'s lifted-closure env) being allocated on one run and
+    replaced with a null pointer on another, for the identical call site."""
     if gg_cls is None:
         return {}
     _idx = _selfhost_extracted_fn_index()
-
-    def _fn_delegate_target(_m):
-        _body = [s for s in _m.body
-                 if not (isinstance(s, ExprStmt)
-                         and isinstance(s.value, StringLiteral))]
-        if (len(_body) == 1 and isinstance(_body[0], ReturnStmt)
-                and isinstance(_body[0].value, CallExpr)
-                and isinstance(_body[0].value.func, MemberExpr)
-                and isinstance(_body[0].value.func.obj, IdentExpr)):
-            return _idx.get(_body[0].value.func.member)
-        return None
-
     # Signal-based param inference for the extracted helpers and for a
     # method's own body. Run against the (nearly-empty struct_field_types)
     # root gen so the impure struct-field-shape-matching branch of
@@ -1149,67 +1229,12 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     # temp_gen.
     _inf_cache: dict = {}
 
-    def _inferred(_fn):
-        _k = id(_fn)
-        if _k not in _inf_cache:
-            try:
-                _inf_cache[_k] = gen._infer_param_types(_fn) or {}
-            except Exception:
-                _inf_cache[_k] = {}
-        return _inf_cache[_k]
-
-    def _param_ct(_ann, _pn, _tgt_fn, _tgt_pn, _pos, _self_fn):
-        if _ann is not None:
-            return gen._resolve_type(_ann)
-        if _tgt_fn is not None and _pos < len(_tgt_fn.params):
-            _ta = _tgt_fn.params[_pos][1]
-            if _ta is not None:
-                return gen._resolve_type(_ta)
-        _ct = _inferred(_tgt_fn).get(_tgt_pn) if _tgt_fn is not None else None
-        if _ct is None:
-            _ct = _inferred(_self_fn).get(_pn)
-        if _ct is not None:
-            return _ct
-        # A parameter's own default VALUE is type evidence (mirrors
-        # gimple_module_gen.py's method-param pass): `sentinel='...'` is
-        # `char *`, `is_self=False` is `_Bool`.
-        for _dsrc in (_self_fn, _tgt_fn):
-            if _dsrc is None:
-                continue
-            _dv = (getattr(_dsrc, 'param_defaults', None) or {}).get(
-                _self_fn is _dsrc and _pn or _tgt_pn)
-            if isinstance(_dv, StringLiteral):
-                return 'char *'
-            if isinstance(_dv, BoolLiteral):
-                return '_Bool'
-        return 'int64_t'
-
-    def _ret_ct(_m, _tgt_fn):
-        if getattr(_m, 'return_type', None) is not None:
-            return gen._resolve_type(_m.return_type)
-        if _tgt_fn is not None:
-            if getattr(_tgt_fn, 'return_type', None) is not None:
-                return gen._resolve_type(_tgt_fn.return_type)
-            try:
-                _r = gen._infer_return_type(_tgt_fn.body)
-                if _r:
-                    return _r
-            except Exception:
-                pass
-        try:
-            _r = gen._infer_return_type(_m.body)
-            if _r:
-                return _r
-        except Exception:
-            pass
-        return 'int64_t'
-
     _out: dict = {}
     for _m in gg_cls.methods:
         if _m.name == '__init__':
             continue
-        _tgt = _fn_delegate_target(_m)
-        _rc = _ret_ct(_m, _tgt)
+        _tgt = _sgfs_fn_delegate_target(_m, _idx)
+        _rc = _sgfs_ret_ct(gen, _m, _tgt)
         _pcs = []
         _has_star = False
         for _i, (_pn, _pt) in enumerate(_m.params):
@@ -1222,10 +1247,14 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
                 # delegate forwards self as its own arg 0, so target pos == _i
                 _tgt_pn = (_tgt.params[_i][0]
                            if _tgt is not None and _i < len(_tgt.params) else _pn)
-                _pcs.append(_param_ct(_pt, _pn, _tgt, _tgt_pn, _i, _m))
+                _pcs.append(_sgfs_param_ct(gen, _inf_cache, _pt, _pn, _tgt, _tgt_pn, _i, _m))
         if _has_star:
             continue   # variadic — leave to the normal passes
-        _dflts = [(pn, dv) for pn, dv in (getattr(_m, 'param_defaults', None) or {}).items()]
+        # Index arg_pairs[i][0]/[1] directly rather than tuple-unpacking a
+        # for-clause target (`for pn, dv in (...).items()`) — the
+        # established boxing bug.
+        _dflts = [(_pd_pair[0], _pd_pair[1])
+                  for _pd_pair in (getattr(_m, 'param_defaults', None) or {}).items()]
         _out[f'GimpleGen_{_m.name}'] = (_rc, _pcs, _dflts)
     return _out
 
