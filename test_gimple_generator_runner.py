@@ -819,6 +819,56 @@ def main():
         print(x)
 """, "0\n1\n")
 
+    # try/else/finally in a generator loop: on a normal (no-exception) pass
+    # the `else` clause runs, THEN `finally`, each exactly once per
+    # iteration. Regression guard for the fall-through path that used to
+    # run the finally body twice (once falling into the finally label,
+    # once again inline) — here it would have doubled BOTH `seen` and
+    # `done`.
+    test_generator_stdout("generator_try_else_finally_counts_once", """\
+def gen():
+    seen = 0
+    done = 0
+    i = 0
+    while i < 3:
+        try:
+            yield i
+        except KeyError:
+            seen = seen + 100
+        else:
+            seen = seen + 1
+        finally:
+            done = done + 1
+        i = i + 1
+    yield seen
+    yield done
+
+def main():
+    for x in gen():
+        print(x)
+""", "0\n1\n2\n3\n3\n")
+
+    # Early `return` out of a try body that has a `finally`, inside a
+    # generator: the finally must run exactly once on the way out and the
+    # generator then stops (StopIteration). Regression guard for the
+    # deferred-return path.
+    test_generator_stdout("generator_try_finally_early_return_runs_once", """\
+def gen():
+    n = 0
+    while True:
+        try:
+            if n == 2:
+                return
+            yield n
+        finally:
+            n = n + 1
+
+def main():
+    for x in gen():
+        print(x)
+    print("end")
+""", "0\n1\nend\n")
+
     # Re-raise (bare `raise` with no value) inside a handler — the exception
     # is caught internally, immediately re-raised, and propagates out
     # uncaught (no value is ever yielded) to the caller's own try/except.

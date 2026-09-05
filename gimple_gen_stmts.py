@@ -3182,6 +3182,7 @@ def _gen_stmt_TryStmt(gen, node):
     _had_terminal = False
     _return_value = None
     _return_type = None
+    _saw_return = [False]   # list so the nested intercepted_emit can set it
     for s in node.body:
         # Temporarily override _emit to intercept return statements
         original_emit = gen._emit
@@ -3195,6 +3196,7 @@ def _gen_stmt_TryStmt(gen, node):
                     _return_type = 'int64_t'  # Simplified
                 else:
                     _return_value = None
+                _saw_return[0] = True
                 # An early return leaves the try block's protected region
                 # just as much as falling off the end of it does — it
                 # must pop the exception stack (_mojo_exc_top) the same
@@ -3240,28 +3242,56 @@ def _gen_stmt_TryStmt(gen, node):
             _had_terminal = True
             break
 
-    # Emit finally body
+    # Normal fall-through out of the try body: no exception, no early
+    # return. `finally` must run EXACTLY ONCE here, then control continues
+    # to the `else` clause (which runs its own `finally` afterwards) or
+    # straight to `bb_after`. Crucially this path must NOT fall into the
+    # early-return `finally` block emitted just below — jump over it.
+    # (The previous structure let control fall through the `bb_finally`
+    # label AND then re-run the finally body inline, so every plain
+    # `try: ... finally: ...` that fell off the end of its try body ran
+    # its finally twice — over-counting any counter the finally mutated,
+    # and, in a `while` loop around the try, skipping loop iterations.)
+    if not _had_terminal:
+        gen._emit("  mojo_exc_pop ();")
+        if bb_else:
+            gen._emit(f"  goto {bb_else};")
+        elif node.finally_body:
+            gen._emit(f"  goto {bb_finally_done};")
+        else:
+            gen._emit(f"  goto {bb_after};")
+
+    # Early-`return`-inside-try path: intercepted_emit rewrote each
+    # `return X` in the body to `mojo_exc_pop (); goto {bb_finally};`.
+    # Run `finally`, then perform the deferred return.
     if bb_finally:
         gen._emit_label(bb_finally)
         for s in node.finally_body:
             gen.gen_stmt(s)
-        gen._emit(f"  goto {bb_finally_done};")
+        if _return_value is not None:
+            gen._emit(f"  return {_return_value};")
+        elif _saw_return[0]:
+            # A valueless `return;` was intercepted in the try body. Only
+            # a void-returning body (a generator body is one) lowers a
+            # bare `return` to a literal `return;` — _gen_stmt_ReturnStmt
+            # already rewrites the non-void case to `return 0;`/a typed
+            # temp, which takes the branch above. So emitting `return;`
+            # here is correct and needed: it ends the (generator) body.
+            gen._emit("  return;")
+        else:
+            # Dead code: no `return` at all in the try body, so nothing
+            # jumps to bb_finally. Fall through to bb_after rather than
+            # emitting a bare `return;` that would fail -Wreturn-mismatch
+            # in a non-void function (real: device_graph.mojo's `region`).
+            gen._emit(f"  goto {bb_after};")
 
-    # After finally: do the actual return if needed. Only re-emit the
-    # return here when a finally deferred it (see intercepted_emit above)
-    # — without a finally_body, the interceptor already emitted the real
-    # return statement directly, and doing it again here would duplicate
-    # it (unreachable dead code, not a compile error, but still wrong).
-    if bb_finally_done:
+    # Normal-path `finally` landing pad (only when there is no `else`
+    # clause — with an `else`, bb_else runs the finally itself).
+    if not _had_terminal and node.finally_body and not bb_else:
         gen._emit_label(bb_finally_done)
-    if _had_terminal and _return_value is not None and node.finally_body:
-        gen._emit(f"  return {_return_value};")
-    elif not _had_terminal:
-        gen._emit("  mojo_exc_pop ();")
-        if bb_finally:
-            for s in node.finally_body:
-                gen.gen_stmt(s)
-        gen._emit(f"  goto {bb_else if bb_else else bb_after};")
+        for s in node.finally_body:
+            gen.gen_stmt(s)
+        gen._emit(f"  goto {bb_after};")
 
     # Reset terminal state for caller
     if not _had_terminal:
