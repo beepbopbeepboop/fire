@@ -2237,10 +2237,26 @@ def _lb_as_set(gen, t: str, v: str) -> str:
     nested closure in `_lower_binary_tail`: as a lifted closure its `gen`
     capture typed int64_t, so `gen._new_val(...)` / `gen._ensure_local(...)`
     returned an erased temp NAME -> `MojoList * (37459640688);` locals in
-    the lifted `_lower_binary_tail__as_set`, different every --dump-full run."""
+    the lifted `_lower_binary_tail__as_set`, different every --dump-full run.
+
+    Hoisting to module level (this function) does NOT by itself fix the
+    erasure: `_selfhost_gen_self_param_ctype`'s convention only actually
+    resolves `gen` to a real `GimpleGen *` for a small minority of the
+    ~330 extracted backend functions (confirmed empirically — of 345
+    gen/self-first-param functions in a real `--dump-full mojo.py` build,
+    only 12 got `GimpleGen *`; the other 333, this one included, still
+    compile `gen` as plain `int64_t`) — some pre-existing ordering gap
+    between when a function's forward declaration is computed and when
+    `_selfhost_gimplegen_registered` becomes visible on whichever temp_gen
+    is doing the compiling, orthogonal to which top-level entry point
+    triggered the build. Fixing that ordering gap for real is a separate,
+    much larger undertaking; the direct, local fix is the same chokepoint
+    guard used everywhere else in this codebase: `_as_str` every value
+    that came back through a call on a `gen` whose static type isn't
+    trustworthy, before it can be embedded in emitted C text."""
     if t == 'MojoSet *':
         return v
-    return gen._new_val('MojoSet *', f'(MojoSet *){gen._ensure_local(t, v)}')
+    return _as_str(gen._new_val('MojoSet *', f'(MojoSet *){_as_str(gen._ensure_local(t, v))}'))
 
 
 def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
@@ -2251,9 +2267,11 @@ def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
     closure inside `_lower_binary_tail`: as a lifted closure its `gen`
     capture typed int64_t and `gen._call_expr(...)`'s returned temp NAME
     erased to a decimal address (`MojoList * (49784941744);` locals in the
-    lifted `_lower_binary_tail__set_op`, different every --dump-full run)."""
-    _res = gen._call_expr('MojoSet *', _fn,
-                          [('MojoSet *', _la), ('MojoSet *', _lb)])
+    lifted `_lower_binary_tail__set_op`, different every --dump-full run).
+    See `_lb_as_set`'s docstring: hoisting alone doesn't fix this — `gen`
+    stays `int64_t` here too, so `_res` needs the same `_as_str` guard."""
+    _res = _as_str(gen._call_expr('MojoSet *', _fn,
+                          [('MojoSet *', _la), ('MojoSet *', _lb)]))
     _e = gen._elem_of(_ov_a) or gen._elem_of(_ov_b)
     if _e and _e != 'int64_t':
         gen._elem_types[_res] = _e
