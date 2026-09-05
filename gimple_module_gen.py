@@ -1134,216 +1134,6 @@ def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
             found[fn] = 'int'
 
 
-def _gmi_scan_for_closures(self, outer_name: str, outer_scope: dict, body: list):
-    """Scan a function/method body for nested FunctionDefs and register them as closures."""
-    _all_stmts_nonfunc = _gmi_all_stmts_nonfunc
-    enriched_scope = dict(outer_scope)
-    _saved_vt2 = dict(self.var_types)
-    self.var_types.update(outer_scope)
-    for bstmt in _all_stmts_nonfunc(body):
-        if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
-            name = bstmt.target.name
-            if name not in enriched_scope:
-                t = self._quick_type(bstmt.value)
-                # `original_emit = gen._emit` (a method taken as a value —
-                # the `_gen_stmt_TryStmt` emit-interception idiom): the
-                # body lowers this to a `MojoBoundMethod *` (see
-                # `_lower_bound_method_value`), but `_quick_type` reports
-                # the method's own return type (`void` / `int64_t`). A
-                # mismatched — or `void` — capture makes the env-struct
-                # field disagree with the body's local (hard C error).
-                if (isinstance(bstmt.value, MemberExpr)
-                        and isinstance(bstmt.value.obj, IdentExpr)
-                        and self.var_types.get(bstmt.value.obj.name, '').endswith(' *')):
-                    _bmv_owner = gimple_exprtypes._struct_name_of(
-                        self.var_types[bstmt.value.obj.name])
-                    if (f"{_bmv_owner}_{bstmt.value.member}" in self.func_return_types
-                            and bstmt.value.member not in self.struct_field_types.get(_bmv_owner, {})):
-                        t = 'MojoBoundMethod *'
-                if t == 'void':
-                    t = 'int64_t'
-                enriched_scope[name] = t
-                self.var_types[name] = t
-        elif isinstance(bstmt, VarDecl):
-            if bstmt.name not in enriched_scope:
-                t = self._quick_type(bstmt.value) if bstmt.value else 'int64_t'
-                if t == 'void':
-                    t = 'int64_t'
-                enriched_scope[bstmt.name] = t
-                self.var_types[bstmt.name] = t
-    self.var_types = _saved_vt2
-    _sibling_cis: list = []   # (inner.name, ci, {names this ci calls})
-    for stmt in _all_stmts_nonfunc(body):
-        if not isinstance(stmt, FunctionDef):
-            continue
-        # `_as_funcdef_node`: identity in CPython, but its `-> FunctionDef`
-        # annotation gives the self-hosted backend a real `FunctionDef *`
-        # view of the otherwise-boxed loop element — without it `inner.name`
-        # goes through dynamic getattr and the lifted symbol comes out
-        # `outer_<garbage-bytes>`, the `_all_closures` key is garbage, and
-        # every nested `def` degrades to a weak "unavailable" stub.
-        inner     = _as_funcdef_node(stmt)
-        if inner.is_async and not inner.is_generator:
-            continue
-        lifted    = f"{outer_name}_{inner.name}"
-        used      = set()
-        for body_node in inner.body:
-            used |= _used_idents_node(body_node)
-        inner_assign_targets = set()
-        for bstmt in _all_stmts_nonfunc(inner.body):
-            if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
-                inner_assign_targets.add(bstmt.target.name)
-            elif isinstance(bstmt, ForStmt):
-                tgt = bstmt.target
-                if isinstance(tgt, str):
-                    inner_assign_targets.add(tgt)
-                elif hasattr(tgt, 'name'):
-                    inner_assign_targets.add(tgt.name)
-        inner_declared = ({pn for pn, _ in inner.params}
-                          | _declared_vars_body(inner.body)
-                          | inner_assign_targets)
-        outer_params = set(outer_scope.keys())
-        free_globals = set(self.func_return_types.keys()) - outer_params
-        free         = used - inner_declared - free_globals
-        # `_as_str(v)`: elements of `sorted(free)` (a set-of-str) erase
-        # to boxed int64_t under self-compile — without the static
-        # `str` view `v in enriched_scope` would hash the pointer.
-        captures     = []
-        for v in sorted(free):
-            v = _as_str(v)
-            if v in enriched_scope:
-                captures.append((v, enriched_scope[v]))
-        _cap_names_so_far = {_cn for _cn, _ in captures}
-        _called_names = {nd.func.name for nd in _walk_ast(inner.body)
-                          if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)}
-        _transitive_mut: set = set()
-        for _called in _called_names:
-            _t_api = self._nested_async_api.get(f"{outer_name}::{_called}")
-            if _t_api is None:
-                continue
-            for _tn, _tt in (_t_api.get('captures') or []):
-                if _tn not in _cap_names_so_far and _tn in enriched_scope:
-                    captures.append((_tn, enriched_scope[_tn]))
-                    _cap_names_so_far.add(_tn)
-                if _tn in (_t_api.get('mut_capture_names') or frozenset()):
-                    _transitive_mut.add(_tn)
-        env_struct   = f"{lifted}_env" if len(captures) > 0 else ""
-        ci           = ClosureInfo(lifted, env_struct, captures, inner)
-        _inner_dflts = getattr(inner, 'param_defaults', None) or {}
-        if _inner_dflts:
-            self._func_param_defaults[lifted] = [
-                (_pn2, _dv2) for _pn2, _dv2 in _inner_dflts.items()]
-        ci.mut_names = self._mutated_free_names(inner, _cap_names_so_far) | _transitive_mut
-        if outer_name not in self._all_closures:
-            self._all_closures[outer_name] = {}
-        self._all_closures[outer_name][inner.name] = ci
-        _sibling_cis.append((inner.name, ci, set(_called_names)))
-        if inner.return_type is not None:
-            self.func_return_types[lifted] = self._resolve_type(inner.return_type)
-        else:
-            for pname, ptype in inner.params:
-                self.var_types[pname] = self._resolve_type(ptype)
-            self.func_return_types[lifted] = self._infer_return_type(inner.body)
-            self.var_types.clear()
-        inner_scope = dict(enriched_scope)
-        for pn, pt in inner.params:
-            inner_scope[pn] = self._resolve_type(pt)
-        for bstmt in inner.body:
-            if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
-                name = bstmt.target.name
-                if name not in inner_scope:
-                    inner_scope[name] = self._quick_type(bstmt.value)
-        _gmi_scan_for_closures(self, lifted, inner_scope, inner.body)
-
-    # Mutually-recursive SIBLING closures (e.g. `_infer_param_types`'s
-    # `scan_expr` <-> `scan_nodes`) each got their OWN env struct with
-    # only their OWN captures. When one calls the other,
-    # `_lower_sibling_closure_call` can forward only the fields whose
-    # names match between the two envs — the callee's other captures
-    # stay NULL and it SEGVs (`accessed_fields.add(...)` on NULL). Give
-    # each connected call-group ONE shared env struct holding the UNION
-    # of the group's captures, so any member can call any other by
-    # passing its own (now identical-layout) env through.
-    if len(_sibling_cis) > 1:
-        _names_here = {n for n, _, _ in _sibling_cis}
-        # Undirected sibling call graph (flat — no nested helper: this
-        # runs inside gen_module_impl's own nested `_scan_for_closures`
-        # and the self-host backend can't lift a 3-deep closure).
-        _adj: dict = {}
-        for _n in _names_here:
-            _adj[_n] = []
-        for _n, _ci_x, _cn in _sibling_cis:
-            for _m in _cn:
-                if _m in _names_here and _m != _n:
-                    if _m not in _adj[_n]:
-                        _adj[_n].append(_m)
-                    if _n not in _adj[_m]:
-                        _adj[_m].append(_n)
-        _seen_names: set = set()
-        for _start in sorted(_names_here):
-            if _start in _seen_names:
-                continue
-            _stack = [_start]
-            _members = []
-            while _stack:
-                _cur = _stack.pop()
-                if _cur in _seen_names:
-                    continue
-                _seen_names.add(_cur)
-                _members.append(_cur)
-                for _nb in _adj[_cur]:
-                    if _nb not in _seen_names:
-                        _stack.append(_nb)
-            if len(_members) < 2:
-                continue
-            _member_cis = [self._all_closures[outer_name][_m] for _m in _members]
-            _merged_caps: dict = {}
-            _merged_mut: list = []
-            for _mci in _member_cis:
-                for _cv, _ct in _mci.captures:
-                    if _cv not in _merged_caps:
-                        _merged_caps[_cv] = _ct
-                for _mn in (getattr(_mci, 'mut_names', None) or []):
-                    if _mn not in _merged_mut:
-                        _merged_mut.append(_mn)
-            if not _merged_caps:
-                continue
-            _shared_env = outer_name + "_" + "_".join(sorted(_members)) + "_env"
-            _merged_list = [(_cv, _merged_caps[_cv]) for _cv in sorted(_merged_caps)]
-            _shared_mut = frozenset([_mn for _mn in _merged_mut if _mn in _merged_caps])
-            for _mci in _member_cis:
-                _mci.captures = list(_merged_list)
-                _mci.env_struct = _shared_env
-                _mci.mut_names = _shared_mut
-
-    def _find_re_sub_callbacks(search_body, context_outer):
-        for stmt in search_body:
-            stmts_to_check = []
-            if isinstance(stmt, AssignStmt):
-                stmts_to_check.append(stmt.value)
-            elif isinstance(stmt, ExprStmt):
-                stmts_to_check.append(stmt.value)  # ExprStmt uses .value
-            elif hasattr(stmt, 'body'):
-                _find_re_sub_callbacks(getattr(stmt, 'body', []), context_outer)
-                for clause in ('orelse', 'handlers', 'finalbody'):
-                    _find_re_sub_callbacks(getattr(stmt, clause, []), context_outer)
-            for expr in stmts_to_check:
-                if not isinstance(expr, CallExpr):
-                    continue
-                func = expr.func
-                if (isinstance(func, MemberExpr)
-                        and isinstance(func.obj, IdentExpr)
-                        and func.obj.name == 're'
-                        and func.member == 'sub'
-                        and len(expr.args) >= 2):
-                    cb_arg = expr.args[1]
-                    if isinstance(cb_arg, IdentExpr):
-                        inner_map = self._all_closures.get(context_outer, {})
-                        if cb_arg.name in inner_map:
-                            inner_map[cb_arg.name].is_re_sub_callback = True
-    _find_re_sub_callbacks(body, outer_name)
-
-
 def _gmi_all_stmts_nonfunc(stmts) -> list:
     """Hoisted out of `gen_module_impl._scan_for_closures` (was a
     2-level-deep nested closure) — see `_gmi_prefold_toplevel_comptime`'s
@@ -5238,6 +5028,215 @@ def gen_module_impl(self, stmts):
 
     self._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
 
+    def _scan_for_closures(outer_name: str, outer_scope: dict, body: list):
+        """Scan a function/method body for nested FunctionDefs and register them as closures."""
+        _all_stmts_nonfunc = _gmi_all_stmts_nonfunc
+        enriched_scope = dict(outer_scope)
+        _saved_vt2 = dict(self.var_types)
+        self.var_types.update(outer_scope)
+        for bstmt in _all_stmts_nonfunc(body):
+            if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
+                name = bstmt.target.name
+                if name not in enriched_scope:
+                    t = self._quick_type(bstmt.value)
+                    # `original_emit = gen._emit` (a method taken as a value —
+                    # the `_gen_stmt_TryStmt` emit-interception idiom): the
+                    # body lowers this to a `MojoBoundMethod *` (see
+                    # `_lower_bound_method_value`), but `_quick_type` reports
+                    # the method's own return type (`void` / `int64_t`). A
+                    # mismatched — or `void` — capture makes the env-struct
+                    # field disagree with the body's local (hard C error).
+                    if (isinstance(bstmt.value, MemberExpr)
+                            and isinstance(bstmt.value.obj, IdentExpr)
+                            and self.var_types.get(bstmt.value.obj.name, '').endswith(' *')):
+                        _bmv_owner = gimple_exprtypes._struct_name_of(
+                            self.var_types[bstmt.value.obj.name])
+                        if (f"{_bmv_owner}_{bstmt.value.member}" in self.func_return_types
+                                and bstmt.value.member not in self.struct_field_types.get(_bmv_owner, {})):
+                            t = 'MojoBoundMethod *'
+                    if t == 'void':
+                        t = 'int64_t'
+                    enriched_scope[name] = t
+                    self.var_types[name] = t
+            elif isinstance(bstmt, VarDecl):
+                if bstmt.name not in enriched_scope:
+                    t = self._quick_type(bstmt.value) if bstmt.value else 'int64_t'
+                    if t == 'void':
+                        t = 'int64_t'
+                    enriched_scope[bstmt.name] = t
+                    self.var_types[bstmt.name] = t
+        self.var_types = _saved_vt2
+        _sibling_cis: list = []   # (inner.name, ci, {names this ci calls})
+        for stmt in _all_stmts_nonfunc(body):
+            if not isinstance(stmt, FunctionDef):
+                continue
+            # `_as_funcdef_node`: identity in CPython, but its `-> FunctionDef`
+            # annotation gives the self-hosted backend a real `FunctionDef *`
+            # view of the otherwise-boxed loop element — without it `inner.name`
+            # goes through dynamic getattr and the lifted symbol comes out
+            # `outer_<garbage-bytes>`, the `_all_closures` key is garbage, and
+            # every nested `def` degrades to a weak "unavailable" stub.
+            inner     = _as_funcdef_node(stmt)
+            if inner.is_async and not inner.is_generator:
+                continue
+            lifted    = f"{outer_name}_{inner.name}"
+            used      = set()
+            for body_node in inner.body:
+                used |= _used_idents_node(body_node)
+            inner_assign_targets = set()
+            for bstmt in _all_stmts_nonfunc(inner.body):
+                if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
+                    inner_assign_targets.add(bstmt.target.name)
+                elif isinstance(bstmt, ForStmt):
+                    tgt = bstmt.target
+                    if isinstance(tgt, str):
+                        inner_assign_targets.add(tgt)
+                    elif hasattr(tgt, 'name'):
+                        inner_assign_targets.add(tgt.name)
+            inner_declared = ({pn for pn, _ in inner.params}
+                              | _declared_vars_body(inner.body)
+                              | inner_assign_targets)
+            outer_params = set(outer_scope.keys())
+            free_globals = set(self.func_return_types.keys()) - outer_params
+            free         = used - inner_declared - free_globals
+            # `_as_str(v)`: elements of `sorted(free)` (a set-of-str) erase
+            # to boxed int64_t under self-compile — without the static
+            # `str` view `v in enriched_scope` would hash the pointer.
+            captures     = []
+            for v in sorted(free):
+                v = _as_str(v)
+                if v in enriched_scope:
+                    captures.append((v, enriched_scope[v]))
+            _cap_names_so_far = {_cn for _cn, _ in captures}
+            _called_names = {nd.func.name for nd in _walk_ast(inner.body)
+                              if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)}
+            _transitive_mut: set = set()
+            for _called in _called_names:
+                _t_api = self._nested_async_api.get(f"{outer_name}::{_called}")
+                if _t_api is None:
+                    continue
+                for _tn, _tt in (_t_api.get('captures') or []):
+                    if _tn not in _cap_names_so_far and _tn in enriched_scope:
+                        captures.append((_tn, enriched_scope[_tn]))
+                        _cap_names_so_far.add(_tn)
+                    if _tn in (_t_api.get('mut_capture_names') or frozenset()):
+                        _transitive_mut.add(_tn)
+            env_struct   = f"{lifted}_env" if len(captures) > 0 else ""
+            ci           = ClosureInfo(lifted, env_struct, captures, inner)
+            _inner_dflts = getattr(inner, 'param_defaults', None) or {}
+            if _inner_dflts:
+                self._func_param_defaults[lifted] = [
+                    (_pn2, _dv2) for _pn2, _dv2 in _inner_dflts.items()]
+            ci.mut_names = self._mutated_free_names(inner, _cap_names_so_far) | _transitive_mut
+            if outer_name not in self._all_closures:
+                self._all_closures[outer_name] = {}
+            self._all_closures[outer_name][inner.name] = ci
+            _sibling_cis.append((inner.name, ci, set(_called_names)))
+            if inner.return_type is not None:
+                self.func_return_types[lifted] = self._resolve_type(inner.return_type)
+            else:
+                for pname, ptype in inner.params:
+                    self.var_types[pname] = self._resolve_type(ptype)
+                self.func_return_types[lifted] = self._infer_return_type(inner.body)
+                self.var_types.clear()
+            inner_scope = dict(enriched_scope)
+            for pn, pt in inner.params:
+                inner_scope[pn] = self._resolve_type(pt)
+            for bstmt in inner.body:
+                if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
+                    name = bstmt.target.name
+                    if name not in inner_scope:
+                        inner_scope[name] = self._quick_type(bstmt.value)
+            _scan_for_closures(lifted, inner_scope, inner.body)
+
+        # Mutually-recursive SIBLING closures (e.g. `_infer_param_types`'s
+        # `scan_expr` <-> `scan_nodes`) each got their OWN env struct with
+        # only their OWN captures. When one calls the other,
+        # `_lower_sibling_closure_call` can forward only the fields whose
+        # names match between the two envs — the callee's other captures
+        # stay NULL and it SEGVs (`accessed_fields.add(...)` on NULL). Give
+        # each connected call-group ONE shared env struct holding the UNION
+        # of the group's captures, so any member can call any other by
+        # passing its own (now identical-layout) env through.
+        if len(_sibling_cis) > 1:
+            _names_here = {n for n, _, _ in _sibling_cis}
+            # Undirected sibling call graph (flat — no nested helper: this
+            # runs inside gen_module_impl's own nested `_scan_for_closures`
+            # and the self-host backend can't lift a 3-deep closure).
+            _adj: dict = {}
+            for _n in _names_here:
+                _adj[_n] = []
+            for _n, _ci_x, _cn in _sibling_cis:
+                for _m in _cn:
+                    if _m in _names_here and _m != _n:
+                        if _m not in _adj[_n]:
+                            _adj[_n].append(_m)
+                        if _n not in _adj[_m]:
+                            _adj[_m].append(_n)
+            _seen_names: set = set()
+            for _start in sorted(_names_here):
+                if _start in _seen_names:
+                    continue
+                _stack = [_start]
+                _members = []
+                while _stack:
+                    _cur = _stack.pop()
+                    if _cur in _seen_names:
+                        continue
+                    _seen_names.add(_cur)
+                    _members.append(_cur)
+                    for _nb in _adj[_cur]:
+                        if _nb not in _seen_names:
+                            _stack.append(_nb)
+                if len(_members) < 2:
+                    continue
+                _member_cis = [self._all_closures[outer_name][_m] for _m in _members]
+                _merged_caps: dict = {}
+                _merged_mut: list = []
+                for _mci in _member_cis:
+                    for _cv, _ct in _mci.captures:
+                        if _cv not in _merged_caps:
+                            _merged_caps[_cv] = _ct
+                    for _mn in (getattr(_mci, 'mut_names', None) or []):
+                        if _mn not in _merged_mut:
+                            _merged_mut.append(_mn)
+                if not _merged_caps:
+                    continue
+                _shared_env = outer_name + "_" + "_".join(sorted(_members)) + "_env"
+                _merged_list = [(_cv, _merged_caps[_cv]) for _cv in sorted(_merged_caps)]
+                _shared_mut = frozenset([_mn for _mn in _merged_mut if _mn in _merged_caps])
+                for _mci in _member_cis:
+                    _mci.captures = list(_merged_list)
+                    _mci.env_struct = _shared_env
+                    _mci.mut_names = _shared_mut
+
+        def _find_re_sub_callbacks(search_body, context_outer):
+            for stmt in search_body:
+                stmts_to_check = []
+                if isinstance(stmt, AssignStmt):
+                    stmts_to_check.append(stmt.value)
+                elif isinstance(stmt, ExprStmt):
+                    stmts_to_check.append(stmt.value)  # ExprStmt uses .value
+                elif hasattr(stmt, 'body'):
+                    _find_re_sub_callbacks(getattr(stmt, 'body', []), context_outer)
+                    for clause in ('orelse', 'handlers', 'finalbody'):
+                        _find_re_sub_callbacks(getattr(stmt, clause, []), context_outer)
+                for expr in stmts_to_check:
+                    if not isinstance(expr, CallExpr):
+                        continue
+                    func = expr.func
+                    if (isinstance(func, MemberExpr)
+                            and isinstance(func.obj, IdentExpr)
+                            and func.obj.name == 're'
+                            and func.member == 'sub'
+                            and len(expr.args) >= 2):
+                        cb_arg = expr.args[1]
+                        if isinstance(cb_arg, IdentExpr):
+                            inner_map = self._all_closures.get(context_outer, {})
+                            if cb_arg.name in inner_map:
+                                inner_map[cb_arg.name].is_re_sub_callback = True
+        _find_re_sub_callbacks(body, outer_name)
+
     for s in stmts:
         if isinstance(s, FunctionDef):
             s = _as_funcdef_node(s)   # real FunctionDef view: keeps `pname`/
@@ -5264,7 +5263,7 @@ def gen_module_impl(self, stmts):
                         outer_scope[stmt.target.name] = t
                         self.var_types[stmt.target.name] = t
             self.var_types = _saved_vt
-            _gmi_scan_for_closures(self, s.name, outer_scope, s.body)
+            _scan_for_closures(s.name, outer_scope, s.body)
         elif isinstance(s, StructDef):
             _moids = self._struct_method_overload_ids(s)
             # index walk, NOT `zip(s.methods, _moids)` — the zip 2-tuple
@@ -5297,7 +5296,7 @@ def gen_module_impl(self, stmts):
                             outer_scope[stmt.target.name] = t
                             self.var_types[stmt.target.name] = t
                 self.var_types = _saved_vt
-                _gmi_scan_for_closures(self, outer_name, outer_scope, method.body)
+                _scan_for_closures(outer_name, outer_scope, method.body)
 
     _changed = True
     while _changed:
