@@ -1331,6 +1331,8 @@ class GimpleGen:
         self._global_inline_defs: set[str] = set()   # all func names with inline definitions (shared)
         self._struct_allocs_needed: set[str] = set() # struct names needing _alloc_ helpers
         self._emitted_allocs: set[str] = set()       # struct names for which _alloc_ was already emitted
+        self._ptr_alloc_n_needed: set[str] = set()   # elem C types needing _alloc_n_ helpers (UnsafePointer[T].alloc(n))
+        self._emitted_ptr_alloc_n: set[str] = set()  # elem C types for which _alloc_n_ was already emitted (shared)
         # Whole-compile "emitted exactly once" singletons keyed by a short
         # tag (e.g. 'type_name_table'). Shared by ref into every nested
         # temp_gen like _emitted_allocs — a plain module-global bool for
@@ -2886,6 +2888,9 @@ class GimpleGen:
         return ggc._ident_call_name(self, func_node)
     def _lower_call(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_call(self, node)
+
+    def _lower_pointer_alloc(self, node: CallExpr) -> tuple[str, str]:
+        return ggc._lower_pointer_alloc(self, node)
 
     def _lower_builtin_len(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_len(self, node)

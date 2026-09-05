@@ -434,6 +434,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
 
+    # `UnsafePointer[T].alloc(n)` / `OwnedPointer[T].alloc(n)` etc. — the
+    # static heap-allocation constructor, whose receiver is the type
+    # subscript `UnsafePointer[T]` (a SubscriptExpr), not a value. Checked
+    # before the receiver is lowered: lowering `UnsafePointer[T]` as an
+    # ordinary subscript yields a bogus `mojo_list_get_int` temp and
+    # `.alloc()` then falls through to the generic scalar-method stub (see
+    # bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md).
+    if (func.member == 'alloc'
+            and isinstance(func.obj, gimple_ctypes.SubscriptExpr)
+            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)
+            and func.obj.obj.name in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer')):
+        return gen._lower_pointer_alloc(node)
+
     # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()` — like
     # the existing `sys.platform` comptime-constant special case just
     # below (obj.name == 'sys'), these are genuinely string-returning

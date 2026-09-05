@@ -181,6 +181,54 @@ def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){vp}")
 
 
+def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`UnsafePointer[T].alloc(n)` (also `OwnedPointer`/`ArcPointer`/`Pointer`)
+    — the static heap-allocation constructor. `node.func` is a MemberExpr
+    (`.alloc`) whose `.obj` is the SubscriptExpr `UnsafePointer[T]`.
+
+    Before this, the `UnsafePointer[T]` receiver was lowered as an ordinary
+    subscript (→ `mojo_list_get_int`) and `.alloc(n)` fell through to the
+    generic "unknown method on a scalar receiver" stub, which hands the
+    receiver value straight back — so the `.alloc()` result was a bogus
+    list-get temp. In-function field access through it happened to still
+    work in some shapes, but `Int(UnsafePointer[T].alloc(n))` read the
+    bogus temp (0) and any round-trip of that handle through `Int()` back
+    into a pointer produced a null deref. See
+    `bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md`.
+
+    Lowered to a per-element-type `_alloc_n_<T>` helper (plain C, emitted in
+    the preamble alongside `_alloc_<T>` / `_mojo_at_<T>`): a `calloc(n,
+    sizeof(T))` cast to `T *`, and — for a struct element type — every
+    element's leading `__mojo_type_id` header is set, so struct-pointer
+    field access (the sibling deref bug's fix, which reads that tag) keeps
+    working on `.alloc()`'d memory too.
+    """
+    sub = node.func.obj  # SubscriptExpr: UnsafePointer[T]
+    idx = sub.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    elem_ann = gen._type_expr_to_ann(elems[0]) if elems else None
+    base = sub.obj.name
+    # Same struct-vs-scalar erasure as _lower_pointer_ctor: `_resolve_type`
+    # already collapses `UnsafePointer[SomeStruct]` to a single `T *`.
+    ptr_ctype = gen._resolve_type(f"{base}[{elem_ann}]") if elem_ann else 'int64_t *'
+    if not ptr_ctype.endswith(' *'):
+        ptr_ctype = ptr_ctype + ' *'
+    elem_ctype = ptr_ctype[:-2].strip()
+    # Count argument. Real Mojo's `.alloc(count)` requires it; default to 1
+    # for the degenerate no-arg spelling rather than emit invalid C.
+    if node.args:
+        nt, nv = gen.lower_expr(node.args[0])
+        n_val = nv if nt == 'int64_t' else gen._new_val('int64_t', f'(int64_t){nv}')
+    else:
+        n_val = gen._new_val('int64_t', '(int64_t)1')
+    for a in node.args[1:]:
+        gen.lower_expr(a)
+    gen._ptr_alloc_n_needed.add(elem_ctype)
+    t = gen._new_temp(ptr_ctype)
+    gen._emit(f"  {t} = _alloc_n_{gimple_ctypes._c_id(elem_ctype)} ({n_val});")
+    return ptr_ctype, t
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a

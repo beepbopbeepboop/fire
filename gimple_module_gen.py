@@ -6227,6 +6227,41 @@ def gen_module_impl(self, stmts):
     if _new_helper_count > 0:
         parts.append('')
 
+    # `UnsafePointer[T].alloc(n)` — per-element-type heap allocator. Plain
+    # C (like `_mojo_at_<T>` just above), so `sizeof(T)` is unrestricted
+    # even for a struct T not in any __GIMPLE signature. For a struct
+    # element type every slot's leading `__mojo_type_id` header is set so
+    # struct-pointer field access keeps working on `.alloc()`'d memory.
+    _pan_names: list = []
+    for _pan in self._ptr_alloc_n_needed:
+        if not _ptr_slot_in_range(_pan):
+            continue
+        _pan_s = _as_str(_pan)
+        if _pan_s and _pan_s not in _pan_names:
+            _pan_names.append(_pan_s)
+    _new_alloc_n_count = 0
+    for et in sorted(_pan_names):
+        if et in self._emitted_ptr_alloc_n:
+            continue
+        self._emitted_ptr_alloc_n.add(et)
+        cn = _c_id(et)
+        _sn = et[:-2].strip() if et.endswith('*') else et
+        if _sn in self.struct_field_types:
+            parts.append(
+                f"static {et} * _alloc_n_{cn} (int64_t n) {{\n"
+                f"  {et} * _p = ({et} *) calloc (n < 1 ? 1 : n, sizeof({et}));\n"
+                f"  for (int64_t _i = 0; _i < n; _i++) _p[_i].__mojo_type_id = (int64_t){_struct_type_id(_sn)};\n"
+                f"  return _p;\n"
+                f"}}"
+            )
+        else:
+            parts.append(
+                f"static {et} * _alloc_n_{cn} (int64_t n) {{ return ({et} *) calloc (n < 1 ? 1 : n, sizeof({et})); }}"
+            )
+        _new_alloc_n_count += 1
+    if _new_alloc_n_count > 0:
+        parts.append('')
+
     global_decls = []  # kept for compatibility, but won't be emitted
     current_mod_name = self.module_name if len(self.module_name) > 0 else "root"
     if current_mod_name not in self._module_globals:
