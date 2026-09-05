@@ -7359,25 +7359,24 @@ def gen_module_impl(self, stmts):
         parts.append('extern void __mojo_gen_resume_once (int64_t);')
         if not any('__mojo_gen_destroy' in p for p in parts[:-1]):
             parts.append('extern void __mojo_gen_destroy (int64_t);')
-    # Named set, not an inline literal `{...}` inside the `&` expression:
-    # a real --dump-full mojo.py crash (SIGSEGV in mojo_set_intersection ->
-    # mojo_set_contains_str -> _str_hash, address 0x1) traced here via lldb
-    # once the gen/self-param typing fix (e4b06a1) stopped this whole
-    # boolean expression from being silently stubbed to a no-op — the
-    # inline set literal wasn't reliably allocated as a real MojoSet* in
-    # this specific "big boolean OR-chain" expression context.
-    # `set[str]`, not bare `set` — mirrors `self._funcptr_builtins_needed:
-    # set[str] = set()` a few hundred lines up (the LEFT side of the `&`
-    # below), which DOES carry the element-type hint. A bare `set`
-    # annotation on THIS side didn't stop the crash (still SIGSEGV in
-    # mojo_set_intersection at the same site) — the asymmetry between a
-    # `set[str]`-typed operand and a bare-`set`-typed one is the likely
-    # actual gap, not "inline literal vs named variable" as first assumed.
-    _coro_generic_names: set[str] = {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}
+    # AVOID `&` (set intersection) entirely here, rather than continuing to
+    # chase its allocation/typing: two attempts (an inline literal, then a
+    # named `set[str]`-annotated local) both still crashed identically —
+    # SIGSEGV in mojo_set_intersection -> mojo_set_contains_str -> _str_hash
+    # on a garbage small address (0x1, then 0x3 on retry) — real, reproduced
+    # via lldb with ASLR re-enabled (lldb disables ASLR by default, which is
+    # why the first several repro attempts came back clean). Whatever is
+    # wrong is specific to a temporary MojoSet*'s lifetime/allocation inside
+    # this ~8000-line function, not the element-type annotation. Only two
+    # fixed, known string constants are ever checked for membership here —
+    # there is no need for a real set or its intersection at all. Plain `in`
+    # checks against `_funcptr_builtins_needed` (already a real, working
+    # `set[str]`) sidestep the bug entirely.
     _needs_async_runtime_h = bool(
         len(self._supported_async) or len(self._supported_async_closures)
         or len(self._nested_async_api)
-        or len(self._funcptr_builtins_needed & _coro_generic_names)
+        or 'mojo_coro_resume_generic' in self._funcptr_builtins_needed
+        or 'mojo_coro_destroy_generic' in self._funcptr_builtins_needed
         # A3 stack-switch "detached async" (bugs/hard/CODEGEN_coro_detached_
         # async_take_handle.md): `external_call["AsyncRT_DeviceContext_
         # enqueueHostFunction(Range)", ...]` is declared ONLY by this header
@@ -7390,9 +7389,10 @@ def gen_module_impl(self, stmts):
         # lowering) — `func_param_types` is the one bookkeeping dict that
         # DOES get populated unconditionally for every external_call name,
         # LIBC-declared or not, so it's the right signal here.
-        or bool(self.func_param_types.keys()
-                & {'AsyncRT_DeviceContext_enqueueHostFunction',
-                   'AsyncRT_DeviceContext_enqueueHostFunctionRange'}))
+        # Same set-intersection avoidance as the `_funcptr_builtins_needed`
+        # checks above — `.keys() & {...}` is the identical crash pattern.
+        or 'AsyncRT_DeviceContext_enqueueHostFunction' in self.func_param_types
+        or 'AsyncRT_DeviceContext_enqueueHostFunctionRange' in self.func_param_types)
     if _needs_async_runtime_h and not (self._supported_async or self._supported_async_closures
                                         or self._nested_async_api):
         parts.append('typedef struct MojoAsync MojoAsync;')
