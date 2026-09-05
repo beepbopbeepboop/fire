@@ -380,16 +380,21 @@ def _render_struct_typedef_body(struct_name, fields):
     guard #define gen_module_impl's own caller appends separately."""
     lines = [f"typedef struct {struct_name} {{", f"  int64_t __mojo_type_id;"]
     if fields:
-        # Index the dict's own keys, not `for field_name, field_type in
-        # fields.items():` — the established tuple-unpack-boxing bug this
-        # session's own fixes are full of (`.items()`'s 2-tuple result
-        # re-boxes an element to int64_t even if it started as char*):
-        # confirmed here as the exact source of `int64_t 49758922528;`
-        # struct-field declarations (an erased field NAME printed as a
-        # decimal address, invalid C) in the synthetic GimpleGen struct's
-        # extra-fields dict, different every --dump-full run.
-        for field_name in fields:
-            field_type = fields[field_name]
+        # REVERTED an attempted `for field_name in fields:` + indexed-
+        # lookup rewrite here: `fields.items()` isn't just iteration
+        # syntax, it's the self-hosted backend's ONLY signal that `fields`
+        # (an unannotated parameter) is a dict rather than a list — bare
+        # `for x in fields:` is genuinely ambiguous to it, and dropping
+        # `.items()` made an ORDINARY struct's fields dict (e.g.
+        # "ARM64JIT", never involved in the GimpleGen bug this was meant
+        # to fix) get inferred as a list, so `fields[field_name]` compiled
+        # as `mojo_list_get_int` and segfaulted on the very next --dump-
+        # full mojo.py run. The real fix for the GimpleGen-only corrupted-
+        # key symptom lives at the SOURCE of those keys instead (the
+        # `dict(x)` copy replaced by an indexed loop + _as_str a few
+        # hundred lines below, in gen_module_impl) — this loop shape was
+        # never actually the bug.
+        for field_name, field_type in fields.items():
             field_name = _as_str(field_name)
             ft = '' + _as_str(field_type)
             if ft == f"{struct_name} *":
