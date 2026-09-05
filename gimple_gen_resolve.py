@@ -662,10 +662,9 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the gimple_cpp_* path while the root module's went through
                 # gimple_gen_coro -- a split that leaves the client .c
                 # referencing symbols nobody defines.
-                import gimple_gen_coro as _ggc
-                stmts, _ss_meta = _ggc.lower(stmts)
+                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
                 if _ss_meta:
-                    _ggc.register(temp_gen, _ss_meta)
+                    gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
 
                 code = temp_gen.gen_module(stmts)
 

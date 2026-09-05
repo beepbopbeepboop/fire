@@ -116,7 +116,10 @@ def _generator_tuple_slots(fn: N.FunctionDef):
         kinds.discard(None)
         if len(kinds) > 1:
             return None            # inconsistent slot type across yields
-        k = next(iter(kinds)) if kinds else None
+        # avoid next(iter(...)) -- a known self-host miscompile trigger
+        # (see project memory: "next(iter(...)) -> _next undefined-symbol
+        # regression"); a plain list index compiles cleanly instead.
+        k = list(kinds)[0] if kinds else None
         if k == 'tuple':
             return None            # nested tuple in a slot -- not v0
         slots.append(_KIND_TO_SLOT_CTYPE[k])
@@ -231,13 +234,13 @@ def _resolve_call_args(name: str, node, cvar: str) -> list:
             for a in resolved]
 
 
-def _is_asyncio_sleep_call(node) -> bool:
+def _coro_is_asyncio_sleep_call(node) -> bool:
     return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
             and node.func.member == 'sleep' and len(node.args) == 1
             and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
 
 
-def _is_asyncio_sock_recv_call(node) -> bool:
+def _coro_is_asyncio_sock_recv_call(node) -> bool:
     return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
             and node.func.member == 'sock_recv' and len(node.args) == 1
             and isinstance(node.func.obj, N.IdentExpr) and node.func.obj.name == 'asyncio')
@@ -290,7 +293,7 @@ def _await_held_handle(node):
 
 def _await_stmt_ok(s, task_vars: set) -> bool:
     inner = s.value.value
-    if _is_asyncio_sleep_call(inner) or _is_asyncio_sock_recv_call(inner):
+    if _coro_is_asyncio_sleep_call(inner) or _coro_is_asyncio_sock_recv_call(inner):
         return True
     if _await_target_name(inner) is not None:
         return True
@@ -468,11 +471,11 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
     """The statement sequence driving one `await <inner>` to completion.
     Returns (stmts, result_expr). `forward` builds the ExprStmt that
     forwards one wait-descriptor upward (plain or tagged channel)."""
-    if _is_asyncio_sleep_call(inner):
+    if _coro_is_asyncio_sleep_call(inner):
         secs = _rewrite_async_expr(inner.args[0], cvar)
         stmts = [N.ExprStmt(value=_call('__mojo_async_await_sleep', [_c_ident(cvar), secs]))]
         return stmts, N.IntLiteral(value=0)
-    if _is_asyncio_sock_recv_call(inner):
+    if _coro_is_asyncio_sock_recv_call(inner):
         fd = _rewrite_async_expr(inner.args[0], cvar)
         _AW_COUNTER[0] += 1
         rv = f'__ar{_AW_COUNTER[0]}'
