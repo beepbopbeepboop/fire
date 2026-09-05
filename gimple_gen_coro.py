@@ -667,7 +667,7 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
 
 
 def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None) -> N.FunctionDef:
-    base = base or f'__mgco_{fn.name}'
+    base = base or f'__mgco_{N._as_str(fn.name)}'
     body_name = f'{base}_body'
     prologue = []
     for i, (pname, _pann) in enumerate(fn.params):
@@ -678,7 +678,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None)
     body_fd.is_generator = False
     body_fd.is_async = False
     meta.append({
-        'name': fn.name, 'struct': None, 'is_method': False, 'is_async': True,
+        'name': N._as_str(fn.name), 'struct': None, 'is_method': False, 'is_async': True,
         'is_async_gen': True,
         'base': base, 'body_name': body_name,
         'params': [_mojo_to_c_type(a) for _n, a in fn.params],
@@ -690,7 +690,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None)
 
 
 def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None) -> N.FunctionDef:
-    base = base or f'__mgco_{fn.name}'
+    base = base or f'__mgco_{N._as_str(fn.name)}'
     body_name = f'{base}_body'
     prologue = []
     for i, (pname, _pann) in enumerate(fn.params):
@@ -701,7 +701,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None) -> 
     body_fd.is_generator = False
     body_fd.is_async = False
     meta.append({
-        'name': fn.name, 'struct': None, 'is_method': False, 'is_async': True,
+        'name': N._as_str(fn.name), 'struct': None, 'is_method': False, 'is_async': True,
         'base': base, 'body_name': body_name,
         'params': [_mojo_to_c_type(a) for _n, a in fn.params],
         'nargs': len(fn.params), 'value_ctype': 'int64_t', 'value_kind': 'i',
@@ -1285,8 +1285,8 @@ def _mojo_to_c_type(ann: str) -> str:
 def _lower_one(fn: N.FunctionDef, meta: list,
                struct_name: str | None = None) -> N.FunctionDef:
     is_method = struct_name is not None
-    base = (f'__mgco_{struct_name}_{fn.name}' if is_method
-            else f'__mgco_{fn.name}')
+    base = (f'__mgco_{N._as_str(struct_name)}_{N._as_str(fn.name)}' if is_method
+            else f'__mgco_{N._as_str(fn.name)}')
     body_name = f'{base}_body'
     kind, _ = _generator_value_kind(fn)
     kind = kind or 'i'
@@ -1317,7 +1317,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     c_params = ([f'{struct_name} *'] if is_method else []) + \
                [_mojo_to_c_type(a) for _n, a in real_params]
     meta.append({
-        'name': fn.name,
+        'name': N._as_str(fn.name),
         'struct': struct_name,
         'is_method': is_method,
         'base': base,
