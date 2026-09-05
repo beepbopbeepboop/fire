@@ -2533,9 +2533,16 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         fp_void = gen._new_val('void *', f'(void *){fp_raw}')
     else:
         fp_void = fp_raw
-    # Widen each arg to int64_t.
+    # Widen each arg to int64_t. Index the pair (`_ap[0]`/`_ap[1]`), don't
+    # unpack it in the for-clause (`for at, av in arg_pairs`) — the
+    # established boxing bug: a 2-tuple unpack re-boxes `av` to int64_t
+    # even when it was a char*/pointer, and the erased value then landed
+    # in `f'(int64_t){av}'` as a decimal address — confirmed via a real
+    # --dump-full mojo.py determinism diff at myinterpreter.py:1027's
+    # `return func(interpreter, *args, **kwargs)`.
     widened = []
-    for at, av in arg_pairs:
+    for _ap in arg_pairs:
+        at, av = _as_str(_ap[0]), _as_str(_ap[1])
         if at == 'int64_t':
             widened.append(av)
         else:
