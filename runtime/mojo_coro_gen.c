@@ -347,3 +347,89 @@ __mojo_async_run_gen(int64_t genHandle)
     g->retval = __mojo_coro_return_value(g->coro);
     g->done = 1;
 }
+
+/* ── Awaitable protocol: Future / Event handles ───────────────────────────
+   The real asyncio suspension primitive: an allocatable handle with a
+   waiter list. `await <future>` parks the current coroutine on the handle
+   (MOJO_WD_FUTURE wait-descriptor -- the scheduler does NOT reschedule it);
+   `future.set_result(v)` / `event.set()` from ANY other coroutine (or from
+   ordinary synchronous code, e.g. Queue.put_nowait waking a blocked
+   getter) records the result and schedules every parked waiter back onto
+   the scheduler's ready queue. All handles are plain int64_t, like every
+   other cross-boundary handle in this file.
+
+   Event is the same object with result unused: it stays "done" once set
+   (so a wait() after set() returns immediately), and clear() re-arms it. */
+extern void __mojo_async_notify_future(int64_t future_handle);
+
+typedef struct MojoFuture {
+    int        done;
+    int64_t    result;
+} MojoFuture;
+
+int64_t
+__mojo_future_new(void)
+{
+    MojoFuture *f = (MojoFuture *)calloc(1, sizeof *f);
+    return (int64_t)(uintptr_t)f;
+}
+
+int64_t
+__mojo_future_done(int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    return f && f->done;
+}
+
+int64_t
+__mojo_future_result(int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    return f ? f->result : 0;
+}
+
+void
+__mojo_future_set_result(int64_t h, int64_t val)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    if (!f || f->done) return;
+    f->done   = 1;
+    f->result = val;
+    /* Wake every top-level coroutine the scheduler parked on this handle
+       (it re-drives its await chain, which re-enters __mojo_async_await_
+       future -> now f->done -> returns the result). */
+    __mojo_async_notify_future(h);
+}
+
+/* `await <future>` / `await <event>.wait()` -- called from inside a lowered
+   async body with its own __c. Returns the future's result box (0 for an
+   Event). If the handle is already done, returns immediately with no
+   suspension (matching asyncio). Otherwise forwards a MOJO_WD_FUTURE
+   wait-descriptor (payload = the handle) upward -- through every enclosing
+   await drive loop, exactly like a SLEEP/READ descriptor -- until it
+   reaches mojo_async_sched.c, which records (handle -> outermost coro). */
+int64_t
+__mojo_async_await_future(int64_t coro, int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    if (!f) return 0;
+    while (!f->done) {
+        __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro,
+                                 mojo_wd_make(MOJO_WD_FUTURE, h), 1);
+    }
+    return f->result;
+}
+
+/* Event is a Future whose result is ignored and which latches. */
+int64_t __mojo_event_new(void)            { return __mojo_future_new(); }
+void    __mojo_event_set(int64_t h)       { __mojo_future_set_result(h, 1); }
+int64_t __mojo_event_is_set(int64_t h)    { return __mojo_future_done(h); }
+void    __mojo_event_clear(int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    if (f) { f->done = 0; f->result = 0; }
+}
+int64_t __mojo_async_await_event_wait(int64_t coro, int64_t h)
+{
+    return __mojo_async_await_future(coro, h);
+}

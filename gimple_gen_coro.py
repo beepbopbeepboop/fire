@@ -505,6 +505,14 @@ _AW_COUNTER = [0]
 # _await_target_name's own "bare top-level name" scope.
 _PARAM_NAMES: dict[str, list[str]] = {}
 
+# Local/param names bound from create_task/create_raising_task in the async
+# def CURRENTLY being lowered -- set by _lower_one_async(_gen) before it
+# calls _rewrite_async_stmts, so _await_drive_stmts can tell an `await
+# <coro handle>` (generator-resume drive loop) from an `await <Future
+# handle>` (Awaitable-protocol waiter-list park). Same per-lower() lifetime
+# and single-threaded rationale as _PARAM_NAMES.
+_TASK_VARS: set = set()
+
 
 def _resolve_call_args(name: str, node, cvar: str) -> list:
     """Positional args, in order, for a call to `name(...)` -- resolving
@@ -575,14 +583,30 @@ def _await_held_handle(node):
     return u if isinstance(u, N.IdentExpr) else None
 
 
+def _is_future_wait_call(node) -> bool:
+    """`await <expr>.wait()` -- an Event.wait() bound-method call, no args.
+    Lowers onto __mojo_async_await_event_wait (the same Future waiter list).
+    `<expr>` must evaluate to an int64_t Event handle."""
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member == 'wait' and not node.args
+            and not getattr(node, 'kwargs', None))
+
+
 def _await_stmt_ok(s, task_vars: set) -> bool:
     inner = s.value.value
     if _is_asyncio_sleep_call(inner) or _is_asyncio_sock_recv_call(inner):
         return True
     if _await_target_name(inner) is not None:
         return True
+    if _is_future_wait_call(inner):
+        return True
     h = _await_held_handle(inner)
-    return h is not None and h.name in task_vars
+    if h is None:
+        return False
+    # `await task^`/`await task` where task came from create_task, OR
+    # `await <future handle>` (Awaitable protocol) -- a bare local/param
+    # name that isn't a known task var is treated as a Future handle.
+    return True
 
 
 def _scan_task_vars(fn: N.FunctionDef) -> set:
@@ -725,6 +749,35 @@ def _rewrite_async_expr(node, cvar: str):
     called on one."""
     if node is None or not hasattr(node, '__dict__'):
         return node
+    # Awaitable protocol: rewrite Future/Event operations to the A3 runtime
+    # shims (runtime/mojo_coro_gen.c). Confined to async-coroutine-body
+    # lowering -- the ordinary synchronous compiled path is untouched.
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr) \
+            and not getattr(node, 'kwargs', None):
+        _m = node.func.member
+        _obj = node.func.obj
+        if _m == 'set_result' and len(node.args) == 1:
+            return _call('__mojo_future_set_result',
+                         [_rewrite_async_expr(_obj, cvar),
+                          _rewrite_async_expr(node.args[0], cvar)])
+        if _m == 'create_future' and not node.args:
+            return _call('__mojo_future_new', [])
+        if _m == 'set' and not node.args:
+            return _call('__mojo_event_set', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'is_set' and not node.args:
+            return _call('__mojo_event_is_set', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'done' and not node.args:
+            return _call('__mojo_future_done', [_rewrite_async_expr(_obj, cvar)])
+        if _m in ('Future',) and not node.args:
+            return _call('__mojo_future_new', [])
+        if _m in ('Event',) and not node.args:
+            return _call('__mojo_event_new', [])
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) \
+            and not node.args and not getattr(node, 'kwargs', None):
+        if node.func.name == 'create_future':
+            return _call('__mojo_future_new', [])
+        if node.func.name == 'Event':
+            return _call('__mojo_event_new', [])
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
@@ -765,6 +818,26 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
         rv = f'__ar{_AW_COUNTER[0]}'
         stmts = [N.VarDecl(name=rv, type_ann=None,
                            value=_call('__mojo_async_await_sock_recv', [_c_ident(cvar), fd]))]
+        return stmts, _c_ident(rv)
+    # Awaitable protocol: `await <event>.wait()` -- park on the Event's
+    # waiter list (same list as a Future's; runtime/mojo_coro_gen.c).
+    if _is_future_wait_call(inner):
+        obj = _rewrite_async_expr(inner.func.obj, cvar)
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_event_wait', [_c_ident(cvar), obj]))]
+        return stmts, _c_ident(rv)
+    # Awaitable protocol: `await <future handle>` -- a bare local/param name
+    # that is NOT a create_task handle is a Future; park on its waiter list.
+    _hh = _await_held_handle(inner)
+    if (_hh is not None and _await_target_name(inner) is None
+            and _hh.name not in _TASK_VARS):
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_future',
+                                       [_c_ident(cvar), _c_ident(_hh.name)]))]
         return stmts, _c_ident(rv)
     name = _await_target_name(inner)
     if name is not None:
@@ -943,6 +1016,8 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None)
     for i, (pname, _pann) in enumerate(fn.params):
         prologue.append(N.VarDecl(name=pname, type_ann=None,
                                   value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
+    _TASK_VARS.clear()
+    _TASK_VARS.update(_scan_task_vars(fn))
     new_body = prologue + _rewrite_async_gen_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
     body_fd = N.FunctionDef(name=body_name, params=[(_CVAR, 'Int')], return_type=None, body=new_body)
     body_fd.is_generator = False
@@ -966,6 +1041,8 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None) -> 
     for i, (pname, _pann) in enumerate(fn.params):
         prologue.append(N.VarDecl(name=pname, type_ann=None,
                                   value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
+    _TASK_VARS.clear()
+    _TASK_VARS.update(_scan_task_vars(fn))
     new_body = prologue + _rewrite_async_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
     body_fd = N.FunctionDef(name=body_name, params=[(_CVAR, 'Int')], return_type=None, body=new_body)
     body_fd.is_generator = False
@@ -1877,6 +1954,27 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_yield_tagged', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_run_gen', 'void')
+    # Awaitable protocol: Future/Event handles (runtime/mojo_coro_gen.c).
+    gen.func_param_types.setdefault('__mojo_future_new', [])
+    gen.func_return_types.setdefault('__mojo_future_new', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_done', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_done', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_result', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_result', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_set_result', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_set_result', 'void')
+    gen.func_param_types.setdefault('__mojo_async_await_future', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_await_future', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_event_new', [])
+    gen.func_return_types.setdefault('__mojo_event_new', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_event_set', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_event_set', 'void')
+    gen.func_param_types.setdefault('__mojo_event_is_set', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_event_is_set', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_event_clear', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_event_clear', 'void')
+    gen.func_param_types.setdefault('__mojo_async_await_event_wait', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_await_event_wait', 'int64_t')
     for m in meta:
         api = {
             'base': m['base'],

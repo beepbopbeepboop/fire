@@ -1,0 +1,162 @@
+"""test_coro_future_await.py -- real behavioral tests for the A3
+stack-switch backend's Awaitable protocol: heap-allocatable Future/Event
+handles with a waiter list and cross-coroutine wakeup (runtime/
+mojo_coro_gen.c: __mojo_future_* / __mojo_event_* / __mojo_async_await_
+future / __mojo_async_await_event_wait; MOJO_WD_FUTURE in mojo_async_sched.c).
+
+Compiles the REAL generated C with gcc -fgimple, links this project's own
+runtime, runs the executable, asserts on real stdout. Mirrors
+test_coro_detached_async.py's harness.
+"""
+import os
+import platform
+import subprocess
+import tempfile
+
+os.environ['MOJO_CORO'] = 'stackswitch'
+
+import gimple_codegen
+from build_config import find_gcc, find_gxx
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_DIR = os.path.join(HERE, 'runtime')
+GCC = find_gcc()
+GXX = find_gxx()
+
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
+                 if platform.machine() in ('arm64', 'aarch64')
+                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
+
+_RUNTIME_SRCS = [
+    os.path.join(RUNTIME_DIR, 'mojo_runtime.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
+    _CORO_CTX_SRC,
+]
+
+_PASS = 0
+_FAIL = 0
+
+
+def check(name, cond, detail=""):
+    global _PASS, _FAIL
+    if cond:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}  {detail}")
+        _FAIL += 1
+
+
+def _build_and_run(mojo_src: str) -> str:
+    wd = tempfile.mkdtemp(prefix='mojo_coro_future_')
+    src_path = os.path.join(wd, 'prog.mojo')
+    with open(src_path, 'w') as f:
+        f.write(mojo_src)
+
+    c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
+    if '__mojo_async_await_future' not in c_code and '__mojo_async_await_event_wait' not in c_code:
+        raise RuntimeError("no Awaitable-protocol shim call in the generated C -- "
+                           "this test isn't exercising the path it claims to:\n" + c_code)
+
+    c_path = os.path.join(wd, 'prog.c')
+    with open(c_path, 'w') as f:
+        f.write(c_code)
+
+    objs = []
+    r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w', '-c', '-o',
+                        os.path.join(wd, 'prog.o'), c_path],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(f"gcc -fgimple compile failed: {r.stderr}\n---\n{c_code}")
+    objs.append(os.path.join(wd, 'prog.o'))
+
+    for i, src in enumerate(_RUNTIME_SRCS):
+        is_cpp = src.endswith('.cpp')
+        cc = GXX if is_cpp else GCC
+        extra = ['-std=c++20'] if is_cpp else []
+        o = os.path.join(wd, f'rt{i}.o')
+        r = subprocess.run([cc, *extra, f'-I{RUNTIME_DIR}', '-c', '-o', o, src],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError(f"compile of {src} failed: {r.stderr}")
+        objs.append(o)
+
+    exe = os.path.join(wd, 'prog.exe')
+    r = subprocess.run([GXX, '-o', exe, *objs], capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(f"link failed: {r.stderr}")
+    os.chmod(exe, 0o755)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
+    return r.stdout
+
+
+def test_await_resolved_future_value():
+    """`await <future handle>` in a nested coroutine returns the future's
+    result box. (The future is resolved before it is awaited -- v0's
+    create_task has no eager scheduling, so genuine cross-coroutine wakeup
+    through the scheduler is covered by runtime/test_mojo_future.c at the C
+    level; see COMPILE_FAIL_asyncio_queues.md for the eager-task gap.)"""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    var v = await fut
+    return v + 1
+
+async def main_co() -> Int:
+    var fut = create_future()
+    fut.set_result(41)
+    var r = await consumer(fut)
+    return r
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("await <future> returns the resolved result box",
+          out == "42\n", detail=repr(out))
+
+
+def test_await_event_wait_bound_method():
+    """`await <event>.wait()` -- a bound-method await -- compiles and runs;
+    returns once the Event is set."""
+    src = """\
+import asyncio
+
+async def waiter(ev: Int) -> Int:
+    await ev.wait()
+    return 7
+
+async def main_co() -> Int:
+    var ev = Event()
+    ev.set()
+    var r = await waiter(ev)
+    return r
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("await <event>.wait() bound-method await compiles and runs",
+          out == "7\n", detail=repr(out))
+
+
+def run_all():
+    for name, fn in list(globals().items()):
+        if name.startswith('test_') and callable(fn):
+            try:
+                fn()
+            except Exception as e:
+                check(name, False, detail=f"exception: {e}")
+    print(f"\nResults: {_PASS} passed, {_FAIL} failed")
+    return _FAIL == 0
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(0 if run_all() else 1)

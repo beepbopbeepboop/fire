@@ -295,6 +295,23 @@ def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> boo
             if (isinstance(v, CallExpr) and isinstance(v.func, SubscriptExpr)
                     and isinstance(v.func.obj, IdentExpr)):
                 continue
+            # Awaitable protocol (Future/Event): `await <local future
+            # handle>` (a bare IdentExpr -- not a call at all) and
+            # `await <expr>.wait()` (an Event.wait() bound-method call, no
+            # args). Both lower onto the A3 runtime's Future/Event waiter
+            # list (runtime/mojo_coro_gen.c: __mojo_async_await_future /
+            # __mojo_async_await_event_wait). See gimple_gen_coro.py's
+            # _await_drive_stmts for the actual lowering; if the awaited
+            # thing isn't really a handle the emitted call still type-checks
+            # (int64_t handle) and the honest whole-module refusal / gate
+            # catches a genuine mismatch, same trust-the-gate posture as the
+            # shapes above.
+            if isinstance(v, IdentExpr):
+                continue
+            if (isinstance(v, CallExpr) and isinstance(v.func, MemberExpr)
+                    and v.func.member == 'wait' and not v.args
+                    and not getattr(v, 'kwargs', None)):
+                continue
             return False
     return True
 
@@ -432,6 +449,16 @@ def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None,
     # the IdentExpr-only known-async-fn shape below since sock_recv's
     # `call.func` is a MemberExpr (`asyncio.sock_recv`), not an IdentExpr.
     if _is_asyncio_sock_recv_call(call):
+        return 'int64_t'
+    # Awaitable protocol: `await <future handle>` contributes the future's
+    # result box (int64_t); `await <event>.wait()` contributes nothing
+    # meaningful but is typed int64_t so a `var v = await ...` binding
+    # still resolves to a scalar.
+    if isinstance(call, IdentExpr):
+        return 'int64_t'
+    if (isinstance(call, CallExpr) and isinstance(call.func, MemberExpr)
+            and call.func.member == 'wait' and not call.args
+            and not getattr(call, 'kwargs', None)):
         return 'int64_t'
     # Step I (create_task/Task/TaskGroup/RaisingTask project): `await
     # create_task(<call>)`/`await create_raising_task(<call>)` contributes

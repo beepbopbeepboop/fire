@@ -18,6 +18,13 @@
 #define MOJO_WD_SLEEP  1   /* payload = absolute wake time, CLOCK_MONOTONIC ns */
 #define MOJO_WD_READ   2   /* payload = fd, wake when readable              */
 #define MOJO_WD_WRITE  3   /* payload = fd, wake when writable              */
+#define MOJO_WD_FUTURE 4   /* payload = MojoFuture* handle bits. Parked on a
+                              Future/Event: the scheduler records (future ->
+                              this top coroutine) and reschedules it when
+                              __mojo_future_set_result / __mojo_event_set
+                              notifies that the handle resolved. Forwarded
+                              upward unchanged through every intermediate
+                              await drive loop, exactly like SLEEP/READ.    */
 
 #define MOJO_WD_MASK   ((int64_t)0x00FFFFFFFFFFFFFFLL)
 
