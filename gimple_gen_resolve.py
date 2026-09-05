@@ -41,6 +41,82 @@ import gimple_gen_calls as ggc
 # function-local import (the pattern this used to follow) caused a real
 # self-hosted whole-program redefinition collision.
 
+def _lbn_target_names(t) -> list:
+    """Hoisted out of `_locally_bound_names` (module-level, not a nested
+    closure) — see `_lbn_walk`'s docstring for why."""
+    if isinstance(t, gimple_ctypes.IdentExpr):
+        return [t.name]
+    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        names = []
+        for e in t.elements:
+            names.extend(_lbn_target_names(e))
+        return names
+    return []
+
+
+def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
+    """Hoisted out of `_locally_bound_names` (module-level, not a nested,
+    RECURSIVE closure mutating two captured sets) — a real --dump-full
+    mojo.py crash (SIGSEGV in mojo_set_update -> mojo_set_add_str ->
+    _set_slot_str -> _str_hash, address 0x1) traced here via lldb: the
+    lifted-closure env carrying `bound`/`global_declared` across this
+    closure's OWN recursive self-calls wasn't reliably allocated/valid at
+    every recursion depth. Threading both sets as explicit parameters
+    (mutated in place, same as any ordinary Python call) sidesteps the
+    lifted-closure machinery entirely."""
+    for node in nodes or []:
+        if isinstance(node, gimple_ctypes.GlobalStmt):
+            global_declared.update(node.names)
+        elif isinstance(node, gimple_ctypes.AssignStmt):
+            bound.update(_lbn_target_names(node.target))
+        elif isinstance(node, gimple_ctypes.MultiAssignStmt):
+            for t in node.targets:
+                bound.update(_lbn_target_names(t))
+        elif isinstance(node, gimple_ctypes.AugAssignStmt):
+            bound.update(_lbn_target_names(node.target))
+        elif isinstance(node, gimple_ctypes.VarDecl):
+            bound.add(node.name)
+        elif isinstance(node, gimple_ctypes.ForStmt):
+            bound.update(_lbn_target_names(node.target))
+            _lbn_walk(bound, global_declared, node.body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+        elif isinstance(node, gimple_ctypes.WhileStmt):
+            _lbn_walk(bound, global_declared, node.body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+        elif isinstance(node, gimple_ctypes.IfStmt):
+            _lbn_walk(bound, global_declared, node.then_body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+            for _, elif_body in (node.elifs or []):
+                _lbn_walk(bound, global_declared, elif_body)
+        elif isinstance(node, gimple_ctypes.TryStmt):
+            _lbn_walk(bound, global_declared, node.body)
+            for h in (node.handlers or []):
+                _lbn_walk(bound, global_declared, h.body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+            if node.finally_body:
+                _lbn_walk(bound, global_declared, node.finally_body)
+        elif isinstance(node, gimple_ctypes.WithStmt):
+            for item in (node.items or []):
+                _al = item.alias
+                if _al is not None:
+                    # `isinstance(_al, str)` is unreliable in the
+                    # self-hosted backend (WithItem.alias is typed
+                    # `object` -> int64_t -> the isinstance stub says
+                    # False for a real `char *`, then `_al.name` on the
+                    # bare string "f" raises AttributeError). Check for
+                    # the node case explicitly; everything else is the
+                    # string alias.
+                    if isinstance(_al, gimple_ctypes.IdentExpr):
+                        bound.add(_al.name)
+                    else:
+                        bound.add(_as_str(_al))
+            _lbn_walk(bound, global_declared, node.body)
+
+
 def _locally_bound_names(gen, body: list, params: list = None) -> set:
     """Names bound as a LOCAL variable anywhere in this statement list,
     PLUS every parameter name — mirrors real Python's own scoping rule
@@ -67,70 +143,7 @@ def _locally_bound_names(gen, body: list, params: list = None) -> set:
     for pname, _ in (params or []):
         bound.add(pname.lstrip('*'))
 
-    def _target_names(t):
-        if isinstance(t, gimple_ctypes.IdentExpr):
-            return [t.name]
-        if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-            names = []
-            for e in t.elements:
-                names.extend(_target_names(e))
-            return names
-        return []
-
-    def walk(nodes):
-        for node in nodes or []:
-            if isinstance(node, gimple_ctypes.GlobalStmt):
-                global_declared.update(node.names)
-            elif isinstance(node, gimple_ctypes.AssignStmt):
-                bound.update(_target_names(node.target))
-            elif isinstance(node, gimple_ctypes.MultiAssignStmt):
-                for t in node.targets:
-                    bound.update(_target_names(t))
-            elif isinstance(node, gimple_ctypes.AugAssignStmt):
-                bound.update(_target_names(node.target))
-            elif isinstance(node, gimple_ctypes.VarDecl):
-                bound.add(node.name)
-            elif isinstance(node, gimple_ctypes.ForStmt):
-                bound.update(_target_names(node.target))
-                walk(node.body)
-                if node.else_body:
-                    walk(node.else_body)
-            elif isinstance(node, gimple_ctypes.WhileStmt):
-                walk(node.body)
-                if node.else_body:
-                    walk(node.else_body)
-            elif isinstance(node, gimple_ctypes.IfStmt):
-                walk(node.then_body)
-                if node.else_body:
-                    walk(node.else_body)
-                for _, elif_body in (node.elifs or []):
-                    walk(elif_body)
-            elif isinstance(node, gimple_ctypes.TryStmt):
-                walk(node.body)
-                for h in (node.handlers or []):
-                    walk(h.body)
-                if node.else_body:
-                    walk(node.else_body)
-                if node.finally_body:
-                    walk(node.finally_body)
-            elif isinstance(node, gimple_ctypes.WithStmt):
-                for item in (node.items or []):
-                    _al = item.alias
-                    if _al is not None:
-                        # `isinstance(_al, str)` is unreliable in the
-                        # self-hosted backend (WithItem.alias is typed
-                        # `object` -> int64_t -> the isinstance stub says
-                        # False for a real `char *`, then `_al.name` on the
-                        # bare string "f" raises AttributeError). Check for
-                        # the node case explicitly; everything else is the
-                        # string alias.
-                        if isinstance(_al, gimple_ctypes.IdentExpr):
-                            bound.add(_al.name)
-                        else:
-                            bound.add(_as_str(_al))
-                walk(node.body)
-
-    walk(body)
+    _lbn_walk(bound, global_declared, body)
     return bound - global_declared
 
 
