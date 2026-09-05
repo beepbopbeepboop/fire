@@ -105,7 +105,9 @@ def _classify(report, src):
 
 
 def run():
-    tag = os.environ.get('MOJO_CORO', 'cpp')
+    # §5.5 cutover: stackswitch is now the default backend (unset ==
+    # stackswitch, not cpp -- see gimple_gen_coro.enabled()).
+    tag = os.environ.get('MOJO_CORO', 'stackswitch')
     tgts = _targets()
     print(f'scoreboard tag={tag}  targets={len(tgts)}')
     results = {}

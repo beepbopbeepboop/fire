@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Layer 2 also needs a way to hand a body its stashed args: */
 extern void *__mojo_coro_env(MojoCoro *c);   /* defined in mojo_coro.c (added) */
@@ -121,6 +122,25 @@ __mojo_gen_arg(int64_t coro, int64_t idx)
     return g->args[idx];
 }
 
+/* async-generator body: yield e -> is_wd=0, await's wait-descriptor ->
+   is_wd=1, on the SAME channel (see mojo_coro.h). The consuming `async
+   for` reads back __mojo_gen_last_yield_was_wd(coro) right after a
+   resume to tell them apart. */
+int64_t
+__mojo_gen_yield_tagged(int64_t coro, int64_t val, int64_t is_wd)
+{
+    return __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro, val, (int)is_wd);
+}
+
+/* Takes a MojoGenerator handle (like _resume/_value/_destroy), not a raw
+   MojoCoro -- consistent with every other <base>_* consumer entry point. */
+int64_t
+__mojo_gen_last_yield_was_wd(int64_t genHandle)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
+    return (g && g->coro) ? __mojo_coro_last_yield_was_wd(g->coro) : 0;
+}
+
 /* yield e -- returns the value sent in by the next resume. Typed variants
    so gimple_gen_coro can pass a char* / double straight through without a
    codegen-inserted cast; all funnel to the one int64_t-box yield. */
@@ -149,6 +169,36 @@ __mojo_gen_set_return(int64_t coro, int64_t v)
 {
     __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, v);
 }
+
+/* `yield (a, b, ...)` -- box the slots into a MojoList (each stored as its
+   raw int64_t bits, exactly the convention _emit_generator_tuple_unpack
+   reads back via mojo_list_get_{int,str,...}) and hand the list pointer
+   bits to the yield as one int64_t. */
+extern void   *mojo_list_new(void);
+extern void    mojo_list_append_int(void *, int64_t);
+
+static int64_t
+tuple_box(const int64_t *slots, int n)
+{
+    void *l = mojo_list_new();
+    for (int i = 0; i < n; i++) mojo_list_append_int(l, slots[i]);
+    return (int64_t)(uintptr_t)l;
+}
+
+int64_t __mojo_tuple_box_2(int64_t a, int64_t b)
+{ int64_t s[2] = { a, b }; return tuple_box(s, 2); }
+int64_t __mojo_tuple_box_3(int64_t a, int64_t b, int64_t c)
+{ int64_t s[3] = { a, b, c }; return tuple_box(s, 3); }
+int64_t __mojo_tuple_box_4(int64_t a, int64_t b, int64_t c, int64_t d)
+{ int64_t s[4] = { a, b, c, d }; return tuple_box(s, 4); }
+int64_t __mojo_tuple_box_5(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e)
+{ int64_t s[5] = { a, b, c, d, e }; return tuple_box(s, 5); }
+int64_t __mojo_tuple_box_6(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f)
+{ int64_t s[6] = { a, b, c, d, e, f }; return tuple_box(s, 6); }
+int64_t __mojo_tuple_box_7(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g)
+{ int64_t s[7] = { a, b, c, d, e, f, g }; return tuple_box(s, 7); }
+int64_t __mojo_tuple_box_8(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
+{ int64_t s[8] = { a, b, c, d, e, f, g, h }; return tuple_box(s, 8); }
 
 /* resume: 1 = produced a value (read via __mojo_gen_value), 0 = done. On an
    uncaught exception in the body, __mojo_coro_resume re-raises here (live
@@ -194,4 +244,106 @@ __mojo_gen_destroy(int64_t gen)
     if (!g) return;
     __mojo_coro_destroy(g->coro);
     free(g);
+}
+
+/* "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md):
+   the stack-switch equivalent of mojo_coro_resume_generic (runtime/
+   mojo_async_runtime.cpp) -- a `void (*)(int64_t)` resume primitive that
+   drives a coroutine ONE resume step, matching the signature
+   AsyncRT_DeviceContext_enqueueHostFunction(Range) (runtime/
+   mojo_async_runtime.h) expects for its resume_fn argument. Substituted in
+   for `_coro_resume_fn` by gimple_codegen.py's BUILTIN_VALUE_MAP override
+   when MOJO_CORO=stackswitch (gimple_gen_coro.py); `__mojo_gen_destroy`
+   above already has the exact `void (*)(int64_t)` shape needed for
+   `_coro_destroy_fn` as-is, so no separate wrapper is needed for that one.
+   Callers of this path only ever hand it a coroutine whose body has no
+   internal suspension point of its own (device_context.mojo's `wrapper()`
+   closures, gated by gimple_gen_coro's ordinary async eligibility -- no
+   `await` in the body), so one resume() always drives it to completion,
+   same honesty argument as the cpp-path stub. */
+void
+__mojo_gen_resume_once(int64_t gen)
+{
+    (void)__mojo_gen_resume(gen, 0);
+}
+
+/* Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
+   async_closure_capture.md) -- v0: a plain int64_t heap box, one malloc'd
+   cell per captured outer local. Handles are plain int64_t (never a raw
+   pointer type), matching every other cross-boundary handle in this file,
+   so the -fgimple-compiled enclosing function and coroutine body can both
+   pass the handle around as an ordinary scalar. No free() -- the box's
+   lifetime is exactly one call of the enclosing (ordinary) function, and
+   this is a small, bounded, deliberate leak for v0 (same simplification
+   this codegen already accepts for other short-lived handles); a real
+   lifetime-tracked free is future work, not required for correctness of
+   the captured VALUE. */
+int64_t
+__mojo_box_new_i64(int64_t init)
+{
+    int64_t *p = (int64_t *)malloc(sizeof(int64_t));
+    if (p) *p = init;
+    return (int64_t)(uintptr_t)p;
+}
+
+int64_t
+__mojo_box_get_i64(int64_t box)
+{
+    return box ? *(int64_t *)(uintptr_t)box : 0;
+}
+
+void
+__mojo_box_set_i64(int64_t box, int64_t v)
+{
+    if (box) *(int64_t *)(uintptr_t)box = v;
+}
+
+/* ── async def / await bridge (runtime/mojo_async_sched.c) ────────────── */
+#include "mojo_wd.h"
+
+extern uint64_t __mojo_async_now_ns(void);
+extern void     __mojo_async_run(MojoCoro *c);
+
+/* `await asyncio.sleep(secs)` -- called from inside a lowered async body
+   with its own __c; suspends until secs have elapsed. */
+void
+__mojo_async_await_sleep(int64_t coro, double secs)
+{
+    uint64_t wake = __mojo_async_now_ns() + (uint64_t)(secs * 1e9);
+    __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_SLEEP, (int64_t)wake), 1);
+}
+
+/* `await asyncio.sock_recv(fd)` -- reads ONE byte once fd is readable,
+   matching the existing cpp-path _mojoasync_SockRecvAwaiter exactly:
+   returns the byte value on success, -1 on EOF (peer closed), -2 on a
+   real read error. */
+int64_t
+__mojo_async_await_sock_recv(int64_t coro, int64_t fd)
+{
+    __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro, mojo_wd_make(MOJO_WD_READ, fd), 1);
+    unsigned char c;
+    ssize_t n = read((int)fd, &c, 1);
+    if (n == 1) return (int64_t)c;
+    if (n == 0) return (int64_t)-1;
+    return (int64_t)-2;
+}
+
+/* `asyncio.run(f())`'s bridge: genHandle is the MojoGenerator f() already
+   constructed (via the ordinary __mgco_f_start call, routed there because
+   f is registered in _generator_api). Drive its underlying MojoCoro to
+   completion through the scheduler, then make the handle's own bookkeeping
+   agree (so a subsequent __mojo_gen_retval(genHandle) reads the right
+   value) -- __mojo_async_run resumes the raw MojoCoro directly (bypassing
+   MojoGen's own resume/value tracking, which only matters for the
+   intermediate wait-descriptor forwarding, not the final result: the body
+   itself already stored the real return box on the MojoCoro via
+   __mojo_gen_set_return -> __mojo_coro_set_return). */
+void
+__mojo_async_run_gen(int64_t genHandle)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
+    if (!g || g->done) return;
+    __mojo_async_run(g->coro);
+    g->retval = __mojo_coro_return_value(g->coro);
+    g->done = 1;
 }

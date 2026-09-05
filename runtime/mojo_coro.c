@@ -63,6 +63,8 @@ struct MojoCoro {
 
     int           status;       /* MOJO_CORO_{SUSPENDED,RUNNING,DONE}     */
     int           started;
+    int           last_wd;      /* was the most recent yield a wait-descriptor
+                                    (async generator only -- see mojo_coro.h) */
     int64_t       yield_box;    /* value handed OUT at a yield            */
     int64_t       send_box;     /* value handed IN at a resume            */
     int64_t       ret_box;      /* body's return value (status==DONE)     */
@@ -291,6 +293,19 @@ int64_t
 __mojo_coro_return_value(MojoCoro *c)
 {
     return c->ret_box;
+}
+
+int64_t
+__mojo_coro_yield_tagged(MojoCoro *c, int64_t val_box, int is_wd)
+{
+    c->last_wd = is_wd;
+    return __mojo_coro_yield(c, val_box);
+}
+
+int
+__mojo_coro_last_yield_was_wd(MojoCoro *c)
+{
+    return c->last_wd;
 }
 
 /* The opaque env pointer passed to __mojo_coro_new -- Layer 1's shim

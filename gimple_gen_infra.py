@@ -94,6 +94,29 @@ def _reset_func(gen, body: list = None, params: list = None):
     # only its (separately allocated) pointee is ever accessed
     # in-place.
     gen._boxed_mut_locals: dict[str, str] = {}
+    # Scalar locals/parameters whose address gets taken somewhere in this
+    # function via `UnsafePointer(to=x)` / `Pointer(to=x)` (see
+    # `_lower_call`'s handling of that plain-call keyword shape) --
+    # pre-populated by name (no type needed -- `_lower_IdentExpr` already
+    # computes ctype itself at read time) via `_seed_addressed_locals`
+    # BEFORE any statement in the body compiles, mirroring `_seed_mut_
+    # captured_local_types`'s identical whole-body-first-pass shape.
+    # Reset per function so a stale entry can never leak into an
+    # unrelated function's body. Every READ of a name in this set
+    # (`_lower_IdentExpr`) is materialized through a fresh register temp
+    # instead of handing back the now-addressable C variable directly --
+    # see that branch's own docstring for why (`-fgimple` rejects a
+    # stack local's address being taken anywhere in the function if that
+    # same local is also directly `return`ed/cast-assigned/read-without-
+    # materializing elsewhere -- confirmed to apply regardless of
+    # whether that other use is BEFORE or AFTER the address-of in
+    # program order, since GCC's addressability analysis is whole-
+    # function, not flow-sensitive: std/collections/list.mojo's SIMD
+    # `extend` reads `value.size` textually BEFORE its own `UnsafePointer
+    # (to=value)` a few lines later, and marking `_addressed_locals`
+    # only AT the address-of statement itself left that earlier read
+    # unprotected -- a real regression this whole-body pre-pass fixes).
+    gen._addressed_locals: set = set()
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
     # Set True by _gen_stmt_TryStmt / the with-__exit__ path in
@@ -788,6 +811,41 @@ def _scalar_arg_is_addressable_local(gen, aval) -> bool:
     # callee AS NULL, not as the address of the dead temp). Only a name
     # that came straight from SOURCE -- a declared local/parameter the
     # user explicitly wrote as the out-param argument -- gets aliased.
+    if re.fullmatch(r'_t\d+', aval) is not None:
+        return False
+    return aval in gen.var_types
+
+
+def _addressable_to_target(gen, ctype: str, aval: str) -> bool:
+    """`UnsafePointer(to=x)`'s discriminator (see `_lower_call`'s handling
+    of that plain-call keyword shape in gimple_gen_calls.py) for whether
+    `aval` is a bare declared local/parameter whose address can safely be
+    taken. Deliberately NOT `_scalar_arg_is_addressable_local` (BUG-2026-
+    016's out-parameter-aliasing check): that helper's `_actual_types`/
+    `_global_var_types` exclusions exist to tell an opaque handle boxed
+    as `int64_t` apart from a genuine numeric local, which only matters
+    when `ctype == 'int64_t'` (the ambiguous erasure case) -- reusing it
+    unconditionally rejected every well-typed scalar PARAMETER whose
+    ctype isn't literally 'int64_t' (any UInt64/Float64/Int32/… param
+    gets an `_actual_types` entry purely so OTHER dispatch sites can
+    recover its real type -- see the param-registration comment in
+    gimple_gen_funcs.py), silently falling through to a null pointer --
+    confirmed via std/sys/_amdgpu.mojo's `hsa_signal_add(sig: UInt64,
+    ...)`, `UnsafePointer(to=sig)`. A genuinely non-'int64_t' ctype can
+    never be a disguised opaque handle in the first place, so the
+    `_actual_types` exclusion only still applies for the ambiguous
+    'int64_t' case; `_global_var_types` stays excluded unconditionally
+    (a module global's own storage is the globals-struct FIELD, not a
+    plain C variable -- `&aval` would take the address of a same-named
+    but unrelated local shadow, not the real global)."""
+    if not isinstance(aval, str):
+        return False
+    if aval in gen._global_var_types:
+        return False
+    if ctype == 'int64_t' and aval in gen._actual_types:
+        return False
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', aval) is None:
+        return False
     if re.fullmatch(r'_t\d+', aval) is not None:
         return False
     return aval in gen.var_types
@@ -2295,6 +2353,40 @@ def _write_dest(gen, name: str) -> str:
         safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
         return f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
     return gen._cname(name)
+
+
+_POINTER_CTOR_NAMES = frozenset({'UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'})
+
+
+def _seed_addressed_locals(gen, body: list):
+    """Pre-scan `body` (BEFORE any statement in it compiles) for every
+    plain-call `UnsafePointer(to=x)` / `Pointer(to=x)` / `OwnedPointer(
+    to=x)` / `ArcPointer(to=x)` (the keyword-argument constructor shape
+    with no `[T]` subscript -- see `_lower_call`'s own handling of it in
+    gimple_gen_calls.py) whose `to=` target is a bare identifier, and
+    record that name in `self._addressed_locals` up front.
+
+    Must run as a genuine whole-body PRE-pass, not a mark-as-you-go step
+    at the address-of call site itself: `-fgimple`'s addressability
+    restriction is WHOLE-FUNCTION, not flow-sensitive, so a read of the
+    same name occurring TEXTUALLY BEFORE its own `UnsafePointer(to=...)`
+    call needs the exact same `_lower_IdentExpr` materialization
+    treatment as one occurring after (confirmed via std/collections/
+    list.mojo's SIMD `extend` overload, whose `assert count <= value.
+    size` reads `value` several lines before its own `UnsafePointer(to=
+    value)` -- marking only at the call site left that earlier read
+    unprotected, a real regression this pre-pass fixes). No type lookup
+    is needed here (unlike `_seed_mut_captured_local_types`'s heap-
+    boxing, which must declare a concrete pointee ctype up front):
+    `_lower_IdentExpr` already computes each name's ctype itself, at
+    the point it materializes a read of it."""
+    for node in gimple_exprtypes._walk_ast(body):
+        if not (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+                and node.func.name in _POINTER_CTOR_NAMES and not node.args):
+            continue
+        for k, v in (getattr(node, 'kwargs', None) or []):
+            if k == 'to' and isinstance(v, IdentExpr):
+                gen._addressed_locals.add(v.name)
 
 
 def _seed_mut_captured_local_types(gen, func_name: str):

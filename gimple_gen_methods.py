@@ -820,9 +820,24 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     #     expect — see runtime/mojo_async_runtime.h's own docstring on
     #     why handles are plain int64_t there, matching real Mojo's
     #     own AnyCoroutine representation.
+    #
+    # Under the A3 stack-switch backend (MOJO_CORO=stackswitch,
+    # gimple_gen_coro.py) a nested `@parameter async def wrapper()`'s
+    # construction (`wrapper()`) instead produces a `MojoGenerator *`
+    # handle (this backend's own opaque coroutine-handle representation —
+    # see gimple_gen_coro.py's `_C_TRAMPOLINE_TMPL`, `{base}_start` returns
+    # `MojoGenerator *`), so the same two methods are modeled the same way
+    # against THAT representation: `_set_noop_callback()` a no-op, and
+    # `_take_handle()` the same handle bits reinterpreted as int64_t —
+    # `__mojo_gen_resume_once`/`__mojo_gen_destroy` (runtime/mojo_coro_gen.c)
+    # are the stack-switch equivalent of `mojo_coro_resume_generic`/
+    # `destroy_generic`, substituted in by gimple_codegen.py's
+    # `BUILTIN_VALUE_MAP` override for `_coro_resume_fn`/`_coro_destroy_fn`
+    # when the stack-switch backend is enabled — see bugs/hard/CODEGEN_
+    # coro_detached_async_take_handle.md.
     if isinstance(func.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.UnaryOp)):
         _obj_type, _obj_val = gen.lower_expr(func.obj)
-        if _obj_type == 'MojoAsync *':
+        if _obj_type in ('MojoAsync *', 'MojoGenerator *'):
             if func.member == '_set_noop_callback' and not node.args:
                 return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
             if func.member == '_take_handle' and not node.args:
@@ -3014,7 +3029,16 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         if _sn and (_sn in gen.struct_field_types
                     or f'{_sn}_{method}' in gen.func_return_types):
             struct_name = _sn
-            _is_cls_receiver = True
+            # `cls.a_staticmethod(...)` inside a @classmethod: unlike an
+            # ordinary/classmethod target, a @staticmethod takes NO
+            # implicit receiver at all — `cls` here is just the lookup
+            # path, not an argument. Without this check every such call
+            # (e.g. tarfile.py's `TarInfo.create_pax_header`, a
+            # @classmethod, calling `cls._create_header(...)`, a
+            # @staticmethod) got `cls` wrongly prepended as arg 0,
+            # producing "too many arguments; expected N, have N+1".
+            _is_cls_receiver = (
+                f"{_sn}_{gimple_ctypes._safe_name(method)}" not in gen._static_methods)
         else:
             struct_name = gimple_exprtypes._struct_name_of(ot)
     else:

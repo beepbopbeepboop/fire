@@ -511,44 +511,151 @@ Layer 2.</p>
     <code>gimple_cpp_*</code> (~10k lines) + x86-64 <code>.S</code></td><td>pending</td><td>—</td></tr>
 </table>
 
-<h2>9. Bug-by-bug status (2026-09-03, <code>test_coro_bugs.py</code>)</h2>
+<h2>8b. Async — v0 landed (2026-09-04)</h2>
+<p><code>async def</code>/<code>await</code>/<code>asyncio.run</code> now compile through
+the SAME stack-switch substrate as generators (commit <code>4a0ee76</code>):
+<code>runtime/mojo_async_sched.c</code> (plain-C port of <code>mojo_async_runtime.cpp</code>'s
+ready-queue/timer-heap/kqueue reactor, resuming via <code>__mojo_coro_resume</code> instead
+of the C++20 coroutine-handle ABI) + <code>runtime/mojo_wd.h</code> (the wait-descriptor an
+async coroutine yields at <code>await</code>) + <code>gimple_gen_coro.py</code>'s
+<code>await</code>/<code>asyncio.run</code> desugar (structurally the same
+"forward-upward-via-yield" shape as generator <code>yield from</code>).</p>
+<p><strong>Verified on real compiled output:</strong> <code>async def f(): await
+asyncio.sleep(.05); return 42</code> + <code>asyncio.run(f())</code> → 42; a two-level
+<code>await</code> chain (outer awaits leaf, leaf sleeps 20ms, outer doubles the result) →
+20. <code>check-coro</code> 16/16.</p>
+<p><strong>Since v0, verified against the REAL expected outputs of
+<code>test_gimple_async_runner.py</code>'s own cases</strong> (not just "it compiles") —
+every one byte-for-byte matching what the existing cpp-path suite asserts:</p>
+<ul>
+<li><b>Real socket I/O</b> — <code>await asyncio.sock_recv(fd)</code>
+    (<code>__mojo_async_await_sock_recv</code>, reusing the scheduler's kqueue reactor
+    <code>MOJO_WD_READ</code> primitive); verified via a standalone fork+delayed-pipe-write
+    harness (real suspend-until-readable, correct byte).</li>
+<li><b>Async generators</b> (<code>async def f(): await …; yield …</code>, consumed via
+    <code>async for</code>) — needed a Layer-2 addition: a TAGGED yield channel
+    (<code>__mojo_coro_yield_tagged</code> + a <code>last_wd</code> flag) so a real
+    <code>yield</code> and an <code>await</code>'s forwarded wait-descriptor, sharing one
+    physical suspend channel, can be told apart by the consumer. Verified: two real sleeps
+    between yields accumulated via <code>async for</code> → 3; an early <code>break</code>
+    after 2 of 4 yields → 30 with wall-clock confirming only 2 sleeps ran (clean
+    abandonment); a parametrized async generator <code>f(10)</code> → 21.
+    <span class="note" style="display:inline">Caught and fixed a real bug here</span> —
+    <code>__mojo_async_await_sleep</code>/<code>_sock_recv</code> initially used the
+    UNTAGGED yield, so their wait-descriptor was silently misread as the generator's own
+    yielded value the first time a suspend happened inside one, corrupting the
+    accumulation; found immediately because the test asserted the real numeric result, not
+    just successful compilation.</li>
+<li><b>Exceptions</b> — raised-and-caught internally, raised inside an <em>awaited callee</em>
+    and caught by the awaiter's own <code>try/except</code>, and raised inside an async
+    generator and caught by the <code>async for</code> caller (→ 101) — all compose for
+    free with the pre-existing generic exception-boundary mechanism (Layer 2's setjmp/
+    longjmp discipline doesn't care how many ordinary C stack frames — including the
+    scheduler's own — sit between raise and catch). An exception escaping ALL the way out
+    of <code>asyncio.run(f())</code> uncaught, caught by <em>ordinary</em> ordinary code's
+    own <code>try/except</code> around the call, verified byte-for-byte
+    (<code>"caught\nboom\n"</code>).</li>
+</ul>
+<p><strong>Step I — <code>create_task</code>/<code>create_raising_task</code>/<code>Task</code>/
+<code>RaisingTask</code>/<code>.wait()</code>: DONE</strong>, verified against all 5 of the real
+test suite's own literal sources (unmodified — <code>raises</code>, <code>Error(...)</code>,
+the <code>^</code> transfer sigil, <code>from std.runtime.asyncrt import …</code> included):</p>
+<ul>
+<li><code>create_task(f(...))</code>/<code>create_raising_task(f(...))</code> are a pure
+    passthrough to <code>f(...)</code> itself — v0 has no real inter-task concurrency (each
+    task drives fully to completion the moment <code>.wait()</code> is called, exactly like
+    <code>asyncio.run</code>), and an uncaught exception already re-raises through
+    <code>__mojo_coro_resume</code>'s existing contract regardless of Task vs RaisingTask, so
+    no separate Task representation is needed at all.</li>
+<li><code>&lt;task&gt;.wait()</code> / <code>&lt;task&gt;^.wait()</code> and
+    <code>await &lt;task&gt;^</code> (an already-constructed handle, not a fresh call) both
+    reuse the SAME generic <code>__mojo_gen_resume</code>/<code>_value</code>/<code>_destroy</code>
+    shims (identical regardless of which function produced the handle) that make a held
+    handle awaitable at all.</li>
+<li>A <code>@parameter async def wrapper():</code> local to an ordinary function
+    (<code>create_task</code>'s wrapper idiom) is hoisted and lowered with a base qualified
+    by its enclosing function's name, so two different enclosing functions each defining
+    their own same-named <code>wrapper</code> don't collide.</li>
+<li>Verified outputs match exactly: basic wrapper → 30; raising-task success/error → 30 /
+    "intentional error from async task" / 1; keyword-argument await + create_raising_task
+    composition → 42/42/1; held-task chained await → 15; same-named nested helpers in two
+    scopes → 2/200 (not 200/200).</li>
+</ul>
+<p>Three real bugs were found and fixed proving this (documented in their commits): the
+sleep/sock_recv untagged-yield corruption (above), a same-named-nested-helper collision
+from unwrapping <code>create_task(...)</code> before applying the per-scope rename, a
+keyword-argument await target silently dropping its argument, and — the most structural —
+none of the three statement rewriters recursed into a <code>TryStmt</code>'s
+<code>except:</code> handler bodies at all (a real, previously-latent gap since session
+start), so a <code>return</code>/<code>await</code>/<code>yield</code> inside a handler was
+silently left un-rewritten.</p>
+<p><strong><code>with BlockingScopedLock</code>/<code>BlockingSpinLock</code>: DONE</strong> —
+this runtime is strictly single-threaded/cooperative (a coroutine only yields at an
+explicit <code>await</code>), so a lock guard around a body with no suspension point
+inside is a <em>provable</em> no-op and is elided entirely; a guard whose body DOES
+contain an <code>await</code> is honestly refused, never silently elided (matching the
+existing cpp-path safety rule exactly). Verified standalone (param-based, not a captured
+outer local — see gap below): guard elided, correct value; await-inside-lock case
+correctly refused.</p>
+<p><strong>Still cpp-path-only</strong> (not yet ported — <code>gimple_cpp_async.py</code>
+stays live for these):</p>
+<ul>
+<li><strong>Mutable transitive closure capture into a nested async function</strong> — the
+    real test suite's own lock-guard cases mutate a variable declared in the ENCLOSING
+    ordinary function (`rawCounter += 1` from inside `@parameter async def inc():`), which
+    needs detecting free variables, boxing them, and threading them as extra hidden args so
+    the enclosing function sees the mutation back. Not built; a real prerequisite for the
+    full lock-guard tests (the elision mechanism itself is verified independently, above).
+    Also blocks general "nested async closures" beyond the create_task wrapper idiom
+    (which needs no capture — its `wrapper()` only reads ordinary top-level names).</li>
+<li>Detached async (<code>_take_handle()</code> / GPU device-context dispatch).</li>
+</ul>
+
+<h2>9. Bug-by-bug status (2026-09-04, <code>test_coro_bugs.py</code>)</h2>
 <p>Isolated compile (<code>compile_to_gimple_with_cpp</code>, no link) + real
 <code>gcc -fgimple -fsyntax-only</code> of the generated C, across the 28 buildable
-generator/coroutine bug sources in <code>bugs/</code> &amp; <code>bugs/hard/</code>:</p>
+generator/coroutine bug sources in <code>bugs/</code> &amp; <code>bugs/hard/</code>. State
+after Layer-1 through tuple yields (<code>7519215</code>):</p>
 <table>
 <tr><th>Outcome</th><th>Count</th><th>Modules / meaning</th></tr>
-<tr><td class="rec">LOWERED — generator codegen works, C syntax-checks</td><td>6</td>
-    <td>codecs, pkgutil, shelve, symtable, tempfile, tokenize (37 <code>__mgco_</code> sites).
-    Module-level generator codegen is <strong>fixed</strong> for these; full build/run
+<tr><td class="rec">LOWERED — generator codegen works, C syntax-checks</td><td>7</td>
+    <td>codecs, ftplib, pkgutil, shelve, symtable, tempfile, tokenize.
+    Module-level generator codegen is <strong>fixed</strong> for these; a full build/run is
     gated only on unrelated issues.</td></tr>
-<tr><td>CFAIL — generators lowered, but the generated C has a type error</td><td>8</td>
-    <td><b>New consumer-side gaps</b> exposed by lowering more generators than the cpp path
-    ever accepted: <code>set()</code>/<code>list()</code>/<code>tuple()</code> over a
-    stack-switch generator handle (dis, gettext); method-call arity in a lowered body
-    (ipaddress <code>_BaseNetwork__address_class</code>, tarfile <code>__create_header</code>);
-    <code>string_cst</code> conversion (imaplib). Plus pre-existing non-generator errors
-    (subprocess, test_dbm <code>mojo_open</code> clash, turtle).</td></tr>
+<tr><td>CFAIL — generators lowered, generated C has a type error</td><td>10</td>
+    <td><b>New consumer/ordinary-path gaps</b> the lowered bodies newly exercise:
+    generator-handle / list-return typing through <code>set()</code> etc. (dis, gettext);
+    method-call arity in a lowered body (ipaddress, tarfile); <code>string_cst</code> conv
+    (imaplib); <code>non-register as LHS</code> (weakref); missing <code>&lt;unistd.h&gt;</code>
+    for <code>unlink</code> (save_env). Plus pre-existing non-generator errors (subprocess,
+    test_dbm, turtle).</td></tr>
 <tr><td>RAISE — falls through to the cpp path, which refuses (→ module runs from source,
-    same as before this work)</td><td>11</td>
-    <td><b>tuple yields</b> — modulefinder, pickletools, weakref, save_env, test_string
-    (<code>yield (a,b,…)</code>, the single biggest remaining generator feature);
-    <b><code>@classmethod</code> generators</b> — enum (<code>cls</code> + the
+    same as before this work)</td><td>9</td>
+    <td><b>nested / inconsistent tuple yields</b> — modulefinder <code>scan_opcodes</code>,
+    pickletools <code>_genops</code>, test_string <code>parse</code>
+    (<code>yield (a,(b,c))</code> etc.);
+    <b><code>@classmethod</code> generators</b> — enum (+ the
     <code>cls._flag_mask_</code> dynamic-metaclass gap);
     <b>async generators / <code>async def</code></b> — test__code_definitions, test_frame;
     <b>generator-as-value</b> — glob (<code>self.select_exists</code> bare ref);
     <b>decorated</b> (<code>@contextmanager</code>) — ensurepip; non-generator — mailbox.</td></tr>
+<tr><td>COMPILE — C ok, no eligible generator (or generator false-positive)</td><td>2</td>
+    <td>test_random_things, test_faulthandler</td></tr>
 </table>
+<p><strong>Done:</strong> scalar / string / float yields · bare <code>yield from</code> ·
+cross-module · generator methods (<code>self</code>) · <strong>tuple yields</strong>
+(flat, consistent arity).</p>
 <p><strong>Prioritised remaining Layer-1 work</strong> (by modules unblocked):</p>
 <ol>
-<li><strong>Tuple yields</strong> (<code>yield (a,b,c)</code>) — box into a <code>MojoList*</code>,
-    register <code>tuple_slot_ctypes</code>, the existing tuple-unpack consumer does the rest. ~5 modules.</li>
-<li><strong>Generator handle as a general iterable</strong> — <code>set/list/tuple/sorted(gen())</code>.
-    Consumer-side; the <code>for</code>/<code>next</code> path already works.</li>
-<li><strong><code>@classmethod</code> / <code>@staticmethod</code> generators</strong> — staticmethod is
-    free-function-shaped; classmethod needs the <code>cls</code> placeholder (+ enum's dynamic attrs separately).</li>
-<li><strong>Lowered-body method-call arity</strong> (ipaddress, tarfile) — an ordinary-path bug the
-    generator body newly exercises; fix in the ordinary path.</li>
-<li><strong><code>x = yield from</code></strong> return-value capture; then <strong>async</strong> (its own project).</li>
+<li><strong>Fix the 10 CFAILs</strong> — mostly small ordinary-path / consumer typing fixes the
+    newly-lowered bodies expose (generator handle through <code>set/list/tuple</code>;
+    method-call arity; a missing runtime header include). Each ≈ 1 module.</li>
+<li><strong>Nested / variable-shape tuple yields</strong> — <code>yield (what, (a, b))</code>
+    (modulefinder, pickletools, test_string). Needs the boxed-tuple slot itself to hold a boxed tuple.</li>
+<li><strong><code>@staticmethod</code> (easy) / <code>@classmethod</code> generators</strong>
+    (enum — classmethod placeholder + dynamic-attr work separately).</li>
+<li><strong>Generator-as-value</strong> (glob); <strong><code>x = yield from</code></strong> capture.</li>
+<li><strong>Async</strong> generators / <code>async def</code> — its own project.</li>
 </ol>
 
 </body>
