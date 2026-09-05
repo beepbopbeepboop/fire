@@ -1,5 +1,31 @@
 # COMPILE_FAIL: asyncio/futures.py
 
+## Status (2026-09-05 — Awaitable/Future RUNTIME now exists; this file's own compile blocker was already closed 2026-08-26, runtime residual partially addressed)
+
+The compile/link blocker this doc tracks (`Future.__await__` /
+`__iter__`'s value-carrying generator return) was resolved 2026-08-26 —
+`mojo.py build .../futures.py` exits 0. The remaining residual was
+"await-composition (a compiled Task consuming `__await__`'s return slot)"
+plus transitive `collections`/`inspect` source-fallback.
+
+This pass built the Awaitable/Future protocol runtime on the A3
+stack-switch substrate (see `COMPILE_FAIL_asyncio_queues.md`'s 2026-09-05
+entry for the full description): heap-allocatable `MojoFuture`/Event
+handles with a waiter list and cross-coroutine wakeup
+(`runtime/mojo_coro_gen.c` / `mojo_async_sched.c` / `mojo_wd.h`), plus
+codegen lowering of `await <future>` / `await <ev>.wait()` /
+`create_future()` / `.set_result()`. C-level cross-coroutine wakeup is
+unit-tested (`runtime/test_mojo_future.c`); `await <resolved future>`
+end-to-end in `test_coro_future_await.py`.
+
+This does NOT by itself change futures.py's status — futures.py defines
+`Future` as a Python class with `__await__` as a generator, which the
+compiled path lowers differently from the native-handle model this
+runtime provides; wiring `Future.__await__`'s `yield self` onto
+`__mojo_async_await_future` (so a real Python `Future` subclass composes
+with the native waiter list) is the next step. Doc kept open; the
+compile blocker it was opened for stays closed.
+
 ## Status (updated 2026-08-27/28 — the link-mode module-value gap below is FIXED; ADVANCED, not closed: a separate, pre-existing, out-of-scope transitive gap remains)
 
 Implemented the fix this doc's own prior entry precisely specified:
