@@ -7366,7 +7366,14 @@ def gen_module_impl(self, stmts):
     # boolean expression from being silently stubbed to a no-op — the
     # inline set literal wasn't reliably allocated as a real MojoSet* in
     # this specific "big boolean OR-chain" expression context.
-    _coro_generic_names: set = {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}
+    # `set[str]`, not bare `set` — mirrors `self._funcptr_builtins_needed:
+    # set[str] = set()` a few hundred lines up (the LEFT side of the `&`
+    # below), which DOES carry the element-type hint. A bare `set`
+    # annotation on THIS side didn't stop the crash (still SIGSEGV in
+    # mojo_set_intersection at the same site) — the asymmetry between a
+    # `set[str]`-typed operand and a bare-`set`-typed one is the likely
+    # actual gap, not "inline literal vs named variable" as first assumed.
+    _coro_generic_names: set[str] = {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}
     _needs_async_runtime_h = bool(
         len(self._supported_async) or len(self._supported_async_closures)
         or len(self._nested_async_api)
