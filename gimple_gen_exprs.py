@@ -3064,15 +3064,22 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     acc_val = None
     for part in parts:
         if part[0] == 'lit':
-            text = part[1]
+            # `_as_str`: `part` is a 2-tuple stored in a list; reading
+            # `part[1]` back re-boxes the text to int64_t on the self-
+            # hosted path, and `_intern_string(_c_escape(<boxed>))` then
+            # produced an erased `_slit` reference (a decimal address) —
+            # `mojo_str_cat (<address>, ...)` in the emitted C, different
+            # every --dump-full mojo.py run.
+            text = _as_str(part[1])
             if not text:
                 continue
-            part_val = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text)))
+            part_val = _as_str(gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text))))
         else:
-            _, full_spec, conv = part
+            full_spec = _as_str(part[1])
+            conv = _as_str(part[2])
             et, ev = gen.lower_expr(rhs_exprs[arg_i])
             arg_i += 1
-            part_val = gen._format_percent_spec(full_spec, conv, et, ev)
+            part_val = _as_str(gen._format_percent_spec(full_spec, conv, et, ev))
         acc_val = part_val if acc_val is None else gen._new_val(
             'char *', f'mojo_str_cat ({acc_val}, {part_val})')
     if acc_val is None:
