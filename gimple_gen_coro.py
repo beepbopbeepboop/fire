@@ -377,6 +377,23 @@ def _yield_from_ok(fn: N.FunctionDef) -> bool:
     return total == bare
 
 
+def _lambdas_ok(fn: N.FunctionDef) -> bool:
+    """A `lambda` literal in the body is fine -- the desugared body is
+    ordinary code and the ordinary codegen path lifts it to a top-level C
+    function -- EXCEPT for shapes that path miscompiles: a `*args`/
+    `**kwargs` parameter (emits a broken forward declaration) or a
+    parameter with a default value (silently reads garbage for the
+    defaulted slot). Refuse those so the module falls through to the cpp
+    path's own honest refusal instead of emitting broken/wrong C.
+    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
+    for n in _walk(fn):
+        if isinstance(n, N.LambdaExpr):
+            for pname, pdefault in n.params:
+                if pname.startswith('*') or pdefault is not None:
+                    return False
+    return True
+
+
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None) -> tuple[bool, str]:
     if fn.is_async:
@@ -387,6 +404,8 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'decorated'
     if not _yield_from_ok(fn):
         return False, 'yield from with return-value capture (v0)'
+    if not _lambdas_ok(fn):
+        return False, 'lambda with *args/**kwargs or a default parameter'
     params = fn.params
     if struct_name is not None:
         if not params or params[0][0] != 'self':

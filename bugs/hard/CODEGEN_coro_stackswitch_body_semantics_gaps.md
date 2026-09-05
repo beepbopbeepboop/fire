@@ -35,13 +35,19 @@ via the §5.5 cutover's real behavioral test suite
   green; stdlib dylib skip count 0→0, `compile_stdlib.py` U-count
   unchanged.
 
-- **#3 (closure/bound-method value stored in a local, then called) —
-  STILL OPEN.** This is the A3 counterpart of the old-cpp-path gap
-  tracked in `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`
-  (that doc's fix was entirely in `gimple_cpp_core.py`, which the
-  stack-switch default no longer uses). Needs a real callable-value
-  representation in the ordinary/generator-body codegen path — feature
-  sized, same assessment as that doc. Not attempted here.
+- **#3 — NARROWED 2026-09-05.** The *lambda* half is fixed: the ordinary
+  codegen path lifts a `lambda` to a top-level C function, so a lambda
+  value stored in a local and called later now works for 0-/1-/2-param
+  lambdas, a lambda re-bound per if/else branch, and a lambda passed as
+  an argument (see `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
+  md`'s 2026-09-05 status + the new `generator_*_lambda_*` regression
+  tests). What remains is a **bound-method value** stored in a local
+  then called (`getpos = self.tell; ... getpos()`) — this is
+  codegen-wide (reproduces in a plain non-generator method, prints only
+  the lambda-branch result and silently drops the bound-method branch),
+  not generator-specific. Needs a real first-class bound-method-value
+  representation in the ordinary codegen path. `MOJO_CORO=cpp` remains a
+  correct fallback for that shape.
 
 - **#4 (heterogeneous `.pop()` + `isinstance` re-read each iteration) —
   STILL OPEN.** Not attempted here (a narrower, likely single-site

@@ -1658,6 +1658,165 @@ def main():
         print(v)
 """, "0.5\n1.5\n2.5\n")
 
+    # ── non-plain assignment targets inside a generator body ──────────
+    # (bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md)
+    # The A3 stack-switch path routes the desugared body through ordinary
+    # codegen, which handles self-field write, subscript write, and
+    # tuple/list-pattern unpack -- shapes the old cpp eligibility gate
+    # refused wholesale.
+    test_generator_stdout("generator_list_pattern_unpack_literal_rhs", """\
+def g():
+    yield 1
+    [x] = [42]
+    yield x
+
+def main():
+    for v in g():
+        print(v)
+""", "1\n42\n")
+
+    test_generator_stdout("generator_list_pattern_unpack_two_and_call_rhs", """\
+def src():
+    return [7, 8]
+
+def g():
+    [a, b] = src()
+    yield a
+    yield b
+    [c] = [99]
+    yield c
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n8\n99\n")
+
+    test_generator_stdout("generator_list_pattern_unpack_comprehension_rhs", """\
+def g():
+    yield 1
+    src = [10, 20, 30]
+    [first] = [w for w in src if w == 20]
+    yield first
+
+def main():
+    for v in g():
+        print(v)
+""", "1\n20\n")
+
+    test_generator_stdout("generator_self_field_write_between_yields", """\
+struct Counter:
+    var count: Int
+    fn __init__(out self):
+        self.count = 0
+    def gen(self):
+        yield self.count
+        self.count = 99
+        yield self.count
+
+def main():
+    c = Counter()
+    for v in c.gen():
+        print(v)
+""", "0\n99\n")
+
+    test_generator_stdout("generator_subscript_write_between_yields", """\
+def g(d):
+    yield d[0]
+    d[0] = 99
+    yield d[0]
+
+def main():
+    xs = [1, 2, 3]
+    for v in g(xs):
+        print(v)
+""", "1\n99\n")
+
+    # ── recursive `yield from` forwards extra positional + keyword-only
+    # arguments (bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_
+    # forwarding.md). The documented "too few arguments" / yield-type
+    # mismatch compile failures are gone on the A3 path.
+    test_generator_stdout("generator_recursive_yield_from_extra_positional_arg", """\
+def countdown(n, step=1):
+    if n <= 0:
+        return
+    yield n
+    yield from countdown(n - step, step)
+
+def main():
+    for v in countdown(5, 2):
+        print(v)
+""", "5\n3\n1\n")
+
+    test_generator_stdout("generator_recursive_yield_from_keyword_only_arg", """\
+def countdown(n, *, step=1):
+    if n <= 0:
+        return
+    yield n
+    yield from countdown(n - step, step=step)
+
+def main():
+    for v in countdown(5, 2 if False else 2):
+        print(v)
+""", "5\n3\n1\n")
+
+    # ── lambda literals inside a generator body ───────────────────────
+    # (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md) -- 0-, 1-
+    # and 2-parameter lambdas, a lambda re-bound on each branch of an
+    # if/else, and a lambda passed as a call argument all work via the
+    # ordinary codegen path's lambda lifting.
+    test_generator_stdout("generator_zero_arg_lambda_called", """\
+def g(n):
+    getpos = lambda: 7
+    i = 0
+    while i < n:
+        yield getpos()
+        i = i + 1
+
+def main():
+    for v in g(3):
+        print(v)
+""", "7\n7\n7\n")
+
+    test_generator_stdout("generator_one_arg_lambda_over_list", """\
+def g(xs):
+    f = lambda m: m + 1
+    for x in xs:
+        yield f(x)
+
+def main():
+    for v in g([10, 20, 30]):
+        print(v)
+""", "11\n21\n31\n")
+
+    test_generator_stdout("generator_two_arg_lambda_and_lambda_as_arg", """\
+def apply(fn, v):
+    return fn(v)
+
+def g(xs):
+    add = lambda a, b: a + b
+    for x in xs:
+        yield apply(lambda m: m * 2, add(x, 10))
+
+def main():
+    for v in g([1, 2, 3]):
+        print(v)
+""", "22\n24\n26\n")
+
+    test_generator_stdout("generator_lambda_rebound_per_branch", """\
+def g(pick):
+    if pick:
+        f = lambda: 42
+    else:
+        f = lambda: 99
+    yield f()
+
+def main():
+    for v in g(1):
+        print(v)
+    for v in g(0):
+        print(v)
+""", "42\n99\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

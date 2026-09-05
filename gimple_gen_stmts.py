@@ -548,7 +548,11 @@ def _assign_target(gen, tgt, et, ev):
             gen._declare_var(tgt.name, hint or et)
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
-    elif isinstance(tgt, gimple_ctypes.TupleExpr):
+    elif isinstance(tgt, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        # A list-pattern target (`[a] = ...` / `[a, b] = ...`) is
+        # semantically identical to the tuple-pattern spelling (`a, = ...`
+        # / `a, b = ...`) — same `.elements` shape, same unpack — so it
+        # shares this branch exactly rather than a parallel implementation.
         # ev is itself an iterable; view it as a MojoList* and unpack by index.
         lp = ev if et == 'MojoList *' else gen._new_temp('MojoList *')
         if et != 'MojoList *':
@@ -605,7 +609,10 @@ def _gen_stmt_AssignStmt(gen, node):
             and _try_bind_list_iter(gen, node.target.name, node.value)):
         return
     # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
-    if isinstance(node.target, gimple_ctypes.TupleExpr):
+    # A list-pattern target (`[a] = ...`, `[a, b] = ...`) is the same
+    # construct with the other Python spelling — identical `.elements`
+    # shape — and is decomposed by the identical logic below.
+    if isinstance(node.target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         targets = node.target.elements
         # Extended unpacking: one target may be starred (`*row, last =
         # data` / `first, *rest = data` — real Python syntax, parses as
@@ -659,8 +666,9 @@ def _gen_stmt_AssignStmt(gen, node):
                 sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
                 gen._assign_target(tgt, set_et, sev)
             return
-        if isinstance(node.value, gimple_ctypes.TupleExpr) and len(node.value.elements) == len(targets):
-            # RHS is a tuple literal — lower and assign each element individually
+        if isinstance(node.value, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)) \
+                and len(node.value.elements) == len(targets):
+            # RHS is a tuple/list literal — lower and assign each element individually
             for tgt, rhs_expr in zip(targets, node.value.elements):
                 et, ev = gen.lower_expr(rhs_expr)
                 gen._assign_target(tgt, et, ev)
