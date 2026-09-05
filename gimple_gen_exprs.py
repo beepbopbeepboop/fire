@@ -511,6 +511,17 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._c_names:
         cname = gen._c_names[name]
     if name in gen.var_types:
+        if name in gen._addressed_locals:
+            # This local's address was taken (`UnsafePointer(to=name)`,
+            # see `_lower_call`'s handling of that shape) -- `-fgimple`
+            # rejects using the now-addressable C variable directly as a
+            # bare register operand (a raw `return name;`, or as the RHS
+            # of certain unary/cast assignments) anywhere else in this
+            # SAME function, even a plain read. Load it into a fresh
+            # register temp first; a plain register-to-register copy of
+            # an addressable variable is fine (only a raw, unmaterialized
+            # use of the variable ITSELF is rejected).
+            return ctype, gen._new_val(ctype, cname)
         return ctype, cname
     # A nested function (closure) referenced as a VALUE (`return add`,
     # `var f = add`, `foo(add)`) — materialize a first-class callable
@@ -1594,6 +1605,27 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # is a 'non-trivial conversion in integer_cst' error (same
             # reason _new_val special-cases int64_t constants).
             return '_Bool', gen._new_val('_Bool', '(_Bool)1' if mv else '(_Bool)0')
+    # `.mut` on a raw UnsafePointer/OwnedPointer/ArcPointer/Pointer
+    # receiver (`ot` a real pointer, its pointee NOT a known struct with
+    # actual fields — a plain scalar-pointee UnsafePointer, e.g.
+    # `UnsafePointer(to=x)` for `x: Int`): real Mojo's `mut` is a
+    # compile-time origin-mutability parameter this codegen has no
+    # general tracking for anywhere except Span's own narrow `_span_mut_
+    # params` table above. Before `UnsafePointer(to=x)`/`Pointer(to=x)`
+    # produced a real typed pointer (see bugs/CODEGEN_unsafepointer_to_
+    # kwarg_dropped.md), this member read reached the generic dynamic/
+    # boxed dispatch fallback on an opaque int64_t and "compiled" only
+    # because everything there is untyped — genuinely a real pointer now,
+    # `.mut` has no matching struct field to read, which is a hard GCC
+    # error ("request for member 'mut' in something not a structure or
+    # union"), not merely a silent wrong value. Honestly approximated as
+    # a fixed `True` (this codegen's existing origin-tracking scope
+    # already stops at Span; a fully general mutable-origin model for
+    # every raw pointer is a separate, larger feature) rather than left
+    # to hard-fail the whole file's compile — confirmed via test/memory/
+    # unsafe_pointer/test_unsafe_pointer.mojo.
+    if node.member == 'mut' and ot.endswith(' *') and struct_name not in gen.struct_field_types:
+        return '_Bool', gen._new_val('_Bool', '(_Bool)1')
     field_map = gen.struct_field_types.get(struct_name, {})
     # pathlib.Path attribute reads on a value this codegen represents as
     # its char* path string. A Path-representing value reaches here as a
@@ -1757,7 +1789,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _ga_ret = gen.func_return_types.get(
                 f"{struct_name}_{gimple_ctypes._safe_name('__getattr__')}",
                 'int64_t')
-            _ga_attr = gen._new_val('char *', f'"{node.member}"')
+            # Route through the shared string pool (`_intern_string`), same
+            # as `_lower_StringLiteral` -- a raw `char * _tN = "debug";`
+            # GIMPLE assignment is a `char[N]`-to-`char *` conversion
+            # `-fgimple` rejects outright ("non-trivial conversion in
+            # 'string_cst'"), unlike a call argument (whose coercion loop
+            # in `_emit_call` already does this same conversion for a
+            # bare `"..."` value); `_new_val`'s direct assignment has no
+            # such coercion. Found via imaplib.py's IMAP4.__getattr__
+            # dispatch (`self.debug`/`self._idle_capture` falling through
+            # to this branch on the IMAP4_stream subclass).
+            _ga_attr = gen._new_val(
+                'char *', gen._intern_string(gimple_ctypes._c_escape(node.member)))
             raw = gen._call_expr(_ga_ret, _ga_csym,
                                   [(ot, ov), ('char *', _ga_attr)])
             return _ga_ret, raw

@@ -33,6 +33,7 @@ from mojo_compiler import (
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
+import gimple_gen_coro
 import regex_compile
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
@@ -448,18 +449,6 @@ import gimple_cpp_core as gcc_
 import gimple_gen_exprs as gex
 import gimple_gen_infra as ginf
 import gimple_gen_resolve as grsl
-# Module-level (not function-local): a function-scoped `import gimple_gen_
-# coro as _ggc` inside `_run_pipeline` below, PLUS an identical one in
-# gimple_gen_resolve.py's `_compile_imported_module`, each independently
-# triggered the self-hosting bootstrap's whole-module inlining with no
-# shared "already inlined" bookkeeping between them -- gimple_gen_coro.py's
-# own top-level functions came out TWICE in the self-hosted `mojo.ci` (once
-# flat, once again through the "real imported module with its own globals
-# struct" path), a GCC "redefinition" error. Every other cross-file
-# `gimple_gen_*` import in this project is already module-level for
-# exactly this reason; matching that convention here (and in gimple_gen_
-# resolve.py) fixes it the same way.
-import gimple_gen_coro as _ggc
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
     BUILTIN_VALUE_MAP: dict[str, str] = {
@@ -533,6 +522,12 @@ class GimpleGen:
         # key off it consistently instead of re-deriving "is this a
         # supported generator" in four different places.
         self._supported_generators: dict[str, FunctionDef] = {}
+        # A3 stack-switch coroutine trampolines gimple_gen_coro.register()
+        # emits as plain C (doc/COROUTINE.html) -- appended verbatim into
+        # this module's .c/.ci output by gen_module. Declared here (not
+        # just dynamically set) so the self-hosted compiler's own static
+        # field table for this class knows about it.
+        self._stackswitch_coro_c_units: list[str] = []
         # Name of every top-level generator/async function that FAILED to
         # translate (raised _UnsupportedGeneratorShape after exhausting all
         # retry passes) and was therefore stub-declared instead, under
@@ -1931,7 +1926,7 @@ class GimpleGen:
         # the same process. See bugs/hard/CODEGEN_coro_detached_async_
         # take_handle.md and gimple_gen_coro.py's own resume_fn/destroy_fn
         # docstring.
-        if _ggc.enabled():
+        if gimple_gen_coro.enabled():
             self.BUILTIN_VALUE_MAP = dict(GimpleGen.BUILTIN_VALUE_MAP)
             self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
             self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
@@ -2520,7 +2515,7 @@ class GimpleGen:
     # Mojo wrapper definition (which would collide with the extern).
     _NEEDS_SELF_EXTERN = frozenset({
         'stat', 'lstat', 'fstat', 'access', 'unlink', 'rmdir', 'mkdir',
-        'symlink', 'readlink', 'link', 'chmod', 'chown', 'getcwd',
+        'symlink', 'readlink', 'link', 'chmod', 'chown', 'getcwd', 'chdir',
         'scalbf',
         # POSIX fd/process calls our prelude headers don't pull in → emit the
         # extern ourselves (using the _LIBC_SIGS prototype) to avoid implicit decls.
@@ -2586,7 +2581,7 @@ class GimpleGen:
         'stderr', 'stdout', 'stdin',
         # Unix file/process functions (from <unistd.h>, <sys/stat.h>)
         'remove', 'rename', 'access', 'stat', 'lstat', 'fstat', 'unlink', 'rmdir',
-        'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown',
+        'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'chdir',
         'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork',
         'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'close',
         # Random functions
@@ -2693,6 +2688,15 @@ class GimpleGen:
         # POSIX fd close (<unistd.h>, not in prelude) — used bare inside
         # Lib/os.py's `_fwalk` generator via `from posix import *`.
         'close': ('int', ['int']),
+        # POSIX path ops (<unistd.h>, not in prelude) — reached bare via
+        # os_helper.unlink(...) / similar `from os import *`-style
+        # bindings inside a compiled generator (Lib/test/libregrtest/
+        # save_env.py's restore_urllib_requests__url_tempfiles).
+        'unlink': ('int', ['char *']),
+        'symlink': ('int', ['char *', 'char *']),
+        'readlink': ('int64_t', ['char *', 'char *', 'int64_t']),
+        'link': ('int', ['char *', 'char *']),
+        'chdir': ('int', ['char *']),
         'execve': ('int', ['char *', 'char *', 'char *']),
         'unsetenv': ('int', ['char *']),
     }
@@ -3489,6 +3493,8 @@ class GimpleGen:
         return ginf._write_dest(self, name)
     def _seed_mut_captured_local_types(self, func_name: str):
         return ginf._seed_mut_captured_local_types(self, func_name)
+    def _seed_addressed_locals(self, body: list):
+        return ginf._seed_addressed_locals(self, body)
     def _emit_mut_local_box_allocs(self):
         return ginf._emit_mut_local_box_allocs(self)
     def _new_jbp_temp(self) -> str:
@@ -3583,6 +3589,8 @@ class GimpleGen:
         return grsl._emit_label(self, label, freq_hint)
     def _scalar_arg_is_addressable_local(self, aval) -> bool:
         return ginf._scalar_arg_is_addressable_local(self, aval)
+    def _addressable_to_target(self, ctype: str, aval: str) -> bool:
+        return ginf._addressable_to_target(self, ctype, aval)
     def _strided_data_ptr(self, pt: str, pv: str) -> str:
         return grsl._strided_data_ptr(self, pt, pv)
     def _safe_coerce_emit(self, src: str, dst: str, val: str, lhs: str) -> None:
@@ -3756,10 +3764,10 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
-    stmts, _coro_meta = _ggc.lower(stmts)
+    stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
     if _coro_meta:
-        _ggc.register(gen, _coro_meta)
+        gimple_gen_coro.register(gen, _coro_meta)
     gen._current_filename = filename
     # Self-hosting bootstrap: when compiling this compiler's own entry point
     # as a transitive closure (`python3 mojo.py build mojo.py`, `--dump-full

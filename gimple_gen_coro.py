@@ -133,22 +133,10 @@ def _generator_tuple_slots(fn: N.FunctionDef):
         kinds.discard(None)
         if len(kinds) > 1:
             return None            # inconsistent slot type across yields
-        # `next(iter(kinds))` (the one-liner this replaces) hits self-
-        # hosted compilation's `next()` support (gimple_gen_calls.py),
-        # which only recognizes a Comprehension argument or a real
-        # `MojoGenerator *` handle -- `next(iter(<a set>))` falls through
-        # both and silently lowered to a call to a NEVER-DEFINED bare C
-        # `next` symbol, an undefined-symbol LINK failure only surfaced
-        # once `make check-selfhost`'s whole-program link actually reaches
-        # this function (invisible to every other test, since none of
-        # them link this compiler's own source). `kinds` has 0 or 1
-        # elements here (the `len(kinds) > 1` check above already ruled
-        # out more), so a plain loop extracts the same single element (or
-        # None) without needing next()/iter() at all.
-        k = None
-        for _k in kinds:
-            k = _k
-            break
+        # avoid next(iter(...)) -- a known self-host miscompile trigger
+        # (see project memory: "next(iter(...)) -> _next undefined-symbol
+        # regression"); a plain list index compiles cleanly instead.
+        k = list(kinds)[0] if kinds else None
         if k == 'tuple':
             return None            # nested tuple in a slot -- not v0
         slots.append(_KIND_TO_SLOT_CTYPE[k])
