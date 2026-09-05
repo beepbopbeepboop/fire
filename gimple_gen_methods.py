@@ -627,6 +627,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 "back to interpreting this module from source instead")
         tg_api['base'] = api['base']
         tg_api['value_ctype'] = api['value_ctype']
+        if api.get('stackswitch'):
+            tg_api['stackswitch'] = True
         handle_i64 = gen._new_val('int64_t', f"(int64_t){handle}")
         gen._emit(f"  mojo_list_append_int ({_wait_obj.name}, {handle_i64});")
         return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
@@ -651,6 +653,34 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and func.member == 'wait' and not node.args):
         tg_api = gen._taskgroup_var_api[_wait_obj.name]
         list_expr = _wait_obj.name
+        if tg_api.get('stackswitch'):
+            # A3 stack-switch backend: each handle in the group is a
+            # MojoGenerator constructed (not scheduled) by its
+            # `{base}_start` call -- drive each to completion via
+            # `__mojo_async_run_gen` (the same drive the single-task
+            # stack-switch `.wait()` rewrite uses, see gimple_gen_coro.
+            # _rewrite_asyncio_run), then destroy it. No cpp-scheduler
+            # drain (`mojo_async_run_until_complete`) and no `{base}_
+            # translate_pending_exc` (the stack-switch trampoline emits
+            # neither) -- exception propagation matches the single-task
+            # stack-switch path exactly (via the resume contract).
+            len64 = gen._new_val('int64_t', f"mojo_list_len ({list_expr})")
+            idx64 = gen._new_val('int64_t', "(int64_t)0")
+            bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+            gen._emit(f"  goto {bb_cond};")
+            gen._emit_label(bb_cond)
+            cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
+            gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+            gen._emit_label(bb_body)
+            raw_h = gen._new_val('int64_t', f"mojo_list_get_int ({list_expr}, {idx64})")
+            gen._emit(f"  __mojo_async_run_gen ({raw_h});")
+            gen._emit(f"  __mojo_gen_destroy ({raw_h});")
+            one64 = gen._new_val('int64_t', "(int64_t)1")
+            nxt = gen._new_val('int64_t', f"{idx64} + {one64}")
+            gen._emit(f"  {idx64} = {nxt};")
+            gen._emit(f"  goto {bb_cond};")
+            gen._emit_label(bb_after)
+            return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
         gen._emit(f"  mojo_async_run_until_complete ();")
         if tg_api['base'] is not None:
             base = tg_api['base']

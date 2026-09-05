@@ -34,6 +34,14 @@ import os
 import subprocess
 import tempfile
 
+# Exercises the gimple_cpp_* C++20-coroutine backend (this harness links
+# mojo_async_runtime.cpp, the cpp scheduler). doc/COROUTINE.html §5.5's
+# cutover made the A3 stack-switch backend the default, so pin the escape
+# hatch explicitly -- the equivalent stack-switch coverage (single-level
+# and the cross-closure / TaskGroup stress shape) lives in
+# test_coro_nested_async_capture.py.
+os.environ.setdefault('MOJO_CORO', 'cpp')
+
 import gimple_codegen
 import mojo
 from build_config import find_gcc, find_gxx

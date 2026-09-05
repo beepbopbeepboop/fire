@@ -1010,7 +1010,15 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
         if isinstance(s, N.FunctionDef):
             fn_ordinary = not getattr(s, 'is_generator', False) and not getattr(s, 'is_async', False)
             fn_task_vars = _scan_task_vars(s) if fn_ordinary else set()
-            fn_lm = lmaps.get(s.name, {}) if fn_ordinary else {}
+            # Merge the ENCLOSING scope's already-active local_map (`lm`)
+            # under this function's own entry, rather than discarding it --
+            # a hoisted nested async def (`inc`) defined in one function is
+            # still in lexical scope inside a FURTHER-nested sibling
+            # function (`caller`) of that same enclosing function, so
+            # `caller`'s own `tg.create_task(inc())` must see the same
+            # qualified-`{base}_start` rename. Matches real Python lexical
+            # scoping (an inner def sees every enclosing scope's bindings).
+            fn_lm = {**lm, **lmaps.get(s.name, {})} if fn_ordinary else {}
             s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars, fn_lm, lmaps)
             out.append(s)
             continue
@@ -1386,6 +1394,58 @@ def _find_calls_to(node, name: str, out: list):
             _find_calls_to(v, name, out)
 
 
+def _collect_nested_ordinary_funcs(stmts: list, out: dict) -> None:
+    """`out[name] = FunctionDef` for every ordinary (non-async, non-
+    generator) function nested ANYWHERE within `stmts`, descending
+    through nested scopes. Any hoisted async def is already gone from
+    the tree by the time this runs (`_hoist_nested_async` removed it)."""
+    for s in stmts:
+        if isinstance(s, N.FunctionDef):
+            if not getattr(s, 'is_async', False) and not getattr(s, 'is_generator', False):
+                out[s.name] = s
+                _collect_nested_ordinary_funcs(s.body, out)
+            continue
+        for k, v in vars(s).items():
+            if k in ('line', 'col'):
+                continue
+            if isinstance(v, list) and v and _looks_like_stmt_list(v):
+                _collect_nested_ordinary_funcs(v, out)
+
+
+def _fn_refs_captures(fn: N.FunctionDef, cap_names: set) -> bool:
+    """True if `fn`'s own body directly reads/writes one of `cap_names`
+    (not counting a deeper nested function's references, nor a name `fn`
+    itself re-declares/shadows)."""
+    used = set()
+    for b in _capture_scan_body(fn.body):
+        used |= gimple_ctypes._used_idents_node(b)
+    declared = ({p for p, _a in fn.params}
+                | gimple_ctypes._declared_vars_body(fn.body))
+    return bool((used - declared) & cap_names)
+
+
+def _hidden_box_name(n: str) -> str:
+    """The C identifier a threaded nested function receives the box
+    handle for captured local `n` under (its hidden trailing param)."""
+    return f'__cap_{n}'
+
+
+def _append_box_args(call, cap_map: dict) -> None:
+    """Append the box-handle hidden-param identifier as a trailing
+    IdentExpr argument to `call`, for each captured name. Builds the
+    name by string concatenation (not by subscripting a local dict
+    comprehension) so the self-hosted compiler infers it as `char *`."""
+    for n in cap_map:
+        call.args.append(_c_ident(_hidden_box_name(n)))
+
+
+def _append_cap_args(call, cap_map: dict) -> None:
+    """Append each captured NAME itself (the enclosing function's own
+    now-boxed local) as a trailing IdentExpr argument to `call`."""
+    for n in cap_map:
+        call.args.append(_c_ident(n))
+
+
 def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_map: dict):
     """Wires a non-empty `_nested_async_capture_plan` result: boxes each
     captured outer local (mutating its declaring VarDecl in place),
@@ -1397,19 +1457,100 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     to `inner.params`, plus a matching trailing argument at every call to
     `inner.name` inside `outer`'s own body (create_task(wrapper()) and
     the bare `wrapper()` detached-async idiom both already route through
-    the ordinary arg list from here on)."""
-    hidden = {n: f'__cap_{n}' for n in cap_map}
+    the ordinary arg list from here on).
+
+    Cross-closure case (the bug doc's item 4): when a FURTHER-nested
+    ordinary sibling function (`caller()`, defined alongside `inner`
+    inside `outer`) is the one that actually calls `inner` -- or itself
+    references a captured local, or calls another such function -- the
+    box handle(s) are threaded THROUGH that sibling too: it receives
+    each box as its own hidden trailing `Int` parameter, its calls to
+    `inner` / other threaded siblings get the matching trailing
+    argument, its own direct reads/writes of a captured name are
+    rewritten through the box, and the call to it from `outer`'s body
+    forwards `outer`'s own box local. This is the same
+    transitive-closure-through-an-ordinary-nested-function shape the
+    ordinary compiled path's own 2026-07-27 fix solved for plain
+    `{mut}` closures, done here as a pure AST rewrite over the plain
+    `int64_t` box handle."""
+    hidden = {n: _hidden_box_name(n) for n in cap_map}
     for name, decl in cap_map.items():
         decl.value = _call(_BOX_NEW, [decl.value])
     outer.body = _cap_rewrite_stmts(outer.body, {n: n for n in cap_map})
     inner.body = _cap_rewrite_stmts(inner.body, hidden)
-    inner.params = list(inner.params) + [(hidden[n], 'Int') for n in cap_map]
-    calls: list = []
+    inner.params = list(inner.params) + [(_hidden_box_name(n), "Int") for n in cap_map]
+
+    # ── transitive threading through ordinary nested sibling functions ──
+    _thread_box_through_siblings(inner.name, outer, cap_map, hidden, set(cap_map))
+
+
+def _fn_body_calls(fn: N.FunctionDef, name: str) -> list:
+    hits: list = []
+    for st in fn.body:
+        _find_calls_to(st, name, hits)
+    return hits
+
+
+def _thread_box_through_siblings(inner_name: str, outer: N.FunctionDef,
+                                 cap_map: dict, hidden: dict, cap_names: set) -> None:
+    """See `_apply_nested_async_capture`'s docstring, cross-closure case.
+    `inner_name` is the hoisted nested async's bare name; every ordinary
+    function nested in `outer` that (transitively) calls it or references
+    a captured local receives the box handle(s) as hidden trailing
+    params, with its calls and the call to it from `outer` given the
+    matching trailing arguments."""
+    nested_funcs: dict = {}
     for st in outer.body:
-        _find_calls_to(st, inner.name, calls)
-    for call in calls:
+        if (isinstance(st, N.FunctionDef) and not getattr(st, 'is_async', False)
+                and not getattr(st, 'is_generator', False)):
+            nested_funcs[st.name] = st
+            _collect_nested_ordinary_funcs(st.body, nested_funcs)
+    all_names: list = list(nested_funcs.keys())
+    needy: list = []
+    for fname in all_names:
+        fn = nested_funcs[fname]
+        if len(_fn_body_calls(fn, inner_name)) > 0 or _fn_refs_captures(fn, cap_names):
+            needy.append(fname)
+    changed = True
+    while changed:
+        changed = False
+        for fname in all_names:
+            if fname in needy:
+                continue
+            fn = nested_funcs[fname]
+            hit = False
+            for other in needy:
+                if len(_fn_body_calls(fn, other)) > 0:
+                    hit = True
+            if hit:
+                needy.append(fname)
+                changed = True
+    for fname in needy:
+        fn = nested_funcs[fname]
+        fn.body = _cap_rewrite_stmts(fn.body, hidden)
+        new_params: list = list(fn.params)
         for n in cap_map:
-            call.args.append(_c_ident(n))
+            new_params.append((_hidden_box_name(n), 'Int'))
+        fn.params = new_params
+        targets: list = [inner_name]
+        for other in needy:
+            targets.append(other)
+        for tgt in targets:
+            if tgt == fname:
+                continue
+            for call in _fn_body_calls(fn, tgt):
+                _append_box_args(call, cap_map)
+    # calls that live directly in `outer`'s own body (not inside a nested
+    # function) read `outer`'s own now-boxed local by name.
+    outer_targets: list = [inner_name]
+    for other in needy:
+        outer_targets.append(other)
+    for tgt in outer_targets:
+        hits: list = []
+        for st in outer.body:
+            _find_calls_to(st, tgt, hits)
+        for call in hits:
+            _append_cap_args(call, cap_map)
 
 
 def _hoist_nested_async(stmts: list, meta: list):

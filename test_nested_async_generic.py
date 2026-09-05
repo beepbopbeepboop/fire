@@ -37,6 +37,11 @@ import os
 import subprocess
 import tempfile
 
+
+# cpp-path (gimple_cpp_*) escape-hatch test -- its build harness links
+# the C++20-coroutine runtime. doc/COROUTINE.html §5.5 made the A3
+# stack-switch backend the default, so pin cpp explicitly.
+os.environ.setdefault('MOJO_CORO', 'cpp')
 import gimple_codegen
 from build_config import find_gcc, find_gxx
 
