@@ -766,24 +766,36 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     `GimpleGen *` struct pointer restores static field/method resolution.
 
     Narrow by construction: only an UNANNOTATED FIRST parameter named exactly
-    `gen`/`self`, only while compiling a `.py` file named `gimple*` under this
-    repo (the self-hosting bootstrap is always this compiler's own Python
-    source — no `.mojo` file is ever part of it), and only when `GimpleGen`
-    is actually a registered struct in this compile."""
-    # TEMPORARY diagnostic, gated by MOJO_DEBUG_SELFHOST_GEN: logs which
-    # condition below rejected a gen/self-first-param function, and the
-    # _current_filename context at the time — used to root-cause why only
-    # ~12/345 such functions actually get typed GimpleGen* in a real
-    # --dump-full mojo.py build (see dumpfull-determinism-progress memory).
-    # Remove once that investigation concludes.
-    _dbg = gimple_ctypes.os.environ.get('MOJO_DEBUG_SELFHOST_GEN')
-    def _dbgprint(_reason):
-        if _dbg:
-            import sys as _sys
-            print(f"SELFHOST_GEN_CTYPE reject={_reason} fn={getattr(node, 'name', '?')} "
-                  f"cf={getattr(gen, '_current_filename', None)!r} "
-                  f"registered={getattr(gen, '_selfhost_gimplegen_registered', False)!r}",
-                  file=_sys.stderr)
+    `gen`/`self`, only for a function that IS actually one of this
+    compiler's own extracted backend helpers, and only when `GimpleGen`
+    is actually a registered struct in this compile.
+
+    Originally checked `gen._current_filename`'s basename/directory instead
+    of the function-name-index membership below — WRONG: `gen` here is
+    WHICHEVER temp_gen happens to currently be compiling SOME file, not
+    necessarily the file `node` (the function whose param we're typing) was
+    itself defined in. A direct measurement (MOJO_DEBUG_SELFHOST_GEN,
+    instrumenting the old file-based check) on a real `--dump-full mojo.py`
+    run showed every single rejection was `bad_basename` — meaning this
+    function gets asked to type a gen/self param belonging to a
+    gimple_gen_*.py-defined helper WHILE `gen._current_filename` is set to
+    some OTHER, non-"gimple"-prefixed file (mojo_compiler.py, module_
+    loader.py, myinterpreter.py, mojo.py, ...) that merely REFERENCES that
+    helper — e.g. during a signature/forward-decl computation triggered
+    from that other file's own compile, which then gets cached (`func_
+    param_types` etc, shared dicts, first-computation-wins) and never
+    recomputed once the helper's OWN home-file compile runs. Measured
+    effect: only ~12 of 345 gen/self-first-param functions ended up typed
+    `GimpleGen *` in the final output despite `_selfhost_gimplegen_
+    registered` being True and the directory check passing on EVERY single
+    call (only `bad_basename` ever fired) — confirming the file-identity
+    check, not the registration-timing, was the actual gap.
+    `_selfhost_extracted_fn_index()` already answers "is this function name
+    one of the ones actually found, by a genuine `gimple_*.py` file scan, to
+    have an unannotated gen/self first param" — independent of whichever
+    gen happens to be asking. Using that instead fixes the false rejections
+    without weakening the check at all (a name NOT in that index still
+    correctly returns None)."""
     if ptype is not None:
         return None
     bare = pname.lstrip('*')
@@ -792,18 +804,7 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     ps = getattr(node, 'params', None) or []
     if not ps or ps[0][0].lstrip('*') != bare:
         return None
-    cf = getattr(gen, '_current_filename', None)
-    if not cf or not cf.endswith('.py'):
-        _dbgprint('no_cf')
-        return None
-    base = gimple_ctypes.os.path.basename(cf)
-    if not base.startswith('gimple'):
-        _dbgprint('bad_basename')
-        return None
-    cur_abs = gimple_ctypes.os.path.abspath(cf)
-    sd = gimple_codegen._SELFHOST_DIR
-    if not (cur_abs == sd or cur_abs.startswith(sd + '/')):
-        _dbgprint('bad_dir')
+    if getattr(node, 'name', None) not in _selfhost_extracted_fn_index():
         return None
     # Fires only once the GimpleGen registry pre-pass has run for this
     # (shared) compile — see _selfhost_register_gimplegen in gimple_codegen
@@ -815,9 +816,7 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     # "silently stubbed" for hard arity / pointer-vs-int errors at every
     # `self.<method>()` call site.
     if not getattr(gen, '_selfhost_gimplegen_registered', False):
-        _dbgprint('not_registered')
         return None
-    _dbgprint('OK')
     return 'GimpleGen *'
 
 
