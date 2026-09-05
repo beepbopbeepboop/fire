@@ -3022,19 +3022,35 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     # `full_spec` keeps the flags/width/precision text (e.g. '%08.3f')
     # so sprintf below reproduces them; only the conversion character
     # needs any Python->C translation.
+    # Build literal runs by SLICING `fmt_text` (`fmt_text[lit_start:i]`),
+    # NOT by `buf.append(c)` + `''.join(buf)` — a list of single `char`s
+    # joined on the self-hosted backend produced an erased/garbage string
+    # that then compiled to `mojo_str_cat (<decimal address>, ...)` in
+    # emitted C (gimple_cpp_core.py:2934's `"..." % (_tid,)`), different
+    # every --dump-full mojo.py run. `%%` (an escaped percent) is the one
+    # case a plain slice can't represent verbatim, so those runs are
+    # accumulated in `esc_buf` (a str, concatenated — not a char list)
+    # and flushed as their own 'lit' part.
     parts = []
-    buf = []
+    lit_start = 0
+    esc_buf = ''
     i, n = 0, len(fmt_text)
     while i < n:
         c = fmt_text[i]
         if c != '%':
-            buf.append(c); i += 1
+            i += 1
             continue
+        # hit a '%': flush the pending literal run
+        _run = fmt_text[lit_start:i]
         if i + 1 < n and fmt_text[i + 1] == '%':
-            buf.append('%'); i += 2
+            esc_buf = esc_buf + _run + '%'
+            i += 2
+            lit_start = i
             continue
-        if buf:
-            parts.append(('lit', ''.join(buf))); buf = []
+        _lit = esc_buf + _run
+        if _lit:
+            parts.append(('lit', _lit))
+        esc_buf = ''
         spec_start = i
         i += 1
         # Flags, width, precision. Dynamic width/precision ('%*d') isn't
@@ -3046,8 +3062,10 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
         if i < n:
             i += 1
         parts.append(('spec', fmt_text[spec_start:i], conv))
-    if buf:
-        parts.append(('lit', ''.join(buf)))
+        lit_start = i
+    _tail = esc_buf + fmt_text[lit_start:n]
+    if _tail:
+        parts.append(('lit', _tail))
 
     n_specs = sum(1 for p in parts if p[0] == 'spec')
     if n_specs != len(rhs_exprs):

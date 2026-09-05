@@ -2263,7 +2263,12 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 else:
                     targets = [node.target]
                     elem_types = [gen._quick_type(node.value)]
-                for target, vtype in zip(targets, elem_types):
+                # Index both lists in parallel — `for target, vtype in
+                # zip(targets, elem_types)` unpacks a zip 2-tuple, the
+                # established boxing bug.
+                for _zi in range(min(len(targets), len(elem_types))):
+                    target = targets[_zi]
+                    vtype = _as_str(elem_types[_zi])
                     if isinstance(target, gimple_ctypes.IdentExpr):
                         vname = _as_str(target.name)
                         if vname not in inferred:
@@ -2289,8 +2294,8 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 collect_assigned_types(node.then_body)
                 if node.else_body:
                     collect_assigned_types(node.else_body)
-                for _, elif_body in node.elifs:
-                    collect_assigned_types(elif_body)
+                for _elif in node.elifs:  # index, not unpack — tuple-boxing bug
+                    collect_assigned_types(_elif[1])
             elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
                 collect_assigned_types(node.body)
                 if node.else_body:
