@@ -2429,6 +2429,20 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name == 'print':
             gen._gen_print(node.value.args, node.value.kwargs)
             return
+        # `fut.add_done_callback(cb)` / `.remove_done_callback(cb)` as a
+        # bare statement (the async-body hook in gimple_gen_coro lowers
+        # the method call to this 2-arg `__mojo_future_*` shim call). The
+        # generic call-building path below would pad the missing 3rd
+        # argument (the callable-kind tag) with a literal 0, mis-invoking
+        # a bound-method / closure callback as a bare function pointer.
+        # Route to the shared handler that derives the tag from the
+        # lowered C type of the callback value -- the statement-level twin
+        # of _lower_call's identical interception.
+        if (raw_name in ('__mojo_future_add_done_callback',
+                         '__mojo_future_remove_done_callback')
+                and len(node.value.args) == 2):
+            ggc._lower_future_done_callback(gen, node.value)
+            return
         # Step B: a bare, value-DISCARDING call to a supported compiled
         # async function (`f()` with no assignment/use of the result) —
         # construct (`<base>_start`) and immediately destroy, WITHOUT

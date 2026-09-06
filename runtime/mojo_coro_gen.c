@@ -427,8 +427,14 @@ extern void    mojo_raise(void);
 
 typedef struct MojoFutureCB {
     int64_t              cb;      /* callback handle (see __mojo_future_invoke_callback) */
+    int64_t              tag;     /* 0 = bare fn ptr, 1 = MojoBoundMethod* / closure */
     struct MojoFutureCB *next;
 } MojoFutureCB;
+
+/* Mirror of runtime/mojo_runtime.h's MojoBoundMethod -- a method or
+   capturing closure referenced as a value: { fn, self }. Kept local so
+   this TU needn't pull in the whole runtime header. */
+typedef struct { void *fn; void *self; } MojoCoroBoundMethod;
 
 typedef struct MojoFuture {
     int          done;           /* resolved: result OR exception OR cancelled */
@@ -440,22 +446,31 @@ typedef struct MojoFuture {
     MojoFutureCB *callbacks;     /* done-callback list, LIFO; fired on resolve */
 } MojoFuture;
 
-/* Invoke one recorded done-callback. Weak so a richer dispatch can override
-   it. Default bridge: treat the handle as a plain `void(*)(int64_t)` C
-   function pointer, called with the future handle -- matching asyncio's
-   `callback(fut)` signature and the representation the compiled path uses
-   for a bare top-level `def cb(fut)` passed by name (a `_funcptr_<csym>`
-   value). LIMITATION: a bound-method (MojoBoundMethod*) or closure-capture
-   callback also arrives here as an int64_t and would be called through this
-   same mismatched ABI -- the codegen does not yet emit a tag distinguishing
-   the handle kinds, so those callback forms need a tagged-handle dispatch
-   (overriding this weak symbol) before add_done_callback is correct for
-   them. add_done_callback/remove_done_callback record them faithfully
-   regardless. A NULL / obviously-non-pointer handle is ignored. */
-__attribute__((weak)) void
-__mojo_future_invoke_callback(int64_t cb, int64_t future_handle)
+/* Invoke one recorded done-callback, dispatching on the handle-kind `tag`
+   the codegen emitted alongside it (gimple_gen_coro._done_callback_tag /
+   gimple_gen_methods._future_callback_tag):
+
+     tag 0 -- bare C function pointer: a top-level `def cb(fut)` passed by
+       name, or a non-capturing nested closure. Both lower to a
+       `_funcptr_<csym>` / `void *` value; call it `((void(*)(int64_t))h)
+       (fut)`, matching asyncio's `callback(fut)` signature.
+
+     tag 1 -- MojoBoundMethod* : a bound method `self.on_done`, or a
+       capturing closure (env carried as `self`). Lowered via
+       `mojo_bound_method_new(fn, self)`; invoke as `fn(self, fut)` -- the
+       same "self, then N ordinary args" convention every compiled method
+       uses, i.e. runtime/mojo_runtime.h's mojo_bound_method_call_1.
+
+   A NULL / obviously-non-pointer handle is ignored. */
+void
+__mojo_future_invoke_callback(int64_t cb, int64_t tag, int64_t future_handle)
 {
     if (cb <= 0xffff) return;
+    if (tag == 1) {
+        MojoCoroBoundMethod *bm = (MojoCoroBoundMethod *)(uintptr_t)cb;
+        ((int64_t (*)(void *, int64_t))bm->fn)(bm->self, future_handle);
+        return;
+    }
     void (*fn)(int64_t) = (void (*)(int64_t))(uintptr_t)cb;
     fn(future_handle);
 }
@@ -467,7 +482,7 @@ future_fire_callbacks(int64_t h, MojoFuture *f)
     f->callbacks = NULL;
     while (cb) {
         MojoFutureCB *nx = cb->next;
-        __mojo_future_invoke_callback(cb->cb, h);
+        __mojo_future_invoke_callback(cb->cb, cb->tag, h);
         free(cb);
         cb = nx;
     }
@@ -575,23 +590,28 @@ __mojo_future_set_running_or_notify_cancel(int64_t h)
 
 /* (3) done-callback list -- `fut.add_done_callback(cb)` /
    `fut.remove_done_callback(cb)`. Callbacks fire (LIFO) on resolution via
-   future_fire_callbacks; see __mojo_future_invoke_callback for the
-   invocation contract and its current limitation. */
+   future_fire_callbacks; `tag` records the callable-value kind -- see
+   __mojo_future_invoke_callback for the invocation contract. */
 void
-__mojo_future_add_done_callback(int64_t h, int64_t cb)
+__mojo_future_add_done_callback(int64_t h, int64_t cb, int64_t tag)
 {
     MojoFuture *f = (MojoFuture *)(uintptr_t)h;
     if (!f) return;
-    if (f->done) { __mojo_future_invoke_callback(cb, h); return; }
+    if (f->done) { __mojo_future_invoke_callback(cb, tag, h); return; }
     MojoFutureCB *node = (MojoFutureCB *)calloc(1, sizeof *node);
     node->cb   = cb;
+    node->tag  = tag;
     node->next = f->callbacks;
     f->callbacks = node;
 }
 
+/* Identity for removal is the handle value only: `tag` is accepted for a
+   uniform 3-arg shim signature but callbacks with the same `cb` are the
+   same registration regardless of tag. */
 int64_t
-__mojo_future_remove_done_callback(int64_t h, int64_t cb)
+__mojo_future_remove_done_callback(int64_t h, int64_t cb, int64_t tag)
 {
+    (void)tag;
     MojoFuture *f = (MojoFuture *)(uintptr_t)h;
     if (!f) return 0;
     int removed = 0;

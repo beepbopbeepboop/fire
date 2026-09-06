@@ -941,6 +941,11 @@ def _rewrite_async_expr(node, cvar: str):
             return _call('__mojo_future_set_running_or_notify_cancel',
                          [_rewrite_async_expr(_obj, cvar)])
         if _m == 'add_done_callback' and len(node.args) == 1:
+            # The 3rd arg (callable-kind tag) is supplied by
+            # gimple_gen_calls._lower_call's dedicated interception, which
+            # inspects the lowered C type of the callback value (so a
+            # capturing closure / bound method passed by name is tagged
+            # correctly, not just a syntactic `self.cb` MemberExpr).
             return _call('__mojo_future_add_done_callback',
                          [_rewrite_async_expr(_obj, cvar),
                           _rewrite_async_expr(node.args[0], cvar)])
@@ -2294,9 +2299,9 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_future_cancelled', 'int64_t')
     gen.func_param_types.setdefault('__mojo_future_set_running_or_notify_cancel', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_future_set_running_or_notify_cancel', 'int64_t')
-    gen.func_param_types.setdefault('__mojo_future_add_done_callback', ['int64_t', 'int64_t'])
+    gen.func_param_types.setdefault('__mojo_future_add_done_callback', ['int64_t', 'int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_future_add_done_callback', 'void')
-    gen.func_param_types.setdefault('__mojo_future_remove_done_callback', ['int64_t', 'int64_t'])
+    gen.func_param_types.setdefault('__mojo_future_remove_done_callback', ['int64_t', 'int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_future_remove_done_callback', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_await_future', ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_async_await_future', 'int64_t')

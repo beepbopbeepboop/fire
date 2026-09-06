@@ -1764,13 +1764,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     'int64_t', '__mojo_future_set_running_or_notify_cancel', [('int64_t', ov)])
             if method == 'add_done_callback' and len(node.args) == 1:
                 _ct, _cv = gen.lower_expr(node.args[0])
+                _tag = ggc._future_done_callback_kind_tag(_ct)
                 gen._emit_call('void', '', '__mojo_future_add_done_callback',
-                               [('int64_t', ov), (_ct, _cv)])
+                               [('int64_t', ov), (_ct, _cv), ('int64_t', str(_tag))])
                 return 'void', ''
             if method == 'remove_done_callback' and len(node.args) == 1:
                 _ct, _cv = gen.lower_expr(node.args[0])
+                _tag = ggc._future_done_callback_kind_tag(_ct)
                 return 'int64_t', gen._call_expr('int64_t', '__mojo_future_remove_done_callback',
-                                                 [('int64_t', ov), (_ct, _cv)])
+                                                 [('int64_t', ov), (_ct, _cv), ('int64_t', str(_tag))])
 
     # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct
     # enclosing the current classmethod (current_func_name is e.g.

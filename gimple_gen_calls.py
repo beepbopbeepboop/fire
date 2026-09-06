@@ -229,7 +229,45 @@ def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return ptr_ctype, t
 
 
+def _future_done_callback_kind_tag(cb_ctype: str) -> int:
+    """Tag stored with a `fut.add_done_callback(cb)` handle so the runtime
+    (`__mojo_future_invoke_callback`, runtime/mojo_coro_gen.c) invokes it
+    through the matching ABI:
+      0 -- bare C function pointer: a top-level `def cb(fut)` by name or a
+           non-capturing nested closure (`_funcptr_<csym>` / `void *`),
+           called `((void(*)(int64_t))h)(fut)`.
+      1 -- `MojoBoundMethod *`: a bound method `self.on_done` or a capturing
+           closure (env carried as `self`), invoked `fn(self, fut)` a la
+           runtime/mojo_runtime.h's mojo_bound_method_call_1.
+    Keyed off the lowered C type -- authoritative for both a syntactic
+    `self.cb` and a capturing closure passed by name."""
+    return 1 if cb_ctype == 'MojoBoundMethod *' else 0
+
+
+def _lower_future_done_callback(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """Lower `__mojo_future_add_done_callback` / `_remove_done_callback`,
+    supplying the callable-kind tag as the 3rd argument from the lowered C
+    type of the callback value (see _future_done_callback_kind_tag). The
+    async-body hook (gimple_gen_coro._rewrite_async_expr) emits these calls
+    with just (future, cb); this fills in the tag centrally so both the
+    async and the sync (gimple_gen_methods) hooks agree."""
+    fname = node.func.name
+    fut_t, fut_v = gen.lower_expr(node.args[0])
+    cb_t, cb_v = gen.lower_expr(node.args[1])
+    tag = _future_done_callback_kind_tag(cb_t)
+    args = [('int64_t', fut_v), (cb_t, cb_v), ('int64_t', str(tag))]
+    if fname.endswith('add_done_callback'):
+        gen._emit_call('void', '', fname, args)
+        return 'void', ''
+    return 'int64_t', gen._call_expr('int64_t', fname, args)
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name in ('__mojo_future_add_done_callback',
+                                   '__mojo_future_remove_done_callback')
+            and len(node.args) == 2):
+        return _lower_future_done_callback(gen, node)
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
     # supported compiled async function (top-level OR nested — a

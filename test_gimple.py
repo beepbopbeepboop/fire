@@ -4213,6 +4213,38 @@ def main():
     print(asyncio.run(main_co()))
 """)
 
+    # bugs/COMPILE_FAIL_asyncio_futures.md (3), callback-kind tag: a
+    # bound-method callback (`self.on_done`, asyncio's own shape) and a
+    # capturing-closure callback must lower through the MojoBoundMethod*
+    # path (tag 1), not as a bare fn pointer. Behavioral proof:
+    # test_coro_future_await.py.
+    test("async_future_done_callback_bound_method_and_closure", """\
+import asyncio
+
+struct W:
+    var n: Int
+    fn __init__(out self):
+        self.n = 0
+    fn on_done(self, fut: Int):
+        print("m")
+    async def run(self, f: Int) -> Int:
+        f.add_done_callback(self.on_done)
+        var k = 3
+        fn cb(fut: Int):
+            print("c", k)
+        f.add_done_callback(cb)
+        f.set_result(1)
+        return 0
+
+async def main_co() -> Int:
+    var w = W()
+    var f = create_future()
+    return await w.run(f)
+
+def main():
+    print(asyncio.run(main_co()))
+""")
+
     # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
     # function>` (Step D) are both supported now — see
     # test_async_await_composition_compiles_via_cpp_path and

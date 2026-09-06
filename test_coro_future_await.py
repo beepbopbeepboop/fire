@@ -605,6 +605,65 @@ def main():
           out == "resolved\n0\n", detail=repr(out))
 
 
+def test_future_done_callback_bound_method():
+    """(3) a bound method `self.on_done` registered via add_done_callback
+    (asyncio's own `fut.add_done_callback(self._done_callback)` shape) must
+    be invoked as `fn(self, fut)` (tag 1 -> mojo_bound_method_call_1), not
+    as a bare function pointer."""
+    src = """\
+import asyncio
+
+struct Watcher:
+    var hits: Int
+
+    fn __init__(out self):
+        self.hits = 0
+
+    fn on_done(self, fut: Int):
+        print("bound-method callback")
+
+    async def run(self, f: Int) -> Int:
+        f.add_done_callback(self.on_done)
+        f.set_result(9)
+        return 0
+
+async def main_co() -> Int:
+    var w = Watcher()
+    var f = create_future()
+    return await w.run(f)
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("bound-method done-callback invoked with self",
+          out == "bound-method callback\n0\n", detail=repr(out))
+
+
+def test_future_done_callback_closure():
+    """(3) a capturing closure registered via add_done_callback lowers to a
+    MojoBoundMethod* (env as self) and must fire through the same tag-1
+    path."""
+    src = """\
+import asyncio
+
+async def main_co() -> Int:
+    var tag = 42
+    fn cb(fut: Int):
+        print("closure saw", tag)
+    var f = create_future()
+    f.add_done_callback(cb)
+    f.set_result(1)
+    return 0
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("capturing-closure done-callback fires correctly",
+          out == "closure saw 42\n0\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):
