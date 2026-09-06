@@ -82,7 +82,53 @@ return types registered in BOTH runtime-signature maps
 
 ## Status
 
-**Stage 1: LANDED (this pass).**
+**Stage 2: LANDED (this pass).**
+
+Landed in Stage 2:
+- runtime (`runtime/mojo_runtime.{h,c}`): `mojo_bytes_concat`, `_repeat`,
+  `_slice` (start/stop/step, negative step, `MOJO_SLICE_STOP_OMITTED`
+  sentinel for omitted start), `_contains`, `_find`, `_count`,
+  `_startswith`, `_endswith`, `_decode` (-> char*), `_hex` (-> char*),
+  `_replace`, `_strip` (do_left/do_right flags + optional chars),
+  `_upper`, `_lower`, `_split` (whitespace when sep omitted), `_rsplit`,
+  `_splitlines`, `_join`; plus `mojo_repr_list_bytes` for
+  `print(list-of-bytes)`.
+- `_lower_bytes_method` in `gimple_gen_methods.py` (new, mirrors
+  `_lower_str_method`), dispatched from `_lower_method_call` on
+  `ot == 'MojoBytes *'` and `_sn == 'MojoBytes'`. `.decode`/`.hex` return
+  `char *`; `.split`/`.rsplit`/`.splitlines` return `MojoList *` with
+  `_elem_types = 'MojoBytes *'`; everything else returns `MojoBytes *`.
+- `+` concat / `*` repeat (both operand orders) in `gimple_gen_exprs.py`
+  `_lower_binary`.
+- `in` / `not in` for `b'x' in b'xyz'` and `int in b'...'` via
+  `mojo_bytes_contains` in `_lower_in_dispatch`.
+- `b[a:b]` / `b[a:]` / `b[:b]` / `b[::k]` (incl. `b[::-1]`) in
+  `_lower_slice` (`MojoBytes *` branch, reuses `_lower_slice_bounds`).
+- `for x in b:` -> x is int 0-255 (`_gen_for_bytes` in
+  `gimple_gen_loops.py`, dispatched from `_gen_for_iter`).
+- `isinstance(x, bytes)` / `isinstance(x, bytearray)` via the
+  `_SCALAR_TYPE_MATCH` table in `_isinstance_one_type`.
+- Tests: `test_gimple.py` (+4 compile checks), `test_gimple_runner.py`
+  (+5 runnable value-asserting cases).
+
+Deferred to **Stage 2b** (not yet done):
+- `b'%d...' % x` / `b'%s' % b'...'` formatting -> bytes. The str `%`
+  path (`_lower_percent` / `_lower_percent_format`) is literal-LHS only
+  and produces `char *`; a bytes analogue needs a `mojo_bytes_mod`
+  runtime primitive (raw-byte %s insertion, embedded NUL safe).
+- Unannotated param inferred `bytes` from *body usage* alone
+  (`x.decode()` / `x[a:b]` used as bytes / `x + b'...'` / `for _ in x`).
+  `_infer_param_types` is heavily bug-tuned (many documented past
+  regressions); a bytes signal needs care not to steal `str`/`list`
+  inference. Annotation (`: bytes`) and `b'...'` default both already work.
+- `bytes(bytearray)` — bytearray is Stage 3; skipped cleanly.
+
+### Stage 3 (still remaining, unchanged)
+- `bytearray` (mutable), `memoryview`.
+
+---
+
+**Stage 1: LANDED.**
 
 Landed:
 - `runtime/mojo_runtime.{h,c}`: `MojoBytes` struct + `mojo_bytes_new_lit`,

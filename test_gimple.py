@@ -5214,6 +5214,56 @@ fn main():
     print(str(b))
 """)
 
+    # bytes value type (Stage 2) — compile checks
+    test("bytes_slice_iter_in", """\
+fn main():
+    var b = b'Hello, World'
+    print(b[0:5])
+    print(b[7:])
+    print(b[::-1])
+    print(b[::2])
+    for x in b:
+        print(x)
+    if b'ell' in b:
+        print("y")
+    if 101 in b:
+        print("z")
+""")
+
+    test("bytes_concat_repeat", """\
+fn main():
+    var c = b'ab' + b'cd'
+    print(c)
+    print(b'xy' * 3)
+    print(2 * b'-')
+""")
+
+    test("bytes_methods", """\
+fn main():
+    print(b'Hello'.startswith(b'He'))
+    print(b'Hello'.endswith(b'lo'))
+    print(b'a,b,c'.split(b','))
+    print(b'x y  z'.split())
+    print(b'a\\nb\\nc'.splitlines())
+    print(b'a-b-c'.replace(b'-', b'_'))
+    print(b'  hi  '.strip())
+    print(b'xxhixx'.strip(b'x'))
+    print(b'AbC'.upper())
+    print(b'AbC'.lower())
+    print(b'abcabc'.find(b'c'))
+    print(b'abcabc'.count(b'bc'))
+    print(b'DEADBEEF'.hex())
+    print(b'hello'.decode('utf-8'))
+    print(b','.join(b'x,y'.split(b',')))
+""")
+
+    test("bytes_isinstance", """\
+fn main():
+    var b = b'x'
+    print(isinstance(b, bytes))
+    print(isinstance(5, bytes))
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

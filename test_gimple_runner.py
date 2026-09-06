@@ -627,6 +627,59 @@ fn main():
     print(b'a\\x00\\nZ')
 """, "b'a\\x00\\nZ'\n")
 
+    # ── bytes value type (Stage 2) ───────────────────────────────────────
+    test_gimple_stdout("gimple_bytes_slice", """\
+fn main():
+    var b = b'Hello, World'
+    print(b[0:5])
+    print(b[7:])
+    print(b[::-1])
+    print(b[::2])
+""", "b'Hello'\nb'World'\nb'dlroW ,olleH'\nb'Hlo ol'\n")
+
+    test_gimple_stdout("gimple_bytes_iter_and_in", """\
+fn main():
+    var total = 0
+    for x in b'ABC':
+        total += x
+    print(total)
+    if b'ell' in b'Hello':
+        print("sub")
+    if 101 in b'Hello':
+        print("byte")
+""", "198\nsub\nbyte\n")
+
+    test_gimple_stdout("gimple_bytes_concat_repeat", """\
+fn main():
+    print(b'ab' + b'cd')
+    print(b'xy' * 3)
+    print(3 * b'-')
+""", "b'abcd'\nb'xyxyxy'\nb'---'\n")
+
+    test_gimple_stdout("gimple_bytes_methods", """\
+fn main():
+    print(b'Hello'.startswith(b'He'))
+    print(b'Hello'.endswith(b'lo'))
+    print(b'a,b,c'.split(b','))
+    print(b'a-b-c'.replace(b'-', b'_'))
+    print(b'  hi  '.strip())
+    print(b'AbC'.upper())
+    print(b'abcabc'.find(b'c'))
+    print(b'abcabc'.count(b'bc'))
+    print(b'DEADBEEF'.hex())
+    print(b'hello'.decode('utf-8'))
+    print(b','.join(b'x,y'.split(b',')))
+""", "1\n1\n[b'a', b'b', b'c']\nb'a_b_c'\nb'hi'\nb'ABC'\n2\n2\n4445414442454546\nhello\nb'x,y'\n")
+
+    test_gimple_stdout("gimple_bytes_isinstance", """\
+fn main():
+    var b = b'x'
+    if isinstance(b, bytes):
+        print("is-bytes")
+    if not isinstance(5, bytes):
+        print("int-not-bytes")
+""", "is-bytes\nint-not-bytes\n")
+
 
 def main():
     gcc = find_gcc()
