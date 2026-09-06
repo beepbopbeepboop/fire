@@ -5876,6 +5876,22 @@ def gen_module_impl(self, stmts):
             break
     self._toplevel_calls_main = False
     for _ts in stmts:
+        # Direct shallow check FIRST — a bare top-level `main()` is
+        # `ExprStmt(value=CallExpr(func=IdentExpr('main')))`, a direct
+        # child needing no deep walk. The generic `_walk_ast` recursion
+        # below (for the `if __name__ == '__main__': main()` shape) has
+        # proven unreliable on the self-hosted compiled path — its
+        # `dataclasses.fields()` handling did not recurse into
+        # `ExprStmt.value`, so `_toplevel_calls_main` stayed False and the
+        # C wrapper emitted a SECOND `_gimple_main ()` after `_toplevel
+        # ()` (the double-invocation the branch comment in `_gen_func`
+        # warns about) — a stage1-vs-stage2 parity break under
+        # MOJO_NO_SHIM=1.
+        _tv = getattr(_ts, 'value', None) if isinstance(_ts, ExprStmt) else None
+        if (isinstance(_tv, CallExpr) and isinstance(_tv.func, IdentExpr)
+                and _as_str(_tv.func.name) == 'main'):
+            self._toplevel_calls_main = True
+            break
         if isinstance(_ts, (AssignStmt, AugAssignStmt, ExprStmt, IfStmt, WhileStmt, ForStmt, TryStmt, WithStmt, PassStmt, BreakStmt, ContinueStmt, ReturnStmt, RaiseStmt, AssertStmt, VarDecl)):
             for _n in _walk_ast(_ts):
                 if isinstance(_n, CallExpr) and isinstance(_n.func, IdentExpr) and _as_str(_n.func.name) == 'main':
