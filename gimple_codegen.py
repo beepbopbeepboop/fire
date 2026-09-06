@@ -209,6 +209,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_zeros':           'MojoBytes *',
     'mojo_bytes_from_list':       'MojoBytes *',
     'mojo_bytes_from_str':        'MojoBytes *',
+    'mojo_bytes_from_cstr':       'MojoBytes *',
     'mojo_bytes_len':             'int64_t',
     'mojo_bytes_get':             'int64_t',
     'mojo_bytes_eq':              'int',
@@ -232,6 +233,20 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_rsplit':          'MojoList *',
     'mojo_bytes_splitlines':      'MojoList *',
     'mojo_bytes_join':            'MojoBytes *',
+    'mojo_bytes_copy':            'MojoBytes *',
+    'mojo_bytearray_new':         'MojoBytes *',
+    'mojo_bytearray_copy':        'MojoBytes *',
+    'mojo_bytearray_pop':         'int64_t',
+    'mojo_memoryview_new':        'MojoMemoryView *',
+    'mojo_memoryview_from_bytes': 'MojoMemoryView *',
+    'mojo_memoryview_len':        'int64_t',
+    'mojo_memoryview_get':        'int64_t',
+    'mojo_memoryview_slice':      'MojoMemoryView *',
+    'mojo_memoryview_tobytes':    'MojoBytes *',
+    'mojo_memoryview_eq':         'int',
+    'mojo_memoryview_hex':        'char *',
+    'mojo_memoryview_cast':       'MojoMemoryView *',
+    'mojo_memoryview_repr':       'char *',
     # C-string utilities used by the REPL and string methods
     'input':          'char *',
     'string_lower':   'char *',
@@ -2915,6 +2930,8 @@ class GimpleGen:
         return gmp._lower_str_method(self, ov, method, args)
     def _lower_bytes_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_bytes_method(self, ov, method, args)
+    def _lower_memoryview_method(self, ov: str, method: str, args: list) -> tuple:
+        return gmp._lower_memoryview_method(self, ov, method, args)
     def _repack_method_call_spread_args(self, mangled: str, struct_name: str, method: str, call_args: list, arg_pairs: list) -> list:
         return gmp._repack_method_call_spread_args(self, mangled, struct_name, method, call_args, arg_pairs)
     def _lower_struct_method_call(self, ov: str, ot: str, method: str, node) -> tuple:
@@ -3257,6 +3274,8 @@ class GimpleGen:
         return glo._gen_for_cstr(self, var, it_val, body)
     def _gen_for_bytes(self, var: str, it_val: str, body: list):
         return glo._gen_for_bytes(self, var, it_val, body)
+    def _gen_for_memoryview(self, var: str, it_val: str, body: list):
+        return glo._gen_for_memoryview(self, var, it_val, body)
     def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_dict(self, var, it_val, body, shadow_name)
     def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None=None):

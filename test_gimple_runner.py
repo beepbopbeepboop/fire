@@ -680,6 +680,58 @@ fn main():
         print("int-not-bytes")
 """, "is-bytes\nint-not-bytes\n")
 
+    # ── bytes value type (Stage 2b) ──────────────────────────────────────
+    test_gimple_stdout("gimple_bytes_percent_format", """\
+fn main():
+    var n: Int = 42
+    print(b'val=%d' % n == b'val=42')
+    print(b'%s!' % b'hi' == b'hi!')
+    print(b'%02x' % 15 == b'0f')
+    print(b'%s=%d;' % (b'k', 7) == b'k=7;')
+    print(b'%5d|' % 3 == b'    3|')
+""", "1\n1\n1\n1\n1\n")
+
+    test_gimple_stdout("gimple_bytes_param_inferred_from_body", """\
+fn dec(data) -> String:
+    return data.decode('utf-8')
+fn main():
+    print(dec(b'hello'))
+""", "hello\n")
+
+    # ── bytes value type (Stage 3): bytearray + memoryview ───────────────
+    test_gimple_stdout("gimple_bytearray_mutation", """\
+fn main():
+    var ba = bytearray(b'abc')
+    ba.append(100)
+    ba[0] = 90
+    print(1 if bytes(ba) == b'Zbcd' else 0)
+    ba.extend(b'XY')
+    var x = ba.pop()
+    print(x)
+    del ba[0]
+    print(1 if bytes(ba) == b'bcdX' else 0)
+    ba[1:3] = b'ZZZ'
+    print(1 if bytes(ba) == b'bZZZX' else 0)
+    var t = 0
+    for c in ba:
+        t = t + c
+    print(t)
+""", "1\n89\n1\n1\n456\n")
+
+    test_gimple_stdout("gimple_memoryview", """\
+fn main():
+    var mv = memoryview(b'hello')
+    print(mv[1])
+    print(len(mv))
+    print(1 if mv[1:3].tobytes() == b'el' else 0)
+    print(mv.hex())
+    print(1 if mv == b'hello' else 0)
+    var t = 0
+    for x in mv:
+        t = t + x
+    print(t)
+""", "101\n5\n1\n68656c6c6f\n1\n532\n")
+
 
 def main():
     gcc = find_gcc()

@@ -602,6 +602,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._gen_for_cstr(var, it_val, node.body)
         elif it_type == 'MojoBytes *':
             gen._gen_for_bytes(var, it_val, node.body)
+        elif it_type == 'MojoMemoryView *':
+            gen._gen_for_memoryview(var, it_val, node.body)
         elif it_type == 'MojoDict *':
             gen._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name)
         elif it_type == 'MojoSet *':
@@ -1565,6 +1567,39 @@ def _gen_for_bytes(gen, var: str, it_val: str, body: list):
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     byte_t = gen._new_val('int64_t', f"mojo_bytes_get ({it_val}, {idx_t})")
+    gen._emit(f"  {gen._cname(var)} = {byte_t};")
+    gen.loop_stack.append((bb_post, bb_after))
+    for s in body:
+        gen.gen_stmt(s)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    one = gen._new_val('int64_t', "(int64_t)1")
+    st = gen._new_val('int64_t', f"{idx_t} + {one}")
+    gen._emit(f"  {idx_t} = {st};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+
+
+def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
+    """`for x in mv:` — x is an int (1-D byte view). Same index-loop shape
+    as _gen_for_bytes over mojo_memoryview_len/_get."""
+    gen._declare_var(var, 'int64_t')
+    len_t = gen._new_val('int64_t', f"mojo_memoryview_len ({it_val})")
+    idx_t = gen._new_temp('int64_t')
+    gen._emit(f"  {idx_t} = (int64_t)0;")
+
+    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
+    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond_t = gen._new_val('_Bool', f"{idx_t} < {len_t}")
+    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    byte_t = gen._new_val('int64_t', f"mojo_memoryview_get ({it_val}, {idx_t})")
     gen._emit(f"  {gen._cname(var)} = {byte_t};")
     gen.loop_stack.append((bb_post, bb_after))
     for s in body:

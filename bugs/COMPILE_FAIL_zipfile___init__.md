@@ -1,5 +1,26 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, bytes-value-type Stage 3): ordinary-path memoryview NOW implemented; coroutine-body memoryview still refused
+
+`bytes`/`bytearray`/`memoryview` value types landed in the ordinary
+GIMPLE path this session (Stages 2b + 3 of
+`bugs/hard/CODEGEN_bytes_value_type.md`): `memoryview(<bytes|bytearray>)`,
+`mv[i]`, `mv[a:b]` (non-copying sub-view), `len`, iteration, `.tobytes`,
+`.hex`, `.cast`, `mv == b'...'`, `bytes(mv)` all compile + run.
+
+BUT `_Extra.split` is a **`@classmethod` generator**, and the C++
+coroutine-body emitter (`gimple_cpp_core.py` ~line 3582) still refuses
+`memoryview(...)` as an unresolved callee — the ordinary-path
+constructor lowering does not reach it. Fresh
+`gimple_codegen.compile_to_gimple(src)` reproduces byte-for-byte:
+`split: a call to unresolved callee 'memoryview(...)' is not supported
+in a compiled generator/coroutine body`. Wiring memoryview into the
+coroutine-body emitter is a separate, self-contained follow-up; even
+once done, this file still has the ≥3 other documented blockers
+(pwd=None unannotated param, genexp-held-in-local in
+`_sanitize_windows_name`, FileHeader int32 under-widening residue). Not
+`git rm`'d.
+
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): memoryview refusal confirmed unchanged
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` on the

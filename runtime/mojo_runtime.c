@@ -1041,6 +1041,15 @@ MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
     return mojo_bytes_new_lit(s, n);
 }
 
+/* NUL-terminated C string -> MojoBytes (copies up to the terminator).
+ * Used by the `b'...' % args` lowering to fold a formatted numeric/str
+ * spec (always ASCII, never embedded NUL) into the byte accumulator. */
+MojoBytes *mojo_bytes_from_cstr(const char *s)
+{
+    if (s == NULL) return mojo_bytes_alloc(0);
+    return mojo_bytes_new_lit(s, (int64_t)strlen(s));
+}
+
 int64_t mojo_bytes_len(MojoBytes *b) { return b->len; }
 
 int64_t mojo_bytes_get(MojoBytes *b, int64_t i)
@@ -1323,6 +1332,176 @@ MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts)
         if (p && p->len) { memcpy(r->data + off, p->data, (size_t)p->len); off += p->len; }
     }
     return r;
+}
+
+/* ── bytearray (mutable, shares the MojoBytes representation) ────────────
+ * No capacity field on MojoBytes, so every size-changing op reallocs
+ * data to exactly len+1. O(n) amortized append is acceptable for this
+ * compiler's workloads and keeps the struct layout (and every codegen
+ * struct-field table) untouched. */
+static void mojo_bytearray_resize(MojoBytes *b, int64_t newlen)
+{
+    if (newlen < 0) newlen = 0;
+    b->data = realloc(b->data, (size_t)newlen + 1);
+    b->data[newlen] = 0;
+    b->len = newlen;
+}
+
+MojoBytes *mojo_bytearray_new(void) { return mojo_bytes_alloc(0); }
+
+MojoBytes *mojo_bytearray_copy(MojoBytes *src)
+{
+    int64_t n = src ? src->len : 0;
+    return mojo_bytes_new_lit(src ? (const char *)src->data : "", n);
+}
+
+/* bytes(bytearray) / bytearray(bytes): an explicit independent copy. */
+MojoBytes *mojo_bytes_copy(MojoBytes *src) { return mojo_bytearray_copy(src); }
+
+void mojo_bytearray_setitem(MojoBytes *b, int64_t i, int64_t v)
+{
+    if (!b) return;
+    if (i < 0) i += b->len;
+    if (i < 0 || i >= b->len) { fprintf(stderr, "IndexError: bytearray index out of range\n"); exit(1); }
+    b->data[i] = (uint8_t)(v & 0xFF);
+}
+
+void mojo_bytearray_append(MojoBytes *b, int64_t v)
+{
+    if (!b) return;
+    mojo_bytearray_resize(b, b->len + 1);
+    b->data[b->len - 1] = (uint8_t)(v & 0xFF);
+}
+
+void mojo_bytearray_extend(MojoBytes *b, MojoBytes *other)
+{
+    if (!b || !other || other->len == 0) return;
+    int64_t old = b->len;
+    /* snapshot in case other aliases b */
+    int64_t on = other->len;
+    uint8_t *tmp = malloc((size_t)on);
+    memcpy(tmp, other->data, (size_t)on);
+    mojo_bytearray_resize(b, old + on);
+    memcpy(b->data + old, tmp, (size_t)on);
+    free(tmp);
+}
+
+int64_t mojo_bytearray_pop(MojoBytes *b, int64_t i)
+{
+    if (!b || b->len == 0) { fprintf(stderr, "IndexError: pop from empty bytearray\n"); exit(1); }
+    if (i == MOJO_SLICE_STOP_OMITTED) i = b->len - 1;
+    if (i < 0) i += b->len;
+    if (i < 0 || i >= b->len) { fprintf(stderr, "IndexError: pop index out of range\n"); exit(1); }
+    int64_t out = b->data[i];
+    memmove(b->data + i, b->data + i + 1, (size_t)(b->len - i - 1));
+    mojo_bytearray_resize(b, b->len - 1);
+    return out;
+}
+
+void mojo_bytearray_delitem(MojoBytes *b, int64_t i)
+{
+    (void)mojo_bytearray_pop(b, i);
+}
+
+/* ba[start:stop] = repl  — splice: delete [start,stop), insert repl's
+ * bytes at start. Negative / omitted bounds already normalized by the
+ * caller (same _lower_slice_bounds path as list splice). */
+void mojo_bytearray_splice(MojoBytes *b, int64_t start, int64_t stop, MojoBytes *repl)
+{
+    if (!b) return;
+    int64_t n = b->len;
+    if (start == MOJO_SLICE_STOP_OMITTED) start = 0;
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = n;
+    if (start < 0) start += n;
+    if (stop < 0) stop += n;
+    if (start < 0) start = 0;
+    if (start > n) start = n;
+    if (stop < start) stop = start;
+    if (stop > n) stop = n;
+    int64_t rn = repl ? repl->len : 0;
+    uint8_t *rtmp = malloc((size_t)(rn ? rn : 1));
+    if (rn) memcpy(rtmp, repl->data, (size_t)rn);
+    int64_t tail = n - stop;
+    uint8_t *ttmp = malloc((size_t)(tail ? tail : 1));
+    if (tail) memcpy(ttmp, b->data + stop, (size_t)tail);
+    mojo_bytearray_resize(b, start + rn + tail);
+    if (rn) memcpy(b->data + start, rtmp, (size_t)rn);
+    if (tail) memcpy(b->data + start + rn, ttmp, (size_t)tail);
+    free(rtmp); free(ttmp);
+}
+
+/* ── memoryview (non-copying 1-D byte view) ─────────────────────────────*/
+MojoMemoryView *mojo_memoryview_new(uint8_t *data, int64_t len, int64_t itemsize)
+{
+    MojoMemoryView *m = malloc(sizeof(MojoMemoryView));
+    m->data = data;
+    m->len = len;
+    m->itemsize = itemsize > 0 ? itemsize : 1;
+    return m;
+}
+
+MojoMemoryView *mojo_memoryview_from_bytes(MojoBytes *b)
+{
+    return mojo_memoryview_new(b ? b->data : NULL, b ? b->len : 0, 1);
+}
+
+int64_t mojo_memoryview_len(MojoMemoryView *m) { return m ? m->len : 0; }
+
+int64_t mojo_memoryview_get(MojoMemoryView *m, int64_t i)
+{
+    if (!m) return 0;
+    if (i < 0) i += m->len;
+    if (i < 0 || i >= m->len) {
+        fprintf(stderr, "IndexError: index out of bounds on memoryview\n");
+        exit(1);
+    }
+    return (int64_t)m->data[i];
+}
+
+/* mv[a:b] — a sub-view into the SAME buffer (no copy). start/stop use the
+ * MOJO_SLICE_STOP_OMITTED sentinel convention; step is not supported for
+ * a non-contiguous view and is treated as 1. */
+MojoMemoryView *mojo_memoryview_slice(MojoMemoryView *m, int64_t start, int64_t stop, int64_t step)
+{
+    (void)step;
+    int64_t n = m ? m->len : 0;
+    int64_t lo = (start == MOJO_SLICE_STOP_OMITTED) ? 0 : start;
+    int64_t hi = (stop == MOJO_SLICE_STOP_OMITTED) ? n : stop;
+    if (lo < 0) lo += n;
+    if (hi < 0) hi += n;
+    if (lo < 0) lo = 0;
+    if (hi > n) hi = n;
+    if (hi < lo) hi = lo;
+    return mojo_memoryview_new(m ? m->data + lo : NULL, hi - lo, m ? m->itemsize : 1);
+}
+
+MojoBytes *mojo_memoryview_tobytes(MojoMemoryView *m)
+{
+    return mojo_bytes_new_lit(m ? (const char *)m->data : "", m ? m->len : 0);
+}
+
+int mojo_memoryview_eq(MojoMemoryView *m, MojoBytes *b)
+{
+    if (!m || !b) return m == NULL && b == NULL;
+    return m->len == b->len && memcmp(m->data, b->data, (size_t)m->len) == 0;
+}
+
+char *mojo_memoryview_hex(MojoMemoryView *m)
+{
+    MojoBytes *b = mojo_memoryview_tobytes(m);
+    char *r = mojo_bytes_hex(b);
+    return r;
+}
+
+/* .cast(fmt) for a 1-D byte view: only 'B'/'b'/'c' are meaningful and all
+ * keep itemsize 1, so this is an identity return. */
+MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt) { (void)fmt; return m; }
+
+char *mojo_memoryview_repr(MojoMemoryView *m)
+{
+    char *s = malloc(48);
+    snprintf(s, 48, "<memory at %p>", (void *)m);
+    return s;
 }
 
 /* A single character (raw `char`, e.g. from string indexing) is a distinct

@@ -1271,7 +1271,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         for _extra in node.args[1:]:
             gen.lower_expr(_extra)
         if at == 'MojoBytes *':
-            return 'MojoBytes *', av
+            # A real independent copy: the arg may be a bytearray (same C
+            # type), and `bytes(ba)` must not alias its mutable buffer.
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_copy', [('MojoBytes *', av)])
+        if at == 'MojoMemoryView *':
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_memoryview_tobytes', [('MojoMemoryView *', av)])
         if at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
@@ -1286,6 +1292,52 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         nv = gen._to_int64(at, av)
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_zeros', [('int64_t', nv)])
+
+    # bytearray(...): mutable bytes. Same C representation as bytes
+    # (MojoBytes *), so every read op is inherited — only construction and
+    # the mutation ops differ. See bugs/hard/CODEGEN_bytes_value_type.md
+    # Stage 3.
+    if (fname_raw == 'bytearray' and not gen._locally_binds_name('bytearray')
+            and len(node.args) <= 3):
+        if len(node.args) == 0:
+            return 'MojoBytes *', gen._new_val('MojoBytes *', 'mojo_bytearray_new ()')
+        at, av = gen.lower_expr(node.args[0])
+        for _extra in node.args[1:]:
+            gen.lower_expr(_extra)
+        if at == 'MojoBytes *':
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytearray_copy', [('MojoBytes *', av)])
+        if at == 'MojoMemoryView *':
+            _tb = gen._call_expr('MojoBytes *', 'mojo_memoryview_tobytes',
+                                 [('MojoMemoryView *', av)])
+            return 'MojoBytes *', _tb
+        if at in ('char *', 'MojoStr *'):
+            sv = av if at == 'char *' else gen._stringify_value(at, av)
+            enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_str',
+                [('char *', sv), ('char *', enc)])
+        if at in ('MojoList *', 'void *'):
+            lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', lv)])
+        nv = gen._to_int64(at, av)
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_zeros', [('int64_t', nv)])
+
+    # memoryview(<bytes|bytearray>): a non-copying 1-D byte view.
+    if (fname_raw == 'memoryview' and not gen._locally_binds_name('memoryview')
+            and len(node.args) == 1):
+        at, av = gen.lower_expr(node.args[0])
+        if at == 'MojoMemoryView *':
+            return 'MojoMemoryView *', av
+        if at == 'MojoBytes *':
+            return 'MojoMemoryView *', gen._call_expr(
+                'MojoMemoryView *', 'mojo_memoryview_from_bytes', [('MojoBytes *', av)])
+        # unknown/opaque — coerce through MojoBytes*
+        bv = gen._new_val('MojoBytes *', f'(MojoBytes *){gen._to_int64(at, av)}')
+        return 'MojoMemoryView *', gen._call_expr(
+            'MojoMemoryView *', 'mojo_memoryview_from_bytes', [('MojoBytes *', bv)])
 
     # str(x): dispatch on the argument's static type via _stringify_value
     # (int → mojo_str_from_int, float → mojo_repr_float, ...) rather than
@@ -1707,6 +1759,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _LEN_FNS = {
         'MojoStr *':  f'mojo_str_len ({av})',
         'MojoBytes *': f'mojo_bytes_len ({av})',
+        'MojoMemoryView *': f'mojo_memoryview_len ({av})',
         'MojoList *': f'mojo_list_len ({av})',
         'MojoDict *': f'mojo_dict_len ({av})',
         'MojoSet *':  f'mojo_set_len ({av})',
@@ -1813,8 +1866,15 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         'list':  ('MojoList *',),
         'dict':  ('MojoDict *',),
         'set':   ('MojoSet *',),
+        # bytes / bytearray share the MojoBytes * representation, so at the
+        # C-type level they are indistinguishable — `isinstance(x, bytes)`
+        # and `isinstance(x, bytearray)` both match any MojoBytes * value.
+        # A type tag on MojoBytes would be needed to discriminate; not
+        # worth the struct-layout churn for this compiler (documented in
+        # bugs/hard/CODEGEN_bytes_value_type.md Stage 3).
         'bytes': ('MojoBytes *',),
         'bytearray': ('MojoBytes *',),
+        'memoryview': ('MojoMemoryView *',),
     }
     if type_name in _SCALAR_TYPE_MATCH:
         if obj_type in _SCALAR_TYPE_MATCH[type_name]:
@@ -4377,6 +4437,12 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         t = gen._new_val('int64_t', f"mojo_bytes_get ({ov}, {idx64})")
         return 'int64_t', t
 
+    if ot == 'MojoMemoryView *':
+        # mv[i] -> int (1-D byte view). Negative index handled in the helper.
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        t = gen._new_val('int64_t', f"mojo_memoryview_get ({ov}, {idx64})")
+        return 'int64_t', t
+
     if ot == 'MojoDict *':
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
         idx_type, iv = gen._char_to_cstr(idx_type, iv)
@@ -4681,6 +4747,14 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         t = gen._new_val('MojoBytes *',
                          f"mojo_bytes_slice ({ov}, {bstart_v}, {stop_v}, {step_v})")
         return 'MojoBytes *', t
+
+    if ot == 'MojoMemoryView *':
+        # mv[a:b] -> a sub-view into the SAME buffer (no copy). Step not
+        # supported for a non-contiguous view; sentinel start like bytes.
+        bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
+        t = gen._new_val('MojoMemoryView *',
+                         f"mojo_memoryview_slice ({ov}, {bstart_v}, {stop_v}, 1)")
+        return 'MojoMemoryView *', t
 
     if ot == 'MojoList *':
         t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")

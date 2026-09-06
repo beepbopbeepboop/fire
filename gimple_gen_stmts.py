@@ -1139,6 +1139,13 @@ def _gen_stmt_AssignStmt(gen, node):
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
             ev_cast = gen._cast_for_list(vtype, v, suf)
             gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
+        elif ot == 'MojoBytes *':
+            # `ba[i] = v` — bytearray element store (bytes is immutable in
+            # Python, but the C type is shared; a store to a genuine
+            # `bytes` value is a TypeError real code never reaches).
+            idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
+            v64 = gen._to_int64(vtype, v)
+            gen._emit(f"  mojo_bytearray_setitem ({obj_v}, {idx64}, {v64});")
         elif ot == 'MojoDict *':
             # Record the dict's value type so later reads recover it (esp.
             # pointer values: dict-of-dicts/lists/sets, or a plain struct
@@ -1355,6 +1362,21 @@ def _gen_stmt_AssignStmt(gen, node):
                 "cannot compile module: slice-assignment to a string "
                 "target is not valid (strings are immutable) — falling "
                 "back to interpreting this module from source instead")
+        if ot == 'MojoBytes *':
+            # `ba[a:b] = <bytes>` — bytearray slice-assign (splice). Only
+            # the unstepped form is valid Python for a size-changing RHS;
+            # a stepped bytearray slice-assign requires matching lengths
+            # and is rare — handle the common case, fall through otherwise.
+            if vtype == 'MojoBytes *':
+                _rhs_b = v
+            elif vtype == 'MojoList *':
+                _rhs_b = gen._new_val('MojoBytes *', f"mojo_bytes_from_list ({v})")
+            else:
+                _rhs_b = gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(vtype, v)}")
+            if stgt.step is None:
+                start_v, stop_v = gen._lower_slice_bounds(stgt)
+                gen._emit(f"  mojo_bytearray_splice ({obj_v}, {start_v}, {stop_v}, {_rhs_b});")
+                return
         lp = obj_v if ot == 'MojoList *' else gen._new_val(
             'MojoList *', f"(MojoList *){gen._to_int64(ot, obj_v)}")
         # RHS (`vtype`, `v`) is already lowered above. Both splice paths
@@ -2061,6 +2083,12 @@ def _gen_stmt_DelStmt(gen, node):
             lp = ov if ot == 'MojoList *' else gen._new_val(
                 'MojoList *', f"(MojoList *){gen._to_int64(ot, ov)}")
             gen._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
+            continue
+        if ot == 'MojoBytes *':
+            # `del ba[i]` — bytearray element removal.
+            idx_type, idx_val = gen.lower_expr(target.index)
+            idx64 = gen._to_int64(idx_type, idx_val)
+            gen._emit(f"  mojo_bytearray_delitem ({ov}, {idx64});")
             continue
         if ot == 'MojoDict *':
             key_type, key_val = gen.lower_expr(target.index)

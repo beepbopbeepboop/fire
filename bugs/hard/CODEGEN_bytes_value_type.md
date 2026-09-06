@@ -82,7 +82,92 @@ return types registered in BOTH runtime-signature maps
 
 ## Status
 
-**Stage 2: LANDED (this pass).**
+**Stage 3: LANDED (2026-09-06).**
+
+- runtime (`runtime/mojo_runtime.{h,c}`):
+  - `mojo_bytes_copy` / `mojo_bytearray_copy` — real independent copies
+    (`bytes(bytearray)` must not alias the mutable buffer).
+  - `mojo_bytearray_{new,setitem,append,extend,pop,delitem,splice}` —
+    mutation ops. No capacity field on `MojoBytes`, so size-changing ops
+    `realloc` to exactly `len+1` (O(n) append, but keeps the struct
+    layout and every codegen struct-field table untouched).
+  - `MojoMemoryView` struct `{uint8_t *data; int64_t len; int64_t
+    itemsize}` + `mojo_memoryview_{new,from_bytes,len,get,slice,tobytes,
+    eq,hex,cast,repr}`. 1-D byte view (itemsize 1); `slice` returns a
+    sub-view into the SAME buffer (no copy).
+- `_TYPE_MAP`: `bytearray` -> `MojoBytes *` (shared repr), `memoryview`
+  -> `MojoMemoryView *`. Return types registered in both signature maps.
+- `bytearray(...)` / `memoryview(...)` constructors in
+  `gimple_gen_calls.py` (`bytearray()`, `bytearray(int)`,
+  `bytearray(bytes)`, `bytearray(list)`, `bytearray(str, enc)`,
+  `bytearray(memoryview)`; `memoryview(bytes|bytearray|memoryview)`).
+- `bytes(x)` now emits `mojo_bytes_copy` for a `MojoBytes *` arg (so
+  `bytes(ba)` is a real copy) and `mojo_memoryview_tobytes` for a view.
+- Mutation lowering: `ba[i] = v` (`_gen_stmt_AssignStmt` SubscriptExpr
+  `MojoBytes *` branch), `ba[a:b] = <bytes|list>` (SliceExpr branch,
+  unstepped), `del ba[i]` (`_gen_stmt_DelStmt`), `.append/.extend/.pop/
+  .clear/.copy/.tobytes` in `_lower_bytes_method`. `ba += b'...'` goes
+  through the generic `+` path (concat + rebind) — correct for `bytes`,
+  and observationally correct for an UNALIASED `bytearray`; a shared
+  bytearray alias will not see an in-place `+=` (documented limitation).
+- memoryview read path: `mv[i]` -> int, `mv[a:b]` -> sub-view (no copy),
+  `len(mv)`, `for x in mv` (`_gen_for_memoryview`), `mv == b'...'`
+  (either operand order), `.tobytes()`, `.hex()`, `.cast('B')` (no-op),
+  `.release()` / `with memoryview(...) as m:` (context-manager no-op —
+  no refcount model), `bytes(mv)`, `str(mv)`/`repr(mv)` -> `<memory at
+  0x...>`.
+- `isinstance(x, bytearray)` / `isinstance(x, memoryview)` via
+  `_SCALAR_TYPE_MATCH`. **bytes vs bytearray cannot be discriminated**
+  in the compiled path — both are `MojoBytes *` and there is no type
+  tag; `isinstance(x, bytes)` and `isinstance(x, bytearray)` both match
+  any `MojoBytes *`. Adding a tag was judged not worth the
+  struct-layout churn.
+- Tests: `test_gimple.py` (+2 compile checks: `bytearray_construct_and_
+  mutate`, `memoryview_ops`), `test_gimple_runner.py` (+2 runnable:
+  `gimple_bytearray_mutation`, `gimple_memoryview`).
+
+Deferred / not done in Stage 3:
+- **`memoryview(...)` inside a compiled generator/coroutine body** — the
+  C++ coroutine-body emitter (`gimple_cpp_core.py` ~line 3582) still
+  refuses it as an "unresolved callee". This is the first blocker for
+  `bugs/COMPILE_FAIL_zipfile___init__.md` (`_Extra.split`), which also
+  has ≥3 further unrelated blockers (pwd=None unannotated param,
+  genexp-held-in-local, FileHeader int32 under-widening) — not closed.
+  The ordinary GIMPLE path's memoryview support is complete.
+- stepped `ba[a:b:k] = ...` slice-assign (rare; falls through).
+
+**Stage 2b: LANDED (2026-09-06).**
+
+- `b'...' % args` -> `MojoBytes *`. `_lower_percent` (gimple_gen_exprs.py)
+  gets a bytes branch BEFORE the str-literal branch (a bytes literal is
+  also a `StringLiteral`): `_lower_bytes_percent_format` mirrors
+  `_lower_percent_format` (compile-time split of the literal template
+  into lit/spec parts, one RHS operand per spec, accumulate left-to-
+  right) but the accumulator is bytes — literal chunks become
+  `mojo_bytes_new_lit` byte-exact constants, `%s`/`%r` of a `MojoBytes`
+  operand is spliced RAW (no decode, embedded-NUL safe), every other
+  spec is rendered to ASCII via the shared `_format_percent_spec` then
+  wrapped with the new `mojo_bytes_from_cstr`. Handles `%d %s %x %X %o
+  %c %% %r` + width/precision/flags. A runtime variadic `mojo_bytes_mod`
+  was considered and rejected: GIMPLE can't express the mixed
+  `MojoBytes*`/`int64_t`/`double` vararg list, and compile-time
+  splitting reuses the already-audited str spec parser. The str `%`
+  path is untouched (still literal-LHS only, still `char *`).
+- Body-usage param inference: an unannotated param used as `x.decode(...)`
+  or `x.hex()` anywhere in the body is inferred `bytes`. `BYTES_ONLY_
+  METHODS = {'decode', 'hex'}` in `_infer_param_types` — neither name is
+  shared with any str/list/dict method the analysis keys on, so this is
+  the only signal conservative enough to act on. Indexing / `in` / `+` /
+  iteration are deliberately NOT bytes signals (identical to str/list).
+  Wins over every other signal. New `is_bytes_method` slot threaded
+  through the `analyze_param_usage` result tuple + its memo cache.
+- Tests: `test_gimple.py` (+2), `test_gimple_runner.py` (+2).
+
+Deferred from Stage 2b: none (both items done).
+
+---
+
+**Stage 2: LANDED.**
 
 Landed in Stage 2:
 - runtime (`runtime/mojo_runtime.{h,c}`): `mojo_bytes_concat`, `_repeat`,

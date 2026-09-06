@@ -2157,6 +2157,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return gen._lower_set_method(ov, method, node.args)
     if ot == 'MojoBytes *':
         return gen._lower_bytes_method(ov, method, node.args)
+    if ot == 'MojoMemoryView *':
+        return gen._lower_memoryview_method(ov, method, node.args)
     _RAW_PTR_METHODS = frozenset({
         'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
         'destroy_pointee', 'take_pointee', 'initialize_pointee',
@@ -3203,7 +3205,53 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
     if method in ('encode',):
         return 'MojoBytes *', ov
 
+    # ── bytearray mutation (bytearray shares the MojoBytes * C type) ──────
+    if method == 'append' and arg_pairs:
+        v = gen._to_int64(*arg_pairs[0])
+        gen._emit(f"  mojo_bytearray_append ({ov}, {v});")
+        return 'void', ov
+    if method == 'extend' and arg_pairs:
+        other = _coerce_to_bytes(gen, *arg_pairs[0])
+        gen._emit(f"  mojo_bytearray_extend ({ov}, {other});")
+        return 'void', ov
+    if method == 'pop':
+        i = gen._to_int64(*arg_pairs[0]) if arg_pairs else 'MOJO_SLICE_STOP_OMITTED'
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytearray_pop',
+                                         [('MojoBytes *', ov), ('int64_t', i)])
+    if method == 'clear':
+        gen._emit(f"  mojo_bytearray_splice ({ov}, 0, mojo_bytes_len ({ov}), mojo_bytearray_new ());")
+        return 'void', ov
+    if method == 'copy':
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytearray_copy',
+                                             [('MojoBytes *', ov)])
+    if method == 'tobytes':
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_copy',
+                                             [('MojoBytes *', ov)])
+
     return gen._stub_result('int', '0', f'TODO: bytes.{method}')
+
+
+def _lower_memoryview_method(gen, ov: str, method: str, args: list) -> tuple:
+    """Lower `MojoMemoryView *` method calls (1-D byte view)."""
+    arg_pairs = [gen.lower_expr(a) for a in args]
+    if method == '__len__':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_len',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'tobytes':
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_tobytes',
+                                             [('MojoMemoryView *', ov)])
+    if method == 'hex':
+        return 'char *', gen._call_expr('char *', 'mojo_memoryview_hex',
+                                        [('MojoMemoryView *', ov)])
+    if method == 'cast':
+        fmt = arg_pairs[0][1] if arg_pairs and arg_pairs[0][0] == 'char *' else '"B"'
+        return 'MojoMemoryView *', gen._call_expr('MojoMemoryView *', 'mojo_memoryview_cast',
+                                                  [('MojoMemoryView *', ov), ('char *', fmt)])
+    if method in ('release', '__enter__', '__exit__'):
+        # No refcount model — context-manager / release is a no-op that
+        # yields the view itself (so `with memoryview(x) as m:` binds m).
+        return 'MojoMemoryView *', ov
+    return gen._stub_result('int', '0', f'TODO: memoryview.{method}')
 
 
 def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,

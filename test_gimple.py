@@ -5264,6 +5264,61 @@ fn main():
     print(isinstance(5, bytes))
 """)
 
+    # bytes value type (Stage 2b) — %-formatting + body-usage param inference
+    test("bytes_percent_format", """\
+fn main():
+    var n: Int = 42
+    print(b'val=%d' % n)
+    print(b'%s!' % b'hi')
+    print(b'%02x' % 15)
+    print(b'%s=%d;' % (b'k', 7))
+    print(b'100%% done')
+""")
+
+    test("bytes_param_inferred_from_body_usage", """\
+fn dec(data) -> String:
+    return data.decode('utf-8')
+fn hx(data) -> String:
+    return data.hex()
+fn main():
+    print(dec(b'hello'))
+    print(hx(b'\\x00\\xff'))
+""")
+
+    # bytes value type (Stage 3) — bytearray + memoryview compile checks
+    test("bytearray_construct_and_mutate", """\
+fn main():
+    var ba = bytearray(b'abc')
+    ba.append(100)
+    ba[0] = 90
+    ba.extend(b'XY')
+    var x = ba.pop()
+    del ba[0]
+    ba[1:2] = b'ZZ'
+    print(len(ba))
+    for c in ba:
+        print(c)
+    print(bytes(ba))
+    var empty = bytearray()
+    var zeros = bytearray(3)
+    var fromlist = bytearray([1, 2, 3])
+""")
+
+    test("memoryview_ops", """\
+fn main():
+    var mv = memoryview(b'hello')
+    print(mv[1])
+    print(len(mv))
+    print(mv[1:3].tobytes())
+    print(mv.hex())
+    print(bytes(mv))
+    print(mv == b'hello')
+    for x in mv:
+        print(x)
+    var mv2 = memoryview(bytearray(b'xy'))
+    print(mv2.cast('B')[0])
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

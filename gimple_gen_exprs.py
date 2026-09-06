@@ -2518,6 +2518,20 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
 
+    # memoryview == bytes (either operand order) → bytewise compare
+    if op in ('==', '!=') and 'MojoMemoryView *' in (lt, rt):
+        mv, other = (lv, rv) if lt == 'MojoMemoryView *' else (rv, lv)
+        ot_other = rt if lt == 'MojoMemoryView *' else lt
+        if ot_other == 'MojoMemoryView *':
+            other = gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({other})")
+        elif ot_other != 'MojoBytes *':
+            other = gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(ot_other, other)}")
+        eq_t = gen._new_val('int', f"mojo_memoryview_eq ({mv}, {other})")
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
     lv_is_str_lit = isinstance(left_node, gimple_ctypes.StringLiteral)
@@ -2983,11 +2997,104 @@ def _lower_percent(gen, node: gimple_ctypes.BinaryOp):
     # positionally by _lower_percent_format.
     if gen._quick_type(node.right) == 'MojoDict *':
         return _lower_percent_dict(gen, node)
+    # `b'...' % args` -> MojoBytes. Detected BEFORE the str literal branch:
+    # a bytes literal LHS is also a StringLiteral (is_bytes=True), but its
+    # formatting result must stay raw bytes (no decode) and `%s` consumes
+    # raw MojoBytes, not a decoded char*.
+    if gen._quick_type(node.left) == 'MojoBytes *':
+        if isinstance(node.left, gimple_ctypes.StringLiteral) and getattr(node.left, 'is_bytes', False):
+            return _lower_bytes_percent_format(gen, node, _as_str(node.left.value))
+        # Non-literal bytes template (rare): degrade by lowering operands
+        # for side effects and returning the template unchanged rather
+        # than emitting a GIMPLE `%` on MojoBytes *.
+        lt, lv = gen.lower_expr(node.left)
+        rhs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
+               else [node.right])
+        for e in rhs:
+            gen.lower_expr(e)
+        return 'MojoBytes *', lv
     if isinstance(node.left, gimple_ctypes.StringLiteral):
         fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value)
         if not is_fstring:
             return gen._lower_percent_format(node, fmt_text)
     return None  # sentinel: caller falls through to generic numeric `%`
+
+
+def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
+    """Lower `b'...' % (args)` to a MojoBytes* result.
+
+    Mirrors `_lower_percent_format` (compile-time split of the literal
+    template into lit/spec parts, one RHS operand per spec, accumulate
+    left-to-right) but the accumulator is bytes: literal chunks become
+    `mojo_bytes_new_lit` byte-exact constants, `%s`/`%r` of a MojoBytes
+    operand is spliced raw (no decode, embedded-NUL safe), and every
+    other spec is rendered to an ASCII char* via the shared
+    `_format_percent_spec` then wrapped with `mojo_bytes_from_cstr`.
+    A runtime variadic `mojo_bytes_mod` was considered and rejected:
+    GIMPLE cannot express the mixed MojoBytes*/int64_t/double vararg
+    list, and compile-time splitting reuses the audited str spec parser.
+    """
+    fmt_bytes = fmt_latin1  # one char per output byte (latin-1)
+    rhs_exprs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
+                 else [node.right])
+
+    parts = []
+    buf = []
+    i, n = 0, len(fmt_bytes)
+    while i < n:
+        c = fmt_bytes[i]
+        if c != '%':
+            buf.append(c); i += 1
+            continue
+        if i + 1 < n and fmt_bytes[i + 1] == '%':
+            buf.append('%'); i += 2
+            continue
+        if buf:
+            parts.append(('lit', ''.join(buf))); buf = []
+        spec_start = i
+        i += 1
+        while i < n and fmt_bytes[i] in '-+0 #.123456789':
+            i += 1
+        conv = fmt_bytes[i] if i < n else 's'
+        if i < n:
+            i += 1
+        parts.append(('spec', fmt_bytes[spec_start:i], conv))
+    if buf:
+        parts.append(('lit', ''.join(buf)))
+
+    n_specs = sum(1 for p in parts if p[0] == 'spec')
+
+    def _lit_bytes(text):
+        body = ''.join('\\%03o' % (ord(ch) & 0xFF) for ch in text)
+        sname = gen._intern_string(body)
+        return gen._new_val('MojoBytes *', f'mojo_bytes_new_lit ({sname}, {len(text)})')
+
+    if n_specs != len(rhs_exprs):
+        for e in rhs_exprs:
+            gen.lower_expr(e)
+        return 'MojoBytes *', _lit_bytes(fmt_bytes)
+
+    arg_i = 0
+    acc_val = None
+    for part in parts:
+        if part[0] == 'lit':
+            if not part[1]:
+                continue
+            part_val = _lit_bytes(part[1])
+        else:
+            _, full_spec, conv = part
+            et, ev = gen.lower_expr(rhs_exprs[arg_i])
+            arg_i += 1
+            if conv in ('s', 'r') and et == 'MojoBytes *':
+                part_val = ev
+            else:
+                cstr = gen._format_percent_spec(full_spec, conv, et, ev)
+                part_val = gen._new_val('MojoBytes *', f'mojo_bytes_from_cstr ({cstr})')
+        acc_val = part_val if acc_val is None else gen._new_val(
+            'MojoBytes *', f'mojo_bytes_concat ({acc_val}, {part_val})')
+    if acc_val is None:
+        acc_val = _lit_bytes('')
+    return 'MojoBytes *', acc_val
 
 
 def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):

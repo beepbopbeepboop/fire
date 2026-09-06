@@ -299,6 +299,7 @@ MojoBytes *mojo_bytes_empty(void);
 MojoBytes *mojo_bytes_zeros(int64_t n);
 MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
 MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
+MojoBytes *mojo_bytes_from_cstr(const char *s);   /* NUL-terminated copy */
 int64_t    mojo_bytes_len(MojoBytes *b);
 int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
 int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
@@ -323,6 +324,37 @@ MojoList  *mojo_bytes_split(MojoBytes *b, MojoBytes *sep);
 MojoList  *mojo_bytes_rsplit(MojoBytes *b, MojoBytes *sep);
 MojoList  *mojo_bytes_splitlines(MojoBytes *b);
 MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts);
+MojoBytes *mojo_bytes_copy(MojoBytes *src);   /* bytes(bytearray) — real copy */
+
+/* ── bytearray (mutable; shares the MojoBytes representation) ────────────
+ * Every read op (len/index/slice/iter/in/eq/methods) is inherited from
+ * the bytes path since the C type is identical. These add mutation. */
+MojoBytes *mojo_bytearray_new(void);
+MojoBytes *mojo_bytearray_copy(MojoBytes *src);
+void       mojo_bytearray_setitem(MojoBytes *b, int64_t i, int64_t v);
+void       mojo_bytearray_append(MojoBytes *b, int64_t v);
+void       mojo_bytearray_extend(MojoBytes *b, MojoBytes *other);
+int64_t    mojo_bytearray_pop(MojoBytes *b, int64_t i); /* i==MOJO_SLICE_STOP_OMITTED -> last */
+void       mojo_bytearray_delitem(MojoBytes *b, int64_t i);
+void       mojo_bytearray_splice(MojoBytes *b, int64_t start, int64_t stop, MojoBytes *repl);
+
+/* ── memoryview (non-copying 1-D byte view, itemsize 1 / format 'B') ─────*/
+typedef struct {
+    uint8_t *data;
+    int64_t  len;
+    int64_t  itemsize;
+} MojoMemoryView;
+
+MojoMemoryView *mojo_memoryview_new(uint8_t *data, int64_t len, int64_t itemsize);
+MojoMemoryView *mojo_memoryview_from_bytes(MojoBytes *b);
+int64_t         mojo_memoryview_len(MojoMemoryView *m);
+int64_t         mojo_memoryview_get(MojoMemoryView *m, int64_t i);
+MojoMemoryView *mojo_memoryview_slice(MojoMemoryView *m, int64_t start, int64_t stop, int64_t step);
+MojoBytes      *mojo_memoryview_tobytes(MojoMemoryView *m);
+int             mojo_memoryview_eq(MojoMemoryView *m, MojoBytes *b);
+char           *mojo_memoryview_hex(MojoMemoryView *m);
+MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt);
+char           *mojo_memoryview_repr(MojoMemoryView *m);
 
 /* ── subprocess.run ──────────────────────────────────────────────────────
  * Mirrors Python's subprocess.CompletedProcess just enough for this
