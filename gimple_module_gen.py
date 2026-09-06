@@ -7433,8 +7433,19 @@ def gen_module_impl(self, stmts):
         else:
             param_ctypes = []
             inferred_params = self._inferred_param_types.get(fdef.name, {}) if hasattr(self, '_inferred_param_types') else {}
+            _fd_defaults = getattr(fdef, 'param_defaults', None) or {}
             for pn, pt in (fdef.params or []):
-                if pn in inferred_params:
+                _bare_pn = pn.lstrip('*')
+                _dfl = _fd_defaults.get(_bare_pn)
+                if (pt is None and getattr(_dfl, 'is_bytes', False)
+                        and isinstance(_dfl, StringLiteral)):
+                    # A `b'...'` default is unambiguous `bytes` evidence and
+                    # must win over a weak usage-inferred `char *` here too,
+                    # so this forward declaration agrees with the definition
+                    # (which goes through _param_ctype's own bytes-default
+                    # hook). Mismatch → "conflicting types for 'size'".
+                    param_ctypes.append('MojoBytes *')
+                elif pn in inferred_params:
                     param_ctypes.append(inferred_params[pn])
                 else:
                     param_ctypes.append(self._param_ctype(pn, pt, fdef))

@@ -2917,6 +2917,12 @@ def _default_expr_to_pair(gen, _dflt) -> tuple:
     if isinstance(_dflt, gimple_ctypes.BoolLiteral):
         return ('_Bool', '1' if _dflt.value else '0')
     if isinstance(_dflt, gimple_ctypes.StringLiteral):
+        if getattr(_dflt, 'is_bytes', False):
+            # A `b'...'` default padded into an omitted-arg call site must
+            # be a real `MojoBytes *`, not a bare `char *` — route through
+            # the normal bytes-literal lowering (emits the octal-escaped
+            # global loaded to a local + `mojo_bytes_new_lit`).
+            return gen.lower_expr(_dflt)
         return ('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"')
     if isinstance(_dflt, gimple_ctypes.FloatLiteral):
         # A float default is a `double` value — returning it typed `int`

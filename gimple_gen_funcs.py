@@ -1383,6 +1383,15 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # default makes it a `str` (char *) param. bytes must NOT be
         # conflated with str — b[i] is an int, not a 1-char string.
         ctype = 'MojoBytes *' if getattr(_pdflt, 'is_bytes', False) else 'char *'
+    elif (ptype is None and ctype == 'char *'
+          and isinstance(_pdflt, StringLiteral) and getattr(_pdflt, 'is_bytes', False)):
+        # A `b'...'` default is unambiguous `bytes` evidence and must win
+        # over a weak usage-inferred `char *` — `len(b)` alone (the only
+        # body signal for many bytes params) resolves to str, which would
+        # then pass a real `MojoBytes *` argument into a `char *` slot and
+        # `strlen()` the struct (non-deterministic length). An explicit
+        # annotation still takes precedence (ptype is not None there).
+        ctype = 'MojoBytes *'
     # Compile-time string types (StaticString, StringLiteral, StringRef,
     # StringSlice) are REAL strings in this codegen — a NUL-terminated
     # `char *`. The general resolver boxes them as opaque int64_t handles
