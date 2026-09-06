@@ -7098,22 +7098,16 @@ def gen_module_impl(self, stmts):
             # the re-scan below is the pre-existing fallback for paths that
             # never populated it.
             init_code = _declared_global_inits.get(_gname_s, '0')
-            if os.environ.get('MOJO_DEBUG_GINIT'):
-                sys.stderr.write("GINIT %s -> %s (map has %d keys)\n" % (
-                    _gname_s, init_code, len(_declared_global_inits)))
             if init_code == '0':
                 for stmt in _gmi_collect_global_stmts(all_global_scan):
                     if (isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr)
                             and _as_str(stmt.target.name) == _gname_s):
-                        init_code = _gmi_global_init_code(stmt.value)
-                        if os.environ.get('MOJO_DEBUG_GINIT'):
-                            sys.stderr.write("GINIT rescan %s AssignStmt IntLit=%s -> %s\n" % (
-                                _gname_s, isinstance(stmt.value, IntLiteral), init_code))
+                        init_code = _extract_init_expr(stmt.value)
                         break
                     elif (isinstance(stmt, MultiAssignStmt)
                             and any(isinstance(_t, IdentExpr) and _as_str(_t.name) == _gname_s
                                     for _t in stmt.targets)):
-                        init_code = _gmi_global_init_code(stmt.value)
+                        init_code = _extract_init_expr(stmt.value)
                         break
                     elif isinstance(stmt, ImportStmt) and gname in (
                             (_as_str(_ta) if _as_str(_ta) else _as_str(_tm))
