@@ -6753,7 +6753,14 @@ def gen_module_impl(self, stmts):
                 global_decls.append(f"int64_t {gname};  /* MojoDict * */")
                 self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoDict *'
-        elif isinstance(value, (ListExpr, TupleExpr)):
+        elif isinstance(value, ListExpr) or isinstance(value, TupleExpr):
+            # `isinstance(v, ListExpr) or isinstance(v, TupleExpr)`, NOT a
+            # 2-tuple isinstance — the tuple form evaluated False on the
+            # self-hosted compiled path, so `arr = [1,2,3]` fell through
+            # this scan and `_global_c_decl_types` was never set to
+            # `int64_t`; the field-freeze loop's fallback then declared it
+            # a bare `MojoList *` (array_ops_jit stage1-vs-stage2 parity
+            # under MOJO_NO_SHIM=1).
             if _is_dispatch_name(gname):
                 global_decls.append(f"MojoList * {gname};")
                 self._global_c_decl_types[gname] = 'MojoList *'
@@ -6769,7 +6776,7 @@ def gen_module_impl(self, stmts):
                 global_decls.append(f"int64_t {gname};  /* MojoSet * */")
                 self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoSet *'
-        elif isinstance(value, (IntLiteral, BoolLiteral)):
+        elif isinstance(value, IntLiteral) or isinstance(value, BoolLiteral):
             global_decls.append(f"int {gname};")
             self._global_var_types[gname] = 'int'
             self._global_c_decl_types[gname] = 'int'
@@ -7111,9 +7118,18 @@ def gen_module_impl(self, stmts):
             elif g_mtype and g_mtype.endswith(' *') \
                     and self._cpp_known_ptr_struct(g_mtype):
                 c_type = g_mtype
+            elif g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                # Box as `int64_t` at the C struct-field level — the
+                # whole-codebase module-global convention. This fallback
+                # used to pass the bare container ctype straight through
+                # when `_global_c_decl_types` had no entry (e.g. the
+                # ListExpr branch above skipped on the compiled path):
+                # array_ops_jit's `MojoList * arr` vs stage1's boxed
+                # `int64_t arr` under MOJO_NO_SHIM=1.
+                c_type = 'int64_t'
             else:
                 c_type = 'void *' if (g_mtype and g_mtype.endswith(' *')) else (
-                    g_mtype if g_mtype and g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *', 'char *') else 'int64_t')
+                    g_mtype if g_mtype == 'char *' else 'int64_t')
             _gname_s = _as_str(gname)
             # Declaration-time capture wins (see `_declared_global_inits`);
             # the re-scan below is the pre-existing fallback for paths that
