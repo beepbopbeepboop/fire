@@ -1259,6 +1259,27 @@ def _gmi_expr_provably_str(e) -> bool:
     return False
 
 
+def _gmi_global_init_code(value) -> str:
+    """Static C initializer for a module-global assignment RHS.
+
+    A thin wrapper over `_extract_init_expr` that FIRST handles the
+    scalar-literal cases inline — same module context as
+    `_gscan_declare_global`'s own `isinstance(value, (IntLiteral,
+    BoolLiteral))` classification (which is confirmed working on the
+    self-hosted compiled path, since it picks the `int x;` field decl).
+    The cross-module `_extract_init_expr` call was returning '0' for a
+    plain `x = 42` on that path (`.x = 0` vs `.x = 42`, a stage1-vs-stage2
+    parity break under MOJO_NO_SHIM=1), so keep the common case here where
+    the node type check is known-good and `.raw`/`.value` are direct field
+    reads on a local."""
+    if isinstance(value, IntLiteral):
+        _r = _as_str(value.raw)
+        return _r if _r else str(value.value)
+    if isinstance(value, BoolLiteral):
+        return '1' if value.value else '0'
+    return _extract_init_expr(value)
+
+
 def _gmi_collect_global_stmts(stmt_list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; pure (no captured state)."""
@@ -6859,8 +6880,8 @@ def gen_module_impl(self, stmts):
             if gname in _declared_globals:
                 continue
             _declared_globals[gname] = True
-            if getattr(stmt, 'value', None) is not None:
-                _declared_global_inits[gname] = _extract_init_expr(stmt.value)
+            if stmt.value is not None:
+                _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
             if stmt.type_ann and stmt.value is None:
                 _resolved = self._resolve_type(stmt.type_ann)
                 self._global_var_types[gname] = _resolved
@@ -6972,7 +6993,7 @@ def gen_module_impl(self, stmts):
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
-            _declared_global_inits[gname] = _extract_init_expr(stmt.value)
+            _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
         elif (isinstance(stmt, ComptimeVarStmt)
                 and isinstance(stmt.value, (ListExpr, TupleExpr))):
             gname = _as_str(stmt.target)
@@ -6980,7 +7001,7 @@ def gen_module_impl(self, stmts):
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
-            _declared_global_inits[gname] = _extract_init_expr(stmt.value)
+            _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
         elif isinstance(stmt, MultiAssignStmt):
             for _tgt in stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
@@ -6990,7 +7011,7 @@ def gen_module_impl(self, stmts):
                     continue
                 _declared_globals[gname] = True
                 _gscan_declare_global(gname, stmt.value)
-                _declared_global_inits[gname] = _extract_init_expr(stmt.value)
+                _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
         elif isinstance(stmt, VarDecl) and _as_str(stmt.name) not in _declared_globals:
             _vd_gname = _as_str(stmt.name)
             _declared_globals[_vd_gname] = True
