@@ -1,5 +1,37 @@
 # COMPILE_FAIL: asyncio/futures.py
 
+## Status (2026-09-05 later — native Future-class __await__ bridge landed (commit 981c647); futures.py compiles in isolation + gcc-syntax-checks clean, but is NOT functionally complete — several Future methods still silently stub)
+
+`gimple_gen_coro.py`'s new native-Future-class bridge
+(`_is_standard_await_generator` / `_detect_native_future_classes` /
+`_rewrite_native_future_refs`) recognises `asyncio.futures.Future`'s
+standard `__await__` generator shape and maps the class wholesale onto the
+native `MojoFuture` handle: `await <Future instance>` now parks on the
+native waiter list (`__mojo_async_await_future`), and `.done()` /
+`.result()` / `.set_result()` bridge to the `__mojo_future_*` shims —
+verified end-to-end (a hand-written standard-`__await__` class, woken by
+both sync `.set_result()` and a sibling `create_task`; see
+`test_coro_future_await.py`).
+
+`Lib/asyncio/futures.py` itself now `compile_to_gimple(do_imports=False)`s
+successfully and its generated C passes `gcc -fgimple -fsyntax-only`.
+
+**BUT it is not functionally done.** Because the bridge replaces the
+`Future` class wholesale with a bare `int64_t` handle, every `Future`
+method OUTSIDE the `done`/`result`/`set_result` shim set silently stubs
+(returns garbage, no diagnostic) in the generated C:
+`.set_exception()` / `.exception()`, `.cancel()` / `.cancelled()` /
+`.set_running_or_notify_cancel()`, `.add_done_callback()` /
+`.remove_done_callback()` / `.__schedule_callbacks()`, and the event-loop
+integration (`.call_soon_threadsafe()`, `._get_running_loop()`,
+`.get_event_loop()`, `.is_closed()`). Closing this needs the native future
+handle to carry: (1) an exception slot + `set_exception`/`exception`
+shims, (2) a cancelled state + `cancel`/`cancelled` shims, (3) a
+done-callback list run on resolution. Items (1)-(3) are the remaining
+work; the compile/await/result path is done. Doc kept open for (1)-(3).
+
+---
+
 ## Status (2026-09-05 — Awaitable/Future RUNTIME now exists; this file's own compile blocker was already closed 2026-08-26, runtime residual partially addressed)
 
 The compile/link blocker this doc tracks (`Future.__await__` /
