@@ -1705,7 +1705,31 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _fut_user_method = bool(
             _fut_sn and _fut_sn in gen.struct_field_types
             and method in (gen.struct_field_types.get(_fut_sn) or ()))
-        if not _fut_user_method:
+        # A container receiver's `.set()` / `.clear()` is dict/set/list
+        # mutation, never an Event op. `ot` is often just `int64_t` for a
+        # boxed module global (e.g. gimple_gen_coro.py's own `_PARAM_NAMES:
+        # dict = {}` / `_TASK_VARS: set = set()`), so also consult the
+        # semantic type of a bare-name / `self.`-field receiver — otherwise
+        # `_PARAM_NAMES.clear()` lowered to `__mojo_event_clear` and the
+        # next `_PARAM_NAMES[k] = v` hit a wrecked handle (SIGBUS in
+        # `mojo_dict_set_int`, only under MOJO_NO_SHIM=1).
+        _fut_recv_sem = ot
+        _fut_recv_obj = getattr(func, 'obj', None)
+        if (not isinstance(_fut_recv_sem, str)
+                or _fut_recv_sem not in ('MojoDict *', 'MojoList *', 'MojoSet *')):
+            if isinstance(_fut_recv_obj, IdentExpr):
+                _fut_recv_sem = (gen.var_types.get(_fut_recv_obj.name)
+                                 or gen._global_var_types.get(_fut_recv_obj.name)
+                                 or _fut_recv_sem)
+            elif (isinstance(_fut_recv_obj, MemberExpr)
+                  and isinstance(_fut_recv_obj.obj, IdentExpr)
+                  and _fut_recv_obj.obj.name == 'self'
+                  and gen._current_struct_name):
+                _fut_recv_sem = (gen.struct_field_types.get(gen._current_struct_name, {})
+                                 .get(_fut_recv_obj.member) or _fut_recv_sem)
+        _fut_container_recv = (isinstance(_fut_recv_sem, str)
+                               and _fut_recv_sem in ('MojoDict *', 'MojoList *', 'MojoSet *'))
+        if not _fut_user_method and not _fut_container_recv:
             if method == 'create_future' and not node.args:
                 return 'int64_t', gen._call_expr('int64_t', '__mojo_future_new', [])
             if method in ('Future', 'Event') and not node.args:
