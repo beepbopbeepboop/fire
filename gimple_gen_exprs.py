@@ -441,7 +441,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # drops an imported module's `if __name__ == '__main__':`-guarded
     # top-level globals from this scan, so it stays this-module-scoped.
     _owned_here = name in gen._own_global_var_types
-    if (_global_owner_mod is None or _global_owner_mod == _this_mod or _owned_here) and \
+    # `_as_str(_global_owner_mod)`: the shared `_global_to_module` dict's
+    # VALUE erases to a boxed pointer on the self-hosted compiled path, so
+    # a bare `_global_owner_mod == _this_mod` compared a stale heap address
+    # to a fresh "root" string and always failed — the bare-name global
+    # read then fell to `(int64_t)0` (`import sys` receivers in
+    # t1.mojo/t_argv.mojo/mojo_main.py, stage1-vs-stage2 parity break).
+    if (_global_owner_mod is None or _as_str(_global_owner_mod) == _this_mod or _owned_here) and \
             (name in gen._func_declared_globals or name not in gen.var_types) and name in gen._global_var_types:
         gtype = gen._global_var_types[name]
         # Globals are stored at C level as int64_t (boxed pointers) except

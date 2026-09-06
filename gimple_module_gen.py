@@ -1387,9 +1387,20 @@ def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
             # `import os`/`import ctypes` module-marker globals landed in
             # `_root_toplev` as address-named fields, different every run.
             for _local in gimple_ctypes._import_local_names(_s):
-                if _local not in self._global_var_types:
+                _local = _as_str(_local)
+                if _local and _local not in self._global_var_types:
                     self._global_var_types[_local] = 'int64_t'
                     self._global_c_decl_types[_local] = 'int64_t'
+                    # `_own_global_var_types` too: this pre-pass runs BEFORE
+                    # `_gen_toplevel`, and `_lower_IdentExpr`'s bare-name
+                    # global-read branch keys "it's ours" off this — the
+                    # shared `_global_to_module` superset's value erases to a
+                    # boxed pointer on the compiled path, so
+                    # `_global_owner_mod == _this_mod` spuriously fails and
+                    # the read fell to `(int64_t)0` (`import sys` in
+                    # t1.mojo/t_argv.mojo/mojo_main.py — a stage1-vs-stage2
+                    # parity break under MOJO_NO_SHIM=1).
+                    self._own_global_var_types[_local] = 'int64_t'
                     if _local not in self._global_to_module:
                         self._global_to_module[_local] = _phase17_mod
         elif isinstance(_s, TryStmt):
