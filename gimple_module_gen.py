@@ -7097,12 +7097,12 @@ def gen_module_impl(self, stmts):
             # Declaration-time capture wins (see `_declared_global_inits`);
             # the re-scan below is the pre-existing fallback for paths that
             # never populated it.
-            init_code = _declared_global_inits.get(_gname_s, '424242')
-            if init_code == '0' or init_code == '424242':
+            init_code = _declared_global_inits.get(_gname_s, '0')
+            if init_code == '0':
                 for stmt in _gmi_collect_global_stmts(all_global_scan):
                     if (isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr)
                             and _as_str(stmt.target.name) == _gname_s):
-                        init_code = _gmi_global_init_code(stmt.value) + '99'
+                        init_code = _extract_init_expr(stmt.value)
                         break
                     elif (isinstance(stmt, MultiAssignStmt)
                             and any(isinstance(_t, IdentExpr) and _as_str(_t.name) == _gname_s
