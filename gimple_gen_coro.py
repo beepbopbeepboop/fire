@@ -516,6 +516,13 @@ _PARAM_NAMES: dict[str, list[str]] = {}
 # and single-threaded rationale as _PARAM_NAMES.
 _TASK_VARS: set = set()
 
+# Bare names of struct `async def` METHODS in the module currently being
+# lowered that passed async-method eligibility -- populated fresh at the
+# top of each lower() call. Lets `await <obj>.<name>(...)` at a call site
+# be recognised as an async-method await (constructed via the struct's own
+# __mgco_<Struct>_<name>_start, driven by the generic await drive loop).
+_ASYNC_METHOD_NAMES: set = set()
+
 
 def _resolve_call_args(name: str, node, cvar: str) -> list:
     """Positional args, in order, for a call to `name(...)` -- resolving
@@ -595,6 +602,18 @@ def _is_future_wait_call(node) -> bool:
             and not getattr(node, 'kwargs', None))
 
 
+def _is_async_method_call(node) -> bool:
+    """`await <obj>.<method>(args)` where `<method>` is a compiled struct
+    `async def` method (name in _ASYNC_METHOD_NAMES). The generic await
+    drive loop constructs the coroutine by leaving the `<obj>.<method>(...)`
+    call in place -- the ordinary type-aware codegen lowers it to
+    `__mgco_<Struct>_<method>_start(obj, args...)` via _generator_method_api
+    -- then drives it exactly like a top-level `await f(args)`."""
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member in _ASYNC_METHOD_NAMES
+            and not getattr(node, 'kwargs', None))
+
+
 def _await_stmt_ok(s, task_vars: set) -> bool:
     inner = s.value.value
     if _is_asyncio_sleep_call(inner) or _is_asyncio_sock_recv_call(inner):
@@ -602,6 +621,8 @@ def _await_stmt_ok(s, task_vars: set) -> bool:
     if _await_target_name(inner) is not None:
         return True
     if _is_future_wait_call(inner):
+        return True
+    if _is_async_method_call(inner):
         return True
     h = _await_held_handle(inner)
     if h is None:
@@ -688,7 +709,8 @@ def _async_for_ok(fn: N.FunctionDef) -> bool:
     return True
 
 
-def _eligible_async_common(fn: N.FunctionDef, nested: bool = False) -> tuple[bool, str]:
+def _eligible_async_common(fn: N.FunctionDef, nested: bool = False,
+                           is_method: bool = False) -> tuple[bool, str]:
     """Checks shared by a plain `async def` and an async GENERATOR.
     `nested=True` (a `@parameter async def` local to an ordinary function,
     e.g. create_task's wrapper idiom) allows the `@parameter` decorator
@@ -705,7 +727,12 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False) -> tuple[boo
             return False, 'decorated (v0 allows only @parameter on a nested async def)'
     elif decorators:
         return False, 'decorated'
-    for pname, pann in fn.params:
+    _params = fn.params
+    if is_method:
+        if not _params or _params[0][0] != 'self':
+            return False, 'async method without a plain `self` first param (v0)'
+        _params = _params[1:]   # self is typed by the codegen from the struct
+    for pname, pann in _params:
         if pann not in _SCALARISH:
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
@@ -719,13 +746,15 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False) -> tuple[boo
     return True, ''
 
 
-def _eligible_async(fn: N.FunctionDef, nested: bool = False) -> tuple[bool, str]:
+def _eligible_async(fn: N.FunctionDef, nested: bool = False,
+                    is_method: bool = False) -> tuple[bool, str]:
     if any(isinstance(n, (N.YieldExpr, N.YieldFromExpr)) for n in _walk(fn)):
         return False, 'async generator -- use _eligible_async_gen'
-    return _eligible_async_common(fn, nested=nested)
+    return _eligible_async_common(fn, nested=nested, is_method=is_method)
 
 
-def _eligible_async_gen(fn: N.FunctionDef, nested: bool = False) -> tuple[bool, str]:
+def _eligible_async_gen(fn: N.FunctionDef, nested: bool = False,
+                        is_method: bool = False) -> tuple[bool, str]:
     if not any(isinstance(n, N.YieldExpr) for n in _walk(fn)):
         return False, 'no yield'
     if any(isinstance(n, N.YieldFromExpr) for n in _walk(fn)):
@@ -742,7 +771,7 @@ def _eligible_async_gen(fn: N.FunctionDef, nested: bool = False) -> tuple[bool, 
             return False, '`x = yield ...` in an async generator (v0)'
         if isinstance(s, N.VarDecl) and isinstance(s.value, N.YieldExpr):
             return False, '`var x = yield ...` in an async generator (v0)'
-    return _eligible_async_common(fn, nested=nested)
+    return _eligible_async_common(fn, nested=nested, is_method=is_method)
 
 
 def _rewrite_async_expr(node, cvar: str):
@@ -840,6 +869,20 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
         rv = f'__ar{_AW_COUNTER[0]}'
         stmts = [N.VarDecl(name=rv, type_ann=None,
                            value=_call('__mojo_async_await_future',
+                                       [_c_ident(cvar), _c_ident(_hh.name)]))]
+        return stmts, _c_ident(rv)
+    # Awaitable protocol: `await <task>` / `await task^` where `task` came
+    # from create_task() -- the task coroutine was eagerly scheduled onto
+    # the shared ready queue at creation, so this must NOT re-drive it with
+    # a private __mojo_gen_resume loop (that would double-resume the same
+    # MojoCoro). Park on it via __mojo_async_await_task (MOJO_WD_TASK); the
+    # scheduler wakes us when the task runs to completion.
+    if (_hh is not None and _await_target_name(inner) is None
+            and _hh.name in _TASK_VARS):
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_task',
                                        [_c_ident(cvar), _c_ident(_hh.name)]))]
         return stmts, _c_ident(rv)
     name = _await_target_name(inner)
@@ -1012,49 +1055,69 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
     return out
 
 
-def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None) -> N.FunctionDef:
-    base = base or f'__mgco_{N._as_str(fn.name)}'
-    body_name = f'{base}_body'
+def _async_method_setup(fn, base, struct_name):
+    """Shared prologue/param plumbing for a plain `async def` and an async
+    generator, top-level OR a struct method. For a method: arg 0 is the
+    real `self` receiver (passed to the body as a typed 2nd C param, like
+    _lower_one's generator-method path), so `__mojo_gen_arg` indices for
+    the ordinary params start at 1 and `self` gets no prologue entry."""
+    is_method = struct_name is not None
+    base = base or (f'__mgco_{N._as_str(struct_name)}_{N._as_str(fn.name)}' if is_method
+                    else f'__mgco_{N._as_str(fn.name)}')
+    real_params = fn.params[1:] if is_method else fn.params
+    arg_base = 1 if is_method else 0
     prologue = []
-    for i, (pname, _pann) in enumerate(fn.params):
+    for i, (pname, _pann) in enumerate(real_params):
         prologue.append(N.VarDecl(name=pname, type_ann=None,
-                                  value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
+                                  value=_call(ARG_SHIM, [_c_ident(_CVAR),
+                                                         N.IntLiteral(value=arg_base + i)])))
+    body_params = [(_CVAR, 'Int')]
+    if is_method:
+        body_params.append(('self', struct_name))
+    c_params = ([f'{struct_name} *'] if is_method else []) + \
+               [_mojo_to_c_type(a) for _n, a in real_params]
+    return base, is_method, real_params, prologue, body_params, c_params
+
+
+def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
+                         struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
+    base, is_method, real_params, prologue, body_params, c_params = \
+        _async_method_setup(fn, base, struct_name)
+    body_name = f'{base}_body'
     _TASK_VARS.clear()
     _TASK_VARS.update(_scan_task_vars(fn))
     new_body = prologue + _rewrite_async_gen_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
-    body_fd = N.FunctionDef(name=body_name, params=[(_CVAR, 'Int')], return_type=None, body=new_body)
+    body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
     body_fd.is_async = False
     meta.append({
-        'name': N._as_str(fn.name), 'struct': None, 'is_method': False, 'is_async': True,
+        'name': N._as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'is_async_gen': True,
         'base': base, 'body_name': body_name,
-        'params': [_mojo_to_c_type(a) for _n, a in fn.params],
-        'nargs': len(fn.params), 'value_ctype': 'int64_t', 'value_kind': 'i',
+        'params': c_params,
+        'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd
 
 
-def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None) -> N.FunctionDef:
-    base = base or f'__mgco_{N._as_str(fn.name)}'
+def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
+                     struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
+    base, is_method, real_params, prologue, body_params, c_params = \
+        _async_method_setup(fn, base, struct_name)
     body_name = f'{base}_body'
-    prologue = []
-    for i, (pname, _pann) in enumerate(fn.params):
-        prologue.append(N.VarDecl(name=pname, type_ann=None,
-                                  value=_call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=i)])))
     _TASK_VARS.clear()
     _TASK_VARS.update(_scan_task_vars(fn))
     new_body = prologue + _rewrite_async_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
-    body_fd = N.FunctionDef(name=body_name, params=[(_CVAR, 'Int')], return_type=None, body=new_body)
+    body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
     body_fd.is_async = False
     meta.append({
-        'name': N._as_str(fn.name), 'struct': None, 'is_method': False, 'is_async': True,
+        'name': N._as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'base': base, 'body_name': body_name,
-        'params': [_mojo_to_c_type(a) for _n, a in fn.params],
-        'nargs': len(fn.params), 'value_ctype': 'int64_t', 'value_kind': 'i',
+        'params': c_params,
+        'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
@@ -1198,8 +1261,19 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             out.extend(pre)
             if isinstance(s, N.VarDecl):
                 out.append(N.VarDecl(name=s.name, type_ann=None, value=new_val))
+                _tname = s.name
             else:
                 out.append(N.AssignStmt(target=s.target, value=new_val))
+                _tname = s.target.name if isinstance(s.target, N.IdentExpr) else None
+            # Eager task scheduling: enqueue the freshly-constructed
+            # coroutine handle onto the shared scheduler ready queue so
+            # sibling tasks actually run concurrently and a producer can
+            # wake an already-parked consumer (bugs/COMPILE_FAIL_asyncio_
+            # queues.md gap 3). A later `await <task>` parks via
+            # __mojo_async_await_task instead of privately re-driving it.
+            if _tname is not None:
+                out.append(N.ExprStmt(value=_call('__mojo_async_task_schedule',
+                                                  [_c_ident(_tname)])))
             continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
@@ -1328,11 +1402,22 @@ def lower(stmts: list) -> tuple[list, list]:
     if not enabled():
         return stmts, []
     _PARAM_NAMES.clear()
+    _ASYNC_METHOD_NAMES.clear()
     _prop_names = _seed_prop_names(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
                                              or getattr(s, 'is_async', False)):
             _PARAM_NAMES[s.name] = [p for p, _a in s.params]
+        if isinstance(s, N.StructDef):
+            for m in s.methods:
+                if not (isinstance(m, N.FunctionDef) and getattr(m, 'is_async', False)):
+                    continue
+                _isg = any(isinstance(n, N.YieldExpr) for n in _walk(m))
+                _mok = (_eligible_async_gen(m, is_method=True)[0] if _isg
+                        else _eligible_async(m, is_method=True)[0])
+                if _mok:
+                    _ASYNC_METHOD_NAMES.add(m.name)
+                    _PARAM_NAMES.setdefault(m.name, [p for p, _a in m.params[1:]])
     out = []
     meta = []
     method_bodies = []
@@ -1357,6 +1442,7 @@ def lower(stmts: list) -> tuple[list, list]:
             _kept = []
             for m in s.methods:
                 if (isinstance(m, N.FunctionDef) and getattr(m, 'is_generator', False)
+                        and not getattr(m, 'is_async', False)
                         and _eligible(m, struct_name=s.name, struct_def=s,
                                       prop_names=_prop_names)[0]):
                     method_bodies.append(_lower_one(m, meta, struct_name=s.name,
@@ -1364,8 +1450,18 @@ def lower(stmts: list) -> tuple[list, list]:
                     # drop the generator method from the struct: gen_module's
                     # Phase 2a skips _supported_generator_methods anyway, and
                     # the body now lives as a top-level function
-                else:
-                    _kept.append(m)
+                    continue
+                if isinstance(m, N.FunctionDef) and getattr(m, 'is_async', False):
+                    _isg = any(isinstance(n, N.YieldExpr) for n in _walk(m))
+                    if _isg and _eligible_async_gen(m, is_method=True)[0]:
+                        method_bodies.append(_lower_one_async_gen(
+                            m, meta, struct_name=s.name, struct_def=s))
+                        continue
+                    if not _isg and _eligible_async(m, is_method=True)[0]:
+                        method_bodies.append(_lower_one_async(
+                            m, meta, struct_name=s.name, struct_def=s))
+                        continue
+                _kept.append(m)
             s.methods = _kept
         out.append(s)
     out = out + method_bodies
@@ -1958,6 +2054,11 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_yield_tagged', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_run_gen', 'void')
+    # Eager task scheduling (bugs/COMPILE_FAIL_asyncio_queues.md gap 3).
+    gen.func_param_types.setdefault('__mojo_async_task_schedule', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_task_schedule', 'void')
+    gen.func_param_types.setdefault('__mojo_async_await_task', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_await_task', 'int64_t')
     # Awaitable protocol: Future/Event handles (runtime/mojo_coro_gen.c).
     gen.func_param_types.setdefault('__mojo_future_new', [])
     gen.func_return_types.setdefault('__mojo_future_new', 'int64_t')

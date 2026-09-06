@@ -184,6 +184,125 @@ def main():
           out == "42\n", detail=repr(out))
 
 
+def test_eager_task_scheduling_concurrency():
+    """Gap 3 (bugs/COMPILE_FAIL_asyncio_queues.md): `create_task` eagerly
+    schedules the coroutine onto the shared scheduler ready queue, so two
+    sibling tasks run concurrently and a producer wakes an already-parked
+    consumer through a Future. `await <task>` drains the scheduler instead
+    of privately re-driving the task."""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    var v = await fut
+    return v + 1
+
+async def producer(fut: Int) -> Int:
+    fut.set_result(41)
+    return 0
+
+async def main_co() -> Int:
+    var fut = create_future()
+    var c = create_task(consumer(fut))
+    var p = create_task(producer(fut))
+    var rc = await c
+    var rp = await p
+    return rc
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("create_task sibling concurrency + Future wakeup of a parked consumer",
+          out == "42\n", detail=repr(out))
+
+
+def test_deque_field_future_handle_roundtrip():
+    """Gap 2 (bugs/COMPILE_FAIL_asyncio_queues.md): an unannotated
+    `self._getters = deque()` field types as MojoList *; append/popleft
+    round-trip an int64_t Future handle so `.set_result()` on the popped
+    value reaches the awaiting coroutine. Mirrors asyncio.Queue's
+    `_getters`/`_wakeup_next` shape."""
+    src = """\
+import asyncio
+from collections import deque
+
+struct Waiters:
+    fn __init__(out self):
+        self._q = deque()
+    fn park(mut self, fut: Int):
+        self._q.append(fut)
+    fn wake_all(mut self):
+        while len(self._q) > 0:
+            var w = self._q.popleft()
+            w.set_result(9)
+
+async def consumer(wq: Waiters) -> Int:
+    return 0
+
+async def main_co() -> Int:
+    var wq = Waiters()
+    var fut = create_future()
+    wq.park(fut)
+    wq.wake_all()
+    var v = await fut
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("deque() field + append/popleft round-trips a Future handle",
+          out == "10\n", detail=repr(out))
+
+
+def test_async_struct_method_queue_roundtrip():
+    """Gap 4 (bugs/COMPILE_FAIL_asyncio_queues.md): `async def` METHODS on
+    a compiled struct (a `self: Queue` receiver) become real A3 stack-switch
+    coroutines -- a receiver slot in the start-function + a method-mangled
+    trampoline (__mgco_<Struct>_<method>_start), and `await obj.method(...)`
+    at the call site constructs + drives that coroutine. This is the
+    asyncio.Queue put/get shape: `get` awaits a bare local Future it parked
+    on `self._getters`; a sync `put_nowait` wakes it via `.set_result`."""
+    src = """\
+import asyncio
+from collections import deque
+
+struct Q:
+    fn __init__(out self):
+        self._items = deque()
+        self._getters = deque()
+    fn empty(self) -> Bool:
+        return len(self._items) == 0
+    fn put_nowait(mut self, item: Int):
+        self._items.append(item)
+        while len(self._getters) > 0:
+            var g = self._getters.popleft()
+            g.set_result(0)
+    async def get(self) -> Int:
+        while self.empty():
+            var getter = create_future()
+            self._getters.append(getter)
+            await getter
+        return self._items.popleft()
+    async def put(self, item: Int) -> Int:
+        self.put_nowait(item)
+        return 0
+
+async def main_co() -> Int:
+    var q = Q()
+    var r = await q.put(41)
+    var v = await q.get()
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("async struct method (Queue.get/.put) compiles + awaits + runs",
+          out == "42\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

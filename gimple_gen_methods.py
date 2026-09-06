@@ -2601,6 +2601,30 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
     # name)` never stored anything and every built path stayed "/". Lower to
     # the runtime's typed insert helpers; element type comes from the same
     # _elem_of tracking every other list method uses.
+    # collections.deque methods on the MojoList * representation
+    # (bugs/COMPILE_FAIL_asyncio_queues.md gap 2): a deque field
+    # (`self._getters = deque()`) is typed MojoList *, and asyncio
+    # round-trips Future handles through popleft/append/appendleft.
+    if method == 'popleft' and not args:
+        _z = gen._new_val('int', '0')
+        _z64 = gen._new_val('int64_t', f'(int64_t){_z}')
+        raw = gen._call_expr('int64_t', 'mojo_list_pop_at',
+                             [('MojoList *', ov), ('int64_t', _z64)])
+        elem = gen._elem_of(ov)
+        if gimple_ctypes.TypeLattice.list_suffix(elem) == 'str':
+            return 'char *', gen._new_val('char *', f"(char *){raw}")
+        return 'int64_t', raw
+    if method == 'appendleft' and args:
+        at, av = gen.lower_expr(args[0])
+        nv = gen._to_int64(at, av)
+        _z = gen._new_val('int', '0')
+        _z64 = gen._new_val('int64_t', f'(int64_t){_z}')
+        gen._emit_call('void', '', 'mojo_list_insert_int',
+                       [('MojoList *', ov), ('int64_t', _z64), ('int64_t', nv)])
+        if at.endswith(' *') and ov in gen._struct_field_owners:
+            for _sn, _fn in gen._struct_field_owners[ov]:
+                gen._field_elem_types.setdefault(_sn, {})[_fn] = at
+        return 'int', gen._new_val('int', '0')
     if method == 'insert' and len(args) >= 2:
         it, iv_ = gen.lower_expr(args[0])
         at, av = gen.lower_expr(args[1])

@@ -303,6 +303,33 @@ __mojo_box_set_i64(int64_t box, int64_t v)
 
 extern uint64_t __mojo_async_now_ns(void);
 extern void     __mojo_async_run(MojoCoro *c);
+extern void     __mojo_async_run_until_complete(void);
+extern void     __mojo_async_task_register(MojoCoro *coro, int64_t genHandle);
+extern int      __mojo_async_task_is_registered(int64_t genHandle);
+
+/* `create_task(f(...))`: f() already built the MojoGen handle; enqueue its
+   coroutine onto the shared scheduler ready queue so sibling tasks run
+   concurrently (bugs/COMPILE_FAIL_asyncio_queues.md gap 3). */
+void
+__mojo_async_task_schedule(int64_t genHandle)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
+    if (!g || !g->coro || g->done) return;
+    __mojo_async_task_register(g->coro, genHandle);
+}
+
+/* Called by the scheduler (mojo_async_sched.c finalize_task) when a
+   registered task coroutine runs off the end: publish its result onto the
+   MojoGen handle so a subsequent __mojo_async_await_task / __mojo_gen_retval
+   reads it. */
+void
+__mojo_gen_finalize(int64_t genHandle, int64_t retbox)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
+    if (!g || g->done) return;
+    g->retval = retbox;
+    g->done = 1;
+}
 
 /* `await asyncio.sleep(secs)` -- called from inside a lowered async body
    with its own __c; suspends until secs have elapsed. */
@@ -343,9 +370,36 @@ __mojo_async_run_gen(int64_t genHandle)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
     if (!g || g->done) return;
-    __mojo_async_run(g->coro);
-    g->retval = __mojo_coro_return_value(g->coro);
-    g->done = 1;
+    if (__mojo_async_task_is_registered(genHandle)) {
+        /* Eagerly scheduled at create_task() time -- it is already on the
+           scheduler's ready queue. Just drain the loop (which also drives
+           every sibling task); finalize_task publishes g->retval/g->done. */
+        __mojo_async_run_until_complete();
+    } else {
+        __mojo_async_run(g->coro);
+    }
+    if (!g->done) {
+        g->retval = __mojo_coro_return_value(g->coro);
+        g->done = 1;
+    }
+}
+
+/* `await <task>` where <task> came from create_task(): the task coroutine
+   was scheduled onto the ready queue at creation. Park this coroutine on
+   it (MOJO_WD_TASK, payload = the task's MojoCoro* bits) until the
+   scheduler's finalize_task publishes its result. Returns the task's
+   return box. */
+int64_t
+__mojo_async_await_task(int64_t coro, int64_t genHandle)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
+    if (!g) return 0;
+    while (!g->done) {
+        __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro,
+                                 mojo_wd_make(MOJO_WD_TASK,
+                                              (int64_t)(uintptr_t)g->coro), 1);
+    }
+    return g->retval;
 }
 
 /* ── Awaitable protocol: Future / Event handles ───────────────────────────
