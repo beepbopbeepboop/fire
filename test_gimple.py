@@ -2113,6 +2113,60 @@ def g(s):
 print(list(g("hi")))
 """)
 
+    # bytes / bytearray / memoryview value types inside a compiled
+    # generator body (bugs/hard/CODEGEN_bytes_value_type.md Stage 4). The
+    # A3 stack-switch backend routes the body through ordinary codegen,
+    # which has full bytes support (Stages 1-3) -- these guard that a
+    # `yield`ing body compiles clean.
+    test("generator_body_memoryview", """\
+def g(data):
+    yield memoryview(data)[0]
+
+def main():
+    var b = bytes([1, 2, 3])
+    for x in g(b):
+        print(x)
+""")
+
+    test("generator_body_bytes_iteration", """\
+def g():
+    var b = bytes([4, 5, 6])
+    for x in b:
+        yield x
+
+def main():
+    for x in g():
+        print(x)
+""")
+
+    test("generator_body_bytearray_mutation", """\
+def g():
+    var ba = bytearray()
+    ba.append(9)
+    yield ba[0]
+
+def main():
+    for x in g():
+        print(x)
+""")
+
+    # zipfile `_Extra.split` shape: a @classmethod generator building a
+    # memoryview over its (unannotated bytes) argument.
+    test("generator_classmethod_body_memoryview", """\
+struct E:
+    @classmethod
+    def split(cls, data):
+        var mv = memoryview(data)
+        var i = 0
+        while i < len(mv):
+            yield mv[i]
+            i = i + 1
+
+def main():
+    for x in E.split(bytes([7, 8])):
+        print(x)
+""")
+
     # Async function (`async def`) honest-fallback: originally (before the
     # compiled-path async/await codegen project's Step B) this codegen had
     # NO event loop / suspend-resume codegen at all, so EVERY `async def`
@@ -5273,6 +5327,24 @@ fn main():
     print(b'%02x' % 15)
     print(b'%s=%d;' % (b'k', 7))
     print(b'100%% done')
+""")
+
+    # A `b'...'` / `b''` literal used inside a real function body: the
+    # `_slit_` string-pool global must be loaded into a local before it
+    # is passed to `mojo_bytes_new_lit` (GIMPLE strict mode). Regression
+    # for "invalid argument to gimple call" seen on zipfile's
+    # `_Extra.strip`'s `b''.join(...)`.
+    test("bytes_literal_in_function_body", """\
+fn joiner(parts: List[Int]) -> Int:
+    var sep = b''
+    var acc = b'x'
+    var total: Int = 0
+    for p in parts:
+        total = total + p
+    return total + len(sep) + len(acc)
+fn main():
+    var ps = [1, 2, 3]
+    print(joiner(ps))
 """)
 
     test("bytes_param_inferred_from_body_usage", """\

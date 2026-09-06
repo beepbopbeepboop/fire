@@ -461,8 +461,21 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
         return False, 'comptime params'
-    if getattr(fn, 'decorators', None):
-        return False, 'decorated'
+    _decos = getattr(fn, 'decorators', None) or []
+    # v0: a @classmethod generator METHOD is accepted (its `cls` receiver
+    # is an opaque, never-read int64_t placeholder slot -- the same ABI
+    # the cpp path used and the call-site machinery in
+    # gimple_gen_methods.py already resolves, both for `Cls.gen(...)` and
+    # `cls.gen(...)`). Any other decorator, or a @classmethod on a plain
+    # (non-method) generator, still falls through.
+    if _decos:
+        if struct_name is not None and _decos == ['classmethod']:
+            if any(isinstance(n, (N.IdentExpr, N.MemberExpr))
+                   and getattr(n, 'name', None) == 'cls'
+                   for n in _walk(fn)):
+                return False, 'classmethod generator body references `cls` (v0)'
+        else:
+            return False, 'decorated'
     if not _yield_from_ok(fn):
         return False, 'yield from with return-value capture (v0)'
     if not _lambdas_ok(fn):
@@ -470,10 +483,27 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     if not _property_call_ok(fn, struct_name, struct_def):
         return False, 'calls the result of a @property getter (v0)'
     params = fn.params
+    _is_cm = False
     if struct_name is not None:
-        if not params or params[0][0] != 'self':
-            return False, 'generator method without a plain `self` first param (v0)'
-        params = params[1:]   # self is typed by the codegen from the annotation
+        _is_cm = _decos == ['classmethod']
+        _want = 'cls' if _is_cm else 'self'
+        if not params or params[0][0] != _want:
+            return False, f'generator method without a plain `{_want}` first param (v0)'
+        params = params[1:]   # self/cls is handled by the codegen
+    if _is_cm:
+        # The newly-accepted @classmethod path is deliberately narrower
+        # than the long-standing `self`/free-function one: a `str`/`String`
+        # param is nominally in `_SCALARISH` but actually crosses as a
+        # `char *` pointer whose bits `__mojo_gen_arg` hands back as a bare
+        # int64_t -- string ops on it (`len`, iteration) then operate on
+        # the raw address. Accept only genuinely-numeric or unannotated
+        # params here (an unannotated bytes/memoryview source still works:
+        # the body's `memoryview(x)` / `bytes(x)` constructor re-casts the
+        # pointer bits itself -- zipfile `_Extra.split`).
+        for pname, pann in params:
+            if pann not in (None, '') and pann not in _INT_ANNS and pann not in _FLOAT_ANNS:
+                return False, (f'@classmethod generator param {pname!r} type '
+                               f'{pann!r} (v0: numeric or unannotated only)')
     # v0: remaining params must be simple positional scalars (or none)
     for pname, pann in params:
         if pann not in _SCALARISH:
@@ -2089,6 +2119,16 @@ def _lower_one(fn: N.FunctionDef, meta: list,
                struct_name: str | None = None,
                struct_def=None) -> N.FunctionDef:
     is_method = struct_name is not None
+    # A @classmethod generator method: `cls` is NOT a real typed receiver
+    # (verified in _eligible to be unreferenced in the body). Its start
+    # signature carries an opaque, never-read int64_t placeholder in slot
+    # 0 -- exactly the shape gimple_gen_methods.py's `_generator_method_
+    # api` call-site lowering already expects for a classmethod generator
+    # -- but the trampoline / body have NO `{Struct} *` param, so for
+    # emit_c/body purposes this behaves like a free-function generator
+    # with one extra leading (ignored) int64_t arg slot.
+    is_classmethod = is_method and (getattr(fn, 'decorators', None) or []) == ['classmethod']
+    has_self = is_method and not is_classmethod
     base = (f'__mgco_{struct_name}_{fn.name}' if is_method
             else f'__mgco_{fn.name}')
     body_name = f'{base}_body'
@@ -2097,8 +2137,8 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     kind = kind or 'i'
 
     real_params = fn.params[1:] if is_method else fn.params
-    # arg 0 is `self` for a method (a real typed body param), so ordinary
-    # params start at __mojo_gen_arg index 1; else index 0.
+    # arg 0 is `self`/`cls` (a method), so ordinary params start at
+    # __mojo_gen_arg index 1; a plain function starts at 0.
     arg_base = 1 if is_method else 0
     prologue = []
     for i, (pname, _pann) in enumerate(real_params):
@@ -2108,7 +2148,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
 
     new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind)
     body_params = [(_CVAR, 'Int')]
-    if is_method:
+    if has_self:
         body_params.append(('self', struct_name))
     body_fd = N.FunctionDef(
         name=body_name,
@@ -2119,12 +2159,15 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_generator = False
     body_fd.is_async = False
 
-    c_params = ([f'{struct_name} *'] if is_method else []) + \
+    c_params = ([f'{struct_name} *'] if has_self else
+                ['int64_t'] if is_classmethod else []) + \
                [_mojo_to_c_type(a) for _n, a in real_params]
     meta.append({
         'name': fn.name,
         'struct': struct_name,
         'is_method': is_method,
+        'has_self': has_self,
+        'is_classmethod': is_classmethod,
         'base': base,
         'body_name': body_name,
         'params': c_params,
@@ -2182,7 +2225,11 @@ _Bool {base}_last_yield_was_wd (MojoGenerator *__g) {{
 def emit_c(meta_entry: dict) -> str:
     n = meta_entry['nargs']
     params = meta_entry['params']            # includes leading 'Struct *' for a method
-    is_method = meta_entry.get('is_method')
+    # `has_self` (a real `{Struct} *` receiver) selects the method
+    # trampoline shape; a @classmethod generator has NO such receiver
+    # (its leading int64_t `cls` slot is just an ordinary ignored arg),
+    # so it uses the plain free-function `__mojo_gen_new_{n}` path.
+    is_method = meta_entry.get('has_self', meta_entry.get('is_method'))
     kind = meta_entry.get('value_kind', 'i')
     vct = _KIND_CTYPE[kind]
     nslots = len(params)                     # start-fn arg count (self + real args)

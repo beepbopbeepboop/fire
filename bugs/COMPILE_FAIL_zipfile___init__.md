@@ -1,5 +1,40 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, bytes-value-type Stage 4): generator-body memoryview refusal GONE; module now dies later, on real ordinary-path bytes-codegen bugs
+
+`gimple_gen_coro._eligible` now accepts a `@classmethod` generator whose
+body doesn't reference `cls`, so `_Extra.split` is lowered by the A3
+stack-switch backend (ordinary codegen, full memoryview support) instead
+of the C++ emitter that refused `memoryview(...)`. The up-front
+`RuntimeError("cannot compile module: function(s) split ...")` is GONE —
+`compile_to_gimple(do_imports=False)` now produces ~763 KB of C.
+
+That C does NOT yet `gcc -fgimple` clean. The error set moved from a
+generator-gate refusal to real ordinary-path bugs (exactly the §5.5
+"a previously-refused generator that still fails is now a real
+ordinary-path bug, exposed" outcome):
+
+1. **FIXED (2026-09-06)** — `mojo_bytes_new_lit (_slit_NNNN, N)` "invalid
+   argument to gimple call". Every `b'...'` / `b''` literal passed the
+   `_slit_` string-pool GLOBAL directly as a call argument;
+   `-fgimple` strict mode requires it loaded into a local first (the
+   plain `char *` string-literal path already does this). Fixed at both
+   bytes-literal emit sites in `gimple_gen_exprs.py` (`_lower_String
+   Literal` bytes branch + `_lit_bytes` in the bytes `%`-format path).
+   Minimal repro (`b''.join(parts)` in a classmethod, `b'%d' % x`) now
+   compiles.
+2. **`'MojoBytes' has no member named 'append'`** (`_ZipDecrypter.
+   decrypter`: `result = bytearray(); append = result.append`). This is
+   the bound-method-of-a-container-value-held-in-a-local gap (`append =
+   result.append` then `append(x)`), not bytes-specific. `result.
+   append(x)` directly compiles fine. First hard blocker now.
+3. The previously-documented further blockers still stand behind these:
+   `pwd=None` unannotated param (read/testzip -> mojo_open), genexp-held-
+   in-local in `_sanitize_windows_name`, `_Extra(bytes)` subclassing +
+   `struct.Struct` class attr + `super().__new__`.
+
+Still not `git rm`'d — does not compile end-to-end.
+
 ## Status (2026-09-06, bytes-value-type Stage 3): ordinary-path memoryview NOW implemented; coroutine-body memoryview still refused
 
 `bytes`/`bytearray`/`memoryview` value types landed in the ordinary

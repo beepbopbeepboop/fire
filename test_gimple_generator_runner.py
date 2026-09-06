@@ -1965,6 +1965,81 @@ def main():
         print(v)
 """, "1\n3\n6\n10\n")
 
+    # bytes / bytearray / memoryview VALUE TYPES inside a compiled
+    # generator body (bugs/hard/CODEGEN_bytes_value_type.md Stage 4). The
+    # A3 stack-switch cutover routes a generator body through ordinary
+    # codegen, which gained full bytes/bytearray/memoryview support in
+    # Stages 1-3 -- these lock in that it actually works end-to-end from
+    # inside a `yield`ing body.
+    test_generator_stdout("generator_memoryview_index", """\
+def g(data):
+    yield memoryview(data)[0]
+    yield memoryview(data)[2]
+
+def main():
+    var b = bytes([10, 20, 30])
+    for x in g(b):
+        print(x)
+""", "10\n30\n")
+
+    test_generator_stdout("generator_bytes_literal_iteration", """\
+def g():
+    var b = bytes([1, 2, 3])
+    for x in b:
+        yield x * 2
+
+def main():
+    for x in g():
+        print(x)
+""", "2\n4\n6\n")
+
+    test_generator_stdout("generator_bytearray_mutation", """\
+def g():
+    var ba = bytearray()
+    ba.append(5)
+    ba.append(7)
+    yield ba[0]
+    yield ba[1]
+    yield len(ba)
+
+def main():
+    for x in g():
+        print(x)
+""", "5\n7\n2\n")
+
+    # A @classmethod generator that builds a memoryview over an
+    # unannotated (bytes) parameter and iterates it -- the shape of
+    # zipfile's `_Extra.split` (bugs/COMPILE_FAIL_zipfile___init__.md).
+    # Newly A3-eligible (gimple_gen_coro._eligible classmethod path).
+    test_generator_stdout("generator_classmethod_memoryview", """\
+struct E:
+    @classmethod
+    def split(cls, data):
+        var mv = memoryview(data)
+        var i = 0
+        while i < len(mv):
+            yield mv[i]
+            i = i + 1
+
+def main():
+    for x in E.split(bytes([4, 5, 6])):
+        print(x)
+""", "4\n5\n6\n")
+
+    test_generator_stdout("generator_classmethod_scalar", """\
+struct C:
+    @classmethod
+    def upto(cls, n: Int):
+        var i = 0
+        while i < n:
+            yield i * i
+            i = i + 1
+
+def main():
+    for x in C.upto(4):
+        print(x)
+""", "0\n1\n4\n9\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

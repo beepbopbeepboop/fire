@@ -82,6 +82,49 @@ return types registered in BOTH runtime-signature maps
 
 ## Status
 
+**Stage 4: generator / coroutine bodies — LANDED (2026-09-06).**
+
+Post the A3 stack-switch cutover (doc/COROUTINE.html §5.5) a generator
+body is lowered by ORDINARY codegen, which already has full
+bytes/bytearray/memoryview support (Stages 1-3). So `bytes(...)` /
+`bytearray(...)` / `memoryview(...)`, `b'...'` literals, `_lower_bytes_
+method` calls, bytes/bytearray slicing + iteration, `mv[i]` etc. ALL
+already work inside a plain `def g(...): ... yield ...` body with no
+codegen change — verified end-to-end (compile + `-fgimple` link + run):
+
+- `def g(data): yield memoryview(data)[0]`
+- `def g(): b = bytes([...]); for x in b: yield x`
+- `def g(): ba = bytearray(); ba.append(5); yield ba[0]`
+
+The only real gap was that a **`@classmethod` generator method** was
+refused by `gimple_gen_coro._eligible` (`decorated`), falling through to
+the dying C++ coroutine emitter which refuses `memoryview(...)` as an
+unresolved callee. Fixed: `_eligible` now accepts a `@classmethod`
+generator whose body does not reference `cls` (its `cls` receiver is an
+opaque never-read `int64_t` placeholder slot — the exact ABI
+`gimple_gen_methods.py`'s `_generator_method_api` call-site lowering
+already resolves, for both `Cls.g(...)` and `cls.g(...)`). `_lower_one`
+/ `emit_c` grew a `has_self` / `is_classmethod` split so the classmethod
+uses the plain free-function trampoline (`__mojo_gen_new_{n}`) with the
+leading ignored `cls` slot rather than the `_m{n}` method shape. The
+classmethod path is deliberately narrower than the `self`/free-function
+one: only numeric or unannotated params (a `str`/`String` param crosses
+as a `char *` pointer whose bits `__mojo_gen_arg` returns as a bare
+int64_t — a pre-existing latent miscompile for ALL A3 generators, not
+widened here).
+
+Tests: `test_gimple.py` (+4 compile checks: `generator_body_memoryview`,
+`generator_body_bytes_iteration`, `generator_body_bytearray_mutation`,
+`generator_classmethod_body_memoryview`); `test_gimple_generator_
+runner.py` (+5 runnable: `generator_memoryview_index`, `generator_bytes_
+literal_iteration`, `generator_bytearray_mutation`, `generator_
+classmethod_memoryview`, `generator_classmethod_scalar`).
+
+Still NOT done in Stage 4:
+- Non-scalar generator params in A3 generally (`str`/`bytes`/`list`
+  annotated params) — a separate feature; the pre-existing `_SCALARISH`
+  gate treats `String` as passable but it miscompiles.
+
 **Stage 3: LANDED (2026-09-06).**
 
 - runtime (`runtime/mojo_runtime.{h,c}`):

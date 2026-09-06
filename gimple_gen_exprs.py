@@ -164,8 +164,16 @@ def _lower_StringLiteral(gen, node):
         # the MojoBytes value at the literal site.
         body = ''.join('\\%03o' % (ord(c) & 0xFF) for c in val)
         sname = gen._intern_string(body)
+        # GIMPLE strict mode rejects passing a module-level global (the
+        # `_slit_` char[] pool entry) directly as a call argument -- it
+        # must be loaded into a local first, exactly like the plain `char
+        # *` string-literal path just below does. Passing `sname` raw
+        # produced "invalid argument to gimple call" on any `b'...'` /
+        # `b''` literal reached inside a real function body (zipfile
+        # `_Extra.strip`'s `b''.join(...)`).
+        sload = gen._new_val('char *', sname)
         temp = gen._new_val('MojoBytes *',
-                            f'mojo_bytes_new_lit ({sname}, {len(val)})')
+                            f'mojo_bytes_new_lit ({sload}, {len(val)})')
         return 'MojoBytes *', temp
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
@@ -3067,7 +3075,10 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
     def _lit_bytes(text):
         body = ''.join('\\%03o' % (ord(ch) & 0xFF) for ch in text)
         sname = gen._intern_string(body)
-        return gen._new_val('MojoBytes *', f'mojo_bytes_new_lit ({sname}, {len(text)})')
+        # load the `_slit_` global into a local first (GIMPLE strict mode
+        # -- see _lower_StringLiteral's bytes branch for the same fix)
+        sload = gen._new_val('char *', sname)
+        return gen._new_val('MojoBytes *', f'mojo_bytes_new_lit ({sload}, {len(text)})')
 
     if n_specs != len(rhs_exprs):
         for e in rhs_exprs:
