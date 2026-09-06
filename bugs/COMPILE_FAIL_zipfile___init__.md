@@ -1,5 +1,55 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, blockers 1 + 2 FIXED): down to ONE remaining blocker — genexp-held-in-a-local in `_sanitize_windows_name`
+
+Two blockers landed this session. `compile_to_gimple(do_imports=False)`
+now produces ~624 KB of C with exactly **2 gcc `-fgimple` errors left**
+(the same error, in `ZipFile._sanitize_windows_name` and its
+`PyZipFile` inherited copy).
+
+**Blocker 1 — FIXED (commit `52107f5`).** `self._readbuffer = b''` in
+`ZipExtFile.__init__` left the struct field typed `char *`, so
+`buf = self._readbuffer[self._offset:]` went through `mojo_cstr_slice`
+and `buf += self._read1(...)` (RHS `MojoBytes *`) fell to
+`_lower_binary_tail`'s raw fallback, emitting `char* + (int64_t)MojoBytes*`
+pointer arithmetic — garbage, and it also ICE'd GCC's GIMPLE frontend
+(`internal compiler error: in build2, at tree.cc:5208`). Fixes:
+`_collect_self_assigns` types a `b''` / `bytes()` / `bytearray()`
+`self.<field>` assignment as `MojoBytes *`; `_infer_local_var_types`
+now scans `var x = ...` VarDecl nodes (it only scanned AssignStmt
+before); method return-type inference seeds inferred local var types so
+`return <bytes-accumulator-local>` infers `MojoBytes *` not `int64_t`.
+`ZipExtFile_mojo_read` / `read1` / `_read1` compile clean; ICE gone.
+
+**Blocker 2 — FIXED (commit `00a2c25`).** `ZipFile.testzip`'s
+`self.open(zinfo.filename, "r")` — `open` is a C-reserved name so the
+mangled symbol is `..._ZipFile_mojo_open`, but the method's parameter
+types were registered in `func_param_types` only under the raw key
+`ZipFile_open`. `_emit_call` looks up by the mangled name, missed, and
+skipped ALL argument coercion — a `char *` filename went straight into
+the `int64_t name` (str|ZipInfo union) slot. `_lower_struct_method_call`
+now mirrors the resolved param-type list onto the mangled key.
+
+**REMAINING BLOCKER — genexp bound to a local, then iterated
+(`_sanitize_windows_name`).** `arcname = (x.rstrip(' .') for x in
+arcname.split(pathsep))` then `arcname = pathsep.join(x for x in arcname
+if x)`. The scalar model can't hold a genexp object in a local, so
+`arcname` stays `char *` and the second loop lowers as CHAR iteration
+(`x = *_t34`) colliding with the char*-typed loop var from the first
+loop — `non-trivial conversion in 'mem_ref'` x2. This is the
+local-held-generator-consumed-as-iterable feature family (same as
+fsutil.py's six-generator refusal list). Genuinely feature-sized; not
+attempted this session.
+
+Behind it still: `pwd=None` unannotated param has been de-risked by
+blocker 2's coercion fix but not re-verified end-to-end past the
+`_sanitize_windows_name` error; `_Extra(bytes)` subclassing +
+`struct.Struct` class attr + `super().__new__` (feature-sized).
+
+Still not `git rm`'d — does not compile end-to-end.
+
+---
+
 ## Status (2026-09-06, GCC-ICE root-caused): NOT the module-constants theory — real cause is `buf += <bytes>` lowered as invalid `char* + int64_t` pointer arithmetic
 
 Investigated the "~60 module-level constants re-materialized as LOCAL
