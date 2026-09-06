@@ -28,7 +28,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser,
+    py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -369,26 +369,42 @@ def _merge_struct_inheritance(all_struct_defs):
     ~15 call sites about inheritance individually — means they transparently
     see the merged view for free. Mirrors myinterpreter.py's
     execute_StructDef, which does the same merge for the interpreted path."""
-    by_name = {s.name: s for s in all_struct_defs if isinstance(s, StructDef)}
+    # `_as_structdef_node(s)`: `s` is a loop var over a list, so it is boxed
+    # on the self-hosted compiled path and `s.bases` / `s.fields` / `s.methods`
+    # would erase to `_mojo_dispatch_getattr` on an int64_t — the entire
+    # inheritance merge then silently no-op'd (every `class Child(Base):` lost
+    # its inherited members: ArcPointer's `_value`, and ~thousands of
+    # stage1-vs-stage2 `.ci` divergences under MOJO_NO_SHIM=1).
+    by_name = {}
+    for _s0 in all_struct_defs:
+        if isinstance(_s0, StructDef):
+            _sd0 = _as_structdef_node(_s0)
+            by_name[_as_str(_sd0.name)] = _sd0
     resolved = set()
 
     def resolve(s):
-        if s.name in resolved:
+        s = _as_structdef_node(s)
+        _sn = _as_str(s.name)
+        if _sn in resolved:
             return
-        resolved.add(s.name)  # mark first: guards against an inheritance cycle
-        if not getattr(s, 'bases', None):
+        resolved.add(_sn)  # mark first: guards against an inheritance cycle
+        _bases = getattr(s, 'bases', None) or []
+        if not _bases:
             return
         merged_fields = []
         merged_methods = {}
-        for base_name in s.bases:
-            base = by_name.get(base_name)
+        for base_name in _bases:
+            base = by_name.get(_as_str(base_name))
             if base is None:
                 continue
+            base = _as_structdef_node(base)
             resolve(base)
             merged_fields.extend(base.fields)
             for m in base.methods:
-                merged_methods[m.name] = m
-        own_names = {m.name for m in s.methods}
+                merged_methods[_as_str(_as_funcdef_node(m).name)] = m
+        own_names = set()
+        for m in s.methods:
+            own_names.add(_as_str(_as_funcdef_node(m).name))
         inherited = [m for name, m in merged_methods.items() if name not in own_names]
         s.fields = merged_fields + s.fields
         s.methods = inherited + s.methods

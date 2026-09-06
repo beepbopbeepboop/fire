@@ -1385,6 +1385,19 @@ def _as_funcdef_node(e: object) -> FunctionDef:
     return e
 
 
+def _as_structdef_node(e: object) -> StructDef:
+    """See _as_ident_node: static StructDef view of a boxed handle, so a
+    following `.bases` / `.fields` / `.methods` / `.name` read compiles to a
+    direct struct field load rather than a `_mojo_dispatch_getattr` on an
+    int64_t. Needed by `_merge_struct_inheritance` (Python-style class
+    inheritance): its `for s in all_struct_defs` loop var was boxed, so
+    `s.bases` erased and the whole inheritance merge silently no-op'd on the
+    self-hosted compiled path — every `class Child(Base):` lost its
+    inherited fields/methods (ArcPointer's `_value`, and ~thousands of
+    stage1-vs-stage2 `.ci` divergences under MOJO_NO_SHIM=1)."""
+    return e
+
+
 def _as_member_node(e: object) -> MemberExpr:
     """See _as_ident_node: static MemberExpr view of a boxed handle, so a
     following `.obj` / `.member` read compiles to a direct field load rather
