@@ -403,15 +403,15 @@ def _own_property_names(struct_def) -> set:
     return out
 
 
-# struct name -> set of @property getter names, INCLUDING those inherited
-# from base classes defined in the same module. Populated fresh at the top
-# of each lower() call (this pre-pass runs before GimpleGen /
-# self._struct_property_names exist).
-_PROP_NAMES: dict[str, set] = {}
-
-
-def _seed_prop_names(stmts: list) -> None:
-    _PROP_NAMES.clear()
+def _seed_prop_names(stmts: list) -> dict:
+    """`{struct name: set of @property getter names}`, INCLUDING those
+    inherited from base classes defined in the same module. Returned as a
+    plain local (threaded through `_eligible`/`_property_call_ok`) rather
+    than stashed in a module global — a `NAME = {}` module-level dict has no
+    write accessor on the self-hosted compiled path, so `_PROP_NAMES[k] = v`
+    there was a NULL-dict store (`mojo_dict_set_int` SIGBUS in
+    `_seed_prop_names` under `MOJO_NO_SHIM=1`)."""
+    _pn: dict = {}
     defs = {s.name: s for s in stmts if isinstance(s, N.StructDef)}
     for name, sd in defs.items():
         seen = set()
@@ -427,10 +427,12 @@ def _seed_prop_names(stmts: list) -> None:
                 bn = b if isinstance(b, str) else getattr(b, 'name', None)
                 if bn:
                     stack.append(bn)
-        _PROP_NAMES[name] = acc
+        _pn[name] = acc
+    return _pn
 
 
-def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def) -> bool:
+def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def,
+                      prop_names: dict | None = None) -> bool:
     """Refuse a generator method whose body *calls* the result of a
     `@property` getter -- `self.<prop>(args)` where `<prop>` is a property
     (Lib/ipaddress.py's `self._address_class(x)`: `_address_class` is a
@@ -443,7 +445,8 @@ def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def) -> bool:
     code."""
     if struct_def is None:
         return True
-    props = _PROP_NAMES.get(struct_name) or _own_property_names(struct_def)
+    props = ((prop_names.get(struct_name) if prop_names else None)
+             or _own_property_names(struct_def))
     if not props:
         return True
     for n in _walk(fn):
@@ -456,7 +459,7 @@ def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def) -> bool:
 
 
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
-              struct_def=None) -> tuple[bool, str]:
+              struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
         return False, 'async'
     if getattr(fn, 'comptime_params', None):
@@ -467,7 +470,7 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'yield from with return-value capture (v0)'
     if not _lambdas_ok(fn):
         return False, 'lambda with *args/**kwargs or a default parameter'
-    if not _property_call_ok(fn, struct_name, struct_def):
+    if not _property_call_ok(fn, struct_name, struct_def, prop_names):
         return False, 'calls the result of a @property getter (v0)'
     params = fn.params
     if struct_name is not None:
@@ -1325,7 +1328,7 @@ def lower(stmts: list) -> tuple[list, list]:
     if not enabled():
         return stmts, []
     _PARAM_NAMES.clear()
-    _seed_prop_names(stmts)
+    _prop_names = _seed_prop_names(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
                                              or getattr(s, 'is_async', False)):
@@ -1335,7 +1338,7 @@ def lower(stmts: list) -> tuple[list, list]:
     method_bodies = []
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
-            ok, _why = _eligible(s)
+            ok, _why = _eligible(s, prop_names=_prop_names)
             if ok:
                 out.append(_lower_one(s, meta))
                 continue
@@ -1354,7 +1357,8 @@ def lower(stmts: list) -> tuple[list, list]:
             _kept = []
             for m in s.methods:
                 if (isinstance(m, N.FunctionDef) and getattr(m, 'is_generator', False)
-                        and _eligible(m, struct_name=s.name, struct_def=s)[0]):
+                        and _eligible(m, struct_name=s.name, struct_def=s,
+                                      prop_names=_prop_names)[0]):
                     method_bodies.append(_lower_one(m, meta, struct_name=s.name,
                                                    struct_def=s))
                     # drop the generator method from the struct: gen_module's
