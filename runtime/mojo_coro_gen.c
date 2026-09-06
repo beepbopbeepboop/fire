@@ -416,10 +416,72 @@ __mojo_async_await_task(int64_t coro, int64_t genHandle)
    (so a wait() after set() returns immediately), and clear() re-arms it. */
 extern void __mojo_async_notify_future(int64_t future_handle);
 
+/* Exception-class tags -- must match GimpleGen._exc_type_id
+   (`(zlib.crc32(b"Name") & 0x7fffffff) or 1`). */
+#define _MOJO_EXC_TAG_EXCEPTION       2100825294
+#define _MOJO_EXC_TAG_CANCELLEDERROR   760980751
+
+extern void    mojo_exc_type_set(int64_t);
+extern void    mojo_exc_msg_set(char *);
+extern void    mojo_raise(void);
+
+typedef struct MojoFutureCB {
+    int64_t              cb;      /* callback handle (see __mojo_future_invoke_callback) */
+    struct MojoFutureCB *next;
+} MojoFutureCB;
+
 typedef struct MojoFuture {
-    int        done;
-    int64_t    result;
+    int          done;           /* resolved: result OR exception OR cancelled */
+    int          cancelled;
+    int          has_exc;
+    int64_t      result;
+    int64_t      exc_type;       /* _exc_type_id tag, when has_exc */
+    char        *exc_msg;
+    MojoFutureCB *callbacks;     /* done-callback list, LIFO; fired on resolve */
 } MojoFuture;
+
+/* Invoke one recorded done-callback. Weak so a richer dispatch can override
+   it. Default bridge: treat the handle as a plain `void(*)(int64_t)` C
+   function pointer, called with the future handle -- matching asyncio's
+   `callback(fut)` signature and the representation the compiled path uses
+   for a bare top-level `def cb(fut)` passed by name (a `_funcptr_<csym>`
+   value). LIMITATION: a bound-method (MojoBoundMethod*) or closure-capture
+   callback also arrives here as an int64_t and would be called through this
+   same mismatched ABI -- the codegen does not yet emit a tag distinguishing
+   the handle kinds, so those callback forms need a tagged-handle dispatch
+   (overriding this weak symbol) before add_done_callback is correct for
+   them. add_done_callback/remove_done_callback record them faithfully
+   regardless. A NULL / obviously-non-pointer handle is ignored. */
+__attribute__((weak)) void
+__mojo_future_invoke_callback(int64_t cb, int64_t future_handle)
+{
+    if (cb <= 0xffff) return;
+    void (*fn)(int64_t) = (void (*)(int64_t))(uintptr_t)cb;
+    fn(future_handle);
+}
+
+static void
+future_fire_callbacks(int64_t h, MojoFuture *f)
+{
+    MojoFutureCB *cb = f->callbacks;
+    f->callbacks = NULL;
+    while (cb) {
+        MojoFutureCB *nx = cb->next;
+        __mojo_future_invoke_callback(cb->cb, h);
+        free(cb);
+        cb = nx;
+    }
+}
+
+/* Common resolution path for set_result / set_exception / cancel: wake
+   every parked awaiter first (so it is on the ready queue), then run the
+   done-callbacks. */
+static void
+future_resolve(int64_t h, MojoFuture *f)
+{
+    __mojo_async_notify_future(h);
+    future_fire_callbacks(h, f);
+}
 
 int64_t
 __mojo_future_new(void)
@@ -452,7 +514,99 @@ __mojo_future_set_result(int64_t h, int64_t val)
     /* Wake every top-level coroutine the scheduler parked on this handle
        (it re-drives its await chain, which re-enters __mojo_async_await_
        future -> now f->done -> returns the result). */
-    __mojo_async_notify_future(h);
+    future_resolve(h, f);
+}
+
+/* (1) exception slot -- `fut.set_exception(Exc("msg"))` / `fut.exception()`.
+   The codegen hook lowers the argument the same way `raise` does: an
+   exception-class name to its _exc_type_id tag, a string message to a
+   char*. `exception()` returns the tag (truthy when an exception is set),
+   0 otherwise. `await fut` re-raises it on the awaiting coroutine's own
+   stack (see __mojo_async_await_future). */
+void
+__mojo_future_set_exception(int64_t h, int64_t exc_type, char *msg)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    if (!f || f->done) return;
+    f->done     = 1;
+    f->has_exc  = 1;
+    f->exc_type = exc_type ? exc_type : _MOJO_EXC_TAG_EXCEPTION;
+    f->exc_msg  = msg;
+    future_resolve(h, f);
+}
+
+int64_t
+__mojo_future_exception(int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    return (f && f->has_exc) ? f->exc_type : 0;
+}
+
+/* (2) cancelled state -- `fut.cancel()` / `fut.cancelled()` /
+   `fut.set_running_or_notify_cancel()`. cancel() resolves the future
+   (returns 1 if it took effect, 0 if it was already resolved);
+   `await fut` on a cancelled future raises CancelledError. */
+int64_t
+__mojo_future_cancel(int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    if (!f || f->done) return 0;
+    f->done      = 1;
+    f->cancelled = 1;
+    future_resolve(h, f);
+    return 1;
+}
+
+int64_t
+__mojo_future_cancelled(int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    return f && f->cancelled;
+}
+
+/* asyncio semantics: False if the future was cancelled (caller must abort),
+   True otherwise. */
+int64_t
+__mojo_future_set_running_or_notify_cancel(int64_t h)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    return f && !f->cancelled;
+}
+
+/* (3) done-callback list -- `fut.add_done_callback(cb)` /
+   `fut.remove_done_callback(cb)`. Callbacks fire (LIFO) on resolution via
+   future_fire_callbacks; see __mojo_future_invoke_callback for the
+   invocation contract and its current limitation. */
+void
+__mojo_future_add_done_callback(int64_t h, int64_t cb)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    if (!f) return;
+    if (f->done) { __mojo_future_invoke_callback(cb, h); return; }
+    MojoFutureCB *node = (MojoFutureCB *)calloc(1, sizeof *node);
+    node->cb   = cb;
+    node->next = f->callbacks;
+    f->callbacks = node;
+}
+
+int64_t
+__mojo_future_remove_done_callback(int64_t h, int64_t cb)
+{
+    MojoFuture *f = (MojoFuture *)(uintptr_t)h;
+    if (!f) return 0;
+    int removed = 0;
+    MojoFutureCB **pp = &f->callbacks;
+    while (*pp) {
+        if ((*pp)->cb == cb) {
+            MojoFutureCB *d = *pp;
+            *pp = d->next;
+            free(d);
+            removed++;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+    return removed;
 }
 
 /* `await <future>` / `await <event>.wait()` -- called from inside a lowered
@@ -470,6 +624,19 @@ __mojo_async_await_future(int64_t coro, int64_t h)
     while (!f->done) {
         __mojo_coro_yield_tagged((MojoCoro *)(uintptr_t)coro,
                                  mojo_wd_make(MOJO_WD_FUTURE, h), 1);
+    }
+    /* Resolved by cancel() / set_exception() -> re-raise on THIS
+       coroutine's stack (its body's landing pad catches it, exactly as if
+       the body had executed a `raise`). */
+    if (f->cancelled) {
+        mojo_exc_type_set(_MOJO_EXC_TAG_CANCELLEDERROR);
+        mojo_exc_msg_set((char *)"");
+        mojo_raise();
+    }
+    if (f->has_exc) {
+        mojo_exc_type_set(f->exc_type);
+        mojo_exc_msg_set(f->exc_msg ? f->exc_msg : (char *)"");
+        mojo_raise();
     }
     return f->result;
 }

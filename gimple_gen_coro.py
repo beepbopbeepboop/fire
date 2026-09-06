@@ -927,6 +927,27 @@ def _rewrite_async_expr(node, cvar: str):
             return _call('__mojo_future_done', [_rewrite_async_expr(_obj, cvar)])
         if _m == 'result' and not node.args:
             return _call('__mojo_future_result', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'set_exception' and len(node.args) == 1:
+            _tag, _msg = _exc_arg_to_shim_args(node.args[0], cvar)
+            return _call('__mojo_future_set_exception',
+                         [_rewrite_async_expr(_obj, cvar), _tag, _msg])
+        if _m == 'exception' and not node.args:
+            return _call('__mojo_future_exception', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'cancel' and not node.args:
+            return _call('__mojo_future_cancel', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'cancelled' and not node.args:
+            return _call('__mojo_future_cancelled', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'set_running_or_notify_cancel' and not node.args:
+            return _call('__mojo_future_set_running_or_notify_cancel',
+                         [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'add_done_callback' and len(node.args) == 1:
+            return _call('__mojo_future_add_done_callback',
+                         [_rewrite_async_expr(_obj, cvar),
+                          _rewrite_async_expr(node.args[0], cvar)])
+        if _m == 'remove_done_callback' and len(node.args) == 1:
+            return _call('__mojo_future_remove_done_callback',
+                         [_rewrite_async_expr(_obj, cvar),
+                          _rewrite_async_expr(node.args[0], cvar)])
         if _m in ('Future',) and not node.args:
             return _call('__mojo_future_new', [])
         if _m in ('Event',) and not node.args:
@@ -1456,6 +1477,40 @@ def _c_ident(name: str) -> N.IdentExpr:
 
 def _call(fn_name: str, args: list) -> N.CallExpr:
     return N.CallExpr(func=_c_ident(fn_name), args=list(args))
+
+
+import zlib as _zlib
+
+
+def _exc_type_tag(name: str) -> int:
+    return (_zlib.crc32(name.encode()) & 0x7fffffff) or 1
+
+
+def _looks_like_exc_class(name: str) -> bool:
+    return bool(name) and name[:1].isupper() and (
+        name.endswith('Error') or name.endswith('Exception')
+        or name in ('CancelledError', 'GeneratorExit', 'KeyboardInterrupt'))
+
+
+def _exc_arg_to_shim_args(arg, cvar: str) -> tuple:
+    """Lower a `set_exception(<arg>)` argument to the (type_tag_int,
+    message_expr) pair __mojo_future_set_exception takes -- the same
+    shapes `raise` lowering (gimple_gen_stmts._gen_stmt_RaiseStmt)
+    recognises: `Exc("msg")`, `Exc`, or a bare bound name."""
+    name = None
+    msg = None
+    if (isinstance(arg, N.CallExpr) and isinstance(arg.func, N.IdentExpr)):
+        name = arg.func.name
+        if len(arg.args) == 1 and isinstance(arg.args[0], N.StringLiteral):
+            msg = arg.args[0]
+    elif isinstance(arg, N.IdentExpr) and _looks_like_exc_class(arg.name):
+        name = arg.name
+    tag = _exc_type_tag(name) if name else 0
+    if msg is None:
+        msg = N.StringLiteral(value="")
+    else:
+        msg = _rewrite_async_expr(msg, cvar)
+    return N.IntLiteral(value=tag), msg
 
 
 def _rewrite_expr(node, cvar: str, kind: str):
@@ -2154,7 +2209,15 @@ def emit_c(meta_entry: dict) -> str:
 def register(gen, meta: list) -> None:
     """Populate gen so the ordinary generator-call / for / next consumers
     treat each lowered generator exactly like a cpp-path one."""
-    if not meta:
+    # The native-Future-class bridge (_rewrite_native_future_refs) drops the
+    # user's `Future` StructDef wholesale, so a module that ONLY defines
+    # such a class produces no coro `meta` -- but its ordinary (sync)
+    # module-level functions still call `.cancel()` / `.set_exception()` /
+    # `.add_done_callback()` etc. on the bare int64_t handle and need the
+    # __mojo_future_* shim externs declared + the sync hooks armed.
+    if _NATIVE_FUTURE_CLASSES:
+        gen._native_future_bridge = True
+    if not meta and not _NATIVE_FUTURE_CLASSES:
         return
     units = getattr(gen, '_stackswitch_coro_c_units', None)
     if units is None:
@@ -2221,6 +2284,20 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_future_result', 'int64_t')
     gen.func_param_types.setdefault('__mojo_future_set_result', ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_future_set_result', 'void')
+    gen.func_param_types.setdefault('__mojo_future_set_exception', ['int64_t', 'int64_t', 'char *'])
+    gen.func_return_types.setdefault('__mojo_future_set_exception', 'void')
+    gen.func_param_types.setdefault('__mojo_future_exception', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_exception', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_cancel', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_cancel', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_cancelled', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_cancelled', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_set_running_or_notify_cancel', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_set_running_or_notify_cancel', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_future_add_done_callback', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_add_done_callback', 'void')
+    gen.func_param_types.setdefault('__mojo_future_remove_done_callback', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_future_remove_done_callback', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_await_future', ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_async_await_future', 'int64_t')
     gen.func_param_types.setdefault('__mojo_event_new', [])

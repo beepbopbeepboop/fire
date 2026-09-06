@@ -4175,6 +4175,44 @@ def main():
     print(asyncio.run(main_co()))
 """)
 
+    # bugs/COMPILE_FAIL_asyncio_futures.md items (1)-(3): the native Future
+    # handle now carries an exception slot (set_exception/exception), a
+    # cancelled state (cancel/cancelled/set_running_or_notify_cancel) and a
+    # done-callback list (add_done_callback/remove_done_callback). These
+    # method names lower to the __mojo_future_* shims instead of stubbing.
+    # Behavioral proof (await raising on set_exception, cancel/cancelled,
+    # a callback firing on set_result): test_coro_future_await.py.
+    test("async_future_exception_cancel_callbacks", """\
+import asyncio
+
+def on_done(fut: Int):
+    print("done")
+
+async def worker(fut: Int) -> Int:
+    try:
+        var v = await fut
+        return v
+    except Exception:
+        return -1
+
+async def main_co() -> Int:
+    var fut = create_future()
+    fut.add_done_callback(on_done)
+    if fut.set_running_or_notify_cancel():
+        fut.set_exception(ValueError("boom"))
+    var r = await worker(fut)
+    var f2 = create_future()
+    var did = f2.cancel()
+    if f2.cancelled():
+        r = r + did
+    if f2.exception() == 0:
+        r = r + 1
+    return r
+
+def main():
+    print(asyncio.run(main_co()))
+""")
+
     # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
     # function>` (Step D) are both supported now — see
     # test_async_await_composition_compiles_via_cpp_path and

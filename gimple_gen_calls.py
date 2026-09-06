@@ -346,7 +346,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and node.func.name in ('create_future', 'Event', 'Future')
             and not node.args and not getattr(node, 'kwargs', None)
             and os.environ.get('MOJO_CORO', 'stackswitch') != 'cpp'
-            and getattr(gen, '_stackswitch_coro_c_units', None)
+            and (getattr(gen, '_stackswitch_coro_c_units', None)
+                 or getattr(gen, '_native_future_bridge', False))
             and node.func.name not in gen.struct_field_types
             and node.func.name not in gen.func_return_types):
         shim = '__mojo_event_new' if node.func.name == 'Event' else '__mojo_future_new'

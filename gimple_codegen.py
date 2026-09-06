@@ -3771,7 +3771,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
-    if _coro_meta:
+    if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
     gen._current_filename = filename
     # Self-hosting bootstrap: when compiling this compiler's own entry point

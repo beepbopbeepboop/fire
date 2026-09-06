@@ -462,6 +462,149 @@ def main():
           out == "42\n", detail=repr(out))
 
 
+def test_future_set_exception_await_raises():
+    """(1) exception slot: `fut.set_exception(Exc(...))` then `await fut`
+    re-raises on the awaiting coroutine's own stack -- caught by an
+    ordinary `except` in the body. `fut.exception()` is truthy once set."""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    try:
+        var v = await fut
+        return v + 1
+    except Exception:
+        return 99
+
+async def main_co() -> Int:
+    var fut = create_future()
+    fut.set_exception(ValueError("boom"))
+    var got_exc = 0
+    if fut.exception() != 0:
+        got_exc = 1
+    var r = await consumer(fut)
+    return r + got_exc
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("set_exception + await re-raises (caught) and exception() is truthy",
+          out == "100\n", detail=repr(out))
+
+
+def test_future_cancel_state():
+    """(2) cancelled state: `fut.cancel()` resolves the future and returns
+    1; `fut.cancelled()` then reports True; `set_running_or_notify_cancel()`
+    reports False on a cancelled future, True otherwise."""
+    src = """\
+import asyncio
+
+async def main_co() -> Int:
+    var a = create_future()
+    var ok_before = 0
+    if a.set_running_or_notify_cancel():
+        ok_before = 1
+    var did = a.cancel()
+    var is_cancelled = 0
+    if a.cancelled():
+        is_cancelled = 1
+    var ok_after = 0
+    if a.set_running_or_notify_cancel():
+        ok_after = 1
+    return ok_before * 1000 + did * 100 + is_cancelled * 10 + ok_after
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("cancel()/cancelled()/set_running_or_notify_cancel()",
+          out == "1110\n", detail=repr(out))
+
+
+def test_future_cancel_await_raises():
+    """(2) awaiting a cancelled future raises (CancelledError) in the
+    awaiting coroutine."""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    try:
+        var v = await fut
+        return v
+    except Exception:
+        return 7
+
+async def main_co() -> Int:
+    var fut = create_future()
+    var _ = fut.cancel()
+    return await consumer(fut)
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("await <cancelled future> raises in the awaiter",
+          out == "7\n", detail=repr(out))
+
+
+def test_future_done_callback_fires():
+    """(3) done-callback list: a bare top-level `def cb(fut)` registered via
+    add_done_callback fires when the future resolves via set_result.
+    remove_done_callback drops it before resolution."""
+    src = """\
+import asyncio
+
+def cb_a(fut: Int):
+    print("cb_a")
+
+def cb_b(fut: Int):
+    print("cb_b")
+
+async def main_co() -> Int:
+    var f = create_future()
+    f.add_done_callback(cb_a)
+    f.add_done_callback(cb_b)
+    var removed = f.remove_done_callback(cb_b)
+    f.set_result(5)
+    return removed
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("add_done_callback fires on resolve; remove_done_callback drops one",
+          out == "cb_a\n1\n", detail=repr(out))
+
+
+def test_future_done_callback_on_set_exception():
+    """(3) callbacks also fire when the future resolves via set_exception."""
+    src = """\
+import asyncio
+
+def cb(fut: Int):
+    print("resolved")
+
+async def worker(fut: Int) -> Int:
+    try:
+        return await fut
+    except Exception:
+        return 0
+
+async def main_co() -> Int:
+    var f = create_future()
+    f.add_done_callback(cb)
+    f.set_exception(RuntimeError("x"))
+    return await worker(f)
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("done-callback fires on set_exception resolution",
+          out == "resolved\n0\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

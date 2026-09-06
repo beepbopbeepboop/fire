@@ -154,7 +154,8 @@ def compile_program(input_file, src, output=None, run=True,
     # link the small Layer 1 shim + Layer 2 + arch Layer 3 whenever the
     # generated client .c references them (gimple_gen_coro lowered a
     # generator this way). Plain C / asm — NOT -fgimple.
-    if '__mgco_' in c_code or '__mojo_coro_yield_i' in c_code:
+    if ('__mgco_' in c_code or '__mojo_coro_yield_i' in c_code
+            or '__mojo_future_' in c_code or '__mojo_event_' in c_code):
         _plain = ('-fPIC', f'-I{RUNTIME}') + flags
         _arch = ('mojo_coro_ctx_aarch64.S'
                  if platform.machine().lower() in ('arm64', 'aarch64')

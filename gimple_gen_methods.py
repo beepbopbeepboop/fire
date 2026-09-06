@@ -1698,7 +1698,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # source and no non-asyncio stdlib module calls them (grep-confirmed),
     # and the runtime shims are callable from any C context.
     if (os.environ.get('MOJO_CORO', 'stackswitch') != 'cpp'
-            and getattr(gen, '_stackswitch_coro_c_units', None)
+            and (getattr(gen, '_stackswitch_coro_c_units', None)
+                 or getattr(gen, '_native_future_bridge', False))
             and not getattr(node, 'kwargs', None)):
         _fut_sn = (gimple_exprtypes._struct_name_of(ot)
                    if isinstance(ot, str) and ot.endswith(' *') else None)
@@ -1731,6 +1732,45 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gen._emit_call('void', '', '__mojo_future_set_result',
                                [('int64_t', ov), (_at, _av)])
                 return 'void', ''
+            if method == 'set_exception' and len(node.args) == 1:
+                _ea = node.args[0]
+                _ename = None
+                _emsg = None
+                if (isinstance(_ea, gimple_ctypes.CallExpr)
+                        and isinstance(_ea.func, gimple_ctypes.IdentExpr)):
+                    _ename = _ea.func.name
+                    if len(_ea.args) == 1 and isinstance(_ea.args[0], gimple_ctypes.StringLiteral):
+                        _emsg = _ea.args[0]
+                elif (isinstance(_ea, gimple_ctypes.IdentExpr)
+                      and _ea.name[:1].isupper()
+                      and (_ea.name.endswith('Error') or _ea.name.endswith('Exception'))):
+                    _ename = _ea.name
+                _tag = gen._exc_type_id(_ename) if _ename else 0
+                if _emsg is not None:
+                    _mt, _mv = gen.lower_expr(_emsg)
+                else:
+                    _mt, _mv = 'char *', '(char *)""'
+                gen._emit_call('void', '', '__mojo_future_set_exception',
+                               [('int64_t', ov), ('int64_t', str(_tag)), (_mt, _mv)])
+                return 'void', ''
+            if method == 'exception' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_exception', [('int64_t', ov)])
+            if method == 'cancel' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_cancel', [('int64_t', ov)])
+            if method == 'cancelled' and not node.args:
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_cancelled', [('int64_t', ov)])
+            if method == 'set_running_or_notify_cancel' and not node.args:
+                return 'int64_t', gen._call_expr(
+                    'int64_t', '__mojo_future_set_running_or_notify_cancel', [('int64_t', ov)])
+            if method == 'add_done_callback' and len(node.args) == 1:
+                _ct, _cv = gen.lower_expr(node.args[0])
+                gen._emit_call('void', '', '__mojo_future_add_done_callback',
+                               [('int64_t', ov), (_ct, _cv)])
+                return 'void', ''
+            if method == 'remove_done_callback' and len(node.args) == 1:
+                _ct, _cv = gen.lower_expr(node.args[0])
+                return 'int64_t', gen._call_expr('int64_t', '__mojo_future_remove_done_callback',
+                                                 [('int64_t', ov), (_ct, _cv)])
 
     # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct
     # enclosing the current classmethod (current_func_name is e.g.

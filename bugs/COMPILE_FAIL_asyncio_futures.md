@@ -1,5 +1,85 @@
 # COMPILE_FAIL: asyncio/futures.py
 
+## Status (2026-09-05 latest — native Future handle items (1)/(2)/(3) LANDED; futures.py isolated-compile stub markers 37 -> 11, and every remaining one is an out-of-scope subsystem)
+
+Implemented all three remaining pieces the prior entry listed, on the
+native `MojoFuture` handle (`runtime/mojo_coro_gen.c`), built on the
+existing struct + scheduler wait table — no parallel implementation:
+
+- **(1) exception slot.** `MojoFuture` gains `has_exc` / `exc_type` /
+  `exc_msg`. `fut.set_exception(Exc("msg"))` lowers (both the async-body
+  hook in `gimple_gen_coro._rewrite_async_expr` and the sync hook in
+  `gimple_gen_methods.py`) to `__mojo_future_set_exception(h, <_exc_type_id
+  tag>, <msg>)`, resolving the future. `fut.exception()` →
+  `__mojo_future_exception` (returns the tag, truthy iff set). `await fut`
+  on an exception-resolved future re-raises on the *awaiting* coroutine's
+  own stack (`mojo_exc_type_set`/`mojo_exc_msg_set`/`mojo_raise` inside
+  `__mojo_async_await_future`) — caught by an ordinary `except` in the
+  body. Behavioural test: `test_coro_future_await.py`
+  `test_future_set_exception_await_raises` /
+  `test_future_done_callback_on_set_exception`.
+
+- **(2) cancelled state.** `MojoFuture.cancelled`. `fut.cancel()` →
+  `__mojo_future_cancel` (resolves, returns 1 if it took effect);
+  `fut.cancelled()` → `__mojo_future_cancelled`;
+  `fut.set_running_or_notify_cancel()` →
+  `__mojo_future_set_running_or_notify_cancel` (asyncio semantics: False
+  iff already cancelled). `await <cancelled future>` raises
+  `CancelledError` (tag 760980751) in the awaiter. Tests
+  `test_future_cancel_state` / `test_future_cancel_await_raises`.
+
+- **(3) done-callback list.** `MojoFuture.callbacks` (LIFO linked list).
+  `fut.add_done_callback(cb)` / `fut.remove_done_callback(cb)` →
+  `__mojo_future_add_done_callback` / `__mojo_future_remove_done_callback`.
+  A single `future_resolve()` path now backs `set_result` /
+  `set_exception` / `cancel`: it wakes every parked awaiter
+  (`__mojo_async_notify_future`) then fires the callbacks
+  (`future_fire_callbacks`). Callback *invocation*
+  (`__mojo_future_invoke_callback`, a weak symbol) currently treats the
+  handle as a plain `void(*)(int64_t)` C function pointer called with the
+  future handle — correct for the dominant compiled case, a bare top-level
+  `def cb(fut)` passed by name (`_funcptr_<csym>` value). A bound-method
+  (`MojoBoundMethod*`) or closure-capture callback arrives here as an
+  int64_t too and the codegen does not yet emit a tag distinguishing the
+  handle kinds — those forms are *recorded* faithfully by
+  `add_done_callback` but need a tagged-handle dispatch (overriding the
+  weak symbol) before invocation is correct for them. That tag is the one
+  remaining piece of (3). Tests `test_future_done_callback_fires`
+  (top-level fn callback firing on `set_result`, plus `remove_done_callback`).
+
+Codegen wiring: `register()` (gimple_gen_coro.py) and the sync Future-op
+hooks (gimple_gen_methods.py / gimple_gen_calls.py) now also arm when the
+native-Future-class bridge ran (`gen._native_future_bridge`), not only when
+the module emitted its own stack-switch coro unit — the bridge *drops* the
+`Future` StructDef, so a module (like futures.py) whose only coroutine was
+`Future.__await__` otherwise produced no `_stackswitch_coro_c_units` and
+left every sync `.cancel()`/`.set_exception()`/… call stubbing.
+`gimple_module_gen.py` emits the shim externs under the same OR; `driver.py`
+link-mode links the coro runtime when `__mojo_future_`/`__mojo_event_`
+appears in the generated C.
+
+**`Lib/asyncio/futures.py` isolated compile** (`compile_to_gimple(
+do_imports=False)`, grep `stubbed`): **37 → 11 markers.** Every
+Future-method name the prior entry listed — `set_result`, `result`,
+`done`, `create_future`, `set_exception`, `exception`, `cancel`,
+`cancelled`, `set_running_or_notify_cancel`, `add_done_callback`,
+`remove_done_callback` — is now gone from the stub list. The residual 11
+are two *separate* subsystems, neither this doc's tracked blocker:
+  * event-loop integration — `_get_running_loop()`, `get_event_loop()`,
+    `call_soon_threadsafe()`, `is_closed()` (there is no compiled event-loop
+    object; the A3 scheduler is the loop, reached only via `asyncio.run`);
+  * exception-*constructor* lowering — `CancelledError()`,
+    `InvalidStateError()`, `.with_traceback()` (the general "an exception
+    constructor call can't be lowered to GIMPLE" gap, tracked with `raise`
+    lowering, not futures-specific).
+
+Doc kept open only for those two out-of-scope residuals + the
+separately-tracked `collections`/`inspect` transitive-import
+source-fallback (`bugs/COMPILE_FAIL_collections___init__.md`) that blocks
+the whole-program link-mode build. The native-Future functional surface
+this doc was reopened for on 2026-09-05 is now complete apart from the
+bound-method-callback tag noted in (3).
+
 ## Status (2026-09-05 later — native Future-class __await__ bridge landed (commit 981c647); futures.py compiles in isolation + gcc-syntax-checks clean, but is NOT functionally complete — several Future methods still silently stub)
 
 `gimple_gen_coro.py`'s new native-Future-class bridge
