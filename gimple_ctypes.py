@@ -1230,6 +1230,17 @@ def _extract_init_expr(stmt_value) -> str:
     """Generate C initialization code for a module-level assignment RHS."""
     if stmt_value is None:
         return '0'
+    # Scalar literals FIRST — on the self-hosted compiled path `isinstance`
+    # against the container node classes (DictExpr/ListExpr/SetExpr) was
+    # observed to mis-match a plain `IntLiteral` (`x = 42` -> the DictExpr
+    # branch's `return '0'` -> `.x = 0` instead of `.x = 42`, a
+    # stage1-vs-stage2 parity break under MOJO_NO_SHIM=1). Checking the
+    # unambiguous `.value`-bearing literal shapes before the containers
+    # sidesteps that.
+    if isinstance(stmt_value, IntLiteral):
+        return str(stmt_value.value)
+    if isinstance(stmt_value, BoolLiteral):
+        return '1' if stmt_value.value else '0'
     if isinstance(stmt_value, DictExpr):
         if not stmt_value.pairs:
             return 'mojo_dict_new()'
@@ -1242,10 +1253,6 @@ def _extract_init_expr(stmt_value) -> str:
         if not stmt_value.elements:
             return 'mojo_set_new()'
         return '0'
-    elif isinstance(stmt_value, IntLiteral):
-        return str(stmt_value.value)
-    elif isinstance(stmt_value, BoolLiteral):
-        return '1' if stmt_value.value else '0'
     elif isinstance(stmt_value, StringLiteral):
         # An f/t-string's raw `.value` is the UNDECODED source text,
         # INCLUDING its f/t prefix and quotes (real decoding + runtime
