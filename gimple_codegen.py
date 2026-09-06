@@ -3012,6 +3012,9 @@ class GimpleGen:
     def _struct_defines_method(self, sn: str, mname: str) -> bool:
         return ggc._struct_defines_method(self, sn, mname)
 
+    def _dict_subclass_defines(self, sn: str, method: str) -> bool:
+        return ggc._dict_subclass_defines(self, sn, method)
+
     def _emit_struct_subscript_write(self, obj_v: str, obj_t: str, idx_v: str, val: str, val_t: str) -> bool:
         return ggc._emit_struct_subscript_write(self, obj_v, obj_t, idx_v, val, val_t)
 

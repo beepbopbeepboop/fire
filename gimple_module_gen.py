@@ -2571,6 +2571,20 @@ def gen_module_impl(self, stmts):
                 if target_def is not None and any(
                         m.name == '__getattr__' for m in target_def.methods):
                     continue
+                # A builtin-`dict` subclass instance's `.get`/`.keys`/
+                # `.values`/`.items`/`.update`/`.pop`/`.setdefault` are
+                # inherited container methods delegated to the hidden
+                # `_data` backing store (see gimple_gen_methods.py's
+                # dict-subclass delegation) — NOT phantom scalar fields.
+                # Minting an `int` field named `get` here would make
+                # `d.get(k)` lower as a function-pointer field call.
+                if (fn in ('get', 'keys', 'values', 'items', 'update',
+                           'pop', 'setdefault', 'clear')
+                        and target_struct in getattr(
+                            self, '_dict_subclass_structs', ())
+                        and not any(m.name == fn for m in
+                                    (target_def.methods if target_def else ()))):
+                    continue
                 self.struct_field_types[target_struct][fn] = 'int'
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):

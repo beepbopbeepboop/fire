@@ -1,5 +1,44 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-09-06 — Stage-4 optional tail LANDED: `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()/.clear()` + `for k in d` delegation on a dict-subclass instance)
+
+Inherited container METHODS on a builtin-`dict`-subclass instance now
+delegate to the hidden `_data` backing store, exactly like `d[k]` /
+`k in d` / `len(d)` already did:
+
+- `gimple_gen_methods.py` `_lower_method_call` — a new delegation block
+  (right after the generator-method check, before every generic
+  fallback) routes `.get / .keys / .values / .items / .update / .pop /
+  .setdefault / .clear` on a `_dict_subclass_of(ot)` receiver to
+  `_lower_dict_method(inst->_data, ...)`, UNLESS the struct or a local
+  base up its MRO defines its own override (`_dict_subclass_defines`,
+  new helper in `gimple_gen_calls.py`, walks `_struct_bases`). `update`
+  also unwraps a dict-subclass ARGUMENT to its `_data`.
+- `gimple_gen_loops.py` — `for k in <dict-subclass instance>` (no
+  `__iter__`/`__next__`/`__has_next__` override) iterates
+  `it_val->_data` via `_gen_for_dict`. `for k, v in d.items()` already
+  worked once `.items()` returns the real `mojo_dict_items` list.
+- `gimple_module_gen.py` `_scan_body_for_local_field_access` — no longer
+  mints phantom `int` fields named `get`/`keys`/`values`/`items`/… on a
+  dict-subclass struct from `d.get(...)` call sites (they were being
+  lowered as function-pointer field calls → `mojo_obj_call1` stub).
+
+Collections isolated probe (`compile_to_gimple(do_imports=False)` on
+`/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`): still
+compiles, still clean under `gcc-mp-15 -fgimple -fsyntax-only`. The
+generic dynamic-dispatch fallback (`mojo_obj_call1`) in the generated C
+dropped **16 → 2**; `mojo_dict_items` 9 → 19, `mojo_dict_values` 0 → 1,
+`->_data` 48 → 56 — i.e. substantially more of Counter/OrderedDict's
+inherited container operations now lower to real dict ops.
+
+Full gate green: check-linkmode 3/3, check-selfhost, stdlib dylib
+from-scratch **0 skips**, `compile_stdlib.py` **664/664, 0 unexpected**,
+`make bootstrap` all 180 files byte-identical across 3 stages.
+test_gimple.py 278/0, test_gimple_runner.py 24/0, test_module_cache.py
+76/0, test_gimple_generator_runner.py 80/4 (4 pre-existing, unrelated).
+
+Still open: the whole-program `mojo.py build` PERF barrier below.
+
 ## Status (2026-09-06 — whole-program `mojo.py build` of a dependent (asyncio/queues.py) is now PERF-bound, not codegen-bound)
 
 `isolated` `compile_to_gimple` of `collections/__init__.py`, `asyncio/

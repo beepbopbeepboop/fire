@@ -5112,6 +5112,56 @@ def main():
     print(go())
 """)
 
+    # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
+    # and `for k in d` on a builtin-`dict` subclass instance delegate to
+    # the hidden `_data` backing store — unless the subclass overrides
+    # them. See bugs/COMPILE_FAIL_collections___init__.md.
+    test("dict_subclass_container_method_delegation", """\
+class Bag(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    b = Bag()
+    b["a"] = 5
+    b["b"] = 2
+    print(b.get("a"))
+    print(b.get("zzz", 42))
+    total = 0
+    for k in b:
+        total += b[k]
+    print(total)
+    for k, v in b.items():
+        print(k)
+    print(len(b.keys()))
+    s = 0
+    for x in b.values():
+        s += x
+    print(s)
+    other = Bag()
+    other["c"] = 9
+    b.update(other)
+    print(len(b))
+    print(b.pop("a"))
+    print(b.setdefault("d", 7))
+""")
+
+    test("dict_subclass_method_override_wins_over_delegation", """\
+class Bag(dict):
+    def keys(self) -> str:
+        return "override"
+
+class Sub(Bag):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    s = Sub()
+    s["x"] = 1
+    print(s.keys())
+    print(s.get("x"))
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

@@ -474,6 +474,63 @@ def main():
         print("no zzz")
 """, "8\n1\n0\n2\nhas a\nno zzz\n")
 
+    # 21b. Inherited container METHODS on a dict-subclass instance —
+    # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
+    # and `for k in d` — delegate to the hidden `_data` backing store.
+    # A compile-only gate can't catch a wrong runtime value here.
+    test_gimple_stdout("gimple_dict_subclass_container_method_delegation", """\
+class Bag(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    b = Bag()
+    b["a"] = 5
+    b["b"] = 2
+    b["c"] = 9
+    print(b.get("a"))
+    print(b.get("zzz", 42))
+    total = 0
+    for k in b:
+        total += b[k]
+    print(total)
+    for k, v in b.items():
+        print(v)
+    print(len(b.keys()))
+    s = 0
+    for x in b.values():
+        s += x
+    print(s)
+    other = Bag()
+    other["d"] = 1
+    b.update(other)
+    print(len(b))
+    print(b.pop("a"))
+    print(b.setdefault("e", 7))
+    print(b.setdefault("b", 100))
+""", "5\n42\n16\n5\n2\n9\n3\n16\n4\n5\n7\n2\n")
+
+    # 21c. A subclass method override beats builtin-dict delegation, and
+    # delegation still reaches through a transitive (non-overriding) base.
+    test_gimple_stdout("gimple_dict_subclass_override_beats_delegation", """\
+class Bag(dict):
+    def keys(self) -> str:
+        return "override"
+
+class Sub(Bag):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    s = Sub()
+    s["x"] = 1
+    s["y"] = 2
+    print(s.keys())
+    print(s.get("x"))
+    for k, v in s.items():
+        print(k)
+""", "override\n1\nx\ny\n")
+
     # Slice-assignment really mutates the list in place (full + bounded,
     # growing and shrinking, pure insert, negative bounds) — this is the
     # regression guard for bugs/CODEGEN_slice_assignment_silently_noops.md

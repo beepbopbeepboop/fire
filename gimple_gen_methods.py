@@ -1986,6 +1986,30 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._generator_var_api[t] = _gm_api
         return 'MojoGenerator *', t
 
+    # ── Builtin-`dict` subclass container delegation ─────────────────────
+    # A user struct whose transitive bases bottom out at builtin `dict`
+    # (see gen_module_impl's `_dict_subclass_structs`) carries a hidden
+    # `_data: MojoDict *` backing store. `.get()/.keys()/.values()/
+    # .items()/.update()/.pop()/.setdefault()/.clear()` on such an instance
+    # are real inherited `dict` methods — route them at `inst->_data`,
+    # exactly like `d[k]` / `k in d` / `len(d)` already do — UNLESS this
+    # struct (or a local base up its MRO) defines its own override, in
+    # which case ordinary struct-method dispatch below wins. Counter /
+    # OrderedDict / defaultdict use these heavily. See
+    # bugs/COMPILE_FAIL_collections___init__.md. Checked here, right after
+    # `ot` has been resolved to the receiver's real struct-pointer type
+    # and BEFORE every generic fallback (opaque-int coerce, the
+    # `_sn not in func_return_types` mojo_obj_call1 stub, struct-method
+    # dispatch) that would otherwise mis-lower an inherited container call.
+    if isinstance(ot, str) and ot.endswith(' *'):
+        _dsub_m = gen._dict_subclass_of(ot)
+        if (_dsub_m
+                and method in ('get', 'keys', 'values', 'items',
+                               'update', 'pop', 'setdefault', 'clear')
+                and not gen._dict_subclass_defines(_dsub_m, method)):
+            _dsub_dp = gen._new_val('MojoDict *', f"{ov}->_data")
+            return gen._lower_dict_method(_dsub_dp, method, node.args)
+
     # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
     # Must intercept BEFORE the opaque-int coerce below, which would misidentify
     # 'join' as a string method and corrupt the class ref.
@@ -2566,6 +2590,13 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             return 'int64_t', raw
     if method == 'update' and args:
         other_type, other_val = gen.lower_expr(args[0])
+        # `d1.update(d2)` where d2 is itself a builtin-`dict` subclass
+        # instance — the real dict lives in its hidden `_data` field, not
+        # at the struct pointer itself.
+        _od_sub = gen._dict_subclass_of(other_type)
+        if _od_sub:
+            other_val = gen._new_val('MojoDict *', f"{other_val}->_data")
+            other_type = 'MojoDict *'
         ov_cast = gen._coerce_to_type('MojoDict *', 'MojoDict *', ov)
         other_val_cast = gen._coerce_to_type(other_type, 'MojoDict *', other_val)
         gen._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")

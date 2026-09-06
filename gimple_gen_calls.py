@@ -4142,6 +4142,27 @@ def _struct_defines_method(gen, sn: str, mname: str) -> bool:
     return sig is not None and len(sig) > 0
 
 
+def _dict_subclass_defines(gen, sn: str, method: str) -> bool:
+    """True if `sn` OR a local base up its inheritance chain defines its
+    own `method` — an override that must win over builtin-`dict`
+    delegation through the hidden `_data` backing store. The builtin
+    terminal base (`dict`) contributes no method bodies of its own."""
+    if not sn:
+        return False
+    seen = set()
+    stack = [sn]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if gen._struct_defines_method(cur, method):
+            return True
+        for b in (getattr(gen, '_struct_bases', {}).get(cur) or []):
+            stack.append(b)
+    return False
+
+
 def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: str, val_t: str) -> bool:
     """Emit `obj[idx] = val` for a struct-with-_data pointer. Returns True if handled."""
     fname, ftype = gen._struct_data_field(obj_t)

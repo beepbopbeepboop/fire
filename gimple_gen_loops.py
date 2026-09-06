@@ -646,7 +646,17 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             base = gimple_exprtypes._struct_name_of(it_type)
             has_next = f"{base}___has_next__"
             nxt      = f"{base}___next__"
-            if has_next in gen.func_return_types or nxt in gen.func_return_types:
+            # A builtin-`dict` subclass instance with no iterator-protocol
+            # override: `for k in d` iterates the hidden `_data` backing
+            # store's keys, exactly like a plain dict. A subclass defining
+            # its own `__iter__`/`__next__` keeps the protocol path above.
+            if (gen._dict_subclass_of(it_type)
+                    and has_next not in gen.func_return_types
+                    and nxt not in gen.func_return_types
+                    and f"{base}___iter__" not in gen.func_return_types):
+                _dsub_dp = gen._new_val('MojoDict *', f"{it_val}->_data")
+                gen._gen_for_dict(var, _dsub_dp, node.body, shadow_name=shadow_name)
+            elif has_next in gen.func_return_types or nxt in gen.func_return_types:
                 gen._gen_for_struct_iter(var, it_type, it_val, node.body, shadow_name=shadow_name)
             else:
                 gimple_ctypes._debug_note('for loop dropped (no iterator protocol)', it_type)
