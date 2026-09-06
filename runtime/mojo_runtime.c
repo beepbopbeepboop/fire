@@ -998,6 +998,95 @@ int mojo_str_contains(char *haystack, char *needle)
 char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i < 0 ? i + s->len : i]; }
 void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 
+/* ── bytes ──────────────────────────────────────────────────────────────*/
+static MojoBytes *mojo_bytes_alloc(int64_t len)
+{
+    MojoBytes *b = malloc(sizeof(MojoBytes));
+    b->len  = len;
+    b->data = malloc((size_t)(len < 0 ? 0 : len) + 1);
+    b->data[len < 0 ? 0 : len] = 0;
+    return b;
+}
+
+MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len)
+{
+    MojoBytes *b = mojo_bytes_alloc(len);
+    if (len > 0) memcpy(b->data, data, (size_t)len);
+    return b;
+}
+
+MojoBytes *mojo_bytes_empty(void) { return mojo_bytes_alloc(0); }
+
+MojoBytes *mojo_bytes_zeros(int64_t n)
+{
+    if (n < 0) n = 0;
+    MojoBytes *b = mojo_bytes_alloc(n);
+    memset(b->data, 0, (size_t)n);
+    return b;
+}
+
+MojoBytes *mojo_bytes_from_list(MojoList *l)
+{
+    int64_t n = mojo_list_len(l);
+    MojoBytes *b = mojo_bytes_alloc(n);
+    for (int64_t i = 0; i < n; i++)
+        b->data[i] = (uint8_t)(mojo_list_get_int(l, i) & 0xFF);
+    return b;
+}
+
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
+{
+    (void)encoding; /* utf-8 / ascii: source is already a UTF-8 char* */
+    int64_t n = (int64_t)strlen(s);
+    return mojo_bytes_new_lit(s, n);
+}
+
+int64_t mojo_bytes_len(MojoBytes *b) { return b->len; }
+
+int64_t mojo_bytes_get(MojoBytes *b, int64_t i)
+{
+    if (i < 0) i += b->len;
+    if (i < 0 || i >= b->len) return 0;
+    return (int64_t)b->data[i];
+}
+
+int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
+{
+    if (a == b) return 1;
+    if (a == NULL || b == NULL) return 0;
+    return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
+}
+
+int mojo_bytes_truthy(MojoBytes *b) { return b != NULL && b->len != 0; }
+
+char *mojo_bytes_repr(MojoBytes *b)
+{
+    if (b == NULL) { char *s = malloc(5); memcpy(s, "None", 5); return s; }
+    /* worst case per byte: \xNN == 4 chars, plus b'' and NUL */
+    char *out = malloc((size_t)b->len * 4 + 4);
+    size_t p = 0;
+    out[p++] = 'b'; out[p++] = '\'';
+    for (int64_t i = 0; i < b->len; i++) {
+        unsigned c = b->data[i];
+        if (c == '\\' || c == '\'') { out[p++] = '\\'; out[p++] = (char)c; }
+        else if (c == '\n') { out[p++] = '\\'; out[p++] = 'n'; }
+        else if (c == '\t') { out[p++] = '\\'; out[p++] = 't'; }
+        else if (c == '\r') { out[p++] = '\\'; out[p++] = 'r'; }
+        else if (c >= 32 && c < 127) { out[p++] = (char)c; }
+        else { p += (size_t)sprintf(out + p, "\\x%02x", c); }
+    }
+    out[p++] = '\'';
+    out[p] = 0;
+    return out;
+}
+
+void mojo_bytes_print(MojoBytes *b)
+{
+    char *s = mojo_bytes_repr(b);
+    fputs(s, stdout);
+    free(s);
+}
+
 /* A single character (raw `char`, e.g. from string indexing) is a distinct
  * representation from a 1-character `char *` string — reinterpreting its
  * numeric byte value as a pointer (the boxed-int64_t-as-pointer convention

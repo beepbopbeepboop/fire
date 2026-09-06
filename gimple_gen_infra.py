@@ -2802,6 +2802,9 @@ def _stringify_value(gen, et: str, ev: str) -> str:
     # %s of such a value emitted `static char * <address> = "<address>"`.
     if et in ('int', 'int64_t') and gen._get_actual_type(et, ev) == 'char *':
         return gen._new_val('char *', f'(char *){ev}')
+    if et == 'MojoBytes *':
+        # Python str(b) / f"{b}" both give the b'...' repr text (no decode).
+        return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', ev)])
     if et == '_Bool':
         # Python str(True)/str(False) → "True"/"False", not the "1"/"0"
         # the int path below would produce.
@@ -3683,6 +3686,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoDict *':
             rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', aval)])
+            gen._emit(f'  {print_fn} ({rv});')
+        elif atype == 'MojoBytes *':
+            rv = gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', aval)])
             gen._emit(f'  {print_fn} ({rv});')
         else:
             t = gen._new_temp('char *')

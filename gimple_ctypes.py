@@ -237,6 +237,7 @@ _TYPE_MAP: dict[str | None, str] = {
     'Set':    'MojoSet *',
     'set':    'MojoSet *',
     'Str':    'MojoStr *',
+    'bytes':  'MojoBytes *',
     'None':   'void',
     # A boxed object reference (AST node child, dynamic value) is a 64-bit tagged
     # handle in this runtime, accessed via mojo_obj_getattr — never a 32-bit int.
@@ -325,6 +326,17 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_repeat':            'MojoStr *',
     'mojo_str_to_int':            'int64_t',
     'mojo_str_to_float':          'double',
+    # bytes
+    'mojo_bytes_new_lit':         'MojoBytes *',
+    'mojo_bytes_empty':           'MojoBytes *',
+    'mojo_bytes_zeros':           'MojoBytes *',
+    'mojo_bytes_from_list':       'MojoBytes *',
+    'mojo_bytes_from_str':        'MojoBytes *',
+    'mojo_bytes_len':             'int64_t',
+    'mojo_bytes_get':             'int64_t',
+    'mojo_bytes_eq':              'int',
+    'mojo_bytes_truthy':          'int',
+    'mojo_bytes_repr':            'char *',
     # C-string utilities used by the REPL and string methods
     'input':          'char *',
     'string_lower':   'char *',

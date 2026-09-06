@@ -1376,10 +1376,13 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # keep their existing precedence. param_defaults is keyed by the
     # bare declared name (the parser stores no star prefixes there),
     # matching how dup_def_signature_key looks the same table up.
+    _pdflt = (getattr(node, 'param_defaults', None) or {}).get(pname.lstrip('*'))
     if (ptype is None and ctype == 'int64_t'
-            and isinstance((getattr(node, 'param_defaults', None) or {}).get(
-                pname.lstrip('*')), StringLiteral)):
-        ctype = 'char *'
+            and isinstance(_pdflt, StringLiteral)):
+        # A `b'...'` default makes the param a `bytes` param; a plain string
+        # default makes it a `str` (char *) param. bytes must NOT be
+        # conflated with str — b[i] is an int, not a 1-char string.
+        ctype = 'MojoBytes *' if getattr(_pdflt, 'is_bytes', False) else 'char *'
     # Compile-time string types (StaticString, StringLiteral, StringRef,
     # StringSlice) are REAL strings in this codegen — a NUL-terminated
     # `char *`. The general resolver boxes them as opaque int64_t handles

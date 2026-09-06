@@ -156,6 +156,17 @@ def _lower_StringLiteral(gen, node):
     # different every run (ASLR). Re-tagging the value as `str` here recovers
     # it. CPython identity.
     val = _as_str(node.value)
+    if getattr(node, 'is_bytes', False):
+        # `b'...'` literal: node.value is latin-1 (one char == one output
+        # byte). Emit a byte-for-byte C string constant with EVERY byte as a
+        # fixed 3-digit octal escape (`\NNN`) so embedded NUL / high bytes
+        # are exact and can never run on into a following digit, then build
+        # the MojoBytes value at the literal site.
+        body = ''.join('\\%03o' % (ord(c) & 0xFF) for c in val)
+        sname = gen._intern_string(body)
+        temp = gen._new_val('MojoBytes *',
+                            f'mojo_bytes_new_lit ({sname}, {len(val)})')
+        return 'MojoBytes *', temp
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
         return gen._lower_IdentExpr(gimple_ctypes.IdentExpr(name=val))
@@ -2481,6 +2492,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # MojoStr == / != → mojo_str_eq
     if op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
         eq_t = gen._new_val('int', f"mojo_str_eq ({lv}, {rv})")
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
+    # MojoBytes == / != → mojo_bytes_eq (bytewise; never conflated with str)
+    if op in ('==', '!=') and lt == 'MojoBytes *' and rt == 'MojoBytes *':
+        eq_t = gen._new_val('int', f"mojo_bytes_eq ({lv}, {rv})")
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")

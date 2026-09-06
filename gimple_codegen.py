@@ -203,6 +203,17 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_repeat':            'MojoStr *',
     'mojo_str_to_int':            'int64_t',
     'mojo_str_to_float':          'double',
+    # bytes
+    'mojo_bytes_new_lit':         'MojoBytes *',
+    'mojo_bytes_empty':           'MojoBytes *',
+    'mojo_bytes_zeros':           'MojoBytes *',
+    'mojo_bytes_from_list':       'MojoBytes *',
+    'mojo_bytes_from_str':        'MojoBytes *',
+    'mojo_bytes_len':             'int64_t',
+    'mojo_bytes_get':             'int64_t',
+    'mojo_bytes_eq':              'int',
+    'mojo_bytes_truthy':          'int',
+    'mojo_bytes_repr':            'char *',
     # C-string utilities used by the REPL and string methods
     'input':          'char *',
     'string_lower':   'char *',
@@ -2747,6 +2758,7 @@ class GimpleGen:
     # `line_nums[-1]` was compiled as a pointer-null check, so an allocated-
     # but-empty list was still "truthy" and the guard never actually fired.
     _CONTAINER_LEN_FN = {
+        'MojoBytes *': 'mojo_bytes_len',
         'MojoList *': 'mojo_list_len',
         'MojoDict *': 'mojo_dict_len',
         'MojoSet *':  'mojo_set_len',

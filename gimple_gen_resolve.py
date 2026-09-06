@@ -1543,7 +1543,8 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.IntLiteral):    return 'int64_t'
     if isinstance(node, gimple_ctypes.FloatLiteral):  return 'double'
     if isinstance(node, gimple_ctypes.BoolLiteral):   return '_Bool'
-    if isinstance(node, gimple_ctypes.StringLiteral): return 'char *'
+    if isinstance(node, gimple_ctypes.StringLiteral):
+        return 'MojoBytes *' if getattr(node, 'is_bytes', False) else 'char *'
     if isinstance(node, gimple_ctypes.IdentExpr):
         if node.name in gen.var_types:
             return gen.var_types[node.name]
@@ -2516,6 +2517,8 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         return gen._call_expr('char *', gen._list_repr_fn(rav), [('MojoList *', rav)])
     if rat == 'MojoDict *':
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
+    if rat == 'MojoBytes *':
+        return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', rav)])
     if rat.endswith(' *') or rat == 'void *':
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag

@@ -1257,6 +1257,36 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         rat, rav = gen.lower_expr(node.args[0])
         return 'char *', gen._repr_value(rat, rav)
 
+    # bytes(...): construct a MojoBytes value.
+    #   bytes()            -> empty
+    #   bytes(<int n>)     -> n zero bytes
+    #   bytes(<list ints>) -> those bytes
+    #   bytes(<bytes>)     -> copy (returned as-is; MojoBytes is immutable)
+    #   bytes(<str>[, enc]) -> encode (utf-8 / ascii; source is already UTF-8)
+    if (fname_raw == 'bytes' and not gen._locally_binds_name('bytes')
+            and len(node.args) <= 3):
+        if len(node.args) == 0:
+            return 'MojoBytes *', gen._new_val('MojoBytes *', 'mojo_bytes_empty ()')
+        at, av = gen.lower_expr(node.args[0])
+        for _extra in node.args[1:]:
+            gen.lower_expr(_extra)
+        if at == 'MojoBytes *':
+            return 'MojoBytes *', av
+        if at in ('char *', 'MojoStr *'):
+            sv = av if at == 'char *' else gen._stringify_value(at, av)
+            enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_str',
+                [('char *', sv), ('char *', enc)])
+        if at in ('MojoList *', 'void *'):
+            lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', lv)])
+        # int / bool / other scalar -> zero-filled bytes of that length
+        nv = gen._to_int64(at, av)
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_zeros', [('int64_t', nv)])
+
     # str(x): dispatch on the argument's static type via _stringify_value
     # (int → mojo_str_from_int, float → mojo_repr_float, ...) rather than
     # the generic mojo_str(void *), which can't tell a real int value of 0
@@ -1676,6 +1706,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     at, av = gen.lower_expr(node.args[0])
     _LEN_FNS = {
         'MojoStr *':  f'mojo_str_len ({av})',
+        'MojoBytes *': f'mojo_bytes_len ({av})',
         'MojoList *': f'mojo_list_len ({av})',
         'MojoDict *': f'mojo_dict_len ({av})',
         'MojoSet *':  f'mojo_set_len ({av})',
@@ -4336,6 +4367,13 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
         t = gen._new_val('char', f"mojo_str_char_at ({ov}, {idx64})")
         return 'char', t
+
+    if ot == 'MojoBytes *':
+        # b[i] -> int 0-255 (never a 1-char str; bytes is not conflated
+        # with str). Negative index handled in mojo_bytes_get.
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        t = gen._new_val('int64_t', f"mojo_bytes_get ({ov}, {idx64})")
+        return 'int64_t', t
 
     if ot == 'MojoDict *':
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)

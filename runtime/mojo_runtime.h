@@ -283,6 +283,29 @@ char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
 
+/* ── bytes ──────────────────────────────────────────────────────────────
+ * Immutable byte string.  Heap value passed as `MojoBytes *` across the C
+ * boundary, exactly like MojoStr/MojoList.  `data` is NOT
+ * NUL-significant — it may contain embedded 0 bytes; always use `len`.
+ * `data` is over-allocated by one trailing NUL purely so debug prints and
+ * accidental char* reads don't run off the end. */
+typedef struct {
+    uint8_t *data;
+    int64_t  len;
+} MojoBytes;
+
+MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` bytes */
+MojoBytes *mojo_bytes_empty(void);
+MojoBytes *mojo_bytes_zeros(int64_t n);
+MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
+int64_t    mojo_bytes_len(MojoBytes *b);
+int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
+int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
+int        mojo_bytes_truthy(MojoBytes *b);
+char      *mojo_bytes_repr(MojoBytes *b);
+void       mojo_bytes_print(MojoBytes *b);
+
 /* ── subprocess.run ──────────────────────────────────────────────────────
  * Mirrors Python's subprocess.CompletedProcess just enough for this
  * compiler's own build tooling (mojo.py, version.py, compile_stdlib.py, …):
