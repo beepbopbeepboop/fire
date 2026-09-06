@@ -6848,7 +6848,7 @@ def gen_module_impl(self, stmts):
 
     for stmt in _gmi_collect_global_stmts(all_global_scan):
         if isinstance(stmt, VarDecl):
-            gname = stmt.name
+            gname = _as_str(stmt.name)
             if gname in _declared_globals:
                 continue
             _declared_globals[gname] = True
@@ -6952,14 +6952,20 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[gname] = 'int'
                 self._global_c_decl_types[gname] = 'int'
         elif isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
-            gname = stmt.target.name
+            # `_as_str`: a boxed target name on the self-hosted path becomes a
+            # boxed `_declared_globals` / `_global_var_types` key, so the
+            # later field-order loop's `_as_str(gname)`-keyed lookups and the
+            # init-code re-match (`x = 42` -> `.x = 42`) all miss -> the
+            # global static-initialised to 0 (bootstrap_test_single_expr,
+            # test_jit) under MOJO_NO_SHIM=1.
+            gname = _as_str(stmt.target.name)
             if gname in _declared_globals:
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
         elif (isinstance(stmt, ComptimeVarStmt)
                 and isinstance(stmt.value, (ListExpr, TupleExpr))):
-            gname = stmt.target
+            gname = _as_str(stmt.target)
             if gname in _declared_globals:
                 continue
             _declared_globals[gname] = True
@@ -6968,17 +6974,18 @@ def gen_module_impl(self, stmts):
             for _tgt in stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
                     continue
-                gname = _tgt.name
+                gname = _as_str(_tgt.name)
                 if gname in _declared_globals:
                     continue
                 _declared_globals[gname] = True
                 _gscan_declare_global(gname, stmt.value)
-        elif isinstance(stmt, VarDecl) and stmt.name not in _declared_globals:
-            _declared_globals[stmt.name] = True
+        elif isinstance(stmt, VarDecl) and _as_str(stmt.name) not in _declared_globals:
+            _vd_gname = _as_str(stmt.name)
+            _declared_globals[_vd_gname] = True
             ctype = self._resolve_type(stmt.type_ann) if stmt.type_ann else 'int64_t'
-            global_decls.append(f"{ctype} {stmt.name};")
-            self._global_var_types[stmt.name] = ctype
-            self._global_c_decl_types[stmt.name] = ctype
+            global_decls.append(f"{ctype} {_vd_gname};")
+            self._global_var_types[_vd_gname] = ctype
+            self._global_c_decl_types[_vd_gname] = ctype
         elif isinstance(stmt, ImportStmt):
             for local_name in gimple_ctypes._import_local_names(stmt):
                 if local_name not in _declared_globals:
@@ -7011,8 +7018,13 @@ def gen_module_impl(self, stmts):
             global_decls.append(f"int64_t {_imp_local};")
             self._global_var_types[_imp_local] = 'int64_t'
             self._global_c_decl_types[_imp_local] = 'int64_t'
-            if _imp_local not in self._global_to_module:
-                self._global_to_module[_imp_local] = current_mod_name
+            # `_own_global_var_types` too: `_lower_IdentExpr`'s bare-name
+            # global-read branch keys "it's our module's global" off this
+            # (the shared `_global_to_module` superset can already hold a
+            # stale foreign owner for a common name like `sys`), so without
+            # it the read still fell to the `(int64_t)0` placeholder.
+            self._own_global_var_types[_imp_local] = 'int64_t'
+            self._global_to_module[_imp_local] = current_mod_name
 
     for gname in sorted(_declared_globals):   # dict keys -> content-sorted (deterministic field order); see decl above
         # Defensive: an erased global NAME (self-hosted backend handed back a
