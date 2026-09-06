@@ -6731,18 +6731,6 @@ def gen_module_impl(self, stmts):
             global_decls.append(f"int {gname};")
             self._global_var_types[gname] = 'int'
             self._global_c_decl_types[gname] = 'int'
-            # Stash the static initializer HERE, where `value` is already
-            # confirmed an Int/BoolLiteral by the same `isinstance` — the
-            # separate `_extract_init_expr` (a cross-module call into
-            # gimple_ctypes) re-tests the node type and that re-test was
-            # unreliable on the self-hosted compiled path (`x = 42` ->
-            # `.x = 0`). `.raw` (token text, a str) survives; `.value`
-            # (an int) was seen reading back 0.
-            if isinstance(value, BoolLiteral):
-                _declared_global_inits[gname] = '1' if value.value else '0'
-            else:
-                _vraw = _as_str(value.raw)
-                _declared_global_inits[gname] = _vraw if _vraw else str(value.value)
         elif isinstance(value, StringLiteral):
             global_decls.append(f"char * {gname};")
             self._global_var_types[gname] = 'char *'
@@ -6984,8 +6972,7 @@ def gen_module_impl(self, stmts):
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
-            if gname not in _declared_global_inits:
-                _declared_global_inits[gname] = _extract_init_expr(stmt.value)
+            _declared_global_inits[gname] = _extract_init_expr(stmt.value)
         elif (isinstance(stmt, ComptimeVarStmt)
                 and isinstance(stmt.value, (ListExpr, TupleExpr))):
             gname = _as_str(stmt.target)
@@ -6993,8 +6980,7 @@ def gen_module_impl(self, stmts):
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
-            if gname not in _declared_global_inits:
-                _declared_global_inits[gname] = _extract_init_expr(stmt.value)
+            _declared_global_inits[gname] = _extract_init_expr(stmt.value)
         elif isinstance(stmt, MultiAssignStmt):
             for _tgt in stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
@@ -7004,8 +6990,7 @@ def gen_module_impl(self, stmts):
                     continue
                 _declared_globals[gname] = True
                 _gscan_declare_global(gname, stmt.value)
-                if gname not in _declared_global_inits:
-                    _declared_global_inits[gname] = _extract_init_expr(stmt.value)
+                _declared_global_inits[gname] = _extract_init_expr(stmt.value)
         elif isinstance(stmt, VarDecl) and _as_str(stmt.name) not in _declared_globals:
             _vd_gname = _as_str(stmt.name)
             _declared_globals[_vd_gname] = True
