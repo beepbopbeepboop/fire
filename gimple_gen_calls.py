@@ -313,6 +313,27 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # kind of task to a given group, so this narrower contract is
     # honest (a hard refusal, not silent wrongness) rather than solving
     # the fully general heterogeneous case.
+    # `collections.deque(...)` / `deque(...)` / `deque[T](...)` -- this
+    # codegen represents a deque as a plain MojoList * (append / popleft /
+    # appendleft lower onto mojo_list_* in gimple_gen_methods.py). asyncio
+    # (queues.py, locks.py) uses deque as a FIFO of Future handles
+    # (bugs/COMPILE_FAIL_asyncio_queues.md gap 2). Route it to the same
+    # builtin lowering as list().
+    _deque_base = node.func
+    if isinstance(_deque_base, gimple_ctypes.SubscriptExpr):
+        _deque_base = _deque_base.obj
+    if ((isinstance(_deque_base, gimple_ctypes.IdentExpr)
+         and _deque_base.name == 'deque'
+         and not gen._locally_binds_name('deque'))
+        or (isinstance(_deque_base, gimple_ctypes.MemberExpr)
+            and _deque_base.member == 'deque'
+            and isinstance(_deque_base.obj, gimple_ctypes.IdentExpr)
+            and _deque_base.obj.name == 'collections')):
+        if len(node.args) <= 1:
+            return gen._lower_builtin_list(
+                gimple_ctypes.CallExpr(func=gimple_ctypes.IdentExpr(name='list'),
+                                       args=list(node.args), kwargs=[]))
+
     if (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name == 'TaskGroup'
             and not node.args and not getattr(node, 'kwargs', None)):
         handle = gen._call_expr('MojoList *', 'mojo_list_new', [])

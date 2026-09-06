@@ -2279,8 +2279,33 @@ def gen_module_impl(self, stmts):
                                       'dict': 'MojoDict *'}.get(v.kind, 'MojoList *')
                             elif isinstance(v, CallExpr):
                                 cfn = v.func
+                                # `deque()` / `deque[T]()` / `collections.deque(...)`
+                                # -> a MojoList * field (bugs/COMPILE_FAIL_
+                                # asyncio_queues.md gap 2). asyncio round-trips
+                                # Future handles through it via append/popleft.
+                                _cfn_base = cfn
+                                if isinstance(_cfn_base, SubscriptExpr):
+                                    _cfn_base = _cfn_base.obj
+                                _is_deque = (
+                                    (isinstance(_cfn_base, IdentExpr)
+                                     and _cfn_base.name == 'deque')
+                                    or (isinstance(_cfn_base, MemberExpr)
+                                        and _cfn_base.member == 'deque'))
                                 cn = cfn.name if isinstance(cfn, IdentExpr) else ''
-                                if cn in ('list', 'DynamicVector', 'mojo_list_new'):
+                                _is_evt_fut = (
+                                    (isinstance(_cfn_base, IdentExpr)
+                                     and _cfn_base.name in ('Event', 'Future'))
+                                    or (isinstance(_cfn_base, MemberExpr)
+                                        and _cfn_base.member in ('Event', 'Future',
+                                                                 'create_future')))
+                                if _is_deque:
+                                    ft = 'MojoList *'
+                                elif _is_evt_fut:
+                                    # asyncio Event/Future field -> A3 runtime
+                                    # int64_t handle (gap 2). The .set()/.wait()/
+                                    # .done() lowering keys off the int64_t recv.
+                                    ft = 'int64_t'
+                                elif cn in ('list', 'DynamicVector', 'mojo_list_new'):
                                     ft = 'MojoList *'
                                 elif cn in ('dict', 'Dict', 'mojo_dict_new'):
                                     ft = 'MojoDict *'
