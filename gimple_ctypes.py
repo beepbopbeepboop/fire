@@ -1073,18 +1073,26 @@ def _import_targets(node) -> list:
     return out
 
 
-def _import_local_names(node) -> list:
+def _import_local_names(node: ImportStmt) -> list:
     """The bound local name for each target of an ImportStmt — `alias or
     module` — as a plain `list[str]`.
+
+    `node: ImportStmt` (NOT an unannotated param): on the self-hosted
+    compiled path an unannotated `node` is `int64_t`, so `node.alias` /
+    `node.module` below still lowered to a `_mojo_dispatch_getattr` whose
+    boxed result `_as_str` could not recover — every top-level `import X`
+    then registered a garbage local name (or none), so `_lower_IdentExpr`'s
+    bare-name global-read branch never saw `X` and a `X.attr` receiver read
+    fell to `(int64_t)0` (`import sys` in t1.mojo/t_argv.mojo/mojo_main.py,
+    stage1-vs-stage2 parity break under MOJO_NO_SHIM=1).
 
     `_import_targets` returns `(module, alias)` tuples; a consumer that only
     needs the local name and does `alias if alias else module` on the
     UNPACKED tuple slots hits a self-hosted bug: the tuple's `None` alias
     slot boxes to a stray non-NULL pointer, so the ternary picks it and the
-    "local name" becomes a decimal heap address (`int64_t <addr>;` fields in
-    `_root_toplev` for `import os` / `import ctypes`, different every run).
-    Reading `node.alias` DIRECTLY (not through a tuple) keeps `None` `None`.
-    Homogeneous `list[str]` return preserves each entry as `char *`."""
+    "local name" becomes a decimal heap address. Reading `node.alias`
+    DIRECTLY (not through a tuple) keeps `None` `None`. Homogeneous
+    `list[str]` return preserves each entry as `char *`."""
     _al = _as_str(node.alias)  # DIRECT field access, not getattr (getattr erases to int64_t -> stray truthy value)
     out = [_al if _al else _as_str(node.module)]
     for _pair in (getattr(node, 'extra', None) or []):
