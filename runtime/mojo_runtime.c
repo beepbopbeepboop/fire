@@ -1087,6 +1087,244 @@ void mojo_bytes_print(MojoBytes *b)
     free(s);
 }
 
+MojoBytes *mojo_bytes_concat(MojoBytes *a, MojoBytes *b)
+{
+    int64_t an = a ? a->len : 0, bn = b ? b->len : 0;
+    MojoBytes *r = mojo_bytes_alloc(an + bn);
+    if (an) memcpy(r->data, a->data, (size_t)an);
+    if (bn) memcpy(r->data + an, b->data, (size_t)bn);
+    return r;
+}
+
+MojoBytes *mojo_bytes_repeat(MojoBytes *b, int64_t n)
+{
+    if (n < 0) n = 0;
+    int64_t bn = b ? b->len : 0;
+    MojoBytes *r = mojo_bytes_alloc(bn * n);
+    for (int64_t i = 0; i < n; i++)
+        if (bn) memcpy(r->data + i * bn, b->data, (size_t)bn);
+    return r;
+}
+
+/* Read-slice with step. start/stop use the same MOJO_SLICE_STOP_OMITTED
+ * sentinel convention as mojo_list_slice; step defaults to 1. */
+MojoBytes *mojo_bytes_slice(MojoBytes *b, int64_t start, int64_t stop, int64_t step)
+{
+    int64_t n = b ? b->len : 0;
+    if (step == 0) step = 1;
+    int64_t lo, hi;
+    if (step > 0) {
+        lo = (start == MOJO_SLICE_STOP_OMITTED) ? 0 : start;
+        hi = (stop == MOJO_SLICE_STOP_OMITTED) ? n : stop;
+        if (lo < 0) lo += n;
+        if (hi < 0) hi += n;
+        if (lo < 0) lo = 0;
+        if (hi > n) hi = n;
+    } else {
+        lo = (start == MOJO_SLICE_STOP_OMITTED) ? n - 1 : start;
+        hi = (stop == MOJO_SLICE_STOP_OMITTED) ? -1 : stop;
+        if (lo < 0 && start != MOJO_SLICE_STOP_OMITTED) lo += n;
+        if (hi < 0 && stop != MOJO_SLICE_STOP_OMITTED) hi += n;
+        if (lo > n - 1) lo = n - 1;
+    }
+    /* count elements */
+    int64_t cnt = 0;
+    for (int64_t i = lo; (step > 0) ? (i < hi) : (i > hi); i += step)
+        if (i >= 0 && i < n) cnt++;
+    MojoBytes *r = mojo_bytes_alloc(cnt);
+    int64_t p = 0;
+    for (int64_t i = lo; (step > 0) ? (i < hi) : (i > hi); i += step)
+        if (i >= 0 && i < n) r->data[p++] = b->data[i];
+    return r;
+}
+
+int mojo_bytes_contains(MojoBytes *hay, MojoBytes *needle)
+{
+    if (!needle || needle->len == 0) return 1;
+    if (!hay || hay->len < needle->len) return 0;
+    for (int64_t i = 0; i + needle->len <= hay->len; i++)
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return 1;
+    return 0;
+}
+
+int64_t mojo_bytes_find(MojoBytes *hay, MojoBytes *needle)
+{
+    if (!needle || needle->len == 0) return 0;
+    if (!hay || hay->len < needle->len) return -1;
+    for (int64_t i = 0; i + needle->len <= hay->len; i++)
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_count(MojoBytes *hay, MojoBytes *needle)
+{
+    if (!hay || !needle || needle->len == 0) return 0;
+    int64_t c = 0;
+    for (int64_t i = 0; i + needle->len <= hay->len; ) {
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) { c++; i += needle->len; }
+        else i++;
+    }
+    return c;
+}
+
+int mojo_bytes_startswith(MojoBytes *b, MojoBytes *p)
+{
+    if (!p || p->len == 0) return 1;
+    if (!b || b->len < p->len) return 0;
+    return memcmp(b->data, p->data, (size_t)p->len) == 0;
+}
+
+int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
+{
+    if (!p || p->len == 0) return 1;
+    if (!b || b->len < p->len) return 0;
+    return memcmp(b->data + b->len - p->len, p->data, (size_t)p->len) == 0;
+}
+
+char *mojo_bytes_decode(MojoBytes *b, char *encoding)
+{
+    (void)encoding;
+    int64_t n = b ? b->len : 0;
+    char *s = malloc((size_t)n + 1);
+    if (n) memcpy(s, b->data, (size_t)n);
+    s[n] = 0;
+    return s;
+}
+
+char *mojo_bytes_hex(MojoBytes *b)
+{
+    int64_t n = b ? b->len : 0;
+    char *s = malloc((size_t)n * 2 + 1);
+    for (int64_t i = 0; i < n; i++)
+        sprintf(s + i * 2, "%02x", b->data[i]);
+    s[n * 2] = 0;
+    return s;
+}
+
+MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to)
+{
+    if (!b) return mojo_bytes_empty();
+    if (!from || from->len == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
+    int64_t cnt = mojo_bytes_count(b, from);
+    int64_t tn = to ? to->len : 0;
+    MojoBytes *r = mojo_bytes_alloc(b->len + cnt * (tn - from->len));
+    int64_t p = 0;
+    for (int64_t i = 0; i < b->len; ) {
+        if (i + from->len <= b->len && memcmp(b->data + i, from->data, (size_t)from->len) == 0) {
+            if (tn) memcpy(r->data + p, to->data, (size_t)tn);
+            p += tn; i += from->len;
+        } else r->data[p++] = b->data[i++];
+    }
+    return r;
+}
+
+static int mojo_bytes_isspace_byte(uint8_t c)
+{ return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+
+MojoBytes *mojo_bytes_strip(MojoBytes *b, MojoBytes *chars, int do_left, int do_right)
+{
+    if (!b) return mojo_bytes_empty();
+    int64_t lo = 0, hi = b->len;
+    #define IN_STRIP(c) (chars ? (memchr(chars->data, (c), (size_t)chars->len) != NULL) : mojo_bytes_isspace_byte(c))
+    if (do_left)  while (lo < hi && IN_STRIP(b->data[lo])) lo++;
+    if (do_right) while (hi > lo && IN_STRIP(b->data[hi - 1])) hi--;
+    #undef IN_STRIP
+    return mojo_bytes_new_lit((const char *)(b->data + lo), hi - lo);
+}
+
+MojoBytes *mojo_bytes_upper(MojoBytes *b)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    for (int64_t i = 0; i < r->len; i++)
+        if (r->data[i] >= 'a' && r->data[i] <= 'z') r->data[i] -= 32;
+    return r;
+}
+
+MojoBytes *mojo_bytes_lower(MojoBytes *b)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    for (int64_t i = 0; i < r->len; i++)
+        if (r->data[i] >= 'A' && r->data[i] <= 'Z') r->data[i] += 32;
+    return r;
+}
+
+static void mojo_bytes_list_push(MojoList *l, const uint8_t *d, int64_t n)
+{
+    MojoBytes *piece = mojo_bytes_new_lit((const char *)d, n);
+    mojo_list_append_int(l, (int64_t)(uintptr_t)piece);
+}
+
+MojoList *mojo_bytes_split(MojoBytes *b, MojoBytes *sep)
+{
+    MojoList *l = mojo_list_new();
+    if (!b) return l;
+    if (!sep || sep->len == 0) {
+        /* whitespace split, no empty pieces */
+        int64_t i = 0;
+        while (i < b->len) {
+            while (i < b->len && mojo_bytes_isspace_byte(b->data[i])) i++;
+            if (i >= b->len) break;
+            int64_t start = i;
+            while (i < b->len && !mojo_bytes_isspace_byte(b->data[i])) i++;
+            mojo_bytes_list_push(l, b->data + start, i - start);
+        }
+        return l;
+    }
+    int64_t start = 0;
+    for (int64_t i = 0; i + sep->len <= b->len; ) {
+        if (memcmp(b->data + i, sep->data, (size_t)sep->len) == 0) {
+            mojo_bytes_list_push(l, b->data + start, i - start);
+            i += sep->len; start = i;
+        } else i++;
+    }
+    mojo_bytes_list_push(l, b->data + start, b->len - start);
+    return l;
+}
+
+MojoList *mojo_bytes_rsplit(MojoBytes *b, MojoBytes *sep)
+{
+    /* no maxsplit support: same result set as split, just reuse it */
+    return mojo_bytes_split(b, sep);
+}
+
+MojoList *mojo_bytes_splitlines(MojoBytes *b)
+{
+    MojoList *l = mojo_list_new();
+    if (!b) return l;
+    int64_t start = 0;
+    for (int64_t i = 0; i < b->len; i++) {
+        if (b->data[i] == '\n') {
+            mojo_bytes_list_push(l, b->data + start, i - start);
+            start = i + 1;
+        }
+    }
+    if (start < b->len) mojo_bytes_list_push(l, b->data + start, b->len - start);
+    return l;
+}
+
+MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts)
+{
+    if (!parts) return mojo_bytes_empty();
+    int64_t n = mojo_list_len(parts);
+    int64_t total = 0;
+    int64_t sn = sep ? sep->len : 0;
+    for (int64_t i = 0; i < n; i++) {
+        MojoBytes *p = (MojoBytes *)(uintptr_t)mojo_list_get_int(parts, i);
+        total += (p ? p->len : 0);
+        if (i) total += sn;
+    }
+    MojoBytes *r = mojo_bytes_alloc(total);
+    int64_t off = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (i && sn) { memcpy(r->data + off, sep->data, (size_t)sn); off += sn; }
+        MojoBytes *p = (MojoBytes *)(uintptr_t)mojo_list_get_int(parts, i);
+        if (p && p->len) { memcpy(r->data + off, p->data, (size_t)p->len); off += p->len; }
+    }
+    return r;
+}
+
 /* A single character (raw `char`, e.g. from string indexing) is a distinct
  * representation from a 1-character `char *` string — reinterpreting its
  * numeric byte value as a pointer (the boxed-int64_t-as-pointer convention
@@ -2750,6 +2988,23 @@ char *mojo_repr_list_ints(MojoList *l) {
     for (int64_t _i = 0; _i < _n; _i++) {
         if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
+char *mojo_repr_list_bytes(MojoList *l) {
+    /* repr for a MojoList * whose element type is statically known to be
+     * `MojoBytes *` (e.g. b.split(sep)). Each int64_t slot holds a
+     * MojoBytes pointer; format each via mojo_bytes_repr. */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
+        _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
     }
     if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
     return mojo_str_cat(_buf, _is_tup ? ")" : "]");

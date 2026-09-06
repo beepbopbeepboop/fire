@@ -1813,6 +1813,8 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         'list':  ('MojoList *',),
         'dict':  ('MojoDict *',),
         'set':   ('MojoSet *',),
+        'bytes': ('MojoBytes *',),
+        'bytearray': ('MojoBytes *',),
     }
     if type_name in _SCALAR_TYPE_MATCH:
         if obj_type in _SCALAR_TYPE_MATCH[type_name]:
@@ -4666,6 +4668,19 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     if ot == 'MojoStr *':
         t = gen._new_val('MojoStr *', f"mojo_str_slice ({ov}, {start_v}, {stop_v})")
         return 'MojoStr *', t
+
+    if ot == 'MojoBytes *':
+        if getattr(node, 'step', None) is not None:
+            _kt, kv = gen.lower_expr(node.step)
+            step_v = gen._to_int64(_kt, kv)
+        else:
+            step_v = '1'
+        # Omitted start: pass the OMITTED sentinel (not 0) so mojo_bytes_slice
+        # can pick the right endpoint for a negative step (`b[::-1]`).
+        bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
+        t = gen._new_val('MojoBytes *',
+                         f"mojo_bytes_slice ({ov}, {bstart_v}, {stop_v}, {step_v})")
+        return 'MojoBytes *', t
 
     if ot == 'MojoList *':
         t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")

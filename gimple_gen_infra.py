@@ -2786,6 +2786,8 @@ def _list_repr_fn(gen, rav: str) -> str:
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
         return 'mojo_repr_list_ints'
+    if et == 'MojoBytes *':
+        return 'mojo_repr_list_bytes'
     return '_mojo_repr_list'
 
 

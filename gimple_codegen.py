@@ -214,6 +214,24 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_eq':              'int',
     'mojo_bytes_truthy':          'int',
     'mojo_bytes_repr':            'char *',
+    'mojo_bytes_concat':          'MojoBytes *',
+    'mojo_bytes_repeat':          'MojoBytes *',
+    'mojo_bytes_slice':           'MojoBytes *',
+    'mojo_bytes_contains':        'int',
+    'mojo_bytes_find':            'int64_t',
+    'mojo_bytes_count':           'int64_t',
+    'mojo_bytes_startswith':      'int',
+    'mojo_bytes_endswith':        'int',
+    'mojo_bytes_decode':          'char *',
+    'mojo_bytes_hex':             'char *',
+    'mojo_bytes_replace':         'MojoBytes *',
+    'mojo_bytes_strip':           'MojoBytes *',
+    'mojo_bytes_upper':           'MojoBytes *',
+    'mojo_bytes_lower':           'MojoBytes *',
+    'mojo_bytes_split':           'MojoList *',
+    'mojo_bytes_rsplit':          'MojoList *',
+    'mojo_bytes_splitlines':      'MojoList *',
+    'mojo_bytes_join':            'MojoBytes *',
     # C-string utilities used by the REPL and string methods
     'input':          'char *',
     'string_lower':   'char *',
@@ -2010,6 +2028,7 @@ class GimpleGen:
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
         'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
         'mojo_repr_list_ints':       ('char *',    ['MojoList *']),
+        'mojo_repr_list_bytes':      ('char *',    ['MojoList *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
         'mojo_python_init':      ('void',       []),
@@ -2894,6 +2913,8 @@ class GimpleGen:
         return gmp._lower_file_method(self, ov, method, args)
     def _lower_str_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_str_method(self, ov, method, args)
+    def _lower_bytes_method(self, ov: str, method: str, args: list) -> tuple:
+        return gmp._lower_bytes_method(self, ov, method, args)
     def _repack_method_call_spread_args(self, mangled: str, struct_name: str, method: str, call_args: list, arg_pairs: list) -> list:
         return gmp._repack_method_call_spread_args(self, mangled, struct_name, method, call_args, arg_pairs)
     def _lower_struct_method_call(self, ov: str, ot: str, method: str, node) -> tuple:
@@ -3234,6 +3255,8 @@ class GimpleGen:
         return glo._gen_for_str(self, var, it_val, body, shadow_name)
     def _gen_for_cstr(self, var: str, it_val: str, body: list):
         return glo._gen_for_cstr(self, var, it_val, body)
+    def _gen_for_bytes(self, var: str, it_val: str, body: list):
+        return glo._gen_for_bytes(self, var, it_val, body)
     def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_dict(self, var, it_val, body, shadow_name)
     def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None=None):

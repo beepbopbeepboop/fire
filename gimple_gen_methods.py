@@ -2155,6 +2155,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return gen._lower_list_method(ov, method, node.args)
     if ot == 'MojoSet *':
         return gen._lower_set_method(ov, method, node.args)
+    if ot == 'MojoBytes *':
+        return gen._lower_bytes_method(ov, method, node.args)
     _RAW_PTR_METHODS = frozenset({
         'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
         'destroy_pointee', 'take_pointee', 'initialize_pointee',
@@ -2400,6 +2402,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return gen._lower_set_method(ov, method, node.args)
     if _sn == 'MojoStr':
         return gen._lower_str_method(ov, method, node.args)
+    if _sn == 'MojoBytes':
+        return gen._lower_bytes_method(ov, method, node.args)
     if (len(_sn) > 0
             and (_sn not in gen.struct_field_types
                  or f'{_sn}_{method}' not in gen.func_return_types)
@@ -3101,6 +3105,105 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub
     return gen._stub_result('int', '0', f'TODO: char*.{method}')
+
+
+# Bytes methods that return a NEW bytes value (never a str).
+_BYTES_RETURNING_METHODS = frozenset({
+    'replace', 'strip', 'lstrip', 'rstrip', 'upper', 'lower',
+    'split', 'rsplit', 'splitlines', 'join',  # (split family returns list — handled explicitly)
+})
+
+
+def _coerce_to_bytes(gen, t: str, v: str) -> str:
+    """Coerce a lowered (type, value) to a `MojoBytes *` C value."""
+    if t == 'MojoBytes *':
+        return v
+    if t == 'char *':
+        return gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
+                              [('char *', v), ('char *', '"utf-8"')])
+    # narrow scalar / unknown pointer: widen through int64_t then cast
+    if t in ('int', 'char', '_Bool', 'int64_t'):
+        v = gen._new_val('int64_t', f'(int64_t){v}')
+    return gen._new_val('MojoBytes *', f'(MojoBytes *){v}')
+
+
+def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
+    """Lower `MojoBytes *` method calls (mirrors _lower_str_method, but
+    bytes-typed: .decode/.hex return char*, everything else returns bytes,
+    split-family returns list-of-bytes)."""
+    arg_pairs = [gen.lower_expr(a) for a in args]
+
+    if method == '__len__':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_len', [('MojoBytes *', ov)])
+
+    if method == 'decode':
+        enc = '"utf-8"'
+        if arg_pairs and arg_pairs[0][0] == 'char *':
+            enc = arg_pairs[0][1]
+        return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
+                                        [('MojoBytes *', ov), ('char *', enc)])
+    if method == 'hex':
+        return 'char *', gen._call_expr('char *', 'mojo_bytes_hex', [('MojoBytes *', ov)])
+
+    if method in ('startswith', 'endswith') and arg_pairs:
+        pv = _coerce_to_bytes(gen, *arg_pairs[0])
+        fn = 'mojo_bytes_startswith' if method == 'startswith' else 'mojo_bytes_endswith'
+        t = gen._call_expr('int', fn, [('MojoBytes *', ov), ('MojoBytes *', pv)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+
+    if method in ('find', 'index') and arg_pairs:
+        sv = _coerce_to_bytes(gen, *arg_pairs[0])
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_find',
+                                         [('MojoBytes *', ov), ('MojoBytes *', sv)])
+    if method == 'count' and arg_pairs:
+        sv = _coerce_to_bytes(gen, *arg_pairs[0])
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_count',
+                                         [('MojoBytes *', ov), ('MojoBytes *', sv)])
+
+    if method in ('split', 'rsplit'):
+        sep = 'NULL'
+        if arg_pairs and arg_pairs[0][0] != 'void':
+            sep = _coerce_to_bytes(gen, *arg_pairs[0])
+        fn = 'mojo_bytes_split' if method == 'split' else 'mojo_bytes_rsplit'
+        t = gen._call_expr('MojoList *', fn, [('MojoBytes *', ov), ('MojoBytes *', sep)])
+        gen._elem_types[t] = 'MojoBytes *'
+        return 'MojoList *', t
+    if method == 'splitlines':
+        t = gen._call_expr('MojoList *', 'mojo_bytes_splitlines', [('MojoBytes *', ov)])
+        gen._elem_types[t] = 'MojoBytes *'
+        return 'MojoList *', t
+
+    if method == 'join' and arg_pairs:
+        it = arg_pairs[0][1]
+        if arg_pairs[0][0] != 'MojoList *':
+            it = gen._new_val('MojoList *', f'(MojoList *){it}')
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_join',
+                                             [('MojoBytes *', ov), ('MojoList *', it)])
+
+    if method == 'replace' and len(arg_pairs) >= 2:
+        a0 = _coerce_to_bytes(gen, *arg_pairs[0])
+        a1 = _coerce_to_bytes(gen, *arg_pairs[1])
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_replace',
+                                             [('MojoBytes *', ov), ('MojoBytes *', a0), ('MojoBytes *', a1)])
+
+    if method in ('strip', 'lstrip', 'rstrip'):
+        chars = 'NULL'
+        if arg_pairs and arg_pairs[0][0] != 'void':
+            chars = _coerce_to_bytes(gen, *arg_pairs[0])
+        do_left = '1' if method in ('strip', 'lstrip') else '0'
+        do_right = '1' if method in ('strip', 'rstrip') else '0'
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_strip',
+                                             [('MojoBytes *', ov), ('MojoBytes *', chars),
+                                              ('int', do_left), ('int', do_right)])
+
+    if method in ('upper', 'lower'):
+        fn = 'mojo_bytes_upper' if method == 'upper' else 'mojo_bytes_lower'
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', fn, [('MojoBytes *', ov)])
+
+    if method in ('encode',):
+        return 'MojoBytes *', ov
+
+    return gen._stub_result('int', '0', f'TODO: bytes.{method}')
 
 
 def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,

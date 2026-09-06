@@ -2489,6 +2489,19 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
         return 'MojoList *', t
 
+    # MojoBytes + MojoBytes → concat ; MojoBytes * int → repeat
+    if op == '+' and lt == 'MojoBytes *' and rt == 'MojoBytes *':
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_concat', [('MojoBytes *', lv), ('MojoBytes *', rv)])
+    if op == '*' and lt == 'MojoBytes *' and rt in ('int', 'int64_t', 'uint64_t'):
+        cnt = gen._new_val('int64_t', f"(int64_t){rv}")
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_repeat', [('MojoBytes *', lv), ('int64_t', cnt)])
+    if op == '*' and rt == 'MojoBytes *' and lt in ('int', 'int64_t', 'uint64_t'):
+        cnt = gen._new_val('int64_t', f"(int64_t){lv}")
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_repeat', [('MojoBytes *', rv), ('int64_t', cnt)])
+
     # MojoStr == / != → mojo_str_eq
     if op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
         eq_t = gen._new_val('int', f"mojo_str_eq ({lv}, {rv})")
@@ -3318,6 +3331,19 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
         else:
             xv64 = gen._to_int64(xt, xv)
             gen._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
+    elif rt == 'MojoBytes *':
+        # `b'x' in b'xyz'` — bytewise subsequence membership. The needle
+        # (left operand) is another bytes value or an int 0-255.
+        if xt == 'MojoBytes *':
+            needle = xv
+        elif xt in ('int', 'int64_t', 'char', 'uint8_t', '_Bool'):
+            xv64 = gen._to_int64(xt, xv)
+            l1 = gen._call_expr('MojoList *', 'mojo_list_new', [])
+            gen._emit(f"  mojo_list_append_int ({l1}, {xv64});")
+            needle = gen._call_expr('MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', l1)])
+        else:
+            needle = gen._new_val('MojoBytes *', f'(MojoBytes *){xv}')
+        gen._emit_call('int', ti, 'mojo_bytes_contains', [('MojoBytes *', rv), ('MojoBytes *', needle)])
     elif rt == 'MojoStr *':
         gen._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
     elif rt == 'char *':

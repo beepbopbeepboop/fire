@@ -305,6 +305,24 @@ int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
 int        mojo_bytes_truthy(MojoBytes *b);
 char      *mojo_bytes_repr(MojoBytes *b);
 void       mojo_bytes_print(MojoBytes *b);
+MojoBytes *mojo_bytes_concat(MojoBytes *a, MojoBytes *b);
+MojoBytes *mojo_bytes_repeat(MojoBytes *b, int64_t n);
+MojoBytes *mojo_bytes_slice(MojoBytes *b, int64_t start, int64_t stop, int64_t step);
+int        mojo_bytes_contains(MojoBytes *hay, MojoBytes *needle);
+int64_t    mojo_bytes_find(MojoBytes *hay, MojoBytes *needle);
+int64_t    mojo_bytes_count(MojoBytes *hay, MojoBytes *needle);
+int        mojo_bytes_startswith(MojoBytes *b, MojoBytes *p);
+int        mojo_bytes_endswith(MojoBytes *b, MojoBytes *p);
+char      *mojo_bytes_decode(MojoBytes *b, char *encoding);
+char      *mojo_bytes_hex(MojoBytes *b);
+MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to);
+MojoBytes *mojo_bytes_strip(MojoBytes *b, MojoBytes *chars, int do_left, int do_right);
+MojoBytes *mojo_bytes_upper(MojoBytes *b);
+MojoBytes *mojo_bytes_lower(MojoBytes *b);
+MojoList  *mojo_bytes_split(MojoBytes *b, MojoBytes *sep);
+MojoList  *mojo_bytes_rsplit(MojoBytes *b, MojoBytes *sep);
+MojoList  *mojo_bytes_splitlines(MojoBytes *b);
+MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts);
 
 /* ── subprocess.run ──────────────────────────────────────────────────────
  * Mirrors Python's subprocess.CompletedProcess just enough for this
@@ -543,6 +561,7 @@ char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);
 char *mojo_repr_list_ints(MojoList *l);
+char *mojo_repr_list_bytes(MojoList *l);
 char *mojo_bool_to_str(int b);
 int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);
