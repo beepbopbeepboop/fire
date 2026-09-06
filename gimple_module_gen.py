@@ -6612,7 +6612,15 @@ def gen_module_impl(self, stmts):
     _dispatch_dict_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
                             '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
     _dispatch_set_names = {'_CMP_OPS'}
-    _dispatch_names = _dispatch_dict_names | _dispatch_set_names
+    # A single flat set literal, NOT `_dispatch_dict_names | _dispatch_set_names`
+    # — set union on the self-hosted compiled path produced a set whose
+    # membership test then matched UNRELATED names (`'arr' in _dispatch_names`
+    # -> True), so an ordinary `arr = [1,2,3]` module global got declared as a
+    # bare `MojoList *` field instead of the boxed `int64_t /* MojoList * */`
+    # every write/read site assumes — a stage1-vs-stage2 parity break under
+    # MOJO_NO_SHIM=1 (array_ops_jit.mojo).
+    _dispatch_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
+                       '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
     _declared_globals = {}  # dict not set: self-hosted `sorted(<set>)` at the field-order loop below sorts boxed str slots by ADDRESS (nondeterministic _<mod>_toplev field order in --dump-full); dict keys sort by content via mojo_dict_sorted_keys
     all_scan = stmts
     for stmt in all_scan:
@@ -6981,6 +6989,31 @@ def gen_module_impl(self, stmts):
                     if local_name not in self._global_to_module:
                         self._global_to_module[local_name] = current_mod_name
 
+    # Belt-and-braces: a plain top-level `import X` must get an `int64_t X;`
+    # backing field on `_<mod>_toplev` so a bare `X` identifier read (or the
+    # dead `X.attr` receiver eval) resolves to `_<mod>_globals.X` — exactly
+    # what the CPython codegen path emits. The `elif isinstance(stmt,
+    # ImportStmt)` branches above were observed NOT to fire on the
+    # self-hosted compiled path for some top-level imports (`import sys` in
+    # t1.mojo/t_argv.mojo/mojo_main.mojo), so `sys` fell to an inline
+    # `(int64_t)0` and the field/accessor went missing — a stage1-vs-stage2
+    # parity break under MOJO_NO_SHIM=1. This standalone pass re-scans the
+    # raw top-level statements with a single-type isinstance (no elif chain)
+    # and fills any gap.
+    for _imp_stmt in stmts:
+        if not isinstance(_imp_stmt, ImportStmt):
+            continue
+        for _imp_local in gimple_ctypes._import_local_names(_imp_stmt):
+            _imp_local = _as_str(_imp_local)
+            if not _imp_local or _imp_local in _declared_globals:
+                continue
+            _declared_globals[_imp_local] = True
+            global_decls.append(f"int64_t {_imp_local};")
+            self._global_var_types[_imp_local] = 'int64_t'
+            self._global_c_decl_types[_imp_local] = 'int64_t'
+            if _imp_local not in self._global_to_module:
+                self._global_to_module[_imp_local] = current_mod_name
+
     for gname in sorted(_declared_globals):   # dict keys -> content-sorted (deterministic field order); see decl above
         # Defensive: an erased global NAME (self-hosted backend handed back a
         # pointer where a `char *` name was expected) stringifies to a decimal
@@ -7016,12 +7049,15 @@ def gen_module_impl(self, stmts):
                 c_type = 'void *' if (g_mtype and g_mtype.endswith(' *')) else (
                     g_mtype if g_mtype and g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *', 'char *') else 'int64_t')
             init_code = '0'
+            _gname_s = _as_str(gname)
             for stmt in _gmi_collect_global_stmts(all_global_scan):
-                if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr) and stmt.target.name == gname:
+                if (isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr)
+                        and _as_str(stmt.target.name) == _gname_s):
                     init_code = _extract_init_expr(stmt.value)
                     break
                 elif (isinstance(stmt, MultiAssignStmt)
-                        and any(isinstance(_t, IdentExpr) and _t.name == gname for _t in stmt.targets)):
+                        and any(isinstance(_t, IdentExpr) and _as_str(_t.name) == _gname_s
+                                for _t in stmt.targets)):
                     init_code = _extract_init_expr(stmt.value)
                     break
                 elif isinstance(stmt, ImportStmt) and gname in (
