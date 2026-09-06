@@ -6846,12 +6846,21 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[gname] = 'int64_t'
                 self._global_c_decl_types[gname] = 'int64_t'
 
+    # `{gname: init_code}` captured at declaration time — the later
+    # field-order loop's re-scan for the matching AssignStmt
+    # (`_gmi_collect_global_stmts` + `stmt.target.name == gname`) proved
+    # unreliable on the self-hosted compiled path, leaving `x = 42` globals
+    # at `.x = 0`. Recorded here where `stmt.value` is already in hand.
+    _declared_global_inits: dict = {}
+
     for stmt in _gmi_collect_global_stmts(all_global_scan):
         if isinstance(stmt, VarDecl):
             gname = _as_str(stmt.name)
             if gname in _declared_globals:
                 continue
             _declared_globals[gname] = True
+            if getattr(stmt, 'value', None) is not None:
+                _declared_global_inits[gname] = _extract_init_expr(stmt.value)
             if stmt.type_ann and stmt.value is None:
                 _resolved = self._resolve_type(stmt.type_ann)
                 self._global_var_types[gname] = _resolved
@@ -6963,6 +6972,7 @@ def gen_module_impl(self, stmts):
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
+            _declared_global_inits[gname] = _extract_init_expr(stmt.value)
         elif (isinstance(stmt, ComptimeVarStmt)
                 and isinstance(stmt.value, (ListExpr, TupleExpr))):
             gname = _as_str(stmt.target)
@@ -6970,6 +6980,7 @@ def gen_module_impl(self, stmts):
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
+            _declared_global_inits[gname] = _extract_init_expr(stmt.value)
         elif isinstance(stmt, MultiAssignStmt):
             for _tgt in stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
@@ -6979,6 +6990,7 @@ def gen_module_impl(self, stmts):
                     continue
                 _declared_globals[gname] = True
                 _gscan_declare_global(gname, stmt.value)
+                _declared_global_inits[gname] = _extract_init_expr(stmt.value)
         elif isinstance(stmt, VarDecl) and _as_str(stmt.name) not in _declared_globals:
             _vd_gname = _as_str(stmt.name)
             _declared_globals[_vd_gname] = True
@@ -7060,23 +7072,27 @@ def gen_module_impl(self, stmts):
             else:
                 c_type = 'void *' if (g_mtype and g_mtype.endswith(' *')) else (
                     g_mtype if g_mtype and g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *', 'char *') else 'int64_t')
-            init_code = '0'
             _gname_s = _as_str(gname)
-            for stmt in _gmi_collect_global_stmts(all_global_scan):
-                if (isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr)
-                        and _as_str(stmt.target.name) == _gname_s):
-                    init_code = _extract_init_expr(stmt.value)
-                    break
-                elif (isinstance(stmt, MultiAssignStmt)
-                        and any(isinstance(_t, IdentExpr) and _as_str(_t.name) == _gname_s
-                                for _t in stmt.targets)):
-                    init_code = _extract_init_expr(stmt.value)
-                    break
-                elif isinstance(stmt, ImportStmt) and gname in (
-                        (_as_str(_ta) if _as_str(_ta) else _as_str(_tm))
-                        for _tm, _ta in _import_targets(stmt)):
-                    init_code = '0'
-                    break
+            # Declaration-time capture wins (see `_declared_global_inits`);
+            # the re-scan below is the pre-existing fallback for paths that
+            # never populated it.
+            init_code = _declared_global_inits.get(_gname_s, '0')
+            if init_code == '0':
+                for stmt in _gmi_collect_global_stmts(all_global_scan):
+                    if (isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr)
+                            and _as_str(stmt.target.name) == _gname_s):
+                        init_code = _extract_init_expr(stmt.value)
+                        break
+                    elif (isinstance(stmt, MultiAssignStmt)
+                            and any(isinstance(_t, IdentExpr) and _as_str(_t.name) == _gname_s
+                                    for _t in stmt.targets)):
+                        init_code = _extract_init_expr(stmt.value)
+                        break
+                    elif isinstance(stmt, ImportStmt) and gname in (
+                            (_as_str(_ta) if _as_str(_ta) else _as_str(_tm))
+                            for _tm, _ta in _import_targets(stmt)):
+                        init_code = '0'
+                        break
             # Faithful restoration of this line's ORIGINAL intent —
             # "append unless this exact (name, c_type, g_mtype) triple is
             # already registered" — which self-hosting silently broke: a

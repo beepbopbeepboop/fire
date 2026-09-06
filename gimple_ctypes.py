@@ -1238,6 +1238,13 @@ def _extract_init_expr(stmt_value) -> str:
     # unambiguous `.value`-bearing literal shapes before the containers
     # sidesteps that.
     if isinstance(stmt_value, IntLiteral):
+        # Prefer `.raw` (the original token text): it is a `str` field that
+        # survives the self-hosted compiled path intact, whereas `.value`
+        # was observed to read back 0 there — yielding `.x = 0` for `x = 42`
+        # module globals (stage1-vs-stage2 parity break under MOJO_NO_SHIM=1).
+        _raw = _as_str(stmt_value.raw)  # DIRECT field access — getattr erases on the self-hosted path
+        if _raw:
+            return _raw
         return str(stmt_value.value)
     if isinstance(stmt_value, BoolLiteral):
         return '1' if stmt_value.value else '0'
