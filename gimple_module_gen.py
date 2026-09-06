@@ -7134,13 +7134,18 @@ def gen_module_impl(self, stmts):
             # "'LayoutSolver_STACK' undeclared" behind). Same policy as
             # before, working comparison.
             _mg_seen = self._module_global_names[current_mod_name]
-            _mg_key = (_as_str(gname) + '\x00' + _as_str(c_type)
+            _mg_key = (_gname_s + '\x00' + _as_str(c_type)
                        + '\x00' + _as_str(g_mtype))
             if _mg_key not in _mg_seen:
                 _mg_seen.add(_mg_key)
-                self._module_globals[current_mod_name].append((gname, c_type, g_mtype))
-                self._module_global_inits[current_mod_name][gname] = init_code
-                self._global_to_module[gname] = current_mod_name
+                # `_gname_s` (the `_as_str`'d name), NOT the raw `gname` from
+                # `sorted(_declared_globals)` — a boxed key here is read back
+                # later via `inits.get(_as_str(_gt[0]))` in the struct-init
+                # emit loop, so a boxed/clean mismatch silently dropped the
+                # initializer (`x = 42` -> `.x = 0` under MOJO_NO_SHIM=1).
+                self._module_globals[current_mod_name].append((_gname_s, c_type, g_mtype))
+                self._module_global_inits[current_mod_name][_gname_s] = init_code
+                self._global_to_module[_gname_s] = current_mod_name
 
     _mg_list = self._module_globals.get(current_mod_name) or []
     # `len(...) > 0`, NOT bare truthiness: the self-hosted compiler's
