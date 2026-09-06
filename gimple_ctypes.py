@@ -32,7 +32,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str,
+    py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -1238,16 +1238,20 @@ def _extract_init_expr(stmt_value) -> str:
     # unambiguous `.value`-bearing literal shapes before the containers
     # sidesteps that.
     if isinstance(stmt_value, IntLiteral):
-        # Prefer `.raw` (the original token text): it is a `str` field that
-        # survives the self-hosted compiled path intact, whereas `.value`
-        # was observed to read back 0 there — yielding `.x = 0` for `x = 42`
-        # module globals (stage1-vs-stage2 parity break under MOJO_NO_SHIM=1).
-        _raw = _as_str(stmt_value.raw)  # DIRECT field access — getattr erases on the self-hosted path
+        # Route through `_as_intlit_node`: a plain `isinstance` pass does NOT
+        # narrow the node on the self-hosted compiled path, so `.raw`/`.value`
+        # went through `_mojo_dispatch_getattr` and `.value` came back 0
+        # (`.x = 0` for `x = 42` module globals — a stage1-vs-stage2 parity
+        # break under MOJO_NO_SHIM=1). The annotated identity view compiles
+        # the field read to a direct struct load. `.raw` (token text) first,
+        # `.value` fallback.
+        _il = _as_intlit_node(stmt_value)
+        _raw = _as_str(_il.raw)
         if _raw:
             return _raw
-        return str(stmt_value.value)
+        return str(_as_int(_il.value))
     if isinstance(stmt_value, BoolLiteral):
-        return '1' if stmt_value.value else '0'
+        return '1' if _as_boollit_node(stmt_value).value else '0'
     if isinstance(stmt_value, DictExpr):
         if not stmt_value.pairs:
             return 'mojo_dict_new()'

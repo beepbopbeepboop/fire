@@ -1392,6 +1392,22 @@ def _as_member_node(e: object) -> MemberExpr:
     return e
 
 
+def _as_intlit_node(e: object) -> IntLiteral:
+    """See _as_ident_node: static IntLiteral view of a boxed handle, so a
+    following `.value` / `.raw` read compiles to a direct field load. Needed
+    where a module-global static initializer is extracted from an
+    already-isinstance-checked RHS (`x = 42` -> `.x = 0` instead of
+    `.x = 42` under MOJO_NO_SHIM=1, because `.value` went through
+    `_mojo_dispatch_getattr` and came back 0)."""
+    return e
+
+
+def _as_boollit_node(e: object) -> BoolLiteral:
+    """See _as_intlit_node — static BoolLiteral view for a following
+    `.value` read."""
+    return e
+
+
 def _sms_key(struct_name: object, method: object) -> str:
     """Composite string key for `_struct_method_signatures`.
 

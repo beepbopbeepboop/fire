@@ -27,6 +27,7 @@ from mojo_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
+    _as_int, _as_intlit_node, _as_boollit_node,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -1262,21 +1263,19 @@ def _gmi_expr_provably_str(e) -> bool:
 def _gmi_global_init_code(value) -> str:
     """Static C initializer for a module-global assignment RHS.
 
-    A thin wrapper over `_extract_init_expr` that FIRST handles the
-    scalar-literal cases inline — same module context as
-    `_gscan_declare_global`'s own `isinstance(value, (IntLiteral,
-    BoolLiteral))` classification (which is confirmed working on the
-    self-hosted compiled path, since it picks the `int x;` field decl).
-    The cross-module `_extract_init_expr` call was returning '0' for a
-    plain `x = 42` on that path (`.x = 0` vs `.x = 42`, a stage1-vs-stage2
-    parity break under MOJO_NO_SHIM=1), so keep the common case here where
-    the node type check is known-good and `.raw`/`.value` are direct field
-    reads on a local."""
+    Handles the scalar-literal cases inline, routing the isinstance-checked
+    node through `_as_intlit_node` / `_as_boollit_node` FIRST — on the
+    self-hosted compiled path a plain `isinstance` pass does NOT narrow the
+    node, so `.value` / `.raw` still went through `_mojo_dispatch_getattr`
+    and came back 0 (`x = 42` -> `.x = 0` instead of `.x = 42`, a
+    stage1-vs-stage2 parity break under MOJO_NO_SHIM=1). The annotated
+    identity view compiles a following field read to a direct struct load."""
     if isinstance(value, IntLiteral):
-        _r = _as_str(value.raw)
-        return _r if _r else str(value.value)
+        _il = _as_intlit_node(value)
+        _r = _as_str(_il.raw)
+        return _r if _r else str(_as_int(_il.value))
     if isinstance(value, BoolLiteral):
-        return '1' if value.value else '0'
+        return '1' if _as_boollit_node(value).value else '0'
     return _extract_init_expr(value)
 
 
