@@ -1,5 +1,18 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-09-06 — whole-program `mojo.py build` of a dependent (asyncio/queues.py) is now PERF-bound, not codegen-bound)
+
+`isolated` `compile_to_gimple` of `collections/__init__.py`, `asyncio/
+queues.py` and `asyncio/futures.py` all succeed (blocker 1 fixed, below).
+A whole-program `python3 mojo.py build Lib/asyncio/queues.py` — which
+compiles the full asyncio + collections + inspect + _collections_abc
+transitive closure from scratch — was observed running >34 min at 100%
+CPU / 1.7 GB without completing: this is the separately-tracked
+`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+quadratic `_walk_ast` re-scan on a large import graph, NOT a codegen
+refusal. The codegen side of the asyncio/collections chain is done; the
+remaining barrier to an end-to-end binary is compile-time perf.
+
 ## Status (2026-09-05 — BLOCKER 1 (builtin `dict` subclassing) FIXED; `Lib/collections/__init__.py` now compiles isolated, clean under `gcc -fgimple -fsyntax-only`)
 
 Real builtin-`dict`-subclass support landed as a feature, in stages
