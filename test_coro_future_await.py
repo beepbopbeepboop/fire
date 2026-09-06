@@ -386,6 +386,82 @@ def main():
           out == "42\n", detail=repr(out))
 
 
+_STD_FUT = """\
+class Fut:
+    def __init__(self):
+        self._loop = 0
+        self._state = 0
+        self._result = 0
+    def done(self):
+        return self._state != 0
+    def result(self):
+        return self._result
+    def set_result(self, v):
+        self._result = v
+        self._state = 1
+    def __await__(self):
+        if not self.done():
+            self._asyncio_future_blocking = True
+            yield self
+        if not self.done():
+            raise RuntimeError("await wasn't used with future")
+        return self.result()
+"""
+
+
+def test_native_future_class_bridge_sync_resolve():
+    """A user class whose `__await__` is the standard asyncio
+    `if not self.done(): ... yield self` / `return self.result()` generator
+    is bridged onto the native MojoFuture handle: `await <instance>` parks
+    on the native waiter list, a sync `.set_result()` resolves it.
+    (bugs/COMPILE_FAIL_asyncio_futures.md)"""
+    src = "import asyncio\n\n" + _STD_FUT + """
+async def consumer(f: Fut) -> Int:
+    var v = await f
+    return v + 1
+
+async def main_co() -> Int:
+    var f = Fut()
+    f.set_result(41)
+    var r = await consumer(f)
+    return r
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("standard __await__ Future subclass + sync set_result -> await",
+          out == "42\n", detail=repr(out))
+
+
+def test_native_future_class_bridge_cross_task_wakeup():
+    """The same standard-shape Future subclass, resolved by a SIBLING task
+    while the consumer is parked on the native waiter list."""
+    src = "import asyncio\n\n" + _STD_FUT + """
+async def consumer(f: Fut) -> Int:
+    var v = await f
+    return v + 1
+
+async def producer(f: Fut) -> Int:
+    f.set_result(41)
+    return 0
+
+async def main_co() -> Int:
+    var f = Fut()
+    var c = create_task(consumer(f))
+    var p = create_task(producer(f))
+    var rc = await c
+    var rp = await p
+    return rc
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("standard __await__ Future subclass woken by a sibling task",
+          out == "42\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

@@ -534,6 +534,116 @@ def _is_struct_param(pann) -> bool:
     return isinstance(pann, str) and pann in _STRUCT_NAMES
 
 
+# ── native Future-class bridge ─────────────────────────────────────────
+# A user/stdlib class whose `__await__` (or `__iter__`) is the *standard*
+# Awaitable-protocol generator:
+#
+#     def __await__(self):
+#         if not self.done():
+#             [<simple self.<attr> = ... assigns>]
+#             yield self
+#         [if not self.done(): raise RuntimeError(...)]
+#         return self.result()
+#
+# is recognised structurally and mapped ONTO the native A3 `MojoFuture`
+# handle model this runtime already provides: an instance of the class IS
+# an `int64_t` future handle (`__mojo_future_new()`), its constructor
+# lowers exactly like `create_future()`, `.done()/.result()/.set_result()`
+# lower to the `__mojo_future_*` shims (via the existing sync + async
+# Future-op hooks, which fire once the receiver is a bare int64_t), and
+# `await <instance>` parks on the native waiter list via
+# `__mojo_async_await_future` -- composing with cross-coroutine wakeup,
+# `create_task` concurrency and deque round-tripping already in place.
+#
+# Conservative: the class is REPLACED by the native handle wholesale (its
+# StructDef is dropped, every `: <Cls>` annotation becomes `Int`, every
+# `<Cls>(...)` call becomes `create_future()`). A class of this shape that
+# ALSO carries other state/methods callable on an instance is out of
+# scope for v0 -- but the standard asyncio `Future.__await__` shape this
+# targets has exactly `done`/`result`/`set_result` as its awaited surface.
+_NATIVE_FUTURE_CLASSES: set = set()
+
+
+def _is_bare_self_call(node, name: str) -> bool:
+    return (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and node.func.member == name and not node.args
+            and not getattr(node, 'kwargs', None)
+            and isinstance(node.func.obj, N.IdentExpr)
+            and node.func.obj.name == 'self')
+
+
+def _is_not_self_done(node) -> bool:
+    return (isinstance(node, N.UnaryOp) and node.op == 'not'
+            and _is_bare_self_call(node.operand, 'done'))
+
+
+def _is_standard_await_generator(m) -> bool:
+    if not (isinstance(m, N.FunctionDef) and m.name in ('__await__', '__iter__')):
+        return False
+    if not any(isinstance(n, N.YieldExpr) for n in _walk(m)):
+        return False
+    body = [s for s in m.body if not isinstance(s, getattr(N, 'PassStmt', ()))]
+    if not body:
+        return False
+    last = body[-1]
+    if not (isinstance(last, N.ReturnStmt) and _is_bare_self_call(last.value, 'result')):
+        return False
+    for s in body[:-1]:
+        if isinstance(s, N.IfStmt) and _is_not_self_done(s.condition):
+            for inner in s.then_body:
+                if (isinstance(inner, N.ExprStmt)
+                        and isinstance(inner.value, N.YieldExpr)
+                        and isinstance(inner.value.value, N.IdentExpr)
+                        and inner.value.value.name == 'self'):
+                    return True
+    return False
+
+
+def _detect_native_future_classes(stmts) -> None:
+    _NATIVE_FUTURE_CLASSES.clear()
+    for s in stmts:
+        if isinstance(s, N.StructDef) and any(
+                _is_standard_await_generator(m) for m in s.methods):
+            _NATIVE_FUTURE_CLASSES.add(s.name)
+
+
+def _rewrite_native_future_refs(stmts) -> list:
+    """In-place: drop native-future StructDefs, rewrite `: <Cls>`
+    annotations to `Int`, rewrite `<Cls>(...)` construction to
+    `create_future()`."""
+    if not _NATIVE_FUTURE_CLASSES:
+        return stmts
+
+    def fix(node):
+        if node is None or not hasattr(node, '__dict__'):
+            return
+        # constructor call -> create_future()
+        if (isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr)
+                and node.func.name in _NATIVE_FUTURE_CLASSES):
+            node.func = N.IdentExpr(name='create_future')
+            node.args = []
+            if hasattr(node, 'kwargs'):
+                node.kwargs = []
+        for k, v in list(vars(node).items()):
+            if k in ('line', 'col'):
+                continue
+            if k in ('type_ann', 'return_type') and v in _NATIVE_FUTURE_CLASSES:
+                setattr(node, k, 'Int')
+            elif k == 'params' and isinstance(v, list):
+                node.params = [(pn, 'Int' if pa in _NATIVE_FUTURE_CLASSES else pa)
+                               for pn, pa in v]
+            elif isinstance(v, list):
+                for x in v:
+                    fix(x)
+            elif hasattr(v, '__dict__'):
+                fix(v)
+
+    for s in stmts:
+        fix(s)
+    return [s for s in stmts
+            if not (isinstance(s, N.StructDef) and s.name in _NATIVE_FUTURE_CLASSES)]
+
+
 def _resolve_call_args(name: str, node, cvar: str) -> list:
     """Positional args, in order, for a call to `name(...)` -- resolving
     any keyword arguments via _PARAM_NAMES when known. Falls back to
@@ -815,6 +925,8 @@ def _rewrite_async_expr(node, cvar: str):
             return _call('__mojo_event_is_set', [_rewrite_async_expr(_obj, cvar)])
         if _m == 'done' and not node.args:
             return _call('__mojo_future_done', [_rewrite_async_expr(_obj, cvar)])
+        if _m == 'result' and not node.args:
+            return _call('__mojo_future_result', [_rewrite_async_expr(_obj, cvar)])
         if _m in ('Future',) and not node.args:
             return _call('__mojo_future_new', [])
         if _m in ('Event',) and not node.args:
@@ -1442,6 +1554,8 @@ def lower(stmts: list) -> tuple[list, list]:
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
     _STRUCT_NAMES.clear()
+    _detect_native_future_classes(stmts)
+    stmts = _rewrite_native_future_refs(stmts)
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _seed_prop_names(stmts)
     for s in stmts:
