@@ -751,6 +751,39 @@ fn main():
     print(t)
 """, "101\n5\n1\n68656c6c6f\n1\n532\n")
 
+    # ── bytes value type (Stage 4): bytes-typed struct fields ────────────
+    # `self._buf = b''` in __init__ makes the field a real bytes value, so
+    # a slice of the field and `acc += <bytes>` accumulation work end to
+    # end (was: char* field -> mojo_cstr_slice -> char*+MojoBytes* pointer
+    # arithmetic + a GCC GIMPLE-FE ICE). COMPILE_FAIL_zipfile___init__.md.
+    test_gimple_stdout("gimple_bytes_field_slice_and_augassign", """\
+fn chunk() -> bytes:
+    return b'hello world'
+
+class Buf:
+    def __init__(self):
+        self._data = b''
+        self._offset = 0
+
+    def fill(self):
+        self._data = chunk()
+
+    def drain(self):
+        var out = self._data[self._offset:]
+        var more = self._data[0:2]
+        out += more
+        self._data = b''
+        self._offset = 0
+        return out
+
+def main():
+    b = Buf()
+    b.fill()
+    var r = b.drain()
+    print(1 if r == b'hello worldhe' else 0)
+    print(len(r))
+""", "1\n13\n")
+
 
 def main():
     gcc = find_gcc()

@@ -3691,6 +3691,20 @@ class GimpleGen:
                                             _base_var_types=_base_var_types)
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         return grsl._infer_local_var_types(self, func)
+    def _infer_method_local_var_types(self, struct_name, method) -> dict[str, str]:
+        """Like _infer_local_var_types but seeds `self`/`cls` so a local
+        typed from `self.<field>` (bytes accumulator, sliced field, ...)
+        resolves instead of defaulting to int64_t."""
+        _saved = self.var_types
+        self.var_types = dict(_saved)
+        self.var_types['self'] = f"{struct_name} *"
+        _mn = getattr(method, 'name', '')
+        if f"{struct_name}_{_mn}" in getattr(self, '_classmethod_names', ()):
+            self.var_types['cls'] = f"{struct_name} *"
+        try:
+            return grsl._infer_local_var_types(self, method)
+        finally:
+            self.var_types = _saved
     def _collect_calls(self, expr, out):
         return grsl._collect_calls(self, expr, out)
     def _calls_in_stmts(self, stmts, out):

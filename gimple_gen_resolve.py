@@ -2253,6 +2253,26 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
+            elif (isinstance(node, gimple_ctypes.VarDecl) and isinstance(node.name, str)
+                    and ',' not in node.name):
+                # `var out = self._buf[a:]` — a VarDecl, not an AssignStmt.
+                # Historically this pass "never scans VarDecl" (see
+                # _closure_value_locals' docstring), so a `var`-declared
+                # local's type fell to the int64_t default, breaking
+                # `return out` return-type inference and the local's own
+                # declared C type when the initializer is a pointer value
+                # (bytes accumulator, sliced field, ...).
+                vname = _as_str(node.name)
+                _vt = None
+                if getattr(node, 'type_ann', None):
+                    try:
+                        _vt = gimple_ctypes._mojo_type(node.type_ann)
+                    except Exception:
+                        _vt = None
+                if (_vt is None or _vt == 'int64_t') and node.value is not None:
+                    _vt = gen._quick_type(node.value)
+                if _vt is not None:
+                    inferred.setdefault(vname, []).append(_vt)
             elif isinstance(node, gimple_ctypes.MultiAssignStmt):
                 # `a = b = ... = expr` (chained assignment): every target
                 # receives the SAME value/type (real Python chained-

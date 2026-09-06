@@ -5336,6 +5336,38 @@ fn main():
     print(str(b))
 """)
 
+    # bytes value type (Stage 4) — bytes-typed struct fields (compile check).
+    # `self._buf = b''` in __init__ makes the field a real MojoBytes*, so a
+    # slice of the field routes through mojo_bytes_slice and `acc += <bytes>`
+    # concatenates instead of emitting a `char* + MojoBytes*` pointer add
+    # (which also ICE'd GCC's GIMPLE FE). COMPILE_FAIL_zipfile___init__.md.
+    test("bytes_field_slice_and_augassign_accumulation", """\
+fn _more() -> bytes:
+    return b'12345'
+
+class Reader:
+    def __init__(self):
+        self._buf = b''
+        self._off = 0
+
+    def _fill(self):
+        self._buf = _more()
+
+    def read_all(self):
+        var out = self._buf[self._off:]
+        while len(out) < 20:
+            out += self._buf[0:2]
+        self._buf = b''
+        self._off = 0
+        return out
+
+fn main():
+    var r = Reader()
+    r._fill()
+    var data = r.read_all()
+    print(len(data))
+""")
+
     # bytes value type (Stage 2) — compile checks
     test("bytes_slice_iter_in", """\
 fn main():

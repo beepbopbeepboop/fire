@@ -2315,7 +2315,13 @@ def gen_module_impl(self, stmts):
                             elif isinstance(v, IntLiteral):
                                 ft = 'int64_t'
                             elif isinstance(v, StringLiteral):
-                                ft = 'char *'
+                                # `self._buf = b''` in __init__ (or any bytes
+                                # literal) -> a real bytes value field, so a
+                                # later `self._buf[a:]` slice routes through
+                                # mojo_bytes_slice and `buf += <bytes>`
+                                # concatenates instead of doing char*+ptr
+                                # pointer arithmetic (COMPILE_FAIL_zipfile).
+                                ft = 'MojoBytes *' if getattr(v, 'is_bytes', False) else 'char *'
                             elif isinstance(v, BoolLiteral):
                                 ft = '_Bool'
                             elif isinstance(v, DictExpr):
@@ -2361,6 +2367,8 @@ def gen_module_impl(self, stmts):
                                     ft = 'MojoDict *'
                                 elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
                                     ft = 'MojoSet *'
+                                elif cn in ('bytes', 'bytearray'):
+                                    ft = 'MojoBytes *'
                                 elif cn.startswith('_alloc_'):
                                     sname = cn[len('_alloc_'):]
                                     ft = sname + ' *'
@@ -3179,6 +3187,18 @@ def gen_module_impl(self, stmts):
                                 self.var_types[pname] = f"{s.name} *"
                             else:
                                 self.var_types[pname] = self._resolve_type(ptype)
+                        # Seed inferred LOCAL var types (see the matching
+                        # comment at the _struct_method_signatures pass
+                        # below): `return <local>` where the local holds
+                        # a pointer value (bytes accumulator, sliced
+                        # field, ...) must not fall to the int64_t
+                        # default. COMPILE_FAIL_zipfile___init__.md.
+                        try:
+                            for _vn, _vt in self._infer_local_var_types(m).items():
+                                if _vt and _vt != 'int64_t':
+                                    self.var_types.setdefault(_vn, _vt)
+                        except Exception:
+                            pass
                         inferred = self._infer_return_type(m.body)
                         key = _mangled_key
                         if self.func_return_types.get(key) != inferred:
@@ -3269,6 +3289,19 @@ def gen_module_impl(self, stmts):
                     self.var_types['self'] = f"{s.name} *"
                     for _pn, _pt in real_params:
                         self.var_types[_pn] = self._resolve_type(_pt)
+                    # Seed inferred LOCAL variable types too, so a
+                    # `return <local>` whose local holds a non-int64_t
+                    # value (e.g. `out = self._buf[a:]; out += chunk;
+                    # return out` -> MojoBytes *) picks the right C
+                    # return type instead of the int64_t default — a
+                    # wrong int64_t return then makes every caller treat
+                    # the pointer as a scalar (COMPILE_FAIL_zipfile).
+                    try:
+                        for _vn, _vt in self._infer_local_var_types(m).items():
+                            if _vt and _vt != 'int64_t':
+                                self.var_types.setdefault(_vn, _vt)
+                    except Exception:
+                        pass
                     _ret_type = self._infer_return_type(m.body)
                     self.var_types = _saved_var_types
                 # Self-hosting bootstrap: the frozen GimpleGen signature
@@ -3391,7 +3424,7 @@ def gen_module_impl(self, stmts):
         if isinstance(s, StructDef):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
-                self._inferred_var_types[key] = self._infer_local_var_types(m)
+                self._inferred_var_types[key] = self._infer_method_local_var_types(_as_str(s.name), m)
 
     def _expr_provably_str(e):
         """Is `e` an expression whose Python runtime value is provably a
@@ -4572,7 +4605,7 @@ def gen_module_impl(self, stmts):
         if isinstance(s, StructDef):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
-                self._inferred_var_types[key] = self._infer_local_var_types(m)
+                self._inferred_var_types[key] = self._infer_method_local_var_types(_as_str(s.name), m)
 
     self._param_generator_api: dict[str, dict[str, str]] = {}
     self._fn_returns_generator: dict[str, str] = {}

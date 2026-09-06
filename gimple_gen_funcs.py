@@ -3844,7 +3844,20 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         else:
             ret_type = gen._resolve_type(node.return_type)
     else:
+        # Seed inferred LOCAL var types so `return <local>` where the
+        # local holds a pointer value (e.g. a bytes accumulator built
+        # from a sliced self.<field> + `+=`) infers the real C return
+        # type instead of int64_t — otherwise the definition's declared
+        # return type disagrees with the body (which declares the local
+        # correctly from _inferred_var_types) and every caller treats
+        # the returned pointer as a scalar. COMPILE_FAIL_zipfile.
+        _seed_lv = gen._inferred_var_types.get(f"{struct_name}_{node.name}") or {}
+        _saved_lv = dict(gen.var_types)
+        for _lvn, _lvt in _seed_lv.items():
+            if _lvt and _lvt != 'int64_t':
+                gen.var_types.setdefault(_lvn, _lvt)
         ret_type = gen._infer_return_type(node.body)
+        gen.var_types = _saved_lv
         if ret_type == 'void':
             ret_type = 'void'
 
