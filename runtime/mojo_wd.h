@@ -25,6 +25,14 @@
                               notifies that the handle resolved. Forwarded
                               upward unchanged through every intermediate
                               await drive loop, exactly like SLEEP/READ.    */
+#define MOJO_WD_TASK   5   /* payload = the awaited task's MojoCoro* bits.
+                              `await <task>` where <task> came from
+                              create_task(): the task was already scheduled
+                              onto the ready queue at creation, so the
+                              scheduler just records (task-coro -> this
+                              waiter) and re-readies the waiter when the
+                              task coroutine runs to completion (drive_once
+                              -> finalize_task -> notify_task).             */
 
 #define MOJO_WD_MASK   ((int64_t)0x00FFFFFFFFFFFFFFLL)
 

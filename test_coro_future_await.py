@@ -184,6 +184,78 @@ def main():
           out == "42\n", detail=repr(out))
 
 
+def test_eager_task_scheduling_concurrency():
+    """Gap 3 (bugs/COMPILE_FAIL_asyncio_queues.md): `create_task` eagerly
+    schedules the coroutine onto the shared scheduler ready queue, so two
+    sibling tasks run concurrently and a producer wakes an already-parked
+    consumer through a Future. `await <task>` drains the scheduler instead
+    of privately re-driving the task."""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    var v = await fut
+    return v + 1
+
+async def producer(fut: Int) -> Int:
+    fut.set_result(41)
+    return 0
+
+async def main_co() -> Int:
+    var fut = create_future()
+    var c = create_task(consumer(fut))
+    var p = create_task(producer(fut))
+    var rc = await c
+    var rp = await p
+    return rc
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("create_task sibling concurrency + Future wakeup of a parked consumer",
+          out == "42\n", detail=repr(out))
+
+
+def test_deque_field_future_handle_roundtrip():
+    """Gap 2 (bugs/COMPILE_FAIL_asyncio_queues.md): an unannotated
+    `self._getters = deque()` field types as MojoList *; append/popleft
+    round-trip an int64_t Future handle so `.set_result()` on the popped
+    value reaches the awaiting coroutine. Mirrors asyncio.Queue's
+    `_getters`/`_wakeup_next` shape."""
+    src = """\
+import asyncio
+from collections import deque
+
+struct Waiters:
+    fn __init__(out self):
+        self._q = deque()
+    fn park(mut self, fut: Int):
+        self._q.append(fut)
+    fn wake_all(mut self):
+        while len(self._q) > 0:
+            var w = self._q.popleft()
+            w.set_result(9)
+
+async def consumer(wq: Waiters) -> Int:
+    return 0
+
+async def main_co() -> Int:
+    var wq = Waiters()
+    var fut = create_future()
+    wq.park(fut)
+    wq.wake_all()
+    var v = await fut
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("deque() field + append/popleft round-trips a Future handle",
+          out == "10\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

@@ -1,5 +1,55 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (2026-09-05 — gaps 2 and 3 CLOSED at the mechanism level; queues.py itself still blocked on a NEW gap 4: async `def` METHODS on a struct)
+
+Gaps 2 and 3 from the entry below are now implemented and covered by
+runnable tests (`test_coro_future_await.py`, 5/5).
+
+**Gap 2 — Future/Event-typed struct fields + `deque` containers — DONE.**
+- `gimple_module_gen.py::_collect_self_assigns`: an unannotated
+  `self._x = deque()` / `deque[T]()` / `collections.deque()` now types the
+  field `MojoList *`; `self._x = Event()` / `asyncio.Event()` /
+  `create_future()` types it `int64_t` (the A3 handle).
+- `gimple_gen_calls.py::_lower_call`: `deque(...)` / `deque[T](...)` /
+  `collections.deque(...)` lower to `mojo_list_new()` (same path as
+  `list()`), instead of the weak "unavailable in compiled mode" stub that
+  returned NULL and segfaulted on the first `.append`.
+- `gimple_gen_methods.py::_lower_list_method`: `popleft()` →
+  `mojo_list_pop_at(l, 0)`, `appendleft(v)` → `mojo_list_insert_int(l, 0, v)`;
+  both round-trip an int64_t Future handle (and propagate `_field_elem_types`).
+- Result: a struct with a `deque()` field whose `append`/`popleft`
+  round-trip Future handles, `.set_result()` on the popped value waking an
+  awaiting coroutine, compiles + links + runs correctly
+  (`test_deque_field_future_handle_roundtrip`).
+
+**Gap 3 — eager task scheduling — DONE.**
+- Runtime: `MOJO_WD_TASK` wait-descriptor (`runtime/mojo_wd.h`); a task
+  registry + task-wait table + `finalize_task`/`notify_task` in
+  `runtime/mojo_async_sched.c`; `__mojo_async_task_schedule` /
+  `__mojo_async_await_task` / `__mojo_gen_finalize` in
+  `runtime/mojo_coro_gen.c`. `__mojo_async_run_gen` drains the shared loop
+  (rather than re-driving) when the handle is a registered task.
+- Codegen (`gimple_gen_coro.py`): `var t = create_task(f(...))` now also
+  emits `__mojo_async_task_schedule(t)` (enqueue f's coroutine on the
+  shared ready queue at creation); `await <task>` / `await task^` lowers to
+  `__mojo_async_await_task(__c, t)` (park on `MOJO_WD_TASK`) instead of a
+  private `__mojo_gen_resume` loop.
+- Result: two sibling `create_task`s run concurrently and a producer wakes
+  an already-parked consumer through a Future
+  (`test_eager_task_scheduling_concurrency`, and the C-level
+  `runtime/test_mojo_future.c`).
+
+**Still open — NEW gap 4: `queues.py` itself.** `Queue.get` / `put` /
+`join` are `async def` METHODS on the `Queue` struct (`self: Queue`
+receiver). v0 async codegen (`_eligible_async_common`) is top-level,
+scalar-parameter only — a struct-typed `self` param is rejected before any
+await-shape analysis. Compiling `queues.py` end-to-end now needs async
+struct-method support (start-function receiver slot + method-mangled
+coroutine trampolines), a distinct and larger piece than gaps 1-3. The
+Future/Event/deque/eager-task substrate this file needed is all in place;
+what remains is the async-method compilation front-end. Doc kept open for
+gap 4.
+
 ## Status (2026-09-05 — gap 1 of 3 CLOSED: sync-method-side Future/Event ops now lower; gaps 2 (Future-typed containers) and 3 (eager task scheduling) still open)
 
 Gap 1 from the entry below ("sync-method-side Future ops") is now

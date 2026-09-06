@@ -839,6 +839,20 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
                            value=_call('__mojo_async_await_future',
                                        [_c_ident(cvar), _c_ident(_hh.name)]))]
         return stmts, _c_ident(rv)
+    # Awaitable protocol: `await <task>` / `await task^` where `task` came
+    # from create_task() -- the task coroutine was eagerly scheduled onto
+    # the shared ready queue at creation, so this must NOT re-drive it with
+    # a private __mojo_gen_resume loop (that would double-resume the same
+    # MojoCoro). Park on it via __mojo_async_await_task (MOJO_WD_TASK); the
+    # scheduler wakes us when the task runs to completion.
+    if (_hh is not None and _await_target_name(inner) is None
+            and _hh.name in _TASK_VARS):
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_task',
+                                       [_c_ident(cvar), _c_ident(_hh.name)]))]
+        return stmts, _c_ident(rv)
     name = _await_target_name(inner)
     if name is not None:
         # fresh `await f(args)` -- construct via f's own _start (the only
@@ -1195,8 +1209,19 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             out.extend(pre)
             if isinstance(s, N.VarDecl):
                 out.append(N.VarDecl(name=s.name, type_ann=None, value=new_val))
+                _tname = s.name
             else:
                 out.append(N.AssignStmt(target=s.target, value=new_val))
+                _tname = s.target.name if isinstance(s.target, N.IdentExpr) else None
+            # Eager task scheduling: enqueue the freshly-constructed
+            # coroutine handle onto the shared scheduler ready queue so
+            # sibling tasks actually run concurrently and a producer can
+            # wake an already-parked consumer (bugs/COMPILE_FAIL_asyncio_
+            # queues.md gap 3). A later `await <task>` parks via
+            # __mojo_async_await_task instead of privately re-driving it.
+            if _tname is not None:
+                out.append(N.ExprStmt(value=_call('__mojo_async_task_schedule',
+                                                  [_c_ident(_tname)])))
             continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
@@ -1954,6 +1979,11 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_yield_tagged', 'int64_t')
     gen.func_param_types.setdefault('__mojo_async_run_gen', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_run_gen', 'void')
+    # Eager task scheduling (bugs/COMPILE_FAIL_asyncio_queues.md gap 3).
+    gen.func_param_types.setdefault('__mojo_async_task_schedule', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_task_schedule', 'void')
+    gen.func_param_types.setdefault('__mojo_async_await_task', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_async_await_task', 'int64_t')
     # Awaitable protocol: Future/Event handles (runtime/mojo_coro_gen.c).
     gen.func_param_types.setdefault('__mojo_future_new', [])
     gen.func_return_types.setdefault('__mojo_future_new', 'int64_t')

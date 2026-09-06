@@ -18,6 +18,13 @@ codegen lowering of `await <future>` / `await <ev>.wait()` /
 unit-tested (`runtime/test_mojo_future.c`); `await <resolved future>`
 end-to-end in `test_coro_future_await.py`.
 
+Update 2026-09-05 (later): eager `create_task` scheduling + real
+cross-coroutine task concurrency (`__mojo_async_task_schedule` /
+`__mojo_async_await_task` / `MOJO_WD_TASK`) and `deque`/Event-typed field
+support also landed this pass (see queues.md gap 2/3). Still does not
+close futures.py — the `Future.__await__` Python-generator model is the
+remaining piece.
+
 This does NOT by itself change futures.py's status — futures.py defines
 `Future` as a Python class with `__await__` as a generator, which the
 compiled path lowers differently from the native-handle model this
