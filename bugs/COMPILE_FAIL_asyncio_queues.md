@@ -1,5 +1,60 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (2026-09-05 — gap 4 CLOSED: `async def` METHODS on a compiled struct are now real A3 stack-switch coroutines. `Lib/asyncio/queues.py`'s OWN module-level refusal is GONE; the file compiles in isolation and the generated C passes `gcc -fgimple -fsyntax-only`. Doc kept open only for the pre-existing, separately-tracked transitive-import blocker + a top-level-async struct-param gap — neither is this file's own async blocker.)
+
+**Gap 4 — async struct methods — DONE** (commit below).
+- `gimple_gen_coro.py`: the async path (`_eligible_async` /
+  `_eligible_async_gen` / `_lower_one_async` / `_lower_one_async_gen`) now
+  accepts a `self` receiver, reusing the EXACT machinery `_lower_one`
+  already had for generator methods: `self` threads as the typed 2nd C
+  param of `__mgco_<Struct>_<method>_body` (runtime `mgen_thunk` /
+  `__mojo_gen_new_m0..3` already pass it), ordinary params start at
+  `__mojo_gen_arg` index 1, the trampoline is method-mangled
+  (`__mgco_<Struct>_<method>_start(<Struct> *, ...)`), and `register()`
+  routes the meta into `_generator_method_api` /
+  `_supported_generator_methods` (its existing `is_method` branch).
+- Call site: `await <obj>.<method>(...)` where `<method>` is a compiled
+  struct `async def` (tracked in the new module-scoped
+  `_ASYNC_METHOD_NAMES`, populated in a `lower()` pre-scan) is now an
+  accepted await shape (`_is_async_method_call`). The generic await drive
+  loop leaves the `<obj>.<method>(...)` call in place so the ordinary
+  type-aware method-call lowering resolves it to
+  `__mgco_<Struct>_<method>_start(obj, args...)` via
+  `_generator_method_api`, then drives it exactly like a top-level
+  `await f(args)`.
+- The three await SHAPES inside `Queue.get`/`put`/`join` (`await
+  <local Future>`, `await self._finished.wait()`) were already handled by
+  the gaps 1-3 Awaitable substrate — gap 4 was purely the `self`-receiver
+  front end.
+- Verified: `Lib/asyncio/queues.py` `compile_to_gimple(do_imports=False)`
+  now succeeds (`__mgco_Queue_get` etc. emitted) where every prior
+  session hit an up-front `function(s) get, join, put ... async def`
+  refusal; the generated C passes `gcc -fgimple -fsyntax-only`.
+- Regression test: `test_coro_future_await.py::test_async_struct_method_
+  queue_roundtrip` — a `Queue`-shaped struct with `async def get/put`
+  methods, a sync `put_nowait` that wakes a parked getter via
+  `.set_result`, driven through `asyncio.run` — real compile + link +
+  run, asserts `42`.
+
+**Remaining (NOT this file's own async blocker):**
+1. `python3 mojo.py build Lib/asyncio/queues.py` end-to-end is still
+   blocked on the transitive-import fallback for `collections` /
+   `inspect` (`Counter[...] = ...` / `OrderedDict[...] = ...`
+   subscript-store refusals — see
+   `COMPILE_FAIL_collections___init__.md`), which the whole-tree build
+   reaches before queues.py's own code. Unchanged, pre-existing, tracked
+   elsewhere.
+2. A top-level `async def consumer(q: Queue)` (a struct-typed PARAM on a
+   NON-method async function) is still refused by
+   `_eligible_async_common`'s scalar-only param gate — `__mojo_gen_arg`
+   returns an untyped `int64_t`, so a non-`self` struct param loses its
+   pointer type in the body (methods work only because `self` is a real
+   typed C param). Real producer/consumer PROGRAMS that pass the queue
+   between top-level coroutines need this; `queues.py` itself does not
+   (its coroutines are all methods). Next concrete step for this feature.
+
+---
+
 ## Status (2026-09-05 — gaps 2 and 3 CLOSED at the mechanism level; queues.py itself still blocked on a NEW gap 4: async `def` METHODS on a struct)
 
 Gaps 2 and 3 from the entry below are now implemented and covered by

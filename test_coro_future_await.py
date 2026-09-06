@@ -256,6 +256,53 @@ def main():
           out == "10\n", detail=repr(out))
 
 
+def test_async_struct_method_queue_roundtrip():
+    """Gap 4 (bugs/COMPILE_FAIL_asyncio_queues.md): `async def` METHODS on
+    a compiled struct (a `self: Queue` receiver) become real A3 stack-switch
+    coroutines -- a receiver slot in the start-function + a method-mangled
+    trampoline (__mgco_<Struct>_<method>_start), and `await obj.method(...)`
+    at the call site constructs + drives that coroutine. This is the
+    asyncio.Queue put/get shape: `get` awaits a bare local Future it parked
+    on `self._getters`; a sync `put_nowait` wakes it via `.set_result`."""
+    src = """\
+import asyncio
+from collections import deque
+
+struct Q:
+    fn __init__(out self):
+        self._items = deque()
+        self._getters = deque()
+    fn empty(self) -> Bool:
+        return len(self._items) == 0
+    fn put_nowait(mut self, item: Int):
+        self._items.append(item)
+        while len(self._getters) > 0:
+            var g = self._getters.popleft()
+            g.set_result(0)
+    async def get(self) -> Int:
+        while self.empty():
+            var getter = create_future()
+            self._getters.append(getter)
+            await getter
+        return self._items.popleft()
+    async def put(self, item: Int) -> Int:
+        self.put_nowait(item)
+        return 0
+
+async def main_co() -> Int:
+    var q = Q()
+    var r = await q.put(41)
+    var v = await q.get()
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("async struct method (Queue.get/.put) compiles + awaits + runs",
+          out == "42\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):
