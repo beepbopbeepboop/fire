@@ -1337,6 +1337,63 @@ def _gen_stmt_AssignStmt(gen, node):
                             gen._emit(f"  *{addr} = {v_cast};")
                     else:
                         gen._emit(f"  {obj_v}[{idx_v}] = {v};")
+    elif isinstance(node.target, gimple_ctypes.SliceExpr):
+        # `x[a:b] = y` / `x[:] = y` / `x[::k] = y` — a real in-place splice
+        # of a list, matching Python semantics (remove the slice's slots,
+        # insert `y`'s elements at `start`, growing/shrinking the list).
+        # Before this branch existed the trailing `else: pass` below
+        # silently dropped the whole store — no error, no mutation
+        # (bugs/CODEGEN_slice_assignment_silently_noops.md). The bounded
+        # case shares the exact bound-normalization (`_lower_slice_bounds`)
+        # of slice READS and `del x[a:b]`, and the same MojoList*-or-assume
+        # ambiguity handling as `del x[a:b]`.
+        stgt = node.target
+        ot, obj_v = gen.lower_expr(stgt.obj)
+        if ot == 'MojoStr *' or ot == 'char *':
+            # `s[a:b] = ...` is not valid Python (str is immutable).
+            raise RuntimeError(
+                "cannot compile module: slice-assignment to a string "
+                "target is not valid (strings are immutable) — falling "
+                "back to interpreting this module from source instead")
+        lp = obj_v if ot == 'MojoList *' else gen._new_val(
+            'MojoList *', f"(MojoList *){gen._to_int64(ot, obj_v)}")
+        # RHS (`vtype`, `v`) is already lowered above. Both splice paths
+        # read it as a MojoList* (raw int64_t element slots) — a list/tuple
+        # literal or any list-typed expression; box a stray non-pointer
+        # through the same cast the tuple-unpack path uses.
+        rhs = v if vtype == 'MojoList *' else gen._new_val(
+            'MojoList *', f"(MojoList *){gen._to_int64(vtype, v)}")
+        if stgt.step is None:
+            # `x[:] = y` / `x[a:b] = y` — a real element-shifting splice
+            # (delete [start:stop), insert y's elements at start, grow or
+            # shrink). Shares `_lower_slice_bounds` (and thus the exact
+            # negative-index / omitted-stop normalization) with slice READS
+            # and `del x[a:b]`.
+            start_v, stop_v = gen._lower_slice_bounds(stgt)
+            gen._emit(f"  mojo_list_splice ({lp}, {start_v}, {stop_v}, {rhs});")
+        else:
+            # `x[a:b:k] = y` — an "extended slice" assignment: no size
+            # change, each selected slot overwritten in order, and Python
+            # requires len(y) to equal the slot count (the runtime helper
+            # reports + exits on a mismatch). `has_start`/`has_stop` let
+            # the runtime tell an omitted bound from an explicit 0, which
+            # matters for the sign of `k` (Python's slice.indices rules).
+            step_t, step_v = gen.lower_expr(stgt.step)
+            step64 = gen._to_int64(step_t, step_v)
+            if stgt.start is not None:
+                st_t, st_v = gen.lower_expr(stgt.start)
+                start64 = gen._to_int64(st_t, st_v)
+                has_start = '1'
+            else:
+                start64, has_start = '0', '0'
+            if stgt.stop is not None:
+                sp_t, sp_v = gen.lower_expr(stgt.stop)
+                stop64 = gen._to_int64(sp_t, sp_v)
+                has_stop = '1'
+            else:
+                stop64, has_stop = '0', '0'
+            gen._emit(f"  mojo_list_assign_step ({lp}, {has_start}, {start64}, "
+                      f"{has_stop}, {stop64}, {step64}, {rhs});")
     elif isinstance(node.target, gimple_ctypes.CallExpr) and isinstance(node.target.func, gimple_ctypes.IdentExpr) \
             and node.target.func.name == '__get_address_as_uninit_lvalue' \
             and node.target.args:

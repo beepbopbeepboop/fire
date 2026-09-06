@@ -969,6 +969,25 @@ def concat(a: List, b: List) -> List:
     return r
 """)
 
+    # 93a. x[:] = y  → in-place full-slice splice (mojo_list_splice)
+    test("list_slice_assign_full", """\
+def replace_all(a: List, b: List):
+    a[:] = b
+""")
+
+    # 93b. x[a:b] = y → in-place bounded-slice splice (grows/shrinks a)
+    test("list_slice_assign_bounded", """\
+def splice(a: List, b: List):
+    a[1:3] = b
+""")
+
+    # 93c. x[a:b:k] = y → extended-slice store (mojo_list_assign_step);
+    # bugs/CODEGEN_slice_assignment_silently_noops.md.
+    test("list_slice_assign_stepped", """\
+def strided(a: List, b: List):
+    a[::2] = b
+""")
+
     # ── Dict iterator ────────────────────────────────────────────────────
 
     # 94. for k in dict_var → MojoDictIter

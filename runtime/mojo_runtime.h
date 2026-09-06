@@ -211,6 +211,10 @@ void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
 void     mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop);
+void     mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl);
+void     mojo_list_assign_step(MojoList *l, int has_start, int64_t start,
+                               int has_stop, int64_t stop, int64_t step,
+                               MojoList *repl);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
 

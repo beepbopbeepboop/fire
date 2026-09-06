@@ -630,6 +630,132 @@ void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
     l->len -= n;
 }
 
+/* `lst[start:stop] = repl` — replace the elements [start, stop) in place
+ * with a copy of `repl`'s elements, shifting the tail and growing/shrinking
+ * the list by (repl->len - (stop - start)). Bound normalization mirrors
+ * mojo_list_slice / mojo_list_del_slice exactly (negative-index wrap,
+ * MOJO_SLICE_STOP_OMITTED, clamping); after clamping `stop < start` is
+ * treated as `stop = start`, i.e. a pure insertion at `start` (`lst[i:i]
+ * = repl`). Element slots are raw int64_t, as with every other MojoList
+ * op — interpretation (int/double-bits/pointer) is the caller's. `repl`
+ * is snapshotted first so `lst[a:b] = lst` (self-aliasing) is safe. */
+void mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl)
+{
+    if (!l) return;
+    int64_t rlen = repl ? repl->len : 0;
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
+    if (start < 0) start = l->len + start;
+    if (stop  < 0) stop  = l->len + stop;
+    if (start < 0) start = 0;
+    if (start > l->len) start = l->len;
+    if (stop < start) stop = start;
+    if (stop > l->len) stop = l->len;
+
+    int64_t *snap = NULL;
+    if (rlen > 0) {
+        snap = malloc((size_t)rlen * sizeof(int64_t));
+        memcpy(snap, repl->data, (size_t)rlen * sizeof(int64_t));
+    }
+
+    int64_t gap    = stop - start;      /* slots removed */
+    int64_t tail   = l->len - stop;     /* slots after the removed region */
+    int64_t newlen = l->len - gap + rlen;
+
+    while (l->cap < newlen)
+        _list_grow(l);
+
+    if (rlen > gap) {
+        /* growing: shift the tail right, back-to-front */
+        for (int64_t i = tail - 1; i >= 0; --i)
+            l->data[start + rlen + i] = l->data[stop + i];
+    } else if (rlen < gap) {
+        /* shrinking: shift the tail left, front-to-back */
+        for (int64_t i = 0; i < tail; ++i)
+            l->data[start + rlen + i] = l->data[stop + i];
+    }
+
+    for (int64_t i = 0; i < rlen; ++i)
+        l->data[start + i] = snap[i];
+
+    l->len = newlen;
+    free(snap);
+}
+
+/* Python's slice.indices(length): normalize (start, stop) for the given
+ * sign of `step` into the half-open-ish bounds an extended slice walks. */
+static void _mojo_slice_indices(int64_t length, int64_t step,
+                                int has_start, int64_t start,
+                                int has_stop, int64_t stop,
+                                int64_t *out_start, int64_t *out_stop)
+{
+    int64_t lower, upper;
+    if (step < 0) { lower = -1;      upper = length - 1; }
+    else          { lower = 0;       upper = length;     }
+    if (!has_start) {
+        start = (step < 0) ? upper : lower;
+    } else {
+        if (start < 0) { start += length; if (start < lower) start = lower; }
+        else if (start > upper) start = upper;
+    }
+    if (!has_stop) {
+        stop = (step < 0) ? lower : upper;
+    } else {
+        if (stop < 0) { stop += length; if (stop < lower) stop = lower; }
+        else if (stop > upper) stop = upper;
+    }
+    *out_start = start;
+    *out_stop  = stop;
+}
+
+/* Number of elements an extended slice [start:stop:step] selects, with
+ * start/stop already normalized by _mojo_slice_indices. */
+static int64_t _mojo_slice_len(int64_t start, int64_t stop, int64_t step)
+{
+    if (step > 0)
+        return start < stop ? (stop - start - 1) / step + 1 : 0;
+    return start > stop ? (start - stop - 1) / (-step) + 1 : 0;
+}
+
+/* `lst[start:stop:step] = repl` for step != 1 (an "extended slice"
+ * assignment). Python requires len(repl) to equal the number of slots the
+ * slice selects — there is no growing/shrinking, each selected slot is
+ * overwritten in order. Returns 0 on success, -1 for step == 0, and the
+ * (positive) required length when it does not match len(repl) so the
+ * length does not match (Python raises ValueError; the compiled runtime
+ * has no ValueError object, so it reports and exits — an honest failure,
+ * not a silent wrong result). `has_*` flags distinguish an omitted bound
+ * (`lst[::2]`) from an explicit 0. */
+void mojo_list_assign_step(MojoList *l,
+                           int has_start, int64_t start,
+                           int has_stop,  int64_t stop,
+                           int64_t step,  MojoList *repl)
+{
+    if (!l) return;
+    if (step == 0) {
+        fprintf(stderr, "ValueError: slice step cannot be zero\n");
+        exit(1);
+    }
+    int64_t s, e;
+    _mojo_slice_indices(l->len, step, has_start, start, has_stop, stop, &s, &e);
+    int64_t slen = _mojo_slice_len(s, e, step);
+    int64_t rlen = repl ? repl->len : 0;
+    if (slen != rlen) {
+        fprintf(stderr,
+                "ValueError: attempt to assign sequence of size %lld "
+                "to extended slice of size %lld\n",
+                (long long)rlen, (long long)slen);
+        exit(1);
+    }
+    int64_t *snap = NULL;
+    if (rlen > 0) {
+        snap = malloc((size_t)rlen * sizeof(int64_t));
+        memcpy(snap, repl->data, (size_t)rlen * sizeof(int64_t));
+    }
+    int64_t idx = s;
+    for (int64_t i = 0; i < slen; ++i) { l->data[idx] = snap[i]; idx += step; }
+    free(snap);
+}
+
 MojoList *mojo_list_concat(MojoList *a, MojoList *b)
 {
     if (!a) a = mojo_list_new();

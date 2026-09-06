@@ -474,6 +474,47 @@ def main():
         print("no zzz")
 """, "8\n1\n0\n2\nhas a\nno zzz\n")
 
+    # Slice-assignment really mutates the list in place (full + bounded,
+    # growing and shrinking, pure insert, negative bounds) — this is the
+    # regression guard for bugs/CODEGEN_slice_assignment_silently_noops.md
+    # (compiled `x[a:b] = y` used to be a silent no-op).
+    test_gimple_stdout("gimple_slice_assign_mutation", """\
+def main():
+    a = [1, 2, 3]
+    a[0:2] = [7, 8]
+    print(a[0])
+    print(a[1])
+    print(a[2])
+    b = [1, 2]
+    b[:] = [9, 9, 5]
+    print(len(b))
+    print(b[2])
+    c = [1, 2, 3, 4, 5]
+    c[1:4] = [0]
+    print(len(c))
+    print(c[1])
+    print(c[2])
+    d = [1, 2, 3]
+    d[1:1] = [8, 8]
+    print(len(d))
+    print(d[1])
+    print(d[3])
+    e = [1, 2, 3, 4]
+    e[-2:] = [9]
+    print(len(e))
+    print(e[2])
+    f = [0, 0, 0, 0, 0]
+    f[::2] = [1, 2, 3]
+    print(f[0])
+    print(f[1])
+    print(f[2])
+    print(f[4])
+    g = [1, 2, 3, 4]
+    g[::-1] = [10, 20, 30, 40]
+    print(g[0])
+    print(g[3])
+""", "7\n8\n3\n3\n5\n3\n0\n5\n5\n8\n2\n3\n9\n1\n0\n2\n3\n40\n10\n")
+
 
 def main():
     gcc = find_gcc()
