@@ -5162,6 +5162,58 @@ def main():
     print(s.get("x"))
 """)
 
+    # bytes value type (Stage 1) — compile checks
+    test("bytes_literal_len_index", """\
+fn main():
+    var b = b'\\x00\\x01ABC'
+    print(len(b))
+    print(b[0])
+    print(b[-1])
+""")
+
+    test("bytes_constructors", """\
+fn main():
+    var a = bytes()
+    var z = bytes(4)
+    var l = bytes([1, 2, 3])
+    var s = bytes("hi", "utf-8")
+    print(len(a), len(z), len(l), len(s))
+""")
+
+    test("bytes_equality_and_truthiness", """\
+fn main():
+    if b'ab' == b'ab':
+        print("eq")
+    if b'ab' != b'ac':
+        print("ne")
+    var b = b'x'
+    if b:
+        print("t")
+    if not bytes():
+        print("f")
+""")
+
+    test("bytes_through_annotated_and_default_params", """\
+fn tail(b: bytes) -> bytes:
+    return b
+
+fn size(b = b'abcd') -> Int:
+    return len(b)
+
+fn main():
+    var t = tail(b'XYZ')
+    print(len(t), t[0])
+    print(size())
+    print(size(b'hello'))
+""")
+
+    test("bytes_repr_and_str", """\
+fn main():
+    var b = b'a\\x00b'
+    print(b)
+    print(str(b))
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

@@ -572,6 +572,61 @@ def main():
     print(g[3])
 """, "7\n8\n3\n3\n5\n3\n0\n5\n5\n8\n2\n3\n9\n1\n0\n2\n3\n40\n10\n")
 
+    # ── bytes value type (Stage 1) ───────────────────────────────────────
+    test_gimple_stdout("gimple_bytes_literal_len_index", """\
+fn main():
+    var b = b'\\x00\\x01ABC'
+    print(len(b))
+    print(b[2])
+    print(b[-1])
+    print(b[0])
+""", "5\n65\n67\n0\n")
+
+    test_gimple_stdout("gimple_bytes_constructors", """\
+fn main():
+    var z = bytes(3)
+    print(len(z), z[0])
+    var l = bytes([65, 66, 67])
+    print(len(l), l[0], l[2])
+    var e = bytes()
+    print(len(e))
+    var s = bytes("hi", "utf-8")
+    print(len(s), s[0], s[1])
+""", "3 0\n3 65 67\n0\n2 104 105\n")
+
+    test_gimple_stdout("gimple_bytes_equality_and_truthiness", """\
+fn main():
+    if b'ab' == b'ab':
+        print("eq")
+    if b'ab' != b'ac':
+        print("ne")
+    var b = b'x'
+    if b:
+        print("truthy")
+    var e = bytes()
+    if not e:
+        print("empty-falsy")
+""", "eq\nne\ntruthy\nempty-falsy\n")
+
+    test_gimple_stdout("gimple_bytes_through_functions", """\
+fn tail(b: bytes) -> bytes:
+    return b
+
+fn size(b = b'abcd') -> Int:
+    return len(b)
+
+fn main():
+    var t = tail(b'XYZ')
+    print(len(t), t[0])
+    print(size())
+    print(size(b'hello'))
+""", "3 88\n4\n5\n")
+
+    test_gimple_stdout("gimple_bytes_repr_print", """\
+fn main():
+    print(b'a\\x00\\nZ')
+""", "b'a\\x00\\nZ'\n")
+
 
 def main():
     gcc = find_gcc()

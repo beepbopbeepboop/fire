@@ -1,0 +1,117 @@
+# CODEGEN: `bytes` value type in the compiled path (multi-stage feature)
+
+## Problem
+
+The compiled path (`mojo_compiler.py` parser -> `gimple_gen_*.py` -> C/GIMPLE,
+runtime in `runtime/`) has **zero** support for `bytes`. `b'...'` literals,
+`bytes(...)`, `bytearray(...)`, `memoryview(...)` all refuse or misbehave.
+Grep confirms: only refusal-message strings mention `bytes`, no implementation.
+
+This blocks a large set of `COMPILE_FAIL_*` docs: zipfile, pickle-family, io,
+hashlib, subprocess, struct, base64, `Tools/*`, umarshal, gencodec, and more.
+
+## Representation
+
+`MojoBytes` — a heap value mirroring `MojoStr` / `MojoList`:
+
+```c
+typedef struct {
+    uint8_t *data;   /* NOT NUL-terminated-significant; may contain embedded 0 */
+    int64_t  len;
+} MojoBytes;
+```
+
+Passed as `MojoBytes *` across the C boundary (like `MojoStr *`, `MojoList *`).
+`_TYPE_MAP['bytes'] = 'MojoBytes *'`. Runtime ops are `mojo_bytes_*`, declared
+in `runtime/mojo_runtime.h`, implemented in `runtime/mojo_runtime.c`, and their
+return types registered in BOTH runtime-signature maps
+(`gimple_ctypes.py` `_RUNTIME_RET` near line 313 and the parallel copy in
+`gimple_codegen.py` near line 190 — these are parallel-maintained today).
+
+### `bytes` vs `str` — must NOT be conflated
+- `b[i]` returns an **int** 0-255, never a 1-char str.
+- No implicit decode/encode. `bytes` never flows into a `char *` slot and
+  `str` never flows into a `MojoBytes *` slot without an explicit
+  `bytes(s, enc)` / `b.decode(enc)`.
+- Equality is bytewise; `b'a' == 'a'` is `False` (different C types — codegen
+  keeps them distinct, so this simply doesn't typecheck to `mojo_str_eq`).
+- Truthiness is `len != 0` (same rule as str/list, different helper).
+
+## Staged scope
+
+### Stage 1 (this pass)
+- `b'...'` / `b"..."` literals with `\xNN`, `\n`, `\t`, `\r`, `\\`, `\'`, `\"`,
+  `\0` escapes -> a `MojoBytes *` value (built at the literal site via
+  `mojo_bytes_new_lit(const char *data, int64_t len)`; the data is a
+  byte-for-byte octal-escaped C string constant in the string pool, so
+  embedded NUL and high bytes are exact and can't run on into following
+  hex/octal digits).
+- `bytes()` (empty), `bytes(<int n>)` (n zero bytes), `bytes(<list of ints>)`,
+  `bytes(<str>, 'utf-8'|'ascii')`.
+- `len(b)`, `b[i]` (-> int 0-255, negative index ok), `b == b2`, `b != b2`,
+  `bool(b)` / truthiness in `if`/`while`/`and`/`or`/`not`.
+- `bytes` through function params annotated `: bytes` and through a return
+  type annotated `-> bytes`; unannotated param inferred `bytes` from a
+  `b'...'` default value.
+
+### Stage 2 (later)
+- `b[a:b]` slice -> `MojoBytes`; `for x in b` (yields int); `bytes(bytearray)`;
+  `.decode()`, `.hex()`, `.startswith`/`.endswith`, `.find`, `.split`,
+  `.replace`, `.strip`, `+` concat, `b'%d' % x`.
+- Unannotated param inferred `bytes` from body usage (indexing feeding an int
+  context, passed to a `bytes` param, etc.).
+
+### Stage 3 (later)
+- `bytearray` (mutable: `ba[i] = v`, `.append`, `.extend`, slice-assign).
+- `memoryview` ({ptr,len,itemsize} non-copying view).
+
+## Study notes — `MojoStr` as the analogue
+
+- runtime struct: `runtime/mojo_runtime.c` ~line 792; header ~line 224.
+- literal lowering: `gimple_gen_exprs.py` `_lower_StringLiteral` (~line 149);
+  prefix/quote handling `_decode_str_literal_text` in `gimple_gen_resolve.py`
+  (~2538); string pool `_intern_string` (`gimple_gen_resolve.py` ~2633),
+  emitted `gimple_module_gen.py` ~7663.
+- parser strips the `b` prefix today in `_strip_string_prefix_and_quotes`
+  (`mojo_compiler.py` ~3726) so byteness is lost. Stage 1 adds an
+  `is_bytes: bool` field to `StringLiteral` (mojo_compiler.py ~162) set in
+  `_parse_primary` (~3951) / `_merge_string_literals`, and stores the decoded
+  bytes as a latin-1 `str` (one char per byte) in `.value`.
+- indexing: `gimple_gen_calls.py` ~4337 (`mojo_str_char_at`).
+- `str`-typed param handling / `_TYPE_MAP`: `gimple_ctypes.py` ~203.
+
+## Status
+
+**Stage 1: LANDED (this pass).**
+
+Landed:
+- `runtime/mojo_runtime.{h,c}`: `MojoBytes` struct + `mojo_bytes_new_lit`,
+  `_empty`, `_zeros`, `_from_list`, `_from_str`, `_len`, `_get`, `_eq`,
+  `_truthy`, `_repr`, `_print`.
+- Parser (`mojo_compiler.py`): `StringLiteral.is_bytes` field;
+  `_raw_string_is_bytes` / `_decode_bytes_literal` (escape decode ->
+  latin-1, one char per byte); wired into `_parse_primary` and
+  `_merge_string_literals` (adjacent-literal concat).
+- `_TYPE_MAP['bytes'] = 'MojoBytes *'`; `mojo_bytes_*` return types in both
+  runtime-signature maps.
+- `_lower_StringLiteral`: bytes branch -> fixed 3-digit octal-escaped C
+  constant + `mojo_bytes_new_lit(_slit_N, len)`.
+- `bytes(...)` constructor in `gimple_gen_calls.py` (0-arg / int / list /
+  str+enc / bytes-copy).
+- `len(b)` (`_LEN_FNS` + `_CONTAINER_LEN_FN` -> truthiness & `bool(b)`),
+  `b[i]` -> `int64_t` via `mojo_bytes_get`, `b == b2` / `!=` via
+  `mojo_bytes_eq`, `print(b)` / `str(b)` / `repr(b)` / f-string -> `b'...'`
+  repr text (no decode).
+- Param typing: annotated `: bytes` / `-> bytes` via `_TYPE_MAP`;
+  unannotated param inferred `MojoBytes *` from a `b'...'` default
+  (`gimple_gen_funcs.py` default-evidence hook + `_quick_type`).
+- Tests: `test_gimple.py` (5 compile checks) + `test_gimple_runner.py`
+  (5 runnable value-asserting cases).
+
+Still missing in Stage 1 / deferred to Stage 2:
+- Unannotated param inferred `bytes` from *body usage* alone (only
+  default-value inference is wired; annotation always works).
+- `String(bytes)` / `bytes`-in-`Str(...)` still emit the generic address
+  path (Python has no such implicit conversion either — needs explicit
+  `.decode()` in Stage 2).
+- Everything else already listed under Stage 2 / Stage 3 above.
