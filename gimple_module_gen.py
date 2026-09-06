@@ -1260,6 +1260,25 @@ def _gmi_expr_provably_str(e) -> bool:
     return False
 
 
+# The hardcoded dispatch tables (`_STMT_DISPATCH` etc.) that get a bare
+# `MojoDict *` / `MojoList *` / `MojoSet *` module-global field rather than
+# the boxed `int64_t` convention. A module-level tuple + explicit `==` loop:
+# `name in <a set literal>` returned True for UNRELATED names on the
+# self-hosted compiled path (`'arr' in _dispatch_names`), declaring an
+# ordinary `arr = [1,2,3]` global as a bare `MojoList *` field (a
+# stage1-vs-stage2 parity break under MOJO_NO_SHIM=1, array_ops_jit.mojo).
+_DISPATCH_TABLE_NAMES = ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
+                         '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS')
+
+
+def _is_dispatch_name(_n) -> bool:
+    _ns = _as_str(_n)
+    for _dn in _DISPATCH_TABLE_NAMES:
+        if _ns == _dn:
+            return True
+    return False
+
+
 def _gmi_global_init_code(value) -> str:
     """Static C initializer for a module-global assignment RHS.
 
@@ -6644,15 +6663,6 @@ def gen_module_impl(self, stmts):
     _dispatch_dict_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
                             '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
     _dispatch_set_names = {'_CMP_OPS'}
-    # A single flat set literal, NOT `_dispatch_dict_names | _dispatch_set_names`
-    # — set union on the self-hosted compiled path produced a set whose
-    # membership test then matched UNRELATED names (`'arr' in _dispatch_names`
-    # -> True), so an ordinary `arr = [1,2,3]` module global got declared as a
-    # bare `MojoList *` field instead of the boxed `int64_t /* MojoList * */`
-    # every write/read site assumes — a stage1-vs-stage2 parity break under
-    # MOJO_NO_SHIM=1 (array_ops_jit.mojo).
-    _dispatch_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                       '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
     _declared_globals = {}  # dict not set: self-hosted `sorted(<set>)` at the field-order loop below sorts boxed str slots by ADDRESS (nondeterministic _<mod>_toplev field order in --dump-full); dict keys sort by content via mojo_dict_sorted_keys
     all_scan = stmts
     for stmt in all_scan:
@@ -6736,7 +6746,7 @@ def gen_module_impl(self, stmts):
         emits `_<mod>_toplev.NAME` for a field this scan never
         declared, i.e. 'struct _X_toplev has no member named NAME'."""
         if isinstance(value, DictExpr):
-            if gname in _dispatch_names:
+            if _is_dispatch_name(gname):
                 global_decls.append(f"MojoDict * {gname};")
                 self._global_c_decl_types[gname] = 'MojoDict *'
             else:
@@ -6744,7 +6754,7 @@ def gen_module_impl(self, stmts):
                 self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoDict *'
         elif isinstance(value, (ListExpr, TupleExpr)):
-            if gname in _dispatch_names:
+            if _is_dispatch_name(gname):
                 global_decls.append(f"MojoList * {gname};")
                 self._global_c_decl_types[gname] = 'MojoList *'
             else:
@@ -6752,7 +6762,7 @@ def gen_module_impl(self, stmts):
                 self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoList *'
         elif isinstance(value, SetExpr):
-            if gname in _dispatch_names:
+            if _is_dispatch_name(gname):
                 global_decls.append(f"MojoSet * {gname};")
                 self._global_c_decl_types[gname] = 'MojoSet *'
             else:
