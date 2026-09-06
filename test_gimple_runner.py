@@ -784,6 +784,46 @@ def main():
     print(len(r))
 """, "1\n13\n")
 
+    # Generator expression bound to a local, then consumed exactly once by
+    # a forward iteration -> materialised as a list (see
+    # _seed_genexp_list_narrowing). bugs/COMPILE_FAIL_zipfile___init__.md
+    # blocker 3.
+    test_gimple_stdout("gimple_genexp_local_sum_once", """\
+fn main():
+    g = (x * 2 for x in [1, 2, 3])
+    print(sum(x for x in g))
+""", "12\n")
+
+    test_gimple_stdout("gimple_genexp_local_for_once", """\
+fn main():
+    g = (x + 1 for x in [10, 20, 30])
+    for v in g:
+        print(v)
+""", "11\n21\n31\n")
+
+    # The exact ZipFile._sanitize_windows_name shape: a genexp bound to a
+    # PARAMETER (char*-typed slot), iterated by a second genexp, plus a
+    # bare `if x` string-truthiness filter (empty string must be dropped).
+    test_gimple_stdout("gimple_genexp_param_reassigned_sanitize_shape", """\
+fn clean(arcname: String, pathsep: String) -> String:
+    arcname = (x.rstrip(" .") for x in arcname.split(pathsep))
+    arcname = pathsep.join(x for x in arcname if x)
+    return arcname
+
+fn main():
+    print(clean("a. /b .// c", "/"))
+""", "a/b/ c\n")
+
+    # Genexp local consumed TWICE: narrowing must NOT fire; the existing
+    # materialise-unconditionally behaviour still applies (both reads see
+    # the same list), never a silent-wrong lazy/empty second pass.
+    test_gimple_stdout("gimple_genexp_local_consumed_twice", """\
+fn main():
+    g = (x * 2 for x in [1, 2, 3])
+    print(sum(x for x in g))
+    print(sum(x for x in g))
+""", "12\n12\n")
+
 
 def main():
     gcc = find_gcc()

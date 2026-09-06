@@ -3382,7 +3382,11 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
     if gen0.conditions:
         bb_append = gen._new_bb()
         for cond_expr in gen0.conditions:
-            _, cv = gen.lower_expr(cond_expr)
+            _ct, cv = gen.lower_expr(cond_expr)
+            # A bare `if x` filter where `x` is a string must test
+            # non-EMPTY (Python truthiness), not merely non-NULL — an
+            # empty `char *` "" pointer is non-null and would wrongly pass.
+            cv = gen._ensure_bool_cond(_ct, cv)
             bb_next = gen._new_bb()
             gen._emit(f"  if ({cv}) goto {bb_next}; else goto {bb_skip};")
             gen._emit_label(bb_next)

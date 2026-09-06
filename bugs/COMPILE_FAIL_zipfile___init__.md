@@ -1,5 +1,57 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, blocker 3 FIXED): `compile_to_gimple(do_imports=False)` is now `gcc -fgimple -fsyntax-only` CLEAN (0 errors, was 2)
+
+**Blocker 3 — FIXED.** `ZipFile._sanitize_windows_name` (+ its
+`PyZipFile` inherited copy): `arcname = (x.rstrip(' .') for x in
+arcname.split(pathsep))` then `arcname = pathsep.join(x for x in arcname
+if x)` — a generator expression bound to the `char *`-typed `arcname`
+PARAMETER, then iterated by a second genexp. The two `gcc -fgimple`
+errors were `non-trivial conversion in 'mem_ref'` on `x = *_t34;` (the
+second genexp lowered `arcname` as a CHAR loop).
+
+Fix — a **bounded** narrowing (`gimple_gen_stmts.py`
+`_seed_genexp_list_narrowing` + `_maybe_narrow_genexp_local`, hook in
+`_lower_IdentExpr`, window-close in `_gen_stmt_AssignStmt`): a generator
+expression assigned to a local, where a per-function flow-ordered
+single-consumption analysis shows the local is read exactly once more —
+and that read is the `.iterable` of a `for` / another comprehension — is
+materialised as a LIST (semantically identical for a single forward
+consumption). When the local already has a non-list C slot (a reassigned
+parameter — the fresh-local case already worked via ordinary inference)
+the list is stored into the slot as an opaque pointer and every later
+read lowers as a properly-cast `MojoList *` until the name is rebound to
+a non-genexp value. Conservative: a genexp local read more than once,
+never iterated, or `global`-pinned is left untouched (its existing
+behaviour / gcc error stands) — a twice-consumed genexp local still
+compiles to the same unconditional materialisation it did before, never
+a silent-wrong lazy second pass.
+
+Also fixed an adjacent bug this uncovered: a comprehension `if x` filter
+(`_gen_compr_append`) tested pointer-non-null instead of Python
+truthiness, so an empty `char *` `""` wrongly passed — now routed
+through `_ensure_bool_cond`. (`_sanitize_windows_name`'s `if x` needs
+exactly this.)
+
+**zipfile re-probe:** fresh `compile_to_gimple(do_imports=False)` +
+`gcc-mp-15 -fgimple -fsyntax-only` → **exit 0, zero errors** (was 2).
+No blocker 4 surfaced at the syntax-check level. `_Extra(bytes)`
+subclassing + `struct.Struct` class attr + `super().__new__` remains a
+documented feature-sized gap that would surface in a full link/run.
+
+Full quality gate green: test_gimple.py 302/302, test_gimple_runner.py
+44/44, test_module_cache.py 76/76 (new regression tests included),
+test_gimple_generator_runner.py 85/4-known-fail, check-linkmode 3/3,
+check-selfhost clean, compile_stdlib.py 664/664 (0 unexpected), stdlib
+dylib from-scratch 0 skips, `make bootstrap` byte-identity — see commit.
+
+Still not `git rm`'d — a full `mojo.py build` (transitive stdlib
+imports) was not completed this session (perf-bound under concurrent
+machine load), and `_Extra(bytes)` subclassing still blocks an
+end-to-end link.
+
+---
+
 ## Status (2026-09-06, blockers 1 + 2 FIXED): down to ONE remaining blocker — genexp-held-in-a-local in `_sanitize_windows_name`
 
 Two blockers landed this session. `compile_to_gimple(do_imports=False)`

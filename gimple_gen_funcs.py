@@ -2422,6 +2422,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emit_mut_local_box_allocs()
 
     # Don't emit bb_2 label at function start - let statements flow directly
+    gen._genexp_narrow_names = set()
+    gen._genexp_list_locals = {}
+    gen._seed_genexp_list_narrowing(node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
 
@@ -3991,6 +3994,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._emit_mut_local_box_allocs()
 
     gen._emit_label("bb_2")
+    gen._genexp_narrow_names = set()
+    gen._genexp_list_locals = {}
+    gen._seed_genexp_list_narrowing(node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
 

@@ -14,7 +14,7 @@ from mojo_compiler import (
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
     SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr,
-    ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension,
+    ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator,
     VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt,
     ReturnStmt, RaiseStmt,
     BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt,
@@ -245,6 +245,130 @@ def _try_bind_list_iter(gen, name, value):
     gen._list_iter_cursor[cname] = {'list': cname, 'cursor': cur, 'elem': elem}
     if elem and elem != 'int64_t':
         gen._elem_types[cname] = elem
+    return True
+
+
+def _iter_ast(n):
+    """Yield `n` and every AST descendant (attribute + list-attribute
+    children). Mirrors gimple_gen_coro._walk."""
+    yield n
+    d = getattr(n, '__dict__', None)
+    if not d:
+        return
+    for v in d.values():
+        if isinstance(v, list):
+            for x in v:
+                if hasattr(x, '__dict__'):
+                    yield from _iter_ast(x)
+        elif hasattr(v, '__dict__'):
+            yield from _iter_ast(v)
+
+
+def _is_genexp(node) -> bool:
+    return isinstance(node, Comprehension) and node.kind == 'generator'
+
+
+def _seed_genexp_list_narrowing(gen, func_node):
+    """Pre-pass: find `name = (<generator expression>)` local assignments
+    whose `name` is then consumed EXACTLY ONCE, in an iterating position
+    (`for _ in name`, or `... for x in name ...` inside another
+    comprehension), and mark `name` for materialisation as a real list.
+
+    A generator expression consumed a single time by a forward iteration is
+    semantically identical to the equivalent list comprehension, and the
+    scalar codegen model has no lazy-generator-object-in-a-local
+    representation. Deliberately conservative: a name read more than once,
+    never iterated, or used where laziness matters is left untouched (its
+    existing behaviour / honest refusal stands). See
+    bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
+    """
+    body = getattr(func_node, 'body', None) or []
+    # Names the function pins via `global`/`nonlocal` are out of scope.
+    pinned = set()
+    for n in _iter_ast(func_node):
+        if isinstance(n, GlobalStmt):
+            for nm in (getattr(n, 'names', None) or []):
+                pinned.add(_as_str(nm))
+
+    def _assign_target_ids(root):
+        out = set()
+        for n in _iter_ast(root):
+            tgts = []
+            if isinstance(n, (AssignStmt, AugAssignStmt, ForStmt)):
+                tgts = [n.target]
+            elif isinstance(n, MultiAssignStmt):
+                tgts = list(getattr(n, 'targets', []) or [])
+            for t in tgts:
+                if isinstance(t, IdentExpr):
+                    out.add(id(t))
+        return out
+
+    def _reads_of(root, name, skip_ids):
+        return [n for n in _iter_ast(root)
+                if isinstance(n, IdentExpr) and n.name == name
+                and id(n) not in skip_ids]
+
+    # Flow-ordered scan over the function's TOP-LEVEL statement list: for a
+    # `name = (<genexp>)` assignment, the FIRST later sibling that reads
+    # `name` must read it exactly once, as a `for`/comprehension iterable.
+    for i, stmt in enumerate(body):
+        if not (isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr)
+                and _is_genexp(stmt.value)):
+            continue
+        name = stmt.target.name
+        if name in pinned:
+            continue
+        # `name` must not be a genexp target more than once anywhere.
+        if sum(1 for n in _iter_ast(func_node)
+               if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr)
+               and n.target.name == name and _is_genexp(n.value)) != 1:
+            continue
+        narrow_ids = {id(x) for x in _iter_ast(stmt.value)}
+        consumer = None
+        for later in body[i + 1:]:
+            if _reads_of(later, name, narrow_ids):
+                consumer = later
+                break
+        if consumer is None:
+            continue
+        skip = _assign_target_ids(consumer) | narrow_ids
+        reads = _reads_of(consumer, name, skip)
+        if len(reads) != 1:
+            continue
+        the_read = reads[0]
+        ok_iter = any(
+            isinstance(n, (Generator, ForStmt))
+            and getattr(n, 'iterable', None) is the_read
+            for n in _iter_ast(consumer))
+        if ok_iter:
+            gen._genexp_narrow_names.add(name)
+
+
+def _maybe_narrow_genexp_local(gen, name, value) -> bool:
+    """If `name = (<genexp>)` was marked by `_seed_genexp_list_narrowing`
+    and `name` already has a non-list C storage type (a parameter, or a
+    local previously typed otherwise — the fresh-local case already works
+    via ordinary inference), materialise the genexp as a list, store it
+    into the existing slot as an opaque pointer, and register `name` in
+    `_genexp_list_locals` so later reads lower as `MojoList *`. Returns
+    True iff it claimed the assignment."""
+    if not (isinstance(name, str) and name in gen._genexp_narrow_names
+            and _is_genexp(value)):
+        return False
+    if gen.var_types.get(name) in (None, 'MojoList *'):
+        return False
+    # Lower the genexp AS a list comprehension.
+    _saved_kind = value.kind
+    value.kind = 'list'
+    try:
+        vtype, v = gen.lower_expr(value)
+    finally:
+        value.kind = _saved_kind
+    dst = gen.var_types[name]
+    gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(name))
+    elem = gen._elem_of(v)
+    gen._genexp_list_locals[name] = elem if elem else 'int64_t'
+    gen._genexp_narrow_names.discard(name)
     return True
 
 
@@ -608,6 +732,10 @@ def _gen_stmt_AssignStmt(gen, node):
             and getattr(node, 'value', None) is not None
             and _try_bind_list_iter(gen, node.target.name, node.value)):
         return
+    if (isinstance(node.target, gimple_ctypes.IdentExpr)
+            and getattr(node, 'value', None) is not None
+            and _maybe_narrow_genexp_local(gen, node.target.name, node.value)):
+        return
     # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
     # A list-pattern target (`[a] = ...`, `[a, b] = ...`) is the same
     # construct with the other Python spelling — identical `.elements`
@@ -687,6 +815,11 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # Rebinding a genexp-materialised local to a non-genexp value (the
+        # RHS was just lowered above, still seeing the list-typed window)
+        # ends that window — later reads use the slot's own declared type.
+        if tname in gen._genexp_list_locals and not _is_genexp(node.value):
+            gen._genexp_list_locals.pop(tname, None)
         _dv = gen._annotation_dict_val_type(getattr(node, 'type_ann', None))
         if _dv is not None:
             gen._dict_val_types[tname] = _dv

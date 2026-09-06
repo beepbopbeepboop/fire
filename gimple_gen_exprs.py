@@ -529,6 +529,17 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     cname = name
     if name in gen._c_names:
         cname = gen._c_names[name]
+    # A genexp-materialised local (see _seed_genexp_list_narrowing): its C
+    # storage slot may be typed `char *` (a reassigned parameter), but it
+    # actually holds a `MojoList *` for the duration of its single forward
+    # consumption — hand every read the properly-cast list pointer.
+    if name in gen._genexp_list_locals and name in gen.var_types:
+        _lt = gen._new_val('MojoList *', f'(MojoList *){cname}')
+        _elem = gen._genexp_list_locals[name]
+        if _elem and _elem != 'int64_t':
+            gen._elem_types[_lt] = _elem
+        gen._actual_types[_lt] = 'MojoList *'
+        return 'MojoList *', _lt
     if name in gen.var_types:
         if name in gen._addressed_locals:
             # This local's address was taken (`UnsafePointer(to=name)`,

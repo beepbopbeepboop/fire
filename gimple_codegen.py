@@ -1522,6 +1522,16 @@ class GimpleGen:
         # type) silently got 0 on the self-hosted path, so a string local
         # passed to an unannotated parameter never propagated its `char *`.
         self._inferred_var_types: dict[str, dict[str, str]] = {}
+        # Genexp-bound-to-a-local narrowing (see _seed_genexp_list_narrowing):
+        # `_genexp_narrow_names` is the per-function set of local names whose
+        # `name = (<genexp>)` assignment qualifies to be materialised as a
+        # list; `_genexp_list_locals` maps a name that WAS so materialised to
+        # its list element ctype, so every subsequent read of that name lowers
+        # as a real `MojoList *` (its C storage slot may still be `char *` —
+        # an opaque pointer round-trip) until the name is rebound to a
+        # non-genexp value.
+        self._genexp_narrow_names: set = set()
+        self._genexp_list_locals: dict[str, str] = {}
         self._param_generator_api: dict = {}
         self._all_async_fn_names: set = set()
         self._bound_method_ret_types: dict = {}
@@ -3320,6 +3330,8 @@ class GimpleGen:
         return gst._emit_dynattr_setattr_dispatch(self, member, vtype, v, ot, ov)
     def _gen_stmt_AssignStmt(self, node):
         return gst._gen_stmt_AssignStmt(self, node)
+    def _seed_genexp_list_narrowing(self, func_node):
+        return gst._seed_genexp_list_narrowing(self, func_node)
     def _gen_stmt_AugAssignStmt(self, node):
         return gst._gen_stmt_AugAssignStmt(self, node)
     def _gen_stmt_ReturnStmt(self, node):

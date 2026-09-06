@@ -3821,6 +3821,30 @@ print(g("ab"))
                 print(f"      {line}")
         _FAIL += 1
 
+    # 182. Generator expression bound to a local / reassigned parameter,
+    # then consumed exactly once by a forward iteration, must compile:
+    # it is materialised as a list (see _seed_genexp_list_narrowing).
+    # The reassigned-parameter shape is ZipFile._sanitize_windows_name —
+    # bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
+    test("genexp_local_single_consumption_join", """\
+fn clean(arcname: String, pathsep: String) -> String:
+    arcname = (x.rstrip(" .") for x in arcname.split(pathsep))
+    arcname = pathsep.join(x for x in arcname if x)
+    return arcname
+
+fn main():
+    print(clean("a. /b .// c", "/"))
+""")
+
+    test("genexp_local_single_consumption_for_and_sum", """\
+fn main():
+    g = (x + 1 for x in [10, 20, 30])
+    for v in g:
+        print(v)
+    h = (x * 2 for x in [1, 2, 3])
+    print(sum(x for x in h))
+""")
+
     # ── Milestone D: try/except/raise inside a compiled generator body ─────
     def _generator_compiles_via_cpp(name: str, src: str, must_contain_cpp=None):
         """Shared compile-only smoke-test helper for Milestone D's generator
