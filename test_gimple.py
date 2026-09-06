@@ -3786,6 +3786,41 @@ def g(a: str) -> str:
 print(g("ab"))
 """)
 
+    # 181. A module with many module-level integer constants, all referenced
+    # inside one function, must lower those constants to file-scope globals
+    # (the `_root_globals` struct + `root__mojo_global_get_*` accessors),
+    # NOT re-materialize a per-function LOCAL copy of every constant in that
+    # function's decl block. A large per-function local-decl block of
+    # module constants is what crashed GCC's GIMPLE frontend
+    # (`internal compiler error: in build2, at tree.cc:5208`) on
+    # Lib/zipfile/__init__.py's ~60 module constants — see
+    # bugs/COMPILE_FAIL_zipfile___init__.md. This locks in the file-scope
+    # representation as a regression guard.
+    _NCONST = 40
+    _kconst_src = (
+        "".join(f"K{i} = {i}\n" for i in range(1, _NCONST + 1))
+        + "\nfn total() -> Int:\n    return "
+        + " + ".join(f"K{i}" for i in range(1, _NCONST + 1))
+        + "\n\nfn main():\n    print(total())\n"
+    )
+    _kc_ok, _kc_c_src, _kc_stderr = gimple_compiles(_kconst_src)
+    # Each constant must appear exactly once as a struct field decl
+    # (`  int Ki;`), never a second time as a function-body local.
+    _dup_locals = [i for i in range(1, _NCONST + 1)
+                   if _kc_c_src.count(f"  int K{i};") != 1]
+    _reads_global = "_root_globals.K1" in _kc_c_src
+    if _kc_ok and not _dup_locals and _reads_global:
+        print("PASS  many_module_constants_are_file_scope_globals"); _PASS += 1
+    else:
+        print("FAIL  many_module_constants_are_file_scope_globals")
+        print(f"      compiled={_kc_ok} reads_global={_reads_global} "
+              f"constants_with_wrong_decl_count={_dup_locals}")
+        if not _kc_ok:
+            print("      --- gcc stderr ---")
+            for line in _kc_stderr.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
     # ── Milestone D: try/except/raise inside a compiled generator body ─────
     def _generator_compiles_via_cpp(name: str, src: str, must_contain_cpp=None):
         """Shared compile-only smoke-test helper for Milestone D's generator

@@ -1,5 +1,76 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, GCC-ICE root-caused): NOT the module-constants theory — real cause is `buf += <bytes>` lowered as invalid `char* + int64_t` pointer arithmetic
+
+Investigated the "~60 module-level constants re-materialized as LOCAL
+declarations inside `ZipExtFile_mojo_read`" theory from the previous
+Status entry. **That theory is wrong / already-resolved.** Fresh
+`compile_to_gimple(do_imports=False)` on current master: every module
+constant (`ZIP_STORED`, `ZIP_ZSTANDARD`, `_CD_*`, `_FH_*`, ...) is
+correctly emitted ONCE as a file-scope `struct _root_toplev`
+field + a `root__mojo_global_get_*` accessor, and every function body
+reads it as `_root_globals.<name>` — there is NO per-function local
+copy anywhere in the 625 KB of generated C (grep-confirmed: `  int
+ZIP_ZSTANDARD;` etc. appear only inside the struct definition block,
+lines ~1078-1200, never inside a function). A minimal 40-constant
+repro confirms the same. Added `test_gimple.py` regression test
+`many_module_constants_are_file_scope_globals` to lock this in.
+
+**The GCC ICE (`internal compiler error: in build2, at tree.cc:5208`)
+is real but mis-attributed.** GCC's GIMPLE frontend prints the ICE
+location as a `struct _root_toplev` FIELD_DECL line (`int
+ZIP_ZSTANDARD;` / `int _FH_CRC;` — it shifts as the struct shifts) and
+`In function 'ZipExtFile_mojo_read'` / `ZipExtFile_read1`, but the real
+trigger is a statement in the `ZipExtFile.read*` family. Root-caused by
+delta-reduction to a self-contained 8-line repro:
+
+```c
+typedef long int64_t;
+void __GIMPLE f (char * buf, int64_t k)
+{
+  char * _t25;
+bb_2:
+  _t25 = buf + k;      /* char* + int64_t, result dead / used only across a BB edge */
+  return;
+}
+```
+
+`gcc-15 -fgimple -fsyntax-only` ICEs at `build2`, tree.cc:5208 on that
+one statement. It does NOT ICE when the `char* + int` result is
+consumed in straight-line code in the same basic block (`buf = _t25;
+return buf;`) — so it is a genuine GCC GIMPLE-FE bug in how it lowers
+`pointer + non-sizetype-integer` to `POINTER_PLUS_EXPR` when the result
+crosses a CFG edge.
+
+But the generated statement is *also* semantically wrong on our side.
+It comes from `ZipExtFile.read`/`read1`/`_read1`'s
+`buf += self._read1(...)` accumulation, where `buf` was typed `char *`
+(from `self._readbuffer[self._offset:]` → `mojo_cstr_slice`, a `char *`)
+and the RHS is a `MojoBytes *`. `_lower_binary_tail` has no
+`char * + MojoBytes *` case, so it falls to the raw
+`{lv} {op} {rv}` fallback and emits `buf + (int64_t)data` — pointer
+arithmetic by the *address* of the bytes object. Pure garbage even if
+GCC accepted it.
+
+**Real fix = the bytes value type project**
+(`bugs/hard/CODEGEN_bytes_value_type.md`): `buf` must be a real bytes
+value (`MojoBytes *`) end-to-end so `buf += data` routes to
+`mojo_bytes_concat`, which the existing `MojoBytes * + MojoBytes *`
+case in `_lower_binary_tail` already handles. A narrow
+`char * + MojoBytes *` → `mojo_str_cat(buf, mojo_bytes_to_cstr(data))`
+shim would stop the ICE but silently truncates on the embedded NUL
+bytes that ZIP extra fields legitimately contain — deliberately NOT
+taken (matches the NUL-termination hazard already flagged in older
+entries below). Touching the shared `_lower_binary_tail` also trips the
+full gimple/codegen quality gate (bootstrap byte-identity +
+compile_stdlib U-count), disproportionate for a lossy shim.
+
+Behind this ICE the previously-documented blockers still stand:
+`pwd=None` unannotated param, genexp-held-in-local in
+`_sanitize_windows_name`, `_Extra(bytes)` subclassing.
+
+Still not `git rm`'d — does not compile end-to-end.
+
 ## Status (2026-09-06, bound-container-method-as-value): blocker #2 FIXED; module now dies later, on a GCC internal compiler error
 
 Blocker #2 (`'MojoBytes' has no member named 'append'` — `_ZipDecrypter.
