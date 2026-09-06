@@ -3851,11 +3851,13 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         # return type disagrees with the body (which declares the local
         # correctly from _inferred_var_types) and every caller treats
         # the returned pointer as a scalar. COMPILE_FAIL_zipfile.
-        _seed_lv = gen._inferred_var_types.get(f"{struct_name}_{node.name}") or {}
         _saved_lv = dict(gen.var_types)
-        for _lvn, _lvt in _seed_lv.items():
-            if _lvt and _lvt != 'int64_t':
-                gen.var_types.setdefault(_lvn, _lvt)
+        try:
+            for _lvn, _lvt in gen._infer_local_var_types(node).items():
+                if _lvt == 'MojoBytes *':
+                    gen.var_types.setdefault(_lvn, _lvt)
+        except Exception:
+            pass
         ret_type = gen._infer_return_type(node.body)
         gen.var_types = _saved_lv
         if ret_type == 'void':

@@ -3195,7 +3195,7 @@ def gen_module_impl(self, stmts):
                         # default. COMPILE_FAIL_zipfile___init__.md.
                         try:
                             for _vn, _vt in self._infer_local_var_types(m).items():
-                                if _vt and _vt != 'int64_t':
+                                if _vt == 'MojoBytes *':
                                     self.var_types.setdefault(_vn, _vt)
                         except Exception:
                             pass
@@ -3298,7 +3298,7 @@ def gen_module_impl(self, stmts):
                     # the pointer as a scalar (COMPILE_FAIL_zipfile).
                     try:
                         for _vn, _vt in self._infer_local_var_types(m).items():
-                            if _vt and _vt != 'int64_t':
+                            if _vt == 'MojoBytes *':
                                 self.var_types.setdefault(_vn, _vt)
                     except Exception:
                         pass
@@ -3424,7 +3424,7 @@ def gen_module_impl(self, stmts):
         if isinstance(s, StructDef):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
-                self._inferred_var_types[key] = self._infer_method_local_var_types(_as_str(s.name), m)
+                self._inferred_var_types[key] = self._infer_local_var_types(m)
 
     def _expr_provably_str(e):
         """Is `e` an expression whose Python runtime value is provably a
@@ -4605,7 +4605,7 @@ def gen_module_impl(self, stmts):
         if isinstance(s, StructDef):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
-                self._inferred_var_types[key] = self._infer_method_local_var_types(_as_str(s.name), m)
+                self._inferred_var_types[key] = self._infer_local_var_types(m)
 
     self._param_generator_api: dict[str, dict[str, str]] = {}
     self._fn_returns_generator: dict[str, str] = {}
