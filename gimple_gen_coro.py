@@ -520,6 +520,19 @@ _TASK_VARS: set = set()
 # __mgco_<Struct>_<name>_start, driven by the generic await drive loop).
 _ASYNC_METHOD_NAMES: set = set()
 
+# Names of every StructDef in the module currently being lowered --
+# populated fresh at the top of each lower() call. Lets a struct-typed
+# PARAM on a top-level (non-method) async def keep its pointer type: it is
+# unpacked from its `__mojo_gen_arg` slot with a `(<T> *)` cast (structs
+# cross the C boundary as `T *` -- BUG-2026-030) and passed to the body as
+# a real typed `<T> *` C param, instead of collapsing to an opaque
+# int64_t. See bugs/COMPILE_FAIL_asyncio_queues.md gap 2.
+_STRUCT_NAMES: set = set()
+
+
+def _is_struct_param(pann) -> bool:
+    return isinstance(pann, str) and pann in _STRUCT_NAMES
+
 
 def _resolve_call_args(name: str, node, cvar: str) -> list:
     """Positional args, in order, for a call to `name(...)` -- resolving
@@ -620,6 +633,11 @@ def _await_stmt_ok(s, task_vars: set) -> bool:
     if _is_future_wait_call(inner):
         return True
     if _is_async_method_call(inner):
+        return True
+    if isinstance(_unwrap_transfer(inner), N.MemberExpr):
+        # `await <expr>.<field>` -- a Future/Event HANDLE held in a struct
+        # field (e.g. queues.py's `await self._finished` shape). Parked on
+        # its waiter list via __mojo_async_await_future.
         return True
     h = _await_held_handle(inner)
     if h is None:
@@ -730,8 +748,8 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False,
             return False, 'async method without a plain `self` first param (v0)'
         _params = _params[1:]   # self is typed by the codegen from the struct
     for pname, pann in _params:
-        if pann not in _SCALARISH:
-            return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
+        if pann not in _SCALARISH and not _is_struct_param(pann):
+            return False, f'param {pname!r} type {pann!r} (v0 scalar / struct only)'
     if getattr(fn, 'kwonly', None):
         return False, 'kwonly params (v0)'
     if not _async_awaits_ok(fn):
@@ -856,6 +874,16 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
         rv = f'__ar{_AW_COUNTER[0]}'
         stmts = [N.VarDecl(name=rv, type_ann=None,
                            value=_call('__mojo_async_await_event_wait', [_c_ident(cvar), obj]))]
+        return stmts, _c_ident(rv)
+    # Awaitable protocol: `await <expr>.<field>` -- a Future/Event handle
+    # held in a struct field; park on its waiter list.
+    _mem = _unwrap_transfer(inner)
+    if isinstance(_mem, N.MemberExpr):
+        obj = _rewrite_async_expr(_mem, cvar)
+        _AW_COUNTER[0] += 1
+        rv = f'__ar{_AW_COUNTER[0]}'
+        stmts = [N.VarDecl(name=rv, type_ann=None,
+                           value=_call('__mojo_async_await_future', [_c_ident(cvar), obj]))]
         return stmts, _c_ident(rv)
     # Awaitable protocol: `await <future handle>` -- a bare local/param name
     # that is NOT a create_task handle is a Future; park on its waiter list.
@@ -1064,15 +1092,28 @@ def _async_method_setup(fn, base, struct_name):
     real_params = fn.params[1:] if is_method else fn.params
     arg_base = 1 if is_method else 0
     prologue = []
-    for i, (pname, _pann) in enumerate(real_params):
-        prologue.append(N.VarDecl(name=pname, type_ann=None,
-                                  value=_call(ARG_SHIM, [_c_ident(_CVAR),
-                                                         N.IntLiteral(value=arg_base + i)])))
+    for i, (pname, pann) in enumerate(real_params):
+        slot = _call(ARG_SHIM, [_c_ident(_CVAR), N.IntLiteral(value=arg_base + i)])
+        if _is_struct_param(pann):
+            # A struct-typed param crosses as `T *` (BUG-2026-030). The
+            # `__mojo_gen_arg` slot holds that pointer bit-pattern as an
+            # int64_t; route it back to `T *` through UnsafePointer[T](...)
+            # -- the exact int-address -> pointer erasure _lower_pointer_ctor
+            # / _resolve_type already implement (void* two-step, GIMPLE
+            # rejects a direct int64_t->T* cast).
+            val = N.CallExpr(
+                func=N.SubscriptExpr(obj=N.IdentExpr(name='UnsafePointer'),
+                                     index=N.IdentExpr(name=pann)),
+                args=[slot])
+            prologue.append(N.VarDecl(name=pname, type_ann=pann, value=val))
+        else:
+            prologue.append(N.VarDecl(name=pname, type_ann=None, value=slot))
     body_params = [(_CVAR, 'Int')]
     if is_method:
         body_params.append(('self', struct_name))
     c_params = ([f'{struct_name} *'] if is_method else []) + \
-               [_mojo_to_c_type(a) for _n, a in real_params]
+               [(f'{a} *' if _is_struct_param(a) else _mojo_to_c_type(a))
+                for _n, a in real_params]
     return base, is_method, real_params, prologue, body_params, c_params
 
 
@@ -1400,6 +1441,8 @@ def lower(stmts: list) -> tuple[list, list]:
         return stmts, []
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
+    _STRUCT_NAMES.clear()
+    _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _seed_prop_names(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)

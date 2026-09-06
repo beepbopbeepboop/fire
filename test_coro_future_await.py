@@ -303,6 +303,89 @@ def main():
           out == "42\n", detail=repr(out))
 
 
+def test_top_level_async_struct_param():
+    """bugs/COMPILE_FAIL_asyncio_queues.md gap 2: a struct-typed PARAM on a
+    top-level (non-method) `async def` keeps its pointer type -- it is
+    unpacked from its `__mojo_gen_arg` slot with a `(<T> *)` cast and
+    passed to the coroutine body as a real `<T> *` C param, so awaiting a
+    Future field / calling a struct method inside the coroutine works.
+    Real producer/consumer: two top-level `create_task`ed coroutines pass
+    a queue-shaped struct between them; the producer wakes the parked
+    consumer via `.set_result`."""
+    src = """\
+import asyncio
+from collections import deque
+
+struct Q:
+    fn __init__(out self):
+        self._items = deque()
+        self._getters = deque()
+    fn empty(self) -> Bool:
+        return len(self._items) == 0
+    fn put_nowait(mut self, item: Int):
+        self._items.append(item)
+        while len(self._getters) > 0:
+            var g = self._getters.popleft()
+            g.set_result(0)
+
+async def consumer(q: Q) -> Int:
+    while q.empty():
+        var getter = create_future()
+        q._getters.append(getter)
+        await getter
+    return q._items.popleft()
+
+async def producer(q: Q) -> Int:
+    q.put_nowait(41)
+    return 0
+
+async def main_co() -> Int:
+    var q = Q()
+    var ct = create_task(consumer(q))
+    var pt = create_task(producer(q))
+    var pr = await pt^
+    var v = await ct^
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("top-level async def with a struct param (producer/consumer queue)",
+          out == "42\n", detail=repr(out))
+
+
+def test_top_level_async_struct_param_future_field():
+    """Minimal shape: `async def consumer(s: S)` awaiting a Future-handle
+    field of the passed struct (`await s._f`), resolved by a sync setter."""
+    src = """\
+import asyncio
+
+struct S:
+    var _f: Int
+    fn __init__(out self):
+        self._f = create_future()
+    fn resolve(self):
+        self._f.set_result(7)
+
+async def consumer(s: S) -> Int:
+    var r = await s._f
+    return 35
+
+async def main_co() -> Int:
+    var s = S()
+    s.resolve()
+    var v = await consumer(s)
+    return v + 7
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("top-level async def struct param awaiting a Future field",
+          out == "42\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

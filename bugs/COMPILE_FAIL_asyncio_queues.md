@@ -1,5 +1,47 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (2026-09-05 — ALL async blockers for this file are now CLOSED; only the pre-existing, unrelated transitive-import gap remains. This doc should be re-filed as tracking `COMPILE_FAIL_collections___init__.md`'s `Counter[...] = ...` subscript-store gap, not an async gap.)
+
+**Gap 2 (top-level async struct param) — DONE** (commit below).
+- `gimple_gen_coro.py`: a STRUCT-typed param on a top-level (non-method)
+  `async def` is now accepted by `_eligible_async_common` (new
+  `_STRUCT_NAMES` set, populated in `lower()`'s pre-scan) alongside the
+  scalar params; List/Dict/variadic/kwonly stay refused.
+- `_async_method_setup`: such a param is unpacked from its
+  `__mojo_gen_arg` slot through `UnsafePointer[T](...)` — the exact
+  int-address → `T *` erasure `_lower_pointer_ctor` / `_resolve_type`
+  already implement (BUG-2026-030: structs cross the C boundary as `T *`)
+  — and the `__mgco_<f>_start` trampoline takes it as a real typed
+  `T * __aN` C param (`c_params` entry `T *`). Inside the coroutine body
+  the param is a genuine `T *` local, so `q.method()` / `q._field`
+  resolve normally.
+- `gimple_gen_coro.py` also gained `await <expr>.<field>` (a Future/Event
+  handle held in a struct field, e.g. queues.py's `await self._finished`)
+  as a recognised await shape → `__mojo_async_await_future`.
+- `gimple_gen_calls.py`: a BARE `create_future()` / `Event()` / `Future()`
+  free-function call on the synchronous compiled path (from a struct
+  `__init__` / any ordinary helper) now lowers to the A3 shim, mirroring
+  the member-form sync hook (`gimple_gen_methods.py`) — same
+  `_stackswitch_coro_c_units` safety gate.
+- Regression tests: `test_coro_future_await.py::test_top_level_async_
+  struct_param` (real compile+link+run: two top-level `create_task`ed
+  coroutines pass a queue-shaped struct between them; producer wakes the
+  parked consumer via `.set_result`; asserts 42) and
+  `::test_top_level_async_struct_param_future_field`; plus
+  `test_gimple.py::async_function_with_struct_param` (compile-check).
+
+**Remaining — NOT an async blocker for this file:**
+`python3 mojo.py build Lib/asyncio/queues.py` end-to-end is still blocked
+ONLY on the transitive-import fallback for `collections` / `inspect`
+(`Counter[...] = ...` / `OrderedDict[...] = ...` subscript-store refusals
+— `COMPILE_FAIL_collections___init__.md`), which the whole-tree build
+reaches before queues.py's own code. queues.py's OWN coroutines all
+compile (methods via gap 4, any top-level struct-param shape via gap 2).
+Recommend renaming/re-filing this doc under the collections subscript-
+store gap.
+
+---
+
 ## Status (2026-09-05 — gap 4 CLOSED: `async def` METHODS on a compiled struct are now real A3 stack-switch coroutines. `Lib/asyncio/queues.py`'s OWN module-level refusal is GONE; the file compiles in isolation and the generated C passes `gcc -fgimple -fsyntax-only`. Doc kept open only for the pre-existing, separately-tracked transitive-import blocker + a top-level-async struct-param gap — neither is this file's own async blocker.)
 
 **Gap 4 — async struct methods — DONE** (commit below).

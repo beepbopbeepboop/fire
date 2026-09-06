@@ -4136,6 +4136,45 @@ async def f(x: String) -> String:
     return x
 """)
 
+    # bugs/COMPILE_FAIL_asyncio_queues.md gap 2: a STRUCT-typed param on a
+    # top-level (non-method) async def is now supported -- unpacked from
+    # its __mojo_gen_arg slot with a `(T *)` cast (structs cross as `T *`,
+    # BUG-2026-030) and threaded to the coroutine body as a real `T *` C
+    # param, so struct methods / Future fields work inside the coroutine.
+    # Real producer/consumer proof: test_coro_future_await.py.
+    test("async_function_with_struct_param", """\
+import asyncio
+from collections import deque
+
+struct Q:
+    fn __init__(out self):
+        self._items = deque()
+        self._getters = deque()
+    fn empty(self) -> Bool:
+        return len(self._items) == 0
+    fn put_nowait(mut self, item: Int):
+        self._items.append(item)
+        while len(self._getters) > 0:
+            var g = self._getters.popleft()
+            g.set_result(0)
+
+async def consumer(q: Q) -> Int:
+    while q.empty():
+        var getter = create_future()
+        q._getters.append(getter)
+        await getter
+    return q._items.popleft()
+
+async def main_co() -> Int:
+    var q = Q()
+    q.put_nowait(41)
+    var v = await consumer(q)
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+""")
+
     # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
     # function>` (Step D) are both supported now — see
     # test_async_await_composition_compiles_via_cpp_path and

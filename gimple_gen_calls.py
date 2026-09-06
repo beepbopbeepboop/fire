@@ -334,6 +334,24 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gimple_ctypes.CallExpr(func=gimple_ctypes.IdentExpr(name='list'),
                                        args=list(node.args), kwargs=[]))
 
+    # Awaitable protocol (Future/Event) — BARE free-function call sites on
+    # the synchronous compiled path (`create_future()` / `Event()` /
+    # `Future()` called with no receiver, e.g. from a struct `__init__` or
+    # any ordinary helper). Mirrors gimple_gen_methods.py's member-form
+    # sync hook and gimple_gen_coro.py's async-body rewrite; same safety
+    # scoping (only when this module emitted a stack-switch coroutine unit,
+    # which is exactly when the shim externs are declared), and never when
+    # a compiled struct defines its own same-named method/global collides.
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name in ('create_future', 'Event', 'Future')
+            and not node.args and not getattr(node, 'kwargs', None)
+            and os.environ.get('MOJO_CORO', 'stackswitch') != 'cpp'
+            and getattr(gen, '_stackswitch_coro_c_units', None)
+            and node.func.name not in gen.struct_field_types
+            and node.func.name not in gen.func_return_types):
+        shim = '__mojo_event_new' if node.func.name == 'Event' else '__mojo_future_new'
+        return 'int64_t', gen._call_expr('int64_t', shim, [])
+
     if (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name == 'TaskGroup'
             and not node.args and not getattr(node, 'kwargs', None)):
         handle = gen._call_expr('MojoList *', 'mojo_list_new', [])
