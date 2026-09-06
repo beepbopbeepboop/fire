@@ -3125,6 +3125,17 @@ class GimpleGen:
             return cdecl
         if own in ('int64_t', 'double', '_Bool', 'char *'):
             return own
+        if own in ('MojoDict *', 'MojoList *', 'MojoSet *') and cdecl is None:
+            # A CONTAINER own-conclusion with NO shared cdecl entry: the
+            # module-global C struct-field convention boxes these as
+            # `int64_t` (only a dispatch-table name gets the bare pointer,
+            # and that path always sets `_global_c_decl_types` explicitly).
+            # Returning the raw container type here declared `MojoList *
+            # arr` for a plain `arr = [1,2,3]` on the self-hosted compiled
+            # path — where `_gscan_declare_global`'s ListExpr branch didn't
+            # run to set the cdecl — vs stage1's boxed `int64_t arr`
+            # (array_ops_jit parity under MOJO_NO_SHIM=1).
+            return 'int64_t'
         return cdecl if cdecl is not None else own
 
     def _global_dst_ctype(self, name: str) -> str:
