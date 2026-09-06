@@ -6608,6 +6608,7 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     global_decls = []  # kept for compatibility, but won't be emitted
+    _this_mod_inits: dict = {}  # flat {name: init_code} for THIS invocation — see its use below
     current_mod_name = self.module_name if len(self.module_name) > 0 else "root"
     if current_mod_name not in self._module_globals:
         self._module_globals[current_mod_name] = []
@@ -7144,6 +7145,14 @@ def gen_module_impl(self, stmts):
                 # emit loop, so a boxed/clean mismatch silently dropped the
                 # initializer (`x = 42` -> `.x = 0` under MOJO_NO_SHIM=1).
                 self._module_globals[current_mod_name].append((_gname_s, c_type, g_mtype))
+                # Flat local dict, NOT the nested
+                # `self._module_global_inits[mod][name] = ...` chained
+                # subscript-assign — on the self-hosted compiled path the
+                # inner-dict handle from `outer[mod]` erased, so the write
+                # silently no-op'd and every non-zero initializer was lost
+                # (`x = 42` -> `.x = 0` under MOJO_NO_SHIM=1). Kept in sync
+                # into the nested attr too (for any cross-invocation read).
+                _this_mod_inits[_gname_s] = init_code
                 self._module_global_inits[current_mod_name][_gname_s] = init_code
                 self._global_to_module[_gname_s] = current_mod_name
 
@@ -7183,7 +7192,9 @@ def gen_module_impl(self, stmts):
 
         for _gt in globals_list:
             gname = _as_str(_gt[0]); c_type = _as_str(_gt[1])
-            init_val = inits.get(gname)
+            init_val = _this_mod_inits.get(gname)
+            if init_val is None:
+                init_val = inits.get(gname)
             if not init_val or init_val == '0' or 'mojo_' in str(init_val) or 'new' in str(init_val):
                 if c_type.endswith(' *'):
                     init_val = f'({c_type})0'
