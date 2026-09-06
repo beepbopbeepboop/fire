@@ -5041,6 +5041,58 @@ def mf(a: Float64, b: Float64) -> Float64:
         print(f"PASS  {name}")
         _PASS += 1
 
+    # --- builtin `dict` subclassing (Counter/OrderedDict shape) ---
+    # See bugs/COMPILE_FAIL_collections___init__.md. A `class X(dict)` gets
+    # a synthesized `_data: MojoDict *` backing store; inherited container
+    # ops route to it, `__missing__` handles a subscript-read miss.
+    test("dict_subclass_backing_store_and_subscript", """\
+class C(dict):
+    pass
+
+def go() -> int:
+    c = C()
+    c["a"] = 5
+    c["a"] += 3
+    n = len(c)
+    if "a" in c:
+        n += 1
+    return c["a"] + n
+
+def main():
+    print(go())
+""")
+
+    test("dict_subclass_missing_dunder_on_read_miss", """\
+class Counter2(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def go() -> int:
+    c = Counter2()
+    c["x"] = 2
+    return c["x"] + c["absent"]
+
+def main():
+    print(go())
+""")
+
+    test("dict_subclass_transitive_and_getitem_override_wins", """\
+class Base(dict):
+    pass
+
+class Sub(Base):
+    def __getitem__(self, key) -> int:
+        return 42
+
+def go() -> int:
+    s = Sub()
+    s["k"] = 1
+    return s["k"]
+
+def main():
+    print(go())
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

@@ -1160,6 +1160,12 @@ class GimpleGen:
         self.relaxed_imports = relaxed_imports  # when True, skip unsupported generator/async fns instead of failing
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
+        # Names of user structs that subclass the builtin `dict` (directly
+        # or transitively) — populated by gen_module_impl. Such a struct
+        # gets a synthesized `_data: MojoDict *` backing field, and
+        # inherited container ops route to it. See
+        # bugs/COMPILE_FAIL_collections___init__.md.
+        self._dict_subclass_structs: set = set()
         # Lazily-created container attributes used across gen_module/body
         # generation (each was previously created via `if not hasattr(...)` /
         # `getattr(self, '_X', ...)` at first USE — a pattern the self-hosted
@@ -2999,6 +3005,12 @@ class GimpleGen:
 
     def _struct_data_field(self, ctype: str):
         return ggc._struct_data_field(self, ctype)
+
+    def _dict_subclass_of(self, ctype: str) -> str:
+        return ggc._dict_subclass_of(self, ctype)
+
+    def _struct_defines_method(self, sn: str, mname: str) -> bool:
+        return ggc._struct_defines_method(self, sn, mname)
 
     def _emit_struct_subscript_write(self, obj_v: str, obj_t: str, idx_v: str, val: str, val_t: str) -> bool:
         return ggc._emit_struct_subscript_write(self, obj_v, obj_t, idx_v, val, val_t)

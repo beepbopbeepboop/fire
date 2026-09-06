@@ -1948,6 +1948,56 @@ def gen_module_impl(self, stmts):
     for _s in all_struct_defs:
         if isinstance(_s, StructDef) and _s.name not in self.struct_field_types:
             self.struct_field_types[_s.name] = {}
+
+    # --- builtin `dict` subclassing: `class Counter(dict)`, `class
+    # OrderedDict(dict)`, and transitive subclasses of those ---
+    # A user struct whose transitive base list bottoms out at the builtin
+    # `dict` (directly, or via another local dict-subclass) has no
+    # container storage of its own — the compiled struct is just its
+    # `__mojo_type_id` header plus whatever scalar fields its methods
+    # assign. Synthesize a hidden `_data` field of type `MojoDict *`
+    # (allocated by `_alloc_<struct>`); inherited container operations
+    # (`d[k]`, `d[k] = v`, `k in d`, `len(d)`) route to it unless the
+    # subclass overrides the corresponding dunder. See
+    # bugs/COMPILE_FAIL_collections___init__.md.
+    _BUILTIN_DICT_BASES = ('dict', 'OrderedDict', 'defaultdict', 'Counter')
+    _dict_subclass: set = set()
+    _dsc_changed = True
+    while _dsc_changed:
+        _dsc_changed = False
+        for _dsc_k in _struct_bases_map:
+            _dsc_name = _as_str(_dsc_k)
+            if _dsc_name in _dict_subclass:
+                continue
+            _dsc_hit = False
+            for _dsc_bk in _struct_bases_map.get(_dsc_name) or ():
+                _dsc_b = _as_str(_dsc_bk)
+                if _dsc_b in _BUILTIN_DICT_BASES or _dsc_b in _dict_subclass:
+                    _dsc_hit = True
+                    break
+            if _dsc_hit:
+                _dict_subclass.add(_dsc_name)
+                _dsc_changed = True
+    self._dict_subclass_structs = _dict_subclass
+    for _s in all_struct_defs:
+        if not isinstance(_s, StructDef):
+            continue
+        _dsc_name = _as_str(_s.name)
+        if _dsc_name not in _dict_subclass:
+            continue
+        _dsc_fm = self.struct_field_types.get(_dsc_name)
+        if _dsc_fm is None:
+            _dsc_fm = {}
+            self.struct_field_types[_dsc_name] = _dsc_fm
+        _dsc_fm['_data'] = 'MojoDict *'
+        _dsc_has = False
+        for _f in _s.fields:
+            if _as_str(getattr(_f, 'name', '')) == '_data':
+                _dsc_has = True
+                break
+        if not _dsc_has:
+            _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
+
     self._ctor_lit_param_types: dict[str, dict[str, str]] = {}
     _ctor_init_params = {}
     _ctor_init_methods = {}
@@ -7121,17 +7171,26 @@ def gen_module_impl(self, stmts):
                     and field_map[_aname] == self._global_var_types.get(_gname, field_map[_aname])):
                 _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
         attr_inits = ''.join(_ai_parts)
+        # A builtin-`dict` subclass gets its hidden `_data` backing
+        # MojoDict allocated here so inherited container ops have real
+        # storage to route to (see gen_module_impl's dict-subclass block).
+        _is_dict_sub = sn in getattr(self, '_dict_subclass_structs', ())
+        _dsub_decls = "  void * _dd;\n" if _is_dict_sub else ""
+        _dsub_init = ("  _dd = mojo_dict_new ();\n"
+                      f"  _p->_data = (MojoDict *) _dd;\n") if _is_dict_sub else ""
         parts.append(
             f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
             f"{{\n"
             f"  {sn} * _p;\n"
             f"  void * _vp;\n"
             f"  int64_t _tag;\n"
+            f"{_dsub_decls}"
             f"\nbb_2:\n"
             f"  _vp = calloc (1, sizeof({sn}));\n"
             f"  _p = ({sn} *) _vp;\n"
             f"  _tag = (int64_t){_struct_type_id(sn)};\n"
             f"  _p->__mojo_type_id = _tag;\n"
+            f"{_dsub_init}"
             f"{attr_inits}"
             f"  return _p;\n"
             f"}}"

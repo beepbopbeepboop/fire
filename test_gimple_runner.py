@@ -447,6 +447,33 @@ fn main():
 main()
 """, "5\n")
 
+    # 21. Builtin `dict` subclassing (Counter/OrderedDict shape) -- see
+    # bugs/COMPILE_FAIL_collections___init__.md. `class X(dict)` gets a
+    # synthesized `_data: MojoDict *` backing store allocated by
+    # `_alloc_X`; inherited `d[k]`, `d[k] = v`, `d[k] += n`, `k in d`,
+    # `len(d)` route to it, and `__missing__` handles a subscript-read
+    # miss (Counter uses this to return 0). A compile-only gate can't
+    # catch a wrong runtime value here.
+    test_gimple_stdout("gimple_dict_subclass_counter_shape", """\
+class Bag(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    b = Bag()
+    b["a"] = 5
+    b["a"] += 3
+    b["b"] += 1
+    print(b["a"])
+    print(b["b"])
+    print(b["never_set"])
+    print(len(b))
+    if "a" in b:
+        print("has a")
+    if "zzz" not in b:
+        print("no zzz")
+""", "8\n1\n0\n2\nhas a\nno zzz\n")
+
 
 def main():
     gcc = find_gcc()

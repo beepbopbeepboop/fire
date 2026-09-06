@@ -1689,6 +1689,10 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # so len(any_string) always silently returned 0. Found via
         # len(c_code) on a real compiled program's C output.
         return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+    _dsub_len = gen._dict_subclass_of(at)
+    if _dsub_len and not gen._struct_defines_method(_dsub_len, '__len__'):
+        dp = gen._new_val('MojoDict *', f"{av}->_data")
+        return 'int64_t', gen._new_val('int64_t', f'mojo_dict_len ({dp})')
     if at.endswith(' *') and at[:-2] in gen.struct_field_types \
             and '_len' in gen.struct_field_types[at[:-2]]:
         return 'int64_t', gen._new_val('int64_t', f'{av}->_len')
@@ -4105,12 +4109,37 @@ def _struct_data_field(gen, ctype: str):
     if not ctype.endswith(' *'):
         return None, None
     sn = gimple_exprtypes._struct_name_of(ctype)
+    if sn in getattr(gen, '_dict_subclass_structs', ()):
+        # A builtin-`dict` subclass's `_data` is a synthesized MojoDict *
+        # backing store, NOT a Span/List-style raw element buffer —
+        # subscript ops on it route through the dict-subclass path, not
+        # `_mojo_at_` pointer arithmetic.
+        return None, None
     sft = gen.struct_field_types.get(sn, {})
     for fname in ('_data', 'data'):
         ft = sft.get(fname, '')
         if ft.endswith(' *'):
             return fname, ft
     return None, None
+
+
+def _dict_subclass_of(gen, ctype: str) -> str:
+    """If `ctype` is a pointer to a user struct that subclasses builtin
+    `dict` (see gen_module_impl), return the struct name, else ''."""
+    if not ctype.endswith(' *'):
+        return ''
+    sn = gimple_exprtypes._struct_name_of(ctype)
+    dsc = getattr(gen, '_dict_subclass_structs', None)
+    if dsc is not None and sn in dsc:
+        return sn
+    return ''
+
+
+def _struct_defines_method(gen, sn: str, mname: str) -> bool:
+    if not sn:
+        return False
+    sig = gen._struct_method_signatures.get(_sms_key(sn, mname))
+    return sig is not None and len(sig) > 0
 
 
 def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: str, val_t: str) -> bool:
@@ -4211,6 +4240,38 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                                                     [(idx_type, iv)])
     if _getitem_r is not None:
         return _getitem_r
+
+    # `d[k]` on a builtin-`dict` subclass with no `__getitem__` override:
+    # read from the backing MojoDict. On a miss, if the class defines
+    # `__missing__`, `d[k]` is `type(d).__missing__(d, k)` (Counter uses
+    # this to yield 0). See bugs/COMPILE_FAIL_collections___init__.md.
+    _dsub_r = gen._dict_subclass_of(ot)
+    if _dsub_r:
+        dp = gen._new_val('MojoDict *', f"{ov}->_data")
+        kt, kv = gen._char_to_cstr(idx_type, iv)
+        if gen._struct_defines_method(_dsub_r, '__missing__'):
+            has = gen._call_expr('int', 'mojo_dict_contains',
+                                 [('MojoDict *', dp), (kt, kv)])
+            res = gen._new_temp('int64_t')
+            bb_hit = gen._new_bb()
+            bb_miss = gen._new_bb()
+            bb_done = gen._new_bb()
+            gen._emit(f"  if ({has} != 0) goto {bb_hit}; else goto {bb_miss};")
+            gen._emit_label(bb_hit)
+            hv = gen._call_expr('int64_t', 'mojo_dict_get_int',
+                                [('MojoDict *', dp), (kt, kv)])
+            gen._emit(f"  {res} = {hv};")
+            gen._emit(f"  goto {bb_done};")
+            gen._emit_label(bb_miss)
+            miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
+            mv = gen._call_expr('int64_t', miss_mangled, [(ot, ov), (kt, kv)])
+            gen._emit(f"  {res} = {mv};")
+            gen._emit(f"  goto {bb_done};")
+            gen._emit_label(bb_done)
+            return 'int64_t', res
+        t = gen._call_expr('int64_t', 'mojo_dict_get_int',
+                           [('MojoDict *', dp), (kt, kv)])
+        return 'int64_t', t
 
     if ot == 'MojoList *':
         elem = gen._elem_of(ov)

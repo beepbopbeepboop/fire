@@ -1123,6 +1123,7 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             ot, obj_v = gen.lower_expr(node.target.obj)
         it, idx_v  = gen.lower_expr(node.target.index)
+        _dsw_sn = gen._dict_subclass_of(ot)
         # A USER-STRUCT instance whose class defines `__setitem__`: the
         # write is protocol dispatch to that method, not a container
         # store (see _lower_struct_subscript_dunder). vtype/v and the
@@ -1227,6 +1228,19 @@ def _gen_stmt_AssignStmt(gen, node):
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+            elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
+                # `d[k] = v` on a builtin-`dict` subclass with no
+                # `__setitem__` override: store into the backing MojoDict.
+                _dsw_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
+                _dsw_kt, _dsw_kv = gen._char_to_cstr(it, idx_v)
+                if vtype == 'char *':
+                    gen._emit_call('void', '', 'mojo_dict_set_str',
+                                    [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
+                                     ('char *', v)])
+                else:
+                    gen._emit_call('void', '', 'mojo_dict_set_int',
+                                    [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
+                                     (vtype, v)])
             else:
                 if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                     # GIMPLE strict: raw pointer subscript write needs address in a register.
@@ -1509,6 +1523,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
         else:
             ot, obj_v = gen.lower_expr(node.target.obj)
         it, idx_v  = gen.lower_expr(node.target.index)
+        _dsa_sn = gen._dict_subclass_of(ot)
         # Augmented-assignment analogue of the AssignStmt branch above:
         # `obj[key] += v` on a user struct defining `__setitem__` stores
         # through that method; the read half already dispatched to
@@ -1579,6 +1594,20 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 suf = gimple_ctypes.TypeLattice.list_suffix(elem)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
                 gen._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {v});")
+        elif _dsa_sn and not gen._struct_defines_method(_dsa_sn, '__setitem__'):
+            # `d[k] += v` on a builtin-`dict` subclass: read-modify-write
+            # through the backing MojoDict (the read half already went
+            # through _lower_subscript's dict-subclass branch).
+            _dsa_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
+            _dsa_kt, _dsa_kv = gen._char_to_cstr(it, idx_v)
+            if vtype == 'char *':
+                gen._emit_call('void', '', 'mojo_dict_set_str',
+                                [('MojoDict *', _dsa_dp), ('char *', _dsa_kv),
+                                 ('char *', v)])
+            else:
+                gen._emit_call('void', '', 'mojo_dict_set_int',
+                                [('MojoDict *', _dsa_dp), ('char *', _dsa_kv),
+                                 (vtype, v)])
         elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:
             # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow ptr arithmetic)
             if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
