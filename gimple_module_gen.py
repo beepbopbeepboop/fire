@@ -5875,22 +5875,38 @@ def gen_module_impl(self, stmts):
             self._has_toplevel_code = True
             break
     self._toplevel_calls_main = False
+    # Direct shallow scan FIRST — the generic `_walk_ast` recursion below
+    # has proven unreliable on the self-hosted compiled path (its
+    # `dataclasses.fields()` handling did not recurse into `ExprStmt.value`),
+    # so `_toplevel_calls_main` stayed False and the C wrapper emitted a
+    # SECOND `_gimple_main ()` after `_toplevel ()` (the double-invocation
+    # the branch comment in `_gen_func` warns about) — a stage1-vs-stage2
+    # parity break under MOJO_NO_SHIM=1. Covers the two real shapes: a bare
+    # top-level `main()` and `if __name__ == '__main__': main()` (one level
+    # into an IfStmt then/elif/else body).
+    def _sm_stmt_calls_main(_st) -> bool:
+        _v = getattr(_st, 'value', None) if isinstance(_st, ExprStmt) else None
+        return (isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
+                and _as_str(_v.func.name) == 'main')
     for _ts in stmts:
-        # Direct shallow check FIRST — a bare top-level `main()` is
-        # `ExprStmt(value=CallExpr(func=IdentExpr('main')))`, a direct
-        # child needing no deep walk. The generic `_walk_ast` recursion
-        # below (for the `if __name__ == '__main__': main()` shape) has
-        # proven unreliable on the self-hosted compiled path — its
-        # `dataclasses.fields()` handling did not recurse into
-        # `ExprStmt.value`, so `_toplevel_calls_main` stayed False and the
-        # C wrapper emitted a SECOND `_gimple_main ()` after `_toplevel
-        # ()` (the double-invocation the branch comment in `_gen_func`
-        # warns about) — a stage1-vs-stage2 parity break under
-        # MOJO_NO_SHIM=1.
-        _tv = getattr(_ts, 'value', None) if isinstance(_ts, ExprStmt) else None
-        if (isinstance(_tv, CallExpr) and isinstance(_tv.func, IdentExpr)
-                and _as_str(_tv.func.name) == 'main'):
+        if _sm_stmt_calls_main(_ts):
             self._toplevel_calls_main = True
+            break
+        if isinstance(_ts, IfStmt):
+            _if_bodies = list(getattr(_ts, 'then_body', None) or [])
+            for _ep in (getattr(_ts, 'elifs', None) or []):
+                _if_bodies.extend(_ep[1] or [])
+            _eb = getattr(_ts, 'else_body', None)
+            if isinstance(_eb, list):
+                _if_bodies.extend(_eb)
+            for _ib in _if_bodies:
+                if _sm_stmt_calls_main(_ib):
+                    self._toplevel_calls_main = True
+                    break
+            if self._toplevel_calls_main:
+                break
+    for _ts in stmts:
+        if self._toplevel_calls_main:
             break
         if isinstance(_ts, (AssignStmt, AugAssignStmt, ExprStmt, IfStmt, WhileStmt, ForStmt, TryStmt, WithStmt, PassStmt, BreakStmt, ContinueStmt, ReturnStmt, RaiseStmt, AssertStmt, VarDecl)):
             for _n in _walk_ast(_ts):
