@@ -3480,6 +3480,17 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             mangled, struct_name, method, node.args, arg_pairs)
     full_param_list = gen.func_param_types.get(mangled,
         gen.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", []))
+    # The method-parameter registration passes key `func_param_types` by
+    # the RAW method name (`ZipFile_open`), but `mangled` runs the name
+    # through `_safe_name`, which rewrites C-reserved names (`open` ->
+    # `mojo_open`). `_emit_call` only looks up `func_param_types[fname]`
+    # with `fname == mangled`, so for such a method it found nothing and
+    # skipped ALL argument coercion — a `char *` filename passed straight
+    # into an `int64_t name` slot ("makes integer from pointer without a
+    # cast"). Mirror the known signature onto the mangled key here.
+    # COMPILE_FAIL_zipfile___init__.md blocker 2.
+    if full_param_list and mangled not in gen.func_param_types:
+        gen.func_param_types[mangled] = list(full_param_list)
     if (not is_class_ref and not _is_cls_receiver
             and full_param_list and full_param_list[0] != f"{struct_name} *"):
         is_class_ref = True
