@@ -3693,6 +3693,39 @@ def main():
 main()
 """)
 
+    # 177b. A BUILTIN-CONTAINER method bound to a local and called later —
+    # `result = bytearray(); append = result.append` then `append(x)` in a
+    # loop (Lib/zipfile/__init__.py's `_ZipDecrypter.decrypter`). List/dict/
+    # set already worked (_lower_builtin_method_value); bytes/bytearray and
+    # memoryview fell through to a struct-field read and emitted an invalid
+    # `->append` access (`'MojoBytes' has no member named 'append'`). See
+    # the bound-method grep cluster in bugs/ (zipfile, pickletools, os,
+    # glob, ipaddress, ctypes_util, ...).
+    test("bound_container_method_bytearray_value", """\
+def decrypter(data):
+    result = bytearray()
+    append = result.append
+    for i in range(len(data)):
+        append(data[i])
+    return bytes(result)
+
+def main():
+    print(len(decrypter([1, 2, 3])))
+""")
+    test("bound_container_method_list_dict_set_value", """\
+def main():
+    xs = []
+    f = xs.append
+    f(1)
+    f(2)
+    d = {}
+    s = d.setdefault
+    st = set()
+    a = st.add
+    a(7)
+    print(len(xs), s('k', 9), len(st))
+""")
+
     # 178. Untyped-parameter identity function called with a string argument
     # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
     # body-usage evidence at all (just returned unchanged), so the parameter

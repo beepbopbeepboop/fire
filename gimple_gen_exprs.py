@@ -1755,7 +1755,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # which raises AttributeError at runtime for every registered
     # container (gencodec.py's python_mapdef_code/python_tabledef_code
     # never produced any output).
-    if ot in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+    if ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoBytes *', 'MojoMemoryView *'):
         return gen._lower_builtin_method_value(ot, ov, node.member)
     # Struct-level comptime alias (e.g. BitSet._words_size): not a physical
     # field — expand its defining expression with `Self`/the struct name

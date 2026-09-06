@@ -260,6 +260,25 @@ def main() -> Int:
     return c.a()
 """, expected_return=42)
 
+    # 10b. A BUILTIN-CONTAINER method bound to a local and invoked later —
+    # `append = xs.append` / `a = ba.append` — the container twin of #10.
+    # Behavioral round-trip: the bound value must mutate the ORIGINAL
+    # container. bytes/bytearray + memoryview used to emit an invalid
+    # `->append` field access ('MojoBytes' has no member named 'append');
+    # zipfile's `_ZipDecrypter.decrypter` is the real trigger.
+    test_gimple_execution("gimple_bound_container_method_value", """\
+def main() -> Int:
+    xs = [10]
+    f = xs.append
+    f(20)
+    f(30)
+    ba = bytearray()
+    a = ba.append
+    a(65)
+    a(66)
+    return xs[2] + len(xs) + ba[0] + len(ba)
+""", expected_return=30 + 3 + 65 + 2)
+
     # 11. An f-string whose nested `{...}` interpolation contains a string
     # literal reusing the SAME quote character as the f-string's own
     # delimiter (legal since PEP 701 / Python 3.12) — this used to truncate

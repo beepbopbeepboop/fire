@@ -217,10 +217,14 @@ def _lower_builtin_method_value(gen, ot: str, ov: str, method: str) -> tuple[str
     `append = l.append` (python_mapdef_code's accumulator idiom in
     Tools/unicode/gencodec.py), `add = myset.add`, etc.
 
+    Also covers `MojoBytes *` (bytes/bytearray) and `MojoMemoryView *`
+    receivers — `append = result.append` on a bytearray held in a local
+    (Lib/zipfile/__init__.py's `_ZipDecrypter.decrypter`).
+
     _lower_bound_method_value above covers USER-STRUCT methods only: a
     struct method has a real, statically-known mangled C symbol to take
     a function pointer of. A builtin container (MojoList*/MojoDict*/
-    MojoSet*) has NO per-method C function at all — its methods are
+    MojoSet*/MojoBytes*/MojoMemoryView*) has NO per-method C function at all — its methods are
     lowered inline at each direct call site (`mojo_list_append_int` vs
     `mojo_list_append_str` chosen by the ARGUMENT's type at that call),
     so there is nothing for a MojoBoundMethod*'s fn pointer to point at.
@@ -269,6 +273,10 @@ def _lower_builtin_bound_method_call(gen, fname_raw: str,
         return gen._lower_list_method(recv_v, method, node.args)
     if recv_ct == 'MojoDict *':
         return gen._lower_dict_method(recv_v, method, node.args)
+    if recv_ct == 'MojoBytes *':
+        return gen._lower_bytes_method(recv_v, method, node.args)
+    if recv_ct == 'MojoMemoryView *':
+        return gen._lower_memoryview_method(recv_v, method, node.args)
     return gen._lower_set_method(recv_v, method, node.args)
 
 

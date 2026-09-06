@@ -1,5 +1,35 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, bound-container-method-as-value): blocker #2 FIXED; module now dies later, on a GCC internal compiler error
+
+Blocker #2 (`'MojoBytes' has no member named 'append'` — `_ZipDecrypter.
+decrypter`'s `result = bytearray(); append = result.append` then
+`append(x)`) is **FIXED**. `_lower_MemberExpr`'s builtin-method-as-value
+branch and `_lower_builtin_bound_method_call` only handled
+`MojoList`/`MojoDict`/`MojoSet` receivers; a `MojoBytes *` /
+`MojoMemoryView *` receiver fell through to a struct-field read and
+emitted an invalid `->append`. Both sites now route bytes/bytearray via
+`_lower_bytes_method` and memoryview via `_lower_memoryview_method`,
+matching the direct-call spelling. Minimal repros (list/dict/set/
+bytearray `.append`/`.setdefault`/`.add` bound to a local + called in a
+loop; the exact `_ZipDecrypter.decrypter` shape) compile+link+run.
+
+Fresh `compile_to_gimple(do_imports=False)` now produces ~625 KB of C
+that gets further and dies on a NEW first blocker:
+
+**NEXT BLOCKER — GCC internal compiler error in `ZipExtFile_mojo_read`.**
+`gcc -fgimple -fsyntax-only`: `internal compiler error: in build2, at
+tree.cc:5208` on `int ZIP_ZSTANDARD;` — one of ~60 module-level
+zipfile constants (`ZIP_STORED`, `_CD_*`, `_FH_*`, ...) hoisted as
+locals into `ZipExtFile_mojo_read`. This is a GCC crash (not a Mojo
+codegen diagnostic), triggered by that function's very large local-decl
+block; feature/​infra-sized (either shrink the hoisted-constant set per
+function, or fold module constants into real file-scope globals). The
+`pwd=None` unannotated param, genexp-held-in-local, and `_Extra`
+subclassing blockers documented below still stand behind it.
+
+Still not `git rm`'d — does not compile end-to-end.
+
 ## Status (2026-09-06, bytes-value-type Stage 4): generator-body memoryview refusal GONE; module now dies later, on real ordinary-path bytes-codegen bugs
 
 `gimple_gen_coro._eligible` now accepts a `@classmethod` generator whose
