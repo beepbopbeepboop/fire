@@ -441,12 +441,6 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # drops an imported module's `if __name__ == '__main__':`-guarded
     # top-level globals from this scan, so it stays this-module-scoped.
     _owned_here = name in gen._own_global_var_types
-    if _as_str(name) == 'sys':
-        gen._emit("  /* SYSTRACE owned:" + ("Y" if _owned_here else "N")
-                  + " gvt:" + ("Y" if name in gen._global_var_types else "N")
-                  + " g2m:" + _as_str(_global_owner_mod if _global_owner_mod else "NONE")
-                  + " this:" + _as_str(_this_mod)
-                  + " invar:" + ("Y" if name in gen.var_types else "N") + " */")
     if (_global_owner_mod is None or _global_owner_mod == _this_mod or _owned_here) and \
             (name in gen._func_declared_globals or name not in gen.var_types) and name in gen._global_var_types:
         gtype = gen._global_var_types[name]
