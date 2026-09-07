@@ -2047,6 +2047,12 @@ class GimpleGen:
         'mojo_bound_method_call_2': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_3': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_4': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_is_bound_method':     ('int', ['void *']),
+        'mojo_maybe_bound_call_0':  ('int64_t', ['void *']),
+        'mojo_maybe_bound_call_1':  ('int64_t', ['void *', 'int64_t']),
+        'mojo_maybe_bound_call_2':  ('int64_t', ['void *', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_3':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_4':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'conforms_to':           ('_Bool',      ['int64_t', 'int64_t']),
         'llabs':                 ('int64_t',   ['int64_t']),
         'labs':                  ('int64_t',   ['int64_t']),
@@ -2959,6 +2965,8 @@ class GimpleGen:
         return gmp._lower_bound_method_call(self, fname_raw, node, stored_ctype)
     def _lower_bound_method_call_value(self, bm: str, node: CallExpr, ret_type: str='int64_t') -> tuple[str, str]:
         return gmp._lower_bound_method_call_value(self, bm, node, ret_type)
+    def _lower_maybe_bound_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
+        return gmp._lower_maybe_bound_call(self, fname_raw, node)
     def _lower_builtin_method_value(self, ot: str, ov: str, method: str) -> tuple[str, str]:
         return gmp._lower_builtin_method_value(self, ot, ov, method)
     def _lower_builtin_bound_method_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:

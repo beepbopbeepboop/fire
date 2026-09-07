@@ -87,12 +87,13 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
  * already uses. See bugs/CODEGEN_bound_method_as_value_not_resolved.md. */
 typedef struct { void *fn; void *self; } MojoBoundMethod;
 
-static inline MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
-    MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
-    bm->fn = fn;
-    bm->self = self;
-    return bm;
-}
+/* Real (non-inline) so the single bound-method registry lives in one TU
+ * (mojo_runtime.c) — mojo_is_bound_method below consults it to tell a
+ * `MojoBoundMethod *` value apart from a plain function pointer at a
+ * dynamically-dispatched call site (`if c: f = lambda: 1 else: f =
+ * self.m; f()`). */
+MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
+int mojo_is_bound_method(void *p);
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -107,6 +108,32 @@ static inline int64_t mojo_bound_method_call_3(MojoBoundMethod *bm, int64_t a, i
 }
 static inline int64_t mojo_bound_method_call_4(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c, int64_t d) {
     return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
+}
+
+/* Dynamic dispatch through a value that may be EITHER a MojoBoundMethod*
+ * or a plain function pointer — the callee identity isn't known
+ * statically (a local branch-joined from `lambda`/free-function and a
+ * `self.method` value). A registered bound method re-supplies its
+ * receiver via mojo_bound_method_call_N; anything else is a bare fnptr. */
+static inline int64_t mojo_maybe_bound_call_0(void *f) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_0((MojoBoundMethod *)f);
+    return mojo_fnptr_call_0(f);
+}
+static inline int64_t mojo_maybe_bound_call_1(void *f, int64_t a) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_1((MojoBoundMethod *)f, a);
+    return mojo_fnptr_call_1(f, a);
+}
+static inline int64_t mojo_maybe_bound_call_2(void *f, int64_t a, int64_t b) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_2((MojoBoundMethod *)f, a, b);
+    return mojo_fnptr_call_2(f, a, b);
+}
+static inline int64_t mojo_maybe_bound_call_3(void *f, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_3((MojoBoundMethod *)f, a, b, c);
+    return mojo_fnptr_call_3(f, a, b, c);
+}
+static inline int64_t mojo_maybe_bound_call_4(void *f, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_4((MojoBoundMethod *)f, a, b, c, d);
+    return mojo_fnptr_call_4(f, a, b, c, d);
 }
 
 /* ── Exception stack (for try/except/raise) ──────────────────────────────

@@ -407,6 +407,39 @@ def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
     return gen._lower_bound_method_call_value(bm, node, ret_type)
 
 
+def _lower_maybe_bound_call(gen, fname_raw: str,
+                            node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """Call through a local that may hold EITHER a `MojoBoundMethod *` or a
+    plain function pointer (see _assign_target's `_bm_tainted_locals`).
+    Emits `mojo_maybe_bound_call_N`, which checks the runtime bound-method
+    registry: a registered `MojoBoundMethod *` dispatches through
+    `mojo_bound_method_call_N` (re-supplying `self`), anything else
+    through `mojo_fnptr_call_N`. GIMPLE can't cast-and-call in one
+    expression, hence the runtime helper — same indirection style as
+    _lower_fnptr_call / _lower_bound_method_call."""
+    fp_raw = gen._c_names.get(fname_raw, fname_raw)
+    if fname_raw in gen._captures and gen._env_param:
+        _t, fp_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    elif fname_raw not in gen.var_types and fname_raw in gen._global_var_types:
+        _t, fp_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    fp_void = gen._new_val('void *', f'(void *){fp_raw}')
+    widened = []
+    for a in node.args:
+        at, av = gen.lower_expr(a)
+        widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
+    n = len(widened)
+    helper = f'mojo_maybe_bound_call_{min(n, 4)}'
+    ret_type = gen._bound_method_ret_types.get(fname_raw, 'int64_t')
+    raw_t = gen._call_expr('int64_t', helper, [('void *', fp_void)] +
+                             [('int64_t', w) for w in widened[:4]])
+    if ret_type in ('int64_t', 'int'):
+        return ret_type, raw_t
+    if ret_type == 'void':
+        return 'int', gen._new_val('int', '0')
+    t = gen._new_val(ret_type, f'({ret_type}){raw_t}')
+    return ret_type, t
+
+
 def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
                                     ret_type: str = 'int64_t') -> tuple[str, str]:
     """Emit a call through an already-lowered `MojoBoundMethod *` VALUE

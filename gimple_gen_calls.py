@@ -1760,6 +1760,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if gen._get_actual_type(_fname_var_ctype, fname_raw) == 'MojoBoundMethod *':
         return gen._lower_bound_method_call(fname_raw, node, _fname_var_ctype)
 
+    # A local that has held a `MojoBoundMethod *` in at least one branch
+    # but whose declared type is void*/int64_t (branch-joined with a plain
+    # fn-pointer / lambda value). Dispatch dynamically at runtime — see
+    # _assign_target's `_bm_tainted_locals` bookkeeping.
+    if fname_raw in getattr(gen, '_bm_tainted_locals', ()):
+        return gen._lower_maybe_bound_call(fname_raw, node)
+
     # Local variable (or captured variable) holding a function pointer.
     # Emit a proper function-pointer call via a C cast. Any name that is
     # a LOCAL VARIABLE here (not a known function/builtin, which the

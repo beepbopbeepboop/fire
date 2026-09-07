@@ -672,6 +672,18 @@ def _assign_target(gen, tgt, et, ev):
             gen._declare_var(tgt.name, hint or et)
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
+        # A `MojoBoundMethod *` value stored into a local whose declared C
+        # type is NOT `MojoBoundMethod *` (a var-type-inference join with
+        # another branch's plain fn-pointer / lambda value collapsed it to
+        # `void *`/`int64_t`, e.g. `if c: f = lambda: 42 else: f =
+        # self.tell`). A later `f()` must dispatch dynamically: a bound
+        # method needs `self` re-supplied, a plain fnptr must not. Record
+        # the name so _lower_call routes it through mojo_maybe_bound_call_N.
+        if et == 'MojoBoundMethod *' and gen.var_types.get(tgt.name) != 'MojoBoundMethod *':
+            gen._bm_tainted_locals.add(tgt.name)
+            _brt = gen._bound_method_ret_types.get(ev)
+            if _brt:
+                gen._bound_method_ret_types[tgt.name] = _brt
     elif isinstance(tgt, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         # A list-pattern target (`[a] = ...` / `[a, b] = ...`) is
         # semantically identical to the tuple-pattern spelling (`a, = ...`
@@ -1044,6 +1056,17 @@ def _gen_stmt_AssignStmt(gen, node):
         # correctly instead of assuming int64_t.
         if dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
             gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
+        # A `MojoBoundMethod *` value stored into a local whose declared C
+        # type is NOT `MojoBoundMethod *` — the var-type-inference join
+        # with another branch's plain fn-pointer / lambda value collapsed
+        # the slot to `void *`/`int64_t` (`if c: f = lambda: 42 else: f =
+        # self.tell; f()`). The call site can't tell statically which kind
+        # of callable is live, so record the name for dynamic dispatch
+        # (mojo_maybe_bound_call_N) — see _lower_maybe_bound_call.
+        if vtype == 'MojoBoundMethod *' and dst != 'MojoBoundMethod *':
+            gen._bm_tainted_locals.add(tname)
+            if v in gen._bound_method_ret_types:
+                gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,

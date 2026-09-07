@@ -253,6 +253,15 @@ def _reset_func(gen, body: list = None, params: list = None):
     # temp names (_tN) recycle across functions. See
     # _lower_builtin_method_value.
     gen._builtin_method_values: dict[str, tuple] = {}
+    # Local variable names that have been assigned a `MojoBoundMethod *`
+    # value at least once but whose DECLARED C type is not
+    # `MojoBoundMethod *` (the var-type-inference join with another
+    # branch's plain function-pointer / lambda value collapsed it to
+    # `void *`/`int64_t`). A call through such a name must dispatch
+    # dynamically (mojo_maybe_bound_call_N) — a bound method needs its
+    # `self` re-supplied, a plain fnptr must NOT. Reset per function:
+    # local names recycle. See _lower_maybe_bound_call.
+    gen._bm_tainted_locals: set = set()
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from

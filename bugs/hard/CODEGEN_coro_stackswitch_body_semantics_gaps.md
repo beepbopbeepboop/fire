@@ -3,7 +3,9 @@ via the §5.5 cutover's real behavioral test suite
 
 ## Status
 
-**Partially fixed 2026-09-05** (see per-issue markers below):
+**ALL FOUR ISSUES FIXED (2026-09-05 / 2026-09-06)** — see per-issue
+markers below. §5.6 (deleting the cpp-path emitter) is no longer blocked
+by this doc.
 
 - **#1 (`finally` in a loop over-runs its counter) — FIXED.**
 - **#2 (`finally` after a `yield` following an early consumer `break`) — FIXED.**
@@ -35,7 +37,26 @@ via the §5.5 cutover's real behavioral test suite
   green; stdlib dylib skip count 0→0, `compile_stdlib.py` U-count
   unchanged.
 
-- **#3 — NARROWED 2026-09-05.** The *lambda* half is fixed: the ordinary
+- **#3 — FIXED 2026-09-06.** The bound-method-value-in-a-local half is
+  now closed. Root cause: `if c: getpos = lambda… else: getpos =
+  self.tell` — the var-type-inference join collapsed `getpos` to `void *`,
+  and `_lower_call` unconditionally routed `getpos()` through
+  `mojo_fnptr_call_0`, which called the `MojoBoundMethod` struct as raw
+  code (bus error). Fix: a runtime bound-method registry
+  (`mojo_is_bound_method`, fed by `mojo_bound_method_new` — now a real
+  function, not a header static-inline) + `mojo_maybe_bound_call_N`
+  helpers that dispatch dynamically (registered bound method →
+  `mojo_bound_method_call_N` re-supplying `self`; anything else →
+  `mojo_fnptr_call_N`). Codegen taints any local that receives a
+  `MojoBoundMethod *` value while its declared type is not
+  `MojoBoundMethod *` (`gen._bm_tainted_locals`) and routes its calls
+  through `_lower_maybe_bound_call`. Reproduces/fixed in a plain
+  non-generator method too. Regression tests:
+  `gimple_branch_joined_lambda_and_bound_method_value` (test_gimple_
+  runner.py) and `generator_lambda_and_self_bound_method_as_value`
+  (test_gimple_generator_runner.py, was a known failure, now passes).
+
+  (historical) NARROWED 2026-09-05: The *lambda* half was fixed: the ordinary
   codegen path lifts a `lambda` to a top-level C function, so a lambda
   value stored in a local and called later now works for 0-/1-/2-param
   lambdas, a lambda re-bound per if/else branch, and a lambda passed as
@@ -64,8 +85,7 @@ via the §5.5 cutover's real behavioral test suite
   too. Regression tests `generator_pops_heterogeneous_tagged_stack` and
   `generator_pops_stack_two_level_tuple_unpack` now pass.
 
-`MOJO_CORO=cpp` (escape hatch) remains a correct implementation for #3
-and #4; §5.6 (deleting the cpp emitter) should still wait on those two.
+All four issues are now fixed on the default A3 stack-switch backend.
 
 --- original filing (2026-09-05) ---
 

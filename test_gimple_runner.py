@@ -260,6 +260,57 @@ def main() -> Int:
     return c.a()
 """, expected_return=42)
 
+    # 10a2. A local branch-joined between a lambda value and a `self.method`
+    # bound-method value, then called — the call site can't tell statically
+    # which kind of callable is live, so it must dynamically dispatch
+    # (mojo_maybe_bound_call_N). Previously the join collapsed the slot to
+    # void* and the call unconditionally used mojo_fnptr_call_0, so the
+    # bound-method branch called the MojoBoundMethod struct as code (bus
+    # error). See bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md
+    # #3. Reproduces in a plain (non-generator) method — this is the
+    # codegen-wide check; the generator twin is in
+    # test_gimple_generator_runner.py.
+    test_gimple_stdout("gimple_branch_joined_lambda_and_bound_method_value", """\
+class Ticker:
+    def __init__(self, start: Int):
+        self.value = start
+    def tell(self):
+        return self.value
+    def run(self, use_lambda: Int):
+        if use_lambda:
+            getpos = lambda: 42
+        else:
+            getpos = self.tell
+        print(getpos())
+
+fn main():
+    tk = Ticker(7)
+    tk.run(1)
+    tk.run(0)
+""", "42\n7\n")
+
+    # 10a3. Heterogeneous stack drained with .pop(), each popped value
+    # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
+    # had no real lowering (fell through to an always-false runtime stub),
+    # so the tuple branch was dead. See
+    # bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md #4.
+    test_gimple_stdout("gimple_isinstance_tuple_on_heterogeneous_pop", """\
+fn walk():
+    stack = [(1, 2)]
+    stack.append("leaf")
+    stack.append((3, 4))
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            a, b = top
+            print(a + b)
+        else:
+            print(99)
+
+fn main():
+    walk()
+""", "7\n99\n3\n")
+
     # 10b. A BUILTIN-CONTAINER method bound to a local and invoked later —
     # `append = xs.append` / `a = ba.append` — the container twin of #10.
     # Behavioral round-trip: the bound value must mutate the ORIGINAL

@@ -441,6 +441,29 @@ int mojo_is_tuple(MojoList *l) {
     return mojo_set_contains_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
 }
 
+/* Bound-method registry — the runtime counterpart of _mojo_list_registry
+ * above. `mojo_bound_method_new` (previously a static-inline in the
+ * header) records every MojoBoundMethod it allocates here so that a
+ * dynamically-dispatched call site (mojo_maybe_bound_call_N) can tell a
+ * bound-method value apart from a plain function pointer stored in the
+ * same void*-typed local. */
+static MojoSet *_mojo_bound_method_registry = NULL;
+
+MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
+    MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
+    bm->fn = fn;
+    bm->self = self;
+    if (!_mojo_bound_method_registry) _mojo_bound_method_registry = mojo_set_new();
+    mojo_set_add_int(_mojo_bound_method_registry, (int64_t)(intptr_t)bm);
+    return bm;
+}
+
+int mojo_is_bound_method(void *p) {
+    int64_t v = (int64_t)(intptr_t)p;
+    if (!_mojo_bound_method_registry || v < 65536) return 0;
+    return mojo_set_contains_int(_mojo_bound_method_registry, v);
+}
+
 MojoList *mojo_list_new(void)
 {
     MojoList *l = malloc(sizeof(MojoList));
