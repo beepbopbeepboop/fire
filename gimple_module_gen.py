@@ -2712,17 +2712,21 @@ def gen_module_impl(self, stmts):
     # — dropping e.g. `_classattr_GimpleGen___NO_OVERLOAD_MANGLE` and its
     # `_alloc_GimpleGen` seed, leaving the field NULL at runtime.
     for s in all_struct_defs:
+        s = _as_structdef_node(s)
         if isinstance(s, StructDef) and s.name == 'GimpleGen':
             self._struct_name_owner['GimpleGen'] = s
             break
     for s in all_struct_defs:
+        s = _as_structdef_node(s)
         if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
             self._struct_name_owner[s.name] = s
     for s in all_struct_defs:
+        s = _as_structdef_node(s)
         if isinstance(s, StructDef) and self._struct_name_owner.get(s.name) is s:
             if s.name not in self.struct_field_types:
                 self.struct_field_types[s.name] = {}
     for s in all_struct_defs:
+        s = _as_structdef_node(s)
         if isinstance(s, StructDef):
             if self._struct_name_owner.get(s.name) is not s:
                 continue
@@ -3115,6 +3119,7 @@ def gen_module_impl(self, stmts):
     self.func_return_types.update(_phase0_func_types)   # Phase 0 types win over defaults
     all_struct_defs_for_types = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
     for s in all_struct_defs_for_types:
+        s = _as_structdef_node(s)
         if isinstance(s, StructDef):
             self.func_return_types[s.name] = f"{s.name} *"
 
