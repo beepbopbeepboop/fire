@@ -338,7 +338,16 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
         # regression"); a plain list index compiles cleanly instead.
         k = list(kinds)[0] if kinds else None
         if k == 'tuple':
-            return None            # nested tuple in a slot -- not v0
+            # A nested tuple literal in a slot (Lib/modulefinder.py's
+            # `yield "store", (name,)` / `yield "relative_import", (level,
+            # fromlist, name)`) would box recursively into its own
+            # MojoList *, but the consumer side has no channel to recover
+            # the INNER elements' types (they are heterogeneous across
+            # sites: str / list / int), so `for x in args:` / `a, b = args`
+            # in the consumer body reads raw pointer bits. Refuse honestly
+            # rather than silently miscompile -- see
+            # bugs/CODEGEN_generator_function_Lib_modulefinder.md.
+            return None            # nested tuple in a slot -- needs a tagged inner value model
         slots.append(_KIND_TO_SLOT_CTYPE[k])
     return slots
 

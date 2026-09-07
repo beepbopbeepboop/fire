@@ -2095,6 +2095,52 @@ def main():
         print(x)
 """, "0\n1\n4\n9\n")
 
+    # ── "cluster B": heterogeneous / tagged tuple-yield value model ────────
+    # A stack-switch generator whose tuple `yield`s carry a slot that is a
+    # different scalar kind at different yield sites, and/or a `None` in a
+    # slot, and/or a list-valued slot. The A3 backend unifies each slot's
+    # type across every yield site (`_generator_tuple_slots`) and the
+    # consumer unpacks per-slot through the runtime list getters
+    # (`_emit_generator_tuple_unpack`). Regression coverage for
+    # bugs/CODEGEN_generator_function_Lib_{modulefinder,pickletools,os,
+    # test_test_string_test_string}.md — the outer-tuple-slot half of that
+    # cluster. (Nested-tuple slots with heterogeneous inner elements remain
+    # honestly refused — see the modulefinder doc.)
+
+    # str | None slot: `is None` on the nil slot must test true.
+    test_generator_stdout("gen_tuple_slot_str_or_none", """\
+def parse(n: Int):
+    yield "lit", "field", "spec"
+    yield "tail", None, None
+
+def main():
+    for text, name, spec in parse(1):
+        print(text)
+        if name is None:
+            print("<none>")
+        else:
+            print(name)
+""", "lit\nfield\ntail\n<none>\n")
+
+    # list-valued slots (os.walk's `(dirpath, dirnames, filenames)` shape).
+    test_generator_stdout("gen_tuple_slot_list_valued", """\
+def walk(n: Int):
+    var d1 = ["sub"]
+    var f1 = ["a", "b"]
+    yield "root", d1, f1
+    var d2 = ["x", "y"]
+    var f2 = ["c"]
+    yield "root/sub", d2, f2
+
+def main():
+    for path, dirs, files in walk(1):
+        print(path)
+        for x in dirs:
+            print(x)
+        for x in files:
+            print(x)
+""", "root\nsub\na\nb\nroot/sub\nx\ny\nc\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

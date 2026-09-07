@@ -1,5 +1,25 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-07 — "cluster B" feature session: `walk`'s blocker is mixed tuple / non-tuple yield, not slot types)
+
+Feature-build pass on cluster B. The `(dirpath, dirnames, filenames)`
+slot shape itself (str, list, list) is already supported — list-valued
+tuple slots round-trip today (new regression:
+`gen_tuple_slot_list_valued` in `test_gimple_generator_runner.py`).
+
+`walk`'s real blocker is that it **mixes a tuple yield and a non-tuple
+yield in one body**: the bottom-up path does `stack.append((top, dirs,
+nondirs))` and later, after `top = stack.pop()`, `if isinstance(top,
+tuple): yield top; continue` — a bare `yield <var>` — while the
+top-down path does `yield top, dirs, nondirs`. `_generator_value_kind`
+refuses `mixed tuple / non-tuple yields`. Handling this needs the
+generator value model to treat a bare yielded value as a possibly-boxed
+tuple discriminated at runtime (`isinstance(top, tuple)`), i.e. the
+same tagged-union direction as `modulefinder`. Plus `scandir()` as a
+for-loop iterable is unresolved. `_fwalk` remains cluster A
+(star-imported `stat`) + defined inside `if _exists("openat")`. No code
+change for this file.
+
 ## Status (2026-09-07 — `stat` is not a callable-value-local; also cluster B gates `_fwalk`)
 
 Batch investigation of "cluster A = callable-value-local dispatch": `stat`

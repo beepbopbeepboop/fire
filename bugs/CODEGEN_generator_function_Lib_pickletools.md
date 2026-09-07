@@ -1,5 +1,26 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (2026-09-07 — "cluster B" feature session: real blocker is variable tuple ARITY, not heterogeneous slots)
+
+Feature-build pass on cluster B. Heterogeneous per-slot types across
+yield sites are NOT the blocker here — the A3 tuple-yield model already
+unifies those (new regression coverage: `gen_tuple_slot_str_or_none` /
+`gen_tuple_slot_list_valued` in `test_gimple_generator_runner.py`).
+
+`_genops`'s actual blocker is **variable tuple arity within one
+generator**: `if yield_end_pos: yield opcode, arg, pos, getpos()` (a
+4-tuple) vs `else: yield opcode, arg, pos` (a 3-tuple), selected by the
+`yield_end_pos` bool parameter. The A3 model requires (reasonably —
+per the cluster-B design note) that all yields in one generator agree
+on tuple LENGTH; only slot TYPES may vary. Supporting a
+parameter-selected tuple shape would need either specialization on the
+bool arg or a max-arity padded representation with a runtime "slot
+present" flag — genuinely feature-sized and not bounded. The
+`getpos`-lambda concern from earlier entries is moot (zero-arg lambda
+through a local now works); arity is the sole remaining blocker.
+Consumer `dis()` is also large but is downstream of this. No code
+change to the generator model for this file.
+
 ## Status (2026-09-07 — cluster B is the gating blocker; cluster A not reachable)
 
 `_eligible` for `_genops` fails at `_generator_value_kind`: "tuple yield
