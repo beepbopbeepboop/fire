@@ -1839,17 +1839,22 @@ def lower(stmts: list) -> tuple[list, list]:
 
 
 # ── nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
-# async_closure_capture.md) -- v0: a captured free variable must be one of
-# the ENCLOSING ordinary function's own top-level `var name = <int
-# literal>` locals (no type annotation, or `Int`/`int`); anything else
-# (a captured PARAMETER, a non-int-literal initializer, a capture that
-# crosses a SECOND closure boundary -- `caller()` invoking a nested async
-# def defined in a DIFFERENT enclosing function) is left ineligible and
+# async_closure_capture.md) -- a captured free variable of a nested
+# `@parameter async def` may be one of the ENCLOSING ordinary function's
+# own top-level `var name = <init>` locals OR one of its PARAMETERS
+# (Increment B), of scalar kind int/bool ('i'), float ('d', Increment C)
+# or string ('p', Increment C). The initializer no longer has to be a
+# bare int literal -- only statically confident in kind (Increment A:
+# annotation, `_strict_init_kind`, or a same-module `def -> <scalar>`
+# return type). A struct capture, an opaque unannotated-call initializer,
+# or a capture reached only through a driven `async for` in a sibling
+# async def is left ineligible (`_nested_async_capture_plan` -> None) and
 # falls through to the existing gimple_cpp_* C++20-coroutine path
 # unchanged, exactly like every other narrow eligibility gate in this
-# file. Represented as a heap box (an `int64_t` handle, never a raw
-# pointer type, matching every other cross-boundary handle this file
-# already uses) rather than `&local` -- mirrors the ordinary (non-async)
+# file. Represented as a heap box -- a plain `int64_t` HANDLE regardless
+# of the cell's element type (`_BOX_SHIMS`), never a raw pointer type,
+# matching every other cross-boundary handle this file
+# already uses -- rather than `&local` -- mirrors the ordinary (non-async)
 # compiled path's own `{mut}`-capture convention (see gimple_gen_infra.
 # py's `_seed_mut_captured_local_types` docstring for why: `-fgimple`
 # rejects a stack local's address being taken anywhere in a function
@@ -1863,17 +1868,105 @@ _BOX_NEW = '__mojo_box_new_i64'
 _BOX_GET = '__mojo_box_get_i64'
 _BOX_SET = '__mojo_box_set_i64'
 
+# Increment A/B/C: typed box shim triples keyed by capture kind. The HANDLE
+# is always a plain int64_t (the malloc'd cell address) so the hidden
+# trailing-param threading is identical for every kind; only the cell's
+# element type (and hence which get/set shim reads it) changes.
+#   'i' int64_t / bool   'd' double (Float64/Float32)   'p' char * (String)
+_BOX_SHIMS = {
+    'i': ('__mojo_box_new_i64', '__mojo_box_get_i64', '__mojo_box_set_i64'),
+    'd': ('__mojo_box_new_d',   '__mojo_box_get_d',   '__mojo_box_set_d'),
+    'p': ('__mojo_box_new_p',   '__mojo_box_get_p',   '__mojo_box_set_p'),
+}
 
-def _outer_int_locals(outer: N.FunctionDef) -> dict:
-    """`{name: VarDecl}` for every top-level `var name = <int literal>`
-    (no type annotation, or `Int`/`int`) directly in `outer`'s own body --
-    the only outer-local shape v0's capture support can box."""
+
+# Same-module `def name(...) -> <ann>` -> scalar box kind ('i'/'d'/'p'),
+# populated fresh at the top of each `_hoist_nested_async` pass. Lets
+# `var x = compute()` (Increment A) pick up its kind from the callee's
+# return annotation. Same single-module/single-pass lifetime as _PARAM_NAMES.
+_FUNC_RET_KIND: dict[str, str] = {}
+
+
+def _capsrc_name(n: str) -> str:
+    """The renamed raw-parameter identifier a captured PARAMETER (Increment
+    B) keeps its incoming value under, once the bare param name has been
+    repurposed to hold that value's box handle in the enclosing body."""
+    return '__capsrc_' + n
+
+
+def _strict_init_kind(value, env: dict) -> str | None:
+    """Confident scalar box kind ('i'/'d'/'p') of an initializer expression,
+    or None. Stricter than `_yield_kind` (which falls back to 'i' for an
+    unknown BinaryOp) -- an unrecognised shape MUST stay None so the
+    capture is refused (cpp path), never mis-boxed."""
+    if value is None:
+        return None
+    if isinstance(value, (N.IntLiteral, N.BoolLiteral)):
+        return 'i'
+    if isinstance(value, N.FloatLiteral):
+        return 'd'
+    if isinstance(value, (N.StringLiteral, N.TstringLiteral)):
+        return 'p'
+    if isinstance(value, N.IdentExpr):
+        v = env.get(value.name)
+        return v if v in ('i', 'd', 'p') else None
+    if isinstance(value, N.CallExpr) and isinstance(value.func, N.IdentExpr):
+        _b = {'int': 'i', 'len': 'i', 'ord': 'i', 'hash': 'i',
+              'float': 'd', 'str': 'p', 'String': 'p', 'repr': 'p'}.get(value.func.name)
+        # a call to a same-module `def name(...) -> <scalar>` -- Increment A
+        # (`var rawCounter = compute()`): the callee's own return annotation
+        # is a confident kind source even without GimpleGen type inference.
+        return _b if _b is not None else _FUNC_RET_KIND.get(value.func.name)
+    if isinstance(value, N.BinaryOp):
+        lk = _strict_init_kind(value.left, env)
+        rk = _strict_init_kind(value.right, env)
+        if lk is None or rk is None:
+            return None
+        if lk == rk:
+            return lk
+        if {lk, rk} == {'i', 'd'}:
+            return 'd'
+        return None
+    return None
+
+
+def _outer_boxable_locals(outer: N.FunctionDef) -> dict:
+    """`{name: (VarDecl, kind)}` for every top-level `var name = <init>`
+    directly in `outer`'s own body whose value v0's capture box can
+    represent -- kind 'i' (int/bool, Increment 0), 'd' (float) or 'p'
+    (string) (Increment C). Increment A: the initializer no longer has to
+    be a bare int literal, only statically confident in kind (explicit
+    `Int`/`Float64`/`String`-family annotation, or a `_strict_init_kind`
+    match)."""
+    env = _static_env(outer)
     out = {}
     for s in outer.body:
-        if (isinstance(s, N.VarDecl) and s.type_ann in (None, 'Int', 'int')
-                and isinstance(s.value, N.IntLiteral)):
-            out[s.name] = s
+        if not isinstance(s, N.VarDecl):
+            continue
+        k = _ann_kind(s.type_ann)
+        if k is None:
+            k = _strict_init_kind(s.value, env)
+        if k in ('i', 'd', 'p'):
+            out[s.name] = (s, k)
     return out
+
+
+def _called_from_nested_async(outer: N.FunctionDef, name: str) -> bool:
+    """True if `name` (a hoisted nested async's bare name) is invoked from
+    inside a FURTHER-nested `async def` sibling. The box-handle threading
+    only covers `outer`'s own body plus ordinary nested sibling functions
+    (`_thread_box_through_siblings`), not a nested async's own driven call
+    sites (`async for` / await drive loops), so such a shape is refused to
+    the cpp path rather than risk an unthreaded call -- never a
+    miscompile."""
+    for s in outer.body:
+        if isinstance(s, N.FunctionDef) and getattr(s, 'is_async', False):
+            hits: list = []
+            for st in s.body:
+                _find_calls_to(st, name, hits)
+            if hits:
+                return True
+    return False
 
 
 def _outer_all_locals(outer: N.FunctionDef) -> set:
@@ -1929,22 +2022,38 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
     captured_names = (used - inner_declared) & all_outer
     if not captured_names:
         return {}
-    int_locals = _outer_int_locals(outer)
-    if captured_names - set(int_locals.keys()):
-        return None            # captures something v0 can't box -- refuse
-    return {n: int_locals[n] for n in captured_names}
+    if _called_from_nested_async(outer, inner.name):
+        return None            # unthreadable call site -- refuse (cpp path)
+    boxable = _outer_boxable_locals(outer)
+    penv = _static_env(outer)          # param annotation kinds + callsite contract
+    outer_param_names = {p for p, _a in outer.params}
+    plan: dict = {}
+    for n in captured_names:
+        if n in boxable:
+            decl, k = boxable[n]
+            plan[n] = (decl, k)
+            continue
+        if n in outer_param_names:      # Increment B: a captured PARAMETER
+            k = penv.get(n)
+            if k in ('i', 'd', 'p'):
+                plan[n] = (None, k)
+                continue
+        return None                     # something v0 can't box -- refuse
+    return plan
 
 
 def _cap_rewrite_expr(node, box_names: dict):
-    """Replace every read of a captured name with `__mojo_box_get_i64
-    (<box-handle ident>)`. `box_names` maps the captured bare name to the
-    C identifier holding its box handle IN THIS SCOPE (the nested body's
-    own hidden parameter, or the enclosing function's own now-boxed
-    local -- same name, new meaning)."""
+    """Replace every read of a captured name with the kind-appropriate box
+    getter (`__mojo_box_get_i64/_d/_p`) applied to `<box-handle ident>`.
+    `box_names` maps the captured bare name to a `(cident, kind)` pair:
+    `cident` is the C identifier holding its box handle IN THIS SCOPE (the
+    nested body's own hidden parameter, or the enclosing function's own
+    now-boxed local -- same name, new meaning); `kind` is 'i'/'d'/'p'."""
     if node is None or not hasattr(node, '__dict__'):
         return node
     if isinstance(node, N.IdentExpr) and node.name in box_names:
-        return _call(_BOX_GET, [_c_ident(box_names[node.name])])
+        _ci, _k = box_names[node.name]
+        return _call(_BOX_SHIMS[_k][1], [_c_ident(_ci)])
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
@@ -1969,16 +2078,17 @@ def _cap_rewrite_stmts(stmts: list, box_names: dict) -> list:
             continue
         if (isinstance(s, N.AssignStmt) and isinstance(s.target, N.IdentExpr)
                 and s.target.name in box_names):
+            bname, bk = box_names[s.target.name]
             val = _cap_rewrite_expr(s.value, box_names)
-            out.append(N.ExprStmt(value=_call(_BOX_SET, [_c_ident(box_names[s.target.name]), val])))
+            out.append(N.ExprStmt(value=_call(_BOX_SHIMS[bk][2], [_c_ident(bname), val])))
             continue
         if (isinstance(s, N.AugAssignStmt) and isinstance(s.target, N.IdentExpr)
                 and s.target.name in box_names):
-            bname = box_names[s.target.name]
-            cur = _call(_BOX_GET, [_c_ident(bname)])
+            bname, bk = box_names[s.target.name]
+            cur = _call(_BOX_SHIMS[bk][1], [_c_ident(bname)])
             rhs = _cap_rewrite_expr(s.value, box_names)
             new_val = N.BinaryOp(op=s.op[:-1], left=cur, right=rhs)
-            out.append(N.ExprStmt(value=_call(_BOX_SET, [_c_ident(bname), new_val])))
+            out.append(N.ExprStmt(value=_call(_BOX_SHIMS[bk][2], [_c_ident(bname), new_val])))
             continue
         if isinstance(s, N.VarDecl) and s.name in box_names:
             # A captured name re-declared in the SAME scope that captures
@@ -2100,15 +2210,38 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     ordinary compiled path's own 2026-07-27 fix solved for plain
     `{mut}` closures, done here as a pure AST rewrite over the plain
     `int64_t` box handle."""
-    hidden = {n: _hidden_box_name(n) for n in cap_map}
-    for name, decl in cap_map.items():
-        decl.value = _call(_BOX_NEW, [decl.value])
-    outer.body = _cap_rewrite_stmts(outer.body, {n: n for n in cap_map})
+    box_kind = {n: k for n, (_d, k) in cap_map.items()}
+    hidden = {n: (_hidden_box_name(n), box_kind[n]) for n in cap_map}
+    outer_box = {n: (n, box_kind[n]) for n in cap_map}
+
+    prepend: list = []
+    for name, (decl, k) in cap_map.items():
+        newshim = _BOX_SHIMS[k][0]
+        if decl is not None:
+            decl.value = _call(newshim, [decl.value])
+        else:
+            # Increment B: a captured PARAMETER has no declaring VarDecl --
+            # rename the raw param and prepend a box-init reading it, so the
+            # bare param name now denotes the box handle in `outer`'s body
+            # (the same invariant a boxed body-local satisfies in place).
+            outer.params = [((_capsrc_name(pn) if pn == name else pn), pa)
+                            for pn, pa in outer.params]
+            prepend.append(N.VarDecl(
+                name=name, type_ann=None,
+                value=_call(newshim, [_c_ident(_capsrc_name(name))])))
+    if prepend:
+        outer.body = prepend + list(outer.body)
+
+    outer.body = _cap_rewrite_stmts(outer.body, outer_box)
     inner.body = _cap_rewrite_stmts(inner.body, hidden)
     inner.params = list(inner.params) + [(_hidden_box_name(n), "Int") for n in cap_map]
 
     # ── transitive threading through ordinary nested sibling functions ──
     _thread_box_through_siblings(inner.name, outer, cap_map, hidden, set(cap_map))
+    # `outer.body` (reassigned just above, prepend + rewrites included) is
+    # now the live body; `_hoist_nested_async` finishes by filtering the
+    # hoisted async defs out of THIS list, so nothing is lost.
+    return prepend
 
 
 def _fn_body_calls(fn: N.FunctionDef, name: str) -> list:
@@ -2192,18 +2325,43 @@ def _hoist_nested_async(stmts: list, meta: list):
     {enclosing_fn_name: {nested_name: qualified_base}})."""
     hoisted = []
     local_maps: dict[str, dict[str, str]] = {}
+    _FUNC_RET_KIND.clear()
+    for s in stmts:
+        if isinstance(s, N.FunctionDef):
+            _rk = _ann_kind(getattr(s, 'return_type', None))
+            if _rk:
+                _FUNC_RET_KIND[s.name] = _rk
     for s in stmts:
         if not (isinstance(s, N.FunctionDef) and not getattr(s, 'is_generator', False)
                 and not getattr(s, 'is_async', False)):
             continue
         rename = {}
-        kept = []
-        for inner in s.body:
+        # `_apply_nested_async_capture` rewrites (and may reassign) `s.body`
+        # in place -- capture reads/writes in the enclosing body, the box
+        # init prepend. Iterate a stable snapshot of the ORIGINAL nested
+        # defs, then rebuild `s.body` by filtering the (rewritten) current
+        # `s.body` -- NOT from a separately-accumulated `kept` list, which
+        # would drop those in-body rewrites (an enclosing-scope write of a
+        # captured local becomes a new __mojo_box_set_* ExprStmt node).
+        original_body = list(s.body)
+        for inner in original_body:
             if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
                 base = f'__mgco_{s.name}_{inner.name}'
                 if any(isinstance(n, N.YieldExpr) for n in _walk(inner)):
                     ok, _why = _eligible_async_gen(inner, nested=True)
                     if ok:
+                        # Increment D: a mutable outer capture into a nested
+                        # async GENERATOR is boxed exactly like the plain
+                        # `async def` branch below. A capture v0's box
+                        # cannot represent -- or one reached only through a
+                        # driven `async for` consumer, which the box-handle
+                        # threading does not cover -- yields `None` here and
+                        # falls through to the cpp path unchanged.
+                        cap_map = _nested_async_capture_plan(inner, s)
+                        if cap_map is None:
+                            continue
+                        if cap_map:
+                            _apply_nested_async_capture(inner, s, cap_map)
                         hoisted.append(_lower_one_async_gen(inner, meta, base=base))
                         meta[-1]['nested'] = True
                         rename[inner.name] = base
@@ -2219,9 +2377,11 @@ def _hoist_nested_async(stmts: list, meta: list):
                             meta[-1]['nested'] = True
                             rename[inner.name] = base
                             continue
-            kept.append(inner)
-        s.body = kept
         if rename:
+            s.body = [x for x in s.body
+                      if not (isinstance(x, N.FunctionDef)
+                              and getattr(x, 'is_async', False)
+                              and x.name in rename)]
             local_maps[s.name] = rename
     return stmts, hoisted, local_maps
 
@@ -2475,6 +2635,19 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault(_BOX_GET, 'int64_t')
     gen.func_param_types.setdefault(_BOX_SET, ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault(_BOX_SET, 'void')
+    # Increment C: typed capture-box shims (float / string cell).
+    gen.func_param_types.setdefault('__mojo_box_new_d', ['double'])
+    gen.func_return_types.setdefault('__mojo_box_new_d', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_box_get_d', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_box_get_d', 'double')
+    gen.func_param_types.setdefault('__mojo_box_set_d', ['int64_t', 'double'])
+    gen.func_return_types.setdefault('__mojo_box_set_d', 'void')
+    gen.func_param_types.setdefault('__mojo_box_new_p', ['char *'])
+    gen.func_return_types.setdefault('__mojo_box_new_p', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_box_get_p', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_box_get_p', 'char *')
+    gen.func_param_types.setdefault('__mojo_box_set_p', ['int64_t', 'char *'])
+    gen.func_return_types.setdefault('__mojo_box_set_p', 'void')
     gen.func_param_types.setdefault('__mojo_gen_last_yield_was_wd', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_last_yield_was_wd', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_yield_tagged', ['int64_t', 'int64_t', 'int64_t'])

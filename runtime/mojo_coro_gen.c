@@ -311,6 +311,51 @@ __mojo_box_set_i64(int64_t box, int64_t v)
     if (box) *(int64_t *)(uintptr_t)box = v;
 }
 
+/* Typed variants of the nested-async capture box (Increment C): a captured
+   outer local that is a `Float64`/`Float32` (double cell) or a
+   `String`/`StringLiteral` (char * cell). The HANDLE stays a plain int64_t
+   (the malloc'd cell address) exactly like the i64 box, so the hidden
+   trailing param threading is unchanged; only the element type differs. */
+int64_t
+__mojo_box_new_d(double init)
+{
+    double *p = (double *)malloc(sizeof(double));
+    if (p) *p = init;
+    return (int64_t)(uintptr_t)p;
+}
+
+double
+__mojo_box_get_d(int64_t box)
+{
+    return box ? *(double *)(uintptr_t)box : 0.0;
+}
+
+void
+__mojo_box_set_d(int64_t box, double v)
+{
+    if (box) *(double *)(uintptr_t)box = v;
+}
+
+int64_t
+__mojo_box_new_p(char *init)
+{
+    char **p = (char **)malloc(sizeof(char *));
+    if (p) *p = init;
+    return (int64_t)(uintptr_t)p;
+}
+
+char *
+__mojo_box_get_p(int64_t box)
+{
+    return box ? *(char **)(uintptr_t)box : (char *)0;
+}
+
+void
+__mojo_box_set_p(int64_t box, char *v)
+{
+    if (box) *(char **)(uintptr_t)box = v;
+}
+
 /* ── async def / await bridge (runtime/mojo_async_sched.c) ────────────── */
 #include "mojo_wd.h"
 

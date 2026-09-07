@@ -6123,6 +6123,13 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_box_new_i64 (int64_t);',
             'extern int64_t __mojo_box_get_i64 (int64_t);',
             'extern void    __mojo_box_set_i64 (int64_t, int64_t);',
+            # Increment C: typed capture-box cells (float / string).
+            'extern int64_t __mojo_box_new_d (double);',
+            'extern double  __mojo_box_get_d (int64_t);',
+            'extern void    __mojo_box_set_d (int64_t, double);',
+            'extern int64_t __mojo_box_new_p (char *);',
+            'extern char *  __mojo_box_get_p (int64_t);',
+            'extern void    __mojo_box_set_p (int64_t, char *);',
           ) if (getattr(self, '_stackswitch_coro_c_units', None)
                 or getattr(self, '_native_future_bridge', False)) else ()),
         '/* Disable security wrappers: sprintf/snprintf/memcpy/memmove/memset/',
