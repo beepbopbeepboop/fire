@@ -752,6 +752,30 @@ def _emit_reflection_dispatch(self, parts):
         parts.append('')
 
 
+def _bytes_subclass_new_payload_name(new_fn):
+    """Given a `class X(bytes)` `__new__` FunctionDef, return the name of
+    the parameter it forwards as the bytes payload via
+    `return super().__new__(cls, <name>)` / `return bytes.__new__(cls,
+    <name>)`, or None if the shape isn't recognised."""
+    for _st in (getattr(new_fn, 'body', None) or []):
+        if not isinstance(_st, ReturnStmt):
+            continue
+        _v = _st.value
+        if not (isinstance(_v, CallExpr) and isinstance(_v.func, MemberExpr)
+                and _v.func.member == '__new__'):
+            continue
+        _base = _v.func.obj
+        _is_super = (isinstance(_base, CallExpr) and isinstance(_base.func, IdentExpr)
+                     and _base.func.name == 'super')
+        _is_bytes = isinstance(_base, IdentExpr) and _base.name == 'bytes'
+        if not (_is_super or _is_bytes):
+            continue
+        # args are (cls, <payload>) — payload is the 2nd positional
+        if len(_v.args) >= 2 and isinstance(_v.args[1], IdentExpr):
+            return _v.args[1].name
+    return None
+
+
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
     self._toplevel_dep_init_modules: list[str] = []
@@ -1997,6 +2021,78 @@ def gen_module_impl(self, stmts):
                 break
         if not _dsc_has:
             _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
+
+    # --- builtin `bytes` subclassing: `class _Extra(bytes)` (zipfile) ---
+    # A user struct whose transitive base list bottoms out at the builtin
+    # `bytes` has no payload storage of its own. Synthesize a hidden
+    # `_data: MojoBytes *` field; `__new__` / `super().__new__(cls, val)`
+    # populates it (a bytes value is immutable, set once at construction —
+    # so unlike the dict case `_alloc_` need NOT pre-allocate it), and
+    # inherited bytes ops (`len(x)`, `x[i]`, `x[a:b]`, `for c in x`,
+    # `x == y`, `x + y`, `x in y`, `b''.join(...)`, `bytes(x)`, `.decode()`,
+    # `.hex()`, `.startswith`/`.split`/...) route to `inst->_data` unless
+    # the subclass overrides the corresponding dunder/method. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    _BUILTIN_BYTES_BASES = ('bytes',)
+    _bytes_subclass: set = set()
+    _bsc_changed = True
+    while _bsc_changed:
+        _bsc_changed = False
+        for _bsc_k in _struct_bases_map:
+            _bsc_name = _as_str(_bsc_k)
+            if _bsc_name in _bytes_subclass:
+                continue
+            _bsc_hit = False
+            for _bsc_bk in _struct_bases_map.get(_bsc_name) or ():
+                _bsc_b = _as_str(_bsc_bk)
+                if _bsc_b in _BUILTIN_BYTES_BASES or _bsc_b in _bytes_subclass:
+                    _bsc_hit = True
+                    break
+            if _bsc_hit:
+                _bytes_subclass.add(_bsc_name)
+                _bsc_changed = True
+    self._bytes_subclass_structs = _bytes_subclass
+    # Which positional constructor argument becomes the bytes payload:
+    # the argument that `__new__`'s `return super().__new__(cls, <name>)`
+    # forwards (mapped back to `__new__`'s own param position, minus the
+    # leading `cls`); defaults to 0 (`class X(bytes)` with no `__new__`,
+    # or an unrecognised `__new__` shape — `X(val)` treats `val` as the
+    # payload).
+    self._bytes_subclass_payload_argidx: dict = {}
+    for _s in all_struct_defs:
+        if not isinstance(_s, StructDef):
+            continue
+        _bsc_name = _as_str(_s.name)
+        if _bsc_name not in _bytes_subclass:
+            continue
+        _bsc_fm = self.struct_field_types.get(_bsc_name)
+        if _bsc_fm is None:
+            _bsc_fm = {}
+            self.struct_field_types[_bsc_name] = _bsc_fm
+        _bsc_fm['_data'] = 'MojoBytes *'
+        _bsc_has = False
+        for _f in _s.fields:
+            if _as_str(getattr(_f, 'name', '')) == '_data':
+                _bsc_has = True
+                break
+        if not _bsc_has:
+            _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
+        _bsc_new = None
+        for _m in _s.methods:
+            if _as_str(getattr(_m, 'name', '')) == '__new__':
+                _bsc_new = _m
+                break
+        _bsc_idx = 0
+        if _bsc_new is not None:
+            _bsc_pnames = [_as_str(pn) for pn, _pt in (_bsc_new.params or [])]
+            # drop the leading cls/self
+            _bsc_body_pnames = _bsc_pnames[1:] if _bsc_pnames else []
+            _bsc_fwd = _bytes_subclass_new_payload_name(_bsc_new)
+            if _bsc_fwd is not None and _bsc_fwd in _bsc_body_pnames:
+                _bsc_idx = _bsc_body_pnames.index(_bsc_fwd)
+            # `__new__` of a bytes subclass returns a new instance pointer
+            self.func_return_types[f"{_bsc_name}___new__"] = f"{_bsc_name} *"
+        self._bytes_subclass_payload_argidx[_bsc_name] = _bsc_idx
 
     self._ctor_lit_param_types: dict[str, dict[str, str]] = {}
     _ctor_init_params = {}
@@ -5809,6 +5905,13 @@ def gen_module_impl(self, stmts):
                 m = _z7_meths[_z7k]
                 overload_id = _moids[_z7k] if _z7k < len(_moids) else ''
                 if (stmt.name, m.name) in self._supported_generator_methods:
+                    continue
+                if (m.name == '__new__'
+                        and stmt.name in getattr(self, '_bytes_subclass_structs', ())):
+                    # A builtin-`bytes` subclass's `__new__` is handled
+                    # inline at the construction site (payload synthesis);
+                    # its `return super().__new__(cls, val)` body is not a
+                    # callable C method. See _lower_struct_constructor.
                     continue
                 method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
                 _method_outer_scope = self._push_import_scope()

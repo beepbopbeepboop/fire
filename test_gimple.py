@@ -5258,6 +5258,54 @@ def main():
     print(go())
 """)
 
+    # --- builtin `bytes` subclassing (`class _Extra(bytes)`, zipfile) ---
+    # See bugs/COMPILE_FAIL_zipfile___init__.md. A `class X(bytes)` gets a
+    # synthesized `_data: MojoBytes *` payload populated by
+    # `super().__new__(cls, val)`; inherited bytes ops (len/index/slice/
+    # iter/eq/concat/`in`/`.decode`/`.hex`/`.split`/...) route to it, plus
+    # any extra `self.<attr>` instance fields, and `isinstance(_, bytes)`.
+    test("bytes_subclass_payload_and_inherited_ops", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+    def __init__(self, v):
+        self.tag = 7
+
+def go() -> int:
+    b = B(b"hello world")
+    n = len(b) + b[1] + b.tag
+    s = b[0:5]
+    if s == b"hello":
+        n += 1
+    if b"wor" in b:
+        n += 1
+    for c in b:
+        n += c
+    if isinstance(b, bytes):
+        n += 1
+    c2 = b + b"!"
+    n += len(c2)
+    return n
+
+def main():
+    print(go())
+""")
+
+    test("bytes_subclass_method_override_wins", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+    def hex(self) -> int:
+        return 99
+
+def go() -> int:
+    b = B(b"ab")
+    return b.hex() + len(b)
+
+def main():
+    print(go())
+""")
+
     # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
     # and `for k in d` on a builtin-`dict` subclass instance delegate to
     # the hidden `_data` backing store — unless the subclass overrides

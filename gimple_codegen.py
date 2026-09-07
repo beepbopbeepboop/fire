@@ -1222,6 +1222,13 @@ class GimpleGen:
         # inherited container ops route to it. See
         # bugs/COMPILE_FAIL_collections___init__.md.
         self._dict_subclass_structs: set = set()
+        # Names of user structs that subclass the builtin `bytes` (directly
+        # or transitively) — populated by gen_module_impl. Such a struct
+        # gets a synthesized `_data: MojoBytes *` payload field populated
+        # by `__new__` / `super().__new__(cls, val)`, and inherited bytes
+        # ops route to it. See bugs/COMPILE_FAIL_zipfile___init__.md.
+        self._bytes_subclass_structs: set = set()
+        self._bytes_subclass_payload_argidx: dict = {}
         # Lazily-created container attributes used across gen_module/body
         # generation (each was previously created via `if not hasattr(...)` /
         # `getattr(self, '_X', ...)` at first USE — a pattern the self-hosted
@@ -3094,6 +3101,12 @@ class GimpleGen:
 
     def _dict_subclass_of(self, ctype: str) -> str:
         return ggc._dict_subclass_of(self, ctype)
+
+    def _bytes_subclass_of(self, ctype: str) -> str:
+        return ggc._bytes_subclass_of(self, ctype)
+
+    def _coerce_to_bytes(self, t: str, v: str) -> str:
+        return gmp._coerce_to_bytes(self, t, v)
 
     def _struct_defines_method(self, sn: str, mname: str) -> bool:
         return ggc._struct_defines_method(self, sn, mname)

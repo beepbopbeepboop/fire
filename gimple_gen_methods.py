@@ -2242,6 +2242,22 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 and not gen._dict_subclass_defines(_dsub_m, method)):
             _dsub_dp = gen._new_val('MojoDict *', f"{ov}->_data")
             return gen._lower_dict_method(_dsub_dp, method, node.args)
+        # ── Builtin-`bytes` subclass method delegation ──────────────────
+        # An inherited bytes method (`.decode`/`.hex`/`.startswith`/
+        # `.split`/`.replace`/`.strip`/`.find`/`.count`/...) on a
+        # `class X(bytes)` instance routes to the backing MojoBytes,
+        # unless the subclass defines its own override. See
+        # bugs/COMPILE_FAIL_zipfile___init__.md.
+        _bsub_m = gen._bytes_subclass_of(ot)
+        if (_bsub_m
+                and method in ('decode', 'hex', 'startswith', 'endswith',
+                               'find', 'index', 'rfind', 'count', 'split',
+                               'rsplit', 'splitlines', 'replace', 'strip',
+                               'lstrip', 'rstrip', 'lower', 'upper', 'join',
+                               '__len__', '__contains__')
+                and not gen._struct_defines_method(_bsub_m, method)):
+            _bsub_bp = gen._new_val('MojoBytes *', f"{ov}->_data")
+            return gen._lower_bytes_method(_bsub_bp, method, node.args)
 
     # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
     # Must intercept BEFORE the opaque-int coerce below, which would misidentify
@@ -3412,6 +3428,30 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
         it = arg_pairs[0][1]
         if arg_pairs[0][0] != 'MojoList *':
             it = gen._new_val('MojoList *', f'(MojoList *){it}')
+        _je = gen._elem_types.get(it) or gen._elem_types.get(arg_pairs[0][1])
+        if _je and gen._bytes_subclass_of(_je):
+            # Elements are `class X(bytes)` instances — `b''.join(...)`
+            # operates on their `_data: MojoBytes *` payloads, not the
+            # struct pointers. Build a converted MojoBytes* list first.
+            # See bugs/COMPILE_FAIL_zipfile___init__.md.
+            _conv = gen._new_val('MojoList *', 'mojo_list_new ()')
+            _jlen = gen._new_val('int64_t', f"mojo_list_len ({it})")
+            _ji = gen._new_temp('int64_t')
+            gen._emit(f"  {_ji} = 0;")
+            _bc = gen._new_bb(); _bb = gen._new_bb(); _ba = gen._new_bb()
+            gen._emit(f"  goto {_bc};")
+            gen._emit_label(_bc)
+            _jc = gen._new_val('_Bool', f"{_ji} < {_jlen}")
+            gen._emit(f"  if ({_jc}) goto {_bb}; else goto {_ba};")
+            gen._emit_label(_bb)
+            _raw = gen._new_val(_je, f"({_je}) mojo_list_get_int ({it}, {_ji})")
+            _pl = gen._new_val('int64_t', f"(int64_t) {_raw}->_data")
+            gen._emit_call('void', '', 'mojo_list_append_int',
+                           [('MojoList *', _conv), ('int64_t', _pl)])
+            gen._emit(f"  {_ji} = {_ji} + 1;")
+            gen._emit(f"  goto {_bc};")
+            gen._emit_label(_ba)
+            it = _conv
         return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_join',
                                              [('MojoBytes *', ov), ('MojoList *', it)])
 

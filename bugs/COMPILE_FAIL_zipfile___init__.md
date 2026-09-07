@@ -1,5 +1,49 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, builtin `bytes` subclassing LANDED as a feature): `class _Extra(bytes)` now has real payload storage + inherited-op delegation; zipfile still blocked behind the generator-codegen wall
+
+Builtin-`bytes` subclassing (`class X(bytes)`) landed in the compiled
+path, mirroring the builtin-`dict`-subclass work (commit 58d5900):
+
+- **Stage 1 — representation + `__new__`.** `gen_module_impl` computes
+  `self._bytes_subclass_structs` (fixpoint over local struct bases
+  bottoming out at builtin `bytes`) and synthesizes a hidden
+  `_data: MojoBytes *` payload field on each. The construction site
+  (`_lower_struct_constructor`) populates `_data` from the argument the
+  subclass's `__new__` forwards to `super().__new__(cls, <arg>)` (payload
+  arg index precomputed; defaults to arg 0); the `__new__` body itself is
+  not emitted as a callable C method. `__init__` still runs for extra
+  `self.<attr>` instance fields (`self.id = id`), handled by the ordinary
+  `_collect_self_assigns` path.
+- **Stage 2 — inherited op delegation + override precedence.** `len(x)`,
+  `x[i]` (→int), `x[a:b]` (→bytes), `for c in x`, `x == y`, `x + y`,
+  `x % y`, `x in y`, `bytes(x)`, `isinstance(x, bytes)` (True), and the
+  bytes method family (`.decode`/`.hex`/`.startswith`/`.split`/`.replace`/
+  `.strip`/`.find`/`.count`/...) all route through the existing bytes
+  lowering against `inst->_data`. A subclass method/dunder override wins
+  (`_struct_defines_method` check, like the dict work).
+- **Stage 3 — `b''.join(<iterable of subclass instances>)`** converts each
+  element to its `_data` payload before `mojo_bytes_join`.
+
+Regression tests: `test_gimple.py` (`bytes_subclass_payload_and_inherited_
+ops`, `bytes_subclass_method_override_wins`) + `test_gimple_runner.py`
+(`gimple_bytes_subclass_shape`, `gimple_bytes_subclass_method_override`,
+`gimple_bytes_subclass_join` — real build-and-run).
+
+**zipfile re-probe:** `compile_to_gimple(do_imports=False)` +
+`gcc -fgimple -fsyntax-only` still **exit 0, zero errors** (unchanged —
+the bytes-subclass shape was already syntax-clean because `_Extra` and a
+number of `ZipFile` methods that transitively reference generator code
+(`_write_end_record` → `_Extra.strip` → the `_Extra.split` classmethod
+generator, `_sanitize_windows_name`, ...) are dropped from the relaxed
+`do_imports=False` probe rather than compiled). A real `mojo.py build`
+(root module, non-relaxed) still hits the `_Extra.split` / `read` /
+`_get_decompressor` generator-codegen wall the older entries below track.
+Bytes-subclassing is no longer a blocker; the generator-codegen wall
+remains. **NOT `git rm`'d.**
+
+---
+
 ## Status (2026-09-06, blocker 3 FIXED): `compile_to_gimple(do_imports=False)` is now `gcc -fgimple -fsyntax-only` CLEAN (0 errors, was 2)
 
 **Blocker 3 — FIXED.** `ZipFile._sanitize_windows_name` (+ its

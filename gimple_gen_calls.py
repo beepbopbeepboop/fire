@@ -1270,6 +1270,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         at, av = gen.lower_expr(node.args[0])
         for _extra in node.args[1:]:
             gen.lower_expr(_extra)
+        if gen._bytes_subclass_of(at):
+            # `bytes(<X(bytes) instance>)` -> a plain copy of its payload.
+            av = gen._new_val('MojoBytes *', f"{av}->_data")
+            at = 'MojoBytes *'
         if at == 'MojoBytes *':
             # A real independent copy: the arg may be a bytearray (same C
             # type), and `bytes(ba)` must not alias its mutable buffer.
@@ -1777,6 +1781,10 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _dsub_len and not gen._struct_defines_method(_dsub_len, '__len__'):
         dp = gen._new_val('MojoDict *', f"{av}->_data")
         return 'int64_t', gen._new_val('int64_t', f'mojo_dict_len ({dp})')
+    _bsub_len = gen._bytes_subclass_of(at)
+    if _bsub_len and not gen._struct_defines_method(_bsub_len, '__len__'):
+        bp = gen._new_val('MojoBytes *', f"{av}->_data")
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_len', [('MojoBytes *', bp)])
     if at.endswith(' *') and at[:-2] in gen.struct_field_types \
             and '_len' in gen.struct_field_types[at[:-2]]:
         return 'int64_t', gen._new_val('int64_t', f'{av}->_len')
@@ -1876,6 +1884,13 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         'bytearray': ('MojoBytes *',),
         'memoryview': ('MojoMemoryView *',),
     }
+    # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) IS a
+    # `bytes` for isinstance purposes even though its C type is the
+    # subclass struct pointer, not `MojoBytes *`. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    if type_name in ('bytes', 'bytearray') and gen._bytes_subclass_of(obj_type):
+        return gen._new_val('_Bool', '(_Bool)1')
+
     if type_name in _SCALAR_TYPE_MATCH:
         if obj_type in _SCALAR_TYPE_MATCH[type_name]:
             if obj_type.endswith(' *'):
@@ -3968,6 +3983,27 @@ def _lower_struct_constructor(gen, struct_name: str,
     gen._struct_allocs_needed.add(struct_name)
     gen._emit(f"  {t} = _alloc_{struct_name} ();")
 
+    # builtin-`bytes` subclass (`class _Extra(bytes)`): populate the
+    # synthesized `_data: MojoBytes *` payload from the constructor
+    # argument the subclass's `__new__` forwards to
+    # `super().__new__(cls, <arg>)` (payload arg index precomputed in
+    # gen_module_impl; defaults to 0). The `__new__` body itself is not
+    # emitted as a callable method — its sole job in the scoped shape is
+    # this payload construction. `__init__` still runs afterwards for any
+    # extra instance attributes (`self.id = id`). See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    if struct_name in getattr(gen, '_bytes_subclass_structs', ()):
+        _bidx = gen._bytes_subclass_payload_argidx.get(struct_name, 0)
+        if args and 0 <= _bidx < len(args):
+            _bt, _bv = gen.lower_expr(args[_bidx])
+            _mb = gmp._coerce_to_bytes(gen, _bt, _bv)
+            gen._emit(f"  {t}->_data = {_mb};")
+        else:
+            # No payload argument (`X()`): an empty bytes value, so
+            # inherited ops never deref a NULL `_data`.
+            _mb = gen._new_val('MojoBytes *', 'mojo_bytes_empty ()')
+            gen._emit(f"  {t}->_data = {_mb};")
+
     # Explicit length-based flags — a bare `if kwargs:` / `kwargs or args`
     # on a `list`-typed param is unreliable on the self-hosted path (the
     # compiled `or` of two pointer operands can fold to a falsy int64_t
@@ -4214,12 +4250,29 @@ def _struct_data_field(gen, ctype: str):
         # subscript ops on it route through the dict-subclass path, not
         # `_mojo_at_` pointer arithmetic.
         return None, None
+    if sn in getattr(gen, '_bytes_subclass_structs', ()):
+        # A builtin-`bytes` subclass's `_data` is a synthesized MojoBytes *
+        # payload, NOT a Span/List raw element buffer — inherited ops route
+        # through the bytes-subclass path, not `_mojo_at_` arithmetic.
+        return None, None
     sft = gen.struct_field_types.get(sn, {})
     for fname in ('_data', 'data'):
         ft = sft.get(fname, '')
         if ft.endswith(' *'):
             return fname, ft
     return None, None
+
+
+def _bytes_subclass_of(gen, ctype: str) -> str:
+    """If `ctype` is a pointer to a user struct that subclasses builtin
+    `bytes` (see gen_module_impl), return the struct name, else ''."""
+    if not ctype.endswith(' *'):
+        return ''
+    sn = gimple_exprtypes._struct_name_of(ctype)
+    bsc = getattr(gen, '_bytes_subclass_structs', None)
+    if bsc is not None and sn in bsc:
+        return sn
+    return ''
 
 
 def _dict_subclass_of(gen, ctype: str) -> str:
@@ -4392,6 +4445,15 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         t = gen._call_expr('int64_t', 'mojo_dict_get_int',
                            [('MojoDict *', dp), (kt, kv)])
         return 'int64_t', t
+
+    # `x[i]` on a builtin-`bytes` subclass with no `__getitem__` override:
+    # a single-byte read (int) against the backing MojoBytes. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    _bsub_r = gen._bytes_subclass_of(ot)
+    if _bsub_r and not gen._struct_defines_method(_bsub_r, '__getitem__'):
+        bp = gen._new_val('MojoBytes *', f"{ov}->_data")
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        return 'int64_t', gen._new_val('int64_t', f"mojo_bytes_get ({bp}, {idx64})")
 
     if ot == 'MojoList *':
         elem = gen._elem_of(ov)
@@ -4736,6 +4798,14 @@ def _lower_slice_bounds(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
 def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.obj)
     start_v, stop_v = gen._lower_slice_bounds(node)
+
+    # `x[a:b]` on a builtin-`bytes` subclass instance -> a plain bytes
+    # slice of its payload (CPython returns `bytes`, not the subclass).
+    # See COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(ot) and not gen._struct_defines_method(
+            gen._bytes_subclass_of(ot), '__getitem__'):
+        ov = gen._new_val('MojoBytes *', f"{ov}->_data")
+        ot = 'MojoBytes *'
 
     if ot == 'MojoStr *':
         t = gen._new_val('MojoStr *', f"mojo_str_slice ({ov}, {start_v}, {stop_v})")

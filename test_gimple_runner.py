@@ -550,6 +550,69 @@ def main():
         print(k)
 """, "override\n1\nx\ny\n")
 
+    # 21d. Builtin `bytes` subclassing (`class _Extra(bytes)`, zipfile) --
+    # see bugs/COMPILE_FAIL_zipfile___init__.md. `super().__new__(cls, v)`
+    # populates the synthesized `_data: MojoBytes *` payload; inherited
+    # len/index/slice/iter/eq/concat/`in`/`.decode`/`.hex`/`.startswith`/
+    # `.split` route to it; extra `self.<attr>` fields sit alongside;
+    # `isinstance(_, bytes)` is true; a method override wins. A
+    # compile-only gate can't catch a wrong runtime value here.
+    test_gimple_stdout("gimple_bytes_subclass_shape", """\
+class Extra(bytes):
+    def __new__(cls, v, id=0):
+        return super().__new__(cls, v)
+    def __init__(self, v, id=0):
+        self.id = id
+
+def main():
+    e = Extra(b"hello world", 42)
+    print(len(e))
+    print(e[1])
+    print(e.id)
+    print(e[0:5].decode())
+    if e == b"hello world":
+        print("eq")
+    if b"wor" in e:
+        print("contains")
+    total = 0
+    for c in e:
+        total += c
+    print(total)
+    print(e.hex())
+    print(e.startswith(b"hello"))
+    parts = e.split(b" ")
+    print(len(parts))
+    if isinstance(e, bytes):
+        print("is bytes")
+    c2 = e + b"!"
+    print(c2.decode())
+""", "11\n101\n42\nhello\neq\ncontains\n1116\n68656c6c6f20776f726c64\n1\n2\nis bytes\nhello world!\n")
+
+    test_gimple_stdout("gimple_bytes_subclass_method_override", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+    def hex(self) -> str:
+        return "OVR"
+
+def main():
+    b = B(b"ab")
+    print(b.hex())
+    print(len(b))
+""", "OVR\n2\n")
+
+    # 21e. `b''.join(<iterable of bytes-subclass instances>)` operates on
+    # each element's `_data` payload (zipfile's `_Extra.strip`).
+    test_gimple_stdout("gimple_bytes_subclass_join", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+
+def main():
+    xs = [B(b"aa"), B(b"bb"), B(b"cc")]
+    print(b"-".join(xs).decode())
+""", "aa-bb-cc\n")
+
     # Slice-assignment really mutates the list in place (full + bounded,
     # growing and shrinking, pure insert, negative bounds) — this is the
     # regression guard for bugs/CODEGEN_slice_assignment_silently_noops.md

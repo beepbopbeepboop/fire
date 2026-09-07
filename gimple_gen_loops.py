@@ -543,6 +543,12 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # Check if this is an int64_t-stored pointer (from method call returning pointer)
     it_type = gen._get_actual_type(it_type, it_val)
 
+    # `for c in <bytes-subclass instance>:` iterates its backing MojoBytes
+    # payload (each `c` an int 0-255). See COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(it_type):
+        it_val = gen._new_val('MojoBytes *', f"{it_val}->_data")
+        it_type = 'MojoBytes *'
+
     # Self-shadowing loop target: `for tail in tail:` — the loop's OWN
     # target variable has the same name as the list/dict/etc it iterates.
     # Only possible when the iterable is a bare IdentExpr whose lowered

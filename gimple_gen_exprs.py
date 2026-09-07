@@ -2324,6 +2324,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
+    # its payload in a hidden `_data: MojoBytes *` field — an inherited
+    # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that
+    # payload. Normalize each such operand to its backing MojoBytes so the
+    # existing MojoBytes cases below fire. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(lt):
+        lv = gen._new_val('MojoBytes *', f"{lv}->_data"); lt = 'MojoBytes *'
+    if gen._bytes_subclass_of(rt):
+        rv = gen._new_val('MojoBytes *', f"{rv}->_data"); rt = 'MojoBytes *'
+
     # A list local may be boxed as int64_t (the slice pre-pass hint is the
     # machine word when the sliced object's type isn't yet known); _actual_types
     # records the real MojoList*. Resolve through it so list+list still concats.
@@ -3441,6 +3452,13 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
     if rt.endswith(' *') and gen.var_types.get(rv) == 'int64_t':
         rv = gen._new_val(rt, f"({rt}){rv}")
     ti = gen._new_temp('int')
+
+    # `x in <bytes-subclass instance>`: substring/byte membership against
+    # the backing MojoBytes payload. See COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(rt) and not gen._struct_defines_method(
+            gen._bytes_subclass_of(rt), '__contains__'):
+        rv = gen._new_val('MojoBytes *', f"{rv}->_data")
+        rt = 'MojoBytes *'
 
     _dsub_in = gen._dict_subclass_of(rt)
     if _dsub_in and not gen._struct_defines_method(_dsub_in, '__contains__'):
