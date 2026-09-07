@@ -2528,6 +2528,27 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_repeat', [('MojoBytes *', rv), ('int64_t', cnt)])
 
+    # `bytes + X` / `X + bytes` where the other operand isn't statically a
+    # MojoBytes* — coerce it and concat, never fall through to the scalar
+    # `+` path (which casts the bytes handle to int64_t and emits an
+    # `int64 + pointer` POINTER_PLUS that ICEs GCC's GIMPLE FE). Common
+    # once `struct.pack(...)` (-> MojoBytes*) feeds a `+` whose other side
+    # is a struct-field / param whose type codegen inferred as a bare
+    # pointer or int64 handle (real: zipfile `_write_end_record`'s
+    # `struct.pack(...) + extra_data`).
+    if op == '+' and (lt == 'MojoBytes *') != (rt == 'MojoBytes *'):
+        def _as_bytes(ct, cv):
+            if ct == 'MojoBytes *':
+                return cv
+            if ct == 'char *':
+                return gen._new_val('MojoBytes *', f"mojo_bytes_from_cstr ({cv})")
+            if ct == 'MojoMemoryView *':
+                return gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({cv})")
+            return gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(ct, cv)}")
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_concat',
+            [('MojoBytes *', _as_bytes(lt, lv)), ('MojoBytes *', _as_bytes(rt, rv))])
+
     # MojoStr == / != → mojo_str_eq
     if op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
         eq_t = gen._new_val('int', f"mojo_str_eq ({lv}, {rv})")

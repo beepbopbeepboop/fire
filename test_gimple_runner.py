@@ -861,6 +861,22 @@ fn main():
     c.read(b'\\x01\\x00\\x02\\x00')
 """, "1 2 4\n")
 
+    # struct.pack with a trailing splat arg + the packed bytes fed into a
+    # `+` concat whose other operand isn't statically MojoBytes* — the
+    # exact shape of zipfile `_write_end_record`'s `struct.pack('<HH' +
+    # 'Q'*len(extra), 1, 8*len(extra), *extra) + extra_data` (used to
+    # ICE GCC's GIMPLE FE via an `int64 + pointer` POINTER_PLUS).
+    test_gimple_stdout("gimple_struct_pack_splat_and_concat", """\
+fn main():
+    var extra = [10, 20]
+    var packed = struct.pack('<HH' + 'Q' * len(extra), 1, 16, *extra)
+    var tail = b'ZZ'
+    var whole = packed + tail
+    print(len(whole))
+    var t = struct.unpack('<HHQQ', packed)
+    print(t[0], t[1], t[2], t[3])
+""", "22\n1 16 10 20\n")
+
     # Stage 3 — struct.pack_into into a bytearray.
     test_gimple_stdout("gimple_struct_pack_into", """\
 fn main():

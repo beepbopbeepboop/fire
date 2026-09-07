@@ -87,6 +87,22 @@ compile+link+run: `calcsize('<HH')==4`, `pack('<HH',1,2)`,
 **Stage 3 — `struct.pack_into(fmt, buffer, offset, *values)`** writes into
 a `bytearray`. Verified.
 
+**Follow-up (same session).** Two shapes that only surfaced on real
+`Lib/zipfile/__init__.py`:
+- `struct.pack(fmt, a, *rest)` — a trailing splat arg. `_struct_build_
+  value_list` now `mojo_list_extend`s from the iterable's raw int64
+  slots (struct splat args are ints in practice) and forces the
+  per-index code map off.
+- `struct.pack(...) + X` where `X` isn't statically `MojoBytes *` (a
+  struct field / param codegen inferred as a bare pointer or int64
+  handle). The scalar `+` path was casting the bytes handle to int64
+  and emitting `int64 + pointer`, which ICE'd GCC's GIMPLE FE
+  (`build2 at tree.cc:5204`). `gimple_gen_exprs._lower_BinaryOp` now
+  coerces the non-bytes operand to `MojoBytes *` and uses
+  `mojo_bytes_concat` whenever exactly one side is bytes.
+Both covered by `gimple_struct_pack_splat_and_concat` in
+`test_gimple_runner.py`.
+
 ### Known gaps
 
 - A `var`-declared **instance field** with a `struct.Struct(...)` default
@@ -104,9 +120,11 @@ a `bytearray`. Verified.
 
 ## zipfile re-probe
 
-`compile_to_gimple(do_imports=False)` on `Lib/zipfile/__init__.py` was
-already `gcc -fgimple -fsyntax-only` CLEAN before this change (the
-`struct` uses inside `_Extra` never surfaced at the syntax-check level).
-The remaining blocker there is `class _Extra(bytes)` — a **bytes-subclass**
-feature — plus `_Extra.split` being a `@classmethod` generator and
-`super().__new__`. `struct` itself is no longer a blocker for that file.
+`compile_to_gimple(do_imports=False)` on `zipfile/__init__.py` is
+`gcc -fgimple -fsyntax-only` CLEAN with this change (it was already clean
+before, via `struct.pack` being an unknown int64-returning stub — the
+follow-up fixes above keep it clean now that `struct.pack` is real and
+returns `MojoBytes *`). The remaining blocker there is `class
+_Extra(bytes)` — a **bytes-subclass** feature — plus `_Extra.split` being
+a `@classmethod` generator and `super().__new__`. `struct` itself is no
+longer a blocker for that file.

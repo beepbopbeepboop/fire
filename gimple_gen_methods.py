@@ -506,7 +506,18 @@ def _struct_build_value_list(gen, arg_nodes, codes):
     mojo_struct_pack_list / mojo_struct_pack_h. `codes` (may be None)
     drives per-field coercion when the format is statically known."""
     lst = gen._new_val('MojoList *', 'mojo_list_new ()')
+    if any(isinstance(a, UnaryOp) and a.op in ('*', '**') for a in arg_nodes):
+        codes = None   # a splat arg makes the per-index code mapping meaningless
     for idx, a in enumerate(arg_nodes):
+        if isinstance(a, UnaryOp) and a.op in ('*', '**'):
+            # `struct.pack(fmt, a, *rest)` — extend from the iterable's raw
+            # int64 slots (struct splat args are ints in practice:
+            # zipfile `_write_end_record`'s `*extra`).
+            _it, _iv = gen.lower_expr(a.operand)
+            _ip = (gen._ensure_local('MojoList *', _iv) if _it == 'MojoList *'
+                   else gen._new_val('MojoList *', f'(MojoList *){gen._to_int64(_it, _iv)}'))
+            gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', lst), ('MojoList *', _ip)])
+            continue
         at, av = gen.lower_expr(a)
         code = codes[idx] if (codes is not None and idx < len(codes)) else None
         want_bytes = (code == 's') or (code is None and at in ('char *', 'MojoBytes *'))
