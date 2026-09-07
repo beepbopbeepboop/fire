@@ -2591,6 +2591,46 @@ def _gen_stmt_MultiAssignStmt(gen, node):
 
 
 def _gen_stmt_ForStmt(gen, node):
+    # `for i in reversed(range(...))` — rewrite to an equivalent descending
+    # `range(...)` ForStmt and take the fast integer-loop path, instead of
+    # `_lower_builtin_reversed` (which only materializes list/str/bytes and
+    # otherwise refuses — `range` isn't a first-class value here). Covers
+    # `reversed(range(n))` / `reversed(range(a, b))` and the step==1
+    # 3-arg form; any other step falls through to the generic path.
+    _riter = node.iterable
+    if (isinstance(_riter, gimple_ctypes.CallExpr)
+            and isinstance(_riter.func, gimple_ctypes.IdentExpr)
+            and _riter.func.name == 'reversed'
+            and not gen._locally_binds_name('reversed')
+            and len(_riter.args) == 1
+            and isinstance(_riter.args[0], gimple_ctypes.CallExpr)
+            and isinstance(_riter.args[0].func, gimple_ctypes.IdentExpr)
+            and _riter.args[0].func.name == 'range'):
+        _rng = _riter.args[0]
+        _IL = gimple_ctypes.IntLiteral
+        _BO = gimple_ctypes.BinaryOp
+        # `-1` as UnaryOp('-', IntLiteral(1)), NOT IntLiteral(-1): _gen_for_range
+        # explicitly special-cases the UnaryOp form for a negative step, and a
+        # bare negative IntLiteral lowers to invalid `-fgimple` C ("expected
+        # expression before '-' token" / "non-trivial conversion in integer_cst").
+        _neg1 = lambda: gimple_ctypes.UnaryOp('-', _IL(1))
+        _minus1 = lambda e: _BO('-', e, _IL(1))
+        _ra = _rng.args
+        _new_args = None
+        if len(_ra) == 1:
+            _new_args = [_minus1(_ra[0]), _neg1(), _neg1()]
+        elif len(_ra) == 2:
+            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
+        elif len(_ra) == 3 and isinstance(_ra[2], gimple_ctypes.IntLiteral) and _ra[2].value == 1:
+            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
+        if _new_args is not None:
+            _desc = gimple_ctypes.ForStmt(
+                node.target,
+                gimple_ctypes.CallExpr(gimple_ctypes.IdentExpr('range'), _new_args),
+                node.body,
+                getattr(node, 'else_body', None))
+            gen._gen_for_range(_desc)
+            return
     if (isinstance(node.iterable, gimple_ctypes.CallExpr) and
             isinstance(node.iterable.func, gimple_ctypes.IdentExpr) and
             node.iterable.func.name == 'range'):

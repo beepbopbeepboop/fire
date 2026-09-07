@@ -1613,7 +1613,10 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.IdentExpr):
         fname: str
         fname = node.func.name
-        _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *'}
+        _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *',
+                          # sorted()/reversed() both materialise a MojoList*
+                          # (see _lower_builtin_sorted / _lower_builtin_reversed).
+                          'sorted': 'MojoList *'}
         # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
         # below — `set`/`dict`/`list` are ordinary identifiers a module
         # could shadow with its own top-level def/import.

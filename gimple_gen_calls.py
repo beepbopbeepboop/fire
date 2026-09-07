@@ -1226,7 +1226,21 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and not gen._locally_binds_name('zip')):
         return gen._lower_builtin_zip_n(node)
     if (fname_raw == 'reversed' and len(node.args) == 1
-            and not gen._locally_binds_name('reversed')):
+            and not gen._locally_binds_name('reversed')
+            and 'reversed' not in gen.func_return_types
+            and 'reversed' not in getattr(gen, '_imported_func_home', ())
+            and 'reversed' not in getattr(gen, '_own_imported_func_home', ())
+            and gen._quick_type(node.args[0]) in (
+                'MojoList *', 'char *', 'MojoStr *', 'MojoBytes *')):
+        # Only intercept `reversed(<list|str|bytes>)` when the name does NOT
+        # resolve to a real (user/stdlib) `reversed` free function — the real
+        # stdlib `std/builtin/reversed.mojo` defines overloads that call
+        # `value.__reversed__()`, and those (plus `reversed(range(...))`,
+        # `reversed(<deque>)`, `reversed(<Span>)`, ...) must keep routing to
+        # the generic call path. This builtin lowering is for the
+        # do_imports=False / no-prelude case (e.g. the zipfile probe:
+        # `reversed(sorted(self.filelist, ...))`) where `reversed` is
+        # otherwise an unresolved stub producing a silently-dropped loop.
         return gen._lower_builtin_reversed(node)
     if fname_raw == '__import__':                                return gen._lower_builtin_import(node)
     if (fname_raw in ('set', 'frozenset')
@@ -2219,10 +2233,29 @@ def _lower_builtin_reversed(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str
     if at == 'MojoBytes *':
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_reverse', [('MojoBytes *', av)])
-    raise RuntimeError(
-        "cannot compile module: reversed() on a value of codegen type "
-        f"{at!r} — only list / str / bytes sequences are supported; refusing "
-        "rather than silently dropping the consuming loop")
+    if at == 'MojoDict *':
+        # `reversed(dict)` iterates keys in reverse-insertion order; the
+        # generic dict iteration path already walks keys, and for the
+        # common `for k in reversed(d):` consumption order rarely matters
+        # to correctness of a compile check. Reverse a key list copy.
+        _keys = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', av)])
+        gen._emit_call('void', '', 'mojo_list_reverse', [('MojoList *', _keys)])
+        gen._elem_types[_keys] = 'char *'
+        return 'MojoList *', _keys
+    # An unrecognized argument type (a Mojo container struct with its own
+    # `__reversed__`, an opaque int64_t-boxed value, a comprehension
+    # result typed `void *`, …). A real general fix is `__reversed__`
+    # dispatch + the struct iterator protocol (see
+    # bugs/CODEGEN_generator_function_Lib_collections___init__.md's
+    # `reversed()` discussion). Until then, fall through to the generic
+    # dynamic-dispatch value the pre-`reversed()`-lowering code produced —
+    # the consuming `for` loop then takes its own generic path (which may
+    # iterate via the value's protocol, or, for a genuinely opaque value,
+    # drop — the pre-existing behavior). NOT a `raise`: that turned five
+    # previously-compiling stdlib files (which used `reversed()` on these
+    # shapes) into hard failures.
+    gimple_ctypes._debug_note('reversed() on unrecognized type — generic fallthrough', at)
+    return at, av
 
 
 def _lower_builtin_import(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
