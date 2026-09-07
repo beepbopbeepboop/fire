@@ -884,6 +884,18 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
     return out;
 }
 
+/* reversed(<str>) modeled as an eagerly reversed copy (see
+ * _lower_builtin_reversed). */
+char *mojo_cstr_reverse(char *s)
+{
+    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
+    size_t n = strlen(s);
+    char *out = malloc(n + 1);
+    for (size_t i = 0; i < n; i++) out[i] = s[n - 1 - i];
+    out[n] = '\0';
+    return out;
+}
+
 /* `s[start:stop] == needle` without ever calling mojo_cstr_slice - no
  * malloc, no memcpy of the slice, no separate strcmp call. Added after a
  * `sample`-based CPU profile (not guessed) showed ~90% of ALL runtime, in
@@ -1357,6 +1369,16 @@ MojoBytes *mojo_bytearray_copy(MojoBytes *src)
 
 /* bytes(bytearray) / bytearray(bytes): an explicit independent copy. */
 MojoBytes *mojo_bytes_copy(MojoBytes *src) { return mojo_bytearray_copy(src); }
+
+/* reversed(<bytes>) modeled as an eagerly reversed copy. */
+MojoBytes *mojo_bytes_reverse(MojoBytes *src)
+{
+    int64_t n = src ? src->len : 0;
+    MojoBytes *out = mojo_bytes_alloc(n);
+    for (int64_t i = 0; i < n; i++) out->data[i] = src->data[n - 1 - i];
+    out->len = n;
+    return out;
+}
 
 void mojo_bytearray_setitem(MojoBytes *b, int64_t i, int64_t v)
 {

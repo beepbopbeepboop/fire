@@ -669,7 +669,9 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             elif has_next in gen.func_return_types or nxt in gen.func_return_types:
                 gen._gen_for_struct_iter(var, it_type, it_val, node.body, shadow_name=shadow_name)
             else:
-                gimple_ctypes._debug_note('for loop dropped (no iterator protocol)', it_type)
+                gimple_ctypes._debug_note(
+                    'for loop dropped (no iterator protocol)',
+                    f"{it_type} fn={getattr(gen, 'current_func_name', '?')}")
                 gen._emit_unsupported_iter(it_type, node)
         else:
             # A boxed int64_t iterable whose real container type wasn't

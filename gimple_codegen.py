@@ -198,6 +198,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_contains':          'int',
     'mojo_str_slice':             'MojoStr *',
     'mojo_cstr_slice':            'char *',
+    'mojo_cstr_reverse':          'char *',
     'mojo_cstr_region_eq':        'int',
     'mojo_str_from_char':         'MojoStr *',
     'mojo_str_repeat':            'MojoStr *',
@@ -234,6 +235,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_splitlines':      'MojoList *',
     'mojo_bytes_join':            'MojoBytes *',
     'mojo_bytes_copy':            'MojoBytes *',
+    'mojo_bytes_reverse':         'MojoBytes *',
     'mojo_bytearray_new':         'MojoBytes *',
     'mojo_bytearray_copy':        'MojoBytes *',
     'mojo_bytearray_pop':         'int64_t',
@@ -2360,6 +2362,8 @@ class GimpleGen:
         'mojo_list_all':         ('int',        ['MojoList *']),
         'mojo_list_any':         ('int',        ['MojoList *']),
         'mojo_list_copy':        ('MojoList *', ['MojoList *']),
+        'mojo_cstr_reverse':     ('char *',     ['char *']),
+        'mojo_bytes_reverse':    ('MojoBytes *', ['MojoBytes *']),
         'mojo_list_extend':      ('void',       ['MojoList *', 'MojoList *']),
         'mojo_list_pop':         ('int64_t',    ['MojoList *']),
         'mojo_list_pop_at':      ('int64_t',    ['MojoList *', 'int64_t']),
@@ -3013,6 +3017,9 @@ class GimpleGen:
 
     def _lower_builtin_zip_n(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_zip_n(self, node)
+
+    def _lower_builtin_reversed(self, node: CallExpr) -> tuple[str, str]:
+        return ggc._lower_builtin_reversed(self, node)
 
     def _lower_builtin_import(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_import(self, node)

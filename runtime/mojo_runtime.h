@@ -242,6 +242,7 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
+char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
  * slice - see mojo_cstr_region_eq's comment in mojo_runtime.c for why this
  * exists (a real, profiled hot path: mojo_compiler.py's own self-hosted
@@ -325,6 +326,7 @@ MojoList  *mojo_bytes_rsplit(MojoBytes *b, MojoBytes *sep);
 MojoList  *mojo_bytes_splitlines(MojoBytes *b);
 MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts);
 MojoBytes *mojo_bytes_copy(MojoBytes *src);   /* bytes(bytearray) — real copy */
+MojoBytes *mojo_bytes_reverse(MojoBytes *src);/* reversed(<bytes>) */
 
 /* ── bytearray (mutable; shares the MojoBytes representation) ────────────
  * Every read op (len/index/slice/iter/in/eq/methods) is inherited from

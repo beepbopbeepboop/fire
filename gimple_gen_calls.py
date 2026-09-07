@@ -1225,6 +1225,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'zip' and len(node.args) > 2
             and not gen._locally_binds_name('zip')):
         return gen._lower_builtin_zip_n(node)
+    if (fname_raw == 'reversed' and len(node.args) == 1
+            and not gen._locally_binds_name('reversed')):
+        return gen._lower_builtin_reversed(node)
     if fname_raw == '__import__':                                return gen._lower_builtin_import(node)
     if (fname_raw in ('set', 'frozenset')
             and not gen._locally_binds_name(fname_raw)):
@@ -2182,6 +2185,44 @@ def _lower_builtin_zip_n(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     for ap in arg_pairs[2:]:
         acc_v = gen._call_expr('void *', 'mojo_zip', [('void *', acc_v), ap])
     return 'void *', acc_v
+
+
+def _lower_builtin_reversed(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """reversed(x) — a reverse iterator over a sequence.
+
+    Modeled as an eagerly reversed COPY (semantically identical for the
+    single forward consumption every real call site does: `for x in
+    reversed(seq)` / `list(reversed(seq))`). Before this, `reversed(...)`
+    had no lowering at all and fell through to the generic dynamic-dispatch
+    stub, producing a `void *` value — and `for x in reversed(...)` over
+    that `void *` was SILENTLY DROPPED by _gen_stmt_ForStmt (real
+    miscompile: zipfile/__init__.py:1612's central-directory concordance
+    loop `for zinfo in reversed(sorted(self.filelist, key=...))` ran zero
+    times). A list/str/bytes arg is reversed properly; anything else is an
+    honest refusal, not a silent drop.
+    """
+    at, av = gen.lower_expr(node.args[0])
+    if at == 'MojoList *':
+        cp = gen._call_expr('MojoList *', 'mojo_list_copy', [('MojoList *', av)])
+        gen._emit_call('void', '', 'mojo_list_reverse', [('MojoList *', cp)])
+        # reversed() only reorders — carry element / nested-element types
+        # through so a later `for x in ...` / `for a, b in ...` binds slots
+        # with the right accessor (mirrors _lower_builtin_sorted).
+        if av in gen._elem_types:
+            gen._elem_types[cp] = gen._elem_types[av]
+        if av in gen._nested_elem_types:
+            gen._nested_elem_types[cp] = gen._nested_elem_types[av]
+        return 'MojoList *', cp
+    if at in ('char *', 'MojoStr *'):
+        sv = av if at == 'char *' else gen._stringify_value(at, av)
+        return 'char *', gen._call_expr('char *', 'mojo_cstr_reverse', [('char *', sv)])
+    if at == 'MojoBytes *':
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_reverse', [('MojoBytes *', av)])
+    raise RuntimeError(
+        "cannot compile module: reversed() on a value of codegen type "
+        f"{at!r} — only list / str / bytes sequences are supported; refusing "
+        "rather than silently dropping the consuming loop")
 
 
 def _lower_builtin_import(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
