@@ -156,6 +156,11 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         k = _ann_kind(pann)
         if k is not None:
             env[pname] = k
+    # Fill unannotated params from the unanimous cross-call-site kind
+    # contract (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_
+    # inference.md repro 1: `def g(x): yield x` called only `g(3.5)`).
+    for pname, k in _CALLSITE_PARAM_KINDS.get(getattr(fn, 'name', None), {}).items():
+        env.setdefault(pname, k)
     list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
     for n in _walk(fn):
         tgt = val = ann = None
@@ -534,6 +539,20 @@ _AW_COUNTER = [0]
 # resolved to the right positional slot. Same-module only, matching
 # _await_target_name's own "bare top-level name" scope.
 _PARAM_NAMES: dict[str, list[str]] = {}
+
+# Generator/async-def name -> {unannotated-param-name: yield-kind ('i'/'p'/'d')}
+# inferred from a whole-module scan of that generator's CALL SITES, when
+# every call passes a statically-typed argument for that positional slot
+# and they all agree (the "unanimous cross-call scalar contract" that
+# ordinary functions get from _infer_param_types -- a generator's fixed
+# single-C-value-kind ABI has no per-call monomorphization, so this is the
+# only way a fully-unannotated param like `def g(x): yield x` called
+# `g(3.5)` picks up its type). Disagreeing call sites -> slot left out
+# (unresolved, defaults to int64_t). Populated fresh at the top of each
+# lower(); keyed by bare name, same single-module/single-threaded lifetime
+# rationale as _PARAM_NAMES. bugs/hard/CODEGEN_coro_stackswitch_yield_
+# kind_identifier_inference.md repro 1.
+_CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 
 # Local/param names bound from create_task/create_raising_task in the async
 # def CURRENTLY being lowered -- set by _lower_one_async(_gen) before it
@@ -1634,6 +1653,110 @@ def _looks_like_stmt_list(v: list) -> bool:
 
 # ── lowering ───────────────────────────────────────────────────────────
 
+_NUMERIC_CTORS = {'Float64': 'd', 'Float32': 'd', 'Float': 'd', 'float': 'd',
+                  'Int': 'i', 'Int64': 'i', 'Int32': 'i', 'int': 'i',
+                  'Bool': 'i', 'bool': 'i',
+                  'String': 'p', 'StringSlice': 'p', 'str': 'p'}
+
+
+def _argkind(expr, caller_env: dict | None = None) -> str | None:
+    """Static yield-C-kind of a call ARGUMENT expression, or None when it
+    can't be told purely syntactically. Literals, a unary +/- of a literal,
+    a numeric/string constructor call, and (via `caller_env`, a _static_env
+    of the calling function) a bare identifier / self.<field> reference."""
+    k = _literal_kind(expr)
+    if isinstance(k, str):
+        return k
+    if isinstance(expr, N.UnaryOp) and expr.op in ('-', '+'):
+        return _argkind(expr.operand, caller_env)
+    if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
+        return _NUMERIC_CTORS.get(expr.func.name)
+    if caller_env:
+        return _yield_kind(expr, caller_env)
+    return None
+
+
+def _scan_callsite_param_kinds(stmts: list) -> None:
+    """Populate _CALLSITE_PARAM_KINDS from a whole-module scan of every call
+    to a generator / async def, mapping each unannotated positional (or
+    keyword) parameter to the unanimous static kind of the arguments passed
+    for it across all call sites. See _CALLSITE_PARAM_KINDS' docstring."""
+    _CALLSITE_PARAM_KINDS.clear()
+    # gen name -> [(pname, pann), ...] (receiver dropped for methods)
+    gen_params: dict[str, list] = {}
+
+    def _record(fd, drop_self):
+        ps = fd.params[1:] if drop_self else fd.params
+        gen_params.setdefault(fd.name, list(ps))
+
+    for s in stmts:
+        if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
+                                             or getattr(s, 'is_async', False)):
+            _record(s, drop_self=False)
+        if isinstance(s, N.StructDef):
+            for m in s.methods:
+                if isinstance(m, N.FunctionDef) and (getattr(m, 'is_generator', False)
+                                                     or getattr(m, 'is_async', False)):
+                    _record(m, drop_self=bool(m.params) and m.params[0][0] in ('self', 'cls'))
+    if not gen_params:
+        return
+
+    # per gen: param name -> set of kinds seen (a None poisons the slot)
+    seen: dict = {g: {} for g in gen_params}
+
+    def _visit_call(node, caller_env):
+        fn = node.func
+        gname = fn.name if isinstance(fn, N.IdentExpr) else \
+            (fn.member if isinstance(fn, N.MemberExpr) else None)
+        pinfo = gen_params.get(gname)
+        if pinfo is None:
+            return
+        cenv = caller_env
+        slot = seen[gname]
+        for i, a in enumerate(node.args):
+            if i >= len(pinfo):
+                break
+            pname, pann = pinfo[i]
+            if _ann_kind(pann) is not None:
+                continue
+            slot.setdefault(pname, set()).add(_argkind(a, cenv))
+        kw = {p: a for p, a in getattr(node, 'kwargs', []) or []}
+        by_name = {p: pa for p, pa in pinfo}
+        for pname, a in kw.items():
+            if pname not in by_name or _ann_kind(by_name[pname]) is not None:
+                continue
+            slot.setdefault(pname, set()).add(_argkind(a, cenv))
+
+    for s in stmts:
+        fns = []
+        if isinstance(s, N.FunctionDef):
+            fns.append(s)
+        elif isinstance(s, N.StructDef):
+            fns.extend(m for m in s.methods if isinstance(m, N.FunctionDef))
+        for fn in fns:
+            cenv = _static_env(fn)
+            for n in _walk(fn):
+                if isinstance(n, N.CallExpr):
+                    _visit_call(n, cenv)
+        # module-level calls (rare, e.g. a bare generator call in a stmt)
+        if not isinstance(s, (N.FunctionDef, N.StructDef)):
+            for n in _walk(s):
+                if isinstance(n, N.CallExpr):
+                    _visit_call(n, None)
+
+    for gname, slot in seen.items():
+        resolved = {}
+        for pname, kinds in slot.items():
+            kinds = {k for k in kinds if k is not None} if None not in kinds else set()
+            # avoid `next(iter(...))` -- a known self-host miscompile trigger
+            # (see _generator_tuple_slots' identical note / project memory:
+            # "next(iter(...)) -> _next undefined-symbol regression")
+            if len(kinds) == 1:
+                resolved[pname] = list(kinds)[0]
+        if resolved:
+            _CALLSITE_PARAM_KINDS[gname] = resolved
+
+
 def lower(stmts: list) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
         {'name', 'base', 'params' (list of C types), 'value_ctype',
@@ -1646,6 +1769,7 @@ def lower(stmts: list) -> tuple[list, list]:
     _STRUCT_NAMES.clear()
     _detect_native_future_classes(stmts)
     stmts = _rewrite_native_future_refs(stmts)
+    _scan_callsite_param_kinds(stmts)
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _seed_prop_names(stmts)
     for s in stmts:
@@ -2140,11 +2264,30 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     # arg 0 is `self`/`cls` (a method), so ordinary params start at
     # __mojo_gen_arg index 1; a plain function starts at 0.
     arg_base = 1 if is_method else 0
+    # Per-real-param yield C kind: the param's own annotation first, then
+    # the unanimous cross-call-site contract (env, populated by
+    # _scan_callsite_param_kinds). A 'd' (double) param can't round-trip
+    # through the int64_t arg ABI as a plain (int64_t) cast -- it needs a
+    # bit-cast at the call site (emit_c's arg_fwd) and the reinterpreting
+    # __mojo_gen_arg_d reader here.
+    param_kinds = []
+    for pname, pann in real_params:
+        k = _ann_kind(pann)
+        if k is None:
+            v = env.get(pname)
+            k = v if isinstance(v, str) else None
+        param_kinds.append(k)
     prologue = []
     for i, (pname, _pann) in enumerate(real_params):
-        prologue.append(N.VarDecl(name=pname, type_ann=None,
-                                  value=_call(ARG_SHIM, [_c_ident(_CVAR),
-                                                         N.IntLiteral(value=arg_base + i)])))
+        if param_kinds[i] == 'd':
+            prologue.append(N.VarDecl(name=pname, type_ann='Float64',
+                                      value=_call('__mojo_gen_arg_d',
+                                                  [_c_ident(_CVAR),
+                                                   N.IntLiteral(value=arg_base + i)])))
+        else:
+            prologue.append(N.VarDecl(name=pname, type_ann=None,
+                                      value=_call(ARG_SHIM, [_c_ident(_CVAR),
+                                                             N.IntLiteral(value=arg_base + i)])))
 
     new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind)
     body_params = [(_CVAR, 'Int')]
@@ -2159,9 +2302,15 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_generator = False
     body_fd.is_async = False
 
-    c_params = ([f'{struct_name} *'] if has_self else
-                ['int64_t'] if is_classmethod else []) + \
-               [_mojo_to_c_type(a) for _n, a in real_params]
+    _lead = ([f'{struct_name} *'] if has_self else
+             ['int64_t'] if is_classmethod else [])
+    _real_ct = []
+    for (_n, a), pk in zip(real_params, param_kinds):
+        ct = _mojo_to_c_type(a)
+        if ct == 'int64_t' and pk == 'd':
+            ct = 'double'          # unannotated param, kind from call sites
+        _real_ct.append(ct)
+    c_params = _lead + _real_ct
     meta.append({
         'name': fn.name,
         'struct': struct_name,
@@ -2234,7 +2383,15 @@ def emit_c(meta_entry: dict) -> str:
     vct = _KIND_CTYPE[kind]
     nslots = len(params)                     # start-fn arg count (self + real args)
     start_params = ', '.join(f'{ct} __a{i}' for i, ct in enumerate(params)) or 'void'
-    arg_fwd = ''.join(f', (int64_t)__a{i}' for i in range(nslots))
+    # A `double` arg slot is stashed as its raw 64 bits (reader side is
+    # __mojo_gen_arg_d); every other slot is an int64_t / pointer that a
+    # plain cast carries losslessly.
+    def _fwd(i):
+        if params[i].strip() == 'double':
+            return (f', ({{ int64_t __t{i}; double __s{i} = __a{i}; '
+                    f'__builtin_memcpy(&__t{i}, &__s{i}, sizeof __t{i}); __t{i}; }})')
+        return f', (int64_t)__a{i}'
+    arg_fwd = ''.join(_fwd(i) for i in range(nslots))
     new_params = ', '.join(['int64_t'] + ['int64_t'] * nslots)
     new_fn = (f'__mojo_gen_new_m{nslots - 1}' if is_method
               else f'__mojo_gen_new_{nslots}')
@@ -2280,6 +2437,8 @@ def register(gen, meta: list) -> None:
     gen.func_param_types.setdefault('__mojo_coro_yield_i', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_coro_yield_d', ['int64_t', 'double'])
     gen.func_param_types.setdefault('__mojo_gen_arg', ['int64_t', 'int64_t'])
+    gen.func_param_types.setdefault('__mojo_gen_arg_d', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_arg_d', 'double')
     gen.func_param_types.setdefault('__mojo_gen_set_return', ['int64_t', 'int64_t'])
     for _k in range(2, 9):
         gen.func_param_types.setdefault(f'__mojo_tuple_box_{_k}', ['int64_t'] * _k)

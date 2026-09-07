@@ -6079,6 +6079,7 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_coro_yield_p (int64_t, void *);',
             'extern int64_t __mojo_coro_yield_d (int64_t, double);',
             'extern int64_t __mojo_gen_arg (int64_t, int64_t);',
+            'extern double  __mojo_gen_arg_d (int64_t, int64_t);',
             'extern void    __mojo_gen_set_return (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_2 (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_3 (int64_t, int64_t, int64_t);',

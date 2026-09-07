@@ -122,6 +122,19 @@ __mojo_gen_arg(int64_t coro, int64_t idx)
     return g->args[idx];
 }
 
+/* Same, for a `double`-typed generator parameter: the argument's raw 64
+   bits were stashed by a bit-cast at the `<base>_start` call site (see
+   gimple_gen_coro.emit_c's arg_fwd), so reinterpret rather than convert.
+   Symmetric with __mojo_coro_yield_d / <base>_value's memcpy unbox. */
+double
+__mojo_gen_arg_d(int64_t coro, int64_t idx)
+{
+    int64_t b = __mojo_gen_arg(coro, idx);
+    double d;
+    __builtin_memcpy(&d, &b, sizeof d);
+    return d;
+}
+
 /* async-generator body: yield e -> is_wd=0, await's wait-descriptor ->
    is_wd=1, on the SAME channel (see mojo_coro.h). The consuming `async
    for` reads back __mojo_gen_last_yield_was_wd(coro) right after a

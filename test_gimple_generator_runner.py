@@ -344,6 +344,61 @@ def main():
         print(v)
 """, "3.5\n")
 
+    # Same, string-typed: `def g(x): yield x` called only `g("...")` —
+    # `x`'s kind resolves to 'p' from the unanimous call site, so the
+    # generator's value slot / <base>_value return type is `char *` and
+    # the string round-trips instead of printing raw pointer bits.
+    test_generator_stdout("param_generator_unannotated_string_via_cross_call", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g("hello"):
+        print(v)
+""", "hello\n")
+
+    # And through a binary expression: `yield a * 2` with `a` resolved to
+    # 'd' from the call site keeps the arithmetic in `double` (the arg ABI
+    # bit-casts the double through its int64_t slot, __mojo_gen_arg_d reads
+    # it back). Value is 5.0; `%g` prints it "5" (same as `print(5.0)` in
+    # the compiled path generally — a separate float-formatting matter).
+    test_generator_stdout("param_generator_unannotated_double_binexpr", """\
+def h(a):
+    yield a * 2
+    yield a * 2
+
+def main():
+    for v in h(2.5):
+        print(v)
+""", "5\n5\n")
+
+    # A generator METHOD with an unannotated param, called consistently
+    # with a float argument: the cross-call contract feeds `v`'s kind into
+    # the method-lowering path too (arg slot index 1, after `self`).
+    test_generator_stdout("param_generator_method_unannotated_double", """\
+struct Box:
+    fn __init__(out self):
+        pass
+    def emit(self, v):
+        yield v
+        yield v
+
+def main():
+    b = Box()
+    for x in b.emit(1.25):
+        print(x)
+""", "1.25\n1.25\n")
+
+    # A generator that is never called anywhere must still compile (no
+    # crash from an empty cross-call kind set).
+    test_generator_c_compiles("param_generator_never_called_compiles", """\
+def unused(z):
+    yield z
+
+def main():
+    print(0)
+""")
+
     # Milestone C step 2 (yield-from delegation): the exact target shape —
     # `outer` delegates its entire output to `inner` via a bare
     # `yield from inner()`. `inner` must be defined before `outer` (see

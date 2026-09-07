@@ -277,6 +277,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     '__mojo_coro_yield_p':   'int64_t',
     '__mojo_coro_yield_d':   'int64_t',
     '__mojo_gen_arg':        'int64_t',
+    '__mojo_gen_arg_d':      'double',
     '__mojo_gen_set_return': 'void',
 }
 
