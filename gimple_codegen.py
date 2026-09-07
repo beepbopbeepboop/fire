@@ -3881,9 +3881,23 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # relative-looking filename that happens to share this process's CWD" —
     # restored it, just widened to also cover 'mojo_compiler.py' (the
     # actual motivating case for broadening this at all).
+    # `_SELFHOST_DIR` is `dirname(abspath(__file__))` — in the COMPILED
+    # binary `__file__` is `<bootstrap>`, so `_SELFHOST_DIR` resolves to the
+    # process CWD (e.g. `stage2/`), never the real source dir, and the
+    # `== _SELFHOST_DIR` check always failed there. That is why
+    # `MOJO_NO_SHIM=1 make bootstrap` never registered the synthetic
+    # GimpleGen struct and stage2's mojo.ci was missing ~1400 lines of
+    # `GimpleGen__*` method externs + the full typedef vs stage1. Accept a
+    # second, path-independent signal: the entry file is one of the
+    # compiler's own named files AND `mojo_compiler.py` sits right next to
+    # it (only true for a genuine compiler-source checkout, never for a
+    # user program that happens to be named `mojo.py`).
+    _sh_dir = os.path.dirname(filename)
+    _sh_sibling = os.path.isfile(os.path.join(_sh_dir, 'mojo_compiler.py')) if _sh_dir else \
+        os.path.isfile('mojo_compiler.py')
     if ((do_imports or link_mode) and filename
             and os.path.basename(filename) in ('mojo.py', 'mojo_main.py', 'mojo_compiler.py')
-            and os.path.abspath(os.path.dirname(filename)) == _SELFHOST_DIR):
+            and (os.path.abspath(_sh_dir) == _SELFHOST_DIR or _sh_sibling)):
         _selfhost_register_gimplegen(gen)
     # Seed the self-import guard with the ROOT file's own identity — see
     # `_compiling_file_paths`'s declaration for why this is needed (a bare
