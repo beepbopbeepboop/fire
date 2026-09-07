@@ -2522,19 +2522,23 @@ def gen_module_impl(self, stmts):
     # its method param/return types, `_struct_method_signatures`, defaults
     # and externs — exactly like `_materialize_imported_struct`. Skipped
     # where `class GimpleGen` arrives naturally (its own compile, the root).
-    _gg_stmts = getattr(self, '_selfhost_gimplegen_stmts', None)
-    _gg_sigs = getattr(self, '_selfhost_gimplegen_sigs', None)
+    _gg_stmts = self._selfhost_gimplegen_stmts   # direct field — see __init__ (getattr erased it)
+    _gg_sigs = self._selfhost_gimplegen_sigs
+    _gg_have_infile = False
+    for _ggs in (stmts + imported_stmts):
+        if isinstance(_ggs, StructDef) and _as_str(_as_structdef_node(_ggs).name) == 'GimpleGen':
+            _gg_have_infile = True
+            break
     if (_gg_stmts is not None and _is_selfhost_file
             and 'GimpleGen' not in self.struct_field_types
-            and not any(isinstance(s, StructDef) and s.name == 'GimpleGen'
-                        for s in (stmts + imported_stmts))):
+            and not _gg_have_infile):
         # Rebuild via an indexed loop, not `dict(x)` — the self-hosted
         # backend's dict-copy-constructor path is untested/unreliable for
         # this shape (see `_render_struct_typedef_body`'s matching fix,
         # same underlying erased-key class of bug); build the copy through
         # explicit key iteration + `_as_str` instead of trusting `dict()`
         # to preserve key/value C types across the copy.
-        _gg_src = getattr(self, '_selfhost_gimplegen_extra_fields', {}) or {}
+        _gg_src = self._selfhost_gimplegen_extra_fields
         _gg_ft0: dict = {}
         for _gg_k in _gg_src:
             _gg_ft0[_as_str(_gg_k)] = _as_str(_gg_src[_gg_k])
@@ -2562,7 +2566,7 @@ def gen_module_impl(self, stmts):
         # this `getattr(...)`-sourced value — see _render_struct_typedef_
         # body's reverted attempt at dropping it, a42ee7e), just don't
         # destructure the pair in the for-clause.
-        for _fc_pair in (getattr(self, '_selfhost_gimplegen_extra_fields', {}) or {}).items():
+        for _fc_pair in (self._selfhost_gimplegen_extra_fields).items():
             _f = _as_str(_fc_pair[0])
             _c = _as_str(_fc_pair[1])
             _cur = _gg_ft.get(_f)
@@ -2580,7 +2584,7 @@ def gen_module_impl(self, stmts):
         # `_seed_struct_field_types` would have done had `class GimpleGen`'s
         # StructDef reached its annotation loop — parsed from the real
         # declared field annotations (see _selfhost_gimplegen_dict_val_types).
-        _gg_dvts = getattr(self, '_selfhost_gimplegen_dict_vts', None) or {}
+        _gg_dvts = self._selfhost_gimplegen_dict_vts
         for _f, (_outer_vt, _nested_vt, _raw_ann) in _gg_dvts.items():
             if _outer_vt and _outer_vt != 'int64_t':
                 self._field_dict_val_types.setdefault('GimpleGen', {}).setdefault(_f, _outer_vt)
@@ -3669,7 +3673,7 @@ def gen_module_impl(self, stmts):
                 # table is authoritative — override this pass's per-instance
                 # inference so `_struct_method_signatures`, the method
                 # externs, the forward decl and the definition all agree.
-                _gg_sig = (getattr(self, '_selfhost_gimplegen_sigs', None) or {}).get(
+                _gg_sig = (self._selfhost_gimplegen_sigs or {}).get(
                     f"GimpleGen_{m.name}") if s.name == 'GimpleGen' and not _oid else None
                 if _gg_sig is not None:
                     _fz_ret, _fz_params, _ = _gg_sig
@@ -7306,7 +7310,7 @@ def gen_module_impl(self, stmts):
     # a NULL global. `_class_attrs['GimpleGen']` was populated beside the
     # frozen-sig apply above; fold the synthetic StructDef in here too.
     _cai_structs = list(all_struct_defs)
-    _gg_syn = getattr(self, '_selfhost_gimplegen_stmts', None)
+    _gg_syn = self._selfhost_gimplegen_stmts
     if (_gg_syn is not None and 'GimpleGen' in self._class_attrs
             and not any(isinstance(s, StructDef) and s.name == 'GimpleGen'
                         for s in _cai_structs)):

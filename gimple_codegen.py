@@ -1802,6 +1802,17 @@ class GimpleGen:
         # typing, keeping the blast radius tight).
         self._imported_typedef_structs: list = []
         self._imported_struct_names: set = set()
+        # Self-host GimpleGen registration state — initialised here (not
+        # only in `_selfhost_register_gimplegen`) so every read is a direct
+        # field load, never a `getattr` that erases to a boxed int64 on the
+        # compiled path (which made the `_gg_stmts is not None` guard in
+        # gimple_module_gen.py mis-fire and drop the ~1400-line GimpleGen
+        # method-extern block from stage2's mojo.ci under MOJO_NO_SHIM=1).
+        self._selfhost_gimplegen_stmts = None
+        self._selfhost_gimplegen_extra_fields: dict = {}
+        self._selfhost_gimplegen_sigs = None
+        self._selfhost_gimplegen_dict_vts: dict = {}
+        self._selfhost_gimplegen_registered = False
         # Imported struct local name -> its home module's C-symbol qualifier
         # (e.g. 'std_utils__ansi'), so a call site on that struct computes the
         # SAME module-qualified method symbol its home module actually
