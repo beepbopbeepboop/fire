@@ -1276,6 +1276,25 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     [(arg_type, arg_val)])
                 gen._elem_types[t] = 'char *'
                 return 'MojoList *', t
+            elif outer_member == 'splitdrive' and len(node.args) == 1:
+                # os.path.splitdrive(p) -> (drive, tail). POSIX: always
+                # ('', p). Materialized as a 2-element string list exactly
+                # like os.path.split above. Call site (zipfile/__init__.py:
+                # `os.path.splitdrive(arcname)[1]`) subscripts element 1.
+                arg_type, arg_val = gen.lower_expr(node.args[0])
+                t = gen._call_expr('MojoList *', 'int64_t_path_splitdrive',
+                                    [(arg_type, arg_val)])
+                gen._elem_types[t] = 'char *'
+                return 'MojoList *', t
+            elif outer_member == 'splitroot' and len(node.args) == 1:
+                # os.path.splitroot(p) -> (drive, root, tail); POSIX
+                # posixpath.splitroot semantics (see the runtime helper).
+                # Materialized as a 3-element string list.
+                arg_type, arg_val = gen.lower_expr(node.args[0])
+                t = gen._call_expr('MojoList *', 'int64_t_path_splitroot',
+                                    [(arg_type, arg_val)])
+                gen._elem_types[t] = 'char *'
+                return 'MojoList *', t
             elif outer_member == 'expanduser' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 t = gen._call_expr('char *', 'int64_t_expanduser', [(arg_type, arg_val)])

@@ -829,6 +829,8 @@ int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
 int64_t int_join(int64_t marker, int64_t base, int64_t part);  /* os.path.join(a, b) */
 int64_t int_join_list(int64_t marker, int64_t path_list);      /* os.path.join(*list) */
 MojoList *int64_t_path_split(char *path);              /* os.path.split(path) -> [head, tail] */
+MojoList *int64_t_path_splitdrive(char *path);         /* os.path.splitdrive(path) -> [drive, tail] */
+MojoList *int64_t_path_splitroot(char *path);          /* os.path.splitroot(path) -> [drive, root, tail] */
 MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */
 int64_t int_getcwd(int64_t marker);                    /* os.getcwd */
 

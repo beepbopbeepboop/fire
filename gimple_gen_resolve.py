@@ -1839,10 +1839,11 @@ def _quick_type(gen, node) -> str:
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
             if node.func.member in ('basename', 'expanduser'):
                 return 'char *'
-            if node.func.member in ('splitext', 'split'):
-                # Both are 2-element string PAIRS in this codegen's model —
+            if node.func.member in ('splitext', 'split', 'splitdrive', 'splitroot'):
+                # All string-tuple results in this codegen's model —
                 # splitext -> [root, ext] (int64_t_splitext + a built list),
-                # split -> [head, tail] (int64_t_path_split).
+                # split -> [head, tail] (int64_t_path_split),
+                # splitdrive -> [drive, tail], splitroot -> [drive, root, tail].
                 return 'MojoList *'
         # Chained string methods, e.g. `s.replace(a, b).replace(c, d)` —
         # the receiver here is itself a CallExpr (the inner .replace()),
@@ -1964,7 +1965,7 @@ def _quick_type(gen, node) -> str:
                 and isinstance(obj.func.obj, gimple_ctypes.MemberExpr)
                 and isinstance(obj.func.obj.obj, gimple_ctypes.IdentExpr)
                 and obj.func.obj.obj.name == 'os' and obj.func.obj.member == 'path'
-                and obj.func.member == 'splitext'):
+                and obj.func.member in ('splitext', 'split', 'splitdrive', 'splitroot')):
             return 'char *'
         if isinstance(obj, gimple_ctypes.IdentExpr):
             e = gen._elem_types.get(obj.name)

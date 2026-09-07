@@ -1801,7 +1801,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             and _as_ident_node(_as_member_node(_efunc_obj).obj).name == 'os'
                             and _as_member_node(_efunc_obj).member == 'path'
                             and _efunc.member in (
-                                'basename', 'splitext', 'expanduser',
+                                'basename', 'splitext', 'split', 'splitdrive',
+                                'splitroot', 'expanduser',
                                 'abspath', 'dirname', 'exists', 'join')):
                         for i, arg in enumerate(expr.args):
                             if (isinstance(arg, gimple_ctypes.IdentExpr)

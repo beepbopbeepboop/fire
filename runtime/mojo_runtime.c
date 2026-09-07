@@ -4704,6 +4704,42 @@ MojoList *int64_t_path_split(char *path) {
     return l;
 }
 
+MojoList *int64_t_path_splitdrive(char *path) {
+    /* os.path.splitdrive(path) -> [drive, tail] as a 2-element string list.
+     * POSIX posixpath.splitdrive has no drive concept: it always returns
+     * ('', p). This codegen targets darwin, so mirror posixpath verbatim. */
+    MojoList *l = mojo_list_new();
+    if (!path) path = "";
+    mojo_list_append_str(l, "");
+    mojo_list_append_str(l, strdup(path));
+    return l;
+}
+
+MojoList *int64_t_path_splitroot(char *path) {
+    /* os.path.splitroot(path) -> [drive, root, tail] as a 3-element string
+     * list. Mirrors cpython posixpath.splitroot verbatim (POSIX):
+     *   p[:1] != '/'                      -> ('', '', p)
+     *   p[1:2] != '/' or p[2:3] == '/'    -> ('', '/', p[1:])   (1 or >=3 slashes)
+     *   else                              -> ('', '//', p[2:])  (exactly 2) */
+    MojoList *l = mojo_list_new();
+    if (!path) path = "";
+    size_t plen = strlen(path);
+    if (plen < 1 || path[0] != '/') {
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, strdup(path));
+    } else if (plen < 2 || path[1] != '/' || (plen >= 3 && path[2] == '/')) {
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, "/");
+        mojo_list_append_str(l, strdup(path + 1));
+    } else {
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, "//");
+        mojo_list_append_str(l, strdup(path + 2));
+    }
+    return l;
+}
+
 char *int64_t_basename(char *path) {
     if (!path) return "";
     const char *base = path;

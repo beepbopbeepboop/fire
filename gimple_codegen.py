@@ -2335,6 +2335,8 @@ class GimpleGen:
         'int_isdir':             ('int',         ['int64_t', 'int64_t']),  # os.path.isdir(path)
         'int_isfile':            ('int',         ['int64_t', 'int64_t']),  # os.path.isfile(path)
         'int64_t_path_split':    ('MojoList *',  ['char *']),              # os.path.split(path) -> [head, tail]
+        'int64_t_path_splitdrive': ('MojoList *', ['char *']),            # os.path.splitdrive(path) -> [drive, tail]
+        'int64_t_path_splitroot':  ('MojoList *', ['char *']),            # os.path.splitroot(path) -> [drive, root, tail]
         'mojo_listdir':          ('MojoList *',  ['char *']),              # os.listdir(path)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
