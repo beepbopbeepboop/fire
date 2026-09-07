@@ -2641,9 +2641,12 @@ def gen_module_impl(self, stmts):
     all_struct_defs = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
     self._struct_bases = {s.name: list(getattr(s, 'bases', None) or [])
                            for s in all_struct_defs if isinstance(s, StructDef)}
-    _all_struct_names = {s.name for s in all_struct_defs if isinstance(s, StructDef)}
-    _struct_bases_map = {s.name: (getattr(s, 'bases', None) or [])
-                          for s in all_struct_defs if isinstance(s, StructDef)}
+    _all_struct_names = {_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
+    _struct_bases_map = {}
+    for _sbm in all_struct_defs:
+        if isinstance(_sbm, StructDef):
+            _sbm = _as_structdef_node(_sbm)
+            _struct_bases_map[_as_str(_sbm.name)] = list(getattr(_sbm, 'bases', None) or [])
     _unresolved_base_memo: dict = {}
     self._structs_with_unresolved_base = {
         _name for _name in _struct_bases_map
@@ -3733,8 +3736,10 @@ def gen_module_impl(self, stmts):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
+            s = _as_structdef_node(s)
             for m in s.methods:
-                key = f"{s.name}_{m.name}"
+                m = _as_funcdef_node(m)
+                key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_param_types[key] = self._infer_param_types(
                     m, owner_struct=s.name)
     # Cross-module generator scalar contracts (see the pre-pass beside the
@@ -3898,8 +3903,10 @@ def gen_module_impl(self, stmts):
     for s in all_structs_for_methods:
         if not isinstance(s, StructDef):
             continue
+        s = _as_structdef_node(s)
         for m in s.methods:
-            _method_caller_bodies.append((f"{s.name}_{m.name}", s.name, m.body))
+            m = _as_funcdef_node(m)
+            _method_caller_bodies.append((f"{_as_str(s.name)}_{_as_str(m.name)}", _as_str(s.name), m.body))
     for name, body in _caller_bodies:
         _method_caller_bodies.append((name, None, body))
 
@@ -4034,8 +4041,10 @@ def gen_module_impl(self, stmts):
                 self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
+            s = _as_structdef_node(s)
             for m in s.methods:
-                method_full_name = f"{s.name}_{m.name}"
+                m = _as_funcdef_node(m)
+                method_full_name = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 if method_full_name in self._selfhost_locked_param_types:
                     continue
                 if m.params and any(pn.startswith('*') for pn, _ in m.params):
@@ -4095,10 +4104,14 @@ def gen_module_impl(self, stmts):
                                                              [(pn, dv) for pn, dv in _m_dflts.items()])
 
     for s in all_structs_for_methods:
-        if not (isinstance(s, StructDef) and s.name == 'GimpleGen'):
+        if not isinstance(s, StructDef):
+            continue
+        s = _as_structdef_node(s)
+        if _as_str(s.name) != 'GimpleGen':
             continue
         for m in s.methods:
-            mangled = f"GimpleGen_{m.name}"
+            m = _as_funcdef_node(m)
+            mangled = f"GimpleGen_{_as_str(m.name)}"
             fpt = self.func_param_types.get(mangled)
             inferred = self._inferred_param_types.get(mangled)
             if not fpt or not inferred:
@@ -4178,7 +4191,7 @@ def gen_module_impl(self, stmts):
     # elsewhere). Without this the callee's loop var is declared `char *`
     # and `s.name` lowers to `os.path.basename(s)` — the exact reason the
     # compiled `gen_module_impl` emitted no function bodies at all.
-    _struct_names_here = ({s.name for s in all_struct_defs if isinstance(s, StructDef)}
+    _struct_names_here = ({_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
                           | set(getattr(self, '_imported_struct_names', ()) or ())
                           | {'FunctionDef', 'StructDef', 'IfStmt', 'ForStmt', 'WhileStmt',
                              'AssignStmt', 'ExprStmt', 'ImportStmt', 'FromImportStmt',
