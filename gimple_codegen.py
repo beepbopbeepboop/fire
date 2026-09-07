@@ -3750,14 +3750,29 @@ class GimpleGen:
 _SELFHOST_GG_CACHE: dict = {}
 
 
-def _selfhost_load_gimplegen_class():
-    """Parse `_SELFHOST_DIR/gimple_codegen.py` and return its `class GimpleGen`
+def _selfhost_load_gimplegen_class(_src_dir=None):
+    """Parse `<src_dir>/gimple_codegen.py` and return its `class GimpleGen`
     StructDef node (or None). `gimple_codegen` is a bare `.py` sibling —
     module_loader can't resolve `import gimple_codegen` as a Mojo module, and
     the `gimple_codegen ↔ gimple_module_gen` import cycle keeps `class
     GimpleGen` out of `imported_stmts` during gimple_module_gen.py's own
-    compile — so parse the file directly. Cached on path+mtime."""
-    _p = os.path.join(_SELFHOST_DIR, 'gimple_codegen.py')
+    compile — so parse the file directly. Cached on path+mtime.
+
+    `_src_dir` (passed from `_run_pipeline`'s resolved entry-file dir) is
+    tried first: in the COMPILED binary `_SELFHOST_DIR` is the process CWD
+    (`stage2/`), not the real source dir, so the old
+    `os.path.join(_SELFHOST_DIR, ...)` did not exist and this returned
+    None."""
+    _p = None
+    for _cand_dir in (_src_dir, _SELFHOST_DIR, '.', '..'):
+        if _cand_dir is None:
+            continue
+        _c = os.path.join(_cand_dir, 'gimple_codegen.py')
+        if os.path.isfile(_c):
+            _p = _c
+            break
+    if _p is None:
+        return None
     try:
         _mt = os.path.getmtime(_p)
     except OSError:
@@ -3795,7 +3810,7 @@ def _selfhost_register_gimplegen(gen):
     ordinary struct-registration passes build everything, and applies the
     extracted-helper field union + frozen signature lock. The stashed
     attributes are shared into every nested temp_gen (gimple_gen_resolve.py)."""
-    _cls = _selfhost_load_gimplegen_class()
+    _cls = _selfhost_load_gimplegen_class(getattr(gen, '_selfhost_src_dir', None))
     if _cls is None:
         return
     gen._selfhost_gimplegen_stmts = _cls
@@ -3909,6 +3924,15 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     if ((do_imports or link_mode) and filename
             and os.path.basename(filename) in ('mojo.py', 'mojo_main.py', 'mojo_compiler.py')
             and (os.path.abspath(_sh_dir) == _SELFHOST_DIR or _sh_sibling)):
+        # Hand the resolved source dir to `_selfhost_load_gimplegen_class`:
+        # in the compiled binary `_SELFHOST_DIR` (== CWD) is wrong, so its
+        # `os.path.join(_SELFHOST_DIR, 'gimple_codegen.py')` did not exist
+        # and it returned None -> NOTHING registered -> the frozen
+        # GimpleGen signature table was empty and stage2's ~200
+        # `GimpleGen__*` method signatures were re-inferred per temp_gen
+        # (timing-dependent -> `CallExpr *` vs stage1's boxed `int64_t`).
+        gen._selfhost_src_dir = _sh_dir if (_sh_dir and os.path.isfile(
+            os.path.join(_sh_dir, 'gimple_codegen.py'))) else _SELFHOST_DIR
         _selfhost_register_gimplegen(gen)
     # Seed the self-import guard with the ROOT file's own identity — see
     # `_compiling_file_paths`'s declaration for why this is needed (a bare
