@@ -27,7 +27,7 @@ from mojo_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
-    _as_int, _as_intlit_node, _as_boollit_node,
+    _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -3481,6 +3481,7 @@ def gen_module_impl(self, stmts):
                                 + self._imported_typedef_structs)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
+            s = _as_structdef_node(s)  # boxed loop var -> direct field access on the compiled path
             for m in s.methods:
                 mangled = f"{s.name}_{m.name}"
                 if m.return_type is not None:
@@ -3521,6 +3522,7 @@ def gen_module_impl(self, stmts):
         _changed = False
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
+                s = _as_structdef_node(s)  # boxed loop var -> direct field access on the compiled path
                 for m in s.methods:
                     self._struct_method_names.setdefault(s.name, set()).add(m.name)
                     if 'property' in (getattr(m, 'decorators', None) or []):
@@ -3585,6 +3587,7 @@ def gen_module_impl(self, stmts):
                 _c_changed = True
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
+                s = _as_structdef_node(s)  # boxed loop var -> direct field access on the compiled path
                 self._prepass_struct = s.name
                 for m in s.methods:
                     if m.name == '__init__':
@@ -3611,6 +3614,7 @@ def gen_module_impl(self, stmts):
 
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
+            s = _as_structdef_node(s)  # boxed loop var -> direct field access on the compiled path
             _moids = self._struct_method_overload_ids(s)
             for _zmi in range(len(s.methods)):
                 m = _as_funcdef_node(s.methods[_zmi]); _oid = _as_str(_moids[_zmi]) if _zmi < len(_moids) else ""
@@ -3679,6 +3683,12 @@ def gen_module_impl(self, stmts):
                 self._mangled_signature_ctypes[f"{s.name}_{m.name}{_oid}"] = _all_ctypes
 
     for s in self._imported_typedef_structs:
+        # `_as_structdef_node`: `s` is a boxed loop var on the self-hosted
+        # compiled path, so `s.methods` / `s.name` erased to
+        # `_mojo_dispatch_getattr` and `range(len(s.methods))` was `range(0)`
+        # — NO `GimpleGen__*` method externs emitted at all (~1400 lines of
+        # the MOJO_NO_SHIM=1 stage1-vs-stage2 mojo.ci divergence).
+        s = _as_structdef_node(s)
         if not s.methods:
             continue
         _s2850_oids = self._struct_method_overload_ids(s)
