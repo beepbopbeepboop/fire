@@ -1,5 +1,54 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-06, os.path.splitdrive/splitroot + reversed() LANDED): probe cleaner; still not end-to-end
+
+Two more codegen gaps surfaced by the `MOJO_DEBUG=1
+compile_to_gimple(do_imports=False)` probe are now FIXED:
+
+1. **`os.path.splitdrive()` / `os.path.splitroot()`** were stubbed
+   (`int.splitdrive() stubbed`). Used at `zipfile/__init__.py:647`
+   (`os.path.normpath(os.path.splitdrive(arcname)[1])`). Implemented
+   properly (POSIX): `int64_t_path_splitdrive` -> `['', p]` always;
+   `int64_t_path_splitroot` -> `[drive, root, tail]` mirroring cpython
+   `posixpath.splitroot` verbatim (1 or >=3 leading slashes -> `'/'`,
+   exactly 2 -> `'//'`). Dispatched in `gimple_gen_methods.py` like
+   `os.path.split` (list-as-tuple, `char*` elements); type resolution
+   in `gimple_gen_resolve.py` / `gimple_gen_infra.py`. Commit `5d9352c`.
+
+2. **Silently-dropped `for` loop** — `for zinfo in reversed(sorted(
+   self.filelist, key=lambda z: z.header_offset))` at
+   `zipfile/__init__.py:1612` (`_RealGetContents` central-directory
+   concordance check). Root cause: `reversed()` had NO lowering at all,
+   fell through to the generic dynamic-dispatch stub producing a
+   `void *`, and `_gen_stmt_ForStmt` silently drops a `for` over an
+   unrecognized `void *` iterable (`mojo_unsupported_iter`, body runs
+   zero times). `reversed()` now lowers to an eagerly reversed COPY of a
+   list / str / bytes sequence (semantically identical for the single
+   forward consumption every call site does), carrying element types
+   through; any other codegen type is now an honest `RuntimeError`
+   refusal, not a silent drop. Runtime: `mojo_cstr_reverse`,
+   `mojo_bytes_reverse`. Commit `36357fc`.
+
+**zipfile re-probe:** `compile_to_gimple(do_imports=False)` -> ~628 KB
+of C, `gcc-mp-15 -fgimple -fsyntax-only` **exit 0** (warnings only). No
+more `for loop dropped` / `int.splitdrive() stubbed` notes. Remaining
+probe noise is the broad transitive-stdlib gap set (compress/decompress
+codecs, `io.BytesIO`, `os.stat`/`seek`/`tell`/`read` on file objects,
+`_encode_filter_properties`, `argparse`, `warnings.warn`, ...) — NOT
+zipfile-codegen-specific; each is a separate stdlib-surface project.
+
+Regression tests: `test_gimple.py`
+(`os_path_splitdrive_splitroot`, `reversed_list_str_and_sorted_chain`) +
+`test_gimple_runner.py` (`gimple_os_path_splitdrive_splitroot`,
+`gimple_reversed_list_str_sorted` — real build-and-run).
+
+Still **NOT `git rm`'d** — a full `mojo.py build` (transitive stdlib
+imports) still does not complete: `_Extra(bytes)` subclassing +
+`struct.Struct` class attr + `super().__new__` end-to-end link, plus
+the broad stdlib file-object / codec surface above, remain.
+
+---
+
 ## Status (2026-09-06, builtin `bytes` subclassing LANDED as a feature): `class _Extra(bytes)` now has real payload storage + inherited-op delegation; zipfile still blocked behind the generator-codegen wall
 
 Builtin-`bytes` subclassing (`class X(bytes)`) landed in the compiled
