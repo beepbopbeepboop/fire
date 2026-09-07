@@ -1,5 +1,78 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-07, end-to-end runtime investigated — blocked on `.py` link-mode module resolution + memoryview-in-generator, both architectural)
+
+The task was "make a real zip round-trip (`from zipfile import ZipFile`,
+`writestr`/`close`/`namelist`/`read`) actually work through `mojo.py
+build`". It does NOT, and the reasons are now precisely characterised —
+this is a multi-feature stack, not a bug:
+
+1. **`mojo.py build` "succeeds" but silently stubs the whole module.**
+   `from zipfile import ZipFile` never resolves in link/build mode.
+   `imports.resolve_source()` / `imports.Resolver._find()` only probe
+   `<dir>/<name>.mojo` and `<dir>/<name>/__init__.mojo` — never `.py` —
+   and `_parsed_import()`'s candidate-path fallback only fires for
+   leading-dot relative names. So `ZipFile(...)` lowers to an opaque
+   `(int64_t)0`, every method call becomes a `int64_t.<m>() stubbed`
+   no-op, and the driver prints `Built:` **even though the final link
+   emitted "Undefined symbols" / the program segfaults or prints
+   garbage** (`names: 8100139744743485279`). The `mojo.py run`
+   (interpreter) path "works" only because it delegates the import to
+   host CPython's real `zipfile` — no compilation involved.
+
+   Attempted fix (reverted — regresses `make check-selfhost`):
+   - `imports.Resolver._find`: add `.py` / package `__init__.py`
+     candidates (after the `.mojo` forms). Self-hosting `imports.py`
+     then fails with `imports.py:85:1: error: invalid conversion in
+     gimple call` — extending the 2-tuple `for cand in (...)` to a
+     4-tuple trips self-host's tuple lowering.
+   - `_register_link_imports`: the raw-source struct-detection regexes
+     match only Mojo `struct <name>`, never Python `class <name>` — so
+     even a *resolvable* `.py` class never reaches the
+     `_link_inline_modules` inline-compile fallback. Adding a
+     `\bclass\s+{name}\s*[(:]` branch is gate-clean on its own but
+     inert without the resolution fix above, and a minimal repro
+     (sibling `mylib.py` with `class Widget` + list-returning method,
+     imported by an `app.mojo` built in link mode) **segfaults both
+     before and after** — `Widget(3)` still unresolved →
+     `mojo_list_len((MojoList*)0)`.
+   - `module_loader.module_name_for_path`: a package `__init__.py`
+     *outside* `STDLIB_PATH` returns the bare basename `__init__`, so
+     every out-of-tree package gets the same `__init__` symbol prefix
+     and `___init___ZipFile___init__`-style method symbols nothing
+     defines (observed directly once resolution was forced with
+     `MOJO_PATH`). Fixing it to use the parent-directory name is a
+     real latent-bug fix but the extra `base` reassignment perturbs
+     self-host's return-type inference for `module_name_for_path`
+     (callers in `monomorphize.py` / `build_stdlib_dylib.py` /
+     `driver.py` then get `assignment to int64_t from char *`).
+
+2. **`_Extra.split` (`@classmethod` generator) + `memoryview(...)`.**
+   Once resolution is forced (`MOJO_PATH=.../Lib`, all three patches
+   above applied), the whole `zipfile` module is dropped with
+   `skip .../zipfile/__init__.py: cannot compile module: function(s)
+   split (generator) ... split: a call to unresolved callee
+   'memoryview(...)' is not supported in a compiled generator/coroutine
+   body` → falls back to interpreting → no compiled symbols → link
+   fails. This is the same wall the older Status entries below track;
+   the A3 stack-switch cutover did not remove it for this shape.
+
+3. **Transitive Python stdlib surface.** Behind (1)/(2): `io.BytesIO`,
+   `zlib`/`bz2`/`lzma` bindings, `struct`, `binascii`, `os.stat`/
+   `seek`/`tell`, `shutil`, `importlib.util`, `threading` — each a
+   separate stdlib-porting project, as prior entries already note.
+
+**Isolated-compile status is unchanged and still green**:
+`compile_to_gimple(do_imports=False)` on `Lib/zipfile/__init__.py` →
+~628 KB C, `gcc-mp-15 -fgimple -fsyntax-only` exit 0, and the emitted
+signatures are correct (`MojoList * ZipFile_namelist (ZipFile *)`,
+`char * ZipFile_mojo_read (ZipFile *, int64_t, int64_t)` — the `read`
+return type should be `MojoBytes *`, a minor separate return-inference
+gap). No code changed this session; no regression. Not `git rm`'d.
+
+---
+
+
 ## Status (2026-09-06, os.path.splitdrive/splitroot + reversed() LANDED): probe cleaner; still not end-to-end
 
 Two more codegen gaps surfaced by the `MOJO_DEBUG=1
