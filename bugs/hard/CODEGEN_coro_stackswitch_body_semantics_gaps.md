@@ -50,8 +50,19 @@ via the §5.5 cutover's real behavioral test suite
   correct fallback for that shape.
 
 - **#4 (heterogeneous `.pop()` + `isinstance` re-read each iteration) —
-  STILL OPEN.** Not attempted here (a narrower, likely single-site
-  `isinstance`/`.pop()` type-tag re-read bug — good next target).
+  FIXED 2026-09-06.** Root cause was NOT a stale type-tag re-read: it was
+  that `isinstance(x, tuple)` had no lowering at all. `_isinstance_one_type`
+  (gimple_gen_calls.py) mapped `tuple` to neither `struct_field_types`,
+  `_TYPE_IDS`, nor `_SCALAR_TYPE_MATCH`, so it fell through to
+  `mojo_isinstance_p(x, 0)` — type_id 0 is unconditionally false in the
+  runtime — making the tuple branch dead on EVERY iteration (hence the
+  constant `99`). Fix: a dedicated `tuple` case in `_isinstance_one_type`
+  that emits `mojo_isinstance_p(x, 8)`, plus a new runtime type_id 8 in
+  both `mojo_isinstance`/`mojo_isinstance_p` (`mojo_is_registered_list(obj)
+  && mojo_is_tuple((MojoList*)obj)` — a tuple is a MojoList carrying the
+  `mojo_mark_as_tuple` marker). Reproduces (and is fixed) in a plain `fn`
+  too. Regression tests `generator_pops_heterogeneous_tagged_stack` and
+  `generator_pops_stack_two_level_tuple_unpack` now pass.
 
 `MOJO_CORO=cpp` (escape hatch) remains a correct implementation for #3
 and #4; §5.6 (deleting the cpp emitter) should still wait on those two.

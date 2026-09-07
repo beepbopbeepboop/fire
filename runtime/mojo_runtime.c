@@ -3219,6 +3219,10 @@ int mojo_isinstance(int64_t obj, int type_id) {
         return mojo_is_registered_list(obj);
     if (type_id == 6)
         return mojo_is_registered_dict(obj);
+    if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
+        if (!mojo_is_registered_list(obj)) return 0;
+        return mojo_is_tuple((MojoList *)(intptr_t)obj);
+    }
     return 0;
 }
 
@@ -3228,6 +3232,10 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
         return mojo_is_registered_list(obj);
     if (type_id == 6)
         return mojo_is_registered_dict(obj);
+    if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
+        if (!mojo_is_registered_list(obj)) return 0;
+        return mojo_is_tuple((MojoList *)(intptr_t)obj);
+    }
     return 0;
 }
 

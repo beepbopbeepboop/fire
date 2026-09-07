@@ -1841,6 +1841,19 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     alternative instead of the previous always-False stub."""
     if type_name == 'type':
         return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
+    if type_name == 'tuple':
+        # A tuple's runtime representation is a MojoList carrying the
+        # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
+        # the static C type (MojoList *, shared with plain lists) nor the
+        # scalar _TYPE_IDS table can answer `isinstance(x, tuple)` — it
+        # needs the runtime marker check (mojo_isinstance_p type_id 8).
+        # Without this every `isinstance(top, tuple)` on a boxed/popped
+        # heterogeneous value fell through to `mojo_isinstance_p(_, 0)`,
+        # which is unconditionally false — so the tuple branch was dead.
+        iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+        res = gen._new_temp('int')
+        gen._emit(f'  {res} = mojo_isinstance_p ({iv}, 8);')
+        return gen._new_val('_Bool', f'(_Bool){res}')
     if type_name in gen.struct_field_types:
         # A real user-defined struct/dataclass type: compare the
         # object's runtime type tag (see mojo_read_type_tag in
@@ -1869,7 +1882,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         gen._emit(f'  {cmp_t} = {tag} == {target};')
         return cmp_t
     _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
-                 'list': '5', 'dict': '6', 'set': '7'}
+                 'list': '5', 'dict': '6', 'set': '7', 'tuple': '8'}
     type_id = _TYPE_IDS.get(type_name, '0')
     # Scalar isinstance by STATIC type. The runtime mojo_isinstance stub
     # always returns 0 (false), so e.g. `isinstance(node.name, str)` was
