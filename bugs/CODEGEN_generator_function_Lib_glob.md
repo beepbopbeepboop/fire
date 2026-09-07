@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-09-07 — "cluster A" premise re-examined; NOT a callable-value-local wiring gap)
+
+Investigated as part of a batch aimed at "extend the callable-value-local
+(`mojo_maybe_bound_call_N`) model into the A3 generator-body path". Finding:
+this doc is NOT closeable that way, and the naive wiring would be a silent
+miscompile.
+
+- `select_recursive` / `select_recursive_step` / `select_wildcard` are
+  nested-closure generators defined *inside methods* of `_GlobberBase`
+  (`recursive_selector` / `wildcard_selector`). The A3 pre-pass
+  (`gimple_gen_coro._eligible`) only handles top-level defs and direct
+  struct methods, so they fall through to the legacy cpp coroutine
+  emitter (`gimple_cpp_core.py`), which refuses on `match(...)`.
+- `match` is `self.compile(part)` — the emitter has no static symbol for
+  it; its runtime value is a bound method of an opaque `re.Pattern`.
+  `mojo_maybe_bound_call_1((void*)match, path)` would compile but, since
+  that value was never registered via `mojo_bound_method_new`,
+  `mojo_is_bound_method` returns false and it is called as a bare
+  function pointer — a jump through a garbage address. That is strictly
+  worse than the current honest refusal, so it is not an acceptable fix.
+- Real blocker: compiled-coroutine support for (a) generators that are
+  nested closures inside a struct method (capturing `self` + locals) and
+  (b) calling a duck-typed/opaque callable value. This is the same
+  opaque-receiver modelling the pickletools doc already concluded is
+  feature-sized. `_iterdir` (the doc's other item) is already A3-eligible
+  and lowers fine today — bytes value type landing resolved it.
+
+No code change. Hand-off: this is a real feature project (opaque-callable
++ nested-closure-generator codegen), not an incremental dispatch wiring.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster A)
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`:

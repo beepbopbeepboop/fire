@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (2026-09-07 — cluster B is the gating blocker; cluster A not reachable)
+
+`_eligible` for `_genops` fails at `_generator_value_kind`: "tuple yield
+with inconsistent shape (v0)" — i.e. the A3 pre-pass rejects it on the
+heterogeneous 4-tuple yield (cluster B) BEFORE the `getpos(...)`
+callable-value site is ever reached. So no cluster-A work on this file is
+possible until cluster B (tuple-yield) lands. And `getpos = data.tell`
+off an opaque `data` has no safe compiled representation anyway (see the
+glob doc's 2026-09-07 note — registering it for `mojo_maybe_bound_call`
+would be a silent miscompile). No code change.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, clusters A + B)
 
 `_genops` is the module's only generator. Still refused:

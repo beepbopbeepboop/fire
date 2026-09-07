@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-09-07 — "cluster A" premise re-examined; `gen` is not a callable-value gap)
+
+Investigated in a batch aimed at wiring `mojo_maybe_bound_call_N` into the
+generator-body path. `gen` does NOT fit that model: `yield nested()` is a
+*direct call to a sibling nested def*, not a call through a callable held
+in a variable. And `nested()` itself is `sys._getframe().f_generator` —
+pure CPython frame introspection with no compiled representation, so even
+full nested-def-in-generator-body compilation would not make it lower.
+`g` (`1/0` bare stmt → needs a runtime int-divide-by-zero trap) and `t3`
+(async `return` of a non-scalar) are unrelated and unchanged. No code
+change; none of the three is an incremental dispatch-wiring fix.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, clusters A + E)
 
 Small test file. Still refused:

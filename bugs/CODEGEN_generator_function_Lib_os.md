@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-09-07 — `stat` is not a callable-value-local; also cluster B gates `_fwalk`)
+
+Batch investigation of "cluster A = callable-value-local dispatch": `stat`
+in `_fwalk` comes from `from posix import *` (a star-imported module-level
+function), not a local/closure callable, so `mojo_maybe_bound_call_N` does
+not apply. Its real obstacle is that `stat(...)` returns a `stat_result`
+structseq that the coroutine body then unpacks — an opaque-value modelling
+gap. `_fwalk` is additionally cluster B (heterogeneous `yield`/`yield
+from` tuple shapes) and is defined inside an `if _exists("openat")` block,
+so the A3 pre-pass never even sees it as a top-level def. `walk` remains
+cluster B. No code change.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, clusters A + B)
 
 `_Environ.__iter__` now compiles through the A3 path. **Still refused:**
