@@ -1504,6 +1504,273 @@ char *mojo_memoryview_repr(MojoMemoryView *m)
     return s;
 }
 
+/* ── struct module: binary pack / unpack ──────────────────────────────
+ * See mojo_runtime.h for the format mini-language and calling convention.
+ * A compiled format expands to one MojoStructOp per value ('x' padding is
+ * folded into offsets and produces no op; 's'/'c' are a single op of
+ * `nbytes` bytes). */
+typedef struct {
+    char    code;     /* b B h H i I l L q Q f d s ? c */
+    int32_t nbytes;   /* wire size (for 's'/'c': the byte count) */
+    int64_t offset;   /* byte offset within the packed buffer */
+} MojoStructOp;
+
+struct MojoStructFmt {
+    int           big_endian;  /* 1 = big/network order, 0 = little (host assumed LE) */
+    int           native;      /* 1 = '@' native size + alignment, 0 = standard sizes, no padding */
+    int64_t       size;        /* calcsize() */
+    int64_t       nops;
+    MojoStructOp *ops;
+    char         *format;      /* original format string (struct.Struct.format) */
+};
+
+void mojo_struct_raise_error(const char *msg)
+{
+    size_t n = strlen(msg) + 1;
+    char *heap = (char *)malloc(n);
+    memcpy(heap, msg, n);
+    mojo_exc_type_set(MOJO_STRUCT_ERROR_TAG);
+    mojo_exc_msg_set(heap);
+    mojo_exc_obj_set(heap);
+    mojo_raise();
+}
+
+static void _struct_type_info(char code, int native, int *sz, int *align)
+{
+    int s;
+    switch (code) {
+        case 'x': case 'b': case 'B': case 'c': case 's': case '?': s = 1; break;
+        case 'h': case 'H': s = 2; break;
+        case 'i': case 'I': s = 4; break;
+        case 'l': case 'L': s = native ? (int)sizeof(long) : 4; break;
+        case 'q': case 'Q': s = 8; break;
+        case 'f': s = 4; break;
+        case 'd': s = 8; break;
+        default:  s = 0; break;   /* unknown code */
+    }
+    if (sz)    *sz = s;
+    if (align) *align = native ? s : 1;
+}
+
+MojoStructFmt *mojo_struct_compile(const char *fmt)
+{
+    if (fmt == NULL) fmt = "";
+    MojoStructFmt *f = (MojoStructFmt *)calloc(1, sizeof *f);
+    f->big_endian = 0;
+    f->native     = 1;
+    const char *p = fmt;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    if (*p == '<' || *p == '>' || *p == '=' || *p == '!' || *p == '@') {
+        switch (*p) {
+            case '<': f->big_endian = 0; f->native = 0; break;
+            case '=': f->big_endian = 0; f->native = 0; break;
+            case '>': f->big_endian = 1; f->native = 0; break;
+            case '!': f->big_endian = 1; f->native = 0; break;
+            case '@': f->big_endian = 0; f->native = 1; break;
+        }
+        p++;
+    }
+    int64_t cap = 8;
+    f->ops  = (MojoStructOp *)malloc((size_t)cap * sizeof(MojoStructOp));
+    f->nops = 0;
+    int64_t off = 0;
+    while (*p) {
+        char c = *p;
+        if (c == ' ' || c == '\t' || c == '\n') { p++; continue; }
+        long count = -1;
+        if (c >= '0' && c <= '9') {
+            count = 0;
+            while (*p >= '0' && *p <= '9') { count = count * 10 + (*p - '0'); p++; }
+            c = *p;
+            if (!c) { mojo_struct_raise_error("repeat count given without format specifier"); return f; }
+        }
+        p++;
+        int sz = 0, align = 1;
+        _struct_type_info(c, f->native, &sz, &align);
+        if (sz == 0) {
+            char m[64];
+            snprintf(m, sizeof m, "bad char in struct format: '%c'", c);
+            mojo_struct_raise_error(m);
+            return f;
+        }
+        if (c == 's' || c == 'c') {
+            long n = (c == 'c') ? 1 : ((count < 0) ? 1 : count);
+            if (f->native && align > 1) off = (off + align - 1) & ~(int64_t)(align - 1);
+            if (f->nops >= cap) { cap *= 2; f->ops = (MojoStructOp *)realloc(f->ops, (size_t)cap * sizeof(MojoStructOp)); }
+            f->ops[f->nops].code   = c;
+            f->ops[f->nops].nbytes = (int32_t)n;
+            f->ops[f->nops].offset = off;
+            f->nops++;
+            off += n;
+        } else {
+            long reps = (count < 0) ? 1 : count;
+            for (long r = 0; r < reps; r++) {
+                if (f->native && align > 1) off = (off + align - 1) & ~(int64_t)(align - 1);
+                if (c != 'x') {
+                    if (f->nops >= cap) { cap *= 2; f->ops = (MojoStructOp *)realloc(f->ops, (size_t)cap * sizeof(MojoStructOp)); }
+                    f->ops[f->nops].code   = c;
+                    f->ops[f->nops].nbytes = (int32_t)sz;
+                    f->ops[f->nops].offset = off;
+                    f->nops++;
+                }
+                off += sz;
+            }
+        }
+    }
+    f->size   = off;
+    f->format = strdup(fmt);
+    return f;
+}
+
+static void _struct_wr_uint(uint8_t *dst, uint64_t v, int nbytes, int big)
+{
+    for (int i = 0; i < nbytes; i++) {
+        int shift = big ? (nbytes - 1 - i) * 8 : i * 8;
+        dst[i] = (uint8_t)((v >> shift) & 0xFF);
+    }
+}
+
+static uint64_t _struct_rd_uint(const uint8_t *src, int nbytes, int big)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < nbytes; i++) {
+        int shift = big ? (nbytes - 1 - i) * 8 : i * 8;
+        v |= (uint64_t)src[i] << shift;
+    }
+    return v;
+}
+
+MojoBytes *mojo_struct_pack_h(MojoStructFmt *f, MojoList *vals)
+{
+    int64_t nv = mojo_list_len(vals);
+    if (nv != f->nops) {
+        char m[96];
+        snprintf(m, sizeof m, "pack expected %lld items for packing (got %lld)",
+                 (long long)f->nops, (long long)nv);
+        mojo_struct_raise_error(m);
+        return mojo_bytes_empty();
+    }
+    MojoBytes *b = mojo_bytes_zeros(f->size);
+    for (int64_t i = 0; i < f->nops; i++) {
+        MojoStructOp *op = &f->ops[i];
+        uint8_t *dst = b->data + op->offset;
+        switch (op->code) {
+            case 's': case 'c': {
+                MojoBytes *sv = (MojoBytes *)(uintptr_t)mojo_list_get_int(vals, i);
+                int64_t n = sv ? sv->len : 0;
+                if (n > op->nbytes) n = op->nbytes;
+                if (n > 0) memcpy(dst, sv->data, (size_t)n);
+                break;
+            }
+            case 'f': {
+                float fv = (float)mojo_list_get_double(vals, i);
+                uint32_t bits; memcpy(&bits, &fv, 4);
+                _struct_wr_uint(dst, bits, 4, f->big_endian);
+                break;
+            }
+            case 'd': {
+                double dv = mojo_list_get_double(vals, i);
+                uint64_t bits; memcpy(&bits, &dv, 8);
+                _struct_wr_uint(dst, bits, 8, f->big_endian);
+                break;
+            }
+            case '?': {
+                dst[0] = mojo_list_get_int(vals, i) ? 1 : 0;
+                break;
+            }
+            default: {
+                int64_t v = mojo_list_get_int(vals, i);
+                _struct_wr_uint(dst, (uint64_t)v, op->nbytes, f->big_endian);
+                break;
+            }
+        }
+    }
+    return b;
+}
+
+static MojoList *_struct_unpack_at(MojoStructFmt *f, MojoBytes *buf, int64_t offset)
+{
+    int64_t buflen = buf ? buf->len : 0;
+    if (offset < 0 || offset + f->size > buflen) {
+        char m[96];
+        snprintf(m, sizeof m, "unpack requires a buffer of %lld bytes", (long long)f->size);
+        mojo_struct_raise_error(m);
+        return mojo_list_new();
+    }
+    MojoList *out = mojo_list_new();
+    for (int64_t i = 0; i < f->nops; i++) {
+        MojoStructOp *op = &f->ops[i];
+        const uint8_t *src = buf->data + offset + op->offset;
+        switch (op->code) {
+            case 's': case 'c': {
+                MojoBytes *sv = mojo_bytes_new_lit((const char *)src, op->nbytes);
+                mojo_list_append_int(out, (int64_t)(uintptr_t)sv);
+                break;
+            }
+            case 'f': {
+                uint32_t bits = (uint32_t)_struct_rd_uint(src, 4, f->big_endian);
+                float fv; memcpy(&fv, &bits, 4);
+                mojo_list_append_double(out, (double)fv);
+                break;
+            }
+            case 'd': {
+                uint64_t bits = _struct_rd_uint(src, 8, f->big_endian);
+                double dv; memcpy(&dv, &bits, 8);
+                mojo_list_append_double(out, dv);
+                break;
+            }
+            case '?': {
+                mojo_list_append_int(out, src[0] ? 1 : 0);
+                break;
+            }
+            default: {
+                uint64_t raw = _struct_rd_uint(src, op->nbytes, f->big_endian);
+                int is_signed = (op->code == 'b' || op->code == 'h' ||
+                                 op->code == 'i' || op->code == 'l' || op->code == 'q');
+                int64_t v;
+                if (is_signed && op->nbytes < 8 &&
+                    (raw & ((uint64_t)1 << (op->nbytes * 8 - 1))))
+                    v = (int64_t)(raw | (~(uint64_t)0 << (op->nbytes * 8)));
+                else
+                    v = (int64_t)raw;
+                mojo_list_append_int(out, v);
+                break;
+            }
+        }
+    }
+    mojo_mark_as_tuple(out);
+    return out;
+}
+
+int64_t   mojo_struct_calcsize(const char *fmt)                 { return mojo_struct_compile(fmt)->size; }
+MojoBytes *mojo_struct_pack_list(const char *fmt, MojoList *v)  { return mojo_struct_pack_h(mojo_struct_compile(fmt), v); }
+MojoList  *mojo_struct_unpack(const char *fmt, MojoBytes *buf)  { return _struct_unpack_at(mojo_struct_compile(fmt), buf, 0); }
+MojoList  *mojo_struct_unpack_from(const char *fmt, MojoBytes *buf, int64_t off)
+                                                               { return _struct_unpack_at(mojo_struct_compile(fmt), buf, off); }
+
+MojoStructFmt *mojo_struct_new(const char *fmt)                 { return mojo_struct_compile(fmt); }
+int64_t   mojo_struct_size(MojoStructFmt *f)                    { return f ? f->size : 0; }
+char     *mojo_struct_format(MojoStructFmt *f)                  { return (f && f->format) ? f->format : (char *)""; }
+MojoList  *mojo_struct_unpack_h(MojoStructFmt *f, MojoBytes *buf)   { return _struct_unpack_at(f, buf, 0); }
+MojoList  *mojo_struct_unpack_from_h(MojoStructFmt *f, MojoBytes *buf, int64_t off)
+                                                               { return _struct_unpack_at(f, buf, off); }
+
+void mojo_struct_pack_into_h(MojoStructFmt *f, MojoBytes *buf, int64_t offset, MojoList *vals)
+{
+    int64_t buflen = buf ? buf->len : 0;
+    if (!buf || offset < 0 || offset + f->size > buflen) {
+        mojo_struct_raise_error("pack_into requires a buffer of sufficient size");
+        return;
+    }
+    MojoBytes *packed = mojo_struct_pack_h(f, vals);
+    memcpy(buf->data + offset, packed->data, (size_t)f->size);
+}
+
+void mojo_struct_pack_into(const char *fmt, MojoBytes *buf, int64_t offset, MojoList *vals)
+{
+    mojo_struct_pack_into_h(mojo_struct_compile(fmt), buf, offset, vals);
+}
+
 /* A single character (raw `char`, e.g. from string indexing) is a distinct
  * representation from a 1-character `char *` string — reinterpreting its
  * numeric byte value as a pointer (the boxed-int64_t-as-pointer convention

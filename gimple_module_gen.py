@@ -2080,8 +2080,14 @@ def gen_module_impl(self, stmts):
                             if field.name in _base_ft:
                                 _inherited_ft = _base_ft[field.name]
                                 break
+                        # A recognisable value-typed default (e.g.
+                        # `var FIELD_STRUCT = struct.Struct('<HH')`) — take
+                        # its ctype rather than the `Struct *`-self fallback.
+                        _val_ct = _class_attr_ctype(getattr(field, 'value', None))
                         self.struct_field_types[s.name][field.name] = (
-                            _inherited_ft if _inherited_ft is not None else s.name + ' *')
+                            _inherited_ft if _inherited_ft is not None
+                            else _val_ct if _val_ct is not None
+                            else s.name + ' *')
             self._struct_generator_method_names.setdefault(s.name, set()).update(
                 m.name for m in s.methods if getattr(m, 'is_generator', False))
             self._class_attrs[s.name] = {}
@@ -2354,8 +2360,15 @@ def gen_module_impl(self, stmts):
                                     or (isinstance(_cfn_base, MemberExpr)
                                         and _cfn_base.member in ('Event', 'Future',
                                                                  'create_future')))
+                                _is_struct_Struct = (
+                                    isinstance(_cfn_base, MemberExpr)
+                                    and isinstance(_cfn_base.obj, IdentExpr)
+                                    and _cfn_base.obj.name == 'struct'
+                                    and _cfn_base.member == 'Struct')
                                 if _is_deque:
                                     ft = 'MojoList *'
+                                elif _is_struct_Struct:
+                                    ft = 'MojoStructFmt *'
                                 elif _is_evt_fut:
                                     # asyncio Event/Future field -> A3 runtime
                                     # int64_t handle (gap 2). The .set()/.wait()/
@@ -7070,6 +7083,13 @@ def gen_module_impl(self, stmts):
                                 class_attr_inits.append(f"  {mangled} = mojo_list_new();")
                             else:
                                 class_attr_inits.extend(inits)
+                        elif ctype == 'MojoStructFmt *':
+                            _sfmt = (v.args[0].value
+                                     if (getattr(v, 'args', None)
+                                         and isinstance(v.args[0], StringLiteral))
+                                     else '')
+                            class_attr_inits.append(
+                                f'  {mangled} = mojo_struct_new("{_c_escape(_sfmt)}");')
                         elif isinstance(v, StringLiteral):
                             ctype = 'char *'
                             class_attr_inits.append(f'  {mangled} = "{_c_escape(v.value)}";')

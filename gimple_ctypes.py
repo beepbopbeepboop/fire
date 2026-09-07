@@ -372,6 +372,18 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_memoryview_hex':        'char *',
     'mojo_memoryview_cast':       'MojoMemoryView *',
     'mojo_memoryview_repr':       'char *',
+    # struct module (binary pack/unpack)
+    'mojo_struct_compile':        'MojoStructFmt *',
+    'mojo_struct_new':            'MojoStructFmt *',
+    'mojo_struct_calcsize':       'int64_t',
+    'mojo_struct_size':           'int64_t',
+    'mojo_struct_format':         'char *',
+    'mojo_struct_pack_list':      'MojoBytes *',
+    'mojo_struct_pack_h':         'MojoBytes *',
+    'mojo_struct_unpack':         'MojoList *',
+    'mojo_struct_unpack_from':    'MojoList *',
+    'mojo_struct_unpack_h':       'MojoList *',
+    'mojo_struct_unpack_from_h':  'MojoList *',
     # C-string utilities used by the REPL and string methods
     'input':          'char *',
     'string_lower':   'char *',
@@ -457,6 +469,12 @@ def _class_attr_ctype(v) -> str | None:
             return 'MojoDict *'
         if cn in ('list', 'DynamicVector', 'mojo_list_new'):
             return 'MojoList *'
+    # `FIELD_STRUCT = struct.Struct('<HH')` — a compiled struct format
+    # (see bugs/hard/CODEGEN_struct_module.md).
+    if (isinstance(v, CallExpr) and isinstance(v.func, MemberExpr)
+            and isinstance(v.func.obj, IdentExpr)
+            and v.func.obj.name == 'struct' and v.func.member == 'Struct'):
+        return 'MojoStructFmt *'
     return None
 
 

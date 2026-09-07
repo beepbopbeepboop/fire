@@ -784,6 +784,91 @@ def main():
     print(len(r))
 """, "1\n13\n")
 
+    # ── struct module (binary pack/unpack) ──────────────────────────────
+    # bugs/hard/CODEGEN_struct_module.md — Stage 1 (module-level fns).
+    test_gimple_stdout("gimple_struct_calcsize", """\
+fn main():
+    print(struct.calcsize('<HH'))
+    print(struct.calcsize('>i'))
+    print(struct.calcsize('4s2h'))
+    print(struct.calcsize('<10s'))
+""", "4\n4\n8\n10\n")
+
+    test_gimple_stdout("gimple_struct_pack_unpack_roundtrip", """\
+fn main():
+    var a = struct.pack('<HH', 1, 2)
+    print(len(a), a[0], a[1], a[2], a[3])
+    var ta = struct.unpack('<HH', a)
+    print(ta[0], ta[1])
+    var b = struct.pack('>i', 258)
+    print(b[0], b[1], b[2], b[3])
+    var tb = struct.unpack('>i', b)
+    print(tb[0])
+    var c = struct.pack('<q', -1)
+    var tc = struct.unpack('<q', c)
+    print(tc[0])
+    var d = struct.pack('4s', b'ab')
+    print(len(d), d[0], d[1], d[2])
+    var td = struct.unpack('4s', d)
+    print(1 if td[0] == b'ab\\x00\\x00' else 0)
+""", "4 1 0 2 0\n1 2\n0 0 1 2\n258\n-1\n4 97 98 0\n1\n")
+
+    test_gimple_stdout("gimple_struct_float_formats", """\
+fn main():
+    var p = struct.pack('<f', 1.5)
+    var t = struct.unpack('<f', p)
+    print(t[0])
+    var p2 = struct.pack('>d', 2.25)
+    var t2 = struct.unpack('>d', p2)
+    print(t2[0])
+""", "1.5\n2.25\n")
+
+    test_gimple_stdout("gimple_struct_unpack_from_and_error", """\
+fn main():
+    var u = struct.unpack_from('<H', b'\\xff\\x01\\x00\\x02', 2)
+    print(u[0])
+    try:
+        var bad = struct.unpack('<HH', b'\\x01\\x00')
+        print('no-error')
+    except struct.error:
+        print('caught')
+""", "512\ncaught\n")
+
+    # Stage 2 — struct.Struct instances (compiled-once format).
+    test_gimple_stdout("gimple_struct_Struct_instance", """\
+fn main():
+    var s = struct.Struct('<HH')
+    print(s.size)
+    print(s.format)
+    var t = s.unpack(b'\\x0a\\x00\\x14\\x00')
+    print(t[0], t[1])
+    var p = s.pack(3, 4)
+    print(p[0], p[2])
+    var u = s.unpack_from(b'\\x00\\x0a\\x00\\x14\\x00', 1)
+    print(u[0], u[1])
+""", "4\n<HH\n10 20\n3 4\n10 20\n")
+
+    test_gimple_stdout("gimple_struct_Struct_class_attr", """\
+struct CentralDir:
+    FIELD_STRUCT = struct.Struct('<HH')
+
+    fn read(self, data: bytes):
+        var t = self.FIELD_STRUCT.unpack(data)
+        print(t[0], t[1], self.FIELD_STRUCT.size)
+
+fn main():
+    var c = CentralDir()
+    c.read(b'\\x01\\x00\\x02\\x00')
+""", "1 2 4\n")
+
+    # Stage 3 — struct.pack_into into a bytearray.
+    test_gimple_stdout("gimple_struct_pack_into", """\
+fn main():
+    var buf = bytearray(8)
+    struct.pack_into('<HH', buf, 2, 5, 6)
+    print(buf[0], buf[2], buf[4])
+""", "0 5 6\n")
+
     # Generator expression bound to a local, then consumed exactly once by
     # a forward iteration -> materialised as a list (see
     # _seed_genexp_list_narrowing). bugs/COMPILE_FAIL_zipfile___init__.md

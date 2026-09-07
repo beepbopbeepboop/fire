@@ -1451,6 +1451,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         ov = null_tmp
 
 
+    # struct.Struct instance attributes (`s.size`, `s.format`).
+    if ot == 'MojoStructFmt *' and node.member in ('size', 'format'):
+        fp = gen._ensure_local('MojoStructFmt *', ov)
+        if node.member == 'size':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_struct_size', [('MojoStructFmt *', fp)])
+        return 'char *', gen._call_expr('char *', 'mojo_struct_format', [('MojoStructFmt *', fp)])
+
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':

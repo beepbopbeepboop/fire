@@ -5515,6 +5515,30 @@ fn main():
     print(mv2.cast('B')[0])
 """)
 
+    # struct module (binary pack/unpack) — compile checks
+    test("struct_module_functions", """\
+fn main():
+    print(struct.calcsize('<HH'))
+    var p = struct.pack('<HH', 1, 2)
+    print(len(p))
+    var t = struct.unpack('<HH', p)
+    print(t[0], t[1])
+    var u = struct.unpack_from('<H', b'\\xaa\\xbb\\xcc', 1)
+    print(u[0])
+    var b = struct.pack('>i4s', 258, b'abcd')
+""")
+
+    test("struct_module_float_and_error", """\
+fn main():
+    var p = struct.pack('<fd', 1.5, 2.5)
+    var t = struct.unpack('<fd', p)
+    print(t[0], t[1])
+    try:
+        var bad = struct.unpack('<HH', b'\\x00')
+    except struct.error:
+        print('caught')
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

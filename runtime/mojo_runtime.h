@@ -356,6 +356,41 @@ char           *mojo_memoryview_hex(MojoMemoryView *m);
 MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt);
 char           *mojo_memoryview_repr(MojoMemoryView *m);
 
+/* ── struct module (binary pack / unpack) ───────────────────────────────
+ * Format mini-language, a subset of CPython's `struct`:
+ *   byte-order prefix  < > = ! @   (@ = native size+align, default)
+ *   codes  x b B h H i I l L q Q f d s ? c  with optional leading count
+ * A compiled format is an opaque `MojoStructFmt *`. Packed values ARE
+ * `MojoBytes` (see CODEGEN_bytes_value_type). GIMPLE cannot pass a mixed
+ * int64/double vararg list, so codegen lowers `struct.pack(fmt, a, b, …)`
+ * to a `MojoList *` of values (ints via mojo_list_append_int, floats via
+ * mojo_list_append_double, `s`/`c` fields as a MojoBytes* pointer stored
+ * in an int slot) and calls mojo_struct_pack_list. unpack returns a
+ * tuple-marked MojoList (`s`/`c` elements are MojoBytes* pointers in int
+ * slots; float codes are doubles; everything else int64).
+ * `struct.error` is raised via mojo_struct_raise_error with the tag
+ * MOJO_STRUCT_ERROR_TAG (== crc32("struct.error") & 0x7fffffff, matching
+ * gimple_gen_infra._exc_type_id). */
+#define MOJO_STRUCT_ERROR_TAG 1315445615
+
+typedef struct MojoStructFmt MojoStructFmt;
+
+void            mojo_struct_raise_error(const char *msg);
+MojoStructFmt  *mojo_struct_compile(const char *fmt);   /* raises struct.error on a bad format */
+int64_t         mojo_struct_calcsize(const char *fmt);
+MojoBytes      *mojo_struct_pack_list(const char *fmt, MojoList *values);
+MojoList       *mojo_struct_unpack(const char *fmt, MojoBytes *buffer);
+MojoList       *mojo_struct_unpack_from(const char *fmt, MojoBytes *buffer, int64_t offset);
+void            mojo_struct_pack_into(const char *fmt, MojoBytes *buffer, int64_t offset, MojoList *values);
+/* struct.Struct instance API (the handle is the compiled format itself) */
+MojoStructFmt  *mojo_struct_new(const char *fmt);
+int64_t         mojo_struct_size(MojoStructFmt *f);
+char           *mojo_struct_format(MojoStructFmt *f);
+MojoBytes      *mojo_struct_pack_h(MojoStructFmt *f, MojoList *values);
+MojoList       *mojo_struct_unpack_h(MojoStructFmt *f, MojoBytes *buffer);
+MojoList       *mojo_struct_unpack_from_h(MojoStructFmt *f, MojoBytes *buffer, int64_t offset);
+void            mojo_struct_pack_into_h(MojoStructFmt *f, MojoBytes *buffer, int64_t offset, MojoList *values);
+
 /* ── subprocess.run ──────────────────────────────────────────────────────
  * Mirrors Python's subprocess.CompletedProcess just enough for this
  * compiler's own build tooling (mojo.py, version.py, compile_stdlib.py, …):
