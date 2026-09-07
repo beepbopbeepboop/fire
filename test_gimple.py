@@ -5587,6 +5587,40 @@ fn main():
         print('caught')
 """)
 
+    # --- os.path.splitdrive / splitroot (POSIX) + reversed() ---
+    # See bugs/COMPILE_FAIL_zipfile___init__.md. Both os.path funcs were
+    # stubbed (`int.splitdrive() stubbed`); reversed() had no lowering at
+    # all so `for x in reversed(...)` over the resulting `void *` was
+    # silently dropped (zipfile/__init__.py:1612).
+    test("os_path_splitdrive_splitroot", """\
+import os
+
+fn main():
+    var p: String = "/a/b/c"
+    var d = os.path.splitdrive(p)
+    print(d[0], d[1])
+    var r = os.path.splitroot(p)
+    print(r[0], r[1], r[2])
+    var r2 = os.path.splitroot("//x/y")
+    print(r2[1], r2[2])
+    var n = os.path.normpath(os.path.splitdrive(p)[1])
+    print(n)
+""")
+
+    test("reversed_list_str_and_sorted_chain", """\
+fn main():
+    var xs = [3, 1, 2]
+    var acc: Int = 0
+    for v in reversed(xs):
+        acc = acc * 10 + v
+    print(acc)
+    for v in reversed(sorted(xs)):
+        acc = acc + v
+    print(acc)
+    for c in reversed("abc"):
+        print(c)
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

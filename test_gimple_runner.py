@@ -988,6 +988,45 @@ fn main():
     print(sum(x for x in g))
 """, "12\n12\n")
 
+    # os.path.splitdrive / splitroot — POSIX (see
+    # bugs/COMPILE_FAIL_zipfile___init__.md). splitdrive is always
+    # ('', p); splitroot follows posixpath (1/>=3 leading slashes -> '/',
+    # exactly 2 -> '//').
+    test_gimple_stdout("gimple_os_path_splitdrive_splitroot", """\
+import os
+
+fn main():
+    print(os.path.splitdrive("/usr/bin")[0] + "|" + os.path.splitdrive("/usr/bin")[1])
+    print(os.path.splitdrive("rel/x")[1])
+    var r = os.path.splitroot("/a/b")
+    print(r[0] + "|" + r[1] + "|" + r[2])
+    var r2 = os.path.splitroot("//a/b")
+    print(r2[1] + "|" + r2[2])
+    var r3 = os.path.splitroot("///a/b")
+    print(r3[1] + "|" + r3[2])
+    var r4 = os.path.splitroot("rel/x")
+    print(r4[0] + "|" + r4[1] + "|" + r4[2])
+""", "|/usr/bin\nrel/x\n|/|a/b\n//|a/b\n/|//a/b\n||rel/x\n")
+
+    # reversed() over a list / str, and the reversed(sorted(...)) chain
+    # that was silently dropped in zipfile/__init__.py:1612.
+    test_gimple_stdout("gimple_reversed_list_str_sorted", """\
+fn main():
+    var xs = [3, 1, 2, 5, 4]
+    var acc: Int = 0
+    for v in reversed(xs):
+        acc = acc * 10 + v
+    print(acc)
+    var s2: Int = 0
+    for v in reversed(sorted(xs)):
+        s2 = s2 * 10 + v
+    print(s2)
+    var out: String = ""
+    for c in reversed("hello"):
+        out = out + c
+    print(out)
+""", "45213\n54321\nolleh\n")
+
 
 def main():
     gcc = find_gcc()
