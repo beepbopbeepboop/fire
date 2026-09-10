@@ -25,7 +25,7 @@ from mojo_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str, _as_dict, _pair_key,
+    Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node,
 )
 import ast_rewriter
 import regex_compile
@@ -1230,14 +1230,19 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     _inf_cache: dict = {}
 
     _out: dict = {}
-    for _m in gg_cls.methods:
-        if _m.name == '__init__':
+    _gg_methods = _as_structdef_node(gg_cls).methods
+    for _mi in range(len(_gg_methods)):
+        _m = _as_funcdef_node(_gg_methods[_mi])
+        if _as_str(_m.name) == '__init__':
             continue
         _tgt = _sgfs_fn_delegate_target(_m, _idx)
         _rc = _sgfs_ret_ct(gen, _m, _tgt)
         _pcs = []
         _has_star = False
-        for _i, (_pn, _pt) in enumerate(_m.params):
+        _mparams = _m.params
+        for _i in range(len(_mparams)):
+            _pn = _as_str(_mparams[_i][0])
+            _pt = _mparams[_i][1]
             if _pn.startswith('*'):
                 _has_star = True
                 break

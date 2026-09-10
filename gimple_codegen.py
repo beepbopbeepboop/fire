@@ -1813,6 +1813,7 @@ class GimpleGen:
         self._selfhost_gimplegen_sigs = None
         self._selfhost_gimplegen_dict_vts: dict = {}
         self._selfhost_gimplegen_registered = False
+        self._selfhost_src_dir = ""
         # Imported struct local name -> its home module's C-symbol qualifier
         # (e.g. 'std_utils__ansi'), so a call site on that struct computes the
         # SAME module-qualified method symbol its home module actually
@@ -3810,7 +3811,7 @@ def _selfhost_register_gimplegen(gen):
     ordinary struct-registration passes build everything, and applies the
     extracted-helper field union + frozen signature lock. The stashed
     attributes are shared into every nested temp_gen (gimple_gen_resolve.py)."""
-    _cls = _selfhost_load_gimplegen_class(getattr(gen, '_selfhost_src_dir', None))
+    _cls = _selfhost_load_gimplegen_class(gen._selfhost_src_dir or None)
     if _cls is None:
         return
     gen._selfhost_gimplegen_stmts = _cls
