@@ -253,6 +253,15 @@ def _reset_func(gen, body: list = None, params: list = None):
     # temp names (_tN) recycle across functions. See
     # _lower_builtin_method_value.
     gen._builtin_method_values: dict[str, tuple] = {}
+    # Local variable names that have been assigned a `MojoBoundMethod *`
+    # value at least once but whose DECLARED C type is not
+    # `MojoBoundMethod *` (the var-type-inference join with another
+    # branch's plain function-pointer / lambda value collapsed it to
+    # `void *`/`int64_t`). A call through such a name must dispatch
+    # dynamically (mojo_maybe_bound_call_N) — a bound method needs its
+    # `self` re-supplied, a plain fnptr must NOT. Reset per function:
+    # local names recycle. See _lower_maybe_bound_call.
+    gen._bm_tainted_locals: set = set()
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -1466,6 +1475,16 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # misidentified by adding it here.
     DICT_ONLY_METHODS = {'items', 'keys', 'values', 'setdefault', 'get'}
 
+    # Methods that exist ONLY on Python `bytes` (never on str/list/dict/set):
+    # `.decode()` turns bytes into str, `.hex()` renders bytes as an ASCII
+    # hex string. Neither name is shared with any str/list method this
+    # analysis already keys on, so `param.decode(...)` / `param.hex()` is
+    # unambiguous "param is bytes" evidence — the only body-usage signal
+    # conservative enough to act on (indexing / `in` / `+` / iteration all
+    # look identical to str/list and must NOT flip a param to bytes). See
+    # bugs/hard/CODEGEN_bytes_value_type.md Stage 2b.
+    BYTES_ONLY_METHODS = {'decode', 'hex'}
+
     # Method names shared across the builtin containers. When one of these
     # is CALLED on the param, it is method-dispatch evidence, NOT evidence
     # of a struct whose FIELD happens to share the name — excluded from the
@@ -1742,6 +1761,14 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     if (_efunc_obj_name == param_name
                             and _efunc.member in STRING_ONLY_METHODS):
                         _F['is_string_method'] = True
+                    # param.<bytes-only-method>(...) — unambiguous "param is
+                    # bytes" (see BYTES_ONLY_METHODS).
+                    if ((_efunc_obj_name == param_name
+                            or (_meth_recv is not _efunc_obj
+                                and isinstance(_meth_recv, gimple_ctypes.IdentExpr)
+                                and _as_ident_node(_meth_recv).name == param_name))
+                            and _efunc.member in BYTES_ONLY_METHODS):
+                        _F['is_bytes_method'] = True
                     # <slice/subscript-of-param>.<str-only-method>(...) —
                     # the indirect twin just above.
                     if (_meth_recv is not _efunc_obj
@@ -1783,7 +1810,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             and _as_ident_node(_as_member_node(_efunc_obj).obj).name == 'os'
                             and _as_member_node(_efunc_obj).member == 'path'
                             and _efunc.member in (
-                                'basename', 'splitext', 'expanduser',
+                                'basename', 'splitext', 'split', 'splitdrive',
+                                'splitroot', 'expanduser',
                                 'abspath', 'dirname', 'exists', 'join')):
                         for i, arg in enumerate(expr.args):
                             if (isinstance(arg, gimple_ctypes.IdentExpr)
@@ -1928,10 +1956,11 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         is_char_compared = bool(_F.get('is_char_compared'))
         is_str_key_subscripted = bool(_F.get('is_str_key_subscripted'))
         is_nondict_key_subscripted = bool(_F.get('is_nondict_key_subscripted'))
+        is_bytes_method = bool(_F.get('is_bytes_method'))
         return (accessed_fields, function_calls, is_subscripted, is_string_method,
                 is_iterated, is_char_compared, is_str_key_subscripted,
                 is_nondict_key_subscripted, called_methods, is_dict_method,
-                aug_member_targets)
+                aug_member_targets, is_bytes_method)
 
     # For each parameter without a type annotation, infer from usage
     for pname, ptype in func.params:
@@ -1966,18 +1995,18 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
                  is_nondict_key_subscripted, called_methods, is_dict_method,
-                 aug_member_targets) = _pu_cached
+                 aug_member_targets, is_bytes_method) = _pu_cached
             else:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
                  is_nondict_key_subscripted, called_methods, is_dict_method,
-                 aug_member_targets
+                 aug_member_targets, is_bytes_method
                  ) = analyze_param_usage(func.body, pname)
                 gen._param_usage_scan_cache[_pu_key] = (
                     fields_accessed, function_calls, is_subscripted, is_string_method,
                     is_iterated, is_char_compared, is_str_key_subscripted,
                     is_nondict_key_subscripted, called_methods, is_dict_method,
-                    aug_member_targets)
+                    aug_member_targets, is_bytes_method)
             # The SET slots round-trip through the return tuple as int64_t on
             # the self-hosted path (packed/unpacked with the int accessor) —
             # re-view them as `MojoSet *` so the struct-evidence set
@@ -2020,6 +2049,15 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     break
             if is_polymorphic:
                 continue  # leave as int64_t (default for unannotated)
+
+            # `param.decode(...)` / `param.hex()` anywhere in the body is
+            # unambiguous "param is bytes" — no str/list/dict method shares
+            # those names. Wins over every other signal (subscript / `in` /
+            # `+` / iteration all look list-or-str-shaped and must not, on
+            # their own, reach here). See BYTES_ONLY_METHODS.
+            if is_bytes_method:
+                inferred[pname] = 'MojoBytes *'
+                continue
 
             # If parameter is subscripted OR iterated (for x in param:), it's
             # indexable (list/dict/etc.) — UNLESS it's also called with a
@@ -2786,6 +2824,8 @@ def _list_repr_fn(gen, rav: str) -> str:
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
         return 'mojo_repr_list_ints'
+    if et == 'MojoBytes *':
+        return 'mojo_repr_list_bytes'
     return '_mojo_repr_list'
 
 
@@ -2802,6 +2842,11 @@ def _stringify_value(gen, et: str, ev: str) -> str:
     # %s of such a value emitted `static char * <address> = "<address>"`.
     if et in ('int', 'int64_t') and gen._get_actual_type(et, ev) == 'char *':
         return gen._new_val('char *', f'(char *){ev}')
+    if et == 'MojoBytes *':
+        # Python str(b) / f"{b}" both give the b'...' repr text (no decode).
+        return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', ev)])
+    if et == 'MojoMemoryView *':
+        return gen._call_expr('char *', 'mojo_memoryview_repr', [('MojoMemoryView *', ev)])
     if et == '_Bool':
         # Python str(True)/str(False) → "True"/"False", not the "1"/"0"
         # the int path below would produce.
@@ -3687,6 +3732,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoDict *':
             rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', aval)])
+            gen._emit(f'  {print_fn} ({rv});')
+        elif atype == 'MojoBytes *':
+            rv = gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', aval)])
             gen._emit(f'  {print_fn} ({rv});')
         else:
             t = gen._new_temp('char *')

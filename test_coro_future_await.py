@@ -303,6 +303,367 @@ def main():
           out == "42\n", detail=repr(out))
 
 
+def test_top_level_async_struct_param():
+    """bugs/COMPILE_FAIL_asyncio_queues.md gap 2: a struct-typed PARAM on a
+    top-level (non-method) `async def` keeps its pointer type -- it is
+    unpacked from its `__mojo_gen_arg` slot with a `(<T> *)` cast and
+    passed to the coroutine body as a real `<T> *` C param, so awaiting a
+    Future field / calling a struct method inside the coroutine works.
+    Real producer/consumer: two top-level `create_task`ed coroutines pass
+    a queue-shaped struct between them; the producer wakes the parked
+    consumer via `.set_result`."""
+    src = """\
+import asyncio
+from collections import deque
+
+struct Q:
+    fn __init__(out self):
+        self._items = deque()
+        self._getters = deque()
+    fn empty(self) -> Bool:
+        return len(self._items) == 0
+    fn put_nowait(mut self, item: Int):
+        self._items.append(item)
+        while len(self._getters) > 0:
+            var g = self._getters.popleft()
+            g.set_result(0)
+
+async def consumer(q: Q) -> Int:
+    while q.empty():
+        var getter = create_future()
+        q._getters.append(getter)
+        await getter
+    return q._items.popleft()
+
+async def producer(q: Q) -> Int:
+    q.put_nowait(41)
+    return 0
+
+async def main_co() -> Int:
+    var q = Q()
+    var ct = create_task(consumer(q))
+    var pt = create_task(producer(q))
+    var pr = await pt^
+    var v = await ct^
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("top-level async def with a struct param (producer/consumer queue)",
+          out == "42\n", detail=repr(out))
+
+
+def test_top_level_async_struct_param_future_field():
+    """Minimal shape: `async def consumer(s: S)` awaiting a Future-handle
+    field of the passed struct (`await s._f`), resolved by a sync setter."""
+    src = """\
+import asyncio
+
+struct S:
+    var _f: Int
+    fn __init__(out self):
+        self._f = create_future()
+    fn resolve(self):
+        self._f.set_result(7)
+
+async def consumer(s: S) -> Int:
+    var r = await s._f
+    return 35
+
+async def main_co() -> Int:
+    var s = S()
+    s.resolve()
+    var v = await consumer(s)
+    return v + 7
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("top-level async def struct param awaiting a Future field",
+          out == "42\n", detail=repr(out))
+
+
+_STD_FUT = """\
+class Fut:
+    def __init__(self):
+        self._loop = 0
+        self._state = 0
+        self._result = 0
+    def done(self):
+        return self._state != 0
+    def result(self):
+        return self._result
+    def set_result(self, v):
+        self._result = v
+        self._state = 1
+    def __await__(self):
+        if not self.done():
+            self._asyncio_future_blocking = True
+            yield self
+        if not self.done():
+            raise RuntimeError("await wasn't used with future")
+        return self.result()
+"""
+
+
+def test_native_future_class_bridge_sync_resolve():
+    """A user class whose `__await__` is the standard asyncio
+    `if not self.done(): ... yield self` / `return self.result()` generator
+    is bridged onto the native MojoFuture handle: `await <instance>` parks
+    on the native waiter list, a sync `.set_result()` resolves it.
+    (bugs/COMPILE_FAIL_asyncio_futures.md)"""
+    src = "import asyncio\n\n" + _STD_FUT + """
+async def consumer(f: Fut) -> Int:
+    var v = await f
+    return v + 1
+
+async def main_co() -> Int:
+    var f = Fut()
+    f.set_result(41)
+    var r = await consumer(f)
+    return r
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("standard __await__ Future subclass + sync set_result -> await",
+          out == "42\n", detail=repr(out))
+
+
+def test_native_future_class_bridge_cross_task_wakeup():
+    """The same standard-shape Future subclass, resolved by a SIBLING task
+    while the consumer is parked on the native waiter list."""
+    src = "import asyncio\n\n" + _STD_FUT + """
+async def consumer(f: Fut) -> Int:
+    var v = await f
+    return v + 1
+
+async def producer(f: Fut) -> Int:
+    f.set_result(41)
+    return 0
+
+async def main_co() -> Int:
+    var f = Fut()
+    var c = create_task(consumer(f))
+    var p = create_task(producer(f))
+    var rc = await c
+    var rp = await p
+    return rc
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("standard __await__ Future subclass woken by a sibling task",
+          out == "42\n", detail=repr(out))
+
+
+def test_future_set_exception_await_raises():
+    """(1) exception slot: `fut.set_exception(Exc(...))` then `await fut`
+    re-raises on the awaiting coroutine's own stack -- caught by an
+    ordinary `except` in the body. `fut.exception()` is truthy once set."""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    try:
+        var v = await fut
+        return v + 1
+    except Exception:
+        return 99
+
+async def main_co() -> Int:
+    var fut = create_future()
+    fut.set_exception(ValueError("boom"))
+    var got_exc = 0
+    if fut.exception() != 0:
+        got_exc = 1
+    var r = await consumer(fut)
+    return r + got_exc
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("set_exception + await re-raises (caught) and exception() is truthy",
+          out == "100\n", detail=repr(out))
+
+
+def test_future_cancel_state():
+    """(2) cancelled state: `fut.cancel()` resolves the future and returns
+    1; `fut.cancelled()` then reports True; `set_running_or_notify_cancel()`
+    reports False on a cancelled future, True otherwise."""
+    src = """\
+import asyncio
+
+async def main_co() -> Int:
+    var a = create_future()
+    var ok_before = 0
+    if a.set_running_or_notify_cancel():
+        ok_before = 1
+    var did = a.cancel()
+    var is_cancelled = 0
+    if a.cancelled():
+        is_cancelled = 1
+    var ok_after = 0
+    if a.set_running_or_notify_cancel():
+        ok_after = 1
+    return ok_before * 1000 + did * 100 + is_cancelled * 10 + ok_after
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("cancel()/cancelled()/set_running_or_notify_cancel()",
+          out == "1110\n", detail=repr(out))
+
+
+def test_future_cancel_await_raises():
+    """(2) awaiting a cancelled future raises (CancelledError) in the
+    awaiting coroutine."""
+    src = """\
+import asyncio
+
+async def consumer(fut: Int) -> Int:
+    try:
+        var v = await fut
+        return v
+    except Exception:
+        return 7
+
+async def main_co() -> Int:
+    var fut = create_future()
+    var _ = fut.cancel()
+    return await consumer(fut)
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("await <cancelled future> raises in the awaiter",
+          out == "7\n", detail=repr(out))
+
+
+def test_future_done_callback_fires():
+    """(3) done-callback list: a bare top-level `def cb(fut)` registered via
+    add_done_callback fires when the future resolves via set_result.
+    remove_done_callback drops it before resolution."""
+    src = """\
+import asyncio
+
+def cb_a(fut: Int):
+    print("cb_a")
+
+def cb_b(fut: Int):
+    print("cb_b")
+
+async def main_co() -> Int:
+    var f = create_future()
+    f.add_done_callback(cb_a)
+    f.add_done_callback(cb_b)
+    var removed = f.remove_done_callback(cb_b)
+    f.set_result(5)
+    return removed
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("add_done_callback fires on resolve; remove_done_callback drops one",
+          out == "cb_a\n1\n", detail=repr(out))
+
+
+def test_future_done_callback_on_set_exception():
+    """(3) callbacks also fire when the future resolves via set_exception."""
+    src = """\
+import asyncio
+
+def cb(fut: Int):
+    print("resolved")
+
+async def worker(fut: Int) -> Int:
+    try:
+        return await fut
+    except Exception:
+        return 0
+
+async def main_co() -> Int:
+    var f = create_future()
+    f.add_done_callback(cb)
+    f.set_exception(RuntimeError("x"))
+    return await worker(f)
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("done-callback fires on set_exception resolution",
+          out == "resolved\n0\n", detail=repr(out))
+
+
+def test_future_done_callback_bound_method():
+    """(3) a bound method `self.on_done` registered via add_done_callback
+    (asyncio's own `fut.add_done_callback(self._done_callback)` shape) must
+    be invoked as `fn(self, fut)` (tag 1 -> mojo_bound_method_call_1), not
+    as a bare function pointer."""
+    src = """\
+import asyncio
+
+struct Watcher:
+    var hits: Int
+
+    fn __init__(out self):
+        self.hits = 0
+
+    fn on_done(self, fut: Int):
+        print("bound-method callback")
+
+    async def run(self, f: Int) -> Int:
+        f.add_done_callback(self.on_done)
+        f.set_result(9)
+        return 0
+
+async def main_co() -> Int:
+    var w = Watcher()
+    var f = create_future()
+    return await w.run(f)
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("bound-method done-callback invoked with self",
+          out == "bound-method callback\n0\n", detail=repr(out))
+
+
+def test_future_done_callback_closure():
+    """(3) a capturing closure registered via add_done_callback lowers to a
+    MojoBoundMethod* (env as self) and must fire through the same tag-1
+    path."""
+    src = """\
+import asyncio
+
+async def main_co() -> Int:
+    var tag = 42
+    fn cb(fut: Int):
+        print("closure saw", tag)
+    var f = create_future()
+    f.add_done_callback(cb)
+    f.set_result(1)
+    return 0
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("capturing-closure done-callback fires correctly",
+          out == "closure saw 42\n0\n", detail=repr(out))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

@@ -1448,10 +1448,22 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # keep their existing precedence. param_defaults is keyed by the
     # bare declared name (the parser stores no star prefixes there),
     # matching how dup_def_signature_key looks the same table up.
+    _pdflt = (getattr(node, 'param_defaults', None) or {}).get(pname.lstrip('*'))
     if (ptype is None and ctype == 'int64_t'
-            and isinstance((getattr(node, 'param_defaults', None) or {}).get(
-                pname.lstrip('*')), StringLiteral)):
-        ctype = 'char *'
+            and isinstance(_pdflt, StringLiteral)):
+        # A `b'...'` default makes the param a `bytes` param; a plain string
+        # default makes it a `str` (char *) param. bytes must NOT be
+        # conflated with str — b[i] is an int, not a 1-char string.
+        ctype = 'MojoBytes *' if getattr(_pdflt, 'is_bytes', False) else 'char *'
+    elif (ptype is None and ctype == 'char *'
+          and isinstance(_pdflt, StringLiteral) and getattr(_pdflt, 'is_bytes', False)):
+        # A `b'...'` default is unambiguous `bytes` evidence and must win
+        # over a weak usage-inferred `char *` — `len(b)` alone (the only
+        # body signal for many bytes params) resolves to str, which would
+        # then pass a real `MojoBytes *` argument into a `char *` slot and
+        # `strlen()` the struct (non-deterministic length). An explicit
+        # annotation still takes precedence (ptype is not None there).
+        ctype = 'MojoBytes *'
     # Compile-time string types (StaticString, StringLiteral, StringRef,
     # StringSlice) are REAL strings in this codegen — a NUL-terminated
     # `char *`. The general resolver boxes them as opaque int64_t handles
@@ -2494,6 +2506,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emit_mut_local_box_allocs()
 
     # Don't emit bb_2 label at function start - let statements flow directly
+    gen._genexp_narrow_names = set()
+    gen._genexp_list_locals = {}
+    gen._seed_genexp_list_narrowing(node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
 
@@ -3931,7 +3946,22 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         else:
             ret_type = gen._resolve_type(node.return_type)
     else:
+        # Seed inferred LOCAL var types so `return <local>` where the
+        # local holds a pointer value (e.g. a bytes accumulator built
+        # from a sliced self.<field> + `+=`) infers the real C return
+        # type instead of int64_t — otherwise the definition's declared
+        # return type disagrees with the body (which declares the local
+        # correctly from _inferred_var_types) and every caller treats
+        # the returned pointer as a scalar. COMPILE_FAIL_zipfile.
+        _saved_lv = dict(gen.var_types)
+        try:
+            for _lvn, _lvt in gen._infer_local_var_types(node).items():
+                if _lvt == 'MojoBytes *':
+                    gen.var_types.setdefault(_lvn, _lvt)
+        except Exception:
+            pass
         ret_type = gen._infer_return_type(node.body)
+        gen.var_types = _saved_lv
         if ret_type == 'void':
             ret_type = 'void'
 
@@ -4063,6 +4093,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._emit_mut_local_box_allocs()
 
     gen._emit_label("bb_2")
+    gen._genexp_narrow_names = set()
+    gen._genexp_list_locals = {}
+    gen._seed_genexp_list_narrowing(node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
 

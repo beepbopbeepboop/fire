@@ -87,12 +87,13 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
  * already uses. See bugs/CODEGEN_bound_method_as_value_not_resolved.md. */
 typedef struct { void *fn; void *self; } MojoBoundMethod;
 
-static inline MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
-    MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
-    bm->fn = fn;
-    bm->self = self;
-    return bm;
-}
+/* Real (non-inline) so the single bound-method registry lives in one TU
+ * (mojo_runtime.c) — mojo_is_bound_method below consults it to tell a
+ * `MojoBoundMethod *` value apart from a plain function pointer at a
+ * dynamically-dispatched call site (`if c: f = lambda: 1 else: f =
+ * self.m; f()`). */
+MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
+int mojo_is_bound_method(void *p);
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -107,6 +108,32 @@ static inline int64_t mojo_bound_method_call_3(MojoBoundMethod *bm, int64_t a, i
 }
 static inline int64_t mojo_bound_method_call_4(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c, int64_t d) {
     return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
+}
+
+/* Dynamic dispatch through a value that may be EITHER a MojoBoundMethod*
+ * or a plain function pointer — the callee identity isn't known
+ * statically (a local branch-joined from `lambda`/free-function and a
+ * `self.method` value). A registered bound method re-supplies its
+ * receiver via mojo_bound_method_call_N; anything else is a bare fnptr. */
+static inline int64_t mojo_maybe_bound_call_0(void *f) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_0((MojoBoundMethod *)f);
+    return mojo_fnptr_call_0(f);
+}
+static inline int64_t mojo_maybe_bound_call_1(void *f, int64_t a) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_1((MojoBoundMethod *)f, a);
+    return mojo_fnptr_call_1(f, a);
+}
+static inline int64_t mojo_maybe_bound_call_2(void *f, int64_t a, int64_t b) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_2((MojoBoundMethod *)f, a, b);
+    return mojo_fnptr_call_2(f, a, b);
+}
+static inline int64_t mojo_maybe_bound_call_3(void *f, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_3((MojoBoundMethod *)f, a, b, c);
+    return mojo_fnptr_call_3(f, a, b, c);
+}
+static inline int64_t mojo_maybe_bound_call_4(void *f, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_4((MojoBoundMethod *)f, a, b, c, d);
+    return mojo_fnptr_call_4(f, a, b, c, d);
 }
 
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
@@ -211,6 +238,10 @@ void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
 void     mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop);
+void     mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl);
+void     mojo_list_assign_step(MojoList *l, int has_start, int64_t start,
+                               int has_stop, int64_t stop, int64_t step,
+                               MojoList *repl);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
 
@@ -238,6 +269,7 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
+char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
  * slice - see mojo_cstr_region_eq's comment in mojo_runtime.c for why this
  * exists (a real, profiled hot path: mojo_compiler.py's own self-hosted
@@ -279,6 +311,115 @@ int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
+
+/* ── bytes ──────────────────────────────────────────────────────────────
+ * Immutable byte string.  Heap value passed as `MojoBytes *` across the C
+ * boundary, exactly like MojoStr/MojoList.  `data` is NOT
+ * NUL-significant — it may contain embedded 0 bytes; always use `len`.
+ * `data` is over-allocated by one trailing NUL purely so debug prints and
+ * accidental char* reads don't run off the end. */
+typedef struct {
+    uint8_t *data;
+    int64_t  len;
+} MojoBytes;
+
+MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` bytes */
+MojoBytes *mojo_bytes_empty(void);
+MojoBytes *mojo_bytes_zeros(int64_t n);
+MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
+MojoBytes *mojo_bytes_from_cstr(const char *s);   /* NUL-terminated copy */
+int64_t    mojo_bytes_len(MojoBytes *b);
+int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
+int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
+int        mojo_bytes_truthy(MojoBytes *b);
+char      *mojo_bytes_repr(MojoBytes *b);
+void       mojo_bytes_print(MojoBytes *b);
+MojoBytes *mojo_bytes_concat(MojoBytes *a, MojoBytes *b);
+MojoBytes *mojo_bytes_repeat(MojoBytes *b, int64_t n);
+MojoBytes *mojo_bytes_slice(MojoBytes *b, int64_t start, int64_t stop, int64_t step);
+int        mojo_bytes_contains(MojoBytes *hay, MojoBytes *needle);
+int64_t    mojo_bytes_find(MojoBytes *hay, MojoBytes *needle);
+int64_t    mojo_bytes_count(MojoBytes *hay, MojoBytes *needle);
+int        mojo_bytes_startswith(MojoBytes *b, MojoBytes *p);
+int        mojo_bytes_endswith(MojoBytes *b, MojoBytes *p);
+char      *mojo_bytes_decode(MojoBytes *b, char *encoding);
+char      *mojo_bytes_hex(MojoBytes *b);
+MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to);
+MojoBytes *mojo_bytes_strip(MojoBytes *b, MojoBytes *chars, int do_left, int do_right);
+MojoBytes *mojo_bytes_upper(MojoBytes *b);
+MojoBytes *mojo_bytes_lower(MojoBytes *b);
+MojoList  *mojo_bytes_split(MojoBytes *b, MojoBytes *sep);
+MojoList  *mojo_bytes_rsplit(MojoBytes *b, MojoBytes *sep);
+MojoList  *mojo_bytes_splitlines(MojoBytes *b);
+MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts);
+MojoBytes *mojo_bytes_copy(MojoBytes *src);   /* bytes(bytearray) — real copy */
+MojoBytes *mojo_bytes_reverse(MojoBytes *src);/* reversed(<bytes>) */
+
+/* ── bytearray (mutable; shares the MojoBytes representation) ────────────
+ * Every read op (len/index/slice/iter/in/eq/methods) is inherited from
+ * the bytes path since the C type is identical. These add mutation. */
+MojoBytes *mojo_bytearray_new(void);
+MojoBytes *mojo_bytearray_copy(MojoBytes *src);
+void       mojo_bytearray_setitem(MojoBytes *b, int64_t i, int64_t v);
+void       mojo_bytearray_append(MojoBytes *b, int64_t v);
+void       mojo_bytearray_extend(MojoBytes *b, MojoBytes *other);
+int64_t    mojo_bytearray_pop(MojoBytes *b, int64_t i); /* i==MOJO_SLICE_STOP_OMITTED -> last */
+void       mojo_bytearray_delitem(MojoBytes *b, int64_t i);
+void       mojo_bytearray_splice(MojoBytes *b, int64_t start, int64_t stop, MojoBytes *repl);
+
+/* ── memoryview (non-copying 1-D byte view, itemsize 1 / format 'B') ─────*/
+typedef struct {
+    uint8_t *data;
+    int64_t  len;
+    int64_t  itemsize;
+} MojoMemoryView;
+
+MojoMemoryView *mojo_memoryview_new(uint8_t *data, int64_t len, int64_t itemsize);
+MojoMemoryView *mojo_memoryview_from_bytes(MojoBytes *b);
+int64_t         mojo_memoryview_len(MojoMemoryView *m);
+int64_t         mojo_memoryview_get(MojoMemoryView *m, int64_t i);
+MojoMemoryView *mojo_memoryview_slice(MojoMemoryView *m, int64_t start, int64_t stop, int64_t step);
+MojoBytes      *mojo_memoryview_tobytes(MojoMemoryView *m);
+int             mojo_memoryview_eq(MojoMemoryView *m, MojoBytes *b);
+char           *mojo_memoryview_hex(MojoMemoryView *m);
+MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt);
+char           *mojo_memoryview_repr(MojoMemoryView *m);
+
+/* ── struct module (binary pack / unpack) ───────────────────────────────
+ * Format mini-language, a subset of CPython's `struct`:
+ *   byte-order prefix  < > = ! @   (@ = native size+align, default)
+ *   codes  x b B h H i I l L q Q f d s ? c  with optional leading count
+ * A compiled format is an opaque `MojoStructFmt *`. Packed values ARE
+ * `MojoBytes` (see CODEGEN_bytes_value_type). GIMPLE cannot pass a mixed
+ * int64/double vararg list, so codegen lowers `struct.pack(fmt, a, b, …)`
+ * to a `MojoList *` of values (ints via mojo_list_append_int, floats via
+ * mojo_list_append_double, `s`/`c` fields as a MojoBytes* pointer stored
+ * in an int slot) and calls mojo_struct_pack_list. unpack returns a
+ * tuple-marked MojoList (`s`/`c` elements are MojoBytes* pointers in int
+ * slots; float codes are doubles; everything else int64).
+ * `struct.error` is raised via mojo_struct_raise_error with the tag
+ * MOJO_STRUCT_ERROR_TAG (== crc32("struct.error") & 0x7fffffff, matching
+ * gimple_gen_infra._exc_type_id). */
+#define MOJO_STRUCT_ERROR_TAG 1315445615
+
+typedef struct MojoStructFmt MojoStructFmt;
+
+void            mojo_struct_raise_error(const char *msg);
+MojoStructFmt  *mojo_struct_compile(const char *fmt);   /* raises struct.error on a bad format */
+int64_t         mojo_struct_calcsize(const char *fmt);
+MojoBytes      *mojo_struct_pack_list(const char *fmt, MojoList *values);
+MojoList       *mojo_struct_unpack(const char *fmt, MojoBytes *buffer);
+MojoList       *mojo_struct_unpack_from(const char *fmt, MojoBytes *buffer, int64_t offset);
+void            mojo_struct_pack_into(const char *fmt, MojoBytes *buffer, int64_t offset, MojoList *values);
+/* struct.Struct instance API (the handle is the compiled format itself) */
+MojoStructFmt  *mojo_struct_new(const char *fmt);
+int64_t         mojo_struct_size(MojoStructFmt *f);
+char           *mojo_struct_format(MojoStructFmt *f);
+MojoBytes      *mojo_struct_pack_h(MojoStructFmt *f, MojoList *values);
+MojoList       *mojo_struct_unpack_h(MojoStructFmt *f, MojoBytes *buffer);
+MojoList       *mojo_struct_unpack_from_h(MojoStructFmt *f, MojoBytes *buffer, int64_t offset);
+void            mojo_struct_pack_into_h(MojoStructFmt *f, MojoBytes *buffer, int64_t offset, MojoList *values);
 
 /* ── subprocess.run ──────────────────────────────────────────────────────
  * Mirrors Python's subprocess.CompletedProcess just enough for this
@@ -517,6 +658,7 @@ char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);
 char *mojo_repr_list_ints(MojoList *l);
+char *mojo_repr_list_bytes(MojoList *l);
 char *mojo_bool_to_str(int b);
 int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);
@@ -717,6 +859,8 @@ int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
 int64_t int_join(int64_t marker, int64_t base, int64_t part);  /* os.path.join(a, b) */
 int64_t int_join_list(int64_t marker, int64_t path_list);      /* os.path.join(*list) */
 MojoList *int64_t_path_split(char *path);              /* os.path.split(path) -> [head, tail] */
+MojoList *int64_t_path_splitdrive(char *path);         /* os.path.splitdrive(path) -> [drive, tail] */
+MojoList *int64_t_path_splitroot(char *path);          /* os.path.splitroot(path) -> [drive, root, tail] */
 MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */
 int64_t int_getcwd(int64_t marker);                    /* os.getcwd */
 

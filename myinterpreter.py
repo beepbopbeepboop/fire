@@ -3755,6 +3755,17 @@ class Interpreter:
             obj = self.eval_expr(target.obj)
             idx = self.eval_expr(target.index)
             obj[idx] = value
+        elif self._is_instance(target, 'SliceExpr'):
+            # `x[a:b] = y` / `x[:] = y` / `x[::k] = y` — real in-place
+            # slice assignment, matching Python semantics (and the compiled
+            # path's `mojo_list_splice` lowering in gimple_gen_stmts.py).
+            # A bare single-slice subscript parses as a SliceExpr with
+            # `.obj` attached directly (not wrapped in a SubscriptExpr).
+            obj = self.eval_expr(target.obj)
+            start = self.eval_expr(target.start) if target.start is not None else None
+            stop = self.eval_expr(target.stop) if target.stop is not None else None
+            step = self.eval_expr(target.step) if getattr(target, 'step', None) is not None else None
+            obj[start:stop:step] = value
         elif self._is_instance(target, 'TupleExpr') or self._is_instance(target, 'TupleLiteral'):
             # Tuple unpacking: a, b, c = expr or (a, b, c) = expr. One
             # element may be starred (`*row, last = data` / `first, *rest =

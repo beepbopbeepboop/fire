@@ -969,6 +969,25 @@ def concat(a: List, b: List) -> List:
     return r
 """)
 
+    # 93a. x[:] = y  → in-place full-slice splice (mojo_list_splice)
+    test("list_slice_assign_full", """\
+def replace_all(a: List, b: List):
+    a[:] = b
+""")
+
+    # 93b. x[a:b] = y → in-place bounded-slice splice (grows/shrinks a)
+    test("list_slice_assign_bounded", """\
+def splice(a: List, b: List):
+    a[1:3] = b
+""")
+
+    # 93c. x[a:b:k] = y → extended-slice store (mojo_list_assign_step);
+    # bugs/CODEGEN_slice_assignment_silently_noops.md.
+    test("list_slice_assign_stepped", """\
+def strided(a: List, b: List):
+    a[::2] = b
+""")
+
     # ── Dict iterator ────────────────────────────────────────────────────
 
     # 94. for k in dict_var → MojoDictIter
@@ -2092,6 +2111,60 @@ def f(s: String):
 def g(s):
     yield s
 print(list(g("hi")))
+""")
+
+    # bytes / bytearray / memoryview value types inside a compiled
+    # generator body (bugs/hard/CODEGEN_bytes_value_type.md Stage 4). The
+    # A3 stack-switch backend routes the body through ordinary codegen,
+    # which has full bytes support (Stages 1-3) -- these guard that a
+    # `yield`ing body compiles clean.
+    test("generator_body_memoryview", """\
+def g(data):
+    yield memoryview(data)[0]
+
+def main():
+    var b = bytes([1, 2, 3])
+    for x in g(b):
+        print(x)
+""")
+
+    test("generator_body_bytes_iteration", """\
+def g():
+    var b = bytes([4, 5, 6])
+    for x in b:
+        yield x
+
+def main():
+    for x in g():
+        print(x)
+""")
+
+    test("generator_body_bytearray_mutation", """\
+def g():
+    var ba = bytearray()
+    ba.append(9)
+    yield ba[0]
+
+def main():
+    for x in g():
+        print(x)
+""")
+
+    # zipfile `_Extra.split` shape: a @classmethod generator building a
+    # memoryview over its (unannotated bytes) argument.
+    test("generator_classmethod_body_memoryview", """\
+struct E:
+    @classmethod
+    def split(cls, data):
+        var mv = memoryview(data)
+        var i = 0
+        while i < len(mv):
+            yield mv[i]
+            i = i + 1
+
+def main():
+    for x in E.split(bytes([7, 8])):
+        print(x)
 """)
 
     # Async function (`async def`) honest-fallback: originally (before the
@@ -3620,6 +3693,39 @@ def main():
 main()
 """)
 
+    # 177b. A BUILTIN-CONTAINER method bound to a local and called later —
+    # `result = bytearray(); append = result.append` then `append(x)` in a
+    # loop (Lib/zipfile/__init__.py's `_ZipDecrypter.decrypter`). List/dict/
+    # set already worked (_lower_builtin_method_value); bytes/bytearray and
+    # memoryview fell through to a struct-field read and emitted an invalid
+    # `->append` access (`'MojoBytes' has no member named 'append'`). See
+    # the bound-method grep cluster in bugs/ (zipfile, pickletools, os,
+    # glob, ipaddress, ctypes_util, ...).
+    test("bound_container_method_bytearray_value", """\
+def decrypter(data):
+    result = bytearray()
+    append = result.append
+    for i in range(len(data)):
+        append(data[i])
+    return bytes(result)
+
+def main():
+    print(len(decrypter([1, 2, 3])))
+""")
+    test("bound_container_method_list_dict_set_value", """\
+def main():
+    xs = []
+    f = xs.append
+    f(1)
+    f(2)
+    d = {}
+    s = d.setdefault
+    st = set()
+    a = st.add
+    a(7)
+    print(len(xs), s('k', 9), len(st))
+""")
+
     # 178. Untyped-parameter identity function called with a string argument
     # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
     # body-usage evidence at all (just returned unchanged), so the parameter
@@ -3678,6 +3784,65 @@ print(y)
 def g(a: str) -> str:
     return a
 print(g("ab"))
+""")
+
+    # 181. A module with many module-level integer constants, all referenced
+    # inside one function, must lower those constants to file-scope globals
+    # (the `_root_globals` struct + `root__mojo_global_get_*` accessors),
+    # NOT re-materialize a per-function LOCAL copy of every constant in that
+    # function's decl block. A large per-function local-decl block of
+    # module constants is what crashed GCC's GIMPLE frontend
+    # (`internal compiler error: in build2, at tree.cc:5208`) on
+    # Lib/zipfile/__init__.py's ~60 module constants — see
+    # bugs/COMPILE_FAIL_zipfile___init__.md. This locks in the file-scope
+    # representation as a regression guard.
+    _NCONST = 40
+    _kconst_src = (
+        "".join(f"K{i} = {i}\n" for i in range(1, _NCONST + 1))
+        + "\nfn total() -> Int:\n    return "
+        + " + ".join(f"K{i}" for i in range(1, _NCONST + 1))
+        + "\n\nfn main():\n    print(total())\n"
+    )
+    _kc_ok, _kc_c_src, _kc_stderr = gimple_compiles(_kconst_src)
+    # Each constant must appear exactly once as a struct field decl
+    # (`  int Ki;`), never a second time as a function-body local.
+    _dup_locals = [i for i in range(1, _NCONST + 1)
+                   if _kc_c_src.count(f"  int K{i};") != 1]
+    _reads_global = "_root_globals.K1" in _kc_c_src
+    if _kc_ok and not _dup_locals and _reads_global:
+        print("PASS  many_module_constants_are_file_scope_globals"); _PASS += 1
+    else:
+        print("FAIL  many_module_constants_are_file_scope_globals")
+        print(f"      compiled={_kc_ok} reads_global={_reads_global} "
+              f"constants_with_wrong_decl_count={_dup_locals}")
+        if not _kc_ok:
+            print("      --- gcc stderr ---")
+            for line in _kc_stderr.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
+    # 182. Generator expression bound to a local / reassigned parameter,
+    # then consumed exactly once by a forward iteration, must compile:
+    # it is materialised as a list (see _seed_genexp_list_narrowing).
+    # The reassigned-parameter shape is ZipFile._sanitize_windows_name —
+    # bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
+    test("genexp_local_single_consumption_join", """\
+fn clean(arcname: String, pathsep: String) -> String:
+    arcname = (x.rstrip(" .") for x in arcname.split(pathsep))
+    arcname = pathsep.join(x for x in arcname if x)
+    return arcname
+
+fn main():
+    print(clean("a. /b .// c", "/"))
+""")
+
+    test("genexp_local_single_consumption_for_and_sum", """\
+fn main():
+    g = (x + 1 for x in [10, 20, 30])
+    for v in g:
+        print(v)
+    h = (x * 2 for x in [1, 2, 3])
+    print(sum(x for x in h))
 """)
 
     # ── Milestone D: try/except/raise inside a compiled generator body ─────
@@ -4134,6 +4299,115 @@ async def f(x):
     test("async_function_with_nonscalar_param", """\
 async def f(x: String) -> String:
     return x
+""")
+
+    # bugs/COMPILE_FAIL_asyncio_queues.md gap 2: a STRUCT-typed param on a
+    # top-level (non-method) async def is now supported -- unpacked from
+    # its __mojo_gen_arg slot with a `(T *)` cast (structs cross as `T *`,
+    # BUG-2026-030) and threaded to the coroutine body as a real `T *` C
+    # param, so struct methods / Future fields work inside the coroutine.
+    # Real producer/consumer proof: test_coro_future_await.py.
+    test("async_function_with_struct_param", """\
+import asyncio
+from collections import deque
+
+struct Q:
+    fn __init__(out self):
+        self._items = deque()
+        self._getters = deque()
+    fn empty(self) -> Bool:
+        return len(self._items) == 0
+    fn put_nowait(mut self, item: Int):
+        self._items.append(item)
+        while len(self._getters) > 0:
+            var g = self._getters.popleft()
+            g.set_result(0)
+
+async def consumer(q: Q) -> Int:
+    while q.empty():
+        var getter = create_future()
+        q._getters.append(getter)
+        await getter
+    return q._items.popleft()
+
+async def main_co() -> Int:
+    var q = Q()
+    q.put_nowait(41)
+    var v = await consumer(q)
+    return v + 1
+
+def main():
+    print(asyncio.run(main_co()))
+""")
+
+    # bugs/COMPILE_FAIL_asyncio_futures.md items (1)-(3): the native Future
+    # handle now carries an exception slot (set_exception/exception), a
+    # cancelled state (cancel/cancelled/set_running_or_notify_cancel) and a
+    # done-callback list (add_done_callback/remove_done_callback). These
+    # method names lower to the __mojo_future_* shims instead of stubbing.
+    # Behavioral proof (await raising on set_exception, cancel/cancelled,
+    # a callback firing on set_result): test_coro_future_await.py.
+    test("async_future_exception_cancel_callbacks", """\
+import asyncio
+
+def on_done(fut: Int):
+    print("done")
+
+async def worker(fut: Int) -> Int:
+    try:
+        var v = await fut
+        return v
+    except Exception:
+        return -1
+
+async def main_co() -> Int:
+    var fut = create_future()
+    fut.add_done_callback(on_done)
+    if fut.set_running_or_notify_cancel():
+        fut.set_exception(ValueError("boom"))
+    var r = await worker(fut)
+    var f2 = create_future()
+    var did = f2.cancel()
+    if f2.cancelled():
+        r = r + did
+    if f2.exception() == 0:
+        r = r + 1
+    return r
+
+def main():
+    print(asyncio.run(main_co()))
+""")
+
+    # bugs/COMPILE_FAIL_asyncio_futures.md (3), callback-kind tag: a
+    # bound-method callback (`self.on_done`, asyncio's own shape) and a
+    # capturing-closure callback must lower through the MojoBoundMethod*
+    # path (tag 1), not as a bare fn pointer. Behavioral proof:
+    # test_coro_future_await.py.
+    test("async_future_done_callback_bound_method_and_closure", """\
+import asyncio
+
+struct W:
+    var n: Int
+    fn __init__(out self):
+        self.n = 0
+    fn on_done(self, fut: Int):
+        print("m")
+    async def run(self, f: Int) -> Int:
+        f.add_done_callback(self.on_done)
+        var k = 3
+        fn cb(fut: Int):
+            print("c", k)
+        f.add_done_callback(cb)
+        f.set_result(1)
+        return 0
+
+async def main_co() -> Int:
+    var w = W()
+    var f = create_future()
+    return await w.run(f)
+
+def main():
+    print(asyncio.run(main_co()))
 """)
 
     # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
@@ -4931,6 +5205,421 @@ def mf(a: Float64, b: Float64) -> Float64:
     else:
         print(f"PASS  {name}")
         _PASS += 1
+
+    # --- builtin `dict` subclassing (Counter/OrderedDict shape) ---
+    # See bugs/COMPILE_FAIL_collections___init__.md. A `class X(dict)` gets
+    # a synthesized `_data: MojoDict *` backing store; inherited container
+    # ops route to it, `__missing__` handles a subscript-read miss.
+    test("dict_subclass_backing_store_and_subscript", """\
+class C(dict):
+    pass
+
+def go() -> int:
+    c = C()
+    c["a"] = 5
+    c["a"] += 3
+    n = len(c)
+    if "a" in c:
+        n += 1
+    return c["a"] + n
+
+def main():
+    print(go())
+""")
+
+    test("dict_subclass_missing_dunder_on_read_miss", """\
+class Counter2(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def go() -> int:
+    c = Counter2()
+    c["x"] = 2
+    return c["x"] + c["absent"]
+
+def main():
+    print(go())
+""")
+
+    test("dict_subclass_transitive_and_getitem_override_wins", """\
+class Base(dict):
+    pass
+
+class Sub(Base):
+    def __getitem__(self, key) -> int:
+        return 42
+
+def go() -> int:
+    s = Sub()
+    s["k"] = 1
+    return s["k"]
+
+def main():
+    print(go())
+""")
+
+    # --- builtin `bytes` subclassing (`class _Extra(bytes)`, zipfile) ---
+    # See bugs/COMPILE_FAIL_zipfile___init__.md. A `class X(bytes)` gets a
+    # synthesized `_data: MojoBytes *` payload populated by
+    # `super().__new__(cls, val)`; inherited bytes ops (len/index/slice/
+    # iter/eq/concat/`in`/`.decode`/`.hex`/`.split`/...) route to it, plus
+    # any extra `self.<attr>` instance fields, and `isinstance(_, bytes)`.
+    test("bytes_subclass_payload_and_inherited_ops", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+    def __init__(self, v):
+        self.tag = 7
+
+def go() -> int:
+    b = B(b"hello world")
+    n = len(b) + b[1] + b.tag
+    s = b[0:5]
+    if s == b"hello":
+        n += 1
+    if b"wor" in b:
+        n += 1
+    for c in b:
+        n += c
+    if isinstance(b, bytes):
+        n += 1
+    c2 = b + b"!"
+    n += len(c2)
+    return n
+
+def main():
+    print(go())
+""")
+
+    test("bytes_subclass_method_override_wins", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+    def hex(self) -> int:
+        return 99
+
+def go() -> int:
+    b = B(b"ab")
+    return b.hex() + len(b)
+
+def main():
+    print(go())
+""")
+
+    # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
+    # and `for k in d` on a builtin-`dict` subclass instance delegate to
+    # the hidden `_data` backing store — unless the subclass overrides
+    # them. See bugs/COMPILE_FAIL_collections___init__.md.
+    test("dict_subclass_container_method_delegation", """\
+class Bag(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    b = Bag()
+    b["a"] = 5
+    b["b"] = 2
+    print(b.get("a"))
+    print(b.get("zzz", 42))
+    total = 0
+    for k in b:
+        total += b[k]
+    print(total)
+    for k, v in b.items():
+        print(k)
+    print(len(b.keys()))
+    s = 0
+    for x in b.values():
+        s += x
+    print(s)
+    other = Bag()
+    other["c"] = 9
+    b.update(other)
+    print(len(b))
+    print(b.pop("a"))
+    print(b.setdefault("d", 7))
+""")
+
+    test("dict_subclass_method_override_wins_over_delegation", """\
+class Bag(dict):
+    def keys(self) -> str:
+        return "override"
+
+class Sub(Bag):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    s = Sub()
+    s["x"] = 1
+    print(s.keys())
+    print(s.get("x"))
+""")
+
+    # bytes value type (Stage 1) — compile checks
+    test("bytes_literal_len_index", """\
+fn main():
+    var b = b'\\x00\\x01ABC'
+    print(len(b))
+    print(b[0])
+    print(b[-1])
+""")
+
+    test("bytes_constructors", """\
+fn main():
+    var a = bytes()
+    var z = bytes(4)
+    var l = bytes([1, 2, 3])
+    var s = bytes("hi", "utf-8")
+    print(len(a), len(z), len(l), len(s))
+""")
+
+    test("bytes_equality_and_truthiness", """\
+fn main():
+    if b'ab' == b'ab':
+        print("eq")
+    if b'ab' != b'ac':
+        print("ne")
+    var b = b'x'
+    if b:
+        print("t")
+    if not bytes():
+        print("f")
+""")
+
+    test("bytes_through_annotated_and_default_params", """\
+fn tail(b: bytes) -> bytes:
+    return b
+
+fn size(b = b'abcd') -> Int:
+    return len(b)
+
+fn main():
+    var t = tail(b'XYZ')
+    print(len(t), t[0])
+    print(size())
+    print(size(b'hello'))
+""")
+
+    test("bytes_repr_and_str", """\
+fn main():
+    var b = b'a\\x00b'
+    print(b)
+    print(str(b))
+""")
+
+    # bytes value type (Stage 4) — bytes-typed struct fields (compile check).
+    # `self._buf = b''` in __init__ makes the field a real MojoBytes*, so a
+    # slice of the field routes through mojo_bytes_slice and `acc += <bytes>`
+    # concatenates instead of emitting a `char* + MojoBytes*` pointer add
+    # (which also ICE'd GCC's GIMPLE FE). COMPILE_FAIL_zipfile___init__.md.
+    test("bytes_field_slice_and_augassign_accumulation", """\
+fn _more() -> bytes:
+    return b'12345'
+
+class Reader:
+    def __init__(self):
+        self._buf = b''
+        self._off = 0
+
+    def _fill(self):
+        self._buf = _more()
+
+    def read_all(self):
+        var out = self._buf[self._off:]
+        while len(out) < 20:
+            out += self._buf[0:2]
+        self._buf = b''
+        self._off = 0
+        return out
+
+fn main():
+    var r = Reader()
+    r._fill()
+    var data = r.read_all()
+    print(len(data))
+""")
+
+    # bytes value type (Stage 2) — compile checks
+    test("bytes_slice_iter_in", """\
+fn main():
+    var b = b'Hello, World'
+    print(b[0:5])
+    print(b[7:])
+    print(b[::-1])
+    print(b[::2])
+    for x in b:
+        print(x)
+    if b'ell' in b:
+        print("y")
+    if 101 in b:
+        print("z")
+""")
+
+    test("bytes_concat_repeat", """\
+fn main():
+    var c = b'ab' + b'cd'
+    print(c)
+    print(b'xy' * 3)
+    print(2 * b'-')
+""")
+
+    test("bytes_methods", """\
+fn main():
+    print(b'Hello'.startswith(b'He'))
+    print(b'Hello'.endswith(b'lo'))
+    print(b'a,b,c'.split(b','))
+    print(b'x y  z'.split())
+    print(b'a\\nb\\nc'.splitlines())
+    print(b'a-b-c'.replace(b'-', b'_'))
+    print(b'  hi  '.strip())
+    print(b'xxhixx'.strip(b'x'))
+    print(b'AbC'.upper())
+    print(b'AbC'.lower())
+    print(b'abcabc'.find(b'c'))
+    print(b'abcabc'.count(b'bc'))
+    print(b'DEADBEEF'.hex())
+    print(b'hello'.decode('utf-8'))
+    print(b','.join(b'x,y'.split(b',')))
+""")
+
+    test("bytes_isinstance", """\
+fn main():
+    var b = b'x'
+    print(isinstance(b, bytes))
+    print(isinstance(5, bytes))
+""")
+
+    # bytes value type (Stage 2b) — %-formatting + body-usage param inference
+    test("bytes_percent_format", """\
+fn main():
+    var n: Int = 42
+    print(b'val=%d' % n)
+    print(b'%s!' % b'hi')
+    print(b'%02x' % 15)
+    print(b'%s=%d;' % (b'k', 7))
+    print(b'100%% done')
+""")
+
+    # A `b'...'` / `b''` literal used inside a real function body: the
+    # `_slit_` string-pool global must be loaded into a local before it
+    # is passed to `mojo_bytes_new_lit` (GIMPLE strict mode). Regression
+    # for "invalid argument to gimple call" seen on zipfile's
+    # `_Extra.strip`'s `b''.join(...)`.
+    test("bytes_literal_in_function_body", """\
+fn joiner(parts: List[Int]) -> Int:
+    var sep = b''
+    var acc = b'x'
+    var total: Int = 0
+    for p in parts:
+        total = total + p
+    return total + len(sep) + len(acc)
+fn main():
+    var ps = [1, 2, 3]
+    print(joiner(ps))
+""")
+
+    test("bytes_param_inferred_from_body_usage", """\
+fn dec(data) -> String:
+    return data.decode('utf-8')
+fn hx(data) -> String:
+    return data.hex()
+fn main():
+    print(dec(b'hello'))
+    print(hx(b'\\x00\\xff'))
+""")
+
+    # bytes value type (Stage 3) — bytearray + memoryview compile checks
+    test("bytearray_construct_and_mutate", """\
+fn main():
+    var ba = bytearray(b'abc')
+    ba.append(100)
+    ba[0] = 90
+    ba.extend(b'XY')
+    var x = ba.pop()
+    del ba[0]
+    ba[1:2] = b'ZZ'
+    print(len(ba))
+    for c in ba:
+        print(c)
+    print(bytes(ba))
+    var empty = bytearray()
+    var zeros = bytearray(3)
+    var fromlist = bytearray([1, 2, 3])
+""")
+
+    test("memoryview_ops", """\
+fn main():
+    var mv = memoryview(b'hello')
+    print(mv[1])
+    print(len(mv))
+    print(mv[1:3].tobytes())
+    print(mv.hex())
+    print(bytes(mv))
+    print(mv == b'hello')
+    for x in mv:
+        print(x)
+    var mv2 = memoryview(bytearray(b'xy'))
+    print(mv2.cast('B')[0])
+""")
+
+    # struct module (binary pack/unpack) — compile checks
+    test("struct_module_functions", """\
+fn main():
+    print(struct.calcsize('<HH'))
+    var p = struct.pack('<HH', 1, 2)
+    print(len(p))
+    var t = struct.unpack('<HH', p)
+    print(t[0], t[1])
+    var u = struct.unpack_from('<H', b'\\xaa\\xbb\\xcc', 1)
+    print(u[0])
+    var b = struct.pack('>i4s', 258, b'abcd')
+""")
+
+    test("struct_module_float_and_error", """\
+fn main():
+    var p = struct.pack('<fd', 1.5, 2.5)
+    var t = struct.unpack('<fd', p)
+    print(t[0], t[1])
+    try:
+        var bad = struct.unpack('<HH', b'\\x00')
+    except struct.error:
+        print('caught')
+""")
+
+    # --- os.path.splitdrive / splitroot (POSIX) + reversed() ---
+    # See bugs/COMPILE_FAIL_zipfile___init__.md. Both os.path funcs were
+    # stubbed (`int.splitdrive() stubbed`); reversed() had no lowering at
+    # all so `for x in reversed(...)` over the resulting `void *` was
+    # silently dropped (zipfile/__init__.py:1612).
+    test("os_path_splitdrive_splitroot", """\
+import os
+
+fn main():
+    var p: String = "/a/b/c"
+    var d = os.path.splitdrive(p)
+    print(d[0], d[1])
+    var r = os.path.splitroot(p)
+    print(r[0], r[1], r[2])
+    var r2 = os.path.splitroot("//x/y")
+    print(r2[1], r2[2])
+    var n = os.path.normpath(os.path.splitdrive(p)[1])
+    print(n)
+""")
+
+    test("reversed_list_str_and_sorted_chain", """\
+fn main():
+    var xs = [3, 1, 2]
+    var acc: Int = 0
+    for v in reversed(xs):
+        acc = acc * 10 + v
+    print(acc)
+    for v in reversed(sorted(xs)):
+        acc = acc + v
+    print(acc)
+    for c in reversed("abc"):
+        print(c)
+""")
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

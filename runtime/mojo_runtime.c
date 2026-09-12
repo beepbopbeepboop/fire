@@ -441,6 +441,29 @@ int mojo_is_tuple(MojoList *l) {
     return mojo_set_contains_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
 }
 
+/* Bound-method registry — the runtime counterpart of _mojo_list_registry
+ * above. `mojo_bound_method_new` (previously a static-inline in the
+ * header) records every MojoBoundMethod it allocates here so that a
+ * dynamically-dispatched call site (mojo_maybe_bound_call_N) can tell a
+ * bound-method value apart from a plain function pointer stored in the
+ * same void*-typed local. */
+static MojoSet *_mojo_bound_method_registry = NULL;
+
+MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
+    MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
+    bm->fn = fn;
+    bm->self = self;
+    if (!_mojo_bound_method_registry) _mojo_bound_method_registry = mojo_set_new();
+    mojo_set_add_int(_mojo_bound_method_registry, (int64_t)(intptr_t)bm);
+    return bm;
+}
+
+int mojo_is_bound_method(void *p) {
+    int64_t v = (int64_t)(intptr_t)p;
+    if (!_mojo_bound_method_registry || v < 65536) return 0;
+    return mojo_set_contains_int(_mojo_bound_method_registry, v);
+}
+
 MojoList *mojo_list_new(void)
 {
     MojoList *l = malloc(sizeof(MojoList));
@@ -630,6 +653,132 @@ void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
     l->len -= n;
 }
 
+/* `lst[start:stop] = repl` — replace the elements [start, stop) in place
+ * with a copy of `repl`'s elements, shifting the tail and growing/shrinking
+ * the list by (repl->len - (stop - start)). Bound normalization mirrors
+ * mojo_list_slice / mojo_list_del_slice exactly (negative-index wrap,
+ * MOJO_SLICE_STOP_OMITTED, clamping); after clamping `stop < start` is
+ * treated as `stop = start`, i.e. a pure insertion at `start` (`lst[i:i]
+ * = repl`). Element slots are raw int64_t, as with every other MojoList
+ * op — interpretation (int/double-bits/pointer) is the caller's. `repl`
+ * is snapshotted first so `lst[a:b] = lst` (self-aliasing) is safe. */
+void mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl)
+{
+    if (!l) return;
+    int64_t rlen = repl ? repl->len : 0;
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
+    if (start < 0) start = l->len + start;
+    if (stop  < 0) stop  = l->len + stop;
+    if (start < 0) start = 0;
+    if (start > l->len) start = l->len;
+    if (stop < start) stop = start;
+    if (stop > l->len) stop = l->len;
+
+    int64_t *snap = NULL;
+    if (rlen > 0) {
+        snap = malloc((size_t)rlen * sizeof(int64_t));
+        memcpy(snap, repl->data, (size_t)rlen * sizeof(int64_t));
+    }
+
+    int64_t gap    = stop - start;      /* slots removed */
+    int64_t tail   = l->len - stop;     /* slots after the removed region */
+    int64_t newlen = l->len - gap + rlen;
+
+    while (l->cap < newlen)
+        _list_grow(l);
+
+    if (rlen > gap) {
+        /* growing: shift the tail right, back-to-front */
+        for (int64_t i = tail - 1; i >= 0; --i)
+            l->data[start + rlen + i] = l->data[stop + i];
+    } else if (rlen < gap) {
+        /* shrinking: shift the tail left, front-to-back */
+        for (int64_t i = 0; i < tail; ++i)
+            l->data[start + rlen + i] = l->data[stop + i];
+    }
+
+    for (int64_t i = 0; i < rlen; ++i)
+        l->data[start + i] = snap[i];
+
+    l->len = newlen;
+    free(snap);
+}
+
+/* Python's slice.indices(length): normalize (start, stop) for the given
+ * sign of `step` into the half-open-ish bounds an extended slice walks. */
+static void _mojo_slice_indices(int64_t length, int64_t step,
+                                int has_start, int64_t start,
+                                int has_stop, int64_t stop,
+                                int64_t *out_start, int64_t *out_stop)
+{
+    int64_t lower, upper;
+    if (step < 0) { lower = -1;      upper = length - 1; }
+    else          { lower = 0;       upper = length;     }
+    if (!has_start) {
+        start = (step < 0) ? upper : lower;
+    } else {
+        if (start < 0) { start += length; if (start < lower) start = lower; }
+        else if (start > upper) start = upper;
+    }
+    if (!has_stop) {
+        stop = (step < 0) ? lower : upper;
+    } else {
+        if (stop < 0) { stop += length; if (stop < lower) stop = lower; }
+        else if (stop > upper) stop = upper;
+    }
+    *out_start = start;
+    *out_stop  = stop;
+}
+
+/* Number of elements an extended slice [start:stop:step] selects, with
+ * start/stop already normalized by _mojo_slice_indices. */
+static int64_t _mojo_slice_len(int64_t start, int64_t stop, int64_t step)
+{
+    if (step > 0)
+        return start < stop ? (stop - start - 1) / step + 1 : 0;
+    return start > stop ? (start - stop - 1) / (-step) + 1 : 0;
+}
+
+/* `lst[start:stop:step] = repl` for step != 1 (an "extended slice"
+ * assignment). Python requires len(repl) to equal the number of slots the
+ * slice selects — there is no growing/shrinking, each selected slot is
+ * overwritten in order. Returns 0 on success, -1 for step == 0, and the
+ * (positive) required length when it does not match len(repl) so the
+ * length does not match (Python raises ValueError; the compiled runtime
+ * has no ValueError object, so it reports and exits — an honest failure,
+ * not a silent wrong result). `has_*` flags distinguish an omitted bound
+ * (`lst[::2]`) from an explicit 0. */
+void mojo_list_assign_step(MojoList *l,
+                           int has_start, int64_t start,
+                           int has_stop,  int64_t stop,
+                           int64_t step,  MojoList *repl)
+{
+    if (!l) return;
+    if (step == 0) {
+        fprintf(stderr, "ValueError: slice step cannot be zero\n");
+        exit(1);
+    }
+    int64_t s, e;
+    _mojo_slice_indices(l->len, step, has_start, start, has_stop, stop, &s, &e);
+    int64_t slen = _mojo_slice_len(s, e, step);
+    int64_t rlen = repl ? repl->len : 0;
+    if (slen != rlen) {
+        fprintf(stderr,
+                "ValueError: attempt to assign sequence of size %lld "
+                "to extended slice of size %lld\n",
+                (long long)rlen, (long long)slen);
+        exit(1);
+    }
+    int64_t *snap = NULL;
+    if (rlen > 0) {
+        snap = malloc((size_t)rlen * sizeof(int64_t));
+        memcpy(snap, repl->data, (size_t)rlen * sizeof(int64_t));
+    }
+    int64_t idx = s;
+    for (int64_t i = 0; i < slen; ++i) { l->data[idx] = snap[i]; idx += step; }
+    free(snap);
+}
+
 MojoList *mojo_list_concat(MojoList *a, MojoList *b)
 {
     if (!a) a = mojo_list_new();
@@ -758,6 +907,18 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
     return out;
 }
 
+/* reversed(<str>) modeled as an eagerly reversed copy (see
+ * _lower_builtin_reversed). */
+char *mojo_cstr_reverse(char *s)
+{
+    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
+    size_t n = strlen(s);
+    char *out = malloc(n + 1);
+    for (size_t i = 0; i < n; i++) out[i] = s[n - 1 - i];
+    out[n] = '\0';
+    return out;
+}
+
 /* `s[start:stop] == needle` without ever calling mojo_cstr_slice - no
  * malloc, no memcpy of the slice, no separate strcmp call. Added after a
  * `sample`-based CPU profile (not guessed) showed ~90% of ALL runtime, in
@@ -871,6 +1032,789 @@ int mojo_str_contains(char *haystack, char *needle)
 
 char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i < 0 ? i + s->len : i]; }
 void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
+
+/* ── bytes ──────────────────────────────────────────────────────────────*/
+static MojoBytes *mojo_bytes_alloc(int64_t len)
+{
+    MojoBytes *b = malloc(sizeof(MojoBytes));
+    b->len  = len;
+    b->data = malloc((size_t)(len < 0 ? 0 : len) + 1);
+    b->data[len < 0 ? 0 : len] = 0;
+    return b;
+}
+
+MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len)
+{
+    MojoBytes *b = mojo_bytes_alloc(len);
+    if (len > 0) memcpy(b->data, data, (size_t)len);
+    return b;
+}
+
+MojoBytes *mojo_bytes_empty(void) { return mojo_bytes_alloc(0); }
+
+MojoBytes *mojo_bytes_zeros(int64_t n)
+{
+    if (n < 0) n = 0;
+    MojoBytes *b = mojo_bytes_alloc(n);
+    memset(b->data, 0, (size_t)n);
+    return b;
+}
+
+MojoBytes *mojo_bytes_from_list(MojoList *l)
+{
+    int64_t n = mojo_list_len(l);
+    MojoBytes *b = mojo_bytes_alloc(n);
+    for (int64_t i = 0; i < n; i++)
+        b->data[i] = (uint8_t)(mojo_list_get_int(l, i) & 0xFF);
+    return b;
+}
+
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
+{
+    (void)encoding; /* utf-8 / ascii: source is already a UTF-8 char* */
+    int64_t n = (int64_t)strlen(s);
+    return mojo_bytes_new_lit(s, n);
+}
+
+/* NUL-terminated C string -> MojoBytes (copies up to the terminator).
+ * Used by the `b'...' % args` lowering to fold a formatted numeric/str
+ * spec (always ASCII, never embedded NUL) into the byte accumulator. */
+MojoBytes *mojo_bytes_from_cstr(const char *s)
+{
+    if (s == NULL) return mojo_bytes_alloc(0);
+    return mojo_bytes_new_lit(s, (int64_t)strlen(s));
+}
+
+int64_t mojo_bytes_len(MojoBytes *b) { return b->len; }
+
+int64_t mojo_bytes_get(MojoBytes *b, int64_t i)
+{
+    if (i < 0) i += b->len;
+    if (i < 0 || i >= b->len) return 0;
+    return (int64_t)b->data[i];
+}
+
+int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
+{
+    if (a == b) return 1;
+    if (a == NULL || b == NULL) return 0;
+    return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
+}
+
+int mojo_bytes_truthy(MojoBytes *b) { return b != NULL && b->len != 0; }
+
+char *mojo_bytes_repr(MojoBytes *b)
+{
+    if (b == NULL) { char *s = malloc(5); memcpy(s, "None", 5); return s; }
+    /* worst case per byte: \xNN == 4 chars, plus b'' and NUL */
+    char *out = malloc((size_t)b->len * 4 + 4);
+    size_t p = 0;
+    out[p++] = 'b'; out[p++] = '\'';
+    for (int64_t i = 0; i < b->len; i++) {
+        unsigned c = b->data[i];
+        if (c == '\\' || c == '\'') { out[p++] = '\\'; out[p++] = (char)c; }
+        else if (c == '\n') { out[p++] = '\\'; out[p++] = 'n'; }
+        else if (c == '\t') { out[p++] = '\\'; out[p++] = 't'; }
+        else if (c == '\r') { out[p++] = '\\'; out[p++] = 'r'; }
+        else if (c >= 32 && c < 127) { out[p++] = (char)c; }
+        else { p += (size_t)sprintf(out + p, "\\x%02x", c); }
+    }
+    out[p++] = '\'';
+    out[p] = 0;
+    return out;
+}
+
+void mojo_bytes_print(MojoBytes *b)
+{
+    char *s = mojo_bytes_repr(b);
+    fputs(s, stdout);
+    free(s);
+}
+
+MojoBytes *mojo_bytes_concat(MojoBytes *a, MojoBytes *b)
+{
+    int64_t an = a ? a->len : 0, bn = b ? b->len : 0;
+    MojoBytes *r = mojo_bytes_alloc(an + bn);
+    if (an) memcpy(r->data, a->data, (size_t)an);
+    if (bn) memcpy(r->data + an, b->data, (size_t)bn);
+    return r;
+}
+
+MojoBytes *mojo_bytes_repeat(MojoBytes *b, int64_t n)
+{
+    if (n < 0) n = 0;
+    int64_t bn = b ? b->len : 0;
+    MojoBytes *r = mojo_bytes_alloc(bn * n);
+    for (int64_t i = 0; i < n; i++)
+        if (bn) memcpy(r->data + i * bn, b->data, (size_t)bn);
+    return r;
+}
+
+/* Read-slice with step. start/stop use the same MOJO_SLICE_STOP_OMITTED
+ * sentinel convention as mojo_list_slice; step defaults to 1. */
+MojoBytes *mojo_bytes_slice(MojoBytes *b, int64_t start, int64_t stop, int64_t step)
+{
+    int64_t n = b ? b->len : 0;
+    if (step == 0) step = 1;
+    int64_t lo, hi;
+    if (step > 0) {
+        lo = (start == MOJO_SLICE_STOP_OMITTED) ? 0 : start;
+        hi = (stop == MOJO_SLICE_STOP_OMITTED) ? n : stop;
+        if (lo < 0) lo += n;
+        if (hi < 0) hi += n;
+        if (lo < 0) lo = 0;
+        if (hi > n) hi = n;
+    } else {
+        lo = (start == MOJO_SLICE_STOP_OMITTED) ? n - 1 : start;
+        hi = (stop == MOJO_SLICE_STOP_OMITTED) ? -1 : stop;
+        if (lo < 0 && start != MOJO_SLICE_STOP_OMITTED) lo += n;
+        if (hi < 0 && stop != MOJO_SLICE_STOP_OMITTED) hi += n;
+        if (lo > n - 1) lo = n - 1;
+    }
+    /* count elements */
+    int64_t cnt = 0;
+    for (int64_t i = lo; (step > 0) ? (i < hi) : (i > hi); i += step)
+        if (i >= 0 && i < n) cnt++;
+    MojoBytes *r = mojo_bytes_alloc(cnt);
+    int64_t p = 0;
+    for (int64_t i = lo; (step > 0) ? (i < hi) : (i > hi); i += step)
+        if (i >= 0 && i < n) r->data[p++] = b->data[i];
+    return r;
+}
+
+int mojo_bytes_contains(MojoBytes *hay, MojoBytes *needle)
+{
+    if (!needle || needle->len == 0) return 1;
+    if (!hay || hay->len < needle->len) return 0;
+    for (int64_t i = 0; i + needle->len <= hay->len; i++)
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return 1;
+    return 0;
+}
+
+int64_t mojo_bytes_find(MojoBytes *hay, MojoBytes *needle)
+{
+    if (!needle || needle->len == 0) return 0;
+    if (!hay || hay->len < needle->len) return -1;
+    for (int64_t i = 0; i + needle->len <= hay->len; i++)
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_count(MojoBytes *hay, MojoBytes *needle)
+{
+    if (!hay || !needle || needle->len == 0) return 0;
+    int64_t c = 0;
+    for (int64_t i = 0; i + needle->len <= hay->len; ) {
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) { c++; i += needle->len; }
+        else i++;
+    }
+    return c;
+}
+
+int mojo_bytes_startswith(MojoBytes *b, MojoBytes *p)
+{
+    if (!p || p->len == 0) return 1;
+    if (!b || b->len < p->len) return 0;
+    return memcmp(b->data, p->data, (size_t)p->len) == 0;
+}
+
+int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
+{
+    if (!p || p->len == 0) return 1;
+    if (!b || b->len < p->len) return 0;
+    return memcmp(b->data + b->len - p->len, p->data, (size_t)p->len) == 0;
+}
+
+char *mojo_bytes_decode(MojoBytes *b, char *encoding)
+{
+    (void)encoding;
+    int64_t n = b ? b->len : 0;
+    char *s = malloc((size_t)n + 1);
+    if (n) memcpy(s, b->data, (size_t)n);
+    s[n] = 0;
+    return s;
+}
+
+char *mojo_bytes_hex(MojoBytes *b)
+{
+    int64_t n = b ? b->len : 0;
+    char *s = malloc((size_t)n * 2 + 1);
+    for (int64_t i = 0; i < n; i++)
+        sprintf(s + i * 2, "%02x", b->data[i]);
+    s[n * 2] = 0;
+    return s;
+}
+
+MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to)
+{
+    if (!b) return mojo_bytes_empty();
+    if (!from || from->len == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
+    int64_t cnt = mojo_bytes_count(b, from);
+    int64_t tn = to ? to->len : 0;
+    MojoBytes *r = mojo_bytes_alloc(b->len + cnt * (tn - from->len));
+    int64_t p = 0;
+    for (int64_t i = 0; i < b->len; ) {
+        if (i + from->len <= b->len && memcmp(b->data + i, from->data, (size_t)from->len) == 0) {
+            if (tn) memcpy(r->data + p, to->data, (size_t)tn);
+            p += tn; i += from->len;
+        } else r->data[p++] = b->data[i++];
+    }
+    return r;
+}
+
+static int mojo_bytes_isspace_byte(uint8_t c)
+{ return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+
+MojoBytes *mojo_bytes_strip(MojoBytes *b, MojoBytes *chars, int do_left, int do_right)
+{
+    if (!b) return mojo_bytes_empty();
+    int64_t lo = 0, hi = b->len;
+    #define IN_STRIP(c) (chars ? (memchr(chars->data, (c), (size_t)chars->len) != NULL) : mojo_bytes_isspace_byte(c))
+    if (do_left)  while (lo < hi && IN_STRIP(b->data[lo])) lo++;
+    if (do_right) while (hi > lo && IN_STRIP(b->data[hi - 1])) hi--;
+    #undef IN_STRIP
+    return mojo_bytes_new_lit((const char *)(b->data + lo), hi - lo);
+}
+
+MojoBytes *mojo_bytes_upper(MojoBytes *b)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    for (int64_t i = 0; i < r->len; i++)
+        if (r->data[i] >= 'a' && r->data[i] <= 'z') r->data[i] -= 32;
+    return r;
+}
+
+MojoBytes *mojo_bytes_lower(MojoBytes *b)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    for (int64_t i = 0; i < r->len; i++)
+        if (r->data[i] >= 'A' && r->data[i] <= 'Z') r->data[i] += 32;
+    return r;
+}
+
+static void mojo_bytes_list_push(MojoList *l, const uint8_t *d, int64_t n)
+{
+    MojoBytes *piece = mojo_bytes_new_lit((const char *)d, n);
+    mojo_list_append_int(l, (int64_t)(uintptr_t)piece);
+}
+
+MojoList *mojo_bytes_split(MojoBytes *b, MojoBytes *sep)
+{
+    MojoList *l = mojo_list_new();
+    if (!b) return l;
+    if (!sep || sep->len == 0) {
+        /* whitespace split, no empty pieces */
+        int64_t i = 0;
+        while (i < b->len) {
+            while (i < b->len && mojo_bytes_isspace_byte(b->data[i])) i++;
+            if (i >= b->len) break;
+            int64_t start = i;
+            while (i < b->len && !mojo_bytes_isspace_byte(b->data[i])) i++;
+            mojo_bytes_list_push(l, b->data + start, i - start);
+        }
+        return l;
+    }
+    int64_t start = 0;
+    for (int64_t i = 0; i + sep->len <= b->len; ) {
+        if (memcmp(b->data + i, sep->data, (size_t)sep->len) == 0) {
+            mojo_bytes_list_push(l, b->data + start, i - start);
+            i += sep->len; start = i;
+        } else i++;
+    }
+    mojo_bytes_list_push(l, b->data + start, b->len - start);
+    return l;
+}
+
+MojoList *mojo_bytes_rsplit(MojoBytes *b, MojoBytes *sep)
+{
+    /* no maxsplit support: same result set as split, just reuse it */
+    return mojo_bytes_split(b, sep);
+}
+
+MojoList *mojo_bytes_splitlines(MojoBytes *b)
+{
+    MojoList *l = mojo_list_new();
+    if (!b) return l;
+    int64_t start = 0;
+    for (int64_t i = 0; i < b->len; i++) {
+        if (b->data[i] == '\n') {
+            mojo_bytes_list_push(l, b->data + start, i - start);
+            start = i + 1;
+        }
+    }
+    if (start < b->len) mojo_bytes_list_push(l, b->data + start, b->len - start);
+    return l;
+}
+
+MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts)
+{
+    if (!parts) return mojo_bytes_empty();
+    int64_t n = mojo_list_len(parts);
+    int64_t total = 0;
+    int64_t sn = sep ? sep->len : 0;
+    for (int64_t i = 0; i < n; i++) {
+        MojoBytes *p = (MojoBytes *)(uintptr_t)mojo_list_get_int(parts, i);
+        total += (p ? p->len : 0);
+        if (i) total += sn;
+    }
+    MojoBytes *r = mojo_bytes_alloc(total);
+    int64_t off = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (i && sn) { memcpy(r->data + off, sep->data, (size_t)sn); off += sn; }
+        MojoBytes *p = (MojoBytes *)(uintptr_t)mojo_list_get_int(parts, i);
+        if (p && p->len) { memcpy(r->data + off, p->data, (size_t)p->len); off += p->len; }
+    }
+    return r;
+}
+
+/* ── bytearray (mutable, shares the MojoBytes representation) ────────────
+ * No capacity field on MojoBytes, so every size-changing op reallocs
+ * data to exactly len+1. O(n) amortized append is acceptable for this
+ * compiler's workloads and keeps the struct layout (and every codegen
+ * struct-field table) untouched. */
+static void mojo_bytearray_resize(MojoBytes *b, int64_t newlen)
+{
+    if (newlen < 0) newlen = 0;
+    b->data = realloc(b->data, (size_t)newlen + 1);
+    b->data[newlen] = 0;
+    b->len = newlen;
+}
+
+MojoBytes *mojo_bytearray_new(void) { return mojo_bytes_alloc(0); }
+
+MojoBytes *mojo_bytearray_copy(MojoBytes *src)
+{
+    int64_t n = src ? src->len : 0;
+    return mojo_bytes_new_lit(src ? (const char *)src->data : "", n);
+}
+
+/* bytes(bytearray) / bytearray(bytes): an explicit independent copy. */
+MojoBytes *mojo_bytes_copy(MojoBytes *src) { return mojo_bytearray_copy(src); }
+
+/* reversed(<bytes>) modeled as an eagerly reversed copy. */
+MojoBytes *mojo_bytes_reverse(MojoBytes *src)
+{
+    int64_t n = src ? src->len : 0;
+    MojoBytes *out = mojo_bytes_alloc(n);
+    for (int64_t i = 0; i < n; i++) out->data[i] = src->data[n - 1 - i];
+    out->len = n;
+    return out;
+}
+
+void mojo_bytearray_setitem(MojoBytes *b, int64_t i, int64_t v)
+{
+    if (!b) return;
+    if (i < 0) i += b->len;
+    if (i < 0 || i >= b->len) { fprintf(stderr, "IndexError: bytearray index out of range\n"); exit(1); }
+    b->data[i] = (uint8_t)(v & 0xFF);
+}
+
+void mojo_bytearray_append(MojoBytes *b, int64_t v)
+{
+    if (!b) return;
+    mojo_bytearray_resize(b, b->len + 1);
+    b->data[b->len - 1] = (uint8_t)(v & 0xFF);
+}
+
+void mojo_bytearray_extend(MojoBytes *b, MojoBytes *other)
+{
+    if (!b || !other || other->len == 0) return;
+    int64_t old = b->len;
+    /* snapshot in case other aliases b */
+    int64_t on = other->len;
+    uint8_t *tmp = malloc((size_t)on);
+    memcpy(tmp, other->data, (size_t)on);
+    mojo_bytearray_resize(b, old + on);
+    memcpy(b->data + old, tmp, (size_t)on);
+    free(tmp);
+}
+
+int64_t mojo_bytearray_pop(MojoBytes *b, int64_t i)
+{
+    if (!b || b->len == 0) { fprintf(stderr, "IndexError: pop from empty bytearray\n"); exit(1); }
+    if (i == MOJO_SLICE_STOP_OMITTED) i = b->len - 1;
+    if (i < 0) i += b->len;
+    if (i < 0 || i >= b->len) { fprintf(stderr, "IndexError: pop index out of range\n"); exit(1); }
+    int64_t out = b->data[i];
+    memmove(b->data + i, b->data + i + 1, (size_t)(b->len - i - 1));
+    mojo_bytearray_resize(b, b->len - 1);
+    return out;
+}
+
+void mojo_bytearray_delitem(MojoBytes *b, int64_t i)
+{
+    (void)mojo_bytearray_pop(b, i);
+}
+
+/* ba[start:stop] = repl  — splice: delete [start,stop), insert repl's
+ * bytes at start. Negative / omitted bounds already normalized by the
+ * caller (same _lower_slice_bounds path as list splice). */
+void mojo_bytearray_splice(MojoBytes *b, int64_t start, int64_t stop, MojoBytes *repl)
+{
+    if (!b) return;
+    int64_t n = b->len;
+    if (start == MOJO_SLICE_STOP_OMITTED) start = 0;
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = n;
+    if (start < 0) start += n;
+    if (stop < 0) stop += n;
+    if (start < 0) start = 0;
+    if (start > n) start = n;
+    if (stop < start) stop = start;
+    if (stop > n) stop = n;
+    int64_t rn = repl ? repl->len : 0;
+    uint8_t *rtmp = malloc((size_t)(rn ? rn : 1));
+    if (rn) memcpy(rtmp, repl->data, (size_t)rn);
+    int64_t tail = n - stop;
+    uint8_t *ttmp = malloc((size_t)(tail ? tail : 1));
+    if (tail) memcpy(ttmp, b->data + stop, (size_t)tail);
+    mojo_bytearray_resize(b, start + rn + tail);
+    if (rn) memcpy(b->data + start, rtmp, (size_t)rn);
+    if (tail) memcpy(b->data + start + rn, ttmp, (size_t)tail);
+    free(rtmp); free(ttmp);
+}
+
+/* ── memoryview (non-copying 1-D byte view) ─────────────────────────────*/
+MojoMemoryView *mojo_memoryview_new(uint8_t *data, int64_t len, int64_t itemsize)
+{
+    MojoMemoryView *m = malloc(sizeof(MojoMemoryView));
+    m->data = data;
+    m->len = len;
+    m->itemsize = itemsize > 0 ? itemsize : 1;
+    return m;
+}
+
+MojoMemoryView *mojo_memoryview_from_bytes(MojoBytes *b)
+{
+    return mojo_memoryview_new(b ? b->data : NULL, b ? b->len : 0, 1);
+}
+
+int64_t mojo_memoryview_len(MojoMemoryView *m) { return m ? m->len : 0; }
+
+int64_t mojo_memoryview_get(MojoMemoryView *m, int64_t i)
+{
+    if (!m) return 0;
+    if (i < 0) i += m->len;
+    if (i < 0 || i >= m->len) {
+        fprintf(stderr, "IndexError: index out of bounds on memoryview\n");
+        exit(1);
+    }
+    return (int64_t)m->data[i];
+}
+
+/* mv[a:b] — a sub-view into the SAME buffer (no copy). start/stop use the
+ * MOJO_SLICE_STOP_OMITTED sentinel convention; step is not supported for
+ * a non-contiguous view and is treated as 1. */
+MojoMemoryView *mojo_memoryview_slice(MojoMemoryView *m, int64_t start, int64_t stop, int64_t step)
+{
+    (void)step;
+    int64_t n = m ? m->len : 0;
+    int64_t lo = (start == MOJO_SLICE_STOP_OMITTED) ? 0 : start;
+    int64_t hi = (stop == MOJO_SLICE_STOP_OMITTED) ? n : stop;
+    if (lo < 0) lo += n;
+    if (hi < 0) hi += n;
+    if (lo < 0) lo = 0;
+    if (hi > n) hi = n;
+    if (hi < lo) hi = lo;
+    return mojo_memoryview_new(m ? m->data + lo : NULL, hi - lo, m ? m->itemsize : 1);
+}
+
+MojoBytes *mojo_memoryview_tobytes(MojoMemoryView *m)
+{
+    return mojo_bytes_new_lit(m ? (const char *)m->data : "", m ? m->len : 0);
+}
+
+int mojo_memoryview_eq(MojoMemoryView *m, MojoBytes *b)
+{
+    if (!m || !b) return m == NULL && b == NULL;
+    return m->len == b->len && memcmp(m->data, b->data, (size_t)m->len) == 0;
+}
+
+char *mojo_memoryview_hex(MojoMemoryView *m)
+{
+    MojoBytes *b = mojo_memoryview_tobytes(m);
+    char *r = mojo_bytes_hex(b);
+    return r;
+}
+
+/* .cast(fmt) for a 1-D byte view: only 'B'/'b'/'c' are meaningful and all
+ * keep itemsize 1, so this is an identity return. */
+MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt) { (void)fmt; return m; }
+
+char *mojo_memoryview_repr(MojoMemoryView *m)
+{
+    char *s = malloc(48);
+    snprintf(s, 48, "<memory at %p>", (void *)m);
+    return s;
+}
+
+/* ── struct module: binary pack / unpack ──────────────────────────────
+ * See mojo_runtime.h for the format mini-language and calling convention.
+ * A compiled format expands to one MojoStructOp per value ('x' padding is
+ * folded into offsets and produces no op; 's'/'c' are a single op of
+ * `nbytes` bytes). */
+typedef struct {
+    char    code;     /* b B h H i I l L q Q f d s ? c */
+    int32_t nbytes;   /* wire size (for 's'/'c': the byte count) */
+    int64_t offset;   /* byte offset within the packed buffer */
+} MojoStructOp;
+
+struct MojoStructFmt {
+    int           big_endian;  /* 1 = big/network order, 0 = little (host assumed LE) */
+    int           native;      /* 1 = '@' native size + alignment, 0 = standard sizes, no padding */
+    int64_t       size;        /* calcsize() */
+    int64_t       nops;
+    MojoStructOp *ops;
+    char         *format;      /* original format string (struct.Struct.format) */
+};
+
+void mojo_struct_raise_error(const char *msg)
+{
+    size_t n = strlen(msg) + 1;
+    char *heap = (char *)malloc(n);
+    memcpy(heap, msg, n);
+    mojo_exc_type_set(MOJO_STRUCT_ERROR_TAG);
+    mojo_exc_msg_set(heap);
+    mojo_exc_obj_set(heap);
+    mojo_raise();
+}
+
+static void _struct_type_info(char code, int native, int *sz, int *align)
+{
+    int s;
+    switch (code) {
+        case 'x': case 'b': case 'B': case 'c': case 's': case '?': s = 1; break;
+        case 'h': case 'H': s = 2; break;
+        case 'i': case 'I': s = 4; break;
+        case 'l': case 'L': s = native ? (int)sizeof(long) : 4; break;
+        case 'q': case 'Q': s = 8; break;
+        case 'f': s = 4; break;
+        case 'd': s = 8; break;
+        default:  s = 0; break;   /* unknown code */
+    }
+    if (sz)    *sz = s;
+    if (align) *align = native ? s : 1;
+}
+
+MojoStructFmt *mojo_struct_compile(const char *fmt)
+{
+    if (fmt == NULL) fmt = "";
+    MojoStructFmt *f = (MojoStructFmt *)calloc(1, sizeof *f);
+    f->big_endian = 0;
+    f->native     = 1;
+    const char *p = fmt;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    if (*p == '<' || *p == '>' || *p == '=' || *p == '!' || *p == '@') {
+        switch (*p) {
+            case '<': f->big_endian = 0; f->native = 0; break;
+            case '=': f->big_endian = 0; f->native = 0; break;
+            case '>': f->big_endian = 1; f->native = 0; break;
+            case '!': f->big_endian = 1; f->native = 0; break;
+            case '@': f->big_endian = 0; f->native = 1; break;
+        }
+        p++;
+    }
+    int64_t cap = 8;
+    f->ops  = (MojoStructOp *)malloc((size_t)cap * sizeof(MojoStructOp));
+    f->nops = 0;
+    int64_t off = 0;
+    while (*p) {
+        char c = *p;
+        if (c == ' ' || c == '\t' || c == '\n') { p++; continue; }
+        long count = -1;
+        if (c >= '0' && c <= '9') {
+            count = 0;
+            while (*p >= '0' && *p <= '9') { count = count * 10 + (*p - '0'); p++; }
+            c = *p;
+            if (!c) { mojo_struct_raise_error("repeat count given without format specifier"); return f; }
+        }
+        p++;
+        int sz = 0, align = 1;
+        _struct_type_info(c, f->native, &sz, &align);
+        if (sz == 0) {
+            char m[64];
+            snprintf(m, sizeof m, "bad char in struct format: '%c'", c);
+            mojo_struct_raise_error(m);
+            return f;
+        }
+        if (c == 's' || c == 'c') {
+            long n = (c == 'c') ? 1 : ((count < 0) ? 1 : count);
+            if (f->native && align > 1) off = (off + align - 1) & ~(int64_t)(align - 1);
+            if (f->nops >= cap) { cap *= 2; f->ops = (MojoStructOp *)realloc(f->ops, (size_t)cap * sizeof(MojoStructOp)); }
+            f->ops[f->nops].code   = c;
+            f->ops[f->nops].nbytes = (int32_t)n;
+            f->ops[f->nops].offset = off;
+            f->nops++;
+            off += n;
+        } else {
+            long reps = (count < 0) ? 1 : count;
+            for (long r = 0; r < reps; r++) {
+                if (f->native && align > 1) off = (off + align - 1) & ~(int64_t)(align - 1);
+                if (c != 'x') {
+                    if (f->nops >= cap) { cap *= 2; f->ops = (MojoStructOp *)realloc(f->ops, (size_t)cap * sizeof(MojoStructOp)); }
+                    f->ops[f->nops].code   = c;
+                    f->ops[f->nops].nbytes = (int32_t)sz;
+                    f->ops[f->nops].offset = off;
+                    f->nops++;
+                }
+                off += sz;
+            }
+        }
+    }
+    f->size   = off;
+    f->format = strdup(fmt);
+    return f;
+}
+
+static void _struct_wr_uint(uint8_t *dst, uint64_t v, int nbytes, int big)
+{
+    for (int i = 0; i < nbytes; i++) {
+        int shift = big ? (nbytes - 1 - i) * 8 : i * 8;
+        dst[i] = (uint8_t)((v >> shift) & 0xFF);
+    }
+}
+
+static uint64_t _struct_rd_uint(const uint8_t *src, int nbytes, int big)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < nbytes; i++) {
+        int shift = big ? (nbytes - 1 - i) * 8 : i * 8;
+        v |= (uint64_t)src[i] << shift;
+    }
+    return v;
+}
+
+MojoBytes *mojo_struct_pack_h(MojoStructFmt *f, MojoList *vals)
+{
+    int64_t nv = mojo_list_len(vals);
+    if (nv != f->nops) {
+        char m[96];
+        snprintf(m, sizeof m, "pack expected %lld items for packing (got %lld)",
+                 (long long)f->nops, (long long)nv);
+        mojo_struct_raise_error(m);
+        return mojo_bytes_empty();
+    }
+    MojoBytes *b = mojo_bytes_zeros(f->size);
+    for (int64_t i = 0; i < f->nops; i++) {
+        MojoStructOp *op = &f->ops[i];
+        uint8_t *dst = b->data + op->offset;
+        switch (op->code) {
+            case 's': case 'c': {
+                MojoBytes *sv = (MojoBytes *)(uintptr_t)mojo_list_get_int(vals, i);
+                int64_t n = sv ? sv->len : 0;
+                if (n > op->nbytes) n = op->nbytes;
+                if (n > 0) memcpy(dst, sv->data, (size_t)n);
+                break;
+            }
+            case 'f': {
+                float fv = (float)mojo_list_get_double(vals, i);
+                uint32_t bits; memcpy(&bits, &fv, 4);
+                _struct_wr_uint(dst, bits, 4, f->big_endian);
+                break;
+            }
+            case 'd': {
+                double dv = mojo_list_get_double(vals, i);
+                uint64_t bits; memcpy(&bits, &dv, 8);
+                _struct_wr_uint(dst, bits, 8, f->big_endian);
+                break;
+            }
+            case '?': {
+                dst[0] = mojo_list_get_int(vals, i) ? 1 : 0;
+                break;
+            }
+            default: {
+                int64_t v = mojo_list_get_int(vals, i);
+                _struct_wr_uint(dst, (uint64_t)v, op->nbytes, f->big_endian);
+                break;
+            }
+        }
+    }
+    return b;
+}
+
+static MojoList *_struct_unpack_at(MojoStructFmt *f, MojoBytes *buf, int64_t offset)
+{
+    int64_t buflen = buf ? buf->len : 0;
+    if (offset < 0 || offset + f->size > buflen) {
+        char m[96];
+        snprintf(m, sizeof m, "unpack requires a buffer of %lld bytes", (long long)f->size);
+        mojo_struct_raise_error(m);
+        return mojo_list_new();
+    }
+    MojoList *out = mojo_list_new();
+    for (int64_t i = 0; i < f->nops; i++) {
+        MojoStructOp *op = &f->ops[i];
+        const uint8_t *src = buf->data + offset + op->offset;
+        switch (op->code) {
+            case 's': case 'c': {
+                MojoBytes *sv = mojo_bytes_new_lit((const char *)src, op->nbytes);
+                mojo_list_append_int(out, (int64_t)(uintptr_t)sv);
+                break;
+            }
+            case 'f': {
+                uint32_t bits = (uint32_t)_struct_rd_uint(src, 4, f->big_endian);
+                float fv; memcpy(&fv, &bits, 4);
+                mojo_list_append_double(out, (double)fv);
+                break;
+            }
+            case 'd': {
+                uint64_t bits = _struct_rd_uint(src, 8, f->big_endian);
+                double dv; memcpy(&dv, &bits, 8);
+                mojo_list_append_double(out, dv);
+                break;
+            }
+            case '?': {
+                mojo_list_append_int(out, src[0] ? 1 : 0);
+                break;
+            }
+            default: {
+                uint64_t raw = _struct_rd_uint(src, op->nbytes, f->big_endian);
+                int is_signed = (op->code == 'b' || op->code == 'h' ||
+                                 op->code == 'i' || op->code == 'l' || op->code == 'q');
+                int64_t v;
+                if (is_signed && op->nbytes < 8 &&
+                    (raw & ((uint64_t)1 << (op->nbytes * 8 - 1))))
+                    v = (int64_t)(raw | (~(uint64_t)0 << (op->nbytes * 8)));
+                else
+                    v = (int64_t)raw;
+                mojo_list_append_int(out, v);
+                break;
+            }
+        }
+    }
+    mojo_mark_as_tuple(out);
+    return out;
+}
+
+int64_t   mojo_struct_calcsize(const char *fmt)                 { return mojo_struct_compile(fmt)->size; }
+MojoBytes *mojo_struct_pack_list(const char *fmt, MojoList *v)  { return mojo_struct_pack_h(mojo_struct_compile(fmt), v); }
+MojoList  *mojo_struct_unpack(const char *fmt, MojoBytes *buf)  { return _struct_unpack_at(mojo_struct_compile(fmt), buf, 0); }
+MojoList  *mojo_struct_unpack_from(const char *fmt, MojoBytes *buf, int64_t off)
+                                                               { return _struct_unpack_at(mojo_struct_compile(fmt), buf, off); }
+
+MojoStructFmt *mojo_struct_new(const char *fmt)                 { return mojo_struct_compile(fmt); }
+int64_t   mojo_struct_size(MojoStructFmt *f)                    { return f ? f->size : 0; }
+char     *mojo_struct_format(MojoStructFmt *f)                  { return (f && f->format) ? f->format : (char *)""; }
+MojoList  *mojo_struct_unpack_h(MojoStructFmt *f, MojoBytes *buf)   { return _struct_unpack_at(f, buf, 0); }
+MojoList  *mojo_struct_unpack_from_h(MojoStructFmt *f, MojoBytes *buf, int64_t off)
+                                                               { return _struct_unpack_at(f, buf, off); }
+
+void mojo_struct_pack_into_h(MojoStructFmt *f, MojoBytes *buf, int64_t offset, MojoList *vals)
+{
+    int64_t buflen = buf ? buf->len : 0;
+    if (!buf || offset < 0 || offset + f->size > buflen) {
+        mojo_struct_raise_error("pack_into requires a buffer of sufficient size");
+        return;
+    }
+    MojoBytes *packed = mojo_struct_pack_h(f, vals);
+    memcpy(buf->data + offset, packed->data, (size_t)f->size);
+}
+
+void mojo_struct_pack_into(const char *fmt, MojoBytes *buf, int64_t offset, MojoList *vals)
+{
+    mojo_struct_pack_into_h(mojo_struct_compile(fmt), buf, offset, vals);
+}
 
 /* A single character (raw `char`, e.g. from string indexing) is a distinct
  * representation from a 1-character `char *` string — reinterpreting its
@@ -2313,6 +3257,10 @@ int mojo_isinstance(int64_t obj, int type_id) {
         return mojo_is_registered_list(obj);
     if (type_id == 6)
         return mojo_is_registered_dict(obj);
+    if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
+        if (!mojo_is_registered_list(obj)) return 0;
+        return mojo_is_tuple((MojoList *)(intptr_t)obj);
+    }
     return 0;
 }
 
@@ -2322,6 +3270,10 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
         return mojo_is_registered_list(obj);
     if (type_id == 6)
         return mojo_is_registered_dict(obj);
+    if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
+        if (!mojo_is_registered_list(obj)) return 0;
+        return mojo_is_tuple((MojoList *)(intptr_t)obj);
+    }
     return 0;
 }
 
@@ -2550,6 +3502,23 @@ char *mojo_repr_list_ints(MojoList *l) {
     for (int64_t _i = 0; _i < _n; _i++) {
         if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
+char *mojo_repr_list_bytes(MojoList *l) {
+    /* repr for a MojoList * whose element type is statically known to be
+     * `MojoBytes *` (e.g. b.split(sep)). Each int64_t slot holds a
+     * MojoBytes pointer; format each via mojo_bytes_repr. */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
+        _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
     }
     if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
     return mojo_str_cat(_buf, _is_tup ? ")" : "]");
@@ -3800,6 +4769,42 @@ MojoList *int64_t_path_split(char *path) {
     }
     mojo_list_append_str(l, head);
     mojo_list_append_str(l, tail);
+    return l;
+}
+
+MojoList *int64_t_path_splitdrive(char *path) {
+    /* os.path.splitdrive(path) -> [drive, tail] as a 2-element string list.
+     * POSIX posixpath.splitdrive has no drive concept: it always returns
+     * ('', p). This codegen targets darwin, so mirror posixpath verbatim. */
+    MojoList *l = mojo_list_new();
+    if (!path) path = "";
+    mojo_list_append_str(l, "");
+    mojo_list_append_str(l, strdup(path));
+    return l;
+}
+
+MojoList *int64_t_path_splitroot(char *path) {
+    /* os.path.splitroot(path) -> [drive, root, tail] as a 3-element string
+     * list. Mirrors cpython posixpath.splitroot verbatim (POSIX):
+     *   p[:1] != '/'                      -> ('', '', p)
+     *   p[1:2] != '/' or p[2:3] == '/'    -> ('', '/', p[1:])   (1 or >=3 slashes)
+     *   else                              -> ('', '//', p[2:])  (exactly 2) */
+    MojoList *l = mojo_list_new();
+    if (!path) path = "";
+    size_t plen = strlen(path);
+    if (plen < 1 || path[0] != '/') {
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, strdup(path));
+    } else if (plen < 2 || path[1] != '/' || (plen >= 3 && path[2] == '/')) {
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, "/");
+        mojo_list_append_str(l, strdup(path + 1));
+    } else {
+        mojo_list_append_str(l, "");
+        mojo_list_append_str(l, "//");
+        mojo_list_append_str(l, strdup(path + 2));
+    }
     return l;
 }
 

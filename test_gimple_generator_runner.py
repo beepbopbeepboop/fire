@@ -344,6 +344,61 @@ def main():
         print(v)
 """, "3.5\n")
 
+    # Same, string-typed: `def g(x): yield x` called only `g("...")` —
+    # `x`'s kind resolves to 'p' from the unanimous call site, so the
+    # generator's value slot / <base>_value return type is `char *` and
+    # the string round-trips instead of printing raw pointer bits.
+    test_generator_stdout("param_generator_unannotated_string_via_cross_call", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g("hello"):
+        print(v)
+""", "hello\n")
+
+    # And through a binary expression: `yield a * 2` with `a` resolved to
+    # 'd' from the call site keeps the arithmetic in `double` (the arg ABI
+    # bit-casts the double through its int64_t slot, __mojo_gen_arg_d reads
+    # it back). Value is 5.0; `%g` prints it "5" (same as `print(5.0)` in
+    # the compiled path generally — a separate float-formatting matter).
+    test_generator_stdout("param_generator_unannotated_double_binexpr", """\
+def h(a):
+    yield a * 2
+    yield a * 2
+
+def main():
+    for v in h(2.5):
+        print(v)
+""", "5\n5\n")
+
+    # A generator METHOD with an unannotated param, called consistently
+    # with a float argument: the cross-call contract feeds `v`'s kind into
+    # the method-lowering path too (arg slot index 1, after `self`).
+    test_generator_stdout("param_generator_method_unannotated_double", """\
+struct Box:
+    fn __init__(out self):
+        pass
+    def emit(self, v):
+        yield v
+        yield v
+
+def main():
+    b = Box()
+    for x in b.emit(1.25):
+        print(x)
+""", "1.25\n1.25\n")
+
+    # A generator that is never called anywhere must still compile (no
+    # crash from an empty cross-call kind set).
+    test_generator_c_compiles("param_generator_never_called_compiles", """\
+def unused(z):
+    yield z
+
+def main():
+    print(0)
+""")
+
     # Milestone C step 2 (yield-from delegation): the exact target shape —
     # `outer` delegates its entire output to `inner` via a bare
     # `yield from inner()`. `inner` must be defined before `outer` (see
@@ -1964,6 +2019,127 @@ def main():
     for v in deltas():
         print(v)
 """, "1\n3\n6\n10\n")
+
+    # bytes / bytearray / memoryview VALUE TYPES inside a compiled
+    # generator body (bugs/hard/CODEGEN_bytes_value_type.md Stage 4). The
+    # A3 stack-switch cutover routes a generator body through ordinary
+    # codegen, which gained full bytes/bytearray/memoryview support in
+    # Stages 1-3 -- these lock in that it actually works end-to-end from
+    # inside a `yield`ing body.
+    test_generator_stdout("generator_memoryview_index", """\
+def g(data):
+    yield memoryview(data)[0]
+    yield memoryview(data)[2]
+
+def main():
+    var b = bytes([10, 20, 30])
+    for x in g(b):
+        print(x)
+""", "10\n30\n")
+
+    test_generator_stdout("generator_bytes_literal_iteration", """\
+def g():
+    var b = bytes([1, 2, 3])
+    for x in b:
+        yield x * 2
+
+def main():
+    for x in g():
+        print(x)
+""", "2\n4\n6\n")
+
+    test_generator_stdout("generator_bytearray_mutation", """\
+def g():
+    var ba = bytearray()
+    ba.append(5)
+    ba.append(7)
+    yield ba[0]
+    yield ba[1]
+    yield len(ba)
+
+def main():
+    for x in g():
+        print(x)
+""", "5\n7\n2\n")
+
+    # A @classmethod generator that builds a memoryview over an
+    # unannotated (bytes) parameter and iterates it -- the shape of
+    # zipfile's `_Extra.split` (bugs/COMPILE_FAIL_zipfile___init__.md).
+    # Newly A3-eligible (gimple_gen_coro._eligible classmethod path).
+    test_generator_stdout("generator_classmethod_memoryview", """\
+struct E:
+    @classmethod
+    def split(cls, data):
+        var mv = memoryview(data)
+        var i = 0
+        while i < len(mv):
+            yield mv[i]
+            i = i + 1
+
+def main():
+    for x in E.split(bytes([4, 5, 6])):
+        print(x)
+""", "4\n5\n6\n")
+
+    test_generator_stdout("generator_classmethod_scalar", """\
+struct C:
+    @classmethod
+    def upto(cls, n: Int):
+        var i = 0
+        while i < n:
+            yield i * i
+            i = i + 1
+
+def main():
+    for x in C.upto(4):
+        print(x)
+""", "0\n1\n4\n9\n")
+
+    # ── "cluster B": heterogeneous / tagged tuple-yield value model ────────
+    # A stack-switch generator whose tuple `yield`s carry a slot that is a
+    # different scalar kind at different yield sites, and/or a `None` in a
+    # slot, and/or a list-valued slot. The A3 backend unifies each slot's
+    # type across every yield site (`_generator_tuple_slots`) and the
+    # consumer unpacks per-slot through the runtime list getters
+    # (`_emit_generator_tuple_unpack`). Regression coverage for
+    # bugs/CODEGEN_generator_function_Lib_{modulefinder,pickletools,os,
+    # test_test_string_test_string}.md — the outer-tuple-slot half of that
+    # cluster. (Nested-tuple slots with heterogeneous inner elements remain
+    # honestly refused — see the modulefinder doc.)
+
+    # str | None slot: `is None` on the nil slot must test true.
+    test_generator_stdout("gen_tuple_slot_str_or_none", """\
+def parse(n: Int):
+    yield "lit", "field", "spec"
+    yield "tail", None, None
+
+def main():
+    for text, name, spec in parse(1):
+        print(text)
+        if name is None:
+            print("<none>")
+        else:
+            print(name)
+""", "lit\nfield\ntail\n<none>\n")
+
+    # list-valued slots (os.walk's `(dirpath, dirnames, filenames)` shape).
+    test_generator_stdout("gen_tuple_slot_list_valued", """\
+def walk(n: Int):
+    var d1 = ["sub"]
+    var f1 = ["a", "b"]
+    yield "root", d1, f1
+    var d2 = ["x", "y"]
+    var f2 = ["c"]
+    yield "root/sub", d2, f2
+
+def main():
+    for path, dirs, files in walk(1):
+        print(path)
+        for x in dirs:
+            print(x)
+        for x in files:
+            print(x)
+""", "root\nsub\na\nb\nroot/sub\nx\ny\nc\n")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

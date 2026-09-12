@@ -543,6 +543,12 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # Check if this is an int64_t-stored pointer (from method call returning pointer)
     it_type = gen._get_actual_type(it_type, it_val)
 
+    # `for c in <bytes-subclass instance>:` iterates its backing MojoBytes
+    # payload (each `c` an int 0-255). See COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(it_type):
+        it_val = gen._new_val('MojoBytes *', f"{it_val}->_data")
+        it_type = 'MojoBytes *'
+
     # Self-shadowing loop target: `for tail in tail:` — the loop's OWN
     # target variable has the same name as the list/dict/etc it iterates.
     # Only possible when the iterable is a bare IdentExpr whose lowered
@@ -600,6 +606,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._gen_for_str(var, it_val, node.body, shadow_name=shadow_name)
         elif it_type == 'char *':
             gen._gen_for_cstr(var, it_val, node.body)
+        elif it_type == 'MojoBytes *':
+            gen._gen_for_bytes(var, it_val, node.body)
+        elif it_type == 'MojoMemoryView *':
+            gen._gen_for_memoryview(var, it_val, node.body)
         elif it_type == 'MojoDict *':
             gen._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name)
         elif it_type == 'MojoSet *':
@@ -646,10 +656,22 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             base = gimple_exprtypes._struct_name_of(it_type)
             has_next = f"{base}___has_next__"
             nxt      = f"{base}___next__"
-            if has_next in gen.func_return_types or nxt in gen.func_return_types:
+            # A builtin-`dict` subclass instance with no iterator-protocol
+            # override: `for k in d` iterates the hidden `_data` backing
+            # store's keys, exactly like a plain dict. A subclass defining
+            # its own `__iter__`/`__next__` keeps the protocol path above.
+            if (gen._dict_subclass_of(it_type)
+                    and has_next not in gen.func_return_types
+                    and nxt not in gen.func_return_types
+                    and f"{base}___iter__" not in gen.func_return_types):
+                _dsub_dp = gen._new_val('MojoDict *', f"{it_val}->_data")
+                gen._gen_for_dict(var, _dsub_dp, node.body, shadow_name=shadow_name)
+            elif has_next in gen.func_return_types or nxt in gen.func_return_types:
                 gen._gen_for_struct_iter(var, it_type, it_val, node.body, shadow_name=shadow_name)
             else:
-                gimple_ctypes._debug_note('for loop dropped (no iterator protocol)', it_type)
+                gimple_ctypes._debug_note(
+                    'for loop dropped (no iterator protocol)',
+                    f"{it_type} fn={getattr(gen, 'current_func_name', '?')}")
                 gen._emit_unsupported_iter(it_type, node)
         else:
             # A boxed int64_t iterable whose real container type wasn't
@@ -1535,6 +1557,72 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     gen._emit(f"  {gen._cname(var)} = mojo_str_char_at ({it_val}, {idx_t});")
+    gen.loop_stack.append((bb_post, bb_after))
+    for s in body:
+        gen.gen_stmt(s)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    one = gen._new_val('int64_t', "(int64_t)1")
+    st = gen._new_val('int64_t', f"{idx_t} + {one}")
+    gen._emit(f"  {idx_t} = {st};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+
+
+def _gen_for_bytes(gen, var: str, it_val: str, body: list):
+    """`for x in b:` where `b` is a `MojoBytes *` — x is an int 0-255.
+    Mirrors _gen_for_cstr's index-loop shape over mojo_bytes_len/_get."""
+    gen._declare_var(var, 'int64_t')
+    len_t = gen._new_val('int64_t', f"mojo_bytes_len ({it_val})")
+    idx_t = gen._new_temp('int64_t')
+    gen._emit(f"  {idx_t} = (int64_t)0;")
+
+    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
+    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond_t = gen._new_val('_Bool', f"{idx_t} < {len_t}")
+    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    byte_t = gen._new_val('int64_t', f"mojo_bytes_get ({it_val}, {idx_t})")
+    gen._emit(f"  {gen._cname(var)} = {byte_t};")
+    gen.loop_stack.append((bb_post, bb_after))
+    for s in body:
+        gen.gen_stmt(s)
+    gen.loop_stack.pop()
+    gen._loop_depth -= 1
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    one = gen._new_val('int64_t', "(int64_t)1")
+    st = gen._new_val('int64_t', f"{idx_t} + {one}")
+    gen._emit(f"  {idx_t} = {st};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+
+
+def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
+    """`for x in mv:` — x is an int (1-D byte view). Same index-loop shape
+    as _gen_for_bytes over mojo_memoryview_len/_get."""
+    gen._declare_var(var, 'int64_t')
+    len_t = gen._new_val('int64_t', f"mojo_memoryview_len ({it_val})")
+    idx_t = gen._new_temp('int64_t')
+    gen._emit(f"  {idx_t} = (int64_t)0;")
+
+    bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
+    bb_post  = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond_t = gen._new_val('_Bool', f"{idx_t} < {len_t}")
+    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+    gen._loop_depth += 1
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
+    byte_t = gen._new_val('int64_t', f"mojo_memoryview_get ({it_val}, {idx_t})")
+    gen._emit(f"  {gen._cname(var)} = {byte_t};")
     gen.loop_stack.append((bb_post, bb_after))
     for s in body:
         gen.gen_stmt(s)

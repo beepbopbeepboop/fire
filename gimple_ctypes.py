@@ -237,6 +237,9 @@ _TYPE_MAP: dict[str | None, str] = {
     'Set':    'MojoSet *',
     'set':    'MojoSet *',
     'Str':    'MojoStr *',
+    'bytes':  'MojoBytes *',
+    'bytearray': 'MojoBytes *',
+    'memoryview': 'MojoMemoryView *',
     'None':   'void',
     # A boxed object reference (AST node child, dynamic value) is a 64-bit tagged
     # handle in this runtime, accessed via mojo_obj_getattr — never a 32-bit int.
@@ -325,6 +328,62 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_repeat':            'MojoStr *',
     'mojo_str_to_int':            'int64_t',
     'mojo_str_to_float':          'double',
+    # bytes
+    'mojo_bytes_new_lit':         'MojoBytes *',
+    'mojo_bytes_empty':           'MojoBytes *',
+    'mojo_bytes_zeros':           'MojoBytes *',
+    'mojo_bytes_from_list':       'MojoBytes *',
+    'mojo_bytes_from_str':        'MojoBytes *',
+    'mojo_bytes_from_cstr':       'MojoBytes *',
+    'mojo_bytes_len':             'int64_t',
+    'mojo_bytes_get':             'int64_t',
+    'mojo_bytes_eq':              'int',
+    'mojo_bytes_truthy':          'int',
+    'mojo_bytes_repr':            'char *',
+    'mojo_bytes_concat':          'MojoBytes *',
+    'mojo_bytes_repeat':          'MojoBytes *',
+    'mojo_bytes_slice':           'MojoBytes *',
+    'mojo_bytes_contains':        'int',
+    'mojo_bytes_find':            'int64_t',
+    'mojo_bytes_count':           'int64_t',
+    'mojo_bytes_startswith':      'int',
+    'mojo_bytes_endswith':        'int',
+    'mojo_bytes_decode':          'char *',
+    'mojo_bytes_hex':             'char *',
+    'mojo_bytes_replace':         'MojoBytes *',
+    'mojo_bytes_strip':           'MojoBytes *',
+    'mojo_bytes_upper':           'MojoBytes *',
+    'mojo_bytes_lower':           'MojoBytes *',
+    'mojo_bytes_split':           'MojoList *',
+    'mojo_bytes_rsplit':          'MojoList *',
+    'mojo_bytes_splitlines':      'MojoList *',
+    'mojo_bytes_join':            'MojoBytes *',
+    'mojo_bytes_copy':            'MojoBytes *',
+    'mojo_bytearray_new':         'MojoBytes *',
+    'mojo_bytearray_copy':        'MojoBytes *',
+    'mojo_bytearray_pop':         'int64_t',
+    'mojo_memoryview_new':        'MojoMemoryView *',
+    'mojo_memoryview_from_bytes': 'MojoMemoryView *',
+    'mojo_memoryview_len':        'int64_t',
+    'mojo_memoryview_get':        'int64_t',
+    'mojo_memoryview_slice':      'MojoMemoryView *',
+    'mojo_memoryview_tobytes':    'MojoBytes *',
+    'mojo_memoryview_eq':         'int',
+    'mojo_memoryview_hex':        'char *',
+    'mojo_memoryview_cast':       'MojoMemoryView *',
+    'mojo_memoryview_repr':       'char *',
+    # struct module (binary pack/unpack)
+    'mojo_struct_compile':        'MojoStructFmt *',
+    'mojo_struct_new':            'MojoStructFmt *',
+    'mojo_struct_calcsize':       'int64_t',
+    'mojo_struct_size':           'int64_t',
+    'mojo_struct_format':         'char *',
+    'mojo_struct_pack_list':      'MojoBytes *',
+    'mojo_struct_pack_h':         'MojoBytes *',
+    'mojo_struct_unpack':         'MojoList *',
+    'mojo_struct_unpack_from':    'MojoList *',
+    'mojo_struct_unpack_h':       'MojoList *',
+    'mojo_struct_unpack_from_h':  'MojoList *',
     # C-string utilities used by the REPL and string methods
     'input':          'char *',
     'string_lower':   'char *',
@@ -410,6 +469,12 @@ def _class_attr_ctype(v) -> str | None:
             return 'MojoDict *'
         if cn in ('list', 'DynamicVector', 'mojo_list_new'):
             return 'MojoList *'
+    # `FIELD_STRUCT = struct.Struct('<HH')` — a compiled struct format
+    # (see bugs/hard/CODEGEN_struct_module.md).
+    if (isinstance(v, CallExpr) and isinstance(v.func, MemberExpr)
+            and isinstance(v.func.obj, IdentExpr)
+            and v.func.obj.name == 'struct' and v.func.member == 'Struct'):
+        return 'MojoStructFmt *'
     return None
 
 

@@ -1,5 +1,125 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-09-06 — Stage-4 optional tail LANDED: `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()/.clear()` + `for k in d` delegation on a dict-subclass instance)
+
+Inherited container METHODS on a builtin-`dict`-subclass instance now
+delegate to the hidden `_data` backing store, exactly like `d[k]` /
+`k in d` / `len(d)` already did:
+
+- `gimple_gen_methods.py` `_lower_method_call` — a new delegation block
+  (right after the generator-method check, before every generic
+  fallback) routes `.get / .keys / .values / .items / .update / .pop /
+  .setdefault / .clear` on a `_dict_subclass_of(ot)` receiver to
+  `_lower_dict_method(inst->_data, ...)`, UNLESS the struct or a local
+  base up its MRO defines its own override (`_dict_subclass_defines`,
+  new helper in `gimple_gen_calls.py`, walks `_struct_bases`). `update`
+  also unwraps a dict-subclass ARGUMENT to its `_data`.
+- `gimple_gen_loops.py` — `for k in <dict-subclass instance>` (no
+  `__iter__`/`__next__`/`__has_next__` override) iterates
+  `it_val->_data` via `_gen_for_dict`. `for k, v in d.items()` already
+  worked once `.items()` returns the real `mojo_dict_items` list.
+- `gimple_module_gen.py` `_scan_body_for_local_field_access` — no longer
+  mints phantom `int` fields named `get`/`keys`/`values`/`items`/… on a
+  dict-subclass struct from `d.get(...)` call sites (they were being
+  lowered as function-pointer field calls → `mojo_obj_call1` stub).
+
+Collections isolated probe (`compile_to_gimple(do_imports=False)` on
+`/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`): still
+compiles, still clean under `gcc-mp-15 -fgimple -fsyntax-only`. The
+generic dynamic-dispatch fallback (`mojo_obj_call1`) in the generated C
+dropped **16 → 2**; `mojo_dict_items` 9 → 19, `mojo_dict_values` 0 → 1,
+`->_data` 48 → 56 — i.e. substantially more of Counter/OrderedDict's
+inherited container operations now lower to real dict ops.
+
+Full gate green: check-linkmode 3/3, check-selfhost, stdlib dylib
+from-scratch **0 skips**, `compile_stdlib.py` **664/664, 0 unexpected**,
+`make bootstrap` all 180 files byte-identical across 3 stages.
+test_gimple.py 278/0, test_gimple_runner.py 24/0, test_module_cache.py
+76/0, test_gimple_generator_runner.py 80/4 (4 pre-existing, unrelated).
+
+Still open: the whole-program `mojo.py build` PERF barrier below.
+
+## Status (2026-09-06 — whole-program `mojo.py build` of a dependent (asyncio/queues.py) is now PERF-bound, not codegen-bound)
+
+`isolated` `compile_to_gimple` of `collections/__init__.py`, `asyncio/
+queues.py` and `asyncio/futures.py` all succeed (blocker 1 fixed, below).
+A whole-program `python3 mojo.py build Lib/asyncio/queues.py` — which
+compiles the full asyncio + collections + inspect + _collections_abc
+transitive closure from scratch — was observed running >34 min at 100%
+CPU / 1.7 GB without completing: this is the separately-tracked
+`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+quadratic `_walk_ast` re-scan on a large import graph, NOT a codegen
+refusal. The codegen side of the asyncio/collections chain is done; the
+remaining barrier to an end-to-end binary is compile-time perf.
+
+## Status (2026-09-05 — BLOCKER 1 (builtin `dict` subclassing) FIXED; `Lib/collections/__init__.py` now compiles isolated, clean under `gcc -fgimple -fsyntax-only`)
+
+Real builtin-`dict`-subclass support landed as a feature, in stages
+(session `session_017xcwMuCdoVEHt8VFT4ihHm`):
+
+- **Stage 1 — representation + storage synthesis.** `gen_module_impl`
+  now computes `self._dict_subclass_structs`: every user struct whose
+  transitive base list bottoms out at builtin `dict` (directly, or via
+  another local dict-subclass, or via `OrderedDict`/`Counter`/
+  `defaultdict`). Each gets a synthesized hidden `_data: MojoDict *`
+  field, and `_alloc_<Struct>` allocates it (`_p->_data =
+  mojo_dict_new()`), exactly like the `__mojo_type_id` header. The
+  self-attr scan no longer needs a workaround — recent code already
+  stopped misregistering inherited method names (`values`/`items`/
+  `get`) as int fields.
+- **Stage 2 — inherited container ops route to the backing dict.**
+  `d[k]` / `d[k] = v` / `d[k] += n` (read, write, aug-assign),
+  `k in d` / `k not in d`, and `len(d)` on an instance of a known
+  dict-subclass with no corresponding dunder override now lower to
+  `mojo_dict_get_int` / `mojo_dict_set_{int,str}` / `mojo_dict_contains`
+  / `mojo_dict_len` against `inst->_data`. `_struct_data_field` was
+  taught to exclude dict-subclass structs so the old Span/List
+  `_mojo_at_` pointer-arithmetic path can't hijack the new `_data`.
+- **Stage 3 — `__missing__` on subscript-read miss.** `d[k]` for a
+  dict-subclass whose class defines `__missing__` compiles to
+  `mojo_dict_contains(...) ? mojo_dict_get_int(...) :
+  <Struct>___missing__(inst, k)` (proper basic-block form), matching
+  CPython's `type(d).__missing__(d, k)`. This is what lets `Counter`'s
+  `self[elem] += count` start from 0.
+- **Stage 4 — override precedence.** A subclass that defines its own
+  `__getitem__` / `__setitem__` / `__contains__` / `__len__` still wins
+  (the existing `_lower_struct_subscript_dunder` dispatch runs first for
+  get/set; the `in`/`len` paths check `_struct_defines_method`).
+
+Isolated probe: `compile_to_gimple(open('Lib/collections/__init__.py'))`
+now succeeds (was: `RuntimeError: cannot compile module: \`Counter[...]
+= ...\` subscript store ...`), and the generated C passes `gcc -fgimple
+-fsyntax-only` with only one benign `-Wint-to-pointer-cast` warning in
+`OrderedDict___reduce__`. The `reversed(self._mapping)` generator
+refusal the older entries below tracked as "blocker 2" no longer
+reproduces on this path (the three `__reversed__` generators are
+skipped as un-compilable rather than aborting the module).
+
+Dependent re-probe (isolated `compile_to_gimple`):
+- `Lib/asyncio/queues.py`, `Lib/asyncio/futures.py` — now compile
+  clean (were blocked here via the `collections` import).
+- `Lib/zipfile/__init__.py`, `Lib/importlib/metadata/__init__.py` —
+  blocker 1 cleared; they now hit a *different*, unrelated wall (plain
+  generator functions `split` / `read` / `_convert_egg_info_reqs_to_
+  simple_reqs` in the straight-line codegen), tracked by the generator-
+  codegen docs, not this one.
+
+Regression tests: `test_gimple.py` (`dict_subclass_backing_store_and_
+subscript`, `dict_subclass_missing_dunder_on_read_miss`, `dict_subclass_
+transitive_and_getitem_override_wins`) and `test_gimple_runner.py`
+(`gimple_dict_subclass_counter_shape`, a real build-and-run checking
+`b[k] += n` from 0 via `__missing__`, `in`, `not in`, `len`).
+
+Not yet done: `.get()` / `.keys()` / `.items()` / `.values()` /
+iteration delegation to the backing dict (Stage 4's optional tail) —
+`collections/__init__.py` compiles without it because `OrderedDict`
+defines its own and `Counter` inherits `dict`'s at the interpreter
+level; add it when a compiled program actually calls e.g.
+`counter.values()`. Doc kept open pending a whole-program (`mojo.py
+build`) confirmation and that delegation tail; `git rm` once both land.
+
+---
+
 ## Status (re-verified 2026-08-26, this session, master fast-forwarded to `9c0e7a8` — tried hard for a narrow fix per explicit task framing, none found; unchanged, both blockers confirmed genuinely structural)
 
 This pass was specifically asked to try hard for a narrow fix here,

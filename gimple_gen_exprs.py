@@ -156,6 +156,25 @@ def _lower_StringLiteral(gen, node):
     # different every run (ASLR). Re-tagging the value as `str` here recovers
     # it. CPython identity.
     val = _as_str(node.value)
+    if getattr(node, 'is_bytes', False):
+        # `b'...'` literal: node.value is latin-1 (one char == one output
+        # byte). Emit a byte-for-byte C string constant with EVERY byte as a
+        # fixed 3-digit octal escape (`\NNN`) so embedded NUL / high bytes
+        # are exact and can never run on into a following digit, then build
+        # the MojoBytes value at the literal site.
+        body = ''.join('\\%03o' % (ord(c) & 0xFF) for c in val)
+        sname = gen._intern_string(body)
+        # GIMPLE strict mode rejects passing a module-level global (the
+        # `_slit_` char[] pool entry) directly as a call argument -- it
+        # must be loaded into a local first, exactly like the plain `char
+        # *` string-literal path just below does. Passing `sname` raw
+        # produced "invalid argument to gimple call" on any `b'...'` /
+        # `b''` literal reached inside a real function body (zipfile
+        # `_Extra.strip`'s `b''.join(...)`).
+        sload = gen._new_val('char *', sname)
+        temp = gen._new_val('MojoBytes *',
+                            f'mojo_bytes_new_lit ({sload}, {len(val)})')
+        return 'MojoBytes *', temp
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
         return gen._lower_IdentExpr(gimple_ctypes.IdentExpr(name=val))
@@ -516,6 +535,17 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     cname = name
     if name in gen._c_names:
         cname = gen._c_names[name]
+    # A genexp-materialised local (see _seed_genexp_list_narrowing): its C
+    # storage slot may be typed `char *` (a reassigned parameter), but it
+    # actually holds a `MojoList *` for the duration of its single forward
+    # consumption — hand every read the properly-cast list pointer.
+    if name in gen._genexp_list_locals and name in gen.var_types:
+        _lt = gen._new_val('MojoList *', f'(MojoList *){cname}')
+        _elem = gen._genexp_list_locals[name]
+        if _elem and _elem != 'int64_t':
+            gen._elem_types[_lt] = _elem
+        gen._actual_types[_lt] = 'MojoList *'
+        return 'MojoList *', _lt
     if name in gen.var_types:
         if name in gen._addressed_locals:
             # This local's address was taken (`UnsafePointer(to=name)`,
@@ -1427,6 +1457,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         ov = null_tmp
 
 
+    # struct.Struct instance attributes (`s.size`, `s.format`).
+    if ot == 'MojoStructFmt *' and node.member in ('size', 'format'):
+        fp = gen._ensure_local('MojoStructFmt *', ov)
+        if node.member == 'size':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_struct_size', [('MojoStructFmt *', fp)])
+        return 'char *', gen._call_expr('char *', 'mojo_struct_format', [('MojoStructFmt *', fp)])
+
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':
@@ -1742,7 +1779,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # which raises AttributeError at runtime for every registered
     # container (gencodec.py's python_mapdef_code/python_tabledef_code
     # never produced any output).
-    if ot in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+    if ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoBytes *', 'MojoMemoryView *'):
         return gen._lower_builtin_method_value(ot, ov, node.member)
     # Struct-level comptime alias (e.g. BitSet._words_size): not a physical
     # field — expand its defining expression with `Self`/the struct name
@@ -2339,6 +2376,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
+    # its payload in a hidden `_data: MojoBytes *` field — an inherited
+    # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that
+    # payload. Normalize each such operand to its backing MojoBytes so the
+    # existing MojoBytes cases below fire. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(lt):
+        lv = gen._new_val('MojoBytes *', f"{lv}->_data"); lt = 'MojoBytes *'
+    if gen._bytes_subclass_of(rt):
+        rv = gen._new_val('MojoBytes *', f"{rv}->_data"); rt = 'MojoBytes *'
+
     # A list local may be boxed as int64_t (the slice pre-pass hint is the
     # machine word when the sliced object's type isn't yet known); _actual_types
     # records the real MojoList*. Resolve through it so list+list still concats.
@@ -2530,9 +2578,65 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
         return 'MojoList *', t
 
+    # MojoBytes + MojoBytes → concat ; MojoBytes * int → repeat
+    if op == '+' and lt == 'MojoBytes *' and rt == 'MojoBytes *':
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_concat', [('MojoBytes *', lv), ('MojoBytes *', rv)])
+    if op == '*' and lt == 'MojoBytes *' and rt in ('int', 'int64_t', 'uint64_t'):
+        cnt = gen._new_val('int64_t', f"(int64_t){rv}")
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_repeat', [('MojoBytes *', lv), ('int64_t', cnt)])
+    if op == '*' and rt == 'MojoBytes *' and lt in ('int', 'int64_t', 'uint64_t'):
+        cnt = gen._new_val('int64_t', f"(int64_t){lv}")
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_repeat', [('MojoBytes *', rv), ('int64_t', cnt)])
+
+    # `bytes + X` / `X + bytes` where the other operand isn't statically a
+    # MojoBytes* — coerce it and concat, never fall through to the scalar
+    # `+` path (which casts the bytes handle to int64_t and emits an
+    # `int64 + pointer` POINTER_PLUS that ICEs GCC's GIMPLE FE). Common
+    # once `struct.pack(...)` (-> MojoBytes*) feeds a `+` whose other side
+    # is a struct-field / param whose type codegen inferred as a bare
+    # pointer or int64 handle (real: zipfile `_write_end_record`'s
+    # `struct.pack(...) + extra_data`).
+    if op == '+' and (lt == 'MojoBytes *') != (rt == 'MojoBytes *'):
+        def _as_bytes(ct, cv):
+            if ct == 'MojoBytes *':
+                return cv
+            if ct == 'char *':
+                return gen._new_val('MojoBytes *', f"mojo_bytes_from_cstr ({cv})")
+            if ct == 'MojoMemoryView *':
+                return gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({cv})")
+            return gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(ct, cv)}")
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_concat',
+            [('MojoBytes *', _as_bytes(lt, lv)), ('MojoBytes *', _as_bytes(rt, rv))])
+
     # MojoStr == / != → mojo_str_eq
     if op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
         eq_t = gen._new_val('int', f"mojo_str_eq ({lv}, {rv})")
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
+    # MojoBytes == / != → mojo_bytes_eq (bytewise; never conflated with str)
+    if op in ('==', '!=') and lt == 'MojoBytes *' and rt == 'MojoBytes *':
+        eq_t = gen._new_val('int', f"mojo_bytes_eq ({lv}, {rv})")
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
+    # memoryview == bytes (either operand order) → bytewise compare
+    if op in ('==', '!=') and 'MojoMemoryView *' in (lt, rt):
+        mv, other = (lv, rv) if lt == 'MojoMemoryView *' else (rv, lv)
+        ot_other = rt if lt == 'MojoMemoryView *' else lt
+        if ot_other == 'MojoMemoryView *':
+            other = gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({other})")
+        elif ot_other != 'MojoBytes *':
+            other = gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(ot_other, other)}")
+        eq_t = gen._new_val('int', f"mojo_memoryview_eq ({mv}, {other})")
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
@@ -2986,11 +3090,107 @@ def _lower_percent(gen, node: gimple_ctypes.BinaryOp):
     # positionally by _lower_percent_format.
     if gen._quick_type(node.right) == 'MojoDict *':
         return _lower_percent_dict(gen, node)
+    # `b'...' % args` -> MojoBytes. Detected BEFORE the str literal branch:
+    # a bytes literal LHS is also a StringLiteral (is_bytes=True), but its
+    # formatting result must stay raw bytes (no decode) and `%s` consumes
+    # raw MojoBytes, not a decoded char*.
+    if gen._quick_type(node.left) == 'MojoBytes *':
+        if isinstance(node.left, gimple_ctypes.StringLiteral) and getattr(node.left, 'is_bytes', False):
+            return _lower_bytes_percent_format(gen, node, _as_str(node.left.value))
+        # Non-literal bytes template (rare): degrade by lowering operands
+        # for side effects and returning the template unchanged rather
+        # than emitting a GIMPLE `%` on MojoBytes *.
+        lt, lv = gen.lower_expr(node.left)
+        rhs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
+               else [node.right])
+        for e in rhs:
+            gen.lower_expr(e)
+        return 'MojoBytes *', lv
     if isinstance(node.left, gimple_ctypes.StringLiteral):
         fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value)
         if not is_fstring:
             return gen._lower_percent_format(node, fmt_text)
     return None  # sentinel: caller falls through to generic numeric `%`
+
+
+def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
+    """Lower `b'...' % (args)` to a MojoBytes* result.
+
+    Mirrors `_lower_percent_format` (compile-time split of the literal
+    template into lit/spec parts, one RHS operand per spec, accumulate
+    left-to-right) but the accumulator is bytes: literal chunks become
+    `mojo_bytes_new_lit` byte-exact constants, `%s`/`%r` of a MojoBytes
+    operand is spliced raw (no decode, embedded-NUL safe), and every
+    other spec is rendered to an ASCII char* via the shared
+    `_format_percent_spec` then wrapped with `mojo_bytes_from_cstr`.
+    A runtime variadic `mojo_bytes_mod` was considered and rejected:
+    GIMPLE cannot express the mixed MojoBytes*/int64_t/double vararg
+    list, and compile-time splitting reuses the audited str spec parser.
+    """
+    fmt_bytes = fmt_latin1  # one char per output byte (latin-1)
+    rhs_exprs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
+                 else [node.right])
+
+    parts = []
+    buf = []
+    i, n = 0, len(fmt_bytes)
+    while i < n:
+        c = fmt_bytes[i]
+        if c != '%':
+            buf.append(c); i += 1
+            continue
+        if i + 1 < n and fmt_bytes[i + 1] == '%':
+            buf.append('%'); i += 2
+            continue
+        if buf:
+            parts.append(('lit', ''.join(buf))); buf = []
+        spec_start = i
+        i += 1
+        while i < n and fmt_bytes[i] in '-+0 #.123456789':
+            i += 1
+        conv = fmt_bytes[i] if i < n else 's'
+        if i < n:
+            i += 1
+        parts.append(('spec', fmt_bytes[spec_start:i], conv))
+    if buf:
+        parts.append(('lit', ''.join(buf)))
+
+    n_specs = sum(1 for p in parts if p[0] == 'spec')
+
+    def _lit_bytes(text):
+        body = ''.join('\\%03o' % (ord(ch) & 0xFF) for ch in text)
+        sname = gen._intern_string(body)
+        # load the `_slit_` global into a local first (GIMPLE strict mode
+        # -- see _lower_StringLiteral's bytes branch for the same fix)
+        sload = gen._new_val('char *', sname)
+        return gen._new_val('MojoBytes *', f'mojo_bytes_new_lit ({sload}, {len(text)})')
+
+    if n_specs != len(rhs_exprs):
+        for e in rhs_exprs:
+            gen.lower_expr(e)
+        return 'MojoBytes *', _lit_bytes(fmt_bytes)
+
+    arg_i = 0
+    acc_val = None
+    for part in parts:
+        if part[0] == 'lit':
+            if not part[1]:
+                continue
+            part_val = _lit_bytes(part[1])
+        else:
+            _, full_spec, conv = part
+            et, ev = gen.lower_expr(rhs_exprs[arg_i])
+            arg_i += 1
+            if conv in ('s', 'r') and et == 'MojoBytes *':
+                part_val = ev
+            else:
+                cstr = gen._format_percent_spec(full_spec, conv, et, ev)
+                part_val = gen._new_val('MojoBytes *', f'mojo_bytes_from_cstr ({cstr})')
+        acc_val = part_val if acc_val is None else gen._new_val(
+            'MojoBytes *', f'mojo_bytes_concat ({acc_val}, {part_val})')
+    if acc_val is None:
+        acc_val = _lit_bytes('')
+    return 'MojoBytes *', acc_val
 
 
 def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
@@ -3313,7 +3513,20 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
         rv = gen._new_val(rt, f"({rt}){rv}")
     ti = gen._new_temp('int')
 
-    if rt == 'MojoList *':
+    # `x in <bytes-subclass instance>`: substring/byte membership against
+    # the backing MojoBytes payload. See COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(rt) and not gen._struct_defines_method(
+            gen._bytes_subclass_of(rt), '__contains__'):
+        rv = gen._new_val('MojoBytes *', f"{rv}->_data")
+        rt = 'MojoBytes *'
+
+    _dsub_in = gen._dict_subclass_of(rt)
+    if _dsub_in and not gen._struct_defines_method(_dsub_in, '__contains__'):
+        _dsub_dp = gen._new_val('MojoDict *', f"{rv}->_data")
+        xt, xv = gen._char_to_cstr(xt, xv)
+        gen._emit_call('int', ti, 'mojo_dict_contains',
+                       [('MojoDict *', _dsub_dp), (xt, xv)])
+    elif rt == 'MojoList *':
         # Determine list element type: prefer actual list elem type over left operand
         if rv in gen._elem_types:
             list_elem = gen._elem_types[rv]
@@ -3353,6 +3566,19 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
         else:
             xv64 = gen._to_int64(xt, xv)
             gen._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
+    elif rt == 'MojoBytes *':
+        # `b'x' in b'xyz'` — bytewise subsequence membership. The needle
+        # (left operand) is another bytes value or an int 0-255.
+        if xt == 'MojoBytes *':
+            needle = xv
+        elif xt in ('int', 'int64_t', 'char', 'uint8_t', '_Bool'):
+            xv64 = gen._to_int64(xt, xv)
+            l1 = gen._call_expr('MojoList *', 'mojo_list_new', [])
+            gen._emit(f"  mojo_list_append_int ({l1}, {xv64});")
+            needle = gen._call_expr('MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', l1)])
+        else:
+            needle = gen._new_val('MojoBytes *', f'(MojoBytes *){xv}')
+        gen._emit_call('int', ti, 'mojo_bytes_contains', [('MojoBytes *', rv), ('MojoBytes *', needle)])
     elif rt == 'MojoStr *':
         gen._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
     elif rt == 'char *':

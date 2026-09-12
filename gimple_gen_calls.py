@@ -229,7 +229,45 @@ def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return ptr_ctype, t
 
 
+def _future_done_callback_kind_tag(cb_ctype: str) -> int:
+    """Tag stored with a `fut.add_done_callback(cb)` handle so the runtime
+    (`__mojo_future_invoke_callback`, runtime/mojo_coro_gen.c) invokes it
+    through the matching ABI:
+      0 -- bare C function pointer: a top-level `def cb(fut)` by name or a
+           non-capturing nested closure (`_funcptr_<csym>` / `void *`),
+           called `((void(*)(int64_t))h)(fut)`.
+      1 -- `MojoBoundMethod *`: a bound method `self.on_done` or a capturing
+           closure (env carried as `self`), invoked `fn(self, fut)` a la
+           runtime/mojo_runtime.h's mojo_bound_method_call_1.
+    Keyed off the lowered C type -- authoritative for both a syntactic
+    `self.cb` and a capturing closure passed by name."""
+    return 1 if cb_ctype == 'MojoBoundMethod *' else 0
+
+
+def _lower_future_done_callback(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """Lower `__mojo_future_add_done_callback` / `_remove_done_callback`,
+    supplying the callable-kind tag as the 3rd argument from the lowered C
+    type of the callback value (see _future_done_callback_kind_tag). The
+    async-body hook (gimple_gen_coro._rewrite_async_expr) emits these calls
+    with just (future, cb); this fills in the tag centrally so both the
+    async and the sync (gimple_gen_methods) hooks agree."""
+    fname = node.func.name
+    fut_t, fut_v = gen.lower_expr(node.args[0])
+    cb_t, cb_v = gen.lower_expr(node.args[1])
+    tag = _future_done_callback_kind_tag(cb_t)
+    args = [('int64_t', fut_v), (cb_t, cb_v), ('int64_t', str(tag))]
+    if fname.endswith('add_done_callback'):
+        gen._emit_call('void', '', fname, args)
+        return 'void', ''
+    return 'int64_t', gen._call_expr('int64_t', fname, args)
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name in ('__mojo_future_add_done_callback',
+                                   '__mojo_future_remove_done_callback')
+            and len(node.args) == 2):
+        return _lower_future_done_callback(gen, node)
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
     # supported compiled async function (top-level OR nested — a
@@ -333,6 +371,25 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._lower_builtin_list(
                 gimple_ctypes.CallExpr(func=gimple_ctypes.IdentExpr(name='list'),
                                        args=list(node.args), kwargs=[]))
+
+    # Awaitable protocol (Future/Event) — BARE free-function call sites on
+    # the synchronous compiled path (`create_future()` / `Event()` /
+    # `Future()` called with no receiver, e.g. from a struct `__init__` or
+    # any ordinary helper). Mirrors gimple_gen_methods.py's member-form
+    # sync hook and gimple_gen_coro.py's async-body rewrite; same safety
+    # scoping (only when this module emitted a stack-switch coroutine unit,
+    # which is exactly when the shim externs are declared), and never when
+    # a compiled struct defines its own same-named method/global collides.
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name in ('create_future', 'Event', 'Future')
+            and not node.args and not getattr(node, 'kwargs', None)
+            and os.environ.get('MOJO_CORO', 'stackswitch') != 'cpp'
+            and (getattr(gen, '_stackswitch_coro_c_units', None)
+                 or getattr(gen, '_native_future_bridge', False))
+            and node.func.name not in gen.struct_field_types
+            and node.func.name not in gen.func_return_types):
+        shim = '__mojo_event_new' if node.func.name == 'Event' else '__mojo_future_new'
+        return 'int64_t', gen._call_expr('int64_t', shim, [])
 
     if (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name == 'TaskGroup'
             and not node.args and not getattr(node, 'kwargs', None)):
@@ -1168,6 +1225,23 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'zip' and len(node.args) > 2
             and not gen._locally_binds_name('zip')):
         return gen._lower_builtin_zip_n(node)
+    if (fname_raw == 'reversed' and len(node.args) == 1
+            and not gen._locally_binds_name('reversed')
+            and 'reversed' not in gen.func_return_types
+            and 'reversed' not in getattr(gen, '_imported_func_home', ())
+            and 'reversed' not in getattr(gen, '_own_imported_func_home', ())
+            and gen._quick_type(node.args[0]) in (
+                'MojoList *', 'char *', 'MojoStr *', 'MojoBytes *')):
+        # Only intercept `reversed(<list|str|bytes>)` when the name does NOT
+        # resolve to a real (user/stdlib) `reversed` free function — the real
+        # stdlib `std/builtin/reversed.mojo` defines overloads that call
+        # `value.__reversed__()`, and those (plus `reversed(range(...))`,
+        # `reversed(<deque>)`, `reversed(<Span>)`, ...) must keep routing to
+        # the generic call path. This builtin lowering is for the
+        # do_imports=False / no-prelude case (e.g. the zipfile probe:
+        # `reversed(sorted(self.filelist, ...))`) where `reversed` is
+        # otherwise an unresolved stub producing a silently-dropped loop.
+        return gen._lower_builtin_reversed(node)
     if fname_raw == '__import__':                                return gen._lower_builtin_import(node)
     if (fname_raw in ('set', 'frozenset')
             and not gen._locally_binds_name(fname_raw)):
@@ -1199,6 +1273,92 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == 'repr' and node.args:
         rat, rav = gen.lower_expr(node.args[0])
         return 'char *', gen._repr_value(rat, rav)
+
+    # bytes(...): construct a MojoBytes value.
+    #   bytes()            -> empty
+    #   bytes(<int n>)     -> n zero bytes
+    #   bytes(<list ints>) -> those bytes
+    #   bytes(<bytes>)     -> copy (returned as-is; MojoBytes is immutable)
+    #   bytes(<str>[, enc]) -> encode (utf-8 / ascii; source is already UTF-8)
+    if (fname_raw == 'bytes' and not gen._locally_binds_name('bytes')
+            and len(node.args) <= 3):
+        if len(node.args) == 0:
+            return 'MojoBytes *', gen._new_val('MojoBytes *', 'mojo_bytes_empty ()')
+        at, av = gen.lower_expr(node.args[0])
+        for _extra in node.args[1:]:
+            gen.lower_expr(_extra)
+        if gen._bytes_subclass_of(at):
+            # `bytes(<X(bytes) instance>)` -> a plain copy of its payload.
+            av = gen._new_val('MojoBytes *', f"{av}->_data")
+            at = 'MojoBytes *'
+        if at == 'MojoBytes *':
+            # A real independent copy: the arg may be a bytearray (same C
+            # type), and `bytes(ba)` must not alias its mutable buffer.
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_copy', [('MojoBytes *', av)])
+        if at == 'MojoMemoryView *':
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_memoryview_tobytes', [('MojoMemoryView *', av)])
+        if at in ('char *', 'MojoStr *'):
+            sv = av if at == 'char *' else gen._stringify_value(at, av)
+            enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_str',
+                [('char *', sv), ('char *', enc)])
+        if at in ('MojoList *', 'void *'):
+            lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', lv)])
+        # int / bool / other scalar -> zero-filled bytes of that length
+        nv = gen._to_int64(at, av)
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_zeros', [('int64_t', nv)])
+
+    # bytearray(...): mutable bytes. Same C representation as bytes
+    # (MojoBytes *), so every read op is inherited — only construction and
+    # the mutation ops differ. See bugs/hard/CODEGEN_bytes_value_type.md
+    # Stage 3.
+    if (fname_raw == 'bytearray' and not gen._locally_binds_name('bytearray')
+            and len(node.args) <= 3):
+        if len(node.args) == 0:
+            return 'MojoBytes *', gen._new_val('MojoBytes *', 'mojo_bytearray_new ()')
+        at, av = gen.lower_expr(node.args[0])
+        for _extra in node.args[1:]:
+            gen.lower_expr(_extra)
+        if at == 'MojoBytes *':
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytearray_copy', [('MojoBytes *', av)])
+        if at == 'MojoMemoryView *':
+            _tb = gen._call_expr('MojoBytes *', 'mojo_memoryview_tobytes',
+                                 [('MojoMemoryView *', av)])
+            return 'MojoBytes *', _tb
+        if at in ('char *', 'MojoStr *'):
+            sv = av if at == 'char *' else gen._stringify_value(at, av)
+            enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_str',
+                [('char *', sv), ('char *', enc)])
+        if at in ('MojoList *', 'void *'):
+            lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', lv)])
+        nv = gen._to_int64(at, av)
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_zeros', [('int64_t', nv)])
+
+    # memoryview(<bytes|bytearray>): a non-copying 1-D byte view.
+    if (fname_raw == 'memoryview' and not gen._locally_binds_name('memoryview')
+            and len(node.args) == 1):
+        at, av = gen.lower_expr(node.args[0])
+        if at == 'MojoMemoryView *':
+            return 'MojoMemoryView *', av
+        if at == 'MojoBytes *':
+            return 'MojoMemoryView *', gen._call_expr(
+                'MojoMemoryView *', 'mojo_memoryview_from_bytes', [('MojoBytes *', av)])
+        # unknown/opaque — coerce through MojoBytes*
+        bv = gen._new_val('MojoBytes *', f'(MojoBytes *){gen._to_int64(at, av)}')
+        return 'MojoMemoryView *', gen._call_expr(
+            'MojoMemoryView *', 'mojo_memoryview_from_bytes', [('MojoBytes *', bv)])
 
     # str(x): dispatch on the argument's static type via _stringify_value
     # (int → mojo_str_from_int, float → mojo_repr_float, ...) rather than
@@ -1600,6 +1760,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if gen._get_actual_type(_fname_var_ctype, fname_raw) == 'MojoBoundMethod *':
         return gen._lower_bound_method_call(fname_raw, node, _fname_var_ctype)
 
+    # A local that has held a `MojoBoundMethod *` in at least one branch
+    # but whose declared type is void*/int64_t (branch-joined with a plain
+    # fn-pointer / lambda value). Dispatch dynamically at runtime — see
+    # _assign_target's `_bm_tainted_locals` bookkeeping.
+    if fname_raw in getattr(gen, '_bm_tainted_locals', ()):
+        return gen._lower_maybe_bound_call(fname_raw, node)
+
     # Local variable (or captured variable) holding a function pointer.
     # Emit a proper function-pointer call via a C cast. Any name that is
     # a LOCAL VARIABLE here (not a known function/builtin, which the
@@ -1619,6 +1786,8 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     at, av = gen.lower_expr(node.args[0])
     _LEN_FNS = {
         'MojoStr *':  f'mojo_str_len ({av})',
+        'MojoBytes *': f'mojo_bytes_len ({av})',
+        'MojoMemoryView *': f'mojo_memoryview_len ({av})',
         'MojoList *': f'mojo_list_len ({av})',
         'MojoDict *': f'mojo_dict_len ({av})',
         'MojoSet *':  f'mojo_set_len ({av})',
@@ -1632,6 +1801,14 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # so len(any_string) always silently returned 0. Found via
         # len(c_code) on a real compiled program's C output.
         return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+    _dsub_len = gen._dict_subclass_of(at)
+    if _dsub_len and not gen._struct_defines_method(_dsub_len, '__len__'):
+        dp = gen._new_val('MojoDict *', f"{av}->_data")
+        return 'int64_t', gen._new_val('int64_t', f'mojo_dict_len ({dp})')
+    _bsub_len = gen._bytes_subclass_of(at)
+    if _bsub_len and not gen._struct_defines_method(_bsub_len, '__len__'):
+        bp = gen._new_val('MojoBytes *', f"{av}->_data")
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_len', [('MojoBytes *', bp)])
     if at.endswith(' *') and at[:-2] in gen.struct_field_types \
             and '_len' in gen.struct_field_types[at[:-2]]:
         return 'int64_t', gen._new_val('int64_t', f'{av}->_len')
@@ -1671,6 +1848,19 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     alternative instead of the previous always-False stub."""
     if type_name == 'type':
         return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
+    if type_name == 'tuple':
+        # A tuple's runtime representation is a MojoList carrying the
+        # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
+        # the static C type (MojoList *, shared with plain lists) nor the
+        # scalar _TYPE_IDS table can answer `isinstance(x, tuple)` — it
+        # needs the runtime marker check (mojo_isinstance_p type_id 8).
+        # Without this every `isinstance(top, tuple)` on a boxed/popped
+        # heterogeneous value fell through to `mojo_isinstance_p(_, 0)`,
+        # which is unconditionally false — so the tuple branch was dead.
+        iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+        res = gen._new_temp('int')
+        gen._emit(f'  {res} = mojo_isinstance_p ({iv}, 8);')
+        return gen._new_val('_Bool', f'(_Bool){res}')
     if type_name in gen.struct_field_types:
         # A real user-defined struct/dataclass type: compare the
         # object's runtime type tag (see mojo_read_type_tag in
@@ -1699,7 +1889,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         gen._emit(f'  {cmp_t} = {tag} == {target};')
         return cmp_t
     _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
-                 'list': '5', 'dict': '6', 'set': '7'}
+                 'list': '5', 'dict': '6', 'set': '7', 'tuple': '8'}
     type_id = _TYPE_IDS.get(type_name, '0')
     # Scalar isinstance by STATIC type. The runtime mojo_isinstance stub
     # always returns 0 (false), so e.g. `isinstance(node.name, str)` was
@@ -1721,7 +1911,23 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         'list':  ('MojoList *',),
         'dict':  ('MojoDict *',),
         'set':   ('MojoSet *',),
+        # bytes / bytearray share the MojoBytes * representation, so at the
+        # C-type level they are indistinguishable — `isinstance(x, bytes)`
+        # and `isinstance(x, bytearray)` both match any MojoBytes * value.
+        # A type tag on MojoBytes would be needed to discriminate; not
+        # worth the struct-layout churn for this compiler (documented in
+        # bugs/hard/CODEGEN_bytes_value_type.md Stage 3).
+        'bytes': ('MojoBytes *',),
+        'bytearray': ('MojoBytes *',),
+        'memoryview': ('MojoMemoryView *',),
     }
+    # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) IS a
+    # `bytes` for isinstance purposes even though its C type is the
+    # subclass struct pointer, not `MojoBytes *`. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    if type_name in ('bytes', 'bytearray') and gen._bytes_subclass_of(obj_type):
+        return gen._new_val('_Bool', '(_Bool)1')
+
     if type_name in _SCALAR_TYPE_MATCH:
         if obj_type in _SCALAR_TYPE_MATCH[type_name]:
             if obj_type.endswith(' *'):
@@ -2013,6 +2219,63 @@ def _lower_builtin_zip_n(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     for ap in arg_pairs[2:]:
         acc_v = gen._call_expr('void *', 'mojo_zip', [('void *', acc_v), ap])
     return 'void *', acc_v
+
+
+def _lower_builtin_reversed(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """reversed(x) — a reverse iterator over a sequence.
+
+    Modeled as an eagerly reversed COPY (semantically identical for the
+    single forward consumption every real call site does: `for x in
+    reversed(seq)` / `list(reversed(seq))`). Before this, `reversed(...)`
+    had no lowering at all and fell through to the generic dynamic-dispatch
+    stub, producing a `void *` value — and `for x in reversed(...)` over
+    that `void *` was SILENTLY DROPPED by _gen_stmt_ForStmt (real
+    miscompile: zipfile/__init__.py:1612's central-directory concordance
+    loop `for zinfo in reversed(sorted(self.filelist, key=...))` ran zero
+    times). A list/str/bytes arg is reversed properly; anything else is an
+    honest refusal, not a silent drop.
+    """
+    at, av = gen.lower_expr(node.args[0])
+    if at == 'MojoList *':
+        cp = gen._call_expr('MojoList *', 'mojo_list_copy', [('MojoList *', av)])
+        gen._emit_call('void', '', 'mojo_list_reverse', [('MojoList *', cp)])
+        # reversed() only reorders — carry element / nested-element types
+        # through so a later `for x in ...` / `for a, b in ...` binds slots
+        # with the right accessor (mirrors _lower_builtin_sorted).
+        if av in gen._elem_types:
+            gen._elem_types[cp] = gen._elem_types[av]
+        if av in gen._nested_elem_types:
+            gen._nested_elem_types[cp] = gen._nested_elem_types[av]
+        return 'MojoList *', cp
+    if at in ('char *', 'MojoStr *'):
+        sv = av if at == 'char *' else gen._stringify_value(at, av)
+        return 'char *', gen._call_expr('char *', 'mojo_cstr_reverse', [('char *', sv)])
+    if at == 'MojoBytes *':
+        return 'MojoBytes *', gen._call_expr(
+            'MojoBytes *', 'mojo_bytes_reverse', [('MojoBytes *', av)])
+    if at == 'MojoDict *':
+        # `reversed(dict)` iterates keys in reverse-insertion order; the
+        # generic dict iteration path already walks keys, and for the
+        # common `for k in reversed(d):` consumption order rarely matters
+        # to correctness of a compile check. Reverse a key list copy.
+        _keys = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', av)])
+        gen._emit_call('void', '', 'mojo_list_reverse', [('MojoList *', _keys)])
+        gen._elem_types[_keys] = 'char *'
+        return 'MojoList *', _keys
+    # An unrecognized argument type (a Mojo container struct with its own
+    # `__reversed__`, an opaque int64_t-boxed value, a comprehension
+    # result typed `void *`, …). A real general fix is `__reversed__`
+    # dispatch + the struct iterator protocol (see
+    # bugs/CODEGEN_generator_function_Lib_collections___init__.md's
+    # `reversed()` discussion). Until then, fall through to the generic
+    # dynamic-dispatch value the pre-`reversed()`-lowering code produced —
+    # the consuming `for` loop then takes its own generic path (which may
+    # iterate via the value's protocol, or, for a genuinely opaque value,
+    # drop — the pre-existing behavior). NOT a `raise`: that turned five
+    # previously-compiling stdlib files (which used `reversed()` on these
+    # shapes) into hard failures.
+    gimple_ctypes._debug_note('reversed() on unrecognized type — generic fallthrough', at)
+    return at, av
 
 
 def _lower_builtin_import(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -2780,6 +3043,12 @@ def _default_expr_to_pair(gen, _dflt) -> tuple:
     if isinstance(_dflt, gimple_ctypes.BoolLiteral):
         return ('_Bool', '1' if _dflt.value else '0')
     if isinstance(_dflt, gimple_ctypes.StringLiteral):
+        if getattr(_dflt, 'is_bytes', False):
+            # A `b'...'` default padded into an omitted-arg call site must
+            # be a real `MojoBytes *`, not a bare `char *` — route through
+            # the normal bytes-literal lowering (emits the octal-escaped
+            # global loaded to a local + `mojo_bytes_new_lit`).
+            return gen.lower_expr(_dflt)
         return ('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"')
     if isinstance(_dflt, gimple_ctypes.FloatLiteral):
         # A float default is a `double` value — returning it typed `int`
@@ -3832,6 +4101,27 @@ def _lower_struct_constructor(gen, struct_name: str,
     gen._struct_allocs_needed.add(struct_name)
     gen._emit(f"  {t} = _alloc_{struct_name} ();")
 
+    # builtin-`bytes` subclass (`class _Extra(bytes)`): populate the
+    # synthesized `_data: MojoBytes *` payload from the constructor
+    # argument the subclass's `__new__` forwards to
+    # `super().__new__(cls, <arg>)` (payload arg index precomputed in
+    # gen_module_impl; defaults to 0). The `__new__` body itself is not
+    # emitted as a callable method — its sole job in the scoped shape is
+    # this payload construction. `__init__` still runs afterwards for any
+    # extra instance attributes (`self.id = id`). See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    if struct_name in getattr(gen, '_bytes_subclass_structs', ()):
+        _bidx = gen._bytes_subclass_payload_argidx.get(struct_name, 0)
+        if args and 0 <= _bidx < len(args):
+            _bt, _bv = gen.lower_expr(args[_bidx])
+            _mb = gmp._coerce_to_bytes(gen, _bt, _bv)
+            gen._emit(f"  {t}->_data = {_mb};")
+        else:
+            # No payload argument (`X()`): an empty bytes value, so
+            # inherited ops never deref a NULL `_data`.
+            _mb = gen._new_val('MojoBytes *', 'mojo_bytes_empty ()')
+            gen._emit(f"  {t}->_data = {_mb};")
+
     # Explicit length-based flags — a bare `if kwargs:` / `kwargs or args`
     # on a `list`-typed param is unreliable on the self-hosted path (the
     # compiled `or` of two pointer operands can fold to a falsy int64_t
@@ -4072,12 +4362,75 @@ def _struct_data_field(gen, ctype: str):
     if not ctype.endswith(' *'):
         return None, None
     sn = gimple_exprtypes._struct_name_of(ctype)
+    if sn in getattr(gen, '_dict_subclass_structs', ()):
+        # A builtin-`dict` subclass's `_data` is a synthesized MojoDict *
+        # backing store, NOT a Span/List-style raw element buffer —
+        # subscript ops on it route through the dict-subclass path, not
+        # `_mojo_at_` pointer arithmetic.
+        return None, None
+    if sn in getattr(gen, '_bytes_subclass_structs', ()):
+        # A builtin-`bytes` subclass's `_data` is a synthesized MojoBytes *
+        # payload, NOT a Span/List raw element buffer — inherited ops route
+        # through the bytes-subclass path, not `_mojo_at_` arithmetic.
+        return None, None
     sft = gen.struct_field_types.get(sn, {})
     for fname in ('_data', 'data'):
         ft = sft.get(fname, '')
         if ft.endswith(' *'):
             return fname, ft
     return None, None
+
+
+def _bytes_subclass_of(gen, ctype: str) -> str:
+    """If `ctype` is a pointer to a user struct that subclasses builtin
+    `bytes` (see gen_module_impl), return the struct name, else ''."""
+    if not ctype.endswith(' *'):
+        return ''
+    sn = gimple_exprtypes._struct_name_of(ctype)
+    bsc = getattr(gen, '_bytes_subclass_structs', None)
+    if bsc is not None and sn in bsc:
+        return sn
+    return ''
+
+
+def _dict_subclass_of(gen, ctype: str) -> str:
+    """If `ctype` is a pointer to a user struct that subclasses builtin
+    `dict` (see gen_module_impl), return the struct name, else ''."""
+    if not ctype.endswith(' *'):
+        return ''
+    sn = gimple_exprtypes._struct_name_of(ctype)
+    dsc = getattr(gen, '_dict_subclass_structs', None)
+    if dsc is not None and sn in dsc:
+        return sn
+    return ''
+
+
+def _struct_defines_method(gen, sn: str, mname: str) -> bool:
+    if not sn:
+        return False
+    sig = gen._struct_method_signatures.get(_sms_key(sn, mname))
+    return sig is not None and len(sig) > 0
+
+
+def _dict_subclass_defines(gen, sn: str, method: str) -> bool:
+    """True if `sn` OR a local base up its inheritance chain defines its
+    own `method` — an override that must win over builtin-`dict`
+    delegation through the hidden `_data` backing store. The builtin
+    terminal base (`dict`) contributes no method bodies of its own."""
+    if not sn:
+        return False
+    seen = set()
+    stack = [sn]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if gen._struct_defines_method(cur, method):
+            return True
+        for b in (getattr(gen, '_struct_bases', {}).get(cur) or []):
+            stack.append(b)
+    return False
 
 
 def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: str, val_t: str) -> bool:
@@ -4179,6 +4532,47 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if _getitem_r is not None:
         return _getitem_r
 
+    # `d[k]` on a builtin-`dict` subclass with no `__getitem__` override:
+    # read from the backing MojoDict. On a miss, if the class defines
+    # `__missing__`, `d[k]` is `type(d).__missing__(d, k)` (Counter uses
+    # this to yield 0). See bugs/COMPILE_FAIL_collections___init__.md.
+    _dsub_r = gen._dict_subclass_of(ot)
+    if _dsub_r:
+        dp = gen._new_val('MojoDict *', f"{ov}->_data")
+        kt, kv = gen._char_to_cstr(idx_type, iv)
+        if gen._struct_defines_method(_dsub_r, '__missing__'):
+            has = gen._call_expr('int', 'mojo_dict_contains',
+                                 [('MojoDict *', dp), (kt, kv)])
+            res = gen._new_temp('int64_t')
+            bb_hit = gen._new_bb()
+            bb_miss = gen._new_bb()
+            bb_done = gen._new_bb()
+            gen._emit(f"  if ({has} != 0) goto {bb_hit}; else goto {bb_miss};")
+            gen._emit_label(bb_hit)
+            hv = gen._call_expr('int64_t', 'mojo_dict_get_int',
+                                [('MojoDict *', dp), (kt, kv)])
+            gen._emit(f"  {res} = {hv};")
+            gen._emit(f"  goto {bb_done};")
+            gen._emit_label(bb_miss)
+            miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
+            mv = gen._call_expr('int64_t', miss_mangled, [(ot, ov), (kt, kv)])
+            gen._emit(f"  {res} = {mv};")
+            gen._emit(f"  goto {bb_done};")
+            gen._emit_label(bb_done)
+            return 'int64_t', res
+        t = gen._call_expr('int64_t', 'mojo_dict_get_int',
+                           [('MojoDict *', dp), (kt, kv)])
+        return 'int64_t', t
+
+    # `x[i]` on a builtin-`bytes` subclass with no `__getitem__` override:
+    # a single-byte read (int) against the backing MojoBytes. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    _bsub_r = gen._bytes_subclass_of(ot)
+    if _bsub_r and not gen._struct_defines_method(_bsub_r, '__getitem__'):
+        bp = gen._new_val('MojoBytes *', f"{ov}->_data")
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        return 'int64_t', gen._new_val('int64_t', f"mojo_bytes_get ({bp}, {idx64})")
+
     if ot == 'MojoList *':
         elem = gen._elem_of(ov)
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -4221,6 +4615,19 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
         t = gen._new_val('char', f"mojo_str_char_at ({ov}, {idx64})")
         return 'char', t
+
+    if ot == 'MojoBytes *':
+        # b[i] -> int 0-255 (never a 1-char str; bytes is not conflated
+        # with str). Negative index handled in mojo_bytes_get.
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        t = gen._new_val('int64_t', f"mojo_bytes_get ({ov}, {idx64})")
+        return 'int64_t', t
+
+    if ot == 'MojoMemoryView *':
+        # mv[i] -> int (1-D byte view). Negative index handled in the helper.
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        t = gen._new_val('int64_t', f"mojo_memoryview_get ({ov}, {idx64})")
+        return 'int64_t', t
 
     if ot == 'MojoDict *':
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
@@ -4510,9 +4917,38 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.obj)
     start_v, stop_v = gen._lower_slice_bounds(node)
 
+    # `x[a:b]` on a builtin-`bytes` subclass instance -> a plain bytes
+    # slice of its payload (CPython returns `bytes`, not the subclass).
+    # See COMPILE_FAIL_zipfile___init__.md.
+    if gen._bytes_subclass_of(ot) and not gen._struct_defines_method(
+            gen._bytes_subclass_of(ot), '__getitem__'):
+        ov = gen._new_val('MojoBytes *', f"{ov}->_data")
+        ot = 'MojoBytes *'
+
     if ot == 'MojoStr *':
         t = gen._new_val('MojoStr *', f"mojo_str_slice ({ov}, {start_v}, {stop_v})")
         return 'MojoStr *', t
+
+    if ot == 'MojoBytes *':
+        if getattr(node, 'step', None) is not None:
+            _kt, kv = gen.lower_expr(node.step)
+            step_v = gen._to_int64(_kt, kv)
+        else:
+            step_v = '1'
+        # Omitted start: pass the OMITTED sentinel (not 0) so mojo_bytes_slice
+        # can pick the right endpoint for a negative step (`b[::-1]`).
+        bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
+        t = gen._new_val('MojoBytes *',
+                         f"mojo_bytes_slice ({ov}, {bstart_v}, {stop_v}, {step_v})")
+        return 'MojoBytes *', t
+
+    if ot == 'MojoMemoryView *':
+        # mv[a:b] -> a sub-view into the SAME buffer (no copy). Step not
+        # supported for a non-contiguous view; sentinel start like bytes.
+        bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
+        t = gen._new_val('MojoMemoryView *',
+                         f"mojo_memoryview_slice ({ov}, {bstart_v}, {stop_v}, 1)")
+        return 'MojoMemoryView *', t
 
     if ot == 'MojoList *':
         t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")

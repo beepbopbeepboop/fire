@@ -1,6 +1,39 @@
 # CODEGEN (A3 stack-switch): `yield <identifier-or-member-expr>` always
 defaults to int64_t, silently truncating float/string values
 
+## Status (2026-09-06 — repro 1's direct `yield <param>` case FIXED via call-site type propagation)
+
+`gimple_gen_coro.py` now runs a whole-module scan of a generator's CALL
+SITES at the top of `lower()` (`_CALLSITE_PARAM_KINDS`, `_argkind`): when
+every call passes a statically-typed argument for an unannotated
+positional slot and they all agree, that kind fills the slot in
+`_static_env` (the "unanimous cross-call scalar contract" ordinary
+functions get from `_infer_param_types` — a stack-switch generator's
+fixed single-C-value-kind ABI has no per-call monomorphization, so this
+is the only route). `_argkind` resolves literals, unary +/- of a
+literal, numeric/string constructor calls, and identifier / `self.<field>`
+refs via the caller's own `_static_env`.
+
+- **`def g(x): yield x` called only `g(3.5)`** → now prints `3.5` (was
+  `3`). `gs("hi")` → `hi` (was pointer bits). This is repro 1's headline
+  shape — verified end-to-end.
+- Also fixed the pre-existing `test_gimple_generator_runner.py` failure
+  `param_generator_unannotated_double_via_cross_call`.
+- Runtime: a small `mojo_coro_gen.c` addition (see the commit).
+
+**Residuals (still default to int64_t):**
+1. **`yield <arithmetic on the inferred param>`** — `def h(a): yield a * 2`
+   called `h(2.5)` still prints `5`, not `5.0`. The param kind is now in
+   the env, but `_yield_kind`'s `BinaryOp` handling doesn't promote
+   through the `* <int literal>`.
+2. **Non-unanimous call sites** — `g` called with both `3.5` and `"hi"`
+   in one program stays unresolved (correct under the "not unanimous →
+   unresolved" rule; genuinely needs per-call-site monomorphization or a
+   tagged yield-value ABI — the detailed analysis retained below).
+
+`MOJO_CORO=cpp` remains the escape hatch for both residuals. Doc kept
+open for residual 1 (the smaller, likely-bounded one).
+
 ## Status
 
 PARTIALLY FIXED 2026-09-05. The tractable, purely-syntactic half is

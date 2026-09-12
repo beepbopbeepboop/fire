@@ -1560,7 +1560,8 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.IntLiteral):    return 'int64_t'
     if isinstance(node, gimple_ctypes.FloatLiteral):  return 'double'
     if isinstance(node, gimple_ctypes.BoolLiteral):   return '_Bool'
-    if isinstance(node, gimple_ctypes.StringLiteral): return 'char *'
+    if isinstance(node, gimple_ctypes.StringLiteral):
+        return 'MojoBytes *' if getattr(node, 'is_bytes', False) else 'char *'
     if isinstance(node, gimple_ctypes.IdentExpr):
         if node.name in gen.var_types:
             return gen.var_types[node.name]
@@ -1629,7 +1630,10 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.IdentExpr):
         fname: str
         fname = node.func.name
-        _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *'}
+        _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *',
+                          # sorted()/reversed() both materialise a MojoList*
+                          # (see _lower_builtin_sorted / _lower_builtin_reversed).
+                          'sorted': 'MojoList *'}
         # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
         # below — `set`/`dict`/`list` are ordinary identifiers a module
         # could shadow with its own top-level def/import.
@@ -1855,10 +1859,11 @@ def _quick_type(gen, node) -> str:
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
             if node.func.member in ('basename', 'expanduser'):
                 return 'char *'
-            if node.func.member in ('splitext', 'split'):
-                # Both are 2-element string PAIRS in this codegen's model —
+            if node.func.member in ('splitext', 'split', 'splitdrive', 'splitroot'):
+                # All string-tuple results in this codegen's model —
                 # splitext -> [root, ext] (int64_t_splitext + a built list),
-                # split -> [head, tail] (int64_t_path_split).
+                # split -> [head, tail] (int64_t_path_split),
+                # splitdrive -> [drive, tail], splitroot -> [drive, root, tail].
                 return 'MojoList *'
         # Chained string methods, e.g. `s.replace(a, b).replace(c, d)` —
         # the receiver here is itself a CallExpr (the inner .replace()),
@@ -1980,7 +1985,7 @@ def _quick_type(gen, node) -> str:
                 and isinstance(obj.func.obj, gimple_ctypes.MemberExpr)
                 and isinstance(obj.func.obj.obj, gimple_ctypes.IdentExpr)
                 and obj.func.obj.obj.name == 'os' and obj.func.obj.member == 'path'
-                and obj.func.member == 'splitext'):
+                and obj.func.member in ('splitext', 'split', 'splitdrive', 'splitroot')):
             return 'char *'
         if isinstance(obj, gimple_ctypes.IdentExpr):
             e = gen._elem_types.get(obj.name)
@@ -2274,6 +2279,26 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
+            elif (isinstance(node, gimple_ctypes.VarDecl) and isinstance(node.name, str)
+                    and ',' not in node.name):
+                # `var out = self._buf[a:]` — a VarDecl, not an AssignStmt.
+                # Historically this pass "never scans VarDecl" (see
+                # _closure_value_locals' docstring), so a `var`-declared
+                # local's type fell to the int64_t default, breaking
+                # `return out` return-type inference and the local's own
+                # declared C type when the initializer is a pointer value
+                # (bytes accumulator, sliced field, ...).
+                vname = _as_str(node.name)
+                _vt = None
+                if getattr(node, 'type_ann', None):
+                    try:
+                        _vt = gimple_ctypes._mojo_type(node.type_ann)
+                    except Exception:
+                        _vt = None
+                if (_vt is None or _vt == 'int64_t') and node.value is not None:
+                    _vt = gen._quick_type(node.value)
+                if _vt is not None:
+                    inferred.setdefault(vname, []).append(_vt)
             elif isinstance(node, gimple_ctypes.MultiAssignStmt):
                 # `a = b = ... = expr` (chained assignment): every target
                 # receives the SAME value/type (real Python chained-
@@ -2538,6 +2563,10 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         return gen._call_expr('char *', gen._list_repr_fn(rav), [('MojoList *', rav)])
     if rat == 'MojoDict *':
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
+    if rat == 'MojoBytes *':
+        return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', rav)])
+    if rat == 'MojoMemoryView *':
+        return gen._call_expr('char *', 'mojo_memoryview_repr', [('MojoMemoryView *', rav)])
     if rat.endswith(' *') or rat == 'void *':
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
@@ -3379,7 +3408,11 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
     if gen0.conditions:
         bb_append = gen._new_bb()
         for cond_expr in gen0.conditions:
-            _, cv = gen.lower_expr(cond_expr)
+            _ct, cv = gen.lower_expr(cond_expr)
+            # A bare `if x` filter where `x` is a string must test
+            # non-EMPTY (Python truthiness), not merely non-NULL — an
+            # empty `char *` "" pointer is non-null and would wrongly pass.
+            cv = gen._ensure_bool_cond(_ct, cv)
             bb_next = gen._new_bb()
             gen._emit(f"  if ({cv}) goto {bb_next}; else goto {bb_skip};")
             gen._emit_label(bb_next)

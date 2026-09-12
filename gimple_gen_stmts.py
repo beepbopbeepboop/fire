@@ -14,7 +14,7 @@ from mojo_compiler import (
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
     SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr,
-    ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension,
+    ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator,
     VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt,
     ReturnStmt, RaiseStmt,
     BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt,
@@ -245,6 +245,130 @@ def _try_bind_list_iter(gen, name, value):
     gen._list_iter_cursor[cname] = {'list': cname, 'cursor': cur, 'elem': elem}
     if elem and elem != 'int64_t':
         gen._elem_types[cname] = elem
+    return True
+
+
+def _iter_ast(n):
+    """Yield `n` and every AST descendant (attribute + list-attribute
+    children). Mirrors gimple_gen_coro._walk."""
+    yield n
+    d = getattr(n, '__dict__', None)
+    if not d:
+        return
+    for v in d.values():
+        if isinstance(v, list):
+            for x in v:
+                if hasattr(x, '__dict__'):
+                    yield from _iter_ast(x)
+        elif hasattr(v, '__dict__'):
+            yield from _iter_ast(v)
+
+
+def _is_genexp(node) -> bool:
+    return isinstance(node, Comprehension) and node.kind == 'generator'
+
+
+def _seed_genexp_list_narrowing(gen, func_node):
+    """Pre-pass: find `name = (<generator expression>)` local assignments
+    whose `name` is then consumed EXACTLY ONCE, in an iterating position
+    (`for _ in name`, or `... for x in name ...` inside another
+    comprehension), and mark `name` for materialisation as a real list.
+
+    A generator expression consumed a single time by a forward iteration is
+    semantically identical to the equivalent list comprehension, and the
+    scalar codegen model has no lazy-generator-object-in-a-local
+    representation. Deliberately conservative: a name read more than once,
+    never iterated, or used where laziness matters is left untouched (its
+    existing behaviour / honest refusal stands). See
+    bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
+    """
+    body = getattr(func_node, 'body', None) or []
+    # Names the function pins via `global`/`nonlocal` are out of scope.
+    pinned = set()
+    for n in _iter_ast(func_node):
+        if isinstance(n, GlobalStmt):
+            for nm in (getattr(n, 'names', None) or []):
+                pinned.add(_as_str(nm))
+
+    def _assign_target_ids(root):
+        out = set()
+        for n in _iter_ast(root):
+            tgts = []
+            if isinstance(n, (AssignStmt, AugAssignStmt, ForStmt)):
+                tgts = [n.target]
+            elif isinstance(n, MultiAssignStmt):
+                tgts = list(getattr(n, 'targets', []) or [])
+            for t in tgts:
+                if isinstance(t, IdentExpr):
+                    out.add(id(t))
+        return out
+
+    def _reads_of(root, name, skip_ids):
+        return [n for n in _iter_ast(root)
+                if isinstance(n, IdentExpr) and n.name == name
+                and id(n) not in skip_ids]
+
+    # Flow-ordered scan over the function's TOP-LEVEL statement list: for a
+    # `name = (<genexp>)` assignment, the FIRST later sibling that reads
+    # `name` must read it exactly once, as a `for`/comprehension iterable.
+    for i, stmt in enumerate(body):
+        if not (isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr)
+                and _is_genexp(stmt.value)):
+            continue
+        name = stmt.target.name
+        if name in pinned:
+            continue
+        # `name` must not be a genexp target more than once anywhere.
+        if sum(1 for n in _iter_ast(func_node)
+               if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr)
+               and n.target.name == name and _is_genexp(n.value)) != 1:
+            continue
+        narrow_ids = {id(x) for x in _iter_ast(stmt.value)}
+        consumer = None
+        for later in body[i + 1:]:
+            if _reads_of(later, name, narrow_ids):
+                consumer = later
+                break
+        if consumer is None:
+            continue
+        skip = _assign_target_ids(consumer) | narrow_ids
+        reads = _reads_of(consumer, name, skip)
+        if len(reads) != 1:
+            continue
+        the_read = reads[0]
+        ok_iter = any(
+            isinstance(n, (Generator, ForStmt))
+            and getattr(n, 'iterable', None) is the_read
+            for n in _iter_ast(consumer))
+        if ok_iter:
+            gen._genexp_narrow_names.add(name)
+
+
+def _maybe_narrow_genexp_local(gen, name, value) -> bool:
+    """If `name = (<genexp>)` was marked by `_seed_genexp_list_narrowing`
+    and `name` already has a non-list C storage type (a parameter, or a
+    local previously typed otherwise — the fresh-local case already works
+    via ordinary inference), materialise the genexp as a list, store it
+    into the existing slot as an opaque pointer, and register `name` in
+    `_genexp_list_locals` so later reads lower as `MojoList *`. Returns
+    True iff it claimed the assignment."""
+    if not (isinstance(name, str) and name in gen._genexp_narrow_names
+            and _is_genexp(value)):
+        return False
+    if gen.var_types.get(name) in (None, 'MojoList *'):
+        return False
+    # Lower the genexp AS a list comprehension.
+    _saved_kind = value.kind
+    value.kind = 'list'
+    try:
+        vtype, v = gen.lower_expr(value)
+    finally:
+        value.kind = _saved_kind
+    dst = gen.var_types[name]
+    gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(name))
+    elem = gen._elem_of(v)
+    gen._genexp_list_locals[name] = elem if elem else 'int64_t'
+    gen._genexp_narrow_names.discard(name)
     return True
 
 
@@ -548,6 +672,18 @@ def _assign_target(gen, tgt, et, ev):
             gen._declare_var(tgt.name, hint or et)
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
+        # A `MojoBoundMethod *` value stored into a local whose declared C
+        # type is NOT `MojoBoundMethod *` (a var-type-inference join with
+        # another branch's plain fn-pointer / lambda value collapsed it to
+        # `void *`/`int64_t`, e.g. `if c: f = lambda: 42 else: f =
+        # self.tell`). A later `f()` must dispatch dynamically: a bound
+        # method needs `self` re-supplied, a plain fnptr must not. Record
+        # the name so _lower_call routes it through mojo_maybe_bound_call_N.
+        if et == 'MojoBoundMethod *' and gen.var_types.get(tgt.name) != 'MojoBoundMethod *':
+            gen._bm_tainted_locals.add(tgt.name)
+            _brt = gen._bound_method_ret_types.get(ev)
+            if _brt:
+                gen._bound_method_ret_types[tgt.name] = _brt
     elif isinstance(tgt, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         # A list-pattern target (`[a] = ...` / `[a, b] = ...`) is
         # semantically identical to the tuple-pattern spelling (`a, = ...`
@@ -607,6 +743,10 @@ def _gen_stmt_AssignStmt(gen, node):
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None
             and _try_bind_list_iter(gen, node.target.name, node.value)):
+        return
+    if (isinstance(node.target, gimple_ctypes.IdentExpr)
+            and getattr(node, 'value', None) is not None
+            and _maybe_narrow_genexp_local(gen, node.target.name, node.value)):
         return
     # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
     # A list-pattern target (`[a] = ...`, `[a, b] = ...`) is the same
@@ -687,6 +827,11 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # Rebinding a genexp-materialised local to a non-genexp value (the
+        # RHS was just lowered above, still seeing the list-typed window)
+        # ends that window — later reads use the slot's own declared type.
+        if tname in gen._genexp_list_locals and not _is_genexp(node.value):
+            gen._genexp_list_locals.pop(tname, None)
         _dv = gen._annotation_dict_val_type(getattr(node, 'type_ann', None))
         if _dv is not None:
             gen._dict_val_types[tname] = _dv
@@ -911,6 +1056,17 @@ def _gen_stmt_AssignStmt(gen, node):
         # correctly instead of assuming int64_t.
         if dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
             gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
+        # A `MojoBoundMethod *` value stored into a local whose declared C
+        # type is NOT `MojoBoundMethod *` — the var-type-inference join
+        # with another branch's plain fn-pointer / lambda value collapsed
+        # the slot to `void *`/`int64_t` (`if c: f = lambda: 42 else: f =
+        # self.tell; f()`). The call site can't tell statically which kind
+        # of callable is live, so record the name for dynamic dispatch
+        # (mojo_maybe_bound_call_N) — see _lower_maybe_bound_call.
+        if vtype == 'MojoBoundMethod *' and dst != 'MojoBoundMethod *':
+            gen._bm_tainted_locals.add(tname)
+            if v in gen._bound_method_ret_types:
+                gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -1123,6 +1279,7 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             ot, obj_v = gen.lower_expr(node.target.obj)
         it, idx_v  = gen.lower_expr(node.target.index)
+        _dsw_sn = gen._dict_subclass_of(ot)
         # A USER-STRUCT instance whose class defines `__setitem__`: the
         # write is protocol dispatch to that method, not a container
         # store (see _lower_struct_subscript_dunder). vtype/v and the
@@ -1138,6 +1295,13 @@ def _gen_stmt_AssignStmt(gen, node):
             idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
             ev_cast = gen._cast_for_list(vtype, v, suf)
             gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
+        elif ot == 'MojoBytes *':
+            # `ba[i] = v` — bytearray element store (bytes is immutable in
+            # Python, but the C type is shared; a store to a genuine
+            # `bytes` value is a TypeError real code never reaches).
+            idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
+            v64 = gen._to_int64(vtype, v)
+            gen._emit(f"  mojo_bytearray_setitem ({obj_v}, {idx64}, {v64});")
         elif ot == 'MojoDict *':
             # Record the dict's value type so later reads recover it (esp.
             # pointer values: dict-of-dicts/lists/sets, or a plain struct
@@ -1227,6 +1391,19 @@ def _gen_stmt_AssignStmt(gen, node):
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+            elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
+                # `d[k] = v` on a builtin-`dict` subclass with no
+                # `__setitem__` override: store into the backing MojoDict.
+                _dsw_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
+                _dsw_kt, _dsw_kv = gen._char_to_cstr(it, idx_v)
+                if vtype == 'char *':
+                    gen._emit_call('void', '', 'mojo_dict_set_str',
+                                    [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
+                                     ('char *', v)])
+                else:
+                    gen._emit_call('void', '', 'mojo_dict_set_int',
+                                    [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
+                                     (vtype, v)])
             else:
                 if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                     # GIMPLE strict: raw pointer subscript write needs address in a register.
@@ -1323,6 +1500,78 @@ def _gen_stmt_AssignStmt(gen, node):
                             gen._emit(f"  *{addr} = {v_cast};")
                     else:
                         gen._emit(f"  {obj_v}[{idx_v}] = {v};")
+    elif isinstance(node.target, gimple_ctypes.SliceExpr):
+        # `x[a:b] = y` / `x[:] = y` / `x[::k] = y` — a real in-place splice
+        # of a list, matching Python semantics (remove the slice's slots,
+        # insert `y`'s elements at `start`, growing/shrinking the list).
+        # Before this branch existed the trailing `else: pass` below
+        # silently dropped the whole store — no error, no mutation
+        # (bugs/CODEGEN_slice_assignment_silently_noops.md). The bounded
+        # case shares the exact bound-normalization (`_lower_slice_bounds`)
+        # of slice READS and `del x[a:b]`, and the same MojoList*-or-assume
+        # ambiguity handling as `del x[a:b]`.
+        stgt = node.target
+        ot, obj_v = gen.lower_expr(stgt.obj)
+        if ot == 'MojoStr *' or ot == 'char *':
+            # `s[a:b] = ...` is not valid Python (str is immutable).
+            raise RuntimeError(
+                "cannot compile module: slice-assignment to a string "
+                "target is not valid (strings are immutable) — falling "
+                "back to interpreting this module from source instead")
+        if ot == 'MojoBytes *':
+            # `ba[a:b] = <bytes>` — bytearray slice-assign (splice). Only
+            # the unstepped form is valid Python for a size-changing RHS;
+            # a stepped bytearray slice-assign requires matching lengths
+            # and is rare — handle the common case, fall through otherwise.
+            if vtype == 'MojoBytes *':
+                _rhs_b = v
+            elif vtype == 'MojoList *':
+                _rhs_b = gen._new_val('MojoBytes *', f"mojo_bytes_from_list ({v})")
+            else:
+                _rhs_b = gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(vtype, v)}")
+            if stgt.step is None:
+                start_v, stop_v = gen._lower_slice_bounds(stgt)
+                gen._emit(f"  mojo_bytearray_splice ({obj_v}, {start_v}, {stop_v}, {_rhs_b});")
+                return
+        lp = obj_v if ot == 'MojoList *' else gen._new_val(
+            'MojoList *', f"(MojoList *){gen._to_int64(ot, obj_v)}")
+        # RHS (`vtype`, `v`) is already lowered above. Both splice paths
+        # read it as a MojoList* (raw int64_t element slots) — a list/tuple
+        # literal or any list-typed expression; box a stray non-pointer
+        # through the same cast the tuple-unpack path uses.
+        rhs = v if vtype == 'MojoList *' else gen._new_val(
+            'MojoList *', f"(MojoList *){gen._to_int64(vtype, v)}")
+        if stgt.step is None:
+            # `x[:] = y` / `x[a:b] = y` — a real element-shifting splice
+            # (delete [start:stop), insert y's elements at start, grow or
+            # shrink). Shares `_lower_slice_bounds` (and thus the exact
+            # negative-index / omitted-stop normalization) with slice READS
+            # and `del x[a:b]`.
+            start_v, stop_v = gen._lower_slice_bounds(stgt)
+            gen._emit(f"  mojo_list_splice ({lp}, {start_v}, {stop_v}, {rhs});")
+        else:
+            # `x[a:b:k] = y` — an "extended slice" assignment: no size
+            # change, each selected slot overwritten in order, and Python
+            # requires len(y) to equal the slot count (the runtime helper
+            # reports + exits on a mismatch). `has_start`/`has_stop` let
+            # the runtime tell an omitted bound from an explicit 0, which
+            # matters for the sign of `k` (Python's slice.indices rules).
+            step_t, step_v = gen.lower_expr(stgt.step)
+            step64 = gen._to_int64(step_t, step_v)
+            if stgt.start is not None:
+                st_t, st_v = gen.lower_expr(stgt.start)
+                start64 = gen._to_int64(st_t, st_v)
+                has_start = '1'
+            else:
+                start64, has_start = '0', '0'
+            if stgt.stop is not None:
+                sp_t, sp_v = gen.lower_expr(stgt.stop)
+                stop64 = gen._to_int64(sp_t, sp_v)
+                has_stop = '1'
+            else:
+                stop64, has_stop = '0', '0'
+            gen._emit(f"  mojo_list_assign_step ({lp}, {has_start}, {start64}, "
+                      f"{has_stop}, {stop64}, {step64}, {rhs});")
     elif isinstance(node.target, gimple_ctypes.CallExpr) and isinstance(node.target.func, gimple_ctypes.IdentExpr) \
             and node.target.func.name == '__get_address_as_uninit_lvalue' \
             and node.target.args:
@@ -1509,6 +1758,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
         else:
             ot, obj_v = gen.lower_expr(node.target.obj)
         it, idx_v  = gen.lower_expr(node.target.index)
+        _dsa_sn = gen._dict_subclass_of(ot)
         # Augmented-assignment analogue of the AssignStmt branch above:
         # `obj[key] += v` on a user struct defining `__setitem__` stores
         # through that method; the read half already dispatched to
@@ -1579,6 +1829,20 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 suf = gimple_ctypes.TypeLattice.list_suffix(elem)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
                 gen._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {v});")
+        elif _dsa_sn and not gen._struct_defines_method(_dsa_sn, '__setitem__'):
+            # `d[k] += v` on a builtin-`dict` subclass: read-modify-write
+            # through the backing MojoDict (the read half already went
+            # through _lower_subscript's dict-subclass branch).
+            _dsa_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
+            _dsa_kt, _dsa_kv = gen._char_to_cstr(it, idx_v)
+            if vtype == 'char *':
+                gen._emit_call('void', '', 'mojo_dict_set_str',
+                                [('MojoDict *', _dsa_dp), ('char *', _dsa_kv),
+                                 ('char *', v)])
+            else:
+                gen._emit_call('void', '', 'mojo_dict_set_int',
+                                [('MojoDict *', _dsa_dp), ('char *', _dsa_kv),
+                                 (vtype, v)])
         elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:
             # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow ptr arithmetic)
             if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
@@ -1976,6 +2240,12 @@ def _gen_stmt_DelStmt(gen, node):
                 'MojoList *', f"(MojoList *){gen._to_int64(ot, ov)}")
             gen._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
             continue
+        if ot == 'MojoBytes *':
+            # `del ba[i]` — bytearray element removal.
+            idx_type, idx_val = gen.lower_expr(target.index)
+            idx64 = gen._to_int64(idx_type, idx_val)
+            gen._emit(f"  mojo_bytearray_delitem ({ov}, {idx64});")
+            continue
         if ot == 'MojoDict *':
             key_type, key_val = gen.lower_expr(target.index)
             key_type, key_val = gen._char_to_cstr(key_type, key_val)
@@ -2344,6 +2614,46 @@ def _gen_stmt_MultiAssignStmt(gen, node):
 
 
 def _gen_stmt_ForStmt(gen, node):
+    # `for i in reversed(range(...))` — rewrite to an equivalent descending
+    # `range(...)` ForStmt and take the fast integer-loop path, instead of
+    # `_lower_builtin_reversed` (which only materializes list/str/bytes and
+    # otherwise refuses — `range` isn't a first-class value here). Covers
+    # `reversed(range(n))` / `reversed(range(a, b))` and the step==1
+    # 3-arg form; any other step falls through to the generic path.
+    _riter = node.iterable
+    if (isinstance(_riter, gimple_ctypes.CallExpr)
+            and isinstance(_riter.func, gimple_ctypes.IdentExpr)
+            and _riter.func.name == 'reversed'
+            and not gen._locally_binds_name('reversed')
+            and len(_riter.args) == 1
+            and isinstance(_riter.args[0], gimple_ctypes.CallExpr)
+            and isinstance(_riter.args[0].func, gimple_ctypes.IdentExpr)
+            and _riter.args[0].func.name == 'range'):
+        _rng = _riter.args[0]
+        _IL = gimple_ctypes.IntLiteral
+        _BO = gimple_ctypes.BinaryOp
+        # `-1` as UnaryOp('-', IntLiteral(1)), NOT IntLiteral(-1): _gen_for_range
+        # explicitly special-cases the UnaryOp form for a negative step, and a
+        # bare negative IntLiteral lowers to invalid `-fgimple` C ("expected
+        # expression before '-' token" / "non-trivial conversion in integer_cst").
+        _neg1 = lambda: gimple_ctypes.UnaryOp('-', _IL(1))
+        _minus1 = lambda e: _BO('-', e, _IL(1))
+        _ra = _rng.args
+        _new_args = None
+        if len(_ra) == 1:
+            _new_args = [_minus1(_ra[0]), _neg1(), _neg1()]
+        elif len(_ra) == 2:
+            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
+        elif len(_ra) == 3 and isinstance(_ra[2], gimple_ctypes.IntLiteral) and _ra[2].value == 1:
+            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
+        if _new_args is not None:
+            _desc = gimple_ctypes.ForStmt(
+                node.target,
+                gimple_ctypes.CallExpr(gimple_ctypes.IdentExpr('range'), _new_args),
+                node.body,
+                getattr(node, 'else_body', None))
+            gen._gen_for_range(_desc)
+            return
     if (isinstance(node.iterable, gimple_ctypes.CallExpr) and
             isinstance(node.iterable.func, gimple_ctypes.IdentExpr) and
             node.iterable.func.name == 'range'):
@@ -2428,6 +2738,20 @@ def _gen_stmt_ExprStmt(gen, node):
         raw_name = gen._ident_call_name(node.value.func)
         if raw_name == 'print':
             gen._gen_print(node.value.args, node.value.kwargs)
+            return
+        # `fut.add_done_callback(cb)` / `.remove_done_callback(cb)` as a
+        # bare statement (the async-body hook in gimple_gen_coro lowers
+        # the method call to this 2-arg `__mojo_future_*` shim call). The
+        # generic call-building path below would pad the missing 3rd
+        # argument (the callable-kind tag) with a literal 0, mis-invoking
+        # a bound-method / closure callback as a bare function pointer.
+        # Route to the shared handler that derives the tag from the
+        # lowered C type of the callback value -- the statement-level twin
+        # of _lower_call's identical interception.
+        if (raw_name in ('__mojo_future_add_done_callback',
+                         '__mojo_future_remove_done_callback')
+                and len(node.value.args) == 2):
+            ggc._lower_future_done_callback(gen, node.value)
             return
         # Step B: a bare, value-DISCARDING call to a supported compiled
         # async function (`f()` with no assignment/use of the result) —

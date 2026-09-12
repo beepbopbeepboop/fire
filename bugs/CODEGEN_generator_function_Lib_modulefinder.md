@@ -1,5 +1,38 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (2026-09-07 — "cluster B" feature session: outer heterogeneous slots CONFIRMED working; this file's real blocker is nested-tuple slots with heterogeneous inner elements)
+
+Feature-build pass on cluster B. Key finding: the A3 stack-switch
+tuple-yield value model already handles **outer-level heterogeneous
+slots** end-to-end today — a slot that is `str` at one `yield` site and
+`None` at another unifies to `char *` with `NULL` as the nil (`is None`
+works); a list-valued slot stays `MojoList *`; a slot that is a
+different scalar kind per site is rejected cleanly. New real
+compile+link+run regression coverage landed in
+`test_gimple_generator_runner.py` (`gen_tuple_slot_str_or_none`,
+`gen_tuple_slot_list_valued`) — previously this working capability had
+zero coverage.
+
+`scan_opcodes` is STILL refused, and its real remaining blocker is
+narrower than "the whole tuple model": it is **nested-tuple slots whose
+inner elements are heterogeneous across sites**. `yield "store",
+(name,)` / `yield "absolute_import", (fromlist, name)` / `yield
+"relative_import", (level, fromlist, name)` — slot 1 is a nested tuple
+whose inner elements are `name`(str), `fromlist`(list|None),
+`level`(int). Boxing the nested tuple as its own `MojoList *` is
+structurally straightforward (verified: it compiles and the outer/inner
+shape round-trips), but the consumer side (`scan_code`'s `for what, args
+in scanner(co):` then `name, = args` / `level, fromlist, name = args`)
+has **no channel to recover each inner element's type** — it reads raw
+pointer bits. A safe fix needs a tagged inner-value representation
+(per-element type tag or a boxed `{tag,value}`), which then has to be
+understood by every consumer shape the inner names flow into
+(`for x in`, `a,=`, `a,b=`, `is None`, `str(x)`, `x in memo`,
+arithmetic). That is the genuine remaining feature-sized chunk; a
+partial (box-without-tags) landing would be a silent miscompile, so it
+was deliberately NOT landed. The `_generator_tuple_slots` refusal
+comment now points here.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster B)
 
 `scan_opcodes` is the module's only generator. Still refused:

@@ -1051,7 +1051,13 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                 elif isinstance(v, IntLiteral):
                     ft = 'int64_t'
                 elif isinstance(v, StringLiteral):
-                    ft = 'char *'
+                    # `self._buf = b''` in __init__ (or any bytes
+                    # literal) -> a real bytes value field, so a
+                    # later `self._buf[a:]` slice routes through
+                    # mojo_bytes_slice and `buf += <bytes>`
+                    # concatenates instead of doing char*+ptr
+                    # pointer arithmetic (COMPILE_FAIL_zipfile).
+                    ft = 'MojoBytes *' if getattr(v, 'is_bytes', False) else 'char *'
                 elif isinstance(v, BoolLiteral):
                     ft = '_Bool'
                 elif isinstance(v, DictExpr):
@@ -1084,8 +1090,15 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                         or (isinstance(_cfn_base, MemberExpr)
                             and _cfn_base.member in ('Event', 'Future',
                                                      'create_future')))
+                    _is_struct_Struct = (
+                        isinstance(_cfn_base, MemberExpr)
+                        and isinstance(_cfn_base.obj, IdentExpr)
+                        and _cfn_base.obj.name == 'struct'
+                        and _cfn_base.member == 'Struct')
                     if _is_deque:
                         ft = 'MojoList *'
+                    elif _is_struct_Struct:
+                        ft = 'MojoStructFmt *'
                     elif _is_evt_fut:
                         # asyncio Event/Future field -> A3 runtime
                         # int64_t handle (gap 2). The .set()/.wait()/
@@ -1097,6 +1110,8 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                         ft = 'MojoDict *'
                     elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
                         ft = 'MojoSet *'
+                    elif cn in ('bytes', 'bytearray'):
+                        ft = 'MojoBytes *'
                     elif cn.startswith('_alloc_'):
                         sname = cn[len('_alloc_'):]
                         ft = sname + ' *'
@@ -1471,6 +1486,30 @@ def _gmi_scan_cpp_nested_imports(self, stmt_list):
             _gmi_scan_cpp_nested_imports(self, _gi.then_body or [])
             if isinstance(_gi.else_body, list):
                 _gmi_scan_cpp_nested_imports(self, _gi.else_body)
+
+
+def _bytes_subclass_new_payload_name(new_fn):
+    """Given a `class X(bytes)` `__new__` FunctionDef, return the name of
+    the parameter it forwards as the bytes payload via
+    `return super().__new__(cls, <name>)` / `return bytes.__new__(cls,
+    <name>)`, or None if the shape isn't recognised."""
+    for _st in (getattr(new_fn, 'body', None) or []):
+        if not isinstance(_st, ReturnStmt):
+            continue
+        _v = _st.value
+        if not (isinstance(_v, CallExpr) and isinstance(_v.func, MemberExpr)
+                and _v.func.member == '__new__'):
+            continue
+        _base = _v.func.obj
+        _is_super = (isinstance(_base, CallExpr) and isinstance(_base.func, IdentExpr)
+                     and _base.func.name == 'super')
+        _is_bytes = isinstance(_base, IdentExpr) and _base.name == 'bytes'
+        if not (_is_super or _is_bytes):
+            continue
+        # args are (cls, <payload>) — payload is the 2nd positional
+        if len(_v.args) >= 2 and isinstance(_v.args[1], IdentExpr):
+            return _v.args[1].name
+    return None
 
 
 def gen_module_impl(self, stmts):
@@ -2662,6 +2701,128 @@ def gen_module_impl(self, stmts):
     for _s in all_struct_defs:
         if isinstance(_s, StructDef) and _s.name not in self.struct_field_types:
             self.struct_field_types[_s.name] = {}
+
+    # --- builtin `dict` subclassing: `class Counter(dict)`, `class
+    # OrderedDict(dict)`, and transitive subclasses of those ---
+    # A user struct whose transitive base list bottoms out at the builtin
+    # `dict` (directly, or via another local dict-subclass) has no
+    # container storage of its own — the compiled struct is just its
+    # `__mojo_type_id` header plus whatever scalar fields its methods
+    # assign. Synthesize a hidden `_data` field of type `MojoDict *`
+    # (allocated by `_alloc_<struct>`); inherited container operations
+    # (`d[k]`, `d[k] = v`, `k in d`, `len(d)`) route to it unless the
+    # subclass overrides the corresponding dunder. See
+    # bugs/COMPILE_FAIL_collections___init__.md.
+    _BUILTIN_DICT_BASES = ('dict', 'OrderedDict', 'defaultdict', 'Counter')
+    _dict_subclass: set = set()
+    _dsc_changed = True
+    while _dsc_changed:
+        _dsc_changed = False
+        for _dsc_k in _struct_bases_map:
+            _dsc_name = _as_str(_dsc_k)
+            if _dsc_name in _dict_subclass:
+                continue
+            _dsc_hit = False
+            for _dsc_bk in _struct_bases_map.get(_dsc_name) or ():
+                _dsc_b = _as_str(_dsc_bk)
+                if _dsc_b in _BUILTIN_DICT_BASES or _dsc_b in _dict_subclass:
+                    _dsc_hit = True
+                    break
+            if _dsc_hit:
+                _dict_subclass.add(_dsc_name)
+                _dsc_changed = True
+    self._dict_subclass_structs = _dict_subclass
+    for _s in all_struct_defs:
+        if not isinstance(_s, StructDef):
+            continue
+        _dsc_name = _as_str(_s.name)
+        if _dsc_name not in _dict_subclass:
+            continue
+        _dsc_fm = self.struct_field_types.get(_dsc_name)
+        if _dsc_fm is None:
+            _dsc_fm = {}
+            self.struct_field_types[_dsc_name] = _dsc_fm
+        _dsc_fm['_data'] = 'MojoDict *'
+        _dsc_has = False
+        for _f in _s.fields:
+            if _as_str(getattr(_f, 'name', '')) == '_data':
+                _dsc_has = True
+                break
+        if not _dsc_has:
+            _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
+
+    # --- builtin `bytes` subclassing: `class _Extra(bytes)` (zipfile) ---
+    # A user struct whose transitive base list bottoms out at the builtin
+    # `bytes` has no payload storage of its own. Synthesize a hidden
+    # `_data: MojoBytes *` field; `__new__` / `super().__new__(cls, val)`
+    # populates it (a bytes value is immutable, set once at construction —
+    # so unlike the dict case `_alloc_` need NOT pre-allocate it), and
+    # inherited bytes ops (`len(x)`, `x[i]`, `x[a:b]`, `for c in x`,
+    # `x == y`, `x + y`, `x in y`, `b''.join(...)`, `bytes(x)`, `.decode()`,
+    # `.hex()`, `.startswith`/`.split`/...) route to `inst->_data` unless
+    # the subclass overrides the corresponding dunder/method. See
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    _BUILTIN_BYTES_BASES = ('bytes',)
+    _bytes_subclass: set = set()
+    _bsc_changed = True
+    while _bsc_changed:
+        _bsc_changed = False
+        for _bsc_k in _struct_bases_map:
+            _bsc_name = _as_str(_bsc_k)
+            if _bsc_name in _bytes_subclass:
+                continue
+            _bsc_hit = False
+            for _bsc_bk in _struct_bases_map.get(_bsc_name) or ():
+                _bsc_b = _as_str(_bsc_bk)
+                if _bsc_b in _BUILTIN_BYTES_BASES or _bsc_b in _bytes_subclass:
+                    _bsc_hit = True
+                    break
+            if _bsc_hit:
+                _bytes_subclass.add(_bsc_name)
+                _bsc_changed = True
+    self._bytes_subclass_structs = _bytes_subclass
+    # Which positional constructor argument becomes the bytes payload:
+    # the argument that `__new__`'s `return super().__new__(cls, <name>)`
+    # forwards (mapped back to `__new__`'s own param position, minus the
+    # leading `cls`); defaults to 0 (`class X(bytes)` with no `__new__`,
+    # or an unrecognised `__new__` shape — `X(val)` treats `val` as the
+    # payload).
+    self._bytes_subclass_payload_argidx: dict = {}
+    for _s in all_struct_defs:
+        if not isinstance(_s, StructDef):
+            continue
+        _bsc_name = _as_str(_s.name)
+        if _bsc_name not in _bytes_subclass:
+            continue
+        _bsc_fm = self.struct_field_types.get(_bsc_name)
+        if _bsc_fm is None:
+            _bsc_fm = {}
+            self.struct_field_types[_bsc_name] = _bsc_fm
+        _bsc_fm['_data'] = 'MojoBytes *'
+        _bsc_has = False
+        for _f in _s.fields:
+            if _as_str(getattr(_f, 'name', '')) == '_data':
+                _bsc_has = True
+                break
+        if not _bsc_has:
+            _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
+        _bsc_new = None
+        for _m in _s.methods:
+            if _as_str(getattr(_m, 'name', '')) == '__new__':
+                _bsc_new = _m
+                break
+        _bsc_idx = 0
+        if _bsc_new is not None:
+            _bsc_pnames = [_as_str(pn) for pn, _pt in (_bsc_new.params or [])]
+            # drop the leading cls/self
+            _bsc_body_pnames = _bsc_pnames[1:] if _bsc_pnames else []
+            _bsc_fwd = _bytes_subclass_new_payload_name(_bsc_new)
+            if _bsc_fwd is not None and _bsc_fwd in _bsc_body_pnames:
+                _bsc_idx = _bsc_body_pnames.index(_bsc_fwd)
+            # `__new__` of a bytes subclass returns a new instance pointer
+            self.func_return_types[f"{_bsc_name}___new__"] = f"{_bsc_name} *"
+        self._bytes_subclass_payload_argidx[_bsc_name] = _bsc_idx
+
     self._ctor_lit_param_types: dict[str, dict[str, str]] = {}
     _ctor_init_params = {}
     _ctor_init_methods = {}
@@ -2748,8 +2909,14 @@ def gen_module_impl(self, stmts):
                             if field.name in _base_ft:
                                 _inherited_ft = _base_ft[field.name]
                                 break
+                        # A recognisable value-typed default (e.g.
+                        # `var FIELD_STRUCT = struct.Struct('<HH')`) — take
+                        # its ctype rather than the `Struct *`-self fallback.
+                        _val_ct = _class_attr_ctype(getattr(field, 'value', None))
                         self.struct_field_types[s.name][field.name] = (
-                            _inherited_ft if _inherited_ft is not None else s.name + ' *')
+                            _inherited_ft if _inherited_ft is not None
+                            else _val_ct if _val_ct is not None
+                            else s.name + ' *')
             self._struct_generator_method_names.setdefault(s.name, set()).update(
                 m.name for m in s.methods if getattr(m, 'is_generator', False))
             self._class_attrs[s.name] = {}
@@ -3110,6 +3277,20 @@ def gen_module_impl(self, stmts):
                 target_def = _struct_by_name.get(target_struct)
                 if target_def is not None and any(
                         m.name == '__getattr__' for m in target_def.methods):
+                    continue
+                # A builtin-`dict` subclass instance's `.get`/`.keys`/
+                # `.values`/`.items`/`.update`/`.pop`/`.setdefault` are
+                # inherited container methods delegated to the hidden
+                # `_data` backing store (see gimple_gen_methods.py's
+                # dict-subclass delegation) — NOT phantom scalar fields.
+                # Minting an `int` field named `get` here would make
+                # `d.get(k)` lower as a function-pointer field call.
+                if (fn in ('get', 'keys', 'values', 'items', 'update',
+                           'pop', 'setdefault', 'clear')
+                        and target_struct in getattr(
+                            self, '_dict_subclass_structs', ())
+                        and not any(m.name == fn for m in
+                                    (target_def.methods if target_def else ()))):
                     continue
                 self.struct_field_types[target_struct][fn] = 'int'
                 if target_def is not None and not any(
@@ -3575,6 +3756,18 @@ def gen_module_impl(self, stmts):
                                 self.var_types[pname] = f"{s.name} *"
                             else:
                                 self.var_types[pname] = self._resolve_type(ptype)
+                        # Seed inferred LOCAL var types (see the matching
+                        # comment at the _struct_method_signatures pass
+                        # below): `return <local>` where the local holds
+                        # a pointer value (bytes accumulator, sliced
+                        # field, ...) must not fall to the int64_t
+                        # default. COMPILE_FAIL_zipfile___init__.md.
+                        try:
+                            for _vn, _vt in self._infer_local_var_types(m).items():
+                                if _vt == 'MojoBytes *':
+                                    self.var_types.setdefault(_vn, _vt)
+                        except Exception:
+                            pass
                         inferred = self._infer_return_type(m.body)
                         key = _mangled_key
                         if self.func_return_types.get(key) != inferred:
@@ -3667,6 +3860,19 @@ def gen_module_impl(self, stmts):
                     self.var_types['self'] = f"{s.name} *"
                     for _pn, _pt in real_params:
                         self.var_types[_pn] = self._resolve_type(_pt)
+                    # Seed inferred LOCAL variable types too, so a
+                    # `return <local>` whose local holds a non-int64_t
+                    # value (e.g. `out = self._buf[a:]; out += chunk;
+                    # return out` -> MojoBytes *) picks the right C
+                    # return type instead of the int64_t default — a
+                    # wrong int64_t return then makes every caller treat
+                    # the pointer as a scalar (COMPILE_FAIL_zipfile).
+                    try:
+                        for _vn, _vt in self._infer_local_var_types(m).items():
+                            if _vt == 'MojoBytes *':
+                                self.var_types.setdefault(_vn, _vt)
+                    except Exception:
+                        pass
                     _ret_type = self._infer_return_type(m.body)
                     self.var_types = _saved_var_types
                 # Self-hosting bootstrap: the frozen GimpleGen signature
@@ -6045,6 +6251,13 @@ def gen_module_impl(self, stmts):
                 overload_id = _moids[_z7k] if _z7k < len(_moids) else ''
                 if (stmt.name, m.name) in self._supported_generator_methods:
                     continue
+                if (m.name == '__new__'
+                        and stmt.name in getattr(self, '_bytes_subclass_structs', ())):
+                    # A builtin-`bytes` subclass's `__new__` is handled
+                    # inline at the construction site (payload synthesis);
+                    # its `return super().__new__(cls, val)` body is not a
+                    # callable C method. See _lower_struct_constructor.
+                    continue
                 method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
                 _method_outer_scope = self._push_import_scope()
                 self._collect_body_import_bindings(m.body, _method_outer_scope)
@@ -6211,6 +6424,7 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_coro_yield_p (int64_t, void *);',
             'extern int64_t __mojo_coro_yield_d (int64_t, double);',
             'extern int64_t __mojo_gen_arg (int64_t, int64_t);',
+            'extern double  __mojo_gen_arg_d (int64_t, int64_t);',
             'extern void    __mojo_gen_set_return (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_2 (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_3 (int64_t, int64_t, int64_t);',
@@ -6233,6 +6447,13 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_future_done (int64_t);',
             'extern int64_t __mojo_future_result (int64_t);',
             'extern void    __mojo_future_set_result (int64_t, int64_t);',
+            'extern void    __mojo_future_set_exception (int64_t, int64_t, char *);',
+            'extern int64_t __mojo_future_exception (int64_t);',
+            'extern int64_t __mojo_future_cancel (int64_t);',
+            'extern int64_t __mojo_future_cancelled (int64_t);',
+            'extern int64_t __mojo_future_set_running_or_notify_cancel (int64_t);',
+            'extern void    __mojo_future_add_done_callback (int64_t, int64_t, int64_t);',
+            'extern int64_t __mojo_future_remove_done_callback (int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_async_await_future (int64_t, int64_t);',
             'extern int64_t __mojo_event_new (void);',
             'extern void    __mojo_event_set (int64_t);',
@@ -6247,7 +6468,15 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_box_new_i64 (int64_t);',
             'extern int64_t __mojo_box_get_i64 (int64_t);',
             'extern void    __mojo_box_set_i64 (int64_t, int64_t);',
-          ) if getattr(self, '_stackswitch_coro_c_units', None) else ()),
+            # Increment C: typed capture-box cells (float / string).
+            'extern int64_t __mojo_box_new_d (double);',
+            'extern double  __mojo_box_get_d (int64_t);',
+            'extern void    __mojo_box_set_d (int64_t, double);',
+            'extern int64_t __mojo_box_new_p (char *);',
+            'extern char *  __mojo_box_get_p (int64_t);',
+            'extern void    __mojo_box_set_p (int64_t, char *);',
+          ) if (getattr(self, '_stackswitch_coro_c_units', None)
+                or getattr(self, '_native_future_bridge', False)) else ()),
         '/* Disable security wrappers: sprintf/snprintf/memcpy/memmove/memset/',
         '   strcpy/strncpy/strcat/strncat macros expand to nested',
         '   __builtin___*_chk calls which GIMPLE rejects (confirmed for memcpy:',
@@ -7423,6 +7652,13 @@ def gen_module_impl(self, stmts):
                                 class_attr_inits.append(f"  {mangled} = mojo_list_new();")
                             else:
                                 class_attr_inits.extend(inits)
+                        elif ctype == 'MojoStructFmt *':
+                            _sfmt = (v.args[0].value
+                                     if (getattr(v, 'args', None)
+                                         and isinstance(v.args[0], StringLiteral))
+                                     else '')
+                            class_attr_inits.append(
+                                f'  {mangled} = mojo_struct_new("{_c_escape(_sfmt)}");')
                         elif isinstance(v, StringLiteral):
                             ctype = 'char *'
                             class_attr_inits.append(f'  {mangled} = "{_c_escape(v.value)}";')
@@ -7571,17 +7807,26 @@ def gen_module_impl(self, stmts):
                     and field_map[_aname] == self._global_var_types.get(_gname, field_map[_aname])):
                 _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
         attr_inits = ''.join(_ai_parts)
+        # A builtin-`dict` subclass gets its hidden `_data` backing
+        # MojoDict allocated here so inherited container ops have real
+        # storage to route to (see gen_module_impl's dict-subclass block).
+        _is_dict_sub = sn in getattr(self, '_dict_subclass_structs', ())
+        _dsub_decls = "  void * _dd;\n" if _is_dict_sub else ""
+        _dsub_init = ("  _dd = mojo_dict_new ();\n"
+                      f"  _p->_data = (MojoDict *) _dd;\n") if _is_dict_sub else ""
         parts.append(
             f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
             f"{{\n"
             f"  {sn} * _p;\n"
             f"  void * _vp;\n"
             f"  int64_t _tag;\n"
+            f"{_dsub_decls}"
             f"\nbb_2:\n"
             f"  _vp = calloc (1, sizeof({sn}));\n"
             f"  _p = ({sn} *) _vp;\n"
             f"  _tag = (int64_t){_struct_type_id(sn)};\n"
             f"  _p->__mojo_type_id = _tag;\n"
+            f"{_dsub_init}"
             f"{attr_inits}"
             f"  return _p;\n"
             f"}}"
@@ -7837,8 +8082,19 @@ def gen_module_impl(self, stmts):
         else:
             param_ctypes = []
             inferred_params = self._inferred_param_types.get(fdef.name, {}) if hasattr(self, '_inferred_param_types') else {}
+            _fd_defaults = getattr(fdef, 'param_defaults', None) or {}
             for pn, pt in (fdef.params or []):
-                if pn in inferred_params:
+                _bare_pn = pn.lstrip('*')
+                _dfl = _fd_defaults.get(_bare_pn)
+                if (pt is None and getattr(_dfl, 'is_bytes', False)
+                        and isinstance(_dfl, StringLiteral)):
+                    # A `b'...'` default is unambiguous `bytes` evidence and
+                    # must win over a weak usage-inferred `char *` here too,
+                    # so this forward declaration agrees with the definition
+                    # (which goes through _param_ctype's own bytes-default
+                    # hook). Mismatch → "conflicting types for 'size'".
+                    param_ctypes.append('MojoBytes *')
+                elif pn in inferred_params:
                     param_ctypes.append(inferred_params[pn])
                 else:
                     param_ctypes.append(self._param_ctype(pn, pt, fdef))

@@ -86,7 +86,7 @@ _CPP_OPAQUE_PTR_STRUCTS = frozenset({
     'MojoList', 'MojoDict', 'MojoSet', 'MojoStr', 'MojoStrIter',
     'MojoListIter', 'MojoDictIter', 'MojoSetIter',
     'MojoGenerator', 'MojoAsync', 'MojoBoundMethod', 'PyObject',
-    'MojoCompletedProcess', 'MojoFileHandle',
+    'MojoCompletedProcess', 'MojoFileHandle', 'MojoStructFmt',
 })
 
 
@@ -198,11 +198,69 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_contains':          'int',
     'mojo_str_slice':             'MojoStr *',
     'mojo_cstr_slice':            'char *',
+    'mojo_cstr_reverse':          'char *',
     'mojo_cstr_region_eq':        'int',
     'mojo_str_from_char':         'MojoStr *',
     'mojo_str_repeat':            'MojoStr *',
     'mojo_str_to_int':            'int64_t',
     'mojo_str_to_float':          'double',
+    # bytes
+    'mojo_bytes_new_lit':         'MojoBytes *',
+    'mojo_bytes_empty':           'MojoBytes *',
+    'mojo_bytes_zeros':           'MojoBytes *',
+    'mojo_bytes_from_list':       'MojoBytes *',
+    'mojo_bytes_from_str':        'MojoBytes *',
+    'mojo_bytes_from_cstr':       'MojoBytes *',
+    'mojo_bytes_len':             'int64_t',
+    'mojo_bytes_get':             'int64_t',
+    'mojo_bytes_eq':              'int',
+    'mojo_bytes_truthy':          'int',
+    'mojo_bytes_repr':            'char *',
+    'mojo_bytes_concat':          'MojoBytes *',
+    'mojo_bytes_repeat':          'MojoBytes *',
+    'mojo_bytes_slice':           'MojoBytes *',
+    'mojo_bytes_contains':        'int',
+    'mojo_bytes_find':            'int64_t',
+    'mojo_bytes_count':           'int64_t',
+    'mojo_bytes_startswith':      'int',
+    'mojo_bytes_endswith':        'int',
+    'mojo_bytes_decode':          'char *',
+    'mojo_bytes_hex':             'char *',
+    'mojo_bytes_replace':         'MojoBytes *',
+    'mojo_bytes_strip':           'MojoBytes *',
+    'mojo_bytes_upper':           'MojoBytes *',
+    'mojo_bytes_lower':           'MojoBytes *',
+    'mojo_bytes_split':           'MojoList *',
+    'mojo_bytes_rsplit':          'MojoList *',
+    'mojo_bytes_splitlines':      'MojoList *',
+    'mojo_bytes_join':            'MojoBytes *',
+    'mojo_bytes_copy':            'MojoBytes *',
+    'mojo_bytes_reverse':         'MojoBytes *',
+    'mojo_bytearray_new':         'MojoBytes *',
+    'mojo_bytearray_copy':        'MojoBytes *',
+    'mojo_bytearray_pop':         'int64_t',
+    'mojo_memoryview_new':        'MojoMemoryView *',
+    'mojo_memoryview_from_bytes': 'MojoMemoryView *',
+    'mojo_memoryview_len':        'int64_t',
+    'mojo_memoryview_get':        'int64_t',
+    'mojo_memoryview_slice':      'MojoMemoryView *',
+    'mojo_memoryview_tobytes':    'MojoBytes *',
+    'mojo_memoryview_eq':         'int',
+    'mojo_memoryview_hex':        'char *',
+    'mojo_memoryview_cast':       'MojoMemoryView *',
+    'mojo_memoryview_repr':       'char *',
+    # struct module (binary pack/unpack)
+    'mojo_struct_compile':        'MojoStructFmt *',
+    'mojo_struct_new':            'MojoStructFmt *',
+    'mojo_struct_calcsize':       'int64_t',
+    'mojo_struct_size':           'int64_t',
+    'mojo_struct_format':         'char *',
+    'mojo_struct_pack_list':      'MojoBytes *',
+    'mojo_struct_pack_h':         'MojoBytes *',
+    'mojo_struct_unpack':         'MojoList *',
+    'mojo_struct_unpack_from':    'MojoList *',
+    'mojo_struct_unpack_h':       'MojoList *',
+    'mojo_struct_unpack_from_h':  'MojoList *',
     # C-string utilities used by the REPL and string methods
     'input':          'char *',
     'string_lower':   'char *',
@@ -219,6 +277,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     '__mojo_coro_yield_p':   'int64_t',
     '__mojo_coro_yield_d':   'int64_t',
     '__mojo_gen_arg':        'int64_t',
+    '__mojo_gen_arg_d':      'double',
     '__mojo_gen_set_return': 'void',
 }
 
@@ -1181,6 +1240,19 @@ class GimpleGen:
         self.relaxed_imports = relaxed_imports  # when True, skip unsupported generator/async fns instead of failing
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
+        # Names of user structs that subclass the builtin `dict` (directly
+        # or transitively) — populated by gen_module_impl. Such a struct
+        # gets a synthesized `_data: MojoDict *` backing field, and
+        # inherited container ops route to it. See
+        # bugs/COMPILE_FAIL_collections___init__.md.
+        self._dict_subclass_structs: set = set()
+        # Names of user structs that subclass the builtin `bytes` (directly
+        # or transitively) — populated by gen_module_impl. Such a struct
+        # gets a synthesized `_data: MojoBytes *` payload field populated
+        # by `__new__` / `super().__new__(cls, val)`, and inherited bytes
+        # ops route to it. See bugs/COMPILE_FAIL_zipfile___init__.md.
+        self._bytes_subclass_structs: set = set()
+        self._bytes_subclass_payload_argidx: dict = {}
         # Lazily-created container attributes used across gen_module/body
         # generation (each was previously created via `if not hasattr(...)` /
         # `getattr(self, '_X', ...)` at first USE — a pattern the self-hosted
@@ -1507,6 +1579,16 @@ class GimpleGen:
         # type) silently got 0 on the self-hosted path, so a string local
         # passed to an unannotated parameter never propagated its `char *`.
         self._inferred_var_types: dict[str, dict[str, str]] = {}
+        # Genexp-bound-to-a-local narrowing (see _seed_genexp_list_narrowing):
+        # `_genexp_narrow_names` is the per-function set of local names whose
+        # `name = (<genexp>)` assignment qualifies to be materialised as a
+        # list; `_genexp_list_locals` maps a name that WAS so materialised to
+        # its list element ctype, so every subsequent read of that name lowers
+        # as a real `MojoList *` (its C storage slot may still be `char *` —
+        # an opaque pointer round-trip) until the name is rebound to a
+        # non-genexp value.
+        self._genexp_narrow_names: set = set()
+        self._genexp_list_locals: dict[str, str] = {}
         self._param_generator_api: dict = {}
         self._all_async_fn_names: set = set()
         self._bound_method_ret_types: dict = {}
@@ -2014,6 +2096,12 @@ class GimpleGen:
         'mojo_bound_method_call_2': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_3': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_4': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_is_bound_method':     ('int', ['void *']),
+        'mojo_maybe_bound_call_0':  ('int64_t', ['void *']),
+        'mojo_maybe_bound_call_1':  ('int64_t', ['void *', 'int64_t']),
+        'mojo_maybe_bound_call_2':  ('int64_t', ['void *', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_3':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_4':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'conforms_to':           ('_Bool',      ['int64_t', 'int64_t']),
         'llabs':                 ('int64_t',   ['int64_t']),
         'labs':                  ('int64_t',   ['int64_t']),
@@ -2041,6 +2129,7 @@ class GimpleGen:
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
         'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
         'mojo_repr_list_ints':       ('char *',    ['MojoList *']),
+        'mojo_repr_list_bytes':      ('char *',    ['MojoList *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
         'mojo_python_init':      ('void',       []),
@@ -2171,7 +2260,21 @@ class GimpleGen:
         'mojo_make_bool':        ('int',        ['int']),   # runtime: int mojo_make_bool(int)
         'mojo_list_new':         ('MojoList *', []),
         'mojo_list_append_int':  ('void',      ['MojoList *', 'int64_t']),
+        'mojo_list_append_double': ('void',    ['MojoList *', 'double']),
         'mojo_list_append_str':  ('void',      ['MojoList *', 'char *']),
+        'mojo_struct_compile':      ('MojoStructFmt *', ['char *']),
+        'mojo_struct_new':          ('MojoStructFmt *', ['char *']),
+        'mojo_struct_calcsize':     ('int64_t',   ['char *']),
+        'mojo_struct_size':         ('int64_t',   ['MojoStructFmt *']),
+        'mojo_struct_format':       ('char *',    ['MojoStructFmt *']),
+        'mojo_struct_pack_list':    ('MojoBytes *', ['char *', 'MojoList *']),
+        'mojo_struct_pack_h':       ('MojoBytes *', ['MojoStructFmt *', 'MojoList *']),
+        'mojo_struct_unpack':       ('MojoList *', ['char *', 'MojoBytes *']),
+        'mojo_struct_unpack_from':  ('MojoList *', ['char *', 'MojoBytes *', 'int64_t']),
+        'mojo_struct_unpack_h':     ('MojoList *', ['MojoStructFmt *', 'MojoBytes *']),
+        'mojo_struct_unpack_from_h': ('MojoList *', ['MojoStructFmt *', 'MojoBytes *', 'int64_t']),
+        'mojo_struct_pack_into':    ('void',      ['char *', 'MojoBytes *', 'int64_t', 'MojoList *']),
+        'mojo_struct_pack_into_h':  ('void',      ['MojoStructFmt *', 'MojoBytes *', 'int64_t', 'MojoList *']),
         'mojo_list_append_obj':  ('void',      ['MojoList *', 'void *']),
         'mojo_list_get_int':     ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_list_get_str':     ('char *',    ['MojoList *', 'int64_t']),
@@ -2290,6 +2393,8 @@ class GimpleGen:
         'int_isdir':             ('int',         ['int64_t', 'int64_t']),  # os.path.isdir(path)
         'int_isfile':            ('int',         ['int64_t', 'int64_t']),  # os.path.isfile(path)
         'int64_t_path_split':    ('MojoList *',  ['char *']),              # os.path.split(path) -> [head, tail]
+        'int64_t_path_splitdrive': ('MojoList *', ['char *']),            # os.path.splitdrive(path) -> [drive, tail]
+        'int64_t_path_splitroot':  ('MojoList *', ['char *']),            # os.path.splitroot(path) -> [drive, root, tail]
         'mojo_listdir':          ('MojoList *',  ['char *']),              # os.listdir(path)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
@@ -2313,6 +2418,8 @@ class GimpleGen:
         'mojo_list_all':         ('int',        ['MojoList *']),
         'mojo_list_any':         ('int',        ['MojoList *']),
         'mojo_list_copy':        ('MojoList *', ['MojoList *']),
+        'mojo_cstr_reverse':     ('char *',     ['char *']),
+        'mojo_bytes_reverse':    ('MojoBytes *', ['MojoBytes *']),
         'mojo_list_extend':      ('void',       ['MojoList *', 'MojoList *']),
         'mojo_list_pop':         ('int64_t',    ['MojoList *']),
         'mojo_list_pop_at':      ('int64_t',    ['MojoList *', 'int64_t']),
@@ -2790,6 +2897,7 @@ class GimpleGen:
     # `line_nums[-1]` was compiled as a pointer-null check, so an allocated-
     # but-empty list was still "truthy" and the guard never actually fired.
     _CONTAINER_LEN_FN = {
+        'MojoBytes *': 'mojo_bytes_len',
         'MojoList *': 'mojo_list_len',
         'MojoDict *': 'mojo_dict_len',
         'MojoSet *':  'mojo_set_len',
@@ -2907,6 +3015,8 @@ class GimpleGen:
         return gmp._lower_bound_method_call(self, fname_raw, node, stored_ctype)
     def _lower_bound_method_call_value(self, bm: str, node: CallExpr, ret_type: str='int64_t') -> tuple[str, str]:
         return gmp._lower_bound_method_call_value(self, bm, node, ret_type)
+    def _lower_maybe_bound_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
+        return gmp._lower_maybe_bound_call(self, fname_raw, node)
     def _lower_builtin_method_value(self, ot: str, ov: str, method: str) -> tuple[str, str]:
         return gmp._lower_builtin_method_value(self, ot, ov, method)
     def _lower_builtin_bound_method_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
@@ -2925,6 +3035,10 @@ class GimpleGen:
         return gmp._lower_file_method(self, ov, method, args)
     def _lower_str_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_str_method(self, ov, method, args)
+    def _lower_bytes_method(self, ov: str, method: str, args: list) -> tuple:
+        return gmp._lower_bytes_method(self, ov, method, args)
+    def _lower_memoryview_method(self, ov: str, method: str, args: list) -> tuple:
+        return gmp._lower_memoryview_method(self, ov, method, args)
     def _repack_method_call_spread_args(self, mangled: str, struct_name: str, method: str, call_args: list, arg_pairs: list) -> list:
         return gmp._repack_method_call_spread_args(self, mangled, struct_name, method, call_args, arg_pairs)
     def _lower_struct_method_call(self, ov: str, ot: str, method: str, node) -> tuple:
@@ -2961,6 +3075,9 @@ class GimpleGen:
 
     def _lower_builtin_zip_n(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_zip_n(self, node)
+
+    def _lower_builtin_reversed(self, node: CallExpr) -> tuple[str, str]:
+        return ggc._lower_builtin_reversed(self, node)
 
     def _lower_builtin_import(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_import(self, node)
@@ -3048,6 +3165,21 @@ class GimpleGen:
 
     def _struct_data_field(self, ctype: str):
         return ggc._struct_data_field(self, ctype)
+
+    def _dict_subclass_of(self, ctype: str) -> str:
+        return ggc._dict_subclass_of(self, ctype)
+
+    def _bytes_subclass_of(self, ctype: str) -> str:
+        return ggc._bytes_subclass_of(self, ctype)
+
+    def _coerce_to_bytes(self, t: str, v: str) -> str:
+        return gmp._coerce_to_bytes(self, t, v)
+
+    def _struct_defines_method(self, sn: str, mname: str) -> bool:
+        return ggc._struct_defines_method(self, sn, mname)
+
+    def _dict_subclass_defines(self, sn: str, method: str) -> bool:
+        return ggc._dict_subclass_defines(self, sn, method)
 
     def _emit_struct_subscript_write(self, obj_v: str, obj_t: str, idx_v: str, val: str, val_t: str) -> bool:
         return ggc._emit_struct_subscript_write(self, obj_v, obj_t, idx_v, val, val_t)
@@ -3272,6 +3404,10 @@ class GimpleGen:
         return glo._gen_for_str(self, var, it_val, body, shadow_name)
     def _gen_for_cstr(self, var: str, it_val: str, body: list):
         return glo._gen_for_cstr(self, var, it_val, body)
+    def _gen_for_bytes(self, var: str, it_val: str, body: list):
+        return glo._gen_for_bytes(self, var, it_val, body)
+    def _gen_for_memoryview(self, var: str, it_val: str, body: list):
+        return glo._gen_for_memoryview(self, var, it_val, body)
     def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_dict(self, var, it_val, body, shadow_name)
     def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
@@ -3316,6 +3452,8 @@ class GimpleGen:
         return gst._emit_dynattr_setattr_dispatch(self, member, vtype, v, ot, ov)
     def _gen_stmt_AssignStmt(self, node):
         return gst._gen_stmt_AssignStmt(self, node)
+    def _seed_genexp_list_narrowing(self, func_node):
+        return gst._seed_genexp_list_narrowing(self, func_node)
     def _gen_stmt_AugAssignStmt(self, node):
         return gst._gen_stmt_AugAssignStmt(self, node)
     def _gen_stmt_ReturnStmt(self, node):
@@ -3851,7 +3989,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
-    if _coro_meta:
+    if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
     gen._current_filename = filename
     # Self-hosting bootstrap: when compiling this compiler's own source as a

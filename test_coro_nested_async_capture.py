@@ -97,10 +97,10 @@ def _build_and_run(mojo_src: str) -> str:
             "gimple_gen_coro (stack-switch) -- no __mgco_ symbols in the "
             "generated C, so this test isn't exercising the code path it "
             "claims to")
-    if '__mojo_box_new_i64' not in c_code:
+    if '__mojo_box_new_' not in c_code:
         raise RuntimeError(
             "expected the captured local to be heap-boxed -- no "
-            "__mojo_box_new_i64 call in the generated C, so the capture "
+            "__mojo_box_new_* call in the generated C, so the capture "
             "wasn't actually threaded through as designed")
 
     c_path = os.path.join(wd, 'prog.c')
@@ -270,6 +270,149 @@ def main() raises:
 """
     out = _build_and_run(src)
     check("single-scope TaskGroup 100-task -> 100", out == "100\n", detail=repr(out))
+
+
+def test_nonliteral_initializer_capture():
+    """Increment A: the captured outer local's initializer is a call
+    (`var n = compute()`), not a bare int literal -- the box is still an
+    int64_t cell; only the plan's initializer restriction is relaxed
+    (kind taken from the callee's `-> Int` return annotation)."""
+    src = """\
+def compute() -> Int:
+    return 40 + 2
+
+
+def test_nonlit() raises:
+    var n = compute()
+
+    @parameter
+    async def bump():
+        n += 1
+
+    var t0 = create_task(bump())
+    t0.wait()
+    print(n)
+
+
+def main() raises:
+    test_nonlit()
+"""
+    out = _build_and_run(src)
+    check("var n = compute(); nested bump() -> 43", out == "43\n", detail=repr(out))
+
+
+def test_captured_parameter():
+    """Increment B: the nested async captures one of the ENCLOSING
+    function's own PARAMETERS directly (no `var c = seed` indirection).
+    The param is renamed and its incoming value boxed at function entry."""
+    src = """\
+def run(seed: Int) raises:
+    @parameter
+    async def bump():
+        seed += 2
+
+    var t0 = create_task(bump())
+    t0.wait()
+    print(seed)
+
+
+def main() raises:
+    run(10)
+"""
+    out = _build_and_run(src)
+    check("captured parameter seed=10, +2 -> 12", out == "12\n", detail=repr(out))
+
+
+def test_float_capture():
+    """Increment C: a Float64 captured local, mutated in the nested async
+    then read back -- the box cell is a `double` (`__mojo_box_new_d`/
+    `_get_d`/`_set_d`) instead of int64_t."""
+    src = """\
+def test_f() raises:
+    var acc = 0.0
+
+    @parameter
+    async def addf():
+        acc += 1.5
+
+    var t0 = create_task(addf())
+    t0.wait()
+    var t1 = create_task(addf())
+    t1.wait()
+    print(acc)
+
+
+def main() raises:
+    test_f()
+"""
+    out = _build_and_run(src)
+    check("Float64 capture acc += 1.5 twice -> 3.0",
+          out.strip() in ("3.0", "3.000000", "3"), detail=repr(out))
+
+
+def test_string_capture():
+    """Increment C: a String captured local, appended-to in the nested
+    async then read back -- the box cell is a `char *` (`__mojo_box_new_p`/
+    `_get_p`/`_set_p`)."""
+    src = """\
+def test_s() raises:
+    var msg = String("a")
+
+    @parameter
+    async def app():
+        msg += "b"
+
+    var t0 = create_task(app())
+    t0.wait()
+    print(msg)
+
+
+def main() raises:
+    test_s()
+"""
+    out = _build_and_run(src)
+    check("String capture msg += \"b\" -> ab", out == "ab\n", detail=repr(out))
+
+
+def test_struct_capture_refused_to_cpp():
+    """A struct-typed captured local is NOT representable by v0's scalar
+    box -- `_nested_async_capture_plan` must return None and the nested
+    async must fall through to the cpp path unchanged (no __mgco_ symbols,
+    no box), never a miscompile."""
+    import gimple_codegen as _gc
+    src = """\
+struct P:
+    var x: Int
+    fn __init__(out self, x: Int):
+        self.x = x
+
+
+def test_p() raises:
+    var p = P(1)
+
+    @parameter
+    async def bump():
+        p.x += 1
+
+    var t0 = create_task(bump())
+    t0.wait()
+    print(p.x)
+
+
+def main() raises:
+    test_p()
+"""
+    try:
+        c = _gc.compile_to_gimple(src, do_imports=False, filename='p.mojo')
+    except RuntimeError as e:
+        # cpp path's own honest "cannot represent async -- interpret from
+        # source" refusal: the stack-switch path correctly declined to box
+        # a struct capture and handed off unchanged. Not a miscompile.
+        check("struct capture -> refused (cpp path), not boxed",
+              'box' not in str(e).lower(), detail=str(e)[:200])
+        return
+    check("struct capture -> not stack-switch-hoisted, not boxed",
+          '__mojo_box_new_' not in c, detail="box shim present -- struct capture was wrongly boxed")
 
 
 def run_all():

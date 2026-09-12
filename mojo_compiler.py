@@ -146,6 +146,7 @@ class StringLiteral:
     value: str
     line: int = 0
     col: int = 0
+    is_bytes: bool = False
 
 @dataclass
 class TstringLiteral:
@@ -164,6 +165,7 @@ class StringLiteral:
     value: str
     line: int = 0
     col: int = 0
+    is_bytes: bool = False
 
 @dataclass
 class EllipsisLiteral:
@@ -3926,6 +3928,87 @@ class Parser:
                 return rest[1:_rl - 1]
         return rest
 
+    def _raw_string_is_bytes(self, raw: str) -> bool:
+        """True when a raw STRING token has a `b`/`B` prefix (possibly with
+        a companion `r`) immediately before its opening quote — i.e. it is a
+        `b'...'` / `rb'...'` byte-string literal, not a text string."""
+        prefix_len = 0
+        while prefix_len < len(raw) and prefix_len < 2:
+            _c = raw[prefix_len]
+            _is_prefix_char = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                                or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                                or _c == 't' or _c == 'T')
+            if not _is_prefix_char:
+                break
+            prefix_len += 1
+        prefix = raw[:prefix_len]
+        rest = raw[prefix_len:]
+        if len(rest) < 1:
+            return False
+        _rc = rest[0]
+        if _rc != '"' and _rc != "'":
+            return False
+        _has_b = False
+        for _pc in prefix:
+            if _pc == 'b' or _pc == 'B':
+                _has_b = True
+        return _has_b
+
+    def _decode_bytes_literal(self, raw: str) -> str:
+        """Strip a `b'...'` token's prefix+quotes and decode its escape
+        sequences to a latin-1 string carrying one character per output
+        byte (codepoints 0-255). `\\xNN`, `\\n`, `\\t`, `\\r`, `\\0`,
+        `\\\\`, `\\'`, `\\"` are recognised; a raw `r` prefix disables all
+        escape processing. Unknown `\\c` sequences are kept verbatim
+        (backslash + char), matching CPython's bytes-literal leniency."""
+        inner = self._strip_string_prefix_and_quotes(raw)
+        is_raw = False
+        prefix_len = 0
+        while prefix_len < len(raw) and prefix_len < 2:
+            _c = raw[prefix_len]
+            if _c == 'r' or _c == 'R':
+                is_raw = True
+            if not (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                    or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                    or _c == 't' or _c == 'T'):
+                break
+            prefix_len += 1
+        if is_raw:
+            return inner
+        out = []
+        i = 0
+        n = len(inner)
+        _hex = '0123456789abcdefABCDEF'
+        while i < n:
+            ch = inner[i]
+            if ch != '\\' or i + 1 >= n:
+                out.append(ch)
+                i += 1
+                continue
+            nxt = inner[i + 1]
+            if nxt == 'n':
+                out.append('\n'); i += 2; continue
+            if nxt == 't':
+                out.append('\t'); i += 2; continue
+            if nxt == 'r':
+                out.append('\r'); i += 2; continue
+            if nxt == '\\':
+                out.append('\\'); i += 2; continue
+            if nxt == "'":
+                out.append("'"); i += 2; continue
+            if nxt == '"':
+                out.append('"'); i += 2; continue
+            if nxt == '0':
+                out.append('\x00'); i += 2; continue
+            if nxt == 'x' and i + 3 < n and inner[i + 2] in _hex and inner[i + 3] in _hex:
+                out.append(chr(int(inner[i + 2:i + 4], 16)))
+                i += 4
+                continue
+            out.append(ch)
+            out.append(nxt)
+            i += 2
+        return ''.join(out)
+
     def _merge_string_literals(self, raws: list, line: int, col: int):
         """Fold a run of adjacent implicitly-concatenated STRING tokens
         into one StringLiteral. If any is an f/t-string the result is a
@@ -3936,6 +4019,19 @@ class Parser:
                 _any_ft = True
                 break
         if not _any_ft:
+            _any_bytes = False
+            for _r in raws:
+                if self._raw_string_is_bytes(_r):
+                    _any_bytes = True
+                    break
+            if _any_bytes:
+                _val = ''
+                for _r in raws:
+                    if self._raw_string_is_bytes(_r):
+                        _val += self._decode_bytes_literal(_r)
+                    else:
+                        _val += self._strip_string_prefix_and_quotes(_r)
+                return StringLiteral(_val, line=line, col=col, is_bytes=True)
             _val = ''
             for _r in raws:
                 _val += self._strip_string_prefix_and_quotes(_r)
@@ -3992,6 +4088,9 @@ class Parser:
                 while self._peek().kind == "STRING":
                     _raws.append(self._advance().value)
                 return self._merge_string_literals(_raws, line, col)
+            if self._raw_string_is_bytes(_raw0):
+                return StringLiteral(self._decode_bytes_literal(_raw0),
+                                     line=line, col=col, is_bytes=True)
             return StringLiteral(self._strip_string_prefix_and_quotes(_raw0),
                                  line=line, col=col)
         if t.kind == "LBRACKET": return self._parse_list_or_compr()

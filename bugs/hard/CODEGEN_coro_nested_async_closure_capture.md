@@ -42,17 +42,52 @@ Full quality gate (steps 0-4) green: check-linkmode 3/3, check-selfhost
 test_module_cache.py 76/0, test_gimple_generator_runner.py 63/4 (4
 pre-existing), test_coro_nested_async_capture.py 4/0.
 
-### Remaining scope (v0 type limits — correctly REFUSED, not miscompiled)
+### Increments A / B / C landed 2026-09-06
 
-`gimple_cpp_async.py` (the C++20-coroutine path) must stay live for a
-capture that v0's int-literal-scalar box cannot represent —
-`_nested_async_capture_plan` returns `None` and the nested async is not
-hoisted (falls through to the cpp path unchanged, never a miscompile):
-a captured PARAMETER, a non-int-literal initializer, a float/string/
-struct capture, or a mutable outer capture into an async GENERATOR
-(this fix covers only the plain `async def` branch of
-`_hoist_nested_async`, not `_lower_one_async_gen`). These are genuine
-future work, all currently safe.
+`gimple_gen_coro.py`'s nested-async capture box is no longer
+int-literal-scalar only:
+
+- **Increment A — non-int-literal initializer.** `_outer_boxable_locals`
+  (was `_outer_int_locals`) accepts any `var name = <init>` whose kind is
+  statically confident: an explicit `Int`/`Float64`/`String`-family
+  annotation, a `_strict_init_kind` match (literal, another typed local,
+  `int()`/`len()`/`float()`/`str()`…, a homogeneous BinaryOp), or a call
+  to a same-module `def … -> <scalar>` (`_FUNC_RET_KIND`, e.g.
+  `var rawCounter = compute()`). An opaque unannotated call of unknown
+  return type still returns `None` → cpp path.
+- **Increment B — captured PARAMETER.** `_nested_async_capture_plan` now
+  also boxes a directly-captured parameter of the enclosing function:
+  the raw param is renamed `__capsrc_<n>` and a `var <n> =
+  __mojo_box_new_*(__capsrc_<n>)` init is prepended, so the bare name
+  denotes the box handle in the body exactly as a boxed body-local does.
+  Kind from the param annotation or the unanimous call-site contract;
+  unknown → `None` → cpp path.
+- **Increment C — float / string capture.** Typed box cells:
+  `__mojo_box_new_d/_get_d/_set_d` (double) and `__mojo_box_new_p/_get_p/
+  _set_p` (`char *`), runtime/mojo_coro_gen.c. `_BOX_SHIMS` picks the
+  triple from the capture kind; the handle stays a plain `int64_t` so the
+  hidden-trailing-param threading is unchanged. **struct** capture is
+  still refused (`_strict_init_kind` → `None` → cpp path).
+
+Regression tests: `test_coro_nested_async_capture.py`
+(`test_nonliteral_initializer_capture`, `test_captured_parameter`,
+`test_float_capture`, `test_string_capture`,
+`test_struct_capture_refused_to_cpp`) — all real compile + link + run.
+
+### Remaining scope (still correctly REFUSED to cpp, not miscompiled)
+
+- **struct capture** — `_nested_async_capture_plan` → `None`.
+- **mutable outer capture into an async GENERATOR consumed via `async
+  for`** (Increment D). `_hoist_nested_async`'s async-generator branch
+  now mirrors the plain-`async def` capture plan/apply (so a directly-
+  driven nested async-gen capture is boxed, and an unrepresentable one
+  falls to the cpp path cleanly instead of emitting an undefined
+  reference), but the realistic consumption — `async for x in g():`
+  inside a *sibling* `async def` — is deliberately refused by the new
+  `_called_from_nested_async` guard: the box-handle threading covers
+  `outer`'s body and ordinary nested siblings only, not a nested async's
+  own `_async_for_drive_stmts` call sites. Threading the box through the
+  async-for driver + the consuming coroutine is the remaining work.
 
 ### Original report (item 1-3 landing, 2026-09-04)
 
@@ -196,13 +231,12 @@ int-literal-scalar v0 scope.
 
 ## Scope note (§5.6 cutover)
 
-`gimple_cpp_async.py` (the C++20-coroutine path) must stay live for:
-the cross-closure case above (item still open); any capture of a
-non-int-literal-initialized local, a captured PARAMETER, or a
-non-scalar (float/string/struct) capture (v0 scope, all by design, all
-still correctly refused rather than miscompiled); and any `async`
-GENERATOR with a mutable outer capture (this fix only covers the plain
-`async def` branch of `_hoist_nested_async`, not `_lower_one_async_gen`'s
-sibling branch) — deleting the cpp path before ALL of these land would
-regress real coverage (`test_locks.mojo`, `test_async_with_lock_guard.
-py`'s stress test) from compiling to source-interpreted fallback.
+`gimple_cpp_async.py` (the C++20-coroutine path) must stay live for the
+two remaining refused shapes: a **struct** capture, and a mutable outer
+capture into an **async GENERATOR consumed via `async for` in a sibling
+`async def`** (see "Remaining scope" above). Both are correctly refused
+rather than miscompiled; deleting the cpp path before they land would
+regress real coverage from compiling to source-interpreted fallback.
+(Int-literal / non-literal-init / captured-parameter / float / string
+captures — items 1-4 and Increments A/B/C — are all handled by the
+stack-switch path now.)

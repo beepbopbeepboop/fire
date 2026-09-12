@@ -260,6 +260,76 @@ def main() -> Int:
     return c.a()
 """, expected_return=42)
 
+    # 10a2. A local branch-joined between a lambda value and a `self.method`
+    # bound-method value, then called — the call site can't tell statically
+    # which kind of callable is live, so it must dynamically dispatch
+    # (mojo_maybe_bound_call_N). Previously the join collapsed the slot to
+    # void* and the call unconditionally used mojo_fnptr_call_0, so the
+    # bound-method branch called the MojoBoundMethod struct as code (bus
+    # error). See bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md
+    # #3. Reproduces in a plain (non-generator) method — this is the
+    # codegen-wide check; the generator twin is in
+    # test_gimple_generator_runner.py.
+    test_gimple_stdout("gimple_branch_joined_lambda_and_bound_method_value", """\
+class Ticker:
+    def __init__(self, start: Int):
+        self.value = start
+    def tell(self):
+        return self.value
+    def run(self, use_lambda: Int):
+        if use_lambda:
+            getpos = lambda: 42
+        else:
+            getpos = self.tell
+        print(getpos())
+
+fn main():
+    tk = Ticker(7)
+    tk.run(1)
+    tk.run(0)
+""", "42\n7\n")
+
+    # 10a3. Heterogeneous stack drained with .pop(), each popped value
+    # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
+    # had no real lowering (fell through to an always-false runtime stub),
+    # so the tuple branch was dead. See
+    # bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md #4.
+    test_gimple_stdout("gimple_isinstance_tuple_on_heterogeneous_pop", """\
+fn walk():
+    stack = [(1, 2)]
+    stack.append("leaf")
+    stack.append((3, 4))
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            a, b = top
+            print(a + b)
+        else:
+            print(99)
+
+fn main():
+    walk()
+""", "7\n99\n3\n")
+
+    # 10b. A BUILTIN-CONTAINER method bound to a local and invoked later —
+    # `append = xs.append` / `a = ba.append` — the container twin of #10.
+    # Behavioral round-trip: the bound value must mutate the ORIGINAL
+    # container. bytes/bytearray + memoryview used to emit an invalid
+    # `->append` field access ('MojoBytes' has no member named 'append');
+    # zipfile's `_ZipDecrypter.decrypter` is the real trigger.
+    test_gimple_execution("gimple_bound_container_method_value", """\
+def main() -> Int:
+    xs = [10]
+    f = xs.append
+    f(20)
+    f(30)
+    ba = bytearray()
+    a = ba.append
+    a(65)
+    a(66)
+    return xs[2] + len(xs) + ba[0] + len(ba)
+""", expected_return=30 + 3 + 65 + 2)
+
     # 11. An f-string whose nested `{...}` interpolation contains a string
     # literal reusing the SAME quote character as the f-string's own
     # delimiter (legal since PEP 701 / Python 3.12) — this used to truncate
@@ -446,6 +516,567 @@ fn main():
 
 main()
 """, "5\n")
+
+    # 21. Builtin `dict` subclassing (Counter/OrderedDict shape) -- see
+    # bugs/COMPILE_FAIL_collections___init__.md. `class X(dict)` gets a
+    # synthesized `_data: MojoDict *` backing store allocated by
+    # `_alloc_X`; inherited `d[k]`, `d[k] = v`, `d[k] += n`, `k in d`,
+    # `len(d)` route to it, and `__missing__` handles a subscript-read
+    # miss (Counter uses this to return 0). A compile-only gate can't
+    # catch a wrong runtime value here.
+    test_gimple_stdout("gimple_dict_subclass_counter_shape", """\
+class Bag(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    b = Bag()
+    b["a"] = 5
+    b["a"] += 3
+    b["b"] += 1
+    print(b["a"])
+    print(b["b"])
+    print(b["never_set"])
+    print(len(b))
+    if "a" in b:
+        print("has a")
+    if "zzz" not in b:
+        print("no zzz")
+""", "8\n1\n0\n2\nhas a\nno zzz\n")
+
+    # 21b. Inherited container METHODS on a dict-subclass instance —
+    # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
+    # and `for k in d` — delegate to the hidden `_data` backing store.
+    # A compile-only gate can't catch a wrong runtime value here.
+    test_gimple_stdout("gimple_dict_subclass_container_method_delegation", """\
+class Bag(dict):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    b = Bag()
+    b["a"] = 5
+    b["b"] = 2
+    b["c"] = 9
+    print(b.get("a"))
+    print(b.get("zzz", 42))
+    total = 0
+    for k in b:
+        total += b[k]
+    print(total)
+    for k, v in b.items():
+        print(v)
+    print(len(b.keys()))
+    s = 0
+    for x in b.values():
+        s += x
+    print(s)
+    other = Bag()
+    other["d"] = 1
+    b.update(other)
+    print(len(b))
+    print(b.pop("a"))
+    print(b.setdefault("e", 7))
+    print(b.setdefault("b", 100))
+""", "5\n42\n16\n5\n2\n9\n3\n16\n4\n5\n7\n2\n")
+
+    # 21c. A subclass method override beats builtin-dict delegation, and
+    # delegation still reaches through a transitive (non-overriding) base.
+    test_gimple_stdout("gimple_dict_subclass_override_beats_delegation", """\
+class Bag(dict):
+    def keys(self) -> str:
+        return "override"
+
+class Sub(Bag):
+    def __missing__(self, key) -> int:
+        return 0
+
+def main():
+    s = Sub()
+    s["x"] = 1
+    s["y"] = 2
+    print(s.keys())
+    print(s.get("x"))
+    for k, v in s.items():
+        print(k)
+""", "override\n1\nx\ny\n")
+
+    # 21d. Builtin `bytes` subclassing (`class _Extra(bytes)`, zipfile) --
+    # see bugs/COMPILE_FAIL_zipfile___init__.md. `super().__new__(cls, v)`
+    # populates the synthesized `_data: MojoBytes *` payload; inherited
+    # len/index/slice/iter/eq/concat/`in`/`.decode`/`.hex`/`.startswith`/
+    # `.split` route to it; extra `self.<attr>` fields sit alongside;
+    # `isinstance(_, bytes)` is true; a method override wins. A
+    # compile-only gate can't catch a wrong runtime value here.
+    test_gimple_stdout("gimple_bytes_subclass_shape", """\
+class Extra(bytes):
+    def __new__(cls, v, id=0):
+        return super().__new__(cls, v)
+    def __init__(self, v, id=0):
+        self.id = id
+
+def main():
+    e = Extra(b"hello world", 42)
+    print(len(e))
+    print(e[1])
+    print(e.id)
+    print(e[0:5].decode())
+    if e == b"hello world":
+        print("eq")
+    if b"wor" in e:
+        print("contains")
+    total = 0
+    for c in e:
+        total += c
+    print(total)
+    print(e.hex())
+    print(e.startswith(b"hello"))
+    parts = e.split(b" ")
+    print(len(parts))
+    if isinstance(e, bytes):
+        print("is bytes")
+    c2 = e + b"!"
+    print(c2.decode())
+""", "11\n101\n42\nhello\neq\ncontains\n1116\n68656c6c6f20776f726c64\n1\n2\nis bytes\nhello world!\n")
+
+    test_gimple_stdout("gimple_bytes_subclass_method_override", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+    def hex(self) -> str:
+        return "OVR"
+
+def main():
+    b = B(b"ab")
+    print(b.hex())
+    print(len(b))
+""", "OVR\n2\n")
+
+    # 21e. `b''.join(<iterable of bytes-subclass instances>)` operates on
+    # each element's `_data` payload (zipfile's `_Extra.strip`).
+    test_gimple_stdout("gimple_bytes_subclass_join", """\
+class B(bytes):
+    def __new__(cls, v):
+        return super().__new__(cls, v)
+
+def main():
+    xs = [B(b"aa"), B(b"bb"), B(b"cc")]
+    print(b"-".join(xs).decode())
+""", "aa-bb-cc\n")
+
+    # Slice-assignment really mutates the list in place (full + bounded,
+    # growing and shrinking, pure insert, negative bounds) — this is the
+    # regression guard for bugs/CODEGEN_slice_assignment_silently_noops.md
+    # (compiled `x[a:b] = y` used to be a silent no-op).
+    test_gimple_stdout("gimple_slice_assign_mutation", """\
+def main():
+    a = [1, 2, 3]
+    a[0:2] = [7, 8]
+    print(a[0])
+    print(a[1])
+    print(a[2])
+    b = [1, 2]
+    b[:] = [9, 9, 5]
+    print(len(b))
+    print(b[2])
+    c = [1, 2, 3, 4, 5]
+    c[1:4] = [0]
+    print(len(c))
+    print(c[1])
+    print(c[2])
+    d = [1, 2, 3]
+    d[1:1] = [8, 8]
+    print(len(d))
+    print(d[1])
+    print(d[3])
+    e = [1, 2, 3, 4]
+    e[-2:] = [9]
+    print(len(e))
+    print(e[2])
+    f = [0, 0, 0, 0, 0]
+    f[::2] = [1, 2, 3]
+    print(f[0])
+    print(f[1])
+    print(f[2])
+    print(f[4])
+    g = [1, 2, 3, 4]
+    g[::-1] = [10, 20, 30, 40]
+    print(g[0])
+    print(g[3])
+""", "7\n8\n3\n3\n5\n3\n0\n5\n5\n8\n2\n3\n9\n1\n0\n2\n3\n40\n10\n")
+
+    # ── bytes value type (Stage 1) ───────────────────────────────────────
+    test_gimple_stdout("gimple_bytes_literal_len_index", """\
+fn main():
+    var b = b'\\x00\\x01ABC'
+    print(len(b))
+    print(b[2])
+    print(b[-1])
+    print(b[0])
+""", "5\n65\n67\n0\n")
+
+    test_gimple_stdout("gimple_bytes_constructors", """\
+fn main():
+    var z = bytes(3)
+    print(len(z), z[0])
+    var l = bytes([65, 66, 67])
+    print(len(l), l[0], l[2])
+    var e = bytes()
+    print(len(e))
+    var s = bytes("hi", "utf-8")
+    print(len(s), s[0], s[1])
+""", "3 0\n3 65 67\n0\n2 104 105\n")
+
+    test_gimple_stdout("gimple_bytes_equality_and_truthiness", """\
+fn main():
+    if b'ab' == b'ab':
+        print("eq")
+    if b'ab' != b'ac':
+        print("ne")
+    var b = b'x'
+    if b:
+        print("truthy")
+    var e = bytes()
+    if not e:
+        print("empty-falsy")
+""", "eq\nne\ntruthy\nempty-falsy\n")
+
+    test_gimple_stdout("gimple_bytes_through_functions", """\
+fn tail(b: bytes) -> bytes:
+    return b
+
+fn size(b = b'abcd') -> Int:
+    return len(b)
+
+fn main():
+    var t = tail(b'XYZ')
+    print(len(t), t[0])
+    print(size())
+    print(size(b'hello'))
+""", "3 88\n4\n5\n")
+
+    test_gimple_stdout("gimple_bytes_repr_print", """\
+fn main():
+    print(b'a\\x00\\nZ')
+""", "b'a\\x00\\nZ'\n")
+
+    # ── bytes value type (Stage 2) ───────────────────────────────────────
+    test_gimple_stdout("gimple_bytes_slice", """\
+fn main():
+    var b = b'Hello, World'
+    print(b[0:5])
+    print(b[7:])
+    print(b[::-1])
+    print(b[::2])
+""", "b'Hello'\nb'World'\nb'dlroW ,olleH'\nb'Hlo ol'\n")
+
+    test_gimple_stdout("gimple_bytes_iter_and_in", """\
+fn main():
+    var total = 0
+    for x in b'ABC':
+        total += x
+    print(total)
+    if b'ell' in b'Hello':
+        print("sub")
+    if 101 in b'Hello':
+        print("byte")
+""", "198\nsub\nbyte\n")
+
+    test_gimple_stdout("gimple_bytes_concat_repeat", """\
+fn main():
+    print(b'ab' + b'cd')
+    print(b'xy' * 3)
+    print(3 * b'-')
+""", "b'abcd'\nb'xyxyxy'\nb'---'\n")
+
+    test_gimple_stdout("gimple_bytes_methods", """\
+fn main():
+    print(b'Hello'.startswith(b'He'))
+    print(b'Hello'.endswith(b'lo'))
+    print(b'a,b,c'.split(b','))
+    print(b'a-b-c'.replace(b'-', b'_'))
+    print(b'  hi  '.strip())
+    print(b'AbC'.upper())
+    print(b'abcabc'.find(b'c'))
+    print(b'abcabc'.count(b'bc'))
+    print(b'DEADBEEF'.hex())
+    print(b'hello'.decode('utf-8'))
+    print(b','.join(b'x,y'.split(b',')))
+""", "1\n1\n[b'a', b'b', b'c']\nb'a_b_c'\nb'hi'\nb'ABC'\n2\n2\n4445414442454546\nhello\nb'x,y'\n")
+
+    test_gimple_stdout("gimple_bytes_isinstance", """\
+fn main():
+    var b = b'x'
+    if isinstance(b, bytes):
+        print("is-bytes")
+    if not isinstance(5, bytes):
+        print("int-not-bytes")
+""", "is-bytes\nint-not-bytes\n")
+
+    # ── bytes value type (Stage 2b) ──────────────────────────────────────
+    test_gimple_stdout("gimple_bytes_percent_format", """\
+fn main():
+    var n: Int = 42
+    print(b'val=%d' % n == b'val=42')
+    print(b'%s!' % b'hi' == b'hi!')
+    print(b'%02x' % 15 == b'0f')
+    print(b'%s=%d;' % (b'k', 7) == b'k=7;')
+    print(b'%5d|' % 3 == b'    3|')
+""", "1\n1\n1\n1\n1\n")
+
+    test_gimple_stdout("gimple_bytes_param_inferred_from_body", """\
+fn dec(data) -> String:
+    return data.decode('utf-8')
+fn main():
+    print(dec(b'hello'))
+""", "hello\n")
+
+    # ── bytes value type (Stage 3): bytearray + memoryview ───────────────
+    test_gimple_stdout("gimple_bytearray_mutation", """\
+fn main():
+    var ba = bytearray(b'abc')
+    ba.append(100)
+    ba[0] = 90
+    print(1 if bytes(ba) == b'Zbcd' else 0)
+    ba.extend(b'XY')
+    var x = ba.pop()
+    print(x)
+    del ba[0]
+    print(1 if bytes(ba) == b'bcdX' else 0)
+    ba[1:3] = b'ZZZ'
+    print(1 if bytes(ba) == b'bZZZX' else 0)
+    var t = 0
+    for c in ba:
+        t = t + c
+    print(t)
+""", "1\n89\n1\n1\n456\n")
+
+    test_gimple_stdout("gimple_memoryview", """\
+fn main():
+    var mv = memoryview(b'hello')
+    print(mv[1])
+    print(len(mv))
+    print(1 if mv[1:3].tobytes() == b'el' else 0)
+    print(mv.hex())
+    print(1 if mv == b'hello' else 0)
+    var t = 0
+    for x in mv:
+        t = t + x
+    print(t)
+""", "101\n5\n1\n68656c6c6f\n1\n532\n")
+
+    # ── bytes value type (Stage 4): bytes-typed struct fields ────────────
+    # `self._buf = b''` in __init__ makes the field a real bytes value, so
+    # a slice of the field and `acc += <bytes>` accumulation work end to
+    # end (was: char* field -> mojo_cstr_slice -> char*+MojoBytes* pointer
+    # arithmetic + a GCC GIMPLE-FE ICE). COMPILE_FAIL_zipfile___init__.md.
+    test_gimple_stdout("gimple_bytes_field_slice_and_augassign", """\
+fn chunk() -> bytes:
+    return b'hello world'
+
+class Buf:
+    def __init__(self):
+        self._data = b''
+        self._offset = 0
+
+    def fill(self):
+        self._data = chunk()
+
+    def drain(self):
+        var out = self._data[self._offset:]
+        var more = self._data[0:2]
+        out += more
+        self._data = b''
+        self._offset = 0
+        return out
+
+def main():
+    b = Buf()
+    b.fill()
+    var r = b.drain()
+    print(1 if r == b'hello worldhe' else 0)
+    print(len(r))
+""", "1\n13\n")
+
+    # ── struct module (binary pack/unpack) ──────────────────────────────
+    # bugs/hard/CODEGEN_struct_module.md — Stage 1 (module-level fns).
+    test_gimple_stdout("gimple_struct_calcsize", """\
+fn main():
+    print(struct.calcsize('<HH'))
+    print(struct.calcsize('>i'))
+    print(struct.calcsize('4s2h'))
+    print(struct.calcsize('<10s'))
+""", "4\n4\n8\n10\n")
+
+    test_gimple_stdout("gimple_struct_pack_unpack_roundtrip", """\
+fn main():
+    var a = struct.pack('<HH', 1, 2)
+    print(len(a), a[0], a[1], a[2], a[3])
+    var ta = struct.unpack('<HH', a)
+    print(ta[0], ta[1])
+    var b = struct.pack('>i', 258)
+    print(b[0], b[1], b[2], b[3])
+    var tb = struct.unpack('>i', b)
+    print(tb[0])
+    var c = struct.pack('<q', -1)
+    var tc = struct.unpack('<q', c)
+    print(tc[0])
+    var d = struct.pack('4s', b'ab')
+    print(len(d), d[0], d[1], d[2])
+    var td = struct.unpack('4s', d)
+    print(1 if td[0] == b'ab\\x00\\x00' else 0)
+""", "4 1 0 2 0\n1 2\n0 0 1 2\n258\n-1\n4 97 98 0\n1\n")
+
+    test_gimple_stdout("gimple_struct_float_formats", """\
+fn main():
+    var p = struct.pack('<f', 1.5)
+    var t = struct.unpack('<f', p)
+    print(t[0])
+    var p2 = struct.pack('>d', 2.25)
+    var t2 = struct.unpack('>d', p2)
+    print(t2[0])
+""", "1.5\n2.25\n")
+
+    test_gimple_stdout("gimple_struct_unpack_from_and_error", """\
+fn main():
+    var u = struct.unpack_from('<H', b'\\xff\\x01\\x00\\x02', 2)
+    print(u[0])
+    try:
+        var bad = struct.unpack('<HH', b'\\x01\\x00')
+        print('no-error')
+    except struct.error:
+        print('caught')
+""", "512\ncaught\n")
+
+    # Stage 2 — struct.Struct instances (compiled-once format).
+    test_gimple_stdout("gimple_struct_Struct_instance", """\
+fn main():
+    var s = struct.Struct('<HH')
+    print(s.size)
+    print(s.format)
+    var t = s.unpack(b'\\x0a\\x00\\x14\\x00')
+    print(t[0], t[1])
+    var p = s.pack(3, 4)
+    print(p[0], p[2])
+    var u = s.unpack_from(b'\\x00\\x0a\\x00\\x14\\x00', 1)
+    print(u[0], u[1])
+""", "4\n<HH\n10 20\n3 4\n10 20\n")
+
+    test_gimple_stdout("gimple_struct_Struct_class_attr", """\
+struct CentralDir:
+    FIELD_STRUCT = struct.Struct('<HH')
+
+    fn read(self, data: bytes):
+        var t = self.FIELD_STRUCT.unpack(data)
+        print(t[0], t[1], self.FIELD_STRUCT.size)
+
+fn main():
+    var c = CentralDir()
+    c.read(b'\\x01\\x00\\x02\\x00')
+""", "1 2 4\n")
+
+    # struct.pack with a trailing splat arg + the packed bytes fed into a
+    # `+` concat whose other operand isn't statically MojoBytes* — the
+    # exact shape of zipfile `_write_end_record`'s `struct.pack('<HH' +
+    # 'Q'*len(extra), 1, 8*len(extra), *extra) + extra_data` (used to
+    # ICE GCC's GIMPLE FE via an `int64 + pointer` POINTER_PLUS).
+    test_gimple_stdout("gimple_struct_pack_splat_and_concat", """\
+fn main():
+    var extra = [10, 20]
+    var packed = struct.pack('<HH' + 'Q' * len(extra), 1, 16, *extra)
+    var tail = b'ZZ'
+    var whole = packed + tail
+    print(len(whole))
+    var t = struct.unpack('<HHQQ', packed)
+    print(t[0], t[1], t[2], t[3])
+""", "22\n1 16 10 20\n")
+
+    # Stage 3 — struct.pack_into into a bytearray.
+    test_gimple_stdout("gimple_struct_pack_into", """\
+fn main():
+    var buf = bytearray(8)
+    struct.pack_into('<HH', buf, 2, 5, 6)
+    print(buf[0], buf[2], buf[4])
+""", "0 5 6\n")
+
+    # Generator expression bound to a local, then consumed exactly once by
+    # a forward iteration -> materialised as a list (see
+    # _seed_genexp_list_narrowing). bugs/COMPILE_FAIL_zipfile___init__.md
+    # blocker 3.
+    test_gimple_stdout("gimple_genexp_local_sum_once", """\
+fn main():
+    g = (x * 2 for x in [1, 2, 3])
+    print(sum(x for x in g))
+""", "12\n")
+
+    test_gimple_stdout("gimple_genexp_local_for_once", """\
+fn main():
+    g = (x + 1 for x in [10, 20, 30])
+    for v in g:
+        print(v)
+""", "11\n21\n31\n")
+
+    # The exact ZipFile._sanitize_windows_name shape: a genexp bound to a
+    # PARAMETER (char*-typed slot), iterated by a second genexp, plus a
+    # bare `if x` string-truthiness filter (empty string must be dropped).
+    test_gimple_stdout("gimple_genexp_param_reassigned_sanitize_shape", """\
+fn clean(arcname: String, pathsep: String) -> String:
+    arcname = (x.rstrip(" .") for x in arcname.split(pathsep))
+    arcname = pathsep.join(x for x in arcname if x)
+    return arcname
+
+fn main():
+    print(clean("a. /b .// c", "/"))
+""", "a/b/ c\n")
+
+    # Genexp local consumed TWICE: narrowing must NOT fire; the existing
+    # materialise-unconditionally behaviour still applies (both reads see
+    # the same list), never a silent-wrong lazy/empty second pass.
+    test_gimple_stdout("gimple_genexp_local_consumed_twice", """\
+fn main():
+    g = (x * 2 for x in [1, 2, 3])
+    print(sum(x for x in g))
+    print(sum(x for x in g))
+""", "12\n12\n")
+
+    # os.path.splitdrive / splitroot — POSIX (see
+    # bugs/COMPILE_FAIL_zipfile___init__.md). splitdrive is always
+    # ('', p); splitroot follows posixpath (1/>=3 leading slashes -> '/',
+    # exactly 2 -> '//').
+    test_gimple_stdout("gimple_os_path_splitdrive_splitroot", """\
+import os
+
+fn main():
+    print(os.path.splitdrive("/usr/bin")[0] + "|" + os.path.splitdrive("/usr/bin")[1])
+    print(os.path.splitdrive("rel/x")[1])
+    var r = os.path.splitroot("/a/b")
+    print(r[0] + "|" + r[1] + "|" + r[2])
+    var r2 = os.path.splitroot("//a/b")
+    print(r2[1] + "|" + r2[2])
+    var r3 = os.path.splitroot("///a/b")
+    print(r3[1] + "|" + r3[2])
+    var r4 = os.path.splitroot("rel/x")
+    print(r4[0] + "|" + r4[1] + "|" + r4[2])
+""", "|/usr/bin\nrel/x\n|/|a/b\n//|a/b\n/|//a/b\n||rel/x\n")
+
+    # reversed() over a list / str, and the reversed(sorted(...)) chain
+    # that was silently dropped in zipfile/__init__.py:1612.
+    test_gimple_stdout("gimple_reversed_list_str_sorted", """\
+fn main():
+    var xs = [3, 1, 2, 5, 4]
+    var acc: Int = 0
+    for v in reversed(xs):
+        acc = acc * 10 + v
+    print(acc)
+    var s2: Int = 0
+    for v in reversed(sorted(xs)):
+        s2 = s2 * 10 + v
+    print(s2)
+    var out: String = ""
+    for c in reversed("hello"):
+        out = out + c
+    print(out)
+""", "45213\n54321\nolleh\n")
 
 
 def main():

@@ -1,5 +1,430 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (2026-09-07, end-to-end runtime investigated — blocked on `.py` link-mode module resolution + memoryview-in-generator, both architectural)
+
+The task was "make a real zip round-trip (`from zipfile import ZipFile`,
+`writestr`/`close`/`namelist`/`read`) actually work through `mojo.py
+build`". It does NOT, and the reasons are now precisely characterised —
+this is a multi-feature stack, not a bug:
+
+1. **`mojo.py build` "succeeds" but silently stubs the whole module.**
+   `from zipfile import ZipFile` never resolves in link/build mode.
+   `imports.resolve_source()` / `imports.Resolver._find()` only probe
+   `<dir>/<name>.mojo` and `<dir>/<name>/__init__.mojo` — never `.py` —
+   and `_parsed_import()`'s candidate-path fallback only fires for
+   leading-dot relative names. So `ZipFile(...)` lowers to an opaque
+   `(int64_t)0`, every method call becomes a `int64_t.<m>() stubbed`
+   no-op, and the driver prints `Built:` **even though the final link
+   emitted "Undefined symbols" / the program segfaults or prints
+   garbage** (`names: 8100139744743485279`). The `mojo.py run`
+   (interpreter) path "works" only because it delegates the import to
+   host CPython's real `zipfile` — no compilation involved.
+
+   Attempted fix (reverted — regresses `make check-selfhost`):
+   - `imports.Resolver._find`: add `.py` / package `__init__.py`
+     candidates (after the `.mojo` forms). Self-hosting `imports.py`
+     then fails with `imports.py:85:1: error: invalid conversion in
+     gimple call` — extending the 2-tuple `for cand in (...)` to a
+     4-tuple trips self-host's tuple lowering.
+   - `_register_link_imports`: the raw-source struct-detection regexes
+     match only Mojo `struct <name>`, never Python `class <name>` — so
+     even a *resolvable* `.py` class never reaches the
+     `_link_inline_modules` inline-compile fallback. Adding a
+     `\bclass\s+{name}\s*[(:]` branch is gate-clean on its own but
+     inert without the resolution fix above, and a minimal repro
+     (sibling `mylib.py` with `class Widget` + list-returning method,
+     imported by an `app.mojo` built in link mode) **segfaults both
+     before and after** — `Widget(3)` still unresolved →
+     `mojo_list_len((MojoList*)0)`.
+   - `module_loader.module_name_for_path`: a package `__init__.py`
+     *outside* `STDLIB_PATH` returns the bare basename `__init__`, so
+     every out-of-tree package gets the same `__init__` symbol prefix
+     and `___init___ZipFile___init__`-style method symbols nothing
+     defines (observed directly once resolution was forced with
+     `MOJO_PATH`). Fixing it to use the parent-directory name is a
+     real latent-bug fix but the extra `base` reassignment perturbs
+     self-host's return-type inference for `module_name_for_path`
+     (callers in `monomorphize.py` / `build_stdlib_dylib.py` /
+     `driver.py` then get `assignment to int64_t from char *`).
+
+2. **`_Extra.split` (`@classmethod` generator) + `memoryview(...)`.**
+   Once resolution is forced (`MOJO_PATH=.../Lib`, all three patches
+   above applied), the whole `zipfile` module is dropped with
+   `skip .../zipfile/__init__.py: cannot compile module: function(s)
+   split (generator) ... split: a call to unresolved callee
+   'memoryview(...)' is not supported in a compiled generator/coroutine
+   body` → falls back to interpreting → no compiled symbols → link
+   fails. This is the same wall the older Status entries below track;
+   the A3 stack-switch cutover did not remove it for this shape.
+
+3. **Transitive Python stdlib surface.** Behind (1)/(2): `io.BytesIO`,
+   `zlib`/`bz2`/`lzma` bindings, `struct`, `binascii`, `os.stat`/
+   `seek`/`tell`, `shutil`, `importlib.util`, `threading` — each a
+   separate stdlib-porting project, as prior entries already note.
+
+**Isolated-compile status is unchanged and still green**:
+`compile_to_gimple(do_imports=False)` on `Lib/zipfile/__init__.py` →
+~628 KB C, `gcc-mp-15 -fgimple -fsyntax-only` exit 0, and the emitted
+signatures are correct (`MojoList * ZipFile_namelist (ZipFile *)`,
+`char * ZipFile_mojo_read (ZipFile *, int64_t, int64_t)` — the `read`
+return type should be `MojoBytes *`, a minor separate return-inference
+gap). No code changed this session; no regression. Not `git rm`'d.
+
+---
+
+
+## Status (2026-09-06, os.path.splitdrive/splitroot + reversed() LANDED): probe cleaner; still not end-to-end
+
+Two more codegen gaps surfaced by the `MOJO_DEBUG=1
+compile_to_gimple(do_imports=False)` probe are now FIXED:
+
+1. **`os.path.splitdrive()` / `os.path.splitroot()`** were stubbed
+   (`int.splitdrive() stubbed`). Used at `zipfile/__init__.py:647`
+   (`os.path.normpath(os.path.splitdrive(arcname)[1])`). Implemented
+   properly (POSIX): `int64_t_path_splitdrive` -> `['', p]` always;
+   `int64_t_path_splitroot` -> `[drive, root, tail]` mirroring cpython
+   `posixpath.splitroot` verbatim (1 or >=3 leading slashes -> `'/'`,
+   exactly 2 -> `'//'`). Dispatched in `gimple_gen_methods.py` like
+   `os.path.split` (list-as-tuple, `char*` elements); type resolution
+   in `gimple_gen_resolve.py` / `gimple_gen_infra.py`. Commit `5d9352c`.
+
+2. **Silently-dropped `for` loop** — `for zinfo in reversed(sorted(
+   self.filelist, key=lambda z: z.header_offset))` at
+   `zipfile/__init__.py:1612` (`_RealGetContents` central-directory
+   concordance check). Root cause: `reversed()` had NO lowering at all,
+   fell through to the generic dynamic-dispatch stub producing a
+   `void *`, and `_gen_stmt_ForStmt` silently drops a `for` over an
+   unrecognized `void *` iterable (`mojo_unsupported_iter`, body runs
+   zero times). `reversed()` now lowers to an eagerly reversed COPY of a
+   list / str / bytes sequence (semantically identical for the single
+   forward consumption every call site does), carrying element types
+   through; any other codegen type is now an honest `RuntimeError`
+   refusal, not a silent drop. Runtime: `mojo_cstr_reverse`,
+   `mojo_bytes_reverse`. Commit `36357fc`.
+
+**zipfile re-probe:** `compile_to_gimple(do_imports=False)` -> ~628 KB
+of C, `gcc-mp-15 -fgimple -fsyntax-only` **exit 0** (warnings only). No
+more `for loop dropped` / `int.splitdrive() stubbed` notes. Remaining
+probe noise is the broad transitive-stdlib gap set (compress/decompress
+codecs, `io.BytesIO`, `os.stat`/`seek`/`tell`/`read` on file objects,
+`_encode_filter_properties`, `argparse`, `warnings.warn`, ...) — NOT
+zipfile-codegen-specific; each is a separate stdlib-surface project.
+
+Regression tests: `test_gimple.py`
+(`os_path_splitdrive_splitroot`, `reversed_list_str_and_sorted_chain`) +
+`test_gimple_runner.py` (`gimple_os_path_splitdrive_splitroot`,
+`gimple_reversed_list_str_sorted` — real build-and-run).
+
+Still **NOT `git rm`'d** — a full `mojo.py build` (transitive stdlib
+imports) still does not complete: `_Extra(bytes)` subclassing +
+`struct.Struct` class attr + `super().__new__` end-to-end link, plus
+the broad stdlib file-object / codec surface above, remain.
+
+---
+
+## Status (2026-09-06, builtin `bytes` subclassing LANDED as a feature): `class _Extra(bytes)` now has real payload storage + inherited-op delegation; zipfile still blocked behind the generator-codegen wall
+
+Builtin-`bytes` subclassing (`class X(bytes)`) landed in the compiled
+path, mirroring the builtin-`dict`-subclass work (commit 58d5900):
+
+- **Stage 1 — representation + `__new__`.** `gen_module_impl` computes
+  `self._bytes_subclass_structs` (fixpoint over local struct bases
+  bottoming out at builtin `bytes`) and synthesizes a hidden
+  `_data: MojoBytes *` payload field on each. The construction site
+  (`_lower_struct_constructor`) populates `_data` from the argument the
+  subclass's `__new__` forwards to `super().__new__(cls, <arg>)` (payload
+  arg index precomputed; defaults to arg 0); the `__new__` body itself is
+  not emitted as a callable C method. `__init__` still runs for extra
+  `self.<attr>` instance fields (`self.id = id`), handled by the ordinary
+  `_collect_self_assigns` path.
+- **Stage 2 — inherited op delegation + override precedence.** `len(x)`,
+  `x[i]` (→int), `x[a:b]` (→bytes), `for c in x`, `x == y`, `x + y`,
+  `x % y`, `x in y`, `bytes(x)`, `isinstance(x, bytes)` (True), and the
+  bytes method family (`.decode`/`.hex`/`.startswith`/`.split`/`.replace`/
+  `.strip`/`.find`/`.count`/...) all route through the existing bytes
+  lowering against `inst->_data`. A subclass method/dunder override wins
+  (`_struct_defines_method` check, like the dict work).
+- **Stage 3 — `b''.join(<iterable of subclass instances>)`** converts each
+  element to its `_data` payload before `mojo_bytes_join`.
+
+Regression tests: `test_gimple.py` (`bytes_subclass_payload_and_inherited_
+ops`, `bytes_subclass_method_override_wins`) + `test_gimple_runner.py`
+(`gimple_bytes_subclass_shape`, `gimple_bytes_subclass_method_override`,
+`gimple_bytes_subclass_join` — real build-and-run).
+
+**zipfile re-probe:** `compile_to_gimple(do_imports=False)` +
+`gcc -fgimple -fsyntax-only` still **exit 0, zero errors** (unchanged —
+the bytes-subclass shape was already syntax-clean because `_Extra` and a
+number of `ZipFile` methods that transitively reference generator code
+(`_write_end_record` → `_Extra.strip` → the `_Extra.split` classmethod
+generator, `_sanitize_windows_name`, ...) are dropped from the relaxed
+`do_imports=False` probe rather than compiled). A real `mojo.py build`
+(root module, non-relaxed) still hits the `_Extra.split` / `read` /
+`_get_decompressor` generator-codegen wall the older entries below track.
+Bytes-subclassing is no longer a blocker; the generator-codegen wall
+remains. **NOT `git rm`'d.**
+
+---
+
+## Status (2026-09-06, blocker 3 FIXED): `compile_to_gimple(do_imports=False)` is now `gcc -fgimple -fsyntax-only` CLEAN (0 errors, was 2)
+
+**Blocker 3 — FIXED.** `ZipFile._sanitize_windows_name` (+ its
+`PyZipFile` inherited copy): `arcname = (x.rstrip(' .') for x in
+arcname.split(pathsep))` then `arcname = pathsep.join(x for x in arcname
+if x)` — a generator expression bound to the `char *`-typed `arcname`
+PARAMETER, then iterated by a second genexp. The two `gcc -fgimple`
+errors were `non-trivial conversion in 'mem_ref'` on `x = *_t34;` (the
+second genexp lowered `arcname` as a CHAR loop).
+
+Fix — a **bounded** narrowing (`gimple_gen_stmts.py`
+`_seed_genexp_list_narrowing` + `_maybe_narrow_genexp_local`, hook in
+`_lower_IdentExpr`, window-close in `_gen_stmt_AssignStmt`): a generator
+expression assigned to a local, where a per-function flow-ordered
+single-consumption analysis shows the local is read exactly once more —
+and that read is the `.iterable` of a `for` / another comprehension — is
+materialised as a LIST (semantically identical for a single forward
+consumption). When the local already has a non-list C slot (a reassigned
+parameter — the fresh-local case already worked via ordinary inference)
+the list is stored into the slot as an opaque pointer and every later
+read lowers as a properly-cast `MojoList *` until the name is rebound to
+a non-genexp value. Conservative: a genexp local read more than once,
+never iterated, or `global`-pinned is left untouched (its existing
+behaviour / gcc error stands) — a twice-consumed genexp local still
+compiles to the same unconditional materialisation it did before, never
+a silent-wrong lazy second pass.
+
+Also fixed an adjacent bug this uncovered: a comprehension `if x` filter
+(`_gen_compr_append`) tested pointer-non-null instead of Python
+truthiness, so an empty `char *` `""` wrongly passed — now routed
+through `_ensure_bool_cond`. (`_sanitize_windows_name`'s `if x` needs
+exactly this.)
+
+**zipfile re-probe:** fresh `compile_to_gimple(do_imports=False)` +
+`gcc-mp-15 -fgimple -fsyntax-only` → **exit 0, zero errors** (was 2).
+No blocker 4 surfaced at the syntax-check level. `_Extra(bytes)`
+subclassing + `struct.Struct` class attr + `super().__new__` remains a
+documented feature-sized gap that would surface in a full link/run.
+
+Full quality gate green: test_gimple.py 302/302, test_gimple_runner.py
+44/44, test_module_cache.py 76/76 (new regression tests included),
+test_gimple_generator_runner.py 85/4-known-fail, check-linkmode 3/3,
+check-selfhost clean, compile_stdlib.py 664/664 (0 unexpected), stdlib
+dylib from-scratch 0 skips, `make bootstrap` byte-identity — see commit.
+
+Still not `git rm`'d — a full `mojo.py build` (transitive stdlib
+imports) was not completed this session (perf-bound under concurrent
+machine load), and `_Extra(bytes)` subclassing still blocks an
+end-to-end link.
+
+---
+
+## Status (2026-09-06, blockers 1 + 2 FIXED): down to ONE remaining blocker — genexp-held-in-a-local in `_sanitize_windows_name`
+
+Two blockers landed this session. `compile_to_gimple(do_imports=False)`
+now produces ~624 KB of C with exactly **2 gcc `-fgimple` errors left**
+(the same error, in `ZipFile._sanitize_windows_name` and its
+`PyZipFile` inherited copy).
+
+**Blocker 1 — FIXED (commit `52107f5`).** `self._readbuffer = b''` in
+`ZipExtFile.__init__` left the struct field typed `char *`, so
+`buf = self._readbuffer[self._offset:]` went through `mojo_cstr_slice`
+and `buf += self._read1(...)` (RHS `MojoBytes *`) fell to
+`_lower_binary_tail`'s raw fallback, emitting `char* + (int64_t)MojoBytes*`
+pointer arithmetic — garbage, and it also ICE'd GCC's GIMPLE frontend
+(`internal compiler error: in build2, at tree.cc:5208`). Fixes:
+`_collect_self_assigns` types a `b''` / `bytes()` / `bytearray()`
+`self.<field>` assignment as `MojoBytes *`; `_infer_local_var_types`
+now scans `var x = ...` VarDecl nodes (it only scanned AssignStmt
+before); method return-type inference seeds inferred local var types so
+`return <bytes-accumulator-local>` infers `MojoBytes *` not `int64_t`.
+`ZipExtFile_mojo_read` / `read1` / `_read1` compile clean; ICE gone.
+
+**Blocker 2 — FIXED (commit `00a2c25`).** `ZipFile.testzip`'s
+`self.open(zinfo.filename, "r")` — `open` is a C-reserved name so the
+mangled symbol is `..._ZipFile_mojo_open`, but the method's parameter
+types were registered in `func_param_types` only under the raw key
+`ZipFile_open`. `_emit_call` looks up by the mangled name, missed, and
+skipped ALL argument coercion — a `char *` filename went straight into
+the `int64_t name` (str|ZipInfo union) slot. `_lower_struct_method_call`
+now mirrors the resolved param-type list onto the mangled key.
+
+**REMAINING BLOCKER — genexp bound to a local, then iterated
+(`_sanitize_windows_name`).** `arcname = (x.rstrip(' .') for x in
+arcname.split(pathsep))` then `arcname = pathsep.join(x for x in arcname
+if x)`. The scalar model can't hold a genexp object in a local, so
+`arcname` stays `char *` and the second loop lowers as CHAR iteration
+(`x = *_t34`) colliding with the char*-typed loop var from the first
+loop — `non-trivial conversion in 'mem_ref'` x2. This is the
+local-held-generator-consumed-as-iterable feature family (same as
+fsutil.py's six-generator refusal list). Genuinely feature-sized; not
+attempted this session.
+
+Behind it still: `pwd=None` unannotated param has been de-risked by
+blocker 2's coercion fix but not re-verified end-to-end past the
+`_sanitize_windows_name` error; `_Extra(bytes)` subclassing +
+`struct.Struct` class attr + `super().__new__` (feature-sized).
+
+Still not `git rm`'d — does not compile end-to-end.
+
+---
+
+## Status (2026-09-06, GCC-ICE root-caused): NOT the module-constants theory — real cause is `buf += <bytes>` lowered as invalid `char* + int64_t` pointer arithmetic
+
+Investigated the "~60 module-level constants re-materialized as LOCAL
+declarations inside `ZipExtFile_mojo_read`" theory from the previous
+Status entry. **That theory is wrong / already-resolved.** Fresh
+`compile_to_gimple(do_imports=False)` on current master: every module
+constant (`ZIP_STORED`, `ZIP_ZSTANDARD`, `_CD_*`, `_FH_*`, ...) is
+correctly emitted ONCE as a file-scope `struct _root_toplev`
+field + a `root__mojo_global_get_*` accessor, and every function body
+reads it as `_root_globals.<name>` — there is NO per-function local
+copy anywhere in the 625 KB of generated C (grep-confirmed: `  int
+ZIP_ZSTANDARD;` etc. appear only inside the struct definition block,
+lines ~1078-1200, never inside a function). A minimal 40-constant
+repro confirms the same. Added `test_gimple.py` regression test
+`many_module_constants_are_file_scope_globals` to lock this in.
+
+**The GCC ICE (`internal compiler error: in build2, at tree.cc:5208`)
+is real but mis-attributed.** GCC's GIMPLE frontend prints the ICE
+location as a `struct _root_toplev` FIELD_DECL line (`int
+ZIP_ZSTANDARD;` / `int _FH_CRC;` — it shifts as the struct shifts) and
+`In function 'ZipExtFile_mojo_read'` / `ZipExtFile_read1`, but the real
+trigger is a statement in the `ZipExtFile.read*` family. Root-caused by
+delta-reduction to a self-contained 8-line repro:
+
+```c
+typedef long int64_t;
+void __GIMPLE f (char * buf, int64_t k)
+{
+  char * _t25;
+bb_2:
+  _t25 = buf + k;      /* char* + int64_t, result dead / used only across a BB edge */
+  return;
+}
+```
+
+`gcc-15 -fgimple -fsyntax-only` ICEs at `build2`, tree.cc:5208 on that
+one statement. It does NOT ICE when the `char* + int` result is
+consumed in straight-line code in the same basic block (`buf = _t25;
+return buf;`) — so it is a genuine GCC GIMPLE-FE bug in how it lowers
+`pointer + non-sizetype-integer` to `POINTER_PLUS_EXPR` when the result
+crosses a CFG edge.
+
+But the generated statement is *also* semantically wrong on our side.
+It comes from `ZipExtFile.read`/`read1`/`_read1`'s
+`buf += self._read1(...)` accumulation, where `buf` was typed `char *`
+(from `self._readbuffer[self._offset:]` → `mojo_cstr_slice`, a `char *`)
+and the RHS is a `MojoBytes *`. `_lower_binary_tail` has no
+`char * + MojoBytes *` case, so it falls to the raw
+`{lv} {op} {rv}` fallback and emits `buf + (int64_t)data` — pointer
+arithmetic by the *address* of the bytes object. Pure garbage even if
+GCC accepted it.
+
+**Real fix = the bytes value type project**
+(`bugs/hard/CODEGEN_bytes_value_type.md`): `buf` must be a real bytes
+value (`MojoBytes *`) end-to-end so `buf += data` routes to
+`mojo_bytes_concat`, which the existing `MojoBytes * + MojoBytes *`
+case in `_lower_binary_tail` already handles. A narrow
+`char * + MojoBytes *` → `mojo_str_cat(buf, mojo_bytes_to_cstr(data))`
+shim would stop the ICE but silently truncates on the embedded NUL
+bytes that ZIP extra fields legitimately contain — deliberately NOT
+taken (matches the NUL-termination hazard already flagged in older
+entries below). Touching the shared `_lower_binary_tail` also trips the
+full gimple/codegen quality gate (bootstrap byte-identity +
+compile_stdlib U-count), disproportionate for a lossy shim.
+
+Behind this ICE the previously-documented blockers still stand:
+`pwd=None` unannotated param, genexp-held-in-local in
+`_sanitize_windows_name`, `_Extra(bytes)` subclassing.
+
+Still not `git rm`'d — does not compile end-to-end.
+
+## Status (2026-09-06, bound-container-method-as-value): blocker #2 FIXED; module now dies later, on a GCC internal compiler error
+
+Blocker #2 (`'MojoBytes' has no member named 'append'` — `_ZipDecrypter.
+decrypter`'s `result = bytearray(); append = result.append` then
+`append(x)`) is **FIXED**. `_lower_MemberExpr`'s builtin-method-as-value
+branch and `_lower_builtin_bound_method_call` only handled
+`MojoList`/`MojoDict`/`MojoSet` receivers; a `MojoBytes *` /
+`MojoMemoryView *` receiver fell through to a struct-field read and
+emitted an invalid `->append`. Both sites now route bytes/bytearray via
+`_lower_bytes_method` and memoryview via `_lower_memoryview_method`,
+matching the direct-call spelling. Minimal repros (list/dict/set/
+bytearray `.append`/`.setdefault`/`.add` bound to a local + called in a
+loop; the exact `_ZipDecrypter.decrypter` shape) compile+link+run.
+
+Fresh `compile_to_gimple(do_imports=False)` now produces ~625 KB of C
+that gets further and dies on a NEW first blocker:
+
+**NEXT BLOCKER — GCC internal compiler error in `ZipExtFile_mojo_read`.**
+`gcc -fgimple -fsyntax-only`: `internal compiler error: in build2, at
+tree.cc:5208` on `int ZIP_ZSTANDARD;` — one of ~60 module-level
+zipfile constants (`ZIP_STORED`, `_CD_*`, `_FH_*`, ...) hoisted as
+locals into `ZipExtFile_mojo_read`. This is a GCC crash (not a Mojo
+codegen diagnostic), triggered by that function's very large local-decl
+block; feature/​infra-sized (either shrink the hoisted-constant set per
+function, or fold module constants into real file-scope globals). The
+`pwd=None` unannotated param, genexp-held-in-local, and `_Extra`
+subclassing blockers documented below still stand behind it.
+
+Still not `git rm`'d — does not compile end-to-end.
+
+## Status (2026-09-06, bytes-value-type Stage 4): generator-body memoryview refusal GONE; module now dies later, on real ordinary-path bytes-codegen bugs
+
+`gimple_gen_coro._eligible` now accepts a `@classmethod` generator whose
+body doesn't reference `cls`, so `_Extra.split` is lowered by the A3
+stack-switch backend (ordinary codegen, full memoryview support) instead
+of the C++ emitter that refused `memoryview(...)`. The up-front
+`RuntimeError("cannot compile module: function(s) split ...")` is GONE —
+`compile_to_gimple(do_imports=False)` now produces ~763 KB of C.
+
+That C does NOT yet `gcc -fgimple` clean. The error set moved from a
+generator-gate refusal to real ordinary-path bugs (exactly the §5.5
+"a previously-refused generator that still fails is now a real
+ordinary-path bug, exposed" outcome):
+
+1. **FIXED (2026-09-06)** — `mojo_bytes_new_lit (_slit_NNNN, N)` "invalid
+   argument to gimple call". Every `b'...'` / `b''` literal passed the
+   `_slit_` string-pool GLOBAL directly as a call argument;
+   `-fgimple` strict mode requires it loaded into a local first (the
+   plain `char *` string-literal path already does this). Fixed at both
+   bytes-literal emit sites in `gimple_gen_exprs.py` (`_lower_String
+   Literal` bytes branch + `_lit_bytes` in the bytes `%`-format path).
+   Minimal repro (`b''.join(parts)` in a classmethod, `b'%d' % x`) now
+   compiles.
+2. **`'MojoBytes' has no member named 'append'`** (`_ZipDecrypter.
+   decrypter`: `result = bytearray(); append = result.append`). This is
+   the bound-method-of-a-container-value-held-in-a-local gap (`append =
+   result.append` then `append(x)`), not bytes-specific. `result.
+   append(x)` directly compiles fine. First hard blocker now.
+3. The previously-documented further blockers still stand behind these:
+   `pwd=None` unannotated param (read/testzip -> mojo_open), genexp-held-
+   in-local in `_sanitize_windows_name`, `_Extra(bytes)` subclassing +
+   `struct.Struct` class attr + `super().__new__`.
+
+Still not `git rm`'d — does not compile end-to-end.
+
+## Status (2026-09-06, bytes-value-type Stage 3): ordinary-path memoryview NOW implemented; coroutine-body memoryview still refused
+
+`bytes`/`bytearray`/`memoryview` value types landed in the ordinary
+GIMPLE path this session (Stages 2b + 3 of
+`bugs/hard/CODEGEN_bytes_value_type.md`): `memoryview(<bytes|bytearray>)`,
+`mv[i]`, `mv[a:b]` (non-copying sub-view), `len`, iteration, `.tobytes`,
+`.hex`, `.cast`, `mv == b'...'`, `bytes(mv)` all compile + run.
+
+BUT `_Extra.split` is a **`@classmethod` generator**, and the C++
+coroutine-body emitter (`gimple_cpp_core.py` ~line 3582) still refuses
+`memoryview(...)` as an unresolved callee — the ordinary-path
+constructor lowering does not reach it. Fresh
+`gimple_codegen.compile_to_gimple(src)` reproduces byte-for-byte:
+`split: a call to unresolved callee 'memoryview(...)' is not supported
+in a compiled generator/coroutine body`. Wiring memoryview into the
+coroutine-body emitter is a separate, self-contained follow-up; even
+once done, this file still has the ≥3 other documented blockers
+(pwd=None unannotated param, genexp-held-in-local in
+`_sanitize_windows_name`, FileHeader int32 under-widening residue). Not
+`git rm`'d.
+
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): memoryview refusal confirmed unchanged
 
 Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` on the

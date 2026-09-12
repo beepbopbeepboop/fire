@@ -1,5 +1,25 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (2026-09-07 — "cluster B" feature session: tuple shape is NOT the blocker; function-nested class is)
+
+Feature-build pass on cluster B. `parse` yields `('', field_name,
+format_spec, None)` and `(field, None, None, None)` — consistent
+4-arity, slots str / str|None / str|None / None. That exact shape is
+**already supported** by the A3 tuple-yield model: verified by the new
+`gen_tuple_slot_str_or_none` regression in
+`test_gimple_generator_runner.py`, which is the same str|None-slot
+shape at top level and round-trips correctly.
+
+`parse`'s real blocker is that it is a **generator method of a class
+(`BarFormatter`) defined inside a function** (`test_override_parse`).
+The A3 pre-pass (`gimple_gen_coro.lower`) only scans module-level
+statements and struct methods; a `StructDef` nested in a function body
+is never seen, so `parse` falls through to the whole-module generator
+refusal. The fix is to make the pre-pass descend into function bodies
+for nested class defs containing generator methods and lift them — a
+separate, bounded-but-nontrivial capability unrelated to the tuple
+value model. Not landed this session.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, cluster B)
 
 `parse` (a generator method of a class `BarFormatter` defined *inside*
