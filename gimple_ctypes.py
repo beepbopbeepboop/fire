@@ -288,6 +288,32 @@ _SCALAR_INT_TYPES = frozenset({
     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
 })
 
+# Distinct runtime container kinds: NOT layout-compatible with one another
+# (MojoDict's slot array is key/value pairs; MojoList's is raw elements;
+# MojoSet's is keys-only with a different probe scheme; MojoBytes is a flat
+# byte buffer). A cast between any two of these reinterprets one struct's
+# memory as another's without any field correspondence — see DESIGN.html's
+# R2/R3 (the `bindings` MojoDict* mis-inferred and cast to MojoList* SIGBUS:
+# `mojo_list_get_int` indexed `dict->slots + 8 * (int64_t)"key"`, ~34GB past
+# the slot array). `_safe_coerce_emit`'s fallback cast branch must refuse
+# ever crossing between two of these — see its `_CONTAINER_KIND_TYPES` check.
+_CONTAINER_KIND_TYPES = frozenset({
+    'MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
+})
+
+# Zero-arg empty-container constructor per kind — used to build a fresh
+# container of the DECLARED kind instead of reinterpret-casting an empty
+# `{}` literal's default MojoDict* (see `_gen_stmt_AssignStmt`'s empty-
+# literal special case in gimple_gen_stmts.py: `{}`'s syntax can't
+# distinguish an empty dict from an empty set, so it always lowers to
+# mojo_dict_new(); when the write target's declared type says otherwise,
+# construct the right kind instead of coercing the wrong one).
+_EMPTY_CONTAINER_CTOR = {
+    'MojoDict *': 'mojo_dict_new ()',
+    'MojoList *': 'mojo_list_new ()',
+    'MojoSet *':  'mojo_set_new ()',
+}
+
 # Return types of well-known runtime functions (seeds func_return_types)
 _RUNTIME_FUNCS: dict[str, str] = {
     # exceptions (mojo_try_push is a macro, not a function)

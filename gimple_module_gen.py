@@ -5281,7 +5281,7 @@ def gen_module_impl(self, stmts):
         # reference propagates the nested `_scan`'s writes cleanly in the
         # self-hosted backend, where a `nonlocal` scalar mut-capture does
         # not (it silently kept `_walk_gen_prov` returning None always).
-        _found = [None]
+        _genprov_found = [None]
 
         def _scan(stmts):
             for st in stmts:
@@ -5301,10 +5301,10 @@ def gen_module_impl(self, stmts):
                     elif isinstance(val, IdentExpr):
                         prov = known_params.get(val.name)
                     if prov is not None:
-                        if _found[0] is None:
-                            _found[0] = prov
-                        elif _found[0] != prov:
-                            _found[0] = '<conflict>'
+                        if _genprov_found[0] is None:
+                            _genprov_found[0] = prov
+                        elif _genprov_found[0] != prov:
+                            _genprov_found[0] = '<conflict>'
                     continue
                 if isinstance(st, FunctionDef):
                     continue
@@ -5320,7 +5320,7 @@ def gen_module_impl(self, stmts):
                         _scan(hb)
 
         _scan(body)
-        return _found[0]
+        return _genprov_found[0]
 
     def _arg_generator_prov(caller_name, arg):
         """The generator function name behind call-site argument `arg`
@@ -7728,16 +7728,16 @@ def gen_module_impl(self, stmts):
                                 and isinstance(v.args[0], (SetExpr, ListExpr, TupleExpr))):
                             _lit_v = v.args[0]
                         if ctype == 'MojoSet *':
-                            inits = [f"  {mangled} = mojo_set_new();"]
+                            _lit_init_lines = [f"  {mangled} = mojo_set_new();"]
                             _set_elts = (_lit_v.elements
                                          if isinstance(_lit_v, (SetExpr, ListExpr, TupleExpr))
                                          else [])
                             for elt in _set_elts:
                                 if isinstance(elt, StringLiteral):
-                                    inits.append(f'  mojo_set_add_str ({mangled}, "{_c_escape(elt.value)}");')
+                                    _lit_init_lines.append(f'  mojo_set_add_str ({mangled}, "{_c_escape(elt.value)}");')
                                 elif isinstance(elt, IntLiteral):
-                                    inits.append(f'  mojo_set_add_int ({mangled}, {elt.value});')
-                            class_attr_inits.extend(inits)
+                                    _lit_init_lines.append(f'  mojo_set_add_int ({mangled}, {elt.value});')
+                            class_attr_inits.extend(_lit_init_lines)
                         elif ctype == 'MojoDict *':
                             _di = [f"  {mangled} = mojo_dict_new();"]
                             _pairs = _lit_v.pairs if isinstance(_lit_v, DictExpr) else []
@@ -7790,22 +7790,22 @@ def gen_module_impl(self, stmts):
                             else:
                                 class_attr_inits.append(f"  {mangled} = mojo_dict_new();")
                         elif ctype == 'MojoList *':
-                            inits = [f"  {mangled} = mojo_list_new();"]
+                            _lit_init_lines = [f"  {mangled} = mojo_list_new();"]
                             _lst_elts = (_lit_v.elements
                                          if isinstance(_lit_v, (ListExpr, TupleExpr, SetExpr))
                                          else [])
                             for elt in _lst_elts:
                                 if isinstance(elt, StringLiteral):
-                                    inits.append(f'  mojo_list_append_str ({mangled}, "{_c_escape(elt.value)}");')
+                                    _lit_init_lines.append(f'  mojo_list_append_str ({mangled}, "{_c_escape(elt.value)}");')
                                 elif isinstance(elt, IntLiteral):
-                                    inits.append(f'  mojo_list_append_int ({mangled}, {elt.value});')
+                                    _lit_init_lines.append(f'  mojo_list_append_int ({mangled}, {elt.value});')
                                 else:
-                                    inits = None
+                                    _lit_init_lines = None
                                     break
-                            if inits is None:
+                            if _lit_init_lines is None:
                                 class_attr_inits.append(f"  {mangled} = mojo_list_new();")
                             else:
-                                class_attr_inits.extend(inits)
+                                class_attr_inits.extend(_lit_init_lines)
                         elif ctype == 'MojoStructFmt *':
                             _sfmt = (v.args[0].value
                                      if (getattr(v, 'args', None)

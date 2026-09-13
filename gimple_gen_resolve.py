@@ -1408,6 +1408,22 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
 def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
     """Hoisted out of `_safe_coerce_emit` (was a nested closure showing the
     lifted-closure-env call-site arity flip) — `gen` threaded."""
+    if (s != d and s in gimple_ctypes._CONTAINER_KIND_TYPES
+            and d in gimple_ctypes._CONTAINER_KIND_TYPES):
+        # DESIGN.html R2: these are distinct, non-layout-compatible runtime
+        # structs (MojoDict/MojoList/MojoSet/MojoBytes each have their own
+        # slot layout) — a cast between them is not a conversion, it is
+        # reinterpreting one struct's memory as another's. This is the
+        # chokepoint every coercion already passes through; refusing here
+        # turns a wrong container-kind inference (previously a 26ms SIGBUS
+        # 34GB past a slot array, see ast_rewriter.py's `bindings`) into an
+        # immediate build-time error naming both types and the value.
+        filename = getattr(gen, '_current_filename', '') or '<unknown>'
+        line = getattr(gen, '_current_line', None)
+        loc = f'{filename}:{line}' if line else filename
+        raise TypeError(
+            f'cannot coerce {s} to {d} (incompatible container kinds) '
+            f'at {loc}: value={v!r} dest={dest!r}')
     if True:
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
         if s == d:

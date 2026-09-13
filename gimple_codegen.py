@@ -3363,7 +3363,6 @@ class GimpleGen:
     def _local_sibling_module_exports(self, module: str):
         return gfn._local_sibling_module_exports(self, module)
     @staticmethod
-    @staticmethod
     def _abs_module(ref: str, base: str) -> str:
         return gfn._abs_module(ref, base)
     def _find_generic_source(self, module: str, name: str, kind: str='fn', depth: int=0):
@@ -3379,7 +3378,6 @@ class GimpleGen:
         return gfn._struct_method_qualifier(self, struct_name)
     def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str='') -> str:
         return gfn._struct_method_csym(self, struct_name, method_name, overload_id)
-    @staticmethod
     @staticmethod
     def _struct_method_csym_static(qualifier: str, struct_name: str, method_name: str, overload_id: str) -> str:
         return gfn._struct_method_csym_static(qualifier, struct_name, method_name, overload_id)

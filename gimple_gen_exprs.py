@@ -2908,6 +2908,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
 
     # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
+    # `a | b` where either operand is a real MojoDict* is Dict.__or__ (key
+    # merge, b's values win on collision) — NOT set union. Must be checked
+    # BEFORE the generic set-union branch below: that branch blindly force-
+    # casts any pointer operand to MojoSet* via _lb_as_set, which for a real
+    # MojoDict* reinterprets its slot layout as a MojoSet*'s and is exactly
+    # the class of container-kind cast DESIGN.html's R3 flags (confirmed via
+    # test_dict.mojo's `orig |= new` where both are Dict[String, Int]).
+    if op == '|' and (lt == 'MojoDict *' or rt == 'MojoDict *') and 'MojoSet *' not in (lt, rt):
+        return 'MojoDict *', gen._call_expr(
+            'MojoDict *', 'mojo_dict_union',
+            [('MojoDict *', _as_str(gen._ensure_local(lt, lv))),
+             ('MojoDict *', _as_str(gen._ensure_local(rt, rv)))])
     # For | on set/list/dict pointer types, use runtime union, not C bitwise |.
     # An empty `{}` operand lowers to MojoDict*; coerce such pointer operands
     # to MojoSet* so GIMPLE's strict pointer typing accepts the call.

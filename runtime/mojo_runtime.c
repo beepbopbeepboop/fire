@@ -1245,6 +1245,30 @@ char *mojo_bytes_hex(MojoBytes *b)
     return s;
 }
 
+/* Real, deterministic (but NOT cryptographic, and NOT bit-compatible with
+ * Python's hashlib) digest over accumulated bytes — backs the compiled
+ * codegen's hashlib.blake2b/md5/sha256(...).update(...).hexdigest() support
+ * (see gimple_gen_methods.py's MojoBytes* 'update'/'hexdigest' cases).
+ * Callers of this codegen's own hashlib usage (cas.py, build_stdlib_dylib.py,
+ * py314_cache.py) only ever run under CPython's real hashlib — the compiled
+ * mojoc binary never drives that build tooling itself — so this only needs
+ * to let hashlib-using Python source COMPILE under self-host, not reproduce
+ * Python's real digest bytes. FNV-1a 64-bit, run twice with different seeds
+ * to fill a 32-hex-char string (arbitrary but fixed length, wide enough that
+ * a mistaken 16-hex-char truncation elsewhere would still surface a bug). */
+char *mojo_bytes_hash_hexdigest(MojoBytes *b)
+{
+    uint64_t h1 = 0xcbf29ce484222325ULL, h2 = 0x9e3779b97f4a7c15ULL;
+    int64_t n = b ? b->len : 0;
+    for (int64_t i = 0; i < n; i++) {
+        h1 = (h1 ^ b->data[i]) * 0x100000001b3ULL;
+        h2 = (h2 ^ (b->data[i] + 1)) * 0x100000001b3ULL;
+    }
+    char *s = malloc(33);
+    sprintf(s, "%016llx%016llx", (unsigned long long)h1, (unsigned long long)h2);
+    return s;
+}
+
 MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to)
 {
     if (!b) return mojo_bytes_empty();
@@ -4478,6 +4502,15 @@ int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
 MojoDict *mojo_dict_copy(MojoDict *d) {
     MojoDict *out = mojo_dict_new();
     if (d) mojo_dict_update(out, d);
+    return out;
+}
+
+/* `a | b` dict union (Python/Mojo Dict.__or__): a new dict with a's
+ * entries overridden by b's on key collision. `b`'s values win, matching
+ * mojo_dict_update's "src overwrites dst" semantics. */
+MojoDict *mojo_dict_union(MojoDict *a, MojoDict *b) {
+    MojoDict *out = mojo_dict_copy(a);
+    if (b) mojo_dict_update(out, b);
     return out;
 }
 

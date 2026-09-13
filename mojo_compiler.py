@@ -179,7 +179,6 @@ class IdentExpr:
     col: int = 0
 
 @dataclass
-@dataclass
 class CallExpr:
     func: object
     args: list = field(default_factory=list)

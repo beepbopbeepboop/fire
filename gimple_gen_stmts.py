@@ -1016,6 +1016,17 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             dst = gen.var_types[tname]
 
+        if (vtype != dst and isinstance(node.value, gimple_ctypes.DictExpr)
+                and not node.value.pairs
+                and dst in gimple_ctypes._EMPTY_CONTAINER_CTOR):
+            # `var x: Set[String] = {}` (or List/Dict-declared-elsewhere):
+            # `{}`'s syntax can't express "empty set", so it always lowers
+            # to mojo_dict_new() — construct the variable's real declared
+            # kind instead of coercing/casting the wrong one. Same fix as
+            # the MemberExpr field-write branch above; see its comment.
+            vtype = dst
+            v = gen._new_val(dst, gimple_ctypes._EMPTY_CONTAINER_CTOR[dst])
+
         if dst in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
             if v in gen._nested_elem_types:
@@ -1252,6 +1263,17 @@ def _gen_stmt_AssignStmt(gen, node):
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
                 return
             field_type = known_fields.get(node.target.member, vtype)
+            if (vtype != field_type and isinstance(node.value, gimple_ctypes.DictExpr)
+                    and not node.value.pairs
+                    and field_type in gimple_ctypes._EMPTY_CONTAINER_CTOR):
+                # `self.x = {}` where `x`'s declared type is a container
+                # kind other than dict (e.g. `Set[String]`): `{}`'s syntax
+                # can't express "empty set" so it always lowers to
+                # mojo_dict_new() — construct the field's real kind instead
+                # of coercing/casting the wrong one (see DESIGN.html R2/R3;
+                # confirmed via TestSuite.skip_list: Set[String] = {}).
+                vtype = field_type
+                v = gen._new_val(field_type, gimple_ctypes._EMPTY_CONTAINER_CTOR[field_type])
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the

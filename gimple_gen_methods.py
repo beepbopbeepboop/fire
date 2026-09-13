@@ -720,6 +720,31 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         for a in node.args: gen.lower_expr(a)
         return 'char *', gen._intern_string('utf-8')
 
+    # `hashlib.blake2b(...)`/`.md5(...)`/`.sha256(...)`: a mutable byte
+    # accumulator (`h.update(x)` called repeatedly, `h.hexdigest()` read at
+    # the end) — genuinely unsupported before this, so `h`'s type fell
+    # through to opaque/unresolved, and its `.update()` call then matched
+    # the receiver-type-unknown heuristic in _lower_call's dict/list/set
+    # dispatch below (ANY unresolved receiver + method name 'update' was
+    # guessed to be a dict) — a real self-host-only miscompile (see
+    # DESIGN.html's R1/R4: guessing a concrete kind from a method NAME
+    # alone, with no verification). Resolving `h`'s real type here as
+    # `MojoBytes *` from construction sidesteps that heuristic entirely: a
+    # correctly-typed receiver never reaches the guess. digest_size/
+    # usedforsecurity kwargs are accepted and ignored — this only needs to
+    # let hashlib-using source COMPILE under self-host; the compiled mojoc
+    # binary never itself drives the Python-side build tooling
+    # (cas.py/build_stdlib_dylib.py/py314_cache.py) that actually calls
+    # hashlib, so exact digest-byte compatibility with CPython's real
+    # blake2b/md5/sha256 is not required (see mojo_bytes_hash_hexdigest's
+    # own comment in runtime/mojo_runtime.c).
+    if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'hashlib'
+            and func.member in ('blake2b', 'md5', 'sha1', 'sha256', 'sha512')):
+        for a in node.args: gen.lower_expr(a)
+        for _, kv in (getattr(node, 'kwargs', None) or []):
+            gen.lower_expr(kv)
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytearray_new', [])
+
     # `<expr>.<SomeABCClass>.register(<arg>)` — real Python's
     # `abc.ABC.register()` virtual-subclass-registration idiom (real:
     # `os.PathLike.register(PurePath)`, pathlib/__init__.py:598).
@@ -2869,7 +2894,23 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                 raw_r = gen._new_val(result_type, f"({result_type}){raw}")
             else:
                 raw_r = gen._coerce_to_type(val_type, result_type, raw)
-            default_r = gen._coerce_to_type(default_ty, result_type, default_val)
+            if (_container_vt and default_ty != result_type
+                    and result_type in gimple_ctypes._EMPTY_CONTAINER_CTOR
+                    and isinstance(args[1], (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr,
+                                              gimple_ctypes.SetExpr, gimple_ctypes.DictExpr))
+                    and not (getattr(args[1], 'elements', None) or getattr(args[1], 'pairs', None))):
+                # `d.get(k, ())` / `d.get(k, [])` / `d.get(k, set())` used
+                # purely as an "empty, container-kind-agnostic fallback"
+                # (real: gimple_cpp_core.py/gimple_cpp_async.py's `d.get(k,
+                # ())` on a dict[str, Set[...]], only ever consumed via
+                # `in`/iteration) — any empty literal shape is a valid
+                # default for ANY container kind, so build the DICT'S real
+                # value kind directly instead of coercing the literal's own
+                # default kind (same class of fix as the empty-`{}`-literal
+                # cases in gimple_gen_stmts.py; see DESIGN.html R2/R4).
+                default_r = gen._new_val(result_type, gimple_ctypes._EMPTY_CONTAINER_CTOR[result_type])
+            else:
+                default_r = gen._coerce_to_type(default_ty, result_type, default_val)
             # Presence test on the RAW int64_t (0 == absent, per the comment
             # above) — NOT `_ensure_bool_cond(result_type, raw_r)`, which for
             # a container result type emits `mojo_list_len(raw_r)` and
@@ -3472,6 +3513,17 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
             enc = arg_pairs[0][1]
         return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
                                         [('MojoBytes *', ov), ('char *', enc)])
+
+    # hashlib(...)'s `.update(data)`/`.hexdigest()` — see _lower_method_call's
+    # `hashlib.blake2b/md5/...` construction, which types the accumulator as
+    # a real `MojoBytes *` so it lands here instead of the receiver-type-
+    # unknown dict/list/set guess-by-method-name heuristic.
+    if method == 'update' and arg_pairs:
+        pv = _coerce_to_bytes(gen, *arg_pairs[0])
+        gen._emit_call('void', '', 'mojo_bytearray_extend', [('MojoBytes *', ov), ('MojoBytes *', pv)])
+        return 'int', gen._new_val('int', '0')
+    if method == 'hexdigest':
+        return 'char *', gen._call_expr('char *', 'mojo_bytes_hash_hexdigest', [('MojoBytes *', ov)])
     if method == 'hex':
         return 'char *', gen._call_expr('char *', 'mojo_bytes_hex', [('MojoBytes *', ov)])
 

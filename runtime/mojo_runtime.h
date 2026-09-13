@@ -345,6 +345,7 @@ int        mojo_bytes_startswith(MojoBytes *b, MojoBytes *p);
 int        mojo_bytes_endswith(MojoBytes *b, MojoBytes *p);
 char      *mojo_bytes_decode(MojoBytes *b, char *encoding);
 char      *mojo_bytes_hex(MojoBytes *b);
+char      *mojo_bytes_hash_hexdigest(MojoBytes *b);  /* hashlib(...).hexdigest() backing */
 MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to);
 MojoBytes *mojo_bytes_strip(MojoBytes *b, MojoBytes *chars, int do_left, int do_right);
 MojoBytes *mojo_bytes_upper(MojoBytes *b);
@@ -489,6 +490,7 @@ MojoList   *mojo_dict_items(MojoDict *d);
 void        mojo_dict_update(MojoDict *dst, MojoDict *src);
 int64_t     mojo_dict_pop_int(MojoDict *d, char *key);
 MojoDict   *mojo_dict_copy(MojoDict *d);
+MojoDict   *mojo_dict_union(MojoDict *a, MojoDict *b);  /* a | b */
 MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */
 MojoList   *mojo_list_copy(MojoList *l);
 int         mojo_list_all(MojoList *l);
