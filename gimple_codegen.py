@@ -3237,7 +3237,6 @@ class GimpleGen:
     def _param_ctype(self, pname: str, ptype, node: FunctionDef, is_self: bool=False) -> str:
         return gfn._param_ctype(self, pname, ptype, node, is_self)
     @staticmethod
-    @staticmethod
     def overload_suffix_for(c_param_types) -> str:
         return gfn.overload_suffix_for(c_param_types)
     def _overload_suffix(self, bare_name: str) -> str:
