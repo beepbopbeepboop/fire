@@ -2312,15 +2312,33 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 # declared C type when the initializer is a pointer value
                 # (bytes accumulator, sliced field, ...).
                 vname = _as_str(_vd_node.name)
-                _vt = None
+                # Empty-string sentinel, NOT `None`: an explicit `_vt: str |
+                # None = None` annotation here was NOT enough — this local
+                # lives inside a doubly-nested closure (collect_assigned_
+                # types nested inside _infer_local_var_types), and that
+                # scope's own C-type inference does not honor a local
+                # variable's annotation the way parameter annotations are
+                # honored elsewhere in this file; it still settled on plain
+                # `int` (from the `= None` assignments), and every real
+                # `_mojo_type(...)`/`_quick_type(...)` char* result then got
+                # TRUNCATED to 32 bits storing into that narrower slot —
+                # corrupting the pointer. The later `_vt == 'int64_t'`
+                # string compare then read the truncated address and
+                # SIGSEGV'd in strcmp, on virtually any VarDecl with a type
+                # annotation (i.e. almost any compiled program). Using ''
+                # instead of `None` for "unset" keeps every assignment to
+                # `_vt` a genuine `char *` literal/result, so there is no
+                # int-vs-pointer ambiguity left for the inferencer to get
+                # wrong.
+                _vt = ''
                 if getattr(_vd_node, 'type_ann', None):
                     try:
                         _vt = gimple_ctypes._mojo_type(_vd_node.type_ann)
                     except Exception:
-                        _vt = None
-                if (_vt is None or _vt == 'int64_t') and _vd_node.value is not None:
+                        _vt = ''
+                if (not _vt or _vt == 'int64_t') and _vd_node.value is not None:
                     _vt = gen._quick_type(_vd_node.value)
-                if _vt is not None:
+                if _vt:
                     inferred.setdefault(vname, []).append(_vt)
             elif isinstance(node, gimple_ctypes.MultiAssignStmt):
                 # Fresh local, not a `node` reassignment — see the
