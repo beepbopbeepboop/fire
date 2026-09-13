@@ -1799,8 +1799,22 @@ def gen_module_impl(self, stmts):
         if isinstance(_s, ComptimeVarStmt) and isinstance(_s.value, ListExpr):
             self._comptime_list_asts.setdefault(_s.target, _s.value)
 
+    # `_as_funcdef_node`, not a bare `s`: `stmts` is a heterogeneous
+    # statement list, so its self-hosted element type is opaque int64_t
+    # regardless of the isinstance filter — `s.name` then went through
+    # the dynamic getattr path and (being read as an int64_t rather than
+    # the real char*) got stringified into this set as a decimal ADDRESS
+    # instead of the real function name. `_func_qualifier`'s tier-1 check
+    # (`bare_name in gen._local_top_level_func_names`) then always missed
+    # for a genuinely local top-level function, falling through to tiers
+    # that don't apply to a module compiling ITS OWN definition, and
+    # ultimately returning '' (no qualifier) — so an imported sibling
+    # module's own function definition compiled under its BARE name
+    # while every caller correctly called the QUALIFIED name, an
+    # undefined-symbol link failure for any --dump-full/mojo.py build
+    # closure with more than one module defining free functions.
     self._local_top_level_func_names = {
-        s.name for s in stmts if isinstance(s, FunctionDef)}
+        _as_funcdef_node(s).name for s in stmts if isinstance(s, FunctionDef)}
 
     for _s in stmts:
         if isinstance(_s, FunctionDef):
