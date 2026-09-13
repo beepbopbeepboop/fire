@@ -44,15 +44,37 @@ from generated_dispatch import (
     _STMT_DISPATCH, _EXPR_DISPATCH,
 )
 def _debug_note(where: str, detail: object = '') -> None:
-    """Report a deliberately-swallowed error on stderr when MOJO_DEBUG is set.
+    """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
 
     Codegen degrades gracefully on some failures (module imports, type
     inference, generic instantiation).  Those paths intentionally continue
     with reduced information; this hook makes them diagnosable without
     changing compiler behavior for normal runs.
+
+    `print(..., flush=True)` to plain stdout, NOT `file=sys.stderr`: the
+    self-hosted backend has no lowering for `sys.stderr`/`sys.stderr.write`
+    (see `_compile_imported_module`'s own identical fix in
+    gimple_gen_resolve.py) — it faults at the `sys.stderr` attribute access
+    itself. That fault is a real, catchable exception under this runtime's
+    setjmp-based exception protocol, so it doesn't crash outright; instead
+    it becomes a NEW exception raised from inside whatever `except:` block
+    had just called `_debug_note` to report the ORIGINAL failure. If that
+    surrounding `except` has nothing further to catch it, the new exception
+    propagates in its place -- but the global exception MESSAGE slot
+    (`mojo_exc_msg_set`) is never overwritten by the stderr fault itself, so
+    the propagated exception still carries the original failure's message
+    text, making the real cause (this line) invisible from the outside.
+    Concretely: `_gen_stmt_ForStmt`'s zip-loop fallback (gimple_gen_stmts.py)
+    calls this on a caught `ValueError`, and self-hosted `--dump-full mojo.py`
+    would silently DROP an entire sibling module (gimple_gen_coro.py) whose
+    `for (a, b), c in zip(...)` shape hit that fallback, with only a
+    misleadingly-labeled "# ERROR: ...: zip() lowering needs a tuple loop
+    target" reaching the module-level catch-all in
+    `_compile_imported_module` -- the real point of failure was here, not
+    the original (correctly-handled) ValueError.
     """
     if os.environ.get('MOJO_DEBUG'):
-        print(f"[gimple_codegen] {where}: {detail}", file=sys.stderr)
+        print(f"[gimple_codegen] {where}: {detail}", flush=True)
 
 # ---------------------------------------------------------------------------
 # TypeLattice — C11 usual arithmetic conversions + container helpers

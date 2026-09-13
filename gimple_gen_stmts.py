@@ -3405,7 +3405,22 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
     added_except_as = False
     had_var_type = False
     restore_var_type = None
-    bind_name = gen._handler_bind_name(handler)
+    # `_as_str`, not the bare call result: `_handler_bind_name` has
+    # multiple return paths (`h.name`, `h.exc_type`, `None`), and the
+    # self-hosted backend's whole-function type-unification erased its
+    # return type to int64_t instead of `str | None`. Every dict write
+    # below keyed off the erased `bind_name` (`gen.var_types[bind_name]
+    # = exc_ctype`, `gen._c_names[bind_name] = bound`) then stored under
+    # a garbage/stringified-pointer key instead of the real name (e.g.
+    # "e") — so a later `note(e)` call-argument lookup for the literal
+    # string "e" always missed both dicts and fell back to a plain
+    # `(int64_t)0` default instead of reading the correctly-bound
+    # `char *` temp holding the caught exception's value. Confirmed via
+    # a --dump-full mojo.py sibling-import diff (mojo_exc_obj_get()'s
+    # result silently discarded at every `except Exception as e:` call
+    # site referencing `e`) and reproduced standalone with a 2-line
+    # `except Exception as e: note(e)`.
+    bind_name = _as_str(gen._handler_bind_name(handler))
     if bind_name:
         # Exception handlers are typed as pointers to exception objects.
         exc_type_name = gen._handler_exc_name(handler)
