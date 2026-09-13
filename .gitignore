@@ -37,3 +37,6 @@ _abt*.ci
 _*.nc
 _*.py.orig
 mojoc.dbg
+
+# tools/codeindex.py derived artifact -- rebuild with `python3 tools/codeindex.py build`
+.codeindex.sqlite3
