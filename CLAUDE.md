@@ -121,10 +121,26 @@ is optional or "extra":
    change touches `mojo_compiler.py`, `gimple_codegen.py`, `module_loader.py`,
    or any `gimple_*.py` — the fullest-coverage check available; `make
    check-selfhost` alone is a faster subset, not a substitute.
+5. `make check-noshim-dumpfull` (or `python3 test_noshim_dumpfull.py`) —
+   diffs `MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full`'s actual output
+   BYTE-FOR-BYTE against the shim's own `--dump-full`, not just exit code.
+   Steps 0-4 all drive codegen through the python3 SHIM; only this one
+   exercises the self-hosted `mojoc` BINARY's own compiled codegen running
+   on real work. A self-host-only bug can produce a wrong-but-exit-0
+   artifact every other step is structurally blind to — this happened for
+   real 2026-08-13→09-13: a fix that silenced a known SIGBUS in that path
+   turned out to silently drop two compiled sibling modules instead
+   (1.4M-line diff from correct), and every other check-* target stayed
+   green throughout, including `make check-selfhost` and `make bootstrap`.
+   Added 2026-09-13 (see the `design-container-typing-audit`/
+   `selfhost-dump-full-module-drop` project memories) specifically because
+   steps 0-4 all missed that regression.
 
 A change passing `test_gimple.py`/`test_module_cache.py`/`make check-selfhost`
 alone is NOT sufficient evidence the compiled path is unaffected — only
 `compile_stdlib.py` and the stdlib dylib build actually exercise the huge
-breadth of real Mojo source this compiler needs to keep working, and only
+breadth of real Mojo source this compiler needs to keep working, only
 `make bootstrap` verifies the compiler's own self-hosted output is stable
-under repeated self-compilation.
+under repeated self-compilation, and only `make check-noshim-dumpfull`
+verifies the self-hosted BINARY's own codegen (not the python3 shim's)
+produces correct output, not just a clean exit code.

@@ -68,9 +68,9 @@ demo:
 # aspirational target — `make bootstrap` — because stage 2 has a known
 # pre-existing codegen segfault (see IMPL.md); it is not gated into `check`
 # so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost check-runtimediff check-linkmode
+check: check-gimple check-runner check-modcache check-selfhost check-runtimediff check-linkmode check-noshim-dumpfull check-no-new-casts
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff + link-mode)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff + link-mode + no-shim dump-full + no-new-casts)"
 
 # Every check-* target is wrapped in checked_run.py: a check's outcome is a
 # pure function of the compiler sources + toolchain + whatever extra files it
@@ -400,6 +400,24 @@ bootstrap: verify validate-all
 # `make bootstrap` itself still uses the shim.
 check-abshim: mojoc $(GIMPLE_SOURCES) test_ab_shim.py
 	python3 checked_run.py check-abshim --extra test_ab_shim.py -- python3 test_ab_shim.py
+
+# ── check-noshim-dumpfull: self-hosted --dump-full ARTIFACT check (DESIGN.html R6) ──
+# Every OTHER check-* target drives codegen through the python3 shim; only
+# this one runs the self-hosted mojoc BINARY's own compiled codegen on real
+# work and diffs the actual output byte-for-byte against the shim's, not
+# just the exit code. See test_noshim_dumpfull.py's own docstring for why:
+# a self-host-only codegen bug can produce a wrong-but-exit-0 .ci that every
+# other gate step is structurally blind to (this happened for real
+# 2026-09-13 - a fix that silenced a known SIGBUS turned out to silently
+# drop two compiled modules instead, and every check-* target stayed green).
+check-noshim-dumpfull: mojoc $(GIMPLE_SOURCES) test_noshim_dumpfull.py
+	python3 checked_run.py check-noshim-dumpfull --extra test_noshim_dumpfull.py -- python3 test_noshim_dumpfull.py
+
+# ── check-no-new-casts: grow-only allowlist on ad-hoc container casts (DESIGN.html R3) ──
+# Pure text scan, no compile needed - deliberately cheap so it runs on every
+# `make check`. See test_no_new_container_casts.py's own docstring.
+check-no-new-casts: $(GIMPLE_SOURCES) test_no_new_container_casts.py
+	python3 checked_run.py check-no-new-casts --extra test_no_new_container_casts.py -- python3 test_no_new_container_casts.py
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 preflight:

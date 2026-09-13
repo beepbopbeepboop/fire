@@ -1016,16 +1016,16 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             dst = gen.var_types[tname]
 
-        if (vtype != dst and isinstance(node.value, gimple_ctypes.DictExpr)
-                and not node.value.pairs
-                and dst in gimple_ctypes._EMPTY_CONTAINER_CTOR):
-            # `var x: Set[String] = {}` (or List/Dict-declared-elsewhere):
-            # `{}`'s syntax can't express "empty set", so it always lowers
-            # to mojo_dict_new() — construct the variable's real declared
-            # kind instead of coercing/casting the wrong one. Same fix as
-            # the MemberExpr field-write branch above; see its comment.
-            vtype = dst
-            v = gen._new_val(dst, gimple_ctypes._EMPTY_CONTAINER_CTOR[dst])
+        # `var x: Set[String] = {}` (or List/Dict-declared-elsewhere):
+        # `{}`'s syntax can't express "empty set", so it always lowers to
+        # mojo_dict_new() — construct the variable's real declared kind
+        # instead of coercing/casting the wrong one. See
+        # gimple_ctypes.reify_empty_container_literal's own docstring
+        # (DESIGN.html R1: shared with the MemberExpr field-write branch
+        # below and _lower_dict_method's `.get(k, default)`).
+        _reified = gimple_ctypes.reify_empty_container_literal(gen, vtype, dst, node.value)
+        if _reified is not None:
+            vtype, v = dst, _reified
 
         if dst in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
             gen._elem_types[tname] = gen._elem_types[v]
@@ -1263,17 +1263,13 @@ def _gen_stmt_AssignStmt(gen, node):
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
                 return
             field_type = known_fields.get(node.target.member, vtype)
-            if (vtype != field_type and isinstance(node.value, gimple_ctypes.DictExpr)
-                    and not node.value.pairs
-                    and field_type in gimple_ctypes._EMPTY_CONTAINER_CTOR):
-                # `self.x = {}` where `x`'s declared type is a container
-                # kind other than dict (e.g. `Set[String]`): `{}`'s syntax
-                # can't express "empty set" so it always lowers to
-                # mojo_dict_new() — construct the field's real kind instead
-                # of coercing/casting the wrong one (see DESIGN.html R2/R3;
-                # confirmed via TestSuite.skip_list: Set[String] = {}).
-                vtype = field_type
-                v = gen._new_val(field_type, gimple_ctypes._EMPTY_CONTAINER_CTOR[field_type])
+            # `self.x = {}` where `x`'s declared type is a container kind
+            # other than dict (e.g. `Set[String]`) — see
+            # gimple_ctypes.reify_empty_container_literal (confirmed via
+            # TestSuite.skip_list: Set[String] = {}).
+            _reified = gimple_ctypes.reify_empty_container_literal(gen, vtype, field_type, node.value)
+            if _reified is not None:
+                vtype, v = field_type, _reified
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the

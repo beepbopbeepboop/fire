@@ -1586,6 +1586,15 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         # key (int literal, arithmetic, unknown identifier) or any slice
         # keeps the historical sequence interpretation.
         str_vars: set = set()
+        # DESIGN.html R4: a THIRD state alongside "provably a string"
+        # (str_vars/_expr_is_stringish) and "provably NOT a string"
+        # (int_vars/_expr_is_definitely_not_stringish) — a key this
+        # analysis simply cannot classify either way must stay UNKNOWN and
+        # carry no signal, never get folded into "not a string" (which the
+        # subscript-key veto below used to do, via a plain `else:` on
+        # `_expr_is_stringish`). See _expr_is_definitely_not_stringish's
+        # own docstring for why this matters.
+        int_vars: set = set()
         # Hoisted alias, NOT `gen.func_return_types` read directly inside
         # `_expr_is_stringish` below: the nested scanners close over plain
         # LOCALS of this function fine (`str_vars` does), but a nested
@@ -1683,6 +1692,33 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 return True
             return False
 
+        def _expr_is_definitely_not_stringish(e):
+            """DESIGN.html R4's third state: PROVABLY not a string (a real
+            int literal, arithmetic on one, or a local bound to one) — as
+            opposed to merely "not proven to be a string" (which also
+            covers keys this analysis just cannot see through, e.g. a
+            function parameter or an opaque call result). Only THIS
+            predicate may veto the dict-key conclusion below; a genuinely
+            unknown key must contribute no signal either way, or an
+            unrelated unprovable key on one dict access wrongly overrides
+            real string evidence from every other access to the same
+            param (the exact bug class already fixed once for the
+            evidence side in `_expr_is_stringish`; this is its mirror on
+            the veto side)."""
+            if isinstance(e, gimple_ctypes.IntLiteral):
+                return True
+            if (isinstance(e, gimple_ctypes.UnaryOp)
+                    and isinstance(e.operand, gimple_ctypes.IntLiteral)):
+                return True
+            if (isinstance(e, gimple_ctypes.BinaryOp)
+                    and e.op in ('+', '-', '*', '//', '%', '<<', '>>', '&', '|', '^')
+                    and (_expr_is_definitely_not_stringish(e.left)
+                         or _expr_is_definitely_not_stringish(e.right))):
+                return True
+            if isinstance(e, gimple_ctypes.IdentExpr) and e.name in int_vars:
+                return True
+            return False
+
         def _is_single_char_literal(e):
             return isinstance(e, gimple_ctypes.StringLiteral) and len(e.value) <= 3  # quotes + <=1 char
 
@@ -1724,8 +1760,13 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     _F['is_subscripted'] = True
                     if _expr_is_stringish(expr.index):
                         _F['is_str_key_subscripted'] = True
-                    else:
+                    elif _expr_is_definitely_not_stringish(expr.index):
                         _F['is_nondict_key_subscripted'] = True
+                    # else: key is genuinely unprovable either way — no
+                    # signal (DESIGN.html R4; previously this `else`
+                    # branch folded "unknown" into "not a string", which
+                    # could veto real string evidence from every OTHER
+                    # subscript on the same param).
                 scan_expr(expr.obj)
                 scan_expr(expr.index)
             elif isinstance(expr, gimple_ctypes.SliceExpr):
@@ -1930,6 +1971,14 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # _expr_is_stringish's own note for the SIGBUS
                         # this produced in ast_rewriter.py.
                         str_vars.add(_as_ident_node(node.target).name)
+                    elif (isinstance(node.target, gimple_ctypes.IdentExpr)
+                            and _expr_is_definitely_not_stringish(node.value)):
+                        # Mirror of the str_vars tracking just above, for
+                        # the OTHER provable state (DESIGN.html R4): `k =
+                        # some_int_expr; d[k]` is real evidence the key is
+                        # NOT a string, same strength as a literal int key
+                        # inline.
+                        int_vars.add(_as_ident_node(node.target).name)
                     scan_expr(node.target)
                     scan_expr(node.value)
                 elif isinstance(node, gimple_ctypes.ExprStmt):

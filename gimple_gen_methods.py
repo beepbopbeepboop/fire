@@ -2894,21 +2894,15 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                 raw_r = gen._new_val(result_type, f"({result_type}){raw}")
             else:
                 raw_r = gen._coerce_to_type(val_type, result_type, raw)
-            if (_container_vt and default_ty != result_type
-                    and result_type in gimple_ctypes._EMPTY_CONTAINER_CTOR
-                    and isinstance(args[1], (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr,
-                                              gimple_ctypes.SetExpr, gimple_ctypes.DictExpr))
-                    and not (getattr(args[1], 'elements', None) or getattr(args[1], 'pairs', None))):
-                # `d.get(k, ())` / `d.get(k, [])` / `d.get(k, set())` used
-                # purely as an "empty, container-kind-agnostic fallback"
-                # (real: gimple_cpp_core.py/gimple_cpp_async.py's `d.get(k,
-                # ())` on a dict[str, Set[...]], only ever consumed via
-                # `in`/iteration) — any empty literal shape is a valid
-                # default for ANY container kind, so build the DICT'S real
-                # value kind directly instead of coercing the literal's own
-                # default kind (same class of fix as the empty-`{}`-literal
-                # cases in gimple_gen_stmts.py; see DESIGN.html R2/R4).
-                default_r = gen._new_val(result_type, gimple_ctypes._EMPTY_CONTAINER_CTOR[result_type])
+            # `d.get(k, ())` / `d.get(k, [])` / `d.get(k, set())` used
+            # purely as an "empty, container-kind-agnostic fallback" (real:
+            # gimple_cpp_core.py/gimple_cpp_async.py's `d.get(k, ())` on a
+            # dict[str, Set[...]], only ever consumed via `in`/iteration) —
+            # see gimple_ctypes.reify_empty_container_literal.
+            _reified = (gimple_ctypes.reify_empty_container_literal(gen, default_ty, result_type, args[1])
+                        if _container_vt else None)
+            if _reified is not None:
+                default_r = _reified
             else:
                 default_r = gen._coerce_to_type(default_ty, result_type, default_val)
             # Presence test on the RAW int64_t (0 == absent, per the comment

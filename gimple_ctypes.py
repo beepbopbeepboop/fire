@@ -314,6 +314,51 @@ _EMPTY_CONTAINER_CTOR = {
     'MojoSet *':  'mojo_set_new ()',
 }
 
+
+def container_kind(ctype: str) -> str | None:
+    """DESIGN.html R1's canonical predicate: 'dict'/'list'/'set'/'bytes' for
+    one of this codegen's container pointer ctypes, else None (not a
+    container, or an unrecognized/opaque type). This is step one of R1 (a
+    single place that answers "what kind of container is this") — most of
+    the ~300 sites that independently DECIDE a container's ctype from
+    scratch (AST shape, call signature, method name, ...) still do not
+    route through a shared decision function, because their inputs are too
+    varied to unify mechanically; that migration is a separate, much larger
+    follow-on. What IS centralized here and in `reify_empty_container_
+    literal` below is the narrower, already-identified recurring pattern:
+    treating an unprovable/mismatched EMPTY literal as if guessing one
+    concrete kind were safe."""
+    if ctype not in _CONTAINER_KIND_TYPES:
+        return None
+    return {'MojoDict *': 'dict', 'MojoList *': 'list',
+            'MojoSet *': 'set', 'MojoBytes *': 'bytes'}[ctype]
+
+
+def reify_empty_container_literal(gen, value_type: str, declared_type: str,
+                                   value_node) -> str | None:
+    """If `value_node` is a syntactically-EMPTY container literal (`{}`,
+    `[]`, `set()`, `()`) whose default lowering (`value_type`) doesn't
+    match the REAL declared/needed container kind (`declared_type`),
+    return a freshly-constructed value of `declared_type` — the empty-
+    literal shape carries no real evidence for ANY particular kind (an
+    empty dict, list, and set are equally "nothing"), so building the
+    kind the destination actually needs is always safe, unlike coercing
+    (reinterpret-casting) the wrong one. Returns None when this doesn't
+    apply (caller falls through to its normal coercion/cast path).
+
+    Centralizes what were 3 independently-written copies of this same
+    check (`_gen_stmt_AssignStmt` x2 in gimple_gen_stmts.py for a var-decl
+    and a struct-field write, and `_lower_dict_method`'s `.get(k, default)`
+    in gimple_gen_methods.py) — see commit 634852c, DESIGN.html R1/R2/R4."""
+    if value_type == declared_type or declared_type not in _EMPTY_CONTAINER_CTOR:
+        return None
+    if not isinstance(value_node, (DictExpr, ListExpr, SetExpr, TupleExpr)):
+        return None
+    if getattr(value_node, 'elements', None) or getattr(value_node, 'pairs', None):
+        return None
+    return gen._new_val(declared_type, _EMPTY_CONTAINER_CTOR[declared_type])
+
+
 # Return types of well-known runtime functions (seeds func_return_types)
 _RUNTIME_FUNCS: dict[str, str] = {
     # exceptions (mojo_try_push is a macro, not a function)
