@@ -1586,6 +1586,16 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         # key (int literal, arithmetic, unknown identifier) or any slice
         # keeps the historical sequence interpretation.
         str_vars: set = set()
+        # Hoisted alias, NOT `gen.func_return_types` read directly inside
+        # `_expr_is_stringish` below: the nested scanners close over plain
+        # LOCALS of this function fine (`str_vars` does), but a nested
+        # function reaching for the enclosing `gen` PARAMETER does not
+        # survive self-hosting -- the lifted closure body compiled to
+        # "error: 'gen' undeclared (first use in this function)". Explicit
+        # `: dict` for the same reason the other hoisted-closure captures
+        # in this codebase carry one (an unannotated captured dict/set
+        # comes back untyped in the lifted function's signature).
+        _fn_ret_types: dict = gen.func_return_types
         # `self.<member> += <param-derived value>` sinks (root ident name,
         # member name). An augmented assignment whose RHS involves the param
         # is real Python string/list CONCATENATION-INTO evidence, but the
@@ -1638,6 +1648,38 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if isinstance(e, gimple_ctypes.TstringLiteral):
                 return True
             if isinstance(e, gimple_ctypes.IdentExpr) and e.name in str_vars:
+                return True
+            # A call to a function whose RESOLVED return type is already
+            # known to be `char *` is just as provably a string as a
+            # literal — `gen.func_return_types` is populated from real
+            # `-> str` annotations/inference, so this is genuine type
+            # resolution, not a name whitelist. Without it, the ONLY
+            # string-key evidence this analysis accepted was a literal
+            # (or a local bound directly to one), so `d[_as_str(x)]` and
+            # `k = _as_str(x); d[k]` both read as "key is not provably a
+            # string" -> is_nondict_key_subscripted -> the param fell to
+            # the `MojoList *` default below.
+            #
+            # That is exactly how ast_rewriter.py's `match_pattern
+            # (pat, term, bindings)` got `MojoList * bindings`: its four
+            # subscripts are `bindings[_vn]` (x2, `_vn = _as_str
+            # (pat.name)`) and `bindings[_as_str(pat.tail...)]` (x2).
+            # Callers pass a real `{}`, so codegen emitted
+            # `(MojoList *)mojo_dict_new ()` and lowered every
+            # `bindings[k]` to `mojo_list_get_int`/`mojo_list_set_int`.
+            # Those index `((MojoList *)dict)->data[key_ptr]`, i.e.
+            # `dict->slots + 8 * (int64_t)"key"` — ~34GB past the slot
+            # array — so `MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full`
+            # took SIGBUS on mojo.py's own line 27 (`os.environ['PATH']
+            # = ...`, the one statement that reaches
+            # `_rewrite_assign_stmt`) 200/200 runs, before writing any
+            # output at all. Same class as the `src[i]` ->
+            # `mojo_list_get_int(src, i)` char*-as-list bug already
+            # described in this function's STRING_ONLY_METHODS note.
+            if (isinstance(e, gimple_ctypes.CallExpr)
+                    and isinstance(e.func, gimple_ctypes.IdentExpr)
+                    and _fn_ret_types.get(
+                        _as_ident_node(e.func).name) == 'char *'):
                 return True
             return False
 
@@ -1875,7 +1917,18 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     else:
                         _track_derivation(node.target, node.value)
                     if (isinstance(node.target, gimple_ctypes.IdentExpr)
-                            and isinstance(node.value, gimple_ctypes.StringLiteral)):
+                            and _expr_is_stringish(node.value)):
+                        # `_expr_is_stringish`, not just StringLiteral: a
+                        # local bound to a `-> str` call (`_vn = _as_str
+                        # (pat.name)`) is every bit as provably a string
+                        # as one bound to a literal, and is the shape the
+                        # `_as_str`/`_as_list` static-view cast idiom used
+                        # all over this codebase actually produces. The
+                        # literal-only form meant `k = _as_str(x); d[k]`
+                        # left `k` untracked, so `d`'s key looked
+                        # unprovable and `d` was typed `MojoList *` — see
+                        # _expr_is_stringish's own note for the SIGBUS
+                        # this produced in ast_rewriter.py.
                         str_vars.add(_as_ident_node(node.target).name)
                     scan_expr(node.target)
                     scan_expr(node.value)

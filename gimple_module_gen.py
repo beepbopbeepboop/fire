@@ -1031,6 +1031,31 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
             _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
 
 
+# Placeholder ctype for a struct field whose value type this pass could not
+# resolve. MUST be machine-word sized: it is the "I don't know yet" marker
+# (the `_existing_fn_ft in ('int', 'int64_t')` re-resolution test below treats
+# it as provisional and lets a later, better-informed assignment overwrite
+# it), and a real Python int already resolves to 'int64_t' via the IntLiteral
+# branch — so 'int' was never the right answer for any KNOWN value, only the
+# unknown one.
+#
+# It used to be plain `int`, which is 32 bits: a field holding an unresolved
+# POINTER was then declared `int`, and the load `_tN = obj->field` truncated
+# the top 32 bits before anything downstream could recover it. Concretely,
+# ast_rewriter.py's `class Var: self.name = _as_str(name)` — `_as_str` is not
+# one of the shapes the cascade below recognises — emitted
+# `typedef struct Var { int64_t __mojo_type_id; int name; }`, so `pat.name`
+# read back 0x001c7538 for a real `char *` at 0x1001c7538 and
+# `mojo_dict_contains(bindings, _vn)` faulted on that truncated address.
+# Note this also explains why wrapping the READ in `_as_str(...)` (the
+# static-view cast idiom used throughout this codebase) could never fix such a
+# field: the bits are already gone at the load, before the cast is applied.
+# Widening the unknown placeholder to int64_t makes that idiom work as
+# intended — the full pointer survives in an opaque word and `_as_str`
+# re-views it — and cannot lose information for any value that fit in `int`.
+_UNKNOWN_FIELD_CTYPE = 'int64_t'
+
+
 def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Not recursive (walks via _walk_ast), but a
@@ -1124,9 +1149,9 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                           and cfn.member in _LIST_RETURNING_METHODS):
                         ft = 'MojoList *'
                     else:
-                        ft = 'int'
+                        ft = _UNKNOWN_FIELD_CTYPE
                 else:
-                    ft = 'int'
+                    ft = _UNKNOWN_FIELD_CTYPE
                 found[fn] = ft
                 # `self._str_pool: dict[str, str] = {}` in
                 # __init__: capture the dict VALUE type from the
@@ -1159,7 +1184,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
             for tgt in node.targets:
                 fn = _gmi_self_member(tgt)
                 if fn is not None and fn not in found:
-                    found[fn] = 'int'
+                    found[fn] = _UNKNOWN_FIELD_CTYPE
         elif isinstance(node, AugAssignStmt):
             fn = _gmi_self_member(node.target)
             if fn is not None and fn not in found:
@@ -1172,7 +1197,7 @@ def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
         fn = _gmi_self_member(node)
         if (fn is not None and fn not in found and fn not in _method_names
                 and fn not in _PSEUDO_DUNDER_ATTRS):
-            found[fn] = 'int'
+            found[fn] = _UNKNOWN_FIELD_CTYPE
 
 
 def _gmi_all_stmts_nonfunc(stmts) -> list:
