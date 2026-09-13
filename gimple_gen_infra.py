@@ -1341,6 +1341,25 @@ def _resolve_type(gen, ann: str | None) -> str:
         ann = gen._c_kw_struct_renames.get(ann, ann)
     if ann in gen.struct_field_types:
         return f"{ann} *"
+    # A module-qualified annotation (`func: gimple_ctypes.FunctionDef` —
+    # this compiler's OWN `gimple_gen_resolve.py` source annotates its
+    # extracted-helper params this way) parses to the literal dotted text
+    # "gimple_ctypes.FunctionDef" (see _walk_type_expr's MemberExpr
+    # branch), which never matches `struct_field_types`'s BARE struct-name
+    # keys ("FunctionDef") — so an explicitly annotated parameter fell
+    # through to the plain int64_t default exactly as if it had no
+    # annotation at all. Concrete failure: `_infer_local_var_types(gen,
+    # func: gimple_ctypes.FunctionDef)` compiled with `func` as int64_t,
+    # so its own `for node in nodes:` isinstance scan (see gimple_gen_
+    # stmts.py's _ensure_bool_cond docstring for the sibling half of this
+    # investigation) operated on opaque handles and mis-dispatched a real
+    # VarDecl into the MultiAssignStmt branch — SIGSEGV in strcmp on a
+    # garbage `.targets` field, on virtually any compiled program with at
+    # least one local variable.
+    if isinstance(ann, str) and '.' in ann:
+        _bare = ann.rsplit('.', 1)[-1]
+        if _bare in gen.struct_field_types:
+            return f"{_bare} *"
     # _mojo_type is a stateless module-level function with no access to
     # struct_field_types, so a pointer-to-a-known-struct annotation like
     # `UnsafePointer[MoveOnly_Int, MutExternalOrigin]` would otherwise

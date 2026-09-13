@@ -17,17 +17,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MOJOC = os.path.join(HERE, 'mojoc')
 
 
-def run_python_dump(src_path: str, out_dir: str) -> str:
-    """Run python3 mojo.py --dump on src_path, return path to .ci file.
+def run_python_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
+    """Run python3 mojo.py <flag> on src_path, return path to .ci file.
 
     MUST run from the repo root (`cwd=HERE`), same as run_native_dump: the
     self-host AST-reflection injection is CWD-gated, so a run from a temp
     dir produces a different (shorter) .ci that is not comparable to the
     native one. Kept symmetric so the only variable is Python-path vs
-    compiled backend.
+    compiled backend. `flag` is '--dump' (do_imports=False, single-TU) or
+    '--dump-full' (do_imports=True, transitive closure) — see
+    test_dump_full_file's docstring for why the two need separate corpora.
     """
     src_path = os.path.abspath(src_path)
-    cmd = [sys.executable, os.path.join(HERE, 'mojo.py'), '--dump', src_path]
+    cmd = [sys.executable, os.path.join(HERE, 'mojo.py'), flag, src_path]
     subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, timeout=60)
     basename = os.path.splitext(os.path.basename(src_path))[0]
     here_ci = os.path.join(HERE, f'{basename}.ci')
@@ -37,8 +39,8 @@ def run_python_dump(src_path: str, out_dir: str) -> str:
     return ci_path
 
 
-def run_native_dump(src_path: str, out_dir: str) -> str:
-    """Run MOJO_NO_SHIM=1 mojoc --dump on src_path, return path to .ci file."""
+def run_native_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
+    """Run MOJO_NO_SHIM=1 mojoc <flag> on src_path, return path to .ci file."""
     src_path = os.path.abspath(src_path)
     env = os.environ.copy()
     env['MOJO_NO_SHIM'] = '1'
@@ -51,9 +53,9 @@ def run_native_dump(src_path: str, out_dir: str) -> str:
     # MOJO_HOME is also set as a belt-and-suspenders (runtime project root).
     env['MOJO_HOME'] = HERE
     # File must come FIRST: the compiled binary's argv parser uses
-    # sys.argv[1] as the input and strips '--dump' by rebuilding the list
-    # (list.remove is broken in the compiled binary).
-    cmd = [MOJOC, src_path, '--dump']
+    # sys.argv[1] as the input and strips '--dump'/'--dump-full' by
+    # rebuilding the list (list.remove is broken in the compiled binary).
+    cmd = [MOJOC, src_path, flag]
     result = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True,
                             timeout=120, env=env)
     if result.returncode != 0:
@@ -160,6 +162,121 @@ def test_file(path: str):
         if not match:
             print(f"         {summary}")
         return match
+
+
+def test_dump_full_multi(name: str, files: dict, driver: str):
+    """Test a `--dump-full` (do_imports=True, transitive closure) sibling-
+    import scenario: `files` maps {basename.mojo: source} for every sibling
+    module, `driver` names the one to invoke mojo(c) on.
+
+    Plain `--dump` (BUILTIN_TESTS above) is do_imports=False — a single
+    translation unit that never calls `_compile_imported_module`, so it
+    cannot exercise cross-module `from X import Y` resolution at all. A
+    real regression (BUG: `from gimple_exprtypes import ...` inside
+    gimple_gen_coro.py, and `from mojo_compiler import (...)` inside
+    gimple_gen_stmts.py, both reached only through the compiled backend's
+    OWN `--dump-full` self-compile of mojo.py) was invisible to the whole
+    27-case `--dump` corpus for exactly this reason — see
+    gimple_module_gen.py's `FromImportStmt` sibling-resolution loop (the
+    `can_resolve_module_path` guard added alongside this test). These
+    cases mirror that shape in miniature: a driver module importing a
+    sibling that is itself not stdlib/test-resolvable, so `load_module`
+    must fail cleanly (guarded) instead of raising uncaught on the
+    compiled backend.
+
+    Files are written INTO the repo root (not a temp dir), same
+    path-sensitivity reason as test_inline_source.
+    """
+    written = []
+    try:
+        for basename, source in files.items():
+            path = os.path.join(HERE, basename)
+            with open(path, 'w') as f:
+                f.write(source)
+            written.append(path)
+        driver_path = os.path.join(HERE, driver)
+        with tempfile.TemporaryDirectory() as td:
+            py_dir = os.path.join(td, 'py')
+            nc_dir = os.path.join(td, 'nc')
+            os.makedirs(py_dir)
+            os.makedirs(nc_dir)
+
+            ci_py = run_python_dump(driver_path, py_dir, flag='--dump-full')
+            ci_nc = run_native_dump(driver_path, nc_dir, flag='--dump-full')
+
+            match, summary = diff_ci_files(ci_py, ci_nc)
+        status = "PASS" if match else "FAIL"
+        print(f"  {status}  {name}: {summary.splitlines()[0]}")
+        if not match:
+            print(f"         {summary}")
+        return match
+    finally:
+        for p in written:
+            if os.path.exists(p):
+                os.remove(p)
+        driver_ci = os.path.join(HERE, os.path.splitext(driver)[0] + '.ci')
+        if os.path.exists(driver_ci):
+            os.remove(driver_ci)
+
+
+# ── Built-in --dump-full sibling-import test cases ────────────────────────
+# Each entry: name -> (files: {basename: source}, driver: basename).
+DUMP_FULL_TESTS = {
+    "sibling_from_import": (
+        {
+            "abfulltest_leaf.mojo": textwrap.dedent("""\
+                def leaf_value() -> Int:
+                    return 7
+            """),
+            "abfulltest_driver.mojo": textwrap.dedent("""\
+                from abfulltest_leaf import leaf_value
+
+                def main() -> Int:
+                    return leaf_value() + 1
+            """),
+        },
+        "abfulltest_driver.mojo",
+    ),
+    "sibling_from_import_multi_name": (
+        {
+            "abfulltest_leaf2.mojo": textwrap.dedent("""\
+                def leaf_a() -> Int:
+                    return 1
+
+                def leaf_b() -> Int:
+                    return 2
+            """),
+            "abfulltest_driver2.mojo": textwrap.dedent("""\
+                from abfulltest_leaf2 import (leaf_a, leaf_b)
+
+                def main() -> Int:
+                    return leaf_a() + leaf_b()
+            """),
+        },
+        "abfulltest_driver2.mojo",
+    ),
+    "transitive_sibling_from_import": (
+        {
+            "abfulltest_leaf3.mojo": textwrap.dedent("""\
+                def leaf_value3() -> Int:
+                    return 3
+            """),
+            "abfulltest_mid3.mojo": textwrap.dedent("""\
+                from abfulltest_leaf3 import leaf_value3
+
+                def mid_value() -> Int:
+                    return leaf_value3() * 2
+            """),
+            "abfulltest_driver3.mojo": textwrap.dedent("""\
+                from abfulltest_mid3 import mid_value
+
+                def main() -> Int:
+                    return mid_value() + 1
+            """),
+        },
+        "abfulltest_driver3.mojo",
+    ),
+}
 
 
 # ── Built-in test cases ──────────────────────────────────────────────────
@@ -417,6 +534,17 @@ def main():
         # Test built-in snippets
         for name, source in BUILTIN_TESTS.items():
             if test_inline_source(name, source):
+                passed += 1
+            else:
+                failed += 1
+
+        # `--dump-full` (do_imports=True) sibling-import corpus — see
+        # test_dump_full_multi's docstring for why this needs its own
+        # section (plain `--dump` above never exercises cross-module
+        # `from X import Y` resolution).
+        print()
+        for name, (files, driver) in DUMP_FULL_TESTS.items():
+            if test_dump_full_multi(name, files, driver):
                 passed += 1
             else:
                 failed += 1

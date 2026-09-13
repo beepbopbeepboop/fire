@@ -1222,6 +1222,22 @@ class GimpleGen:
         # of a source that emits a stack-switch coroutine hits
         # "'GimpleGen' has no member named '_stackswitch_coro_c_units'".
         self._stackswitch_coro_c_units: list = []
+        # Declared here for the same reason (see comment just above), not
+        # left to `gen._native_future_bridge = True` (gimple_gen_coro.py's
+        # only write site) alone: every OTHER reader is a bare
+        # `getattr(gen, '_native_future_bridge', False)` (gimple_gen_calls.py,
+        # gimple_gen_methods.py, gimple_module_gen.py) expecting a real
+        # `False` default when unset. Without an explicit `__init__`
+        # assignment, the self-hosted struct field for a program that never
+        # takes gimple_gen_coro.py's `gen._native_future_bridge = True`
+        # branch is heap-allocated but never written — reading it back
+        # returns whatever garbage bit pattern was already on that memory
+        # (observed as `1`, a false-truthy "yes, coroutine shim needed" on
+        # a trivial `def main(): print(42)` program with no coroutines at
+        # all), which spuriously pulled in ~40 unrelated `extern __mojo_*`
+        # declarations and crashed a `mojo_list_len` call downstream in
+        # gen_module_impl's boilerplate assembly on `MOJO_NO_SHIM=1`.
+        self._native_future_bridge: bool = False
         # Set (and always cleared in a finally) by _gen_cpp_async_unit for
         # the duration of ONE async function's body translation — lets the
         # SHARED _cpp_stmt/_cpp_expr whitelist emitter (reused from the

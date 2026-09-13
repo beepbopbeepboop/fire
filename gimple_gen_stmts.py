@@ -1949,6 +1949,35 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
     """Convert val to a GIMPLE-safe _Bool for use in if/while conditions."""
     if ctype == '_Bool':
         return val
+    # A module-level container global (`x: set = set()`) is deliberately
+    # reported here as `ctype == 'int64_t'` — its C struct field is boxed
+    # int64_t by design (see _lower_IdentExpr's global-read branch: "Globals
+    # are stored at C level as int64_t (boxed pointers)"), with the REAL
+    # Mojo type tracked separately in `gen._actual_types[val]` for callers
+    # that need it. Without consulting that overlay here, `if <container
+    # -global>:` compiled to a raw `!= 0` pointer-nullness check instead of
+    # an emptiness check — always true once the global's `set()`/`{}`/`[]`
+    # initializer allocated it, regardless of whether it had any elements.
+    # Concrete failure: gimple_gen_coro.py's module-level `_NATIVE_FUTURE_
+    # CLASSES: set = set()` — `if _NATIVE_FUTURE_CLASSES:` (gated on
+    # non-empty) was always truthy on the compiled backend, so `register()`
+    # unconditionally set `gen._native_future_bridge = True` for every
+    # program (even one with zero coroutines/futures), spuriously pulling
+    # in ~40 unrelated `extern __mojo_*` coroutine-shim declarations into
+    # gen_module_impl's boilerplate assembly on EVERY `MOJO_NO_SHIM=1`
+    # compile and crashing downstream.
+    if ctype == 'int64_t':
+        _real_ctype = gen._actual_types.get(val)
+        if _real_ctype in gen._CONTAINER_LEN_FN:
+            # `val` is still C-level `int64_t` (the boxed-pointer storage
+            # type) — GIMPLE needs the pointer cast to go through `void *`
+            # first (the same two-step sequence every other int64_t<->
+            # pointer boxing site in this file uses), or gcc rejects the
+            # direct `int64_t` -> `MojoSet *` argument as "makes pointer
+            # from integer without a cast".
+            _vp = gen._new_val('void *', f'(void *){val}')
+            val = gen._new_val(_real_ctype, f'({_real_ctype}){_vp}')
+            ctype = _real_ctype
     if ctype in gen._CONTAINER_LEN_FN:
         n = gen._call_expr('int64_t', gen._CONTAINER_LEN_FN[ctype], [(ctype, val)])
         b = gen._new_temp('_Bool')

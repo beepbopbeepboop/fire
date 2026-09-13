@@ -310,7 +310,19 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
     """Compile Mojo source to executable using GIMPLE codegen."""
     basename = os.path.splitext(os.path.basename(input_file))[0]
     # Default to a debuggable unoptimized build; -O*/-g* on the command line override.
-    cg_flags = [opt_flag or "-O0", debug_flag or "-g3"]
+    # -ftrivial-auto-var-init=zero: matches Makefile's stage2/mojo build (see
+    # its own comment there for the full story) — the generated .ci reads
+    # some `char *` locals before every codegen path has assigned them (a
+    # real self-hosted metadata-dict/AST-field type-inference gap). Without
+    # this flag GCC leaves such a read as uninitialized-stack garbage, a
+    # flaky SIGSEGV whenever the resulting binary runs its OWN compiled
+    # codegen (MOJO_NO_SHIM=1) — e.g. `mojoc` built via this same
+    # build_executable path (Makefile's `mojoc` target), which had no
+    # hardening flag at all before this fix and crashed on even a trivial
+    # `def main(): print(42)` under MOJO_NO_SHIM=1. Zero-init makes the read
+    # well-defined (NULL), which the codegen's own `_ptr_slot_in_range`
+    # guard already treats as "no known type" and falls back on safely.
+    cg_flags = [opt_flag or "-O0", debug_flag or "-g3", "-ftrivial-auto-var-init=zero"]
     try:
         import gimple_codegen
 

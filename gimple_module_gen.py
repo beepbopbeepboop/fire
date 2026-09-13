@@ -1004,7 +1004,7 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
             for _pname, _ptype in (_n.params or []):
                 if _ptype:
                     self.var_types[_pname] = _mojo_type(_ptype)
-            for _lname, _ltype in self._infer_local_var_types(_n).items():
+            for _lname, _ltype in self._infer_local_var_types(_as_funcdef_node(_n)).items():
                 if _lname not in self.var_types:
                     self.var_types[_lname] = _ltype
             _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
@@ -3363,9 +3363,23 @@ def gen_module_impl(self, stmts):
     for s in stmts:
         if isinstance(s, FromImportStmt):
             _sib_qualifier = None
-            try:
-                exports = load_module(s.module)
-            except Exception:
+            # Guard BEFORE calling load_module, not just try/except around
+            # it: this codegen's compiled try/except does not reliably
+            # catch a raised exception, so a genuine sibling `.py` compiler
+            # module (e.g. `from gimple_exprtypes import ...` inside
+            # gimple_gen_coro.py) reached module_loader's `raise ValueError
+            # ("Only stdlib and test imports supported")` UNCAUGHT and
+            # aborted the whole imported-module compile on
+            # `MOJO_NO_SHIM=1 --dump-full` (invisible to the shimmed
+            # `make bootstrap` path). See ModuleLoader.can_resolve_
+            # module_path's docstring.
+            import module_loader as _mlmod_fims
+            if _mlmod_fims.can_resolve_module_path(s.module):
+                try:
+                    exports = load_module(s.module)
+                except Exception:
+                    exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
+            else:
                 exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
             _sib_is_local_project = False
             if _sib_qualifier:
@@ -3998,7 +4012,23 @@ def gen_module_impl(self, stmts):
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
     for s in all_functions:
         if isinstance(s, FunctionDef):
-            self._inferred_var_types[_as_str(s.name)] = self._infer_local_var_types(s)
+            # `_as_funcdef_node`, not the isinstance-narrowed `s` directly:
+            # `all_functions` is a heterogeneous statement list (FunctionDef/
+            # StructDef/ImportStmt/...), so its loop var erases to opaque
+            # int64_t on the self-hosted path — the isinstance guard proves
+            # it's a FunctionDef at the Python level but doesn't give this
+            # CALL ARGUMENT a static FunctionDef type. `_infer_local_var_
+            # types`'s own nested `for node in nodes:` scan then compiled
+            # every isinstance(node, ...) check against an untyped node too,
+            # and a real VarDecl's runtime type tag was read correctly but
+            # fell through an unrelated elif branch (MultiAssignStmt) with
+            # mismatched field offsets for `.targets` — a garbage-pointer
+            # SIGSEGV in strcmp on virtually every program with at least one
+            # function, once `_ensure_bool_cond`'s fix above stopped an
+            # earlier, unrelated crash from masking this one. Mirrors this
+            # file's own established fix for the identical bug shape at
+            # every `m = _as_funcdef_node(...)` call site a few lines below.
+            self._inferred_var_types[_as_str(s.name)] = self._infer_local_var_types(_as_funcdef_node(s))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             for m in s.methods:
@@ -5126,7 +5156,10 @@ def gen_module_impl(self, stmts):
 
     for s in all_functions:
         if isinstance(s, FunctionDef):
-            self._inferred_var_types[_as_str(s.name)] = self._infer_local_var_types(s)
+            # See the identical fix + comment at this file's other
+            # `for s in all_functions: ... self._infer_local_var_types(s)`
+            # site above.
+            self._inferred_var_types[_as_str(s.name)] = self._infer_local_var_types(_as_funcdef_node(s))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             for m in s.methods:

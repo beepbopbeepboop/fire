@@ -1148,15 +1148,42 @@ def _sgfs_inferred(gen, _inf_cache: dict, _fn):
     return _inf_cache[_k]
 
 
+def _sgfs_resolve_ann(gen, _ann: str) -> str:
+    """`gen._resolve_type(_ann)`, but checking the compiler's own FIXED
+    AST-node classes (FunctionDef, VarDecl, ...) FIRST — these are real
+    Python classes always importable from `gimple_ctypes`/`mojo_compiler`,
+    unlike an arbitrary user struct, which only becomes a known name once
+    something registers it into the (deliberately near-empty, for this
+    frozen-sig pass) `gen.struct_field_types`. Without this, an explicitly
+    annotated `func: FunctionDef` parameter on one of `class GimpleGen`'s
+    own methods (e.g. the `_infer_local_var_types` delegate) resolved to
+    plain `int64_t` — `_resolve_type`'s `ann in gen.struct_field_types`
+    check is correctly deterministic in general, but FunctionDef hadn't
+    been registered into THIS root gen's struct_field_types yet at the
+    point this one-time frozen-sig scan runs. That untyped `func` then made
+    every `isinstance(node, ...)` check inside `_infer_local_var_types`'s
+    own nested node-scanning closure operate on an opaque int64_t instead
+    of a real AST-node pointer — for at least one real VarDecl node, the
+    isinstance dispatch landed in the wrong elif branch (MultiAssignStmt)
+    and read a garbage `.targets` field, SIGSEGV in strcmp on virtually any
+    compiled program with at least one local variable, once the unrelated
+    `_ensure_bool_cond` fix (see its own docstring) stopped an earlier
+    crash from masking this one."""
+    _cls = getattr(gimple_ctypes, _ann, None)
+    if isinstance(_cls, type):
+        return f"{_ann} *"
+    return gen._resolve_type(_ann)
+
+
 def _sgfs_param_ct(gen, _inf_cache: dict, _ann, _pn, _tgt_fn, _tgt_pn, _pos, _self_fn):
     """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
     `_sgfs_fn_delegate_target`'s docstring."""
     if _ann is not None:
-        return gen._resolve_type(_ann)
+        return _sgfs_resolve_ann(gen, _ann)
     if _tgt_fn is not None and _pos < len(_tgt_fn.params):
         _ta = _tgt_fn.params[_pos][1]
         if _ta is not None:
-            return gen._resolve_type(_ta)
+            return _sgfs_resolve_ann(gen, _ta)
     _ct = _sgfs_inferred(gen, _inf_cache, _tgt_fn).get(_tgt_pn) if _tgt_fn is not None else None
     if _ct is None:
         _ct = _sgfs_inferred(gen, _inf_cache, _self_fn).get(_pn)
@@ -1181,10 +1208,10 @@ def _sgfs_ret_ct(gen, _m, _tgt_fn):
     """Hoisted out of `_selfhost_gimplegen_frozen_sigs` — see
     `_sgfs_fn_delegate_target`'s docstring."""
     if getattr(_m, 'return_type', None) is not None:
-        return gen._resolve_type(_m.return_type)
+        return _sgfs_resolve_ann(gen, _m.return_type)
     if _tgt_fn is not None:
         if getattr(_tgt_fn, 'return_type', None) is not None:
-            return gen._resolve_type(_tgt_fn.return_type)
+            return _sgfs_resolve_ann(gen, _tgt_fn.return_type)
         try:
             _r = gen._infer_return_type(_tgt_fn.body)
             if _r:

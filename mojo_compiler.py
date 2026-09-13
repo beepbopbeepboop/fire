@@ -1423,6 +1423,21 @@ def _as_boollit_node(e: object) -> BoolLiteral:
     return e
 
 
+def _as_assignstmt_node(e: object) -> AssignStmt:
+    """See _as_ident_node: static AssignStmt view of a boxed handle."""
+    return e
+
+
+def _as_vardecl_node(e: object) -> VarDecl:
+    """See _as_ident_node: static VarDecl view of a boxed handle."""
+    return e
+
+
+def _as_multiassignstmt_node(e: object) -> MultiAssignStmt:
+    """See _as_ident_node: static MultiAssignStmt view of a boxed handle."""
+    return e
+
+
 def _sms_key(struct_name: object, method: object) -> str:
     """Composite string key for `_struct_method_signatures`.
 

@@ -26,6 +26,7 @@ from mojo_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     _as_str, _sms_key,
+    _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node,
 )
 import regex_compile
 import mlir
@@ -866,6 +867,15 @@ def _register_link_imports(gen, stmts) -> list:
         # does this resolution correctly (walking up from the current
         # file, same as _find_imported_struct/_resolve_test_relative_module).
         _sib_path = gen._parsed_import(module)[0]
+        # Guard BEFORE calling load_module, not just try/except around it:
+        # this codegen's compiled try/except does not reliably catch a
+        # raised exception, so a sibling `.py` compiler module (not under
+        # STDLIB_PATH/TEST_PATH) reached module_loader's `raise ValueError
+        # ("Only stdlib and test imports supported")` UNCAUGHT. See
+        # ModuleLoader.can_resolve_module_path's docstring.
+        import module_loader as _mlmod_exp
+        if not _mlmod_exp.can_resolve_module_path(module):
+            return {}, False, _sib_path
         try:
             return gimple_ctypes.load_module(module), False, _sib_path
         except Exception as e:
@@ -2237,16 +2247,26 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         """Recursively scan statements and collect types assigned to variables."""
         for node in nodes:
             if isinstance(node, gimple_ctypes.AssignStmt):
+                # A FRESH local (`_as_node`), not a reassignment of `node`
+                # itself: `node` is the shared `for node in nodes:` loop
+                # variable, whole-function-unified to whatever ambient type
+                # its OTHER uses across every branch settle on (opaque
+                # int64_t, since `nodes` is a heterogeneous statement list)
+                # — rebinding the SAME name here does not give it a fresh,
+                # independent static type. A brand-new name bound only to
+                # `_as_assignstmt_node(node)`'s annotated return type gets
+                # its own real `AssignStmt *` typing.
+                _as_node = _as_assignstmt_node(node)
                 # Use _quick_type instead of lower_expr to avoid incomplete var_types
-                if isinstance(node.target, gimple_ctypes.TupleExpr):
-                    targets = node.target.elements
+                if isinstance(_as_node.target, gimple_ctypes.TupleExpr):
+                    targets = _as_node.target.elements
                     # Type each unpack target by its own value, never by the
                     # whole RHS: _quick_type(a_tuple) is 'MojoList *', which would
                     # wrongly poison scalar unpack targets (e.g. start, stop, step
                     # = ivals[0], ivals[1], ivals[2]).
-                    if (isinstance(node.value, gimple_ctypes.TupleExpr)
-                            and len(node.value.elements) == len(targets)):
-                        elem_types = [gen._quick_type(e) for e in node.value.elements]
+                    if (isinstance(_as_node.value, gimple_ctypes.TupleExpr)
+                            and len(_as_node.value.elements) == len(targets)):
+                        elem_types = [gen._quick_type(e) for e in _as_node.value.elements]
                     else:
                         # Unpacking a single iterable: per-element type is
                         # unknown here; use the int64_t storage default.
@@ -2259,15 +2279,15 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                         # tested pointer-non-null and an empty-string ""
                         # pointer (non-null) read as truthy → every plain
                         # literal took the f-string path and lost its text.
-                        _cv = node.value
+                        _cv = _as_node.value
                         _is_decode = (
                             isinstance(_cv, gimple_ctypes.CallExpr)
                             and isinstance(_cv.func, gimple_ctypes.MemberExpr)
                             and _cv.func.member == '_decode_str_literal_text')
                         elem_types = [('char *' if _is_decode else 'int64_t')] * len(targets)
                 else:
-                    targets = [node.target]
-                    elem_types = [gen._quick_type(node.value)]
+                    targets = [_as_node.target]
+                    elem_types = [gen._quick_type(_as_node.value)]
                 # Index both lists in parallel — `for target, vtype in
                 # zip(targets, elem_types)` unpacks a zip 2-tuple, the
                 # established boxing bug.
@@ -2281,6 +2301,9 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                         inferred[vname].append(vtype)
             elif (isinstance(node, gimple_ctypes.VarDecl) and isinstance(node.name, str)
                     and ',' not in node.name):
+                # Fresh local, not a `node` reassignment — see the
+                # AssignStmt branch's identical comment above.
+                _vd_node = _as_vardecl_node(node)
                 # `var out = self._buf[a:]` — a VarDecl, not an AssignStmt.
                 # Historically this pass "never scans VarDecl" (see
                 # _closure_value_locals' docstring), so a `var`-declared
@@ -2288,18 +2311,21 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 # `return out` return-type inference and the local's own
                 # declared C type when the initializer is a pointer value
                 # (bytes accumulator, sliced field, ...).
-                vname = _as_str(node.name)
+                vname = _as_str(_vd_node.name)
                 _vt = None
-                if getattr(node, 'type_ann', None):
+                if getattr(_vd_node, 'type_ann', None):
                     try:
-                        _vt = gimple_ctypes._mojo_type(node.type_ann)
+                        _vt = gimple_ctypes._mojo_type(_vd_node.type_ann)
                     except Exception:
                         _vt = None
-                if (_vt is None or _vt == 'int64_t') and node.value is not None:
-                    _vt = gen._quick_type(node.value)
+                if (_vt is None or _vt == 'int64_t') and _vd_node.value is not None:
+                    _vt = gen._quick_type(_vd_node.value)
                 if _vt is not None:
                     inferred.setdefault(vname, []).append(_vt)
             elif isinstance(node, gimple_ctypes.MultiAssignStmt):
+                # Fresh local, not a `node` reassignment — see the
+                # AssignStmt branch's identical comment above.
+                _ma_node = _as_multiassignstmt_node(node)
                 # `a = b = ... = expr` (chained assignment): every target
                 # receives the SAME value/type (real Python chained-
                 # assignment semantics), unlike AssignStmt's TupleExpr
@@ -2308,8 +2334,8 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 # scan's int64_t default regardless of the RHS's real
                 # type. See bugs/hard/CODEGEN_multi_assign_local_var_
                 # type_not_inferred.md.
-                vtype = gen._quick_type(node.value)
-                for target in node.targets:
+                vtype = gen._quick_type(_ma_node.value)
+                for target in _ma_node.targets:
                     if isinstance(target, gimple_ctypes.IdentExpr):
                         vname = _as_str(target.name)
                         if vname not in inferred:
