@@ -3712,6 +3712,22 @@ def gen_module_impl(self, stmts):
         if _is_foreign_main(s):
             continue
         if isinstance(s, FunctionDef) and s.return_type is None:
+            # `current_func_name` save/set/restore, mirroring the identical,
+            # already-correct pattern a few hundred lines below (the
+            # `_p3b_s` pass) — without it, `_infer_return_type`'s
+            # `_collect_return_types` -> `_quick_type` -> `_closure_info_
+            # for_ident` lookup keys `_all_closures` by `gen.current_func_
+            # name`, which was left at WHATEVER unrelated value (often "")
+            # an earlier pass last set it to. A `return <nested_fn>` (e.g.
+            # `make_adder`'s `return add`) then couldn't find its own
+            # nested function's ClosureInfo and fell to the plain int64_t
+            # default instead of the real `MojoBoundMethod *`/`void *` —
+            # a closure-returning function's return type silently
+            # mistyped on this pass (later passes may re-derive it
+            # correctly, but any reader between the two sees the wrong
+            # value, and self-hosted output showed the wrong one winning).
+            _saved_fcn_p1 = self.current_func_name
+            self.current_func_name = s.name
             for pname, ptype in s.params:
                 if pname.startswith('**'):
                     self.var_types[pname[2:]] = 'MojoDict *'
@@ -3724,6 +3740,7 @@ def gen_module_impl(self, stmts):
                 inferred = 'int64_t'
             self.func_return_types[s.name] = inferred
             self.var_types.clear()
+            self.current_func_name = _saved_fcn_p1
 
     for _pass2b_iter in range(4):
         _changed = False
@@ -6338,7 +6355,18 @@ def gen_module_impl(self, stmts):
             _debug_note('top-level statement dropped', type(stmt).__name__)
             func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
 
-    func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
+    # `_as_funcdef_node`, not a bare `s`: `stmts` is a heterogeneous
+    # statement list, so its self-hosted element type is opaque int64_t
+    # regardless of the isinstance filter — every `fdef.name`/`fdef.body`
+    # read below then went through the dynamic getattr path instead of a
+    # direct struct-field load. Concretely, `.get(fdef.name, ...)` treated
+    # `fdef.name`'s (wrongly int64_t) result as a raw integer needing
+    # `mojo_str_from_int()` conversion into a dict key — looking up
+    # func_return_types by a stringified ADDRESS ("54073494352") instead
+    # of the real name ("make_adder"), always missing and always falling
+    # to the 'int64_t' default. A closure-returning function's forward
+    # declaration was silently wrong on every compile as a result.
+    func_defs = [_as_funcdef_node(s) for s in stmts if isinstance(s, FunctionDef)]
     for fdef in func_defs:
         if fdef.name == 'main':
             continue
@@ -7978,7 +8006,18 @@ def gen_module_impl(self, stmts):
     if self.imported_symbols:
         parts.append('')
 
-    func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
+    # `_as_funcdef_node`, not a bare `s`: `stmts` is a heterogeneous
+    # statement list, so its self-hosted element type is opaque int64_t
+    # regardless of the isinstance filter — every `fdef.name`/`fdef.body`
+    # read below then went through the dynamic getattr path instead of a
+    # direct struct-field load. Concretely, `.get(fdef.name, ...)` treated
+    # `fdef.name`'s (wrongly int64_t) result as a raw integer needing
+    # `mojo_str_from_int()` conversion into a dict key — looking up
+    # func_return_types by a stringified ADDRESS ("54073494352") instead
+    # of the real name ("make_adder"), always missing and always falling
+    # to the 'int64_t' default. A closure-returning function's forward
+    # declaration was silently wrong on every compile as a result.
+    func_defs = [_as_funcdef_node(s) for s in stmts if isinstance(s, FunctionDef)]
     # `self._generator_api` alone is not covered by `_supported_generators`/
     # `_generator_method_api`: a NESTED `async def` (create_task's
     # wrapper idiom, or the detached-async `var coro = wrapper()` idiom --
