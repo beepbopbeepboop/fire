@@ -1968,7 +1968,21 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
     # compile and crashing downstream.
     if ctype == 'int64_t':
         _real_ctype = gen._actual_types.get(val)
-        if _real_ctype in gen._CONTAINER_LEN_FN:
+        # `_real_ctype is not None and ...`, not a bare `in` check: `val`
+        # is usually NOT a key in `_actual_types` (that dict only tracks
+        # globals/specially-typed temps), so `.get(val)` returning the
+        # real Python `None` is the COMMON case here — and checking
+        # `None in gen._CONTAINER_LEN_FN` (a dict of string keys) on the
+        # compiled backend doesn't safely evaluate to False the way real
+        # Python does: it reached the same string-keyed dict membership
+        # machinery with a NULL "key" and SIGSEGV'd in strcmp inside
+        # mojo_dict_contains, on virtually any `if <cond>:`/`while <cond>:`
+        # whose scalar int64_t condition simply isn't a tracked container
+        # value — i.e. almost every ordinary boolean condition in a real
+        # program (surfaced only once compiling mojo.py's own full source
+        # actually reached a deeply-nested closure this small test corpus
+        # never exercised).
+        if _real_ctype is not None and _real_ctype in gen._CONTAINER_LEN_FN:
             # `val` is still C-level `int64_t` (the boxed-pointer storage
             # type) — GIMPLE needs the pointer cast to go through `void *`
             # first (the same two-step sequence every other int64_t<->

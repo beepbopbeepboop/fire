@@ -3729,7 +3729,27 @@ class Parser:
                         self._expect("RBRACKET")
                         if len(items) == 1:
                             only = items[0]
-                            if isinstance(only, SliceExpr):
+                            # A bare slice at THIS bracket depth (`x[a:b]`) comes
+                            # back from _parse_subscript_item as a fresh
+                            # SliceExpr(obj=None, ...) still waiting for its
+                            # object. But `only` can also be a SliceExpr whose
+                            # obj is ALREADY set -- e.g. `x[y[1:]]`, where the
+                            # single subscript item is itself a fully-parsed
+                            # nested slice expression (obj=y) returned unchanged
+                            # by _parse_subscript_item's "plain index" path
+                            # (`_parse_expr(0)` recursing into `_parse_postfix`
+                            # for `y[1:]`, then landing right back here one call
+                            # deeper, where its own single item's obj=None case
+                            # already ran and set obj=y). Checking only
+                            # `isinstance(only, SliceExpr)` can't tell these
+                            # apart, and used to unconditionally overwrite
+                            # `.obj` with the OUTER object -- so `x[y[1:]]`
+                            # silently became `x[1:]` (y discarded entirely),
+                            # producing a bogus slice-assignment/read target
+                            # with the wrong bounds and object. `obj is None`
+                            # distinguishes "still needs attaching" from
+                            # "already a complete nested expression".
+                            if isinstance(only, SliceExpr) and only.obj is None:
                                 only.obj = expr  # attach object to the bare slice
                                 expr = only
                             else:

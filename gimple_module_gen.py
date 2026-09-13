@@ -3740,19 +3740,51 @@ def gen_module_impl(self, stmts):
             # mistyped on this pass (later passes may re-derive it
             # correctly, but any reader between the two sees the wrong
             # value, and self-hosted output showed the wrong one winning).
+            # `_as_funcdef_node`, not the bare `s`: `all_functions` is a
+            # heterogeneous statement list, so its element type is opaque
+            # int64_t regardless of the isinstance filter — `s.params`
+            # would otherwise go through the dynamic getattr path.
+            _as_s_p1 = _as_funcdef_node(s)
             _saved_fcn_p1 = self.current_func_name
-            self.current_func_name = s.name
-            for pname, ptype in s.params:
+            self.current_func_name = _as_s_p1.name
+            # Index, don't unpack: `for pname, ptype in params:` boxes the
+            # tuple elements to int64_t on the self-hosted path even when
+            # `params` itself is a properly-typed MojoList* (the
+            # established boxing bug this file works around everywhere
+            # else — see e.g. the AssignStmt-target zip comment in
+            # gimple_gen_resolve.py).
+            #
+            # NOTE: this loop's `self.var_types[pname[1:]] = 'MojoList *'`
+            # was ALSO hit by a real, separate parser bug (now fixed in
+            # `_parse_postfix`, mojo_compiler.py): `X[Y[a:b]]` — a subscript
+            # whose single index is itself a nested slice expression —
+            # mis-attached the nested slice's already-resolved `.obj` (Y)
+            # to the OUTER object (X), silently turning `self.var_types
+            # [pname[1:]]` into `self.var_types[1:]` (pname discarded
+            # entirely). That miscompiled the very statement below into a
+            # slice-ASSIGNMENT on `self.var_types` itself, calling
+            # `mojo_list_splice` with a bogus target/bounds and SIGSEGV'ing
+            # — reproducible only once compilation actually reached a real
+            # sibling module (myinterpreter.py) whose own `def f(*args,
+            # **kwargs)` shape exercised this exact line. See
+            # `_parse_postfix`'s `if isinstance(only, SliceExpr) and
+            # only.obj is None:` fix for the real root cause; the
+            # index-don't-unpack change here remains worth keeping since
+            # `params`-tuple-unpack boxing is a real, independent gap.
+            _p1_params = _as_s_p1.params
+            for _p1i in range(len(_p1_params)):
+                pname = _as_str(_p1_params[_p1i][0])
+                ptype = _p1_params[_p1i][1]
                 if pname.startswith('**'):
                     self.var_types[pname[2:]] = 'MojoDict *'
                 elif pname.startswith('*'):
                     self.var_types[pname[1:]] = 'MojoList *'
                 else:
                     self.var_types[pname] = self._resolve_type(ptype)
-            inferred = self._infer_return_type(s.body)
-            if s.name == 'main' and inferred == 'void':
+            inferred = self._infer_return_type(_as_s_p1.body)
+            if _as_s_p1.name == 'main' and inferred == 'void':
                 inferred = 'int64_t'
-            self.func_return_types[s.name] = inferred
+            self.func_return_types[_as_s_p1.name] = inferred
             self.var_types.clear()
             self.current_func_name = _saved_fcn_p1
 
@@ -5168,9 +5200,20 @@ def gen_module_impl(self, stmts):
 
     for s in all_functions:
         if isinstance(s, FunctionDef) and s.return_type is None:
+            # `_as_funcdef_node` — see the identical fix + comment at the
+            # other `for s in all_functions:` return-type-inference pass
+            # above: `all_functions` is a heterogeneous statement list, so
+            # `s`'s self-hosted element type is opaque int64_t regardless
+            # of the isinstance filter.
+            s = _as_funcdef_node(s)
             _saved_vt_23e = self.var_types
             self.var_types = dict(_saved_vt_23e)
-            for pname, ptype in s.params:
+            # Index, don't unpack — see the identical fix + comment at the
+            # earlier return-type-inference pass above.
+            _p23e_params = s.params
+            for _p23ei in range(len(_p23e_params)):
+                pname = _as_str(_p23e_params[_p23ei][0])
+                ptype = _p23e_params[_p23ei][1]
                 bare = pname.lstrip('*')
                 if pname.startswith('*'):
                     self.var_types[bare] = 'MojoList *'
@@ -5755,11 +5798,22 @@ def gen_module_impl(self, stmts):
 
     for _p3b_s in all_functions:
         if isinstance(_p3b_s, FunctionDef) and _p3b_s.return_type is None:
+            # `_as_funcdef_node` — see the identical fix + comment at the
+            # earlier `for s in all_functions:` return-type-inference
+            # passes above: `all_functions` is a heterogeneous statement
+            # list, so its element type is opaque int64_t regardless of
+            # the isinstance filter.
+            _p3b_s = _as_funcdef_node(_p3b_s)
             _saved_vt_3b = self.var_types
             _saved_fcn_3b = self.current_func_name
             self.current_func_name = _p3b_s.name
             self.var_types = dict(_saved_vt_3b)
-            for pname, ptype in _p3b_s.params:
+            # Index, don't unpack — see the identical fix + comment at the
+            # earlier return-type-inference passes above.
+            _p3b_params = _p3b_s.params
+            for _p3bi in range(len(_p3b_params)):
+                pname = _as_str(_p3b_params[_p3bi][0])
+                ptype = _p3b_params[_p3bi][1]
                 bare = pname.lstrip('*')
                 if pname.startswith('*'):
                     self.var_types[bare] = 'MojoList *'
