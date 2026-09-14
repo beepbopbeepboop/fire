@@ -347,34 +347,6 @@ from gimple_exprtypes import (
 
 _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
 
-
-def _is_selfhost_source_dir(_dir: str) -> bool:
-    """Is `_dir` a directory holding a genuine checkout of this compiler's
-    own source (not necessarily THIS checkout)? Every real call site that
-    used to compare `_cur_abs == _SELFHOST_DIR` (or a `.startswith` prefix
-    of it) broke the moment the compiler's own `gimple_*.py`/mojo_compiler.py
-    sources are compiled from a DIFFERENT checkout than the one currently
-    running as the driver — e.g. a downstream project (a GCC frontend)
-    vendoring a byte-identical copy of this compiler's backend at its own
-    path: `_SELFHOST_DIR` is hardcoded to wherever `gimple_codegen.py`
-    itself was loaded from, so an equality/prefix check against it is
-    FALSE for any other, otherwise-identical checkout, silently disabling
-    self-hosting-only struct_field_types seeding, gen/self param typing,
-    and bare (unprefixed) function naming for every module in that other
-    checkout — the extracted GimpleGen helpers then fall back to generic
-    int64_t-boxed `gen` params, producing undeclared-function / int-to-
-    pointer gcc errors (confirmed: `/Users/mrs/net/gcc/gcc/fire`'s vendored
-    copy).  Same path-independent signal `_run_pipeline`'s own
-    `_selfhost_register_gimplegen` gate already uses successfully
-    (`_sh_sibling`): a `mojo_compiler.py` living right next to `_dir` is
-    true only for a genuine compiler-source directory, never for an
-    ordinary user program's directory that happens to contain a
-    same-named file."""
-    if not _dir:
-        return False
-    return (_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
-            or os.path.isfile(os.path.join(_dir, 'mojo_compiler.py')))
-
 # Function/method C symbols that the self-host forward-decl block
 # (gen_module's `_is_selfhost_file` gate) declares explicitly with concrete
 # signatures. The lazy auto-stub path (`_lower_named_call`'s `_is_unknown`

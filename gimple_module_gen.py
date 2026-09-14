@@ -41,6 +41,49 @@ import gimple_codegen
 import gimple_gen_funcs as _ggf_dup
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _emitted_unresolved_stub_syms, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
+
+def _is_selfhost_source_dir(_dir: str) -> bool:
+    """Is `_dir` a directory holding a genuine checkout of this compiler's
+    own source (not necessarily THIS checkout)? Every real call site that
+    used to compare `_cur_abs == _SELFHOST_DIR` (or a `.startswith` prefix
+    of it) broke the moment the compiler's own `gimple_*.py`/mojo_compiler.py
+    sources are compiled from a DIFFERENT checkout than the one currently
+    running as the driver — e.g. a downstream project (a GCC frontend)
+    vendoring a byte-identical copy of this compiler's backend at its own
+    path: `_SELFHOST_DIR` is hardcoded to wherever `gimple_codegen.py`
+    itself was loaded from, so an equality/prefix check against it is
+    FALSE for any other, otherwise-identical checkout (confirmed:
+    `/Users/mrs/net/gcc/gcc/fire`'s vendored copy). Same path-independent
+    signal `_run_pipeline`'s own `_selfhost_register_gimplegen` gate
+    already uses successfully (`_sh_sibling`): a `mojo_compiler.py` living
+    right next to `_dir` is true only for a genuine compiler-source
+    directory, never for an ordinary user program's directory that
+    happens to contain a same-named file.
+
+    Defined HERE (not in gimple_codegen.py, its original home) and used
+    only within this file: a cross-module `from gimple_codegen import
+    _is_selfhost_source_dir` reference broke self-hosted with an
+    "unavailable in compiled mode (imported from an unresolved external/
+    relative module)" weak-stub fallback that always returned 0/False —
+    traced to `_local_sibling_module_exports`'s `gen._parsed_import(
+    'gimple_codegen')` itself returning a falsy path self-hosted (a
+    genuine, deeper self-hosted-only resolution gap for THIS one module
+    name, unrelated to this function specifically), even though the
+    shim's own compile resolves it fine. Every OTHER name imported from
+    gimple_codegen.py on the same import line is either a struct/class
+    type (never routed through this function-resolution path at all) or
+    a `gen`/`self`-first-param extracted GimpleGen helper already covered
+    by the separate, independently-working `_selfhost_extracted_fn_index`
+    mechanism — this plain, `str`-first-param utility function was the
+    only thing actually relying on the broken path. A local, single-file
+    definition sidesteps the whole cross-module resolution gap rather
+    than working around it."""
+    if not _dir:
+        return False
+    return (_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
+            or os.path.isfile(os.path.join(_dir, 'mojo_compiler.py')))
+
+
 _SELFHOST_MODGLOBAL_CACHE: dict = {}
 
 
@@ -1877,7 +1920,7 @@ def gen_module_impl(self, stmts):
         _sg_cf = getattr(self, '_current_filename', None)
         if _sg_cf:
             _sg_abs = os.path.abspath(os.path.dirname(_sg_cf))
-            if gimple_codegen._is_selfhost_source_dir(_sg_abs):
+            if _is_selfhost_source_dir(_sg_abs):
                 _seed_selfhost_module_globals(self)
                 _seed_selfhost_struct_dict_field_types(self)
                 _seed_selfhost_return_elem_types(self)
@@ -2187,7 +2230,7 @@ def gen_module_impl(self, stmts):
     }
 
     _cur_file = getattr(self, '_current_filename', None)
-    _is_selfhost_file = bool(_cur_file) and gimple_codegen._is_selfhost_source_dir(
+    _is_selfhost_file = bool(_cur_file) and _is_selfhost_source_dir(
         os.path.abspath(os.path.dirname(_cur_file)))
     if _is_selfhost_file:
         self.struct_field_types['Scope'] = {
