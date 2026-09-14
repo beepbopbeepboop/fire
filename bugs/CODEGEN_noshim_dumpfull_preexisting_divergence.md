@@ -392,3 +392,232 @@ synthetic resolution to the same one-time pre-pass that already parses
 `gimple_codegen.py`, before `gen_module_impl` ever runs for ANY file),
 not a quick patch — left for a future session. Bugs A and B are real,
 safe, and landed.
+
+## Finding 4 Bug C — RESOLVED (session 3, commit `585879c`)
+
+Root-caused to a chain of independent self-hosted-only bugs (the
+architectural one-time-seed idea from the previous session's note above
+turned out to be necessary-but-not-sufficient — it was landed, but the
+underlying field-scan was ALSO silently broken several different ways,
+each masking the next once the prior one was fixed):
+
+1. **`glob.glob()` returns 0 matches self-hosted, always**, regardless of
+   directory correctness — confirmed by hand: `os.listdir(d)` + manual
+   `startswith('gimple_')`/`endswith('.py')` filtering found the correct
+   17 files in the same directory where `glob.glob(os.path.join(d,
+   'gimple_*.py'))` returned empty. `_selfhost_scan_gimplegen_extra_
+   fields` (gimple_gen_funcs.py) now scans via `os.listdir()` instead.
+2. **Bare `dict = {}` annotations** (no value ctype) on
+   `self._selfhost_gimplegen_extra_fields` left the value ctype
+   unresolved self-hosted — reads came back as the raw `MojoDict`-value
+   pointer bits reinterpreted as `int64_t` (printed as a huge decimal
+   like `4374397560`) instead of dereferencing as `char *`. Fixed via
+   explicit `dict[str, str]`.
+3. **`_selfhost_merge_field`'s upgrade condition excluded `_Bool`** —
+   only allowed upgrading a generic `int`/`int64_t` default to a
+   POINTER type (`_ct.endswith(' *')`), so a `_Bool` literal seen after
+   the default was silently kept at `int64_t`. Fixed to also accept
+   `_ct == '_Bool'`.
+4. **`gen._selfhost_src_dir` was never threaded through** to the scan,
+   so it fell back to `gimple_codegen._SELFHOST_DIR`/`.`/`..`, none of
+   which reliably had `gimple_*.py` siblings in the compiled binary's
+   process CWD. Fixed by threading it through with the same fallback
+   order `_selfhost_load_gimplegen_class` already uses.
+5. **The shared `gimple_exprtypes._walk_ast`/`_walk_ast_into` utility
+   has a real self-hosted bug**: `isinstance(node, str) or
+   isinstance(node, int) or isinstance(node, float) or
+   isinstance(node, bool)` evaluates TRUE for essentially every real AST
+   dataclass instance self-hosted (confirmed via instrumentation: of
+   5457 total `_walk_ast_into` calls compiling `mojo.py` self-hosted,
+   5027 were misclassified as scalar leaves and never recursed into;
+   the `dataclasses.is_dataclass` branch was reached 0 times). Reordering
+   to check `is_dataclass` FIRST fixes the walker correctly — verified
+   via a differential node-count check against the shim — but this
+   exposed a SEPARATE, well-documented, actively-tracked cost:
+   `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`'s
+   O(N²) whole-program rescan, previously tolerated (if slow) via
+   CPython but genuinely catastrophic self-hosted once the walker
+   actually recurses (confirmed: `MOJO_NO_SHIM=1 ./mojoc gimple_gen_
+   loops.py --dump-full` alone — unrelated to this scan — grew to 15GB+
+   RSS and SIGSEGV'd with the reordered walker; RSS growth measured at
+   ~750MB/sec). Fixing `_walk_ast` itself is out of scope here (it would
+   require ALSO fixing the O(N²) rescan cost first, per that doc's own
+   multi-phase, multi-week history) — **`_walk_ast` was left as-is,
+   still broken self-hosted, this bug remains open there**. Instead, a
+   NEW dedicated narrow statement-only walker
+   (`_selfhost_walk_stmts_for_assign_targets`, gimple_gen_funcs.py) was
+   written specifically for GimpleGen's narrow need (`self.x = <literal>`
+   assignments are always direct statements, never nested in an
+   expression, so only statement-level body-bearing fields — if/while/
+   for/try/with/match/comptime — need recursing into, not full generic
+   AST traversal), sidestepping the shared utility entirely.
+6. **Within that new walker, a boxed self-hosted string field compared
+   with `==` failed to match** even when semantically equal:
+   `_tgt.obj.name == p0` (both a boxed `MemberExpr.obj.name` AST-field
+   read and a `str.lstrip()` result) — confirmed via layered
+   instrumentation that EVERY upstream counter (files found, functions
+   matched, statements visited, assign-shaped statements found) matched
+   the shim exactly, and this ONE comparison was the entire remaining
+   divergence at that layer (266 matches expected, 0 found). Fixed via
+   `_as_str()` normalization on both sides:
+   `_as_str(_tgt.obj.name) == _as_str(p0)`.
+7. **`_selfhost_literal_ctype` used `type(_val)` as a dict key** — same
+   underlying mechanism as #5's bug (self-hosted `type()` does not
+   reliably identify a class the way CPython's real class objects do
+   for dict-key purposes). `_SELFHOST_LITERAL_CTM.get(type(_val))`
+   returned `None` for the overwhelming majority of values self-hosted
+   (confirmed: of 141 literal-typed matches via the shim, only 22
+   resolved self-hosted with the dict-lookup form). Rewritten as a
+   plain isinstance chain. **This was the fix that actually closed the
+   gap** — confirmed via debug counters matching the shim exactly
+   (`total-fields=88`, all 5 spot-checked fields with correct types)
+   after this specific change and no earlier one.
+8. **`mojo.py`'s own `build_executable`/`link_executable` link path was
+   missing the 512MB stack-size linker flag** that `driver.py`'s
+   link-mode path already has (`otool -l mojoc` showed `stacksize 0`
+   instead of `536870912`) — an unrelated infra gap discovered while
+   investigating #5's crash, fixed for parity regardless of whether
+   `_walk_ast` itself ever gets fixed (an 8MB default stack is
+   marginal for this compiler's own deeply-recursive regex engine and
+   AST walkers even without `_walk_ast`'s bug).
+
+Verified via layered instrumentation at every stage (file discovery →
+function matching → statement traversal → assignment-target matching →
+literal-type inference → field storage), comparing self-hosted counters
+against the shim's after each fix, since several of these bugs
+completely MASKED the next one downstream (e.g. fixing #1-4 moved the
+count from 247/259 fields to 266/292 but NOT further, because #5-7 were
+still silently eating almost every match). Full gate green: check-
+linkmode (3/3), check-selfhost, from-scratch stdlib dylib rebuild (0
+skips), compile_stdlib.py (664/664, 0 unexpected), make bootstrap
+(180/180 files match across 3 stages). Landed in commit `585879c`.
+
+### A separate bug found and fixed in the same session: bytes-literal concat non-determinism
+
+While re-verifying the full `mojo.py --dump-full` comparison after the
+above, found `test_noshim_dumpfull.py` still failing — but for a
+DIFFERENT reason, confirmed unrelated to Bug C: `mojo_bytes_from_cstr
+(<huge decimal number>)` calls appearing in the generated C for any
+`bytes_literal + x.encode()`-shaped expression (concrete repro:
+`b'\0missing:' + name.encode()` in `cas.py`), where the number is a
+raw heap memory address — non-deterministic run to run (confirmed: two
+consecutive self-hosted runs of the identical binary on the identical
+input produced two DIFFERENT addresses at this exact call site, while
+the shim consistently produced the correct `mojo_bytes_from_cstr
+(_t4)` symbolic reference both times).
+
+Root cause: `_as_bytes`, a nested closure inside `_lower_binary_tail`'s
+MojoBytes-concat handling (`gimple_gen_exprs.py`, `op == '+' and (lt ==
+'MojoBytes *') != (rt == 'MojoBytes *')` branch), had unannotated
+`ct`/`cv` parameters. Matches this codebase's established "hoisted/
+nested closures need explicit param annotations self-hosted or they
+misbehave" pattern (see the `--dump-full-determinism-progress` memory's
+own GOTCHA note) — without an explicit `str` annotation, `cv` (a
+proper `_tNN` variable-reference string, e.g. from a stubbed
+`.encode()` call) got boxed and read back as its raw pointer bits when
+interpolated into the f-string building the call expression. Fixed via
+explicit `def _as_bytes(ct: str, cv: str):`. Confirmed deterministic
+across 3+ repeated runs after the fix, and confirmed the shim was
+already correct throughout (this bug never affected the shim's own
+output). Landed in the same commit (`585879c`).
+
+## Finding 5 — struct EMISSION ORDER divergence (found, NOT fixed, session 3)
+
+With Bug C's field CONTENT now correct and the bytes-literal bug fixed,
+`test_noshim_dumpfull.py` still fails — the first differing byte moved
+from deep inside the (now-correct) `GimpleGen` field list to its
+POSITION in the file: self-hosted emits `typedef struct GimpleGen`
+immediately after `typedef struct Generator`, while the shim emits
+`typedef struct GlobalStmt` at that same position (i.e. `GimpleGen`
+appears somewhere else in the shim's output — content matches, only
+ORDER differs). Total diff is still ~1.4M lines (`diff` counts every
+downstream line as different once ANY earlier struct reorders, even
+though most of the actual STRUCT CONTENT is byte-identical — this is a
+"cascading reorder" diff shape, not a content-corruption one).
+
+**Investigated further, hypothesis DISPROVEN**: the obvious first
+suspect — `track_best` (a plain dict in `gen_module_impl`'s
+`emit_struct_defs` block, ~gimple_module_gen.py:7897, whose
+`.values()` iteration order was assumed to drive final struct emission
+order) — was instrumented directly (log struct name + a 0-based
+sequence number for its first ~180 entries, gated behind
+`MOJO_ORDER_DEBUG`, compared self-hosted vs shim). Result: **the
+sequences are IDENTICAL** — all 179 unique struct names, including
+`Generator` at position 112, `GlobalStmt` at 129, and `GimpleGen` at
+178 (dead last), matched EXACTLY between self-hosted and the shim, in
+both a fresh rebuild and a repeat run. Yet the byte-level `.ci`
+comparison, run immediately after with the SAME binary, still showed
+the identical positional divergence (`GimpleGen` right after
+`Generator` self-hosted, `GlobalStmt` there in the shim) — and `grep
+-c` confirmed each struct's typedef appears exactly once in each
+output (no duplicate-emission explanation either).
+
+**Conclusion: `track_best`'s loop is NOT what controls final struct
+position in the output for structs like these.** Rereading the
+surrounding code, this loop is gated by `if sd.name not in
+self._emitted_structs:` — meaning it is a "catch anything not already
+emitted" fallback/dedup pass, not the primary emission path. The
+actual likely mechanism (not yet confirmed, just inferred from the
+codebase's overall shape): `mojo.py`'s transitive closure is compiled
+FILE BY FILE (`_compile_imported_module`, once per module), and each
+file's own compile likely emits ITS OWN locally-first-seen struct
+typedefs into that file's C-code fragment as they're encountered,
+with the FINAL `.ci` being a concatenation of per-file fragments in
+FILE COMPILE ORDER — so a struct's position in the final output is
+really a question of WHICH FILE first referenced it, and WHEN that
+file got compiled relative to others, not of any single dict's
+iteration order. This is structurally a different (and deeper)
+question than every previous finding in this doc — those were all
+"one function's own local dict/set iterates differently self-hosted
+vs shim"; this one is "the ORDER FILES GET COMPILED differs
+self-hosted vs shim", which could stem from import-graph traversal
+order, `self._module_stmts`/`self._compiled_modules` iteration
+somewhere, or something else entirely in the do_imports driver loop.
+
+**Not root-caused this session** — this needs fresh instrumentation
+aimed at the RIGHT layer (file/module compile order, not a
+struct-tracking dict inside one file's own emission pass), and given
+how much runway the `track_best` red herring consumed, is better
+started fresh in a future session with a clear head, following the
+method below.
+
+**Next steps for a future session**: instrument
+`_compile_imported_module` itself (or wherever the top-level
+`do_imports=True` driver loop decides which module to compile next)
+to log `module_name` + a sequence counter as each module starts
+compiling, self-hosted vs shim, and diff the two sequences directly.
+If that sequence differs, the next question is WHY (a dict/set whose
+iteration order determines "what's next in the work queue", most
+likely) — same "compare a specific counter/sequence between
+self-hosted and shim after each candidate fix" method that cracked
+Bug C's several layers, just aimed one level higher (module-compile
+order, not struct-list order within one module's own emission).
+
+## Followups (not fixed this session, worth a future audit)
+
+- **`type(x)`-keyed dict/cache lookups are a confirmed-unreliable
+  self-hosted pattern**, found independently in TWO places this session
+  (`_WALK_FIELD_NAMES_CACHE` in gimple_exprtypes.py, and
+  `_selfhost_literal_ctype`'s old form in gimple_gen_funcs.py) — both
+  silently returned wrong/`None` results self-hosted despite working
+  perfectly via the shim. `_WALK_FIELD_NAMES_CACHE`'s own fix
+  (`type(node).__name__` as the key instead of `type(node)`) is landed
+  and safe, but `_selfhost_literal_ctype`'s fix went further (a full
+  isinstance chain, no dict lookup at all) since even `.__name__` felt
+  like an unnecessary residual risk once the pattern was this
+  precedented. Worth a codebase-wide `grep -n '\.get(type('` (and
+  similar `[type(...)]` dict-subscript patterns) audit for other
+  instances — each one is a silent, hard-to-detect self-hosted-only
+  correctness bug that a shim-only test suite will never catch.
+- **Unannotated closures with string parameters are a confirmed-risky
+  self-hosted pattern**, found again this session (`_as_bytes` in
+  gimple_gen_exprs.py) on top of the pre-existing GOTCHA already noted
+  in the `--dump-full-determinism-progress` memory (hoisted closures
+  needing explicit dict/set param annotations). Worth a broader audit
+  for other unannotated nested-function/closure definitions handling
+  string-typed values self-hosted.
+- Finding 5 (struct emission order) above remains fully open — the
+  `track_best` dict-order hypothesis was tested and DISPROVEN this
+  session; the real mechanism is believed to be per-FILE compile
+  order (which module gets compiled when), not any single dict's
+  iteration order within one module's own struct-emission pass.
