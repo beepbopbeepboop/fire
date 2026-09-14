@@ -1305,8 +1305,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_str',
                 [('char *', sv), ('char *', enc)])
-        if at in ('MojoList *', 'void *'):
-            lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')
+        if at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
+            # `bytes(a_dict)`/`bytes(a_set)` of ints is real Python (an
+            # iterable of ints is a valid bytes() source; a dict's own
+            # iteration yields its keys) — DESIGN.html R1/R5, shares
+            # _materialize_as_list with the tuple/list-unpack sites.
+            lv = gen._materialize_as_list(at, av)
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', lv)])
         # int / bool / other scalar -> zero-filled bytes of that length
@@ -1338,8 +1342,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_str',
                 [('char *', sv), ('char *', enc)])
-        if at in ('MojoList *', 'void *'):
-            lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')
+        if at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
+            # `bytearray(a_dict)`/`bytearray(a_set)` of ints - same real
+            # Python shape as bytes() above.
+            lv = gen._materialize_as_list(at, av)
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', lv)])
         nv = gen._to_int64(at, av)
@@ -1356,7 +1362,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return 'MojoMemoryView *', gen._call_expr(
                 'MojoMemoryView *', 'mojo_memoryview_from_bytes', [('MojoBytes *', av)])
         # unknown/opaque — coerce through MojoBytes*
-        bv = gen._new_val('MojoBytes *', f'(MojoBytes *){gen._to_int64(at, av)}')
+        bv = gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(at, av))
         return 'MojoMemoryView *', gen._call_expr(
             'MojoMemoryView *', 'mojo_memoryview_from_bytes', [('MojoBytes *', bv)])
 
@@ -1461,6 +1467,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'sum' and len(node.args) == 1
             and not gen._locally_binds_name('sum')):
         at, av = gen.lower_expr(node.args[0])
+        # `sum(a_dict)`/`sum(a_set)` of numbers is real Python, and even a
+        # genuinely-untyped boxed handle deserves the same runtime guard —
+        # DESIGN.html R1/R5, shares _materialize_as_list. mojo_sum/_double
+        # themselves unconditionally reinterpret their arg as MojoList* at
+        # the C level with NO dispatch of their own, so without this a
+        # MojoDict*/MojoSet* argument was reinterpreted as a list header
+        # (the exact R2-violation shape) rather than just an ad-hoc cast
+        # in this codegen.
+        if at != 'MojoList *':
+            av = gen._materialize_as_list(at, av)
+            at = 'MojoList *'
         if gen._elem_types.get(av) == 'double':
             acast = av if at == 'void *' else gen._new_val('void *', f'(void *){av}')
             return 'double', gen._call_expr('double', 'mojo_sum_double', [('void *', acast)])
@@ -1830,13 +1847,12 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             cp = gen._new_val('char *', f'(char *){av}')
             return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen', [('char *', cp)])
         if actual == 'MojoDict *':
-            dp = gen._new_val('MojoDict *', f'(MojoDict *){av}')
+            dp = gen._coerce_to_type('int64_t', 'MojoDict *', av)
             return 'int64_t', gen._new_val('int64_t', f'mojo_dict_len ({dp})')
         if actual == 'MojoSet *':
-            sp = gen._new_val('MojoSet *', f'(MojoSet *){av}')
+            sp = gen._coerce_to_type('int64_t', 'MojoSet *', av)
             return 'int64_t', gen._new_val('int64_t', f'mojo_set_len ({sp})')
-        ip = gen._new_val('int64_t', f'(int64_t){av}')
-        lp = gen._new_val('MojoList *', f'(MojoList *){ip}')
+        lp = gen._coerce_to_type('int64_t', 'MojoList *', av)
         return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({lp})')
     return 'int64_t', gen._new_val('int64_t', f'(int64_t)0  /* len() on unsupported type {at} */')
 
@@ -2085,7 +2101,7 @@ def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     sequences."""
     lt, lv = gen.lower_expr(node.args[0])
     if lt != 'MojoList *':
-        lv = gen._new_val('MojoList *', f"(MojoList *){lv}")
+        lv = gen._coerce_to_type(lt, 'MojoList *', lv)
     elem = gen._elem_of(lv) or 'int64_t'
     n_t = gen._new_val('int64_t', f"mojo_list_len ({lv})")
     zero = gen._new_val('int64_t', "(int64_t)0")
@@ -2131,8 +2147,16 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
     stub_val   = '1'             if fname_raw == 'all' else '0'
     at, av = gen.lower_expr(node.args[0])
     t = gen._new_temp('int')
-    if at == 'MojoList *' or (at.endswith(' *') and at != 'char *'):
-        lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')
+    if at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *' \
+            or (at.endswith(' *') and at != 'char *'):
+        # DESIGN.html R1/R5: dict/set materialization (all(d)/any(s) over a
+        # dict's keys / a set's elements, not a reinterpret of the header —
+        # see bugs/CODEGEN_all_any_dict_set_miscompile.md) shares
+        # _materialize_as_list with enumerate()/str.join()/bytes.join()/
+        # shlex.join(); a genuinely-unknown boxed handle is now also
+        # runtime-guarded (mojo_is_registered_dict/_set) there instead of
+        # blindly assuming list.
+        lv = gen._materialize_as_list(at, av)
         gen._emit_call('int', t, runtime_fn, [('MojoList *', lv)])
     else:
         gen._emit(f'  {t} = {stub_val};  /* {fname_raw}() stubbed */')
@@ -2370,7 +2394,7 @@ def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if at == 'MojoList *':
         gen._emit_call('MojoDict *', t, 'mojo_dict_from_pairs', [('MojoList *', av)])
     elif at in ('int64_t', 'int') or not at.endswith(' *') or at == 'void *':
-        raw = gen._new_val('MojoDict *', f'(MojoDict *){av}')
+        raw = gen._coerce_to_type(at, 'MojoDict *', av)
         gen._emit_call('MojoDict *', t, 'mojo_dict_copy', [('MojoDict *', raw)])
     else:
         gen._emit_call('MojoDict *', t, 'mojo_dict_copy', [(at, av)])
@@ -3650,9 +3674,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and not gen._locally_binds_name(fname_raw)
             and 'key' not in {k for k, _ in getattr(node, 'kwargs', []) or []}):
         at, av = arg_pairs[0]
-        if at == 'MojoList *' or at in ('int', 'int64_t', 'void *'):
-            lp = (av if at == 'MojoList *'
-                  else gen._new_val('MojoList *', f"(MojoList *){gen._to_int64(at, av)}"))
+        if at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *' \
+                or at in ('int', 'int64_t', 'void *'):
+            # `min(a_dict)`/`max(a_set)` is real Python (min/max KEY, or
+            # element) — DESIGN.html R1/R5, shares _materialize_as_list.
+            lp = gen._materialize_as_list(at, av)
             if gen._elem_of(av) == 'double':
                 return 'double', gen._call_expr(
                     'double', f"mojo_{fname_raw}_double", [('void *', lp)])
@@ -4693,14 +4719,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                        or gen._get_actual_type(idx_type, iv) == 'char *')
         if actual_type == 'MojoDict *' or (_idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
             # Dict subscript: int64_t → MojoDict *
-            dp = gen._new_temp('MojoDict *')
-            ip = gen._new_temp('int64_t')
-            ov_local = gen._ensure_local(ot, ov)
-            if ot == 'int64_t':
-                gen._emit(f"  {ip} = {ov_local};")
-            else:
-                gen._emit(f"  {ip} = (int64_t){ov_local};")
-            gen._emit(f"  {dp} = (MojoDict *){ip};")
+            dp = gen._coerce_to_type(ot, 'MojoDict *', gen._ensure_local(ot, ov))
             # Propagate dict value type from source (ov) so _dict_val_of
             # below returns the correct value type (char * etc.) instead
             # of defaulting to int64_t — fixes BUG-2026-043.
@@ -4718,14 +4737,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
             return 'int64_t', t
         # Otherwise treat as MojoList* stored as int; cast and subscript
-        lp = gen._new_temp('MojoList *')
-        ip = gen._new_temp('int64_t')
-        ov_local = gen._ensure_local(ot, ov)
-        if ot == 'int64_t':
-            gen._emit(f"  {ip} = {ov_local};")  # same type, no cast
-        else:
-            gen._emit(f"  {ip} = (int64_t){ov_local};")
-        gen._emit(f"  {lp} = (MojoList *){ip};")
+        lp = gen._coerce_to_type(ot, 'MojoList *', gen._ensure_local(ot, ov))
         idx64 = gen._to_int64(idx_type, iv)
         # Copy element type tracking from the int64_t temp to the MojoList * temp
         # This is critical for nested list access: when lp came from arr[i], we need to know

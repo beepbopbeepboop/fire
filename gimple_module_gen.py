@@ -734,6 +734,12 @@ def _emit_reflection_dispatch(self, parts):
             + f"{tag_cases_repr}\n"
             + ("  return mojo_repr_obj((int64_t)(intptr_t)obj);\n"
                "}\n"
+               # DESIGN.html R3 exception, NOT routed through the chokepoint:
+               # this is static C SOURCE TEXT for a runtime helper function,
+               # not per-call-site codegen through `gen` (no `gen` in scope
+               # here at all). Already exactly the R5-recommended pattern —
+               # each cast is guarded by its own `mojo_is_registered_list`/
+               # `_dict` runtime check immediately above it.
                "static char * _mojo_generic_elem_repr (int64_t val) {\n"
                "  if (val == 0) return \"None\";\n"
                "  if (val > 65536) {\n"
@@ -7966,6 +7972,12 @@ def gen_module_impl(self, stmts):
         # storage to route to (see gen_module_impl's dict-subclass block).
         _is_dict_sub = sn in getattr(self, '_dict_subclass_structs', ())
         _dsub_decls = "  void * _dd;\n" if _is_dict_sub else ""
+        # DESIGN.html R3 exception, NOT routed through the chokepoint: raw
+        # C source text for a struct allocator function (no `gen`, no
+        # per-call-site codegen). Safe by construction, not a guess -
+        # `_dd` is the value `mojo_dict_new()` on the line directly above
+        # just returned, so its real kind is trivially proven, not
+        # inferred.
         _dsub_init = ("  _dd = mojo_dict_new ();\n"
                       f"  _p->_data = (MojoDict *) _dd;\n") if _is_dict_sub else ""
         parts.append(

@@ -195,7 +195,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             # The C storage is int64_t (boxed handle); cast to a real
             # MojoList* temp before the accessor call, or GIMPLE rejects
             # "passing int64_t where MojoList * expected".
-            lp = gen._new_val('MojoList *', f"(MojoList *){v}")
+            lp = gen._coerce_to_type('int64_t', 'MojoList *', v)
         if suf == 'str':
             return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
         if suf == 'double':
@@ -206,8 +206,20 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # opaque int64_t then cast, matching the old 'int'-suffix handling.
         raw = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
         return elem, gen._new_val(elem, f"({elem}){raw}")
-    # Non-container / untracked: index the boxed pointer as a plain int list
-    lp = gen._new_val('MojoList *', f"(MojoList *){v}")
+    # Non-container / untracked: despite this function's name, its real
+    # callers include plain multi-assign unpacking (`a, b = x`) over ANY
+    # iterable, not just a syntactic tuple/call-return — `a, b = some_dict`
+    # is real, valid Python (unpacks the dict's keys) and reaches here with
+    # `vtype == 'MojoDict *'` directly (found via a real crash: DESIGN.html
+    # R1/R5, shares _materialize_as_list with all()/any()/enumerate()/
+    # *.join()/the list-pattern-target branch above in gimple_gen_stmts.py).
+    lp = gen._materialize_as_list(vtype, v)
+    elem = gen._elem_of(lp)
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
+    if suf == 'str':
+        return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+    if suf == 'double':
+        return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
     return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
 
 
@@ -703,8 +715,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             _boxed_elem = gen._elem_of(it_val)
             if (it_type in ('int', 'int64_t', 'void *') and _boxed_elem
                     and _boxed_elem != 'int64_t' and _boxed_elem.endswith(' *')):
-                _lp_known = gen._new_val(
-                    'MojoList *', f"(MojoList *){gen._to_int64(it_type, it_val)}")
+                _lp_known = gen._coerce_to_type(
+                    'int64_t', 'MojoList *', gen._to_int64(it_type, it_val))
                 gen._elem_types[_lp_known] = _boxed_elem
                 gen._gen_for_list(var, _lp_known, node.body)
             elif it_type in ('int', 'int64_t', 'void *'):
@@ -739,7 +751,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and not node.iterable.args
                     and not (var.startswith('(') and var.endswith(')')))
                 gen._emit_label(bb_dict)
-                dp = gen._new_val('MojoDict *', f"(MojoDict *){it64}")
+                dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
                 if _it_is_items:
                     _pairs = gen._new_val(
                         'MojoList *', f"mojo_dict_items ({dp})")
@@ -752,7 +764,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     gen._gen_for_dict(var, dp, node.body)
                 gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_list)
-                lp = gen._new_val('MojoList *', f"(MojoList *){it64}")
+                lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
                 if _it_is_items:
                     # An already-materialized items list: its elements are
                     # the same [key, value] pairs.
@@ -824,7 +836,7 @@ def _gen_for_zip_longest(gen, node):
             raise ValueError(f"zip_longest over {st} is unsupported here")
         ptr = sv
         if ptr in gen.var_types and gen.var_types[ptr] == 'int64_t':
-            ptr = gen._new_val('MojoList *', f"(MojoList *){sv}")
+            ptr = gen._coerce_to_type('int64_t', 'MojoList *', sv)
         seqs.append((ptr, gen._elem_of(sv)))
 
     # Per-slot read + fill expressions, all selected through ONE int64_t
@@ -1032,7 +1044,7 @@ def _gen_for_zip(gen, node):
             raise ValueError(f"zip() over {st} is unsupported here")
         ptr = sv
         if ptr in gen.var_types and gen.var_types[ptr] == 'int64_t':
-            ptr = gen._new_val('MojoList *', f"(MojoList *){sv}")
+            ptr = gen._coerce_to_type('int64_t', 'MojoList *', sv)
         seq_ptrs.append(ptr)
         _e = gen._elem_of(sv)
         seq_elems.append(_e if _e else 'int64_t')
@@ -1201,9 +1213,16 @@ def _gen_for_enumerate(gen, node):
     if lst_type == 'MojoList *':
         list_ptr = lst_val
         if lst_val in gen.var_types and gen.var_types[lst_val] == 'int64_t':
-            list_ptr = gen._new_val('MojoList *', f"(MojoList *){lst_val}")
+            list_ptr = gen._coerce_to_type('int64_t', 'MojoList *', lst_val)
     else:
-        list_ptr = gen._new_val('MojoList *', f"(MojoList *){lst_val}")
+        # DESIGN.html R1/R5: dict/set materialization (`enumerate(d)`/
+        # `enumerate(s)` — real Python semantics: a dict's KEYS, a set's
+        # elements, not a reinterpret of the header) shares
+        # _materialize_as_list with all()/any()/str.join()/bytes.join()/
+        # shlex.join(); a genuinely-unknown boxed handle is now also
+        # runtime-guarded (mojo_is_registered_dict/_set) there instead of
+        # blindly assuming list.
+        list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
     gen._declare_var(idx_var, 'int64_t')
@@ -1251,7 +1270,7 @@ def _gen_for_enumerate(gen, node):
         # string tuple's char* slots became decimal pointers.
         inner = raw_val[1:-1].strip()
         tuple_vars = gen._split_top_level_comma(inner)
-        tuple_ptr = gen._new_val('MojoList *', f"(MojoList *){val_var}")
+        tuple_ptr = gen._coerce_to_type('int64_t', 'MojoList *', val_var)
         pair_elem = gen._nested_elem_types.get(list_ptr, 'int64_t')
         suf_inner = gimple_ctypes.TypeLattice.list_suffix(pair_elem)
         for vi, vname in enumerate(tuple_vars):
@@ -1391,7 +1410,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     # Cast it_val back to MojoList* if it's stored as int64_t (from method call)
     list_ptr = it_val
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
-        list_ptr = gen._new_val('MojoList *', f"(MojoList *){it_val}")
+        list_ptr = gen._coerce_to_type('int64_t', 'MojoList *', it_val)
     gen._emit(f"  {len64} = mojo_list_len ({list_ptr});")
     gen._emit(f"  {len_t} = {len64};")
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -1407,7 +1426,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     if is_tuple:
         elem64 = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
-        tuple_ptr = gen._new_val('MojoList *', f"(MojoList *){elem64}")
+        tuple_ptr = gen._coerce_to_type('int64_t', 'MojoList *', elem64)
         # Pick the accessor PER ELEMENT. The old branch read every slot
         # via mojo_list_get_str, which is right only for all-string pairs
         # — a dict.items() pair is [char* key, BOXED value] (the runtime
@@ -1441,7 +1460,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             if vn.startswith('(') and vn.endswith(')'):
                 rt, rv = _emit_slot_read(ptr, i, 'int64_t')
                 nested_raw = gen._new_val(rt, rv)
-                nested_ptr = gen._new_val('MojoList *', f"(MojoList *){nested_raw}")
+                nested_ptr = gen._coerce_to_type(rt, 'MojoList *', nested_raw)
                 nested_names = gen._split_top_level_comma(vn[1:-1].strip())
                 for j, nn in enumerate(nested_names):
                     _emit_target_assign(nested_ptr, nn, j, pair_elem)
@@ -1735,8 +1754,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         gen._declare_var(var, 'char *', force=(var == shadow_name))
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
-        dict_ptr = gen._new_val('MojoDict *', f"(MojoDict *){it_val}")
-        it_val = dict_ptr
+        it_val = gen._coerce_to_type('int64_t', 'MojoDict *', it_val)
     iter_t = gen._new_temp('MojoDictIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_dict_iter_new ({it_val});")
@@ -1810,8 +1828,7 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
     gen._declare_var(var, 'int64_t', force=(var == shadow_name))
     # If it_val is int64_t (boxed pointer), cast to MojoSet * (matches dict path)
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
-        set_ptr = gen._new_val('MojoSet *', f"(MojoSet *){it_val}")
-        it_val = set_ptr
+        it_val = gen._coerce_to_type('int64_t', 'MojoSet *', it_val)
     iter_t = gen._new_temp('MojoSetIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_set_iter_new ({it_val});")

@@ -66,6 +66,14 @@ anywhere else), these rules override any instinct to move on quickly:
   after every single small fix wastes tokens re-deriving the same green
   result. Group related fixes and run the full gate once per group and
   once at the end, per the batching guidance already in that section.
+- **No mid-batch check-ins and no mid-batch gate runs.** While working
+  through a batch, do not stop to summarize progress, ask "should I keep
+  going?", or run any gate step (make check, compile_stdlib.py, bootstrap,
+  etc.) as a status check between fixes. Land the whole batch of intended
+  work first; run the full gate exactly once, at the end, covering
+  everything accumulated. Explicitly requested by the user 2026-09-13 —
+  interim gate runs and interim check-ins were seen as wasted tokens/time
+  when the intent was always to gate once at the end anyway.
 
 ## Quality gate for gimple/codegen-affecting changes
 Before considering a change to `mojo_compiler.py` (the shared parser/AST),

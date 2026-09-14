@@ -548,7 +548,7 @@ def _struct_build_value_list(gen, arg_nodes, codes):
             # zipfile `_write_end_record`'s `*extra`).
             _it, _iv = gen.lower_expr(a.operand)
             _ip = (gen._ensure_local('MojoList *', _iv) if _it == 'MojoList *'
-                   else gen._new_val('MojoList *', f'(MojoList *){gen._to_int64(_it, _iv)}'))
+                   else gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(_it, _iv)))
             gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', lst), ('MojoList *', _ip)])
             continue
         at, av = gen.lower_expr(a)
@@ -562,7 +562,7 @@ def _struct_build_value_list(gen, arg_nodes, codes):
                 bp = gen._call_expr('MojoBytes *', 'mojo_bytes_from_cstr', [('char *', av)])
             else:
                 vp = gen._new_val('void *', f'(void *){av}')
-                bp = gen._new_val('MojoBytes *', f'(MojoBytes *){vp}')
+                bp = gen._coerce_to_type('void *', 'MojoBytes *', vp)
             cp = gen._new_val('char *', f'(char *){bp}')
             gen._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', lst), ('char *', cp)])
         elif want_double:
@@ -582,7 +582,7 @@ def _struct_buffer_arg(gen, node_arg):
     if bt == 'MojoMemoryView *':
         return gen._call_expr('MojoBytes *', 'mojo_memoryview_tobytes', [('MojoMemoryView *', bv)])
     vp = gen._new_val('void *', f'(void *){bv}')
-    return gen._new_val('MojoBytes *', f'(MojoBytes *){vp}')
+    return gen._coerce_to_type('void *', 'MojoBytes *', vp)
 
 
 def _struct_tag_unpack_result(gen, t, codes):
@@ -1598,10 +1598,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # separator-based mojo_str_join with a wrong/absent separator.
         if module_name == 'shlex' and method_name == 'join' and len(node.args) == 1:
             arg_type, arg_val = gen.lower_expr(node.args[0])
-            if arg_type != 'MojoList *':
-                if arg_type in ('int', 'char'):
-                    arg_val = gen._new_val('int64_t', f'(int64_t){arg_val}')
-                arg_val = gen._new_val('MojoList *', f'(MojoList *){arg_val}')
+            # DESIGN.html R1: shared with all()/any()/enumerate()/
+            # str.join()/bytes.join() - see _materialize_as_list.
+            arg_val = gen._materialize_as_list(arg_type, arg_val)
             t = gen._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
             return 'char *', t
 
@@ -2468,9 +2467,80 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # ── Opaque int → coerce to appropriate container type FIRST ──────────
     # Must happen before container-type checks so the casted type is seen below.
     if ot in ('int', 'int64_t') and not _get_float_timeout and method in (
+        'remove', 'clear',
+    ):
+        # `.remove()` is a real method on BOTH list and set; `.clear()` is
+        # real on list, dict, AND set. On a boxed/opaque receiver these
+        # can't be resolved by method name alone the way the other names
+        # below can — the old code picked ONE static guess (set for
+        # remove, list for clear) with no runtime check, so e.g. a boxed
+        # value that was actually a MojoList* had `.remove(x)` routed to
+        # `_lower_set_method`, which has no 'remove' case at all and
+        # silently no-op'd instead of removing the element. Runtime-
+        # dispatch via the kind registries instead (DESIGN.html R5). See
+        # bugs/CODEGEN_boxed_method_name_list_set_ambiguity.md.
+        ip = gen._new_temp('int64_t')
+        ov_local = gen._ensure_local(ot, ov)
+        if ot == 'int64_t':
+            gen._emit(f"  {ip} = {ov_local};")
+        else:
+            gen._emit(f"  {ip} = (int64_t){ov_local};")
+        result = gen._new_temp('int')
+        if method == 'clear':
+            bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
+            bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
+            bb_after = gen._new_bb()
+            isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', ip)])
+            gen._emit(f"  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};")
+            gen._emit_label(bb_dict)
+            dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
+            gen._emit(f"  mojo_dict_clear ({dp});")
+            gen._emit(f"  {result} = 0;")
+            gen._emit(f"  goto {bb_after};")
+            gen._emit_label(bb_not_dict)
+            iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', ip)])
+            gen._emit(f"  if ({iss}) goto {bb_set}; else goto {bb_not_set};")
+            gen._emit_label(bb_set)
+            sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
+            gen._emit(f"  mojo_set_clear ({sp});")
+            gen._emit(f"  {result} = 0;")
+            gen._emit(f"  goto {bb_after};")
+            gen._emit_label(bb_not_set)
+            lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
+            gen._emit(f"  mojo_list_clear ({lp});")
+            gen._emit(f"  {result} = 0;")
+            gen._emit_label(bb_after)
+            return 'int', result
+        # method == 'remove'
+        if not node.args:
+            return 'int', gen._new_val('int', '0')
+        at, av = gen.lower_expr(node.args[0])
+        bb_set = gen._new_bb(); bb_not_set = gen._new_bb(); bb_after = gen._new_bb()
+        iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', ip)])
+        gen._emit(f"  if ({iss}) goto {bb_set}; else goto {bb_not_set};")
+        gen._emit_label(bb_set)
+        sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
+        if at == 'char *':
+            gen._emit_call('void', '', 'mojo_set_discard', [('MojoSet *', sp), ('char *', av)])
+        else:
+            av64 = gen._to_int64(at, av)
+            gen._emit_call('void', '', 'mojo_set_discard', [('MojoSet *', sp), ('int64_t', av64)])
+        gen._emit(f"  {result} = 0;")
+        gen._emit(f"  goto {bb_after};")
+        gen._emit_label(bb_not_set)
+        lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
+        if at == 'char *':
+            gen._emit_call('void', '', 'mojo_list_remove_str', [('MojoList *', lp), ('char *', av)])
+        else:
+            gen._emit_call('void', '', 'mojo_list_remove_int', [('MojoList *', lp), (at, av)])
+        gen._emit(f"  {result} = 0;")
+        gen._emit_label(bb_after)
+        return 'int', result
+
+    if ot in ('int', 'int64_t') and not _get_float_timeout and method in (
         'keys', 'values', 'items', 'get', 'update', 'pop', 'copy',
-        'append', 'extend', 'sort', 'reverse', 'clear',
-        'add', 'discard', 'remove',
+        'append', 'extend', 'sort', 'reverse',
+        'add', 'discard',
         'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
         'split', 'join', 'replace', 'find', 'lower', 'upper',
         'format', 'encode', 'count',
@@ -2482,17 +2552,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             gen._emit(f"  {ip} = (int64_t){ov_local};")
         if method in ('keys', 'values', 'items', 'get', 'update'):
-            dp = gen._new_val('MojoDict *', f"(MojoDict *){ip}")
+            dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
             if ov in gen._dict_val_types:
                 gen._dict_val_types[dp] = gen._dict_val_types[ov]
             ot, ov = 'MojoDict *', dp
-        elif method in ('append', 'extend', 'sort', 'reverse', 'clear'):
-            lp = gen._new_val('MojoList *', f"(MojoList *){ip}")
+        elif method in ('append', 'extend', 'sort', 'reverse'):
+            lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
             if ov in gen._struct_field_owners:
                 gen._struct_field_owners[lp] = list(gen._struct_field_owners[ov])
             ot, ov = 'MojoList *', lp
-        elif method in ('add', 'discard', 'remove'):
-            sp = gen._new_val('MojoSet *', f"(MojoSet *){ip}")
+        elif method in ('add', 'discard'):
+            sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
             ot, ov = 'MojoSet *', sp
         else:
             cp = gen._new_val('char *', f"(char *){ip}")
@@ -2678,6 +2748,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'MojoSet *', t
 
     # .values()/.items() called on wrong receiver: unbox int64_t to MojoDict * first
+    # NOT routed through the R2 chokepoint (DESIGN.html R3 exception): `ot`
+    # can genuinely be 'MojoList *' here — this is a DELIBERATE reinterpret
+    # of a value whose static type was wrongly inferred as a list, and it's
+    # the whole point of this branch. gen._coerce_to_type('MojoList *',
+    # 'MojoDict *', ...) would hard-raise (both are container-kind types),
+    # breaking this recovery path for currently-working code.
     if method in ('values', 'items') and ot in ('MojoList *', 'int64_t', 'int'):
         vp = gen._new_temp('void *'); gen._emit(f"  {vp} = (void *){ov};")
         dp = gen._new_temp('MojoDict *'); gen._emit(f"  {dp} = (MojoDict *){vp};")
@@ -3187,10 +3263,39 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
     """Lower MojoSet * method calls."""
     if method == 'update' and args:
         other_type, other_val = gen.lower_expr(args[0])
-        if other_type != 'MojoSet *':
-            other_val = gen._new_val('MojoSet *', f"(MojoSet *){other_val}")
-            other_type = 'MojoSet *'
-        return gen._void_call('mojo_set_update', [('MojoSet *', ov), ('MojoSet *', other_val)])
+        if other_type == 'MojoSet *':
+            return gen._void_call('mojo_set_update', [('MojoSet *', ov), ('MojoSet *', other_val)])
+        # `set.update(x)` accepts ANY iterable in real Python (a list, a
+        # dict — its keys —, or a genuinely boxed/unknown handle), not
+        # just another set; mojo_set_update only accepts a MojoSet*.
+        # DESIGN.html R1/R5: materialize via the same shared helper
+        # all()/any()/enumerate()/*.join() use (dict -> keys, boxed handle
+        # -> runtime-guarded dict/set/list dispatch), then add each
+        # element individually via mojo_set_add_str/int, picking the
+        # accessor from the materialized list's tracked element type.
+        lv = gen._materialize_as_list(other_type, other_val)
+        _elem = gen._elem_of(lv)
+        _suf = gimple_ctypes.TypeLattice.list_suffix(_elem) if _elem else 'int'
+        _len = gen._new_val('int64_t', f"mojo_list_len ({lv})")
+        _idx = gen._new_val('int64_t', "(int64_t)0")
+        bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+        gen._emit(f"  goto {bb_cond};")
+        gen._emit_label(bb_cond)
+        cond_t = gen._new_val('_Bool', f"{_idx} < {_len}")
+        gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+        gen._emit_label(bb_body)
+        if _suf == 'str':
+            _elv = gen._new_val('char *', f"mojo_list_get_str ({lv}, {_idx})")
+            gen._emit(f"  mojo_set_add_str ({ov}, {_elv});")
+        else:
+            _elv = gen._new_val('int64_t', f"mojo_list_get_int ({lv}, {_idx})")
+            gen._emit(f"  mojo_set_add_int ({ov}, {_elv});")
+        _one = gen._new_val('int64_t', "(int64_t)1")
+        _nxt = gen._new_val('int64_t', f"{_idx} + {_one}")
+        gen._emit(f"  {_idx} = {_nxt};")
+        gen._emit(f"  goto {bb_cond};")
+        gen._emit_label(bb_after)
+        return 'int', gen._new_val('int', '0')
     if method == 'add' and args:
         at, av = gen.lower_expr(args[0])
         if at == 'char *':
@@ -3343,14 +3448,11 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         if arg_vals:
             iter_val = arg_vals[0]
             iter_type = arg_pairs[0][0] if arg_pairs else 'MojoList *'
-            if iter_type != 'MojoList *':
-                # A narrow scalar (e.g. an unsupported `materialize[...]`
-                # comptime call stubbed to plain int 0) cast straight to
-                # a pointer type is a real -Wint-to-pointer-cast size
-                # mismatch — widen through int64_t first, as elsewhere.
-                if iter_type in ('int', 'char'):
-                    iter_val = gen._new_val('int64_t', f'(int64_t){iter_val}')
-                iter_val = gen._new_val('MojoList *', f"(MojoList *){iter_val}")
+            # DESIGN.html R1: shared with all()/any()/enumerate()/
+            # bytes.join()/shlex.join() - see _materialize_as_list (real,
+            # common Python idiom: `sep.join(some_dict)` joins its keys —
+            # a real repro in std/builtin/simd.mojo).
+            iter_val = gen._materialize_as_list(iter_type, iter_val)
             return 'char *', gen._call_expr('char *', 'mojo_str_join', [('char *', cstr_ov), ('MojoList *', iter_val)])
         t = gen._new_temp('char *')
         gen._emit(f"  {t} = {cstr_ov};  /* join: no iterable */")
@@ -3486,9 +3588,18 @@ def _coerce_to_bytes(gen, t: str, v: str) -> str:
     if t == 'char *':
         return gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
                               [('char *', v), ('char *', '"utf-8"')])
-    # narrow scalar / unknown pointer: widen through int64_t then cast
+    # narrow scalar: widen through int64_t then route through the
+    # chokepoint (safe - a scalar can never be a different container kind).
     if t in ('int', 'char', '_Bool', 'int64_t'):
         v = gen._new_val('int64_t', f'(int64_t){v}')
+        return gen._coerce_to_type('int64_t', 'MojoBytes *', v)
+    # Genuinely unknown pointer (DESIGN.html R3 exception, NOT routed
+    # through the chokepoint): `t` could in principle be another
+    # container-kind type reaching this generic fallback (e.g. an
+    # ill-typed `some_bytes.startswith(a_list)`), which would hard-raise
+    # via gen._coerce_to_type. Left as a direct cast; no real corpus
+    # example of this actually firing on a non-bytes-like value found
+    # during this pass.
     return gen._new_val('MojoBytes *', f'(MojoBytes *){v}')
 
 
@@ -3550,9 +3661,12 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
         return 'MojoList *', t
 
     if method == 'join' and arg_pairs:
-        it = arg_pairs[0][1]
-        if arg_pairs[0][0] != 'MojoList *':
-            it = gen._new_val('MojoList *', f'(MojoList *){it}')
+        # DESIGN.html R1/R5: shared with all()/any()/enumerate()/str.join()/
+        # shlex.join() - see _materialize_as_list (`b''.join(some_dict)`
+        # joins its keys, real Python semantics); a genuinely-unknown boxed
+        # handle is now also runtime-guarded (mojo_is_registered_dict/_set)
+        # there instead of blindly assuming list.
+        it = gen._materialize_as_list(arg_pairs[0][0], arg_pairs[0][1])
         _je = gen._elem_types.get(it) or gen._elem_types.get(arg_pairs[0][1])
         if _je and gen._bytes_subclass_of(_je):
             # Elements are `class X(bytes)` instances — `b''.join(...)`

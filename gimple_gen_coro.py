@@ -2571,6 +2571,14 @@ def emit_c(meta_entry: dict) -> str:
     if kind == 'p':
         value_unbox = f'({vct})__mojo_gen_value ((int64_t)__g)'
     elif kind == 'tuple':
+        # DESIGN.html R3 exception, NOT routed through gen._coerce_to_type:
+        # this whole function builds a raw C-source TEMPLATE STRING with no
+        # `gen` in scope at all (it emits static trampoline C, not
+        # per-call-site codegen) - `kind` is the generator's OWN declared
+        # yield-value kind (proven statically per-generator, same as the
+        # `kind == 'p'` branch just above using `vct` the same way), not a
+        # runtime guess, so this cast is safe; it just has no chokepoint to
+        # route through structurally.
         value_unbox = '(MojoList *)__mojo_gen_value ((int64_t)__g)'
     elif kind == 'd':
         value_unbox = ('({ double __d; long long __b = __mojo_gen_value ((int64_t)__g); '

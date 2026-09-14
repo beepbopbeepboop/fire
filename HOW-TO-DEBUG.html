@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HOW-TO-DEBUG</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --fg:#1d1c1a; --muted:#5d5a55; --rule:#ddd8d0;
+    --card:#fff; --accent:#8a3324; --accent2:#1d4e63; --ok:#1f6b3a; --bad:#9b2226;
+    --code-bg:#f3f1ec; --code-fg:#23211e;
+  }
+  :root:not([data-theme="light"]){}
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#16151a; --fg:#e9e6e1; --muted:#a29d95; --rule:#33313a;
+      --card:#1e1d24; --accent:#e08a6f; --accent2:#7fb8d4; --ok:#6fce96; --bad:#f0857f;
+      --code-bg:#111016; --code-fg:#e2ded8;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#16151a; --fg:#e9e6e1; --muted:#a29d95; --rule:#33313a;
+    --card:#1e1d24; --accent:#e08a6f; --accent2:#7fb8d4; --ok:#6fce96; --bad:#f0857f;
+    --code-bg:#111016; --code-fg:#e2ded8;
+  }
+  body{background:var(--bg);color:var(--fg);
+       font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       margin:0;padding:0 20px 80px;}
+  .wrap{max-width:980px;margin:0 auto;}
+  header{padding:44px 0 18px;border-bottom:2px solid var(--rule);margin-bottom:30px;}
+  h1{font-size:30px;margin:0 0 8px;letter-spacing:-.02em;}
+  .sub{color:var(--muted);font-size:15px;margin:0;}
+  h2{font-size:21px;margin:38px 0 12px;padding-top:16px;border-top:1px solid var(--rule);
+     letter-spacing:-.01em;}
+  h3{font-size:16px;margin:24px 0 8px;color:var(--accent2);}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  code{background:var(--code-bg);color:var(--code-fg);padding:1px 5px;border-radius:4px;font-size:13px;}
+  pre{background:var(--code-bg);color:var(--code-fg);padding:14px 16px;border-radius:8px;
+      overflow-x:auto;font-size:13px;line-height:1.5;border:1px solid var(--rule);}
+  pre code{background:none;padding:0;font-size:13px;}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px;display:block;overflow-x:auto;}
+  th,td{border:1px solid var(--rule);padding:7px 10px;text-align:left;vertical-align:top;}
+  th{background:var(--code-bg);font-weight:600;}
+  .card{background:var(--card);border:1px solid var(--rule);border-left:3px solid var(--accent);
+        border-radius:6px;padding:14px 18px;margin:18px 0;}
+  .ok{color:var(--ok);font-weight:600;} .bad{color:var(--bad);font-weight:600;}
+  .muted{color:var(--muted);}
+  ol,ul{padding-left:22px;} li{margin:5px 0;}
+  .step{font-weight:600;color:var(--accent);}
+  .tag{display:inline-block;background:var(--code-bg);border:1px solid var(--rule);
+       border-radius:20px;padding:1px 10px;font-size:12px;color:var(--muted);margin-right:6px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>HOW-TO-DEBUG</h1>
+  <p class="sub">Hard-bug methodology for this compiler, and the worked example that produced it.<br>
+  Written 2026-09-13 from the <code>match_pattern</code> dict-as-list type-confusion hunt.</p>
+</header>
+
+<div class="card">
+<strong>The one rule that matters most:</strong> a bug that "shimmers" — appears and
+disappears — is usually being measured wrong, not behaving randomly. Before
+chasing non-determinism, prove your <em>measurement</em> is sound. In the worked
+example below, three sessions believed the compiler produced
+"byte-identical output with only a bad exit code." It actually produced
+<em>no output at all</em>; the verification had been diffing two empty files
+for hours.
+</div>
+
+<h2>0. Validate the measurement before you validate the bug</h2>
+<p>
+The very first thing to establish is that the thing you are measuring is the
+thing you care about. Cheap checks that catch most false signals:
+</p>
+<ul>
+  <li><span class="step">Check artifact size and mtime</span>, not just exit code or a diff count.
+      <code>diff a b | wc -l</code> returns <code>0</code> for two empty files.</li>
+  <li><span class="step">Time the run.</span> If a job that should take 100 s finishes in 26 ms,
+      it did not do the work. Wall-clock is the cheapest correctness signal you have.</li>
+  <li><span class="step">Know where output actually goes.</span> <code>--dump-full</code> writes
+      <code>./mojo.ci</code>; redirecting <em>stdout</em> captures nothing. A stale
+      <code>mojo.ci</code> from an earlier good run will happily impersonate fresh output.</li>
+  <li><span class="step">Delete the artifact before every run</span> so "file exists" cannot be
+      inherited from a previous run.</li>
+</ul>
+
+<h2>1. Establish the hit rate, with an interval</h2>
+<p>
+Run the bare reproduction in a loop and histogram the exit codes. Do this
+<em>before</em> attaching a debugger — debuggers change timing, heap layout and
+signal delivery, any of which can make a real bug shimmer.
+</p>
+<pre><code>for i in $(seq 1 200); do
+  MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full &gt;/dev/null 2&gt;&amp;1
+  echo $?
+done | sort | uniq -c</code></pre>
+<p>
+Report it as a confidence interval, not a vibe. For <em>x</em> failures in
+<em>n</em> trials with x = n, the one-sided Clopper–Pearson lower bound is
+<code>alpha^(1/n)</code>:
+</p>
+<table>
+  <tr><th>observed</th><th>95% lower bound on p</th><th>99% lower bound on p</th></tr>
+  <tr><td>200/200</td><td>98.51%</td><td>97.72%</td></tr>
+  <tr><td>1000/1000</td><td>99.70%</td><td>99.54%</td></tr>
+</table>
+<p>
+Sampling alone can never prove 100%. To actually claim 100% you need a
+<em>structural</em> argument — see §6. Sampling tells you whether to look for a
+race; structure tells you the answer.
+</p>
+
+<h2>2. Freeze the address space</h2>
+<p>
+Data-address breakpoints and watchpoints are worthless if addresses move. Turn
+off randomization first.
+</p>
+<pre><code>gdbtool "settings set target.disable-aslr true"
+gdbtool "settings set target.env-vars MOJO_NO_SHIM=1"
+gdbtool "settings set auto-confirm true"   # else 're-run?' prompts wedge the pty
+gdbtool "run mojo.py --dump-full"</code></pre>
+<p>
+Then re-run several times and diff the fault data. Distinguish the three cases:
+</p>
+<table>
+  <tr><th>what varies</th><th>meaning</th></tr>
+  <tr><td>nothing at all</td><td>fully deterministic computation</td></tr>
+  <tr><td>only the high bits of heap pointers</td><td>allocator base moves; offsets deterministic — still a deterministic bug</td></tr>
+  <tr><td>faulting offset / which line faults</td><td>genuine non-determinism: suspect uninitialised memory, a race, or iteration over a pointer-ordered set</td></tr>
+</table>
+
+<h2>3. Identify the wrong datum before hunting the writer</h2>
+<p>
+Do not set a watchpoint until you can name the bad value. At the fault, ask the
+program itself what it thinks the object is — the runtime usually has
+predicates you can call from the debugger, and calling them is far stronger
+evidence than eyeballing a struct:
+</p>
+<pre><code>p mojo_is_registered_dict((long)0xbe24719c0)   # -&gt; 1   it IS a dict
+p mojo_is_registered_list((long)0xbe24719c0)   # -&gt; 0   it is NOT a list
+p (char*)4296832280                            # -&gt; "key"  the 'index' is a string</code></pre>
+<p class="muted">
+Calling a live predicate beats reading raw memory: it answers in the program's
+own terms and cannot be misread by you.
+</p>
+
+<h3>Confirm the mechanism arithmetically</h3>
+<p>
+A hypothesis is only proven when it predicts the exact faulting address. Compute
+it and compare bit-for-bit:
+</p>
+<pre><code>p/x (long)(*(long*)0xbe24719c0) + 8*4296832280
+#   slots               + 8 * (int64_t)"key"
+# =&gt; 0x13e32951c0   ==   actual EXC_BAD_ACCESS address 0x13e32951c0</code></pre>
+<p>
+An exact match converts "probably type confusion" into "type confusion,
+demonstrated." If the prediction is off, your model is wrong — fix the model,
+not the prediction.
+</p>
+
+<h2>4. Watchpoints: gate them, don't drown in them</h2>
+<p>
+A watchpoint on a hot address fires thousands of times. Techniques, cheapest first:
+</p>
+<ol>
+  <li><span class="step">Condition the watchpoint</span>:
+      <code>watchpoint modify -c '(condition)'</code>.</li>
+  <li><span class="step">Gate with a breakpoint</span>: set a breakpoint at the function that
+      <em>begins</em> the interesting window whose command list <em>enables</em> the
+      watchpoint, and another at the exit that disables it. This is the single
+      most effective trick for a value written constantly but only wrong once.
+      <pre><code>b interesting_window_start
+breakpoint command add 1
+watchpoint enable 1
+continue
+DONE
+b interesting_window_end
+breakpoint command add 2
+watchpoint disable 1
+continue
+DONE</code></pre></li>
+  <li><span class="step">Count instead of stopping</span>: let it run to completion, read
+      <code>breakpoint list</code> hit counts, then use
+      <code>breakpoint modify -i N-1</code> to skip straight to the interesting hit.</li>
+  <li><span class="step">Prefer <code>-c</code> over auto-continue loops.</span> Repeated
+      <code>breakpoint command add ... continue</code> hit 100+ times has crashed lldb
+      itself in this project (internal LLDB assertion, not a target crash).</li>
+</ol>
+
+<h3>Know when a watchpoint is the wrong tool</h3>
+<div class="card">
+Watchpoints find <em>who wrote this memory</em>. They are useless when the bad value
+was never "written" at runtime at all — when it was <em>compiled in</em>. If the
+faulting instruction is reached on a straight-line path with no preceding
+store to the operand, stop hunting memory and go read the generated code. In
+the worked example the "wrong data" was a type decision made by the compiler
+minutes earlier, in a different process.
+</div>
+
+<h2>5. Read the generated code; ask if it is valid</h2>
+<p>
+For a compiler, the emitted <code>.ci</code>/asm is evidence you can read directly, and
+it is often faster than any dynamic technique. The defect was plainly visible:
+</p>
+<pre><code>MojoDict * _t6;
+MojoList * bindings;              /* &lt;- declared LIST */
+  _t6 = mojo_dict_new ();         /* &lt;- allocates a DICT */
+  _t10 = (MojoList *)_t6;         /* &lt;- hard cast dict-&gt;list */
+  _t7 = match_pattern_c16e51 (_t2, _t9, _t10);</code></pre>
+<p><strong>Is the codegen valid?</strong> No. Specifically:</p>
+<ul>
+  <li>The allocation site produces <code>MojoDict *</code>; the callee's parameter is
+      <code>MojoList *</code>. The two structs are <em>not</em> layout-compatible:
+      <code>MojoList{data,len,cap}</code> vs <code>MojoDict{slots,used,cap,next_seq}</code>.
+      Aliasing maps <code>slots→data</code>, <code>used→len</code>.</li>
+  <li>Every subscript lowers to <code>mojo_list_get_int</code>/<code>mojo_list_set_int</code>,
+      which compute <code>data[i]</code> with <code>i</code> = the key's <em>char pointer</em>
+      (~4.3e9), i.e. <code>slots + 34 GB</code>.</li>
+  <li>The explicit <code>(MojoList *)</code> cast is what makes this invisible to GCC —
+      the cast silences the very diagnostic that would have caught it. The C is
+      well-formed and warning-free; it is <em>semantically</em> wrong.</li>
+</ul>
+<p class="muted">
+Note the asymmetry that hid this for so long: the Python "shim" never
+<em>executes</em> the emitted C, so it happily writes a broken program and exits 0.
+Only the self-hosted binary — which <em>is</em> that emitted C — crashes. A
+compiler that miscompiles itself will always look healthy from the interpreter.
+</p>
+
+<h2>6. Proving 100%, structurally</h2>
+<p>
+Once the mechanism is known, determinism can be argued rather than sampled:
+</p>
+<ul>
+  <li>The faulting call is on an unconditional path for that statement.</li>
+  <li>The index is a <em>static</em> string-literal address — identical in every run
+      (confirmed: <code>i = 4296832280</code> in 4/4 ASLR-disabled runs).</li>
+  <li>The offset <code>8 × 0x1001c7518</code> ≈ 34 GB is never mapped, for any heap base.</li>
+</ul>
+<p>
+So p = 1 by construction; the 200/200 sample is consistent with it, and the
+observed variation is confined to the malloc-zone base (low 32 bits of the dict
+pointer were identical, <code>0x4719c0</code>, in every run).
+</p>
+
+<h2>7. Differential experiments to classify a bug</h2>
+<table>
+  <tr><th>experiment</th><th>if the bug survives</th><th>if it vanishes</th></tr>
+  <tr><td>Flip <code>-O0 / -Og / -O1 / -O2</code></td><td>not an optimiser bug</td><td>optimiser or UB in source</td></tr>
+  <tr><td>Add bulk code earlier (shift all PCs/allocations)</td><td>not PC/layout dependent; safe to add debug code elsewhere</td><td>layout/overflow sensitive — suspect a buffer overrun</td></tr>
+  <tr><td>Disable ASLR</td><td>deterministic logic</td><td>address-value dependent (e.g. ordering a set by pointer)</td></tr>
+  <tr><td>Run under the interpreter/shim</td><td>bug is in shared logic</td><td>bug is in the compiled path only</td></tr>
+</table>
+<p class="muted">
+The PC-shift test has a second payoff: once you know the bug is layout-insensitive,
+you may freely add printf/instrumentation to unrelated functions without fear of
+perturbing it away.
+</p>
+
+<h2>8. When the writer is in the compiler, instrument the compiler</h2>
+<p>
+The compile-time analogue of a watchpoint is a wrapper that traps the moment a
+value is decided, and prints a stack. Because the shim is plain CPython, this is
+exact, fast and fully deterministic:
+</p>
+<pre><code>import gimple_gen_infra as ginf
+orig = ginf._infer_param_types
+def patched(gen, func, owner_struct=None):
+    r = orig(gen, func, owner_struct)
+    if getattr(func, 'name', None) == 'match_pattern':
+        print(r, file=sys.stderr)
+        if r.get('bindings') == 'MojoList *':
+            traceback.print_stack()          # &lt;- the 'writer'
+    return r
+ginf._infer_param_types = patched</code></pre>
+<p>
+Two force-multipliers here:
+</p>
+<ul>
+  <li><span class="step">Shrink the repro first.</span> The full closure takes 106 s;
+      compiling the single offending module reproduced the identical bad
+      signature in <strong>0.5 s</strong>. A 200× faster loop is worth ten minutes of setup.</li>
+  <li><span class="step">Copy the tree to a sandbox</span> (<code>/tmp/…</code>) and instrument
+      the copy, so the repo stays clean and you can hack freely.</li>
+</ul>
+
+<h2>9. Worked example — the full chain</h2>
+<p class="muted">
+<span class="tag">SIGBUS</span><span class="tag">200/200</span><span class="tag">type confusion</span>
+<span class="tag">gimple_gen_infra.py</span>
+</p>
+<ol>
+  <li><strong>Symptom.</strong> <code>MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full</code>
+      → SIGBUS in 26 ms, no output. Previously mis-recorded as "byte-identical
+      output, cosmetic exit code" because stdout (empty) was being diffed.</li>
+  <li><strong>Fault.</strong> <code>mojo_list_get_int(l=0xbe24719c0, i=4296832280)</code>
+      from <code>_rewrite_assign_stmt</code> (ast_rewriter.py:691) — the one
+      <code>os.environ['PATH'] = …</code> at mojo.py:27.</li>
+  <li><strong>Wrong datum.</strong> <code>l</code> is a registered <em>dict</em>;
+      <code>i</code> is the string <code>"key"</code>. Predicted fault address matched
+      actual exactly.</li>
+  <li><strong>Static cause.</strong> The emitted C declares
+      <code>MojoList * match_pattern_c16e51(…, MojoList * bindings)</code> and passes
+      <code>(MojoList *)mojo_dict_new ()</code>.</li>
+  <li><strong>Writer.</strong> <code>gimple_module_gen.py:4023</code> →
+      <code>_infer_param_types</code> → <code>gimple_gen_infra.py:2139</code>
+      <code>else: inferred[pname] = 'MojoList *'</code>.</li>
+  <li><strong>Root cause.</strong> <code>analyze_param_usage</code> reported
+      <code>is_str_key_subscripted=False</code>, <code>is_nondict_key_subscripted=True</code>.
+      Instrumenting the flag-setting line named the four offending keys:
+      <code>bindings[_vn]</code> ×2 (where <code>_vn = _as_str(pat.name)</code>) and
+      <code>bindings[_as_str(…)]</code> ×2. <code>_expr_is_stringish</code> accepted only a
+      string literal, an f-string, or a local bound <em>directly</em> to a literal —
+      so a <code>-&gt; str</code> call result was "not provably a string", and the
+      <code>else</code> branch read absence-of-evidence as evidence-of-list.</li>
+  <li><strong>Fix.</strong> Teach <code>_expr_is_stringish</code> that a call whose
+      resolved return type is <code>char *</code> is a string
+      (<code>gen.func_return_types</code> — real type resolution, not a name
+      whitelist), and record <code>x = &lt;stringish&gt;</code> into <code>str_vars</code>.
+      Inference then yields <code>{'bindings': 'MojoDict *'}</code>.</li>
+</ol>
+
+<h2>10. gdbtool gotchas (hard-won)</h2>
+<ul>
+  <li><code>b -a &lt;addr&gt;</code> set <em>before</em> the process exists resolves against an
+      unloaded PIE image and silently never fires. <code>process launch --stop-at-entry</code>
+      first, then set it.</li>
+  <li><code>b -n &lt;mangled&gt;</code> often fails even when <code>nm</code> shows the symbol
+      (leading-underscore convention; static <code>t</code> symbols).
+      <code>b file.py:LINE</code> via the emitted <code>#line</code> directives is far more reliable.</li>
+  <li><code>breakpoint command add</code> with several <code>-o</code> flags keeps only the last.
+      Use the multi-line form terminated by <code>DONE</code>, sent as one call.</li>
+  <li>Calling a <code>static</code> C helper from <code>expr</code> needs an explicit
+      function-pointer cast when there is no debug info.</li>
+  <li>At a bare function-entry breakpoint the prologue has not run: read arguments
+      from <code>$x0…</code>, not from frame-relative stack slots.</li>
+  <li>An interactive prompt ("re-run? [Y/n]") wedges the persistent pty and every
+      later command returns nothing. Set <code>auto-confirm true</code> early; if wedged,
+      send a bare <code>Y</code>.</li>
+  <li>This runtime's <code>mojo_print</code> emits no separators between rapid identical
+      calls, so a burst renders as one giant line that defeats <code>grep</code>/<code>tail</code>.
+      Redirect lldb to a file and parse it with Python instead.</li>
+</ul>
+
+<h2>11. Checklist</h2>
+<ol>
+  <li>Prove the measurement (size, mtime, wall-clock), delete artifacts first.</li>
+  <li>Hit rate over ≥200 bare runs; report a Clopper–Pearson bound.</li>
+  <li>Disable ASLR; confirm which parts of the fault are stable.</li>
+  <li>Name the wrong datum; interrogate it with the runtime's own predicates.</li>
+  <li>Predict the faulting address arithmetically; require a bit-exact match.</li>
+  <li>Read the generated code. Decide explicitly: is it valid, and why not?</li>
+  <li>If compiled-in, instrument the compiler; if runtime, use gated watchpoints.</li>
+  <li>Shrink the repro before iterating.</li>
+  <li>Fix the root cause, then re-run the full gate — a type-inference change has
+      whole-program blast radius.</li>
+</ol>
+
+</div>
+</body>
+</html>

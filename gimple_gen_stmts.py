@@ -233,7 +233,7 @@ def _try_bind_list_iter(gen, name, value):
     if at == 'MojoList *':
         list_val = av
     elif at in ('int', 'int64_t', 'void *'):
-        list_val = gen._new_val('MojoList *', f"(MojoList *){gen._to_int64(at, av)}")
+        list_val = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(at, av))
     else:
         return False
     elem = gen._elem_of(av)
@@ -689,10 +689,11 @@ def _assign_target(gen, tgt, et, ev):
         # semantically identical to the tuple-pattern spelling (`a, = ...`
         # / `a, b = ...`) — same `.elements` shape, same unpack — so it
         # shares this branch exactly rather than a parallel implementation.
-        # ev is itself an iterable; view it as a MojoList* and unpack by index.
-        lp = ev if et == 'MojoList *' else gen._new_temp('MojoList *')
-        if et != 'MojoList *':
-            gen._emit(f"  {lp} = (MojoList *){ev};")
+        # ev is itself an iterable; view it as a MojoList* and unpack by
+        # index. DESIGN.html R1/R5: shares _materialize_as_list with all()/
+        # any()/enumerate()/*.join() - `a, b = some_dict` is real Python
+        # (unpacks the dict's keys), not just an ambiguous boxed handle.
+        lp = gen._materialize_as_list(et, ev)
         for i, sub in enumerate(tgt.elements):
             idx64 = gen._new_val('int64_t', f"(int64_t){i}")
             elem_type = gen._elem_of(lp)
@@ -775,9 +776,10 @@ def _gen_stmt_AssignStmt(gen, node):
                 break
         if _star_idx is not None:
             vtype, v = gen.lower_expr(node.value)
-            lp = v if vtype == 'MojoList *' else gen._new_temp('MojoList *')
-            if vtype != 'MojoList *':
-                gen._emit(f"  {lp} = (MojoList *){v};")
+            # DESIGN.html R1/R5: shares _materialize_as_list with all()/
+            # any()/enumerate()/*.join() - `*a, b = some_dict` is real
+            # Python (unpacks the dict's keys).
+            lp = gen._materialize_as_list(vtype, v)
             before, after = targets[:_star_idx], targets[_star_idx + 1:]
             star_target = targets[_star_idx].operand
             n_before, n_after = len(before), len(after)
@@ -1121,8 +1123,8 @@ def _gen_stmt_AssignStmt(gen, node):
         if (isinstance(node.target.obj, gimple_ctypes.IdentExpr)
                 and node.target.obj.name == 'sys'
                 and node.target.member == 'argv'):
-            _av = v if vtype == 'MojoList *' else gen._new_val(
-                'MojoList *', f"(MojoList *){v}")
+            _av = v if vtype == 'MojoList *' else gen._coerce_to_type(
+                vtype, 'MojoList *', v)
             gen._emit_call('void', '', 'mojo_replace_argv',
                             [('MojoList *', _av)])
             return
@@ -1381,9 +1383,8 @@ def _gen_stmt_AssignStmt(gen, node):
                 if not _is_dict:
                     # It's a list - cast to MojoList* and set element
                     ip = gen._new_temp('int64_t')
-                    lp = gen._new_temp('MojoList *')
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
-                    gen._emit(f"  {lp} = (MojoList *){ip};")
+                    lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
                     idx64 = gen._new_val('int64_t', f"(int64_t){idx_v}")
                     # Get element type from the nested list
                     # First try _elem_of, then check _nested_elem_types, then default to int64_t
@@ -1400,9 +1401,8 @@ def _gen_stmt_AssignStmt(gen, node):
                 else:
                     # Default to dict (original behavior)
                     ip = gen._new_temp('int64_t')
-                    dp = gen._new_temp('MojoDict *')
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
-                    gen._emit(f"  {dp} = (MojoDict *){ip};")
+                    dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v)
                     if isinstance(node.value, gimple_ctypes.BoolLiteral):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
@@ -1546,19 +1546,19 @@ def _gen_stmt_AssignStmt(gen, node):
             elif vtype == 'MojoList *':
                 _rhs_b = gen._new_val('MojoBytes *', f"mojo_bytes_from_list ({v})")
             else:
-                _rhs_b = gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(vtype, v)}")
+                _rhs_b = gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(vtype, v))
             if stgt.step is None:
                 start_v, stop_v = gen._lower_slice_bounds(stgt)
                 gen._emit(f"  mojo_bytearray_splice ({obj_v}, {start_v}, {stop_v}, {_rhs_b});")
                 return
-        lp = obj_v if ot == 'MojoList *' else gen._new_val(
-            'MojoList *', f"(MojoList *){gen._to_int64(ot, obj_v)}")
+        lp = obj_v if ot == 'MojoList *' else gen._coerce_to_type(
+            'int64_t', 'MojoList *', gen._to_int64(ot, obj_v))
         # RHS (`vtype`, `v`) is already lowered above. Both splice paths
         # read it as a MojoList* (raw int64_t element slots) — a list/tuple
-        # literal or any list-typed expression; box a stray non-pointer
-        # through the same cast the tuple-unpack path uses.
-        rhs = v if vtype == 'MojoList *' else gen._new_val(
-            'MojoList *', f"(MojoList *){gen._to_int64(vtype, v)}")
+        # literal or any list-typed expression. `x[:] = some_dict` is real
+        # Python too (splices in the dict's keys) — DESIGN.html R1/R5,
+        # shares _materialize_as_list with the tuple/list-unpack targets.
+        rhs = gen._materialize_as_list(vtype, v)
         if stgt.step is None:
             # `x[:] = y` / `x[a:b] = y` — a real element-shifting splice
             # (delete [start:stop), insert y's elements at start, grow or
@@ -1693,8 +1693,8 @@ def _gen_stmt_AugAssignStmt(gen, node):
         if (isinstance(node.target.obj, gimple_ctypes.IdentExpr)
                 and node.target.obj.name == 'sys'
                 and node.target.member == 'argv'):
-            _av = v if vtype == 'MojoList *' else gen._new_val(
-                'MojoList *', f"(MojoList *){v}")
+            _av = v if vtype == 'MojoList *' else gen._coerce_to_type(
+                vtype, 'MojoList *', v)
             gen._emit_call('void', '', 'mojo_replace_argv',
                             [('MojoList *', _av)])
             return
@@ -1830,9 +1830,8 @@ def _gen_stmt_AugAssignStmt(gen, node):
                           or gen._get_actual_type(it, idx_v) == 'char *')
             if actual_type == 'MojoDict *' or (idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
                 ip = gen._new_temp('int64_t')
-                dp = gen._new_temp('MojoDict *')
                 gen._emit(f"  {ip} = (int64_t){obj_v};")
-                gen._emit(f"  {dp} = (MojoDict *){ip};")
+                dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                 _, key_tmp2 = gen._char_to_cstr(it, idx_v)
                 if vtype == 'char *':
                     gen._emit_call('void', '', 'mojo_dict_set_str',
@@ -1842,7 +1841,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
             else:
                 ip = gen._new_val('int64_t', f"(int64_t){obj_v}")
-                lp = gen._new_val('MojoList *', f"(MojoList *){ip}")
+                lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
                 elem = gen._elem_of(obj_v)
                 suf = gimple_ctypes.TypeLattice.list_suffix(elem)
                 idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
@@ -2285,8 +2284,8 @@ def _gen_stmt_DelStmt(gen, node):
             # a slice) — an ambiguous/untracked boxed value is assumed to
             # be a list here, mirroring _lower_slice's own MojoList*
             # branch reasoning for the same ambiguity.
-            lp = ov if ot == 'MojoList *' else gen._new_val(
-                'MojoList *', f"(MojoList *){gen._to_int64(ot, ov)}")
+            lp = ov if ot == 'MojoList *' else gen._coerce_to_type(
+                'int64_t', 'MojoList *', gen._to_int64(ot, ov))
             gen._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
             continue
         if not isinstance(target, gimple_ctypes.SubscriptExpr):
@@ -2297,8 +2296,8 @@ def _gen_stmt_DelStmt(gen, node):
         ot, ov = gen.lower_expr(target.obj)
         if isinstance(target.index, gimple_ctypes.SliceExpr):
             start_v, stop_v = gen._lower_slice_bounds(target.index)
-            lp = ov if ot == 'MojoList *' else gen._new_val(
-                'MojoList *', f"(MojoList *){gen._to_int64(ot, ov)}")
+            lp = ov if ot == 'MojoList *' else gen._coerce_to_type(
+                'int64_t', 'MojoList *', gen._to_int64(ot, ov))
             gen._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
             continue
         if ot == 'MojoBytes *':
@@ -2333,14 +2332,14 @@ def _gen_stmt_DelStmt(gen, node):
             isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
             gen._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_after};")
             gen._emit_label(bb_dict)
-            dp = gen._new_val('MojoDict *', f"(MojoDict *){it64}")
+            dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
             dkey_type, dkey_val = gen.lower_expr(target.index)
             dkey_type, dkey_val = gen._char_to_cstr(dkey_type, dkey_val)
             gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
                              [('MojoDict *', dp), (dkey_type, dkey_val)])
             gen._emit(f"  goto {bb_after};")
             gen._emit_label(bb_list)
-            lp = gen._new_val('MojoList *', f"(MojoList *){it64}")
+            lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
             lidx_type, lidx_val = gen.lower_expr(target.index)
             lidx64 = gen._to_int64(lidx_type, lidx_val)
             gen._emit_call('int64_t', '', 'mojo_list_pop_at',
@@ -2632,9 +2631,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 if not (actual_type == 'MojoDict *'
                         or (_idx_is_str2 and actual_type not in ('MojoList *', 'MojoSet *'))):
                     ip = gen._new_temp('int64_t')
-                    lp = gen._new_temp('MojoList *')
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
-                    gen._emit(f"  {lp} = (MojoList *){ip};")
+                    lp = gen._coerce_to_type('int64_t', 'MojoList *', ip)
                     idx64 = gen._new_val('int64_t', f"(int64_t){idx_v}")
                     elem = gen._elem_of(obj_v) or 'int64_t'
                     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -2642,9 +2640,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {ev_cast});")
                 else:
                     ip = gen._new_temp('int64_t')
-                    dp = gen._new_temp('MojoDict *')
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
-                    gen._emit(f"  {dp} = (MojoDict *){ip};")
+                    dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v)
                     if isinstance(node.value, gimple_ctypes.BoolLiteral):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")

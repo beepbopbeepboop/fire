@@ -2707,6 +2707,68 @@ def _coerce_to_type(gen, src_type: str, dst_type: str, value: str) -> str:
     return result
 
 
+def _materialize_as_list(gen, src_type: str, value: str) -> str:
+    """DESIGN.html R1: the shared "give me a MojoList* view of this value"
+    decision, for an operation that accepts any iterable (Python's
+    all()/any(), enumerate(), str.join()/bytes.join()/shlex.join(), ...)
+    but whose runtime primitive only operates on a MojoList*.
+
+    A dict materializes its KEYS (real Python semantics — iterating a dict
+    yields keys); a set materializes via mojo_set_sorted (no unsorted
+    set->list runtime helper exists, and a Python set's iteration order is
+    unspecified anyway, so a stable materialization is fine). Anything else
+    goes through the ordinary R2 chokepoint unchanged.
+
+    This exact "materialize dict-keys/set-sorted/else-coerce" shape was
+    independently duplicated 5 times (all()/any(), enumerate(),
+    str.join(), bytes.join(), shlex.join()) during the same 2026-09-13 R3
+    cast-migration pass that introduced each of them one at a time — this
+    consolidation is the R1 follow-up DESIGN.html calls for.
+
+    DESIGN.html R5 (added same day as a direct follow-on of the R1
+    consolidation above): when `src_type` is a genuinely opaque/boxed
+    handle (int64_t/void*/other pointer — the real kind isn't statically
+    known), guard with the runtime kind registries
+    (`mojo_is_registered_dict`/`_set`) instead of blindly assuming list —
+    the exact gap bugs/CODEGEN_all_any_dict_set_miscompile.md documented.
+    Fixing it here, once, closes it for all 5 call sites at once."""
+    if src_type == 'MojoList *':
+        return value
+    if src_type == 'MojoDict *':
+        _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', value)])
+        gen._elem_types[_dk] = 'char *'  # dict keys are always strings
+        return _dk
+    if src_type == 'MojoSet *':
+        return gen._call_expr('MojoList *', 'mojo_set_sorted', [('MojoSet *', value)])
+    if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
+        it64 = gen._to_int64(src_type, value)
+        result = gen._new_temp('MojoList *')
+        bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
+        bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
+        bb_after = gen._new_bb()
+        isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
+        gen._emit(f"  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};")
+        gen._emit_label(bb_dict)
+        _dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
+        _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', _dp)])
+        gen._emit(f"  {result} = {_dk};")
+        gen._emit(f"  goto {bb_after};")
+        gen._emit_label(bb_not_dict)
+        iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', it64)])
+        gen._emit(f"  if ({iss}) goto {bb_set}; else goto {bb_not_set};")
+        gen._emit_label(bb_set)
+        _sp = gen._coerce_to_type('int64_t', 'MojoSet *', it64)
+        _sl = gen._call_expr('MojoList *', 'mojo_set_sorted', [('MojoSet *', _sp)])
+        gen._emit(f"  {result} = {_sl};")
+        gen._emit(f"  goto {bb_after};")
+        gen._emit_label(bb_not_set)
+        _lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
+        gen._emit(f"  {result} = {_lp};")
+        gen._emit_label(bb_after)
+        return result
+    return gen._coerce_to_type(src_type, 'MojoList *', value)
+
+
 def _infer_return_type(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
@@ -3534,7 +3596,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
         gen._emit_label(bb_body)
         raw_elem = gen._new_val('int64_t', f"mojo_list_get_int ({_iv}, {idx64})")
-        sub_list = gen._new_val('MojoList *', f"(MojoList *){raw_elem}")
+        sub_list = gen._coerce_to_type('int64_t', 'MojoList *', raw_elem)
 
         def _emit_slot_assign(ptr, vn, i, se):
             # Nested tuple target: the slot is an opaque boxed pair —
@@ -3550,7 +3612,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             _p = _as_str(ptr)
             if vn.startswith('(') and vn.endswith(')'):
                 raw_n = gen._new_val('int64_t', f"mojo_list_get_int ({_p}, {i})")
-                nested_ptr = gen._new_val('MojoList *', f"(MojoList *){raw_n}")
+                nested_ptr = gen._coerce_to_type('int64_t', 'MojoList *', raw_n)
                 nested_names = _split_top_level_comma(vn[1:-1].strip())
                 for j, nn in enumerate(nested_names):
                     _emit_slot_assign(nested_ptr, nn, j, 'int64_t')
@@ -3825,7 +3887,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 aval = gen._new_val('char *', f'(char *){aval}')
                 atype = 'char *'
             elif real == 'MojoDict *':
-                dp = gen._new_val('MojoDict *', f'(MojoDict *){aval}')
+                dp = gen._coerce_to_type('int64_t', 'MojoDict *', aval)
                 rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', dp)])
                 aval = rv
                 atype = 'char *'

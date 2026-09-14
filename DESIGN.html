@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DESIGN — Container Typing</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --fg:#1d1c1a; --muted:#5d5a55; --rule:#ddd8d0;
+    --card:#fff; --accent:#8a3324; --accent2:#1d4e63; --ok:#1f6b3a; --bad:#9b2226;
+    --code-bg:#f3f1ec; --code-fg:#23211e; --warn-bg:#fdf6e8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#16151a; --fg:#e9e6e1; --muted:#a29d95; --rule:#33313a;
+      --card:#1e1d24; --accent:#e08a6f; --accent2:#7fb8d4; --ok:#6fce96; --bad:#f0857f;
+      --code-bg:#111016; --code-fg:#e2ded8; --warn-bg:#241f14;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#16151a; --fg:#e9e6e1; --muted:#a29d95; --rule:#33313a;
+    --card:#1e1d24; --accent:#e08a6f; --accent2:#7fb8d4; --ok:#6fce96; --bad:#f0857f;
+    --code-bg:#111016; --code-fg:#e2ded8; --warn-bg:#241f14;
+  }
+  body{background:var(--bg);color:var(--fg);
+       font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       margin:0;padding:0 20px 80px;}
+  .wrap{max-width:980px;margin:0 auto;}
+  header{padding:44px 0 18px;border-bottom:2px solid var(--rule);margin-bottom:30px;}
+  h1{font-size:30px;margin:0 0 8px;letter-spacing:-.02em;}
+  .sub{color:var(--muted);font-size:15px;margin:0;}
+  h2{font-size:21px;margin:38px 0 12px;padding-top:16px;border-top:1px solid var(--rule);letter-spacing:-.01em;}
+  h3{font-size:16px;margin:24px 0 8px;color:var(--accent2);}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  code{background:var(--code-bg);color:var(--code-fg);padding:1px 5px;border-radius:4px;font-size:13px;}
+  pre{background:var(--code-bg);color:var(--code-fg);padding:14px 16px;border-radius:8px;
+      overflow-x:auto;font-size:13px;line-height:1.5;border:1px solid var(--rule);}
+  pre code{background:none;padding:0;font-size:13px;}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px;display:block;overflow-x:auto;}
+  th,td{border:1px solid var(--rule);padding:7px 10px;text-align:left;vertical-align:top;}
+  th{background:var(--code-bg);font-weight:600;}
+  td.num{text-align:right;font-family:ui-monospace,Menlo,monospace;}
+  .card{background:var(--card);border:1px solid var(--rule);border-left:3px solid var(--accent);
+        border-radius:6px;padding:14px 18px;margin:18px 0;}
+  .verdict{background:var(--warn-bg);border-left-color:var(--bad);}
+  .ok{color:var(--ok);font-weight:600;} .bad{color:var(--bad);font-weight:600;}
+  .muted{color:var(--muted);}
+  ol,ul{padding-left:22px;} li{margin:5px 0;}
+  .rule{background:var(--card);border:1px solid var(--rule);border-radius:6px;
+        padding:16px 18px;margin:20px 0;}
+  .rule h3{margin-top:0;color:var(--accent);font-size:17px;}
+  .violated{display:inline-block;background:var(--bad);color:#fff;border-radius:3px;
+            padding:1px 8px;font-size:11px;letter-spacing:.06em;margin-left:8px;vertical-align:2px;}
+  .held{display:inline-block;background:var(--ok);color:#fff;border-radius:3px;
+        padding:1px 8px;font-size:11px;letter-spacing:.06em;margin-left:8px;vertical-align:2px;}
+  .lbl{font-weight:600;color:var(--accent2);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>DESIGN — Container Typing in Codegen</h1>
+  <p class="sub">Why the <code>match_pattern</code> dict-as-list SIGBUS was possible, and the design
+  rules that had to be violated for it to happen.<br>Written 2026-09-13, from measurements of the
+  tree at commit <code>5633e87</code>.</p>
+</header>
+
+<h2>The question</h2>
+<p>
+<em>"Is all codegen for a Dict in 30 lines of code, trivial to audit? If not — if this is one of
+thousands of codegen bits for a Dict spread across 9 gimple files — isn't that the bug?"</em>
+</p>
+
+<div class="card verdict">
+<strong>Answer: it is not 30 lines, and yes — that is the bug.</strong><br><br>
+Container-kind handling is spread over <strong>17 files and 62,851 lines</strong>. The
+dict-versus-list decision is independently re-derived at <strong>239 sites</strong> in
+<strong>12 files</strong>, read back at <strong>224 more</strong>, and there is
+<strong>no single predicate</strong> anywhere that answers "is this value a dict?".
+The bug that took a full debugging session to find was one of those 239 sites
+choosing wrong. Nothing in the architecture prevents the other 238 from doing the same,
+and the fix I landed is <em>not</em> obvious in the code — it lives on one line inside a
+<strong>907-line function</strong>.
+</div>
+
+<h2>Measurements</h2>
+<p class="muted">All figures produced by grep/AST counting over <code>gimple_*.py</code>; reproduce with the commands in §Appendix.</p>
+<table>
+  <tr><th>Quantity</th><th>Count</th><th>Spread</th></tr>
+  <tr><td>Total codegen source</td><td class="num">62,851 LOC</td><td>17 files</td></tr>
+  <tr><td>Mentions of <code>MojoDict *</code></td><td class="num">364</td><td>15 files</td></tr>
+  <tr><td>Mentions of <code>MojoList *</code></td><td class="num">874</td><td>16 files</td></tr>
+  <tr><td><strong>Sites that ASSIGN a container ctype</strong> (decide the kind)</td><td class="num"><strong>239</strong></td><td>12 files</td></tr>
+  <tr><td><strong>Sites that BRANCH on a container ctype</strong></td><td class="num"><strong>224</strong></td><td>—</td></tr>
+  <tr><td>Sites emitting dict/list element read or write</td><td class="num">208</td><td>—</td></tr>
+  <tr><td>Distinct runtime entrypoints referenced (<code>mojo_dict_*</code> / <code>mojo_list_*</code>)</td><td class="num">34 / 44</td><td>—</td></tr>
+  <tr><td>Hard container-kind casts emitted (<code>(MojoList *)</code>/<code>(MojoDict *)</code>)</td><td class="num">146</td><td>—</td></tr>
+  <tr><td class="bad">Canonical "is this a dict?" predicate</td><td class="num bad">0</td><td>—</td></tr>
+  <tr><td class="bad">Codegen paths that REFUSE an impossible conversion</td><td class="num bad">0</td><td>—</td></tr>
+  <tr><td>Size of the function containing the fix (<code>_infer_param_types</code>)</td><td class="num">907 lines</td><td>1 of 239 sites</td></tr>
+</table>
+
+<h2>Rules violated</h2>
+
+<div class="rule">
+<h3>R1 · Single source of truth for a type decision<span class="violated">VIOLATED</span></h3>
+<p><span class="lbl">Rule.</span> A semantic classification — "this value is a dict, not a list" —
+must be computed by exactly one function. Every consumer calls it. CLAUDE.md already states the
+general form of this rule: <em>"Consolidate duplicates rather than maintaining parallel
+implementations. If two files do the same thing, merge them."</em></p>
+<p><span class="lbl">Evidence of violation.</span> 239 independent assignment sites across 12 files;
+zero canonical predicates. The kind is recomputed from scratch — from usage heuristics, from call
+signatures, from literal shapes, from element maps — in each one.</p>
+<p><span class="lbl">Consequence.</span> A correct fix must be applied 239 times to be complete, and
+there is no mechanical way to know whether it was. Each site is an independent opportunity to
+reintroduce the identical bug.</p>
+</div>
+
+<div class="rule">
+<h3>R2 · Coercion must be partial, and refuse the impossible<span class="violated">VIOLATED</span></h3>
+<p><span class="lbl">Rule.</span> A type-conversion chokepoint must be able to say <em>no</em>.
+<code>MojoDict *</code> → <code>MojoList *</code> is not a conversion; the structs are not
+layout-compatible. It must be a hard, loud compile-time failure naming both types and the
+source location.</p>
+<p><span class="lbl">Evidence of violation.</span> <code>_coerce_to_type</code>
+(<code>gimple_gen_infra.py:2643</code>) delegates to <code>_safe_coerce_emit</code>
+(<code>gimple_gen_resolve.py:1343</code>), which contains <strong>zero</strong> <code>raise</code>
+or <code>assert</code> statements. Repo-wide, <strong>no</strong> codegen path rejects an
+impossible type conversion. Every pair of types is silently convertible.</p>
+<p><span class="lbl">Consequence.</span> This is the single highest-leverage failure. The chokepoint
+already existed and every argument passed through it. One <code>raise</code> here would have
+converted a multi-session SIGBUS hunt into a precise error message at the exact moment the bad
+code was generated:
+<code>cannot coerce MojoDict * to MojoList * (arg 3 of match_pattern, ast_rewriter.py:672)</code>.</p>
+</div>
+
+<div class="rule">
+<h3>R3 · Never emit a cast that defeats the type checker<span class="violated">VIOLATED</span></h3>
+<p><span class="lbl">Rule.</span> The generated C's type system is a free, exhaustive verifier of
+this compiler's own reasoning. Emitting a pointer cast switches it off exactly where it would
+have paid out. Casts may be emitted only by the coercion chokepoint, and only after it has
+established the conversion is legal.</p>
+<p><span class="lbl">Evidence of violation.</span> 146 hard container-kind casts, written directly
+at call sites rather than by the chokepoint. The worst shape, appearing verbatim twice:</p>
+<pre><code>gimple_gen_calls.py:1309
+gimple_gen_calls.py:1342
+    lv = av if at == 'MojoList *' else gen._new_val('MojoList *', f'(MojoList *){av}')</code></pre>
+<p>Read plainly: <em>"if it is not already a list, declare that it is one."</em> No check that the
+source could possibly be a list.</p>
+<p><span class="lbl">Consequence.</span> GCC compiled the faulting program without a single
+warning. The emitted C was well-formed and meaningless. Note the contrast: when I removed
+the cast's protection by hand, GCC immediately caught an unrelated error
+(<code>'gen' undeclared</code>) in seconds — the checker works, when we let it.</p>
+</div>
+
+<div class="rule">
+<h3>R4 · Absence of evidence is not evidence<span class="violated">VIOLATED — and self-documented</span></h3>
+<p><span class="lbl">Rule.</span> An inference that cannot prove a property must record
+<em>"unknown"</em> and degrade to a safe representation. It must never convert "I could not prove
+this key is a string" into "therefore this container is a list."</p>
+<p><span class="lbl">Evidence of violation.</span> The codebase <em>states this rule</em> at
+<code>gimple_gen_infra.py:2114</code> —</p>
+<pre><code>&#47;&#47; ... reaching this branch only means "some subscript key could not be
+&#47;&#47; PROVEN to be a string" — the absence of evidence, not evidence of a
+&#47;&#47; list. The unambiguous signal has to win, or a dict subscripted with a
+&#47;&#47; key whose stringness this analysis cannot see through ... is silently
+&#47;&#47; typed `MojoList *`.</code></pre>
+<p>— and then, 25 lines later, does exactly that:</p>
+<pre><code>else:
+    inferred[pname] = 'MojoList *'          &#47;&#47; gimple_gen_infra.py:2139</code></pre>
+<p>The comment predicts the bug precisely, including its mechanism. A previous author saw it,
+patched the one instance in front of them (<code>is_dict_method</code>), and left the default
+in place.</p>
+<p><span class="lbl">Consequence.</span> Two single-flag booleans
+(<code>is_str_key_subscripted</code>, <code>is_nondict_key_subscripted</code>) collapse three
+distinct states — <em>provably string</em>, <em>provably not string</em>, <em>unknown</em> — into
+two. "Unknown" is silently merged into "provably not a string," which then means "list."</p>
+</div>
+
+<div class="rule">
+<h3>R5 · Use the runtime facts you already have<span class="violated">VIOLATED</span></h3>
+<p><span class="lbl">Rule.</span> Where a static type cannot be proven, a cheap runtime check
+should guard the operation rather than a guess being baked in.</p>
+<p><span class="lbl">Evidence of violation.</span> The runtime maintains exact kind registries and
+exposes <code>mojo_is_registered_dict()</code> / <code>mojo_is_registered_list()</code>. These are
+precisely the functions I called in the debugger to <em>prove</em> the object was a dict — the
+ground truth was available at runtime all along. Codegen references them in only
+<strong>11</strong> places, all for <code>repr</code>/formatting in
+<code>gimple_cpp_core.py</code>. <strong>Not one</strong> guards a container element access.</p>
+<p><span class="lbl">Consequence.</span> The program had, at the moment of the fault, everything
+needed to detect it. <code>mojo_list_get_int</code> received a pointer the runtime knew was a
+dict, and indexed it anyway.</p>
+</div>
+
+<div class="rule">
+<h3>R6 · A self-hosting compiler must be run, not just emitted<span class="violated">VIOLATED</span></h3>
+<p><span class="lbl">Rule.</span> The Python shim never <em>executes</em> the C it writes, so it
+cannot fail on a miscompile. Any check that only exercises the shim proves nothing about the
+compiled path.</p>
+<p><span class="lbl">Evidence of violation.</span> The shim happily emitted
+<code>(MojoList *)mojo_dict_new ()</code> and exited 0 for months. The defect was only observable
+by running the self-hosted binary — and even then it was mis-recorded for several sessions as
+"cosmetic, output is byte-identical," because the verification compared empty stdout captures
+instead of the real <code>mojo.ci</code> artifact.</p>
+<p><span class="lbl">Consequence.</span> Green gates on a broken compiler. A compiler that
+miscompiles itself always looks healthy from the interpreter.</p>
+</div>
+
+<div class="rule">
+<h3>R7 · One chokepoint, not a thousand special cases<span class="held">CORRECT INSTINCT, UNDERBUILT</span></h3>
+<p>Worth recording what the design got <em>right</em>. <code>_coerce_to_type</code> carries this
+docstring:</p>
+<pre><code>Works for ANY type pair without function-name awareness.
+Scales to 1M functions - ONE routine, not 1M special cases.</code></pre>
+<p>That is exactly the right architecture, and it means <strong>R2's fix has a home already</strong>.
+The chokepoint exists and is on the path; it is merely total where it should be partial. The
+remediation below is therefore far smaller than the 239-site number suggests.</p>
+</div>
+
+<h2>How the rules failed, in order</h2>
+<p>Each rule below, had it held, would have stopped the bug on its own.</p>
+<table>
+  <tr><th>#</th><th>Step</th><th>Rule that would have caught it</th></tr>
+  <tr><td>1</td><td><code>_expr_is_stringish</code> cannot prove <code>_as_str(x)</code> is a string</td><td>—<span class="muted"> (a genuine analysis gap; the real defect is what happens next)</span></td></tr>
+  <tr><td>2</td><td>"unprovable" is recorded as <code>is_nondict_key_subscripted = True</code></td><td class="bad">R4</td></tr>
+  <tr><td>3</td><td><code>else: inferred['bindings'] = 'MojoList *'</code> guesses a concrete kind</td><td class="bad">R4, R1</td></tr>
+  <tr><td>4</td><td>Call site coerces a real <code>MojoDict *</code> into the declared <code>MojoList *</code></td><td class="bad">R2</td></tr>
+  <tr><td>5</td><td>Coercion emits <code>(MojoList *)</code>, silencing GCC</td><td class="bad">R3</td></tr>
+  <tr><td>6</td><td>Every <code>bindings[k]</code> lowers to <code>mojo_list_get_int</code></td><td class="bad">R1</td></tr>
+  <tr><td>7</td><td>Runtime indexes a dict as a list; no guard consults the kind registry</td><td class="bad">R5</td></tr>
+  <tr><td>8</td><td>Shim exits 0; only the self-hosted binary faults</td><td class="bad">R6</td></tr>
+</table>
+<p>
+Eight steps, seven of them structural. The analysis gap at step 1 is ordinary and forgivable —
+a static analyser will always have blind spots. Everything after it is the design converting a
+blind spot into 34 GB of wild pointer arithmetic.
+</p>
+
+<h2>Remediation, in leverage order</h2>
+<ol>
+  <li><strong>Make <code>_safe_coerce_emit</code> refuse impossible conversions (R2).</strong>
+      One edit, one chokepoint, already on the path. Define a small incompatibility relation —
+      distinct container kinds (<code>MojoList</code>/<code>MojoDict</code>/<code>MojoSet</code>/
+      <code>MojoBytes</code>) never convert to one another — and raise with both types and the
+      source location. This is the change that turns every future instance of this entire bug
+      class into a build failure with a precise message.
+      <span class="muted">Expect fallout: it will surface existing latent miscompiles. That is the
+      point, and they should be fixed, not exempted.</span></li>
+
+  <li><strong>Introduce the missing predicate and route the 239 sites through it (R1).</strong>
+      A single <code>container_kind(value_or_type) -> 'list'|'dict'|'set'|'unknown'</code>.
+      Mechanical, reviewable, and it makes a fix like the one I landed a one-line change in an
+      obvious place instead of one line inside a 907-line function.</li>
+
+  <li><strong>Represent "unknown" explicitly (R4).</strong> Replace the two-boolean key encoding
+      with a three-valued result. An unproven key must select the opaque representation
+      (<code>int64_t</code> box) or a guarded runtime dispatch — never a concrete container kind.</li>
+
+  <li><strong>Ban ad-hoc casts (R3).</strong> All 146 sites emit via the chokepoint. Enforce with a
+      grep-based test that fails CI on a literal <code>(MojoList *)</code>/<code>(MojoDict *)</code>
+      outside <code>gimple_gen_resolve.py</code>.</li>
+
+  <li><strong>Guard unproven container access at runtime (R5).</strong> Where the kind is unknown,
+      emit a <code>mojo_is_registered_dict()</code>-guarded dispatch. A branch is cheaper than a
+      multi-session debugging hunt, and the registries already exist.</li>
+
+  <li><strong>Add a gate step that runs the self-hosted binary on real work and checks the
+      artifact (R6).</strong> Not exit code — artifact size and content.
+      <code>MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full</code> producing a 0-byte
+      <code>mojo.ci</code> must fail loudly. This one check would have caught the regression
+      the moment it appeared.</li>
+</ol>
+
+<h2>What "obvious" should look like</h2>
+<p>
+The test for whether this is fixed is not "is the SIGBUS gone." It is: <em>can a reader
+determine, from one place, how a dict subscript becomes C?</em> Today the honest answer is no —
+it requires reading 239 decision sites across 12 files and knowing which of them wins.
+After remediation the answer should be: one predicate decides the kind, one chokepoint
+converts between kinds and refuses the impossible, and every emission site is downstream of
+both. At that point a wrong container type is a build error, not a 26-millisecond SIGBUS
+34 GB past the end of a slot array.
+</p>
+
+<h2>Appendix — reproducing the measurements</h2>
+<pre><code># decision sites: assign a container ctype
+grep -nE "=\s*'(MojoDict|MojoList) \*'" gimple_*.py | wc -l          # 239
+grep -nE "=\s*'(MojoDict|MojoList) \*'" gimple_*.py | cut -d: -f1 | sort | uniq -c | sort -rn
+
+# sites branching on container ctype
+grep -n "== *'MojoDict \*'\|'MojoDict \*',\|in (\s*'MojoDict" gimple_*.py | wc -l   # 224
+
+# hard casts emitted
+grep -n "(MojoList \*)\|(MojoDict \*)" gimple_*.py | wc -l           # 146
+
+# canonical predicate (expect none)
+grep -nE "def .*(is_dict|dict_like|is_mapping|container_kind|is_dict_type)" gimple_*.py
+
+# coercion refusals (expect none)
+grep -ncE "raise|assert" &lt;(sed -n '1343,1460p' gimple_gen_resolve.py)
+
+# runtime kind predicates used as guards (expect repr-only)
+grep -n "mojo_is_registered_dict\|mojo_is_registered_list" gimple_*.py</code></pre>
+
+<p class="muted" style="margin-top:30px;">
+Companion document: <code>HOW-TO-DEBUG.html</code> — the methodology used to find this bug,
+and the gdbtool/watchpoint techniques for the next one.
+</p>
+
+<h2>Status update — 2026-09-13, R3 migration pass</h2>
+<div class="card">
+<p><span class="lbl">R2/R4/R6/R1(partial)</span> landed earlier the same day (634852c, fe1c36e,
+b00955c) — see the project memory for that history.</p>
+<p><span class="lbl">R3 (ban ad-hoc casts)</span>: of the 169-cast baseline frozen by
+<code>test_no_new_container_casts.py</code> at 634852c, <strong>139 sites routed through a real
+chokepoint this pass</strong>, baseline lowered <strong>169 → 30</strong>:</p>
+<ul>
+<li>62 sites across <code>gimple_gen_infra/calls/exprs/loops/methods/stmts.py</code> now go
+through <code>gen._coerce_to_type</code> — the GIMPLE-statement R2 chokepoint itself (so these
+also inherit R2's impossible-conversion refusal, not just cast consolidation).</li>
+<li>74 sites in <code>gimple_cpp_core.py</code> (the separate C++ fallback expression-string
+lowering path — no `gen` statement stream to emit into, so the GIMPLE chokepoint doesn't fit)
+now go through a new sibling helper, <code>_cpp_as()</code>, added to that file. It is a pure
+text-consolidation cast (R1: one function, not 74 independent
+<code>f"(MojoList *)(...)"</code> sites) with deliberately no R2 refusal — every site using it
+had already proven the value's real kind via a static-type branch before the cast, so this is
+provably a zero-behavior-change refactor (byte-identical generated C++), not a coercion
+decision.</li>
+<li>3 more sites (a second pass, same day) needed real behavior fixes, not just routing:
+<code>all()</code>/<code>any()</code> and <code>enumerate()</code> over a <em>statically-known</em>
+<code>MojoDict *</code>/<code>MojoSet *</code> now materialize via <code>mojo_dict_keys</code>/
+<code>mojo_set_sorted</code> before the list-based runtime call, instead of reinterpreting the
+dict/set header as a list. <code>set.update(a_list)</code> got a real per-element
+<code>mojo_set_add_int</code>/<code>_str</code> loop (the bulk <code>mojo_set_update</code> call
+only accepts another <code>MojoSet *</code>), and <code>bytes.join(...)</code> got the same
+dict/set materialization as <code>all()</code>/<code>any()</code>.</li>
+</ul>
+<p>The remaining 30 are comments the grep also matches, C source text with no <code>gen</code> in
+scope to route through (raw runtime-helper/struct-allocator strings, already either
+runtime-guarded or safe-by-construction), or genuine "no static proof, could really be a
+different container kind at runtime" sites — routing THOSE through the R2-refusing chokepoint
+would trade a silent miscompile for a build crash on currently-working code. Every one of the 30
+now carries an inline comment naming which case it is and, where relevant, what a real fix would
+need (a runtime <code>mojo_is_registered_dict</code>/<code>_set</code> guard, mostly).</p>
+
+<h2>Status update — 2026-09-13, R1/R5 follow-up</h2>
+<div class="card">
+<p>Auditing the 30 remaining R3 exceptions surfaced a real R1 violation this same session had
+just introduced: the "materialize a dict's keys / a set's elements / else coerce to list" shape
+was independently written out five separate times — in <code>all()</code>/<code>any()</code>,
+<code>enumerate()</code>, <code>str.join()</code>, <code>bytes.join()</code>, and
+<code>shlex.join()</code> — as each one got its own R3 fix earlier the same day.</p>
+<p>Consolidated into one function, <code>gimple_gen_infra._materialize_as_list(gen, src_type,
+value)</code>, and routed all five call sites through it (R1: "consolidate duplicates... if two
+files do the same thing, merge them" — applied here to code this very pass had just duplicated).
+Baseline lowered <strong>30 → 28</strong> as a side effect (the fifth, previously-uncoercible
+fallback cast in each copy collapsed into one).</p>
+<p>With the five call sites sharing one function, the residual "genuinely unknown/boxed handle"
+branch — DESIGN.html's outstanding R5 gap, previously left undone in all five copies because
+fixing it meant duplicating a runtime-guard dispatch five times — became a single, one-time fix:
+<code>_materialize_as_list</code> now guards that case with <code>mojo_is_registered_dict</code>/
+<code>mojo_is_registered_set</code> before falling back to list, closing
+<code>bugs/CODEGEN_all_any_dict_set_miscompile.md</code> for real, for all five call sites at once.
+<code>set.update(x)</code> was also refactored onto the same helper plus a shared per-element
+<code>mojo_set_add_int</code>/<code>_str</code> loop, replacing its own remaining R3 exception.</p>
+<p>Continued auditing found 4 MORE real, pre-existing sites (not created by this session's own
+work) that reach a container-kind coercion with a variable source type that <em>can genuinely be</em>
+<code>MojoDict *</code>/<code>MojoSet *</code> in valid Python, not just an ambiguous boxed handle:
+tuple/list-unpack targets (<code>a, b = some_dict</code>, <code>*a, b = some_dict</code>,
+<code>[a, b] = some_dict</code> — all real Python, unpacking a dict's keys) and a slice-assign
+splice RHS (<code>x[:] = some_dict</code>). Confirmed via an actual crash repro
+(<code>a, b = d</code> raised <em>"cannot coerce MojoDict * to MojoList *"</em> before the fix) —
+this disproved this session's own earlier reasoning that one of these four
+(<code>_tuple_elem_value</code>'s fallback) could only be reached via an upstream bug. All four
+routed through <code>_materialize_as_list</code> too.</p>
+<p>Continuing the same search (guards that exclude <code>MojoDict *</code>/<code>MojoSet *</code>
+where the real Python builtin accepts any iterable) found 3 more: <code>bytes(a_dict)</code>/
+<code>bytearray(a_set)</code> of ints (a valid bytes()/bytearray() source in real Python)
+previously fell to the wrong branch entirely, silently producing zero-filled bytes of the wrong
+length rather than crashing; <code>min(a_dict)</code>/<code>max(a_set)</code> (real Python: min/max
+key or element) fell through to an unsupported stub. Most severe:
+<code>sum(a_dict)</code>/<code>sum(a_set)</code> had <strong>no dispatch anywhere in the
+path</strong> — not even an ad-hoc cast in this codegen — because <code>mojo_sum</code>/
+<code>mojo_sum_double</code> themselves unconditionally reinterpret their argument as
+<code>MojoList *</code> at the C level with zero runtime check. All fixed via
+<code>_materialize_as_list</code>, which — as a side effect — also adds the R5 runtime guard to
+<code>sum()</code>'s previously-unprotected boxed/untyped case. <strong>8 real bugs found and
+fixed this pass</strong>, beyond the 5-site duplication this session's own R3 work had created.
+Checked <code>in</code>/<code>not in</code> membership testing too — already dispatches correctly
+on dict/set/list, no fix needed there.</p>
+<p>A ninth, structurally different bug: <code>gimple_gen_methods.py</code>'s boxed-`int64_t`
+method-name-based unboxing dispatcher resolved <code>.remove()</code> to
+<code>MojoSet *</code> and <code>.clear()</code> to <code>MojoList *</code> unconditionally —
+both are real methods on multiple container kinds in Python (<code>.remove()</code> on list AND
+set; <code>.clear()</code> on list, dict, AND set), so a boxed value that was actually a
+<code>MojoList *</code> had <code>.remove(x)</code> routed into <code>_lower_set_method</code>,
+which has no <code>'remove'</code> case at all, silently no-op'ing instead of removing the
+element. Fixed with a real <code>mojo_is_registered_dict</code>/<code>_set</code> runtime
+dispatch (falling back to list) before calling the matching runtime function, mirroring the
+existing dict-vs-list dispatch pattern already used elsewhere (<code>_gen_for_iter</code>,
+<code>DelStmt</code> subscript handling). Verified via an isolated compile plus simd.mojo.</p>
+<p>R1 full migration (the ~300 originally-scoped independent decision sites, most of which are
+genuine heuristic inference under real ambiguity rather than mechanical duplication like the
+case above) and general R5 infrastructure for the remaining unguarded sites are still open —
+this pass fixed the high-leverage, low-risk instances the R3 work itself created plus 9 genuine
+pre-existing bugs the same search technique surfaced, not the larger pre-existing scope.</p>
+<p><span class="lbl">Full gate, run at the end of this batch:</span> <code>check-gimple</code>,
+<code>check-runner</code>, <code>check-modcache</code>, <code>check-selfhost</code>,
+<code>check-runtimediff</code>, <code>check-linkmode</code>, <code>check-no-new-casts</code> (28
+casts, baseline unchanged), <code>compile_stdlib.py</code> (664/664, 0 failures), and a from-
+scratch stdlib dylib rebuild (0 skips) all pass. <code>check-noshim-dumpfull</code> fails — the
+same pre-existing self-host module-drop divergence (byte offset 2390, `gimple_gen_coro` missing
+from the self-hosted build) confirmed via <code>git stash</code> bisection to exist on the
+untouched <code>b00955c</code> tree, unrelated to this session's R1/R3/R5 work — see
+<code>bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md</code>, tracked separately.</p>
+</div>
+</div>
+
+</div>
+</body>
+</html>

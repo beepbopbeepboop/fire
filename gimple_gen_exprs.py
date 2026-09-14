@@ -540,7 +540,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # actually holds a `MojoList *` for the duration of its single forward
     # consumption — hand every read the properly-cast list pointer.
     if name in gen._genexp_list_locals and name in gen.var_types:
-        _lt = gen._new_val('MojoList *', f'(MojoList *){cname}')
+        _lt = gen._coerce_to_type('char *', 'MojoList *', cname)
         _elem = gen._genexp_list_locals[name]
         if _elem and _elem != 'int64_t':
             gen._elem_types[_lt] = _elem
@@ -842,7 +842,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             and node.member in ('key', 'value')):
         _pv_type = gen._dict_item_pair_vars[node.obj.name]
         _pv_raw = gen._cname(node.obj.name)
-        _pair = gen._new_val('MojoList *', f"(MojoList *){_pv_raw}")
+        _pair = gen._coerce_to_type('int64_t', 'MojoList *', _pv_raw)
         if node.member == 'key':
             return 'char *', gen._new_val(
                 'char *', f"mojo_list_get_str ({_pair}, 0)")
@@ -2342,6 +2342,17 @@ def _lb_as_set(gen, t: str, v: str) -> str:
     trustworthy, before it can be embedded in emitted C text."""
     if t == 'MojoSet *':
         return v
+    # DESIGN.html R3 exception, NOT routed through gen._coerce_to_type:
+    # (1) `t` can genuinely be a different container kind here (e.g.
+    # `some_dict.keys() | other` reaching this via the set-op binary
+    # path), which the chokepoint would hard-refuse - a real behavior
+    # change needing its own verification; (2) this function's docstring
+    # above documents a SPECIFIC, already-diagnosed self-host `gen`-type-
+    # erasure hazard for every `gen.` call here, worked around by the
+    # `_as_str` wrapping - `_coerce_to_type` is itself a `gen.` call
+    # subject to the identical hazard, and swapping it in without
+    # re-verifying the erasure workaround still holds risks reintroducing
+    # that exact bug. Left as the direct cast.
     return _as_str(gen._new_val('MojoSet *', f'(MojoSet *){_as_str(gen._ensure_local(t, v))}'))
 
 
@@ -2393,10 +2404,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     alt = gen._actual_types.get(lv, gen.var_types.get(lv, lt))
     art = gen._actual_types.get(rv, gen.var_types.get(rv, rt))
     if op == '+' and alt == 'MojoList *' and art == 'MojoList *':
-        lcast = lv if lt == 'MojoList *' else gen._new_temp('MojoList *')
-        if lt != 'MojoList *': gen._emit(f"  {lcast} = (MojoList *){lv};")
-        rcast = rv if rt == 'MojoList *' else gen._new_temp('MojoList *')
-        if rt != 'MojoList *': gen._emit(f"  {rcast} = (MojoList *){rv};")
+        lcast = lv if lt == 'MojoList *' else gen._coerce_to_type(lt, 'MojoList *', lv)
+        rcast = rv if rt == 'MojoList *' else gen._coerce_to_type(rt, 'MojoList *', rv)
         t = gen._new_val('MojoList *', f"mojo_list_concat ({lcast}, {rcast})")
         if lcast in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lcast]
@@ -2423,7 +2432,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op == '+' and lt == 'MojoList *' and rt.endswith(' *'):
         rcast = rv
         if rt != 'MojoList *':
-            rcast = gen._new_val('MojoList *', f"(MojoList *){rv}")
+            rcast = gen._coerce_to_type(rt, 'MojoList *', rv)
         t = gen._new_val('MojoList *', f"mojo_list_concat ({lv}, {rcast})")
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
@@ -2439,7 +2448,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # boxed handle, producing a garbage list that faulted later in
     # mojo_str_join (A5-BUG.md section 1's bootstrap failure).
     if op == '+' and rt == 'MojoList *' and lt in ('int', 'int64_t', 'void *'):
-        lcast = gen._new_val('MojoList *', f"(MojoList *){lv}")
+        lcast = gen._coerce_to_type(lt, 'MojoList *', lv)
         t = gen._new_val('MojoList *', f"mojo_list_concat ({lcast}, {rv})")
         if rv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[rv]
@@ -2607,7 +2616,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 return gen._new_val('MojoBytes *', f"mojo_bytes_from_cstr ({cv})")
             if ct == 'MojoMemoryView *':
                 return gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({cv})")
-            return gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(ct, cv)}")
+            return gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(ct, cv))
         return 'MojoBytes *', gen._call_expr(
             'MojoBytes *', 'mojo_bytes_concat',
             [('MojoBytes *', _as_bytes(lt, lv)), ('MojoBytes *', _as_bytes(rt, rv))])
@@ -2635,7 +2644,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         if ot_other == 'MojoMemoryView *':
             other = gen._new_val('MojoBytes *', f"mojo_memoryview_tobytes ({other})")
         elif ot_other != 'MojoBytes *':
-            other = gen._new_val('MojoBytes *', f"(MojoBytes *){gen._to_int64(ot_other, other)}")
+            other = gen._coerce_to_type('int64_t', 'MojoBytes *', gen._to_int64(ot_other, other))
         eq_t = gen._new_val('int', f"mojo_memoryview_eq ({mv}, {other})")
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
@@ -3589,7 +3598,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
             gen._emit(f"  mojo_list_append_int ({l1}, {xv64});")
             needle = gen._call_expr('MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', l1)])
         else:
-            needle = gen._new_val('MojoBytes *', f'(MojoBytes *){xv}')
+            needle = gen._coerce_to_type(xt, 'MojoBytes *', xv)
         gen._emit_call('int', ti, 'mojo_bytes_contains', [('MojoBytes *', rv), ('MojoBytes *', needle)])
     elif rt == 'MojoStr *':
         gen._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
