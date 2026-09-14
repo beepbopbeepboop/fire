@@ -621,8 +621,128 @@ site identifier, then compare self-hosted vs shim to see WHICH site
 actually emits `Generator`/`GimpleGen`/`GlobalStmt` — this was not
 attempted this session and is the recommended starting point.
 
+## Finding 5 UPDATE — root cause actually found (same session, continued)
+
+Finding 5's text-assembly-vs-iteration-order question above turned out
+to be moot: continued digging (comparing the FULL, still-extracted
+`GimpleGen` struct body from a real end-to-end compile, not just the
+scan function's return value in isolation) showed the struct's field
+CONTENT itself was STILL wrong for ~19 fields, despite the struct's
+total field COUNT matching (292=292). This directly explains Finding
+5 too: the topological struct-emission sort (gen_module_impl,
+~gimple_module_gen.py:6933-6962 — NOT the `track_best` loop
+instrumented above, which really is just a fallback/dedup pass) orders
+structs by resolved field-type DEPENDENCIES; a GimpleGen with fewer
+correctly-typed struct-pointer fields has fewer dependency edges and
+becomes topologically "ready" in an earlier pass self-hosted than the
+shim's correctly-typed version. Finding 5 is NOT a separate bug — it
+is a symptom of Bug C being incompletely fixed. `track_best`'s
+iteration order and module-compile order were both real, correctly-
+eliminated hypotheses; they just weren't where the actual remaining
+corruption lived.
+
+Tracing why the struct content was still wrong found the SAME field-
+type-inference machinery already fixed for the extracted-helper scan
+(`_selfhost_scan_gimplegen_extra_fields`, in `585879c`) had an
+UNFIXED sibling: `_selfhost_gimplegen_field_types`'s own class-body/
+`__init__`/method scan (used for `self.X = <literal>` writes inside
+`class GimpleGen`'s OWN methods, as opposed to the extracted-helper
+files) still called `gimple_exprtypes._walk_ast(_m.body)` directly —
+the exact same broken shared utility, just not yet worked around here.
+Three real fixes landed for this (commit `dba69b8`, see that commit
+message for full detail): a dedicated walker replacing `_walk_ast`
+(mirroring the sibling scan's fix), `TernaryExpr` handling in
+`_selfhost_literal_ctype` (a real gap independent of the walker issue
+— `gen.field = X if cond else Y` shaped RHS values were never
+literal-inferable at all, in either the shim or self-hosted), and a
+positional workaround for `__init__` lookup after discovering `.name`
+reads on `FunctionDef` nodes from this object graph are corrupted
+self-hosted.
+
+That last discovery — `.name` corruption — turned out to be the tip of
+something bigger: `.type_ann` reads on `AssignStmt` nodes from the
+SAME object graph are ALSO corrupted self-hosted (confirmed by hand:
+`isinstance(getattr(_n, 'type_ann', None), str)` evaluates `False`
+self-hosted for an assignment the shim correctly reads as the string
+`"DispatchSolver | None"`). This is NOT the same `_as_str()`-shaped
+bug as everywhere else in this doc — `_as_str()` recovers a boxed
+STRING value; here the value isn't even TYPED as a string self-hosted,
+it's outright wrong/garbage at the attribute-read level. This affects
+the smaller remaining set of GimpleGen fields whose correct type comes
+from an explicit annotation on the assignment itself (`self.X: T = ...`)
+rather than `__init__` parameter passthrough (`_dispatch_solver`,
+`_cpp_gen_self_struct`, `_cpp_last_tuple_slot_ctypes`, and similar) —
+NOT fixed, and is now the actual, precisely-isolated remaining blocker
+for `make check-noshim-dumpfull` (diff 1,419,444 lines, first
+differing byte still ~19215 — same GimpleGen-struct-position symptom).
+
+**What makes this different from every other bug in this doc**: every
+previous self-hosted-only bug found across this whole investigation
+(here and in the sibling `--dump-full-determinism-progress` /
+`selfhost-shimless-progress` memories) has been a *comparison* or
+*key-typing* problem — a boxed value compared/used-as-key without
+`_as_str()`, a `type(x)`-keyed dict losing fidelity, an isinstance
+check misclassifying a dataclass instance as a scalar. All of those
+are fixable by normalizing HOW an already-correctly-typed value gets
+used. This one is different: the underlying attribute READ itself
+(`.name` on a `FunctionDef`, `.type_ann` on an `AssignStmt`) returns
+wrong data self-hosted, with no normalization able to recover it,
+specific to objects built by `_selfhost_load_gimplegen_class`'s
+runtime meta-reparse of `gimple_codegen.py` (invoking the self-hosted-
+compiled `Parser` as a library call at RUNTIME, not through the
+ordinary compile-then-immediately-consume flow every other AST node in
+this codebase goes through). A `FunctionDef`/`AssignStmt` built the
+ORDINARY way (parsed once, consumed during that same compile) has
+never shown this symptom anywhere else in this codebase's history.
+
+**Recommended next steps for a future dedicated session** (this is
+likely a substantial, Bug-C-sized undertaking in its own right, not a
+quick patch):
+1. Confirm the SCOPE: write a minimal self-hosted repro that parses a
+   tiny class via `Parser(...).parse_module()` at runtime (mimicking
+   `_selfhost_load_gimplegen_class`'s exact call shape) and reads
+   `.name`/`.type_ann` off its methods/assignments immediately — does
+   the corruption reproduce on a MUCH smaller object graph, or is it
+   specific to `class GimpleGen`'s real size/complexity (4000+ lines,
+   363 methods)? This determines whether the bug is about runtime
+   re-parsing in general or something size/complexity-dependent (e.g.
+   a GC/memory-pressure interaction, or an internal object-pool/arena
+   reuse bug that only manifests past some object count).
+2. If it reproduces small: this is a general, `_selfhost_load_
+   gimplegen_class`-independent bug in the self-hosted runtime's
+   dataclass-field-read path for RUNTIME-CONSTRUCTED (not compile-time)
+   AST objects specifically — worth searching the runtime C sources
+   (`runtime/mojo_runtime.c`) for whatever backs dataclass field access
+   (`_mojo_dispatch_getattr` and friends, mentioned in several comments
+   throughout this codebase) to understand why object PROVENANCE
+   (parsed live at runtime vs. parsed during the normal compile pass)
+   would matter to that dispatch at all — it shouldn't, structurally,
+   unless something about `_SELFHOST_GG_CACHE`'s caching, or the
+   isolation between the "outer" self-hosted process and objects it
+   constructs mid-run, is involved.
+3. If it does NOT reproduce small: narrow by binary-searching how much
+   of `class GimpleGen` needs to be included in the re-parsed source
+   before `.name`/`.type_ann` corruption appears, to find the actual
+   trigger (a specific field count, method count, or file size
+   threshold).
+4. Once root-caused, re-verify ALL of this session's `_as_str()`-based
+   fixes are still needed/correct — some of the earlier `_as_str()`
+   "fixes" in this exact investigation may have been treating a
+   SYMPTOM of this same deeper corruption rather than the classic
+   boxed-string-as-dict-key issue; they were verified safe and net-
+   positive via the full gate either way, but the ROOT explanation for
+   a few of them may need revising once this is understood.
+
 ## Followups (not fixed this session, worth a future audit)
 
+- **The `.name`/`.type_ann` attribute-read corruption on objects from
+  `_selfhost_load_gimplegen_class`'s runtime meta-reparse is now THE
+  PRIORITY ITEM** for a future session — see the "Finding 5 UPDATE"
+  section immediately above for full detail and recommended next
+  steps. This is a genuinely new class of self-hosted bug (attribute-
+  read corruption, not a comparison/key-typing issue) that may affect
+  other runtime-meta-reparse patterns in the codebase beyond this one
+  GimpleGen use case.
 - **`type(x)`-keyed dict/cache lookups are a confirmed-unreliable
   self-hosted pattern**, found independently in TWO places this session
   (`_WALK_FIELD_NAMES_CACHE` in gimple_exprtypes.py, and
