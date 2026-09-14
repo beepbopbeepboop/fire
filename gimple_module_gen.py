@@ -1877,7 +1877,7 @@ def gen_module_impl(self, stmts):
         _sg_cf = getattr(self, '_current_filename', None)
         if _sg_cf:
             _sg_abs = os.path.abspath(os.path.dirname(_sg_cf))
-            if _sg_abs == _SELFHOST_DIR or _sg_abs.startswith(_SELFHOST_DIR + os.sep):
+            if gimple_codegen._is_selfhost_source_dir(_sg_abs):
                 _seed_selfhost_module_globals(self)
                 _seed_selfhost_struct_dict_field_types(self)
                 _seed_selfhost_return_elem_types(self)
@@ -2187,9 +2187,8 @@ def gen_module_impl(self, stmts):
     }
 
     _cur_file = getattr(self, '_current_filename', None)
-    _cur_abs = os.path.abspath(_cur_file) if _cur_file else ''
-    _is_selfhost_file = bool(_cur_file) and (
-        _cur_abs == _SELFHOST_DIR or _cur_abs.startswith(_SELFHOST_DIR + '/'))
+    _is_selfhost_file = bool(_cur_file) and gimple_codegen._is_selfhost_source_dir(
+        os.path.abspath(os.path.dirname(_cur_file)))
     if _is_selfhost_file:
         self.struct_field_types['Scope'] = {
             'parent': 'Scope *',

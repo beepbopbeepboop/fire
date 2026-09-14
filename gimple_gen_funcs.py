@@ -892,9 +892,25 @@ def _selfhost_ann_ctype(_ann):
     `X | None` / `Optional[X]` → `X *` for a struct name X; builtins mapped
     via _SELFHOST_ANN_CTM. Conservative: unknown → None (caller keeps its
     own default)."""
-    if not isinstance(_ann, str):
+    # NOT `isinstance(_ann, str)`: callers pass `AssignStmt.type_ann` /
+    # `VarDecl.type_ann`, both hardcoded ambiguous `int64_t` in
+    # gimple_module_gen.py's struct_field_types (the field is legitimately
+    # `str | None`, but the table lumps it in with the polymorphic
+    # target/value slots). `mojo_isinstance`/`mojo_isinstance_p`
+    # (runtime/mojo_runtime.c) never implement type_id 4 (str) for an
+    # ambiguous boxed int64_t -- they unconditionally return 0 -- so
+    # `isinstance(_ann, str)` is FALSE self-hosted for every real string
+    # value here, not just malformed ones (confirmed: this is what made
+    # `.type_ann` look "corrupted, neither str nor None" throughout the
+    # Finding 5 investigation -- it wasn't corruption, isinstance(x, str)
+    # simply cannot answer True for this field's representation). `is None`
+    # is unaffected (a direct sentinel-value compare, not a type dispatch),
+    # and `_as_str` is this codebase's established zero-cost cast for
+    # exactly this "backend erased a real str to int64_t" shape -- same
+    # fix pattern as every other `_as_str(...)` call in this file.
+    if _ann is None:
         return None
-    _s = _ann.strip()
+    _s = _as_str(_ann).strip()
     for _drop in (' | None', 'None | ', 'Optional[', ']'):
         _s = _s.replace(_drop, '')
     _s = _s.strip()
@@ -2266,11 +2282,19 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # qualifier path converge on the same plain-name spelling
         # regardless of which one happened to run first.
         return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
-    _cur_file = getattr(gen, '_current_filename', None)
-    _cur_abs = gimple_ctypes.os.path.abspath(_cur_file) if _cur_file else ''
-    if (_cur_file and _cur_file.endswith('.py')
-            and (_cur_abs == gimple_codegen._SELFHOST_DIR or _cur_abs.startswith(gimple_codegen._SELFHOST_DIR + '/'))):
-        return ''
+    # NOT an early `if self-hosting file: return ''` short-circuit here
+    # (removed — see git history / bugs doc): that unconditionally bare-ified
+    # EVERY reference made from within any self-hosting-flagged file,
+    # including one that genuinely imports a DIFFERENT, non-self-hosting
+    # submodule (a downstream project's own nested package, e.g. a `jit/`
+    # subdirectory that sits one level below the sibling `mojo_compiler.py`
+    # check) — those callees are correctly compiled WITH a real module
+    # prefix (tier 3 below resolves it correctly), so a caller-side bare
+    # override produced an undeclared-symbol reference instead. Removing
+    # it is a no-op for genuine self-hosting-internal references (tiers
+    # 1-3 below simply find nothing for those, same as before, falling
+    # through to this function's own unconditional trailing `return ''`)
+    # while letting a real cross-module resolution win when one exists.
     if bare_name in getattr(gen, '_local_top_level_func_names', ()):
         return _sanitize_qualifier(gen.module_name) or ''
     # Per-lexical-scope import tracking: a bare-name reference is bound by
@@ -3078,7 +3102,15 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     for f in sdef.fields:
         if not isinstance(f, gimple_ctypes.VarDecl):
             continue
-        _fann = f.type_ann.strip() if isinstance(f.type_ann, str) else ''
+        # NOT `isinstance(f.type_ann, str)`: VarDecl.type_ann is hardcoded
+        # ambiguous `int64_t` in struct_field_types (struct_boxed_fields
+        # includes it), and `mojo_isinstance`/`mojo_isinstance_p` never
+        # answer True for type_id 4 (str) on an ambiguous boxed value --
+        # see `_selfhost_ann_ctype`'s docstring for the full root-cause
+        # writeup. `_as_str` is the zero-cost cast this codebase already
+        # uses everywhere else for this exact "backend erased a real str
+        # to int64_t" shape.
+        _fann = _as_str(f.type_ann).strip() if f.type_ann is not None else ''
         _farr_m = gimple_ctypes._FIXED_ARRAY_ANN_RE.match(_fann) if _fann else None
         if _farr_m:
             _felem_nm, _fsize_txt = _farr_m.group(1), _farr_m.group(2)
@@ -3193,9 +3225,12 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     # before World), but the cross-module materialization path has no
     # such natural order and must construct it explicitly here.
     for f in sdef.fields:
-        if not isinstance(f, gimple_ctypes.VarDecl) or not isinstance(f.type_ann, str):
+        # See `_selfhost_ann_ctype`'s docstring: VarDecl.type_ann is
+        # ambiguous boxed int64_t, so `isinstance(f.type_ann, str)` is
+        # unconditionally False self-hosted — use `is not None` + `_as_str`.
+        if not isinstance(f, gimple_ctypes.VarDecl) or f.type_ann is None:
             continue
-        _ann = f.type_ann.strip()
+        _ann = _as_str(f.type_ann).strip()
         _elem_name = None
         _is_list_field = _ann.startswith('List[') and _ann.endswith(']')
         if _is_list_field:
@@ -3229,11 +3264,11 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     # Annotation-derived static truth — mirrors the seeding just added to
     # gen_module's local StructDef pass (see its BUG-2026-023 comment).
     for f in sdef.fields:
-        if not isinstance(f, gimple_ctypes.VarDecl) or not isinstance(f.type_ann, str):
+        if not isinstance(f, gimple_ctypes.VarDecl) or f.type_ann is None:
             continue
         if fields.get(f.name) != 'MojoList *':
             continue
-        _ann2 = f.type_ann.strip()
+        _ann2 = _as_str(f.type_ann).strip()
         if not (_ann2.startswith('List[') and _ann2.endswith(']')):
             continue
         _inner2 = gimple_ctypes._split_top_level_commas(
@@ -3954,6 +3989,29 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     exempt by never going through struct-method mangling at all."""
     if struct_name == 'Span':
         return ''
+    # GimpleGen: same shape of exemption as Span just above, for a
+    # different reason. GimpleGen genuinely DOES have a real home module
+    # (gimple_codegen.py) and a normal per-file compile of THAT file
+    # correctly finds it via `_local_struct_names` (tier 1 below),
+    # qualifying its `overload_suffix`/`overload_suffix_for`/etc. methods
+    # as `gimple_codegen_GimpleGen_*` — but GimpleGen is also registered
+    # as a SYNTHETIC struct (`_selfhost_register_gimplegen`) for every
+    # OTHER gimple_*.py file's own compile (so `gen`/`self` params can be
+    # typed `GimpleGen *`), and those OTHER files never see a real
+    # `from gimple_codegen import GimpleGen`-shaped import to populate
+    # `_imported_struct_home` with a matching qualifier — they fall
+    # through to this function's own trailing bare `return ''` instead.
+    # Removing the old blanket "any self-hosting file -> bare" override
+    # (see _func_qualifier's matching comment) exposed exactly this:
+    # confirmed via `make check-selfhost` linker errors ("_GimpleGen__
+    # overload_suffix"/"_GimpleGen_overload_suffix_for" referenced but
+    # undefined, the real bodies emitted as `gimple_codegen_GimpleGen_*`
+    # only when gimple_codegen.py itself is the file being compiled).
+    # GimpleGen's own methods must be bare EVERYWHERE, consistently,
+    # regardless of which file references or defines them — the same
+    # requirement Span has, just for a different underlying reason.
+    if struct_name == 'GimpleGen' and getattr(gen, '_selfhost_gimplegen_registered', False):
+        return ''
     # Every source below can hand back a raw module_name — which, for a
     # DOTTED package import (`import pkg.helper as m`, module_name ==
     # "pkg.helper"), contains '.' characters that are not valid in a C
@@ -3991,11 +4049,15 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
         # qualifier path converge on the same plain-name spelling
         # regardless of which one happened to run first.
         return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
-    _cur_file = getattr(gen, '_current_filename', None)
-    _cur_abs = gimple_ctypes.os.path.abspath(_cur_file) if _cur_file else ''
-    if (_cur_file and _cur_file.endswith('.py')
-            and (_cur_abs == gimple_codegen._SELFHOST_DIR or _cur_abs.startswith(gimple_codegen._SELFHOST_DIR + '/'))):
-        return ''
+    # NOT an early self-hosting-file bare short-circuit — see the free-
+    # function sibling `_func_qualifier`'s matching comment: unconditionally
+    # bare-ifying every struct reference from a self-hosting-flagged file
+    # broke a genuine cross-module reference to a struct defined in a
+    # DIFFERENT, non-self-hosting submodule (a downstream project's own
+    # nested package). Removing it is a no-op for genuine self-hosting-
+    # internal references (falls through to this function's own trailing
+    # `return ''`) while letting a real `_imported_struct_home` resolution
+    # win when one exists.
     # A struct genuinely DECLARED in the file currently being compiled
     # (gen_module's _local_struct_names, set once per GimpleGen instance
     # from that instance's own top-level stmts) always wins THIS
