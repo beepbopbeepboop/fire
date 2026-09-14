@@ -143,16 +143,125 @@ actual `mojoc` binary (per `HOW-TO-DEBUG.html`) rather than adding new
 source-level tracing to the compiler's own self-hosted functions**,
 given this demonstrated fragility.
 
+## Root cause of Finding 2, FOUND AND FIXED (2026-09-13, same day, via lldb)
+
+Used `tools/gdbtool` (lldb) directly on the `mojoc` binary rather than
+more source instrumentation, per the lesson above. Set a conditional
+breakpoint on `mojo_exc_msg_set` (`strstr(msg, "tuple loop target")`)
+and walked the backtrace at each hit:
+
+- First hit: inside `_gen_for_zip_ba2192` called from
+  `_gen_stmt_ForStmt_ba2192`'s try block (`gimple_gen_stmts.py:2732`) —
+  watched `_mojo_exc_top` (7 → 6 via `mojo_exc_pop`) and confirmed
+  `mojo_raise()`'s `longjmp` correctly returned control to the `except`
+  block at line 2736. This occurrence (compiling `mojo_compiler.py` as
+  a nested import) is caught CORRECTLY self-hosted — the try/except
+  mechanism itself is not broken in general.
+- Second hit: same raise, but frame #1 was `__mojo_coro_yield`, called
+  from `__mgco__iter_ast_body` (`gimple_gen_stmts.py:254`, the compiled
+  coroutine for `_iter_ast` — see Finding 1's sibling function) —
+  i.e. the raise fired WHILE a compiled coroutine (`_iter_ast`) was
+  suspended mid-`yield` on the call stack. A `try/except`'s `setjmp`
+  captured on the ORIGINAL (resuming) stack, longjmp'd to FROM CODE
+  RUNNING ON THE GENERATOR'S OWN SEPARATE FIBER STACK, is undefined
+  behavior — exactly the documented coroutine/setjmp hazard, now hit in
+  a new combination (a try/except elsewhere in the pipeline, racing
+  against an unrelated coroutine walk on the stack at raise time).
+
+**Fixed**: converted `_iter_ast` (`gimple_gen_stmts.py`) and its sibling
+`_walk` (`gimple_gen_coro.py`, confirmed via a second lldb session to be
+the OTHER offender specifically for `gimple_gen_coro.py`'s own module
+compile — the `__mgco__walk_body` coroutine caught suspended at the
+exact same raise) from `yield`-based generators to plain iterative
+list-building functions (see the commit landing this fix for the full
+diffs). Verified via `test_noshim_dumpfull.py`: the shim-vs-noshim size
+gap dropped from ~4MB to ~196KB, and the failing byte offset moved from
+2390 (`gimple_gen_coro` almost entirely missing) to 2894 (`myinterpreter`
+module missing instead — see Finding 4 below). `gimple_gen_coro` is now
+byte-for-byte present in both builds.
+
+## Finding 4 (a THIRD, separate divergence — isolated, NOT fixed)
+
+With Findings 1/2 fixed, the next (and much smaller) divergence is the
+`myinterpreter` module dropping to `code_len=0` self-hosted, with:
+
+```
+cannot coerce MojoList * to MojoDict * (incompatible container kinds)
+at myinterpreter.py: value='_t32' dest='_t33'
+```
+
+Backtraced via lldb (conditional breakpoint on `mojo_exc_msg_set` for
+"cannot coerce") to `_lower_dict_method` (`gimple_gen_methods.py:3043`,
+the `dict.update()` handling) called with `ov` statically typed
+`MojoDict *`. The real source line is `myinterpreter.py:3326`:
+`from_base.update(base_cls.methods.keys())` inside
+`execute_StructDef`, where **`from_base = set()`** is declared
+unambiguously three lines earlier (line 3314) and used consistently as
+a set everywhere (`.update()`, `in`, `.discard()`). The compiler
+mis-infers `from_base`'s declared type as `MojoDict *` instead of
+`MojoSet *` — self-hosted only; the shim compiles this function
+correctly.
+
+**Precisely bisected the trigger** (repeatedly truncating a copy of the
+real `myinterpreter.py` and re-running `MOJO_NO_SHIM=1 ./mojoc <file>
+--dump-full`, ~15s per iteration, no `mojoc` rebuild needed since only
+the INPUT file changes): the mistyping requires the LITERAL PRESENCE,
+anywhere later in the same file/class, of a `self.<attr>.update(...)`
+call — specifically the METHOD NAME `"update"` on a `self.` attribute.
+Confirmed via direct substitution experiments:
+- Removing `self.global_vars.update(node.names)` (replacing with `pass`)
+  → bug disappears.
+- Changing the ARGUMENT (`node.names` → `set(node.names)`, a `MojoSet *`
+  instead of `MojoList *`) → bug still present (argument type is
+  irrelevant).
+- Changing the METHOD NAME (`.update(...)` → `.add('x')`) → bug
+  disappears (method name specifically matters, not just "any call on
+  a self attribute").
+
+This means an UNRELATED method (`execute_GlobalStmt`, ~700 lines later
+in the file) merely CONTAINING a `self.X.update(...)` call corrupts a
+completely different method's (`execute_StructDef`) local variable
+inference. **Root cause NOT found** despite substantial further
+effort: ruled out `_infer_param_types`/`is_dict_method` (scoped to
+function PARAMETERS only — `from_base` is a local, not a parameter, so
+this code path doesn't apply); ruled out `_SELFHOST_MODGLOBAL_CACHE`
+(keyed only by genuine MODULE-LEVEL globals, and `from_base` is not a
+module-level name anywhere in this codebase); ruled out a declared-type
+conflict for the `self.global_vars` field itself (all 3 real usages
+treat it consistently as a set); read `_infer_local_var_types`
+(`gimple_gen_resolve.py:2234`) end-to-end — its `gen.var_types`
+save/restore is `try/finally`-protected (safe), and a single `from_base
+= set()` assignment should join trivially to `MojoSet *` via
+`_quick_type`'s `_BUILTIN_CTORS` table. The likely remaining suspect is
+the per-class-method loop that calls `_infer_local_var_types(m)` once
+per method (`gimple_module_gen.py:5268-5272`,
+`for s in all_structs_for_methods: for m in s.methods: ... self.
+_infer_local_var_types(m)`) — matching this codebase's own frequently-
+documented "loop variable doesn't get a fresh type per self-hosted
+iteration" bug class — but this was NOT confirmed; an attempted lldb
+watchpoint on `mojo_dict_set_str` (conditioned on `key == "from_base"`)
+to catch every write to that name live did not hit within a bounded
+wait (there may be MANY unrelated `MojoDict *` instances with string
+keys throughout a self-hosted compile — string-interning tables,
+memoization caches — making this specific breakpoint too broad/slow to
+be practical without a more targeted address or call-site condition).
+
 ## Next steps (not attempted this pass)
 
-- Root-cause Finding 2 (why this specific try/except fails to catch
-  self-hosted) via gdb on the `mojoc` binary — set a breakpoint on
-  `mojo_raise`/the try-frame push/pop primitives, single-step through
-  the actual generated GIMPLE for `_gen_stmt_ForStmt`'s zip branch, and
-  see exactly which try-frame is "current" at the moment of the raise.
+- Root-cause Finding 4: either (a) set a breakpoint scoped to the
+  SPECIFIC `MojoDict *` instance backing `gen.var_types` (need to find
+  its address/identity first, e.g. by breaking inside
+  `_infer_local_var_types`'s own compiled body and reading `gen`'s
+  `var_types` field directly), or (b) bisect the compiler's OWN logic
+  the same way the input file was bisected here — comment out
+  candidate inference paths in `gimple_module_gen.py`'s per-method loop
+  and rebuild `mojoc` (slower: full self-host rebuild per iteration,
+  ~2-3 min, vs. the ~15s per-iteration cost of bisecting the INPUT file
+  used for Finding 4's isolation) until the corruption stops.
 - Investigate Finding 3 (`os.environ` self-host reliability) separately
   — check whether it's a general lowering gap or context-specific.
 - This is genuinely open-ended (matches the multi-day effort shape of
-  prior instances of this bug class per project memory) — Finding 1 is
-  a real, complete, verified fix landed this session; Findings 2/3 are
-  diagnostic progress, not fixes.
+  prior instances of this bug class per project memory). Findings 1 and
+  2 are real, complete, verified fixes landed this session, closing
+  ~95% of the original divergence (shim/no-shim size gap: ~5MB → ~196KB).
+  Finding 4 is precisely isolated but not yet root-caused.

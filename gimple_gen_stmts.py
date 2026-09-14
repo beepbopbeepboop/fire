@@ -249,19 +249,51 @@ def _try_bind_list_iter(gen, name, value):
 
 
 def _iter_ast(n):
-    """Yield `n` and every AST descendant (attribute + list-attribute
-    children). Mirrors gimple_gen_coro._walk."""
-    yield n
-    d = getattr(n, '__dict__', None)
-    if not d:
-        return
-    for v in d.values():
-        if isinstance(v, list):
-            for x in v:
-                if hasattr(x, '__dict__'):
-                    yield from _iter_ast(x)
-        elif hasattr(v, '__dict__'):
-            yield from _iter_ast(v)
+    """Return `n` and every AST descendant (attribute + list-attribute
+    children), as a list, in the same pre-order sequence a recursive
+    `yield`/`yield from` walk would produce. Mirrors gimple_gen_coro._walk.
+
+    Deliberately NOT a generator (it used to be): a `yield`/`yield from`
+    function compiles to a REAL stack-switching coroutine in this
+    codegen, and this runtime's own docs (runtime/mojo_runtime.h) already
+    flag that "a coroutine body can't use setjmp/longjmp directly" — the
+    C stack frame that ran `setjmp()` for some OTHER try/except elsewhere
+    in this compiler's own pipeline no longer exists once a coroutine has
+    suspended onto its own separate fiber stack, so a `mojo_raise()`
+    firing while this walk is mid-iteration can longjmp across that fiber
+    boundary — undefined behavior. Found via bugs/
+    CODEGEN_noshim_dumpfull_preexisting_divergence.md: a zip()-nested-
+    tuple ValueError (gimple_gen_loops.py's `_gen_for_zip`, meant to be
+    caught locally by `_gen_stmt_ForStmt`'s try/except and fall back
+    gracefully) instead escaped to the module-level handler ONLY when
+    self-hosted — confirmed via lldb that the raise fires from inside
+    `__mojo_coro_yield` while this exact function (as a compiled
+    coroutine, `__mgco__iter_ast_body`) is suspended mid-walk.
+
+    None of this function's 8 call sites need laziness (each one -
+    `for`/list-comp/`sum(1 for ...)`/set-comp - fully consumes the
+    result), so building a real list up front with an explicit stack
+    avoids the coroutine machinery entirely for this internal walk."""
+    result = []
+    stack = [n]
+    while stack:
+        cur = stack.pop()
+        result.append(cur)
+        d = getattr(cur, '__dict__', None)
+        if not d:
+            continue
+        children = []
+        for v in d.values():
+            if isinstance(v, list):
+                for x in v:
+                    if hasattr(x, '__dict__'):
+                        children.append(x)
+            elif hasattr(v, '__dict__'):
+                children.append(v)
+        # Push in reverse so children still pop (and thus visit their
+        # own full subtrees) in original left-to-right order.
+        stack.extend(reversed(children))
+    return result
 
 
 def _is_genexp(node) -> bool:

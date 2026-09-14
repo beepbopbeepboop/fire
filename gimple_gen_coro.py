@@ -75,18 +75,50 @@ def enabled() -> bool:
 # ── eligibility ─────────────────────────────────────────────────────────
 
 def _walk(node):
-    """Yield node and every AST descendant (attributes + list attributes)."""
-    yield node
-    d = getattr(node, '__dict__', None)
-    if not d:
-        return
-    for v in d.values():
-        if isinstance(v, list):
-            for x in v:
-                if hasattr(x, '__dict__'):
-                    yield from _walk(x)
-        elif hasattr(v, '__dict__'):
-            yield from _walk(v)
+    """Return node and every AST descendant (attributes + list attributes),
+    as a list, in the same pre-order sequence a recursive `yield`/`yield
+    from` walk would produce.
+
+    Deliberately NOT a generator (it used to be): a `yield`/`yield from`
+    function compiles to a REAL stack-switching coroutine in this
+    codegen, and this runtime's own docs (runtime/mojo_runtime.h) already
+    flag that "a coroutine body can't use setjmp/longjmp directly" — a
+    `mojo_raise()` firing (from a try/except ELSEWHERE in this compiler's
+    own pipeline) while this walk is mid-iteration can longjmp across
+    that coroutine's own separate fiber stack — undefined behavior.
+    Found and fixed via bugs/CODEGEN_noshim_dumpfull_preexisting_
+    divergence.md: this exact function, compiled to `__mgco__walk_body`,
+    was caught live in lldb suspended mid-yield at the moment a
+    zip()-nested-tuple `ValueError` (meant to be caught locally by
+    `_gen_stmt_ForStmt`'s try/except and fall back gracefully) instead
+    escaped all the way to the module-level handler — only when this
+    compiler self-hosted. See `gimple_gen_stmts._iter_ast`'s identical
+    fix (same bug, sibling function) for the fuller writeup.
+
+    None of this function's many call sites need laziness (each one -
+    `for`/`sum(1 for ...)`/`any(... for ...)` - fully consumes the
+    result), so building a real list up front with an explicit stack
+    avoids the coroutine machinery entirely for this internal walk."""
+    result = []
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        result.append(cur)
+        d = getattr(cur, '__dict__', None)
+        if not d:
+            continue
+        children = []
+        for v in d.values():
+            if isinstance(v, list):
+                for x in v:
+                    if hasattr(x, '__dict__'):
+                        children.append(x)
+            elif hasattr(v, '__dict__'):
+                children.append(v)
+        # Push in reverse so children still pop (and thus visit their
+        # own full subtrees) in original left-to-right order.
+        stack.extend(reversed(children))
+    return result
 
 
 _SCALARISH = {'Int', 'Int64', 'Int32', 'Bool', 'String', 'StringLiteral', '', None,
