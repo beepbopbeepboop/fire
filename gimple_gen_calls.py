@@ -1524,19 +1524,36 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         rt, fn = _SIMPLE_BUILTINS[fname_raw]
         pairs = [gen.lower_expr(a) for a in node.args]
         return rt, gen._call_expr(rt, fn, pairs)
-    # `vars(obj)` on a value whose struct type is statically known — same
-    # real MojoDict* field view as `obj.__dict__` just above in
-    # `_lower_MemberExpr` (see that call site's own comment; this is
-    # Step 0 of bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md,
-    # `vars()`/`__dict__` are the same operation in real Python). Scoped
-    # the same way: only when the argument's struct type is genuinely
-    # known, so an opaque/generic receiver falls through unchanged.
+    # `vars(obj)` — same real MojoDict* field view as `obj.__dict__` just
+    # above in `_lower_MemberExpr` (see that call site's own comment; this
+    # is Step 0 of bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md,
+    # `vars()`/`__dict__` are the same operation in real Python).
+    #
+    # `_mojo_dispatch_asdict(void *obj)` (gimple_module_gen.py) is ALREADY
+    # a fully-general RUNTIME dispatcher: it reads the object's own type
+    # tag via `mojo_read_type_tag_safe` and picks the matching
+    # `_mojo_asdict_<struct>` at RUNTIME — it never needed the STATIC type
+    # to be known at compile time. The previous version of this code only
+    # called it `if gimple_exprtypes._struct_name_of(at) in gen.
+    # struct_field_types` (statically-known struct), and otherwise let
+    # `vars(x)` fall through to the generic "unresolved builtin" weak-stub
+    # path (a print-and-return-0 no-op) — exactly the R4 "absence of proof
+    # treated as a negative answer" pattern DESIGN.html describes, when a
+    # perfectly good runtime answer was available all along (R5). Found by
+    # tracing bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md:
+    # gimple_gen_coro.py's own AST-walking helpers use `for k, v in
+    # vars(node).items():` on a GENERICALLY-typed `node` parameter (by
+    # design — it walks many different AST node types uniformly), so
+    # EVERY one of those calls hit the useless stub once this compiler
+    # self-hosted (compiled gimple_gen_coro.py's own source), silently
+    # no-op'ing the coroutine-detection walk across the entire self-hosted
+    # build instead of raising or working.
     if fname_raw == 'vars' and len(node.args) == 1:
         at, av = gen.lower_expr(node.args[0])
-        if gimple_exprtypes._struct_name_of(at) in gen.struct_field_types:
-            gen._asdict_dispatch_needed.add(1)
-            return 'MojoDict *', gen._call_expr(
-                'MojoDict *', '_mojo_dispatch_asdict', [(at, av)])
+        gen._asdict_dispatch_needed.add(1)
+        vp = av if at == 'void *' else gen._new_val('void *', f'(void *){av}')
+        return 'MojoDict *', gen._call_expr(
+            'MojoDict *', '_mojo_dispatch_asdict', [('void *', vp)])
     if fname_raw == 'getattr' and len(node.args) >= 2:
         # `getattr(f, "_cached", None)` where `f` is a free function
         # memoizing a value on itself (see `_func_attrs`'s pre-scan
