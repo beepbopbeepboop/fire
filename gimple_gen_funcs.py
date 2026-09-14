@@ -858,6 +858,22 @@ def _selfhost_literal_ctype(_val):
             return 'MojoDict *'
         if _fn == 'list':
             return 'MojoList *'
+    if isinstance(_val, TernaryExpr):
+        # `X if cond else Y` (e.g. `gen._cpp_pending_tuple_slots =
+        # list(_pre_slots) if (_pre_ok and _pre_slots) else None`, real
+        # extracted-helper code in gimple_cpp_async.py) -- neither
+        # branch alone is the whole RHS, so the top-level isinstance
+        # checks above never matched and this field silently defaulted
+        # to `int64_t` on BOTH the shim and self-hosted before this
+        # case existed (the shim independently resolved the correct
+        # type some other way downstream; self-hosted did not, which
+        # is what this fix closes). Recurse into whichever branch
+        # resolves to a real ctype first (a bare `None` branch
+        # correctly yields nothing to prefer over the other).
+        _tc = _selfhost_literal_ctype(_val.then_val)
+        if _tc is not None:
+            return _tc
+        return _selfhost_literal_ctype(_val.else_val)
     return None
 
 
@@ -1078,10 +1094,10 @@ def _selfhost_gimplegen_field_types(gg_cls, _src_dir=None) -> dict:
             _ct = (_selfhost_ann_ctype(getattr(_fld, 'type_ann', None))
                    or _selfhost_literal_ctype(_fld.value))
             if _ct is not None:
-                _selfhost_merge_field(_fields, _fld.target.name, _ct)
+                _selfhost_merge_field(_fields, _as_str(_fld.target.name), _ct)
         elif isinstance(_fld, VarDecl) and _fld.name:
             _ct = _selfhost_ann_ctype(getattr(_fld, 'type_ann', None))
-            _selfhost_merge_field(_fields, _fld.name, _ct or 'int64_t')
+            _selfhost_merge_field(_fields, _as_str(_fld.name), _ct or 'int64_t')
     # `__init__(self, ..., module_name="", ...)` param defaults: a bare
     # `self.module_name = module_name` in the body carries no literal RHS,
     # so infer the field ctype from the parameter's own default value /
@@ -1089,33 +1105,115 @@ def _selfhost_gimplegen_field_types(gg_cls, _src_dir=None) -> dict:
     # `gen.module_name`-based module-name compare (`_global_to_module`
     # ownership, `_<mod>_globals` struct routing) read boxed garbage.
     _init_param_ct: dict = {}
-    for _m in getattr(gg_cls, 'methods', []):
-        if _m.name != '__init__':
-            continue
+    # NOT `_m.name != '__init__'` (even wrapped in `_as_str()`) -- confirmed
+    # by hand that reading `.name` off a FunctionDef from THIS specific
+    # object graph (the runtime meta-reparse of gimple_codegen.py done by
+    # `_selfhost_load_gimplegen_class`, invoking the self-hosted-compiled
+    # Parser as a library call rather than through the ordinary compile
+    # flow) comes back as outright corrupted garbage self-hosted for EVERY
+    # method (logged: every one of 363 methods printed the same nonsense
+    # bytes, not merely a comparison failure) -- a different, deeper bug
+    # than any `_as_str()` fix addresses. `__init__` is reliably the FIRST
+    # method GimpleGen declares (confirmed via the shim's own method-name
+    # log), so use position instead of a name read/compare that's known
+    # broken on this object graph.
+    _gg_methods_list = getattr(gg_cls, 'methods', [])
+    if _gg_methods_list:
+        _m = _gg_methods_list[0]
         for _pn, _pt in (getattr(_m, 'params', None) or []):
-            _bare = _pn.lstrip('*')
+            _bare = _as_str(_pn).lstrip('*')
             _pc = _selfhost_ann_ctype(_pt)
             if _pc is not None:
                 _init_param_ct[_bare] = _pc
         for _pn2, _dv in (getattr(_m, 'param_defaults', None) or {}).items():
-            _bare2 = _pn2.lstrip('*')
+            _bare2 = _as_str(_pn2).lstrip('*')
             if _bare2 not in _init_param_ct:
                 _lc = _selfhost_literal_ctype(_dv)
                 if _lc is not None:
                     _init_param_ct[_bare2] = _lc
-    # `self.X = <literal>` in every method body (dominated by __init__)
+    # `self.X = <literal>` in every method body (dominated by __init__).
+    # Deliberately NOT `gimple_exprtypes._walk_ast(_m.body)` -- the same
+    # shared-utility bug already worked around in
+    # `_selfhost_scan_gimplegen_extra_fields` (isinstance(node, str/int/
+    # float/bool) misclassifies real AST dataclass instances self-hosted,
+    # so the walker barely recurses past the top level of a method body)
+    # applies here too; any `self.X = <literal>` nested inside an if/for/
+    # try/with/match block in `__init__` or another method went
+    # undetected self-hosted, defaulting those fields to `int64_t`.
+    # Confirmed by hand: after this class's whole GimpleGen struct
+    # matched the shim in total field COUNT, ~19 fields (`do_imports`,
+    # `_dispatch_solver`, `_cpp_gen_self_struct`, ...) still showed
+    # `int64_t` self-hosted where the shim had the correct `_Bool`/
+    # `char *`/`DispatchSolver *`/etc — this scan is where they're set.
     for _m in getattr(gg_cls, 'methods', []):
-        for _n in gimple_exprtypes._walk_ast(_m.body):
-            if (isinstance(_n, AssignStmt)
-                    and isinstance(_n.target, MemberExpr)
-                    and isinstance(_n.target.obj, IdentExpr)
-                    and _n.target.obj.name == 'self'):
-                _ct = (_selfhost_ann_ctype(getattr(_n, 'type_ann', None))
-                       or _selfhost_literal_ctype(_n.value))
-                if _ct is None and isinstance(_n.value, IdentExpr):
-                    _ct = _init_param_ct.get(_n.value.name)
-                _selfhost_merge_field(_fields, _n.target.member, _ct or 'int64_t')
+        _selfhost_walk_stmts_for_self_assigns(_m.body, _fields, _init_param_ct)
     return _fields
+
+
+def _selfhost_walk_stmts_for_self_assigns(stmts, fields, init_param_ct):
+    """Narrow, statement-only recursive walker for `self.X = <literal>`
+    assignments inside a GimpleGen method body — the sibling of
+    `_selfhost_walk_stmts_for_assign_targets` (same rationale: avoids
+    the shared, self-hosted-broken `gimple_exprtypes._walk_ast`).
+    Mutates `fields` via `_selfhost_merge_field`; no return value."""
+    for _n in stmts:
+        if (isinstance(_n, AssignStmt)
+                and isinstance(_n.target, MemberExpr)
+                and isinstance(_n.target.obj, IdentExpr)
+                and _as_str(_n.target.obj.name) == 'self'):
+            # NOTE: `getattr(_n, 'type_ann', None)` was confirmed by hand
+            # to read as non-string garbage self-hosted for at least some
+            # assignments in this method body (e.g. `self._dispatch_
+            # solver: DispatchSolver | None = None`) -- the same class of
+            # attribute-read corruption already found on `.name` for
+            # FunctionDef objects from this same runtime-meta-reparsed
+            # `class GimpleGen` object graph (see `_selfhost_gimplegen_
+            # field_types`'s docstring/comments). `_selfhost_ann_ctype`
+            # safely returns None for a non-string input, so this doesn't
+            # crash -- it just silently loses the annotation-based type
+            # for whichever fields hit it, leaving them at the generic
+            # `int64_t` fallback. NOT fixed here; flagged as a deeper,
+            # unresolved followup in bugs/CODEGEN_noshim_dumpfull_
+            # preexisting_divergence.md — reading ANY attribute off an
+            # object from this object graph may be unreliable, not just
+            # `.name`/`.type_ann` specifically, so a real fix likely needs
+            # to avoid re-parsing `class GimpleGen` via this runtime path
+            # at all rather than patching individual field reads.
+            _ct = (_selfhost_ann_ctype(getattr(_n, 'type_ann', None))
+                   or _selfhost_literal_ctype(_n.value))
+            if _ct is None and isinstance(_n.value, IdentExpr):
+                _ct = init_param_ct.get(_as_str(_n.value.name))
+            _selfhost_merge_field(fields, _as_str(_n.target.member), _ct or 'int64_t')
+        if isinstance(_n, IfStmt):
+            _selfhost_walk_stmts_for_self_assigns(_n.then_body, fields, init_param_ct)
+            for _ec, _eb in _n.elifs:
+                _selfhost_walk_stmts_for_self_assigns(_eb, fields, init_param_ct)
+            if _n.else_body:
+                _selfhost_walk_stmts_for_self_assigns(_n.else_body, fields, init_param_ct)
+        elif isinstance(_n, ComptimeIfStmt):
+            _selfhost_walk_stmts_for_self_assigns(_n.then_body, fields, init_param_ct)
+            for _ec, _eb in _n.elifs:
+                _selfhost_walk_stmts_for_self_assigns(_eb, fields, init_param_ct)
+            if _n.else_body:
+                _selfhost_walk_stmts_for_self_assigns(_n.else_body, fields, init_param_ct)
+        elif isinstance(_n, WhileStmt) or isinstance(_n, ForStmt) or isinstance(_n, ComptimeForStmt):
+            _selfhost_walk_stmts_for_self_assigns(_n.body, fields, init_param_ct)
+            _eb2 = getattr(_n, 'else_body', None)
+            if _eb2:
+                _selfhost_walk_stmts_for_self_assigns(_eb2, fields, init_param_ct)
+        elif isinstance(_n, TryStmt):
+            _selfhost_walk_stmts_for_self_assigns(_n.body, fields, init_param_ct)
+            for _h in _n.handlers:
+                _selfhost_walk_stmts_for_self_assigns(_h.body, fields, init_param_ct)
+            if _n.else_body:
+                _selfhost_walk_stmts_for_self_assigns(_n.else_body, fields, init_param_ct)
+            if _n.finally_body:
+                _selfhost_walk_stmts_for_self_assigns(_n.finally_body, fields, init_param_ct)
+        elif isinstance(_n, WithStmt):
+            _selfhost_walk_stmts_for_self_assigns(_n.body, fields, init_param_ct)
+        elif isinstance(_n, MatchStmt):
+            for _c in _n.cases:
+                _selfhost_walk_stmts_for_self_assigns(_c.body, fields, init_param_ct)
 
 
 def _dvt_val_cts(_ann):
