@@ -733,6 +733,106 @@ quick patch):
    positive via the full gate either way, but the ROOT explanation for
    a few of them may need revising once this is understood.
 
+## Finding 5 UPDATE 2 — minimal repro built, precise diagnosis (same session, continued further)
+
+Step 1 of the plan above was carried out: built a minimal in-process
+repro (parse a TINY 5-line, 2-method synthetic class via the exact
+same call shape as `_selfhost_load_gimplegen_class` —
+`ast_rewriter.rewrite(Parser(py_tokenize(src)).with_filename(...)
+.parse_module())` — inline inside `_selfhost_register_gimplegen`,
+gated behind a debug env var so it runs as part of the real self-
+hosted `mojoc` binary rather than needing a separate standalone test
+program, since standalone-binary attempts (`mojoc build` on a small
+test file importing `mojo_compiler`/`ast_rewriter`) hit at least three
+DIFFERENT unrelated pre-existing self-hosted bugs unrelated to this
+investigation — a `'mo' undeclared` gcc error compiling `build`'s
+do_imports path, corrupted `--dump-full` output requiring
+`MOJO_NO_SHIM` for self-referential compiles specifically (not
+relevant to an arbitrary test file, but the corruption appeared
+anyway), and a duplicate-declaration gcc error
+(`Parser__parse_expr` re-declared) with `#line` markers pointing at
+plain comment text. None of these three were investigated further —
+each is its own separate, real, pre-existing self-hosted bug outside
+this investigation's scope; noted here only so a future session
+doesn't waste a cycle rediscovering them via the same approach).
+
+**Result: the corruption reproduces at tiny scale — NOT size/
+complexity-dependent as originally hypothesized.** On the 2-method
+synthetic class:
+- `.name` on both `FunctionDef` methods read CORRECTLY self-hosted
+  (`method_name=[__init__]`, `method_name=[bar]`, matching the shim
+  exactly) — contradicting the earlier finding that `.name` was
+  corrupted on GimpleGen's real 363-method class. This means the
+  EARLIER `.name` corruption was itself likely size/count-dependent
+  (or a different, as-yet-unidentified trigger specific to GimpleGen's
+  real scale) — the positional-lookup workaround already landed for it
+  remains valid and necessary regardless, since it fixed real, verified
+  behavior on the actual GimpleGen class.
+- `.target.member` on the `AssignStmt` nodes ALSO read CORRECTLY
+  self-hosted (`target_member=[x]`, `target_member=[y]`, matching the
+  shim) — confirming the `AssignStmt` NODE ITSELF is otherwise intact,
+  correctly constructed, and its OTHER fields are readable.
+- `.type_ann` specifically reads as **neither a string NOR `None`**
+  self-hosted (`is_str=False`, `is_none=False`) — ruling out "the
+  self-hosted Parser simply never populates `type_ann` for this
+  syntax shape" (a parsing omission would show `is_none=True`). The
+  field WAS set to something; reading it back gives a value that is
+  neither the correct `char *` string nor a legitimate `None` — this
+  is the exact "a value's real bits get reinterpreted as the wrong
+  ctype" symptom that has recurred constantly throughout this entire
+  investigation (and the broader codebase — see the `_lower_
+  StringLiteral` docstring's own historical note about the identical
+  symptom for boxed string literals), just now happening on the
+  self-hosted COMPILER'S OWN core `AssignStmt.type_ann` field rather
+  than a user-level GimpleGen field.
+
+**Refined diagnosis**: this now looks like a `struct_field_types`-
+style ctype-INFERENCE problem for `AssignStmt.type_ann` itself (a
+core, built-in AST node class from `mojo_compiler.py`, not a
+GimpleGen-specific field) — most likely, the self-hosted compiler's
+own field-type inference for `type_ann` (presumably an untyped/
+`object`-annotated dataclass field in `mojo_compiler.py`, since it can
+legitimately hold either `str` or `None`) resolves to a DIFFERENT
+ctype (`int64_t` instead of `char *`) depending on the CALL CONTEXT
+that constructs the `AssignStmt` instance — normal top-level parsing
+apparently infers it correctly (used successfully thousands of times
+elsewhere in this same self-hosted binary's own compile of itself),
+but construction via this specific NESTED runtime `Parser(...)`
+invocation does not. This reframes the bug from "attribute reads are
+generally unreliable on runtime-reparsed objects" (the earlier, more
+alarming hypothesis) to something narrower and more actionable: a
+field-ctype-inference gap specific to how `mojo_compiler.py`'s OWN
+`AssignStmt.type_ann` field gets typed when instances originate from
+a nested/runtime parse call rather than the top-level one.
+
+**Recommended next steps for a future session** (revised from the
+plan above, now that a working, cheap, in-process repro exists — no
+need for the standalone-binary approach and its unrelated blockers):
+1. Extend the SAME inline mini-repro technique (parse a tiny synthetic
+   source string via `Parser(...).parse_module()` inside any already-
+   working self-hosted-compiled function, gated behind a debug env
+   var, write results to a file) to test OTHER core AST node fields
+   similarly typed `object`/optional in `mojo_compiler.py` — does
+   `AssignStmt.value`, `FunctionDef.return_type`, or other similarly-
+   shaped fields show the SAME corruption when constructed via a
+   nested runtime parse, or is `type_ann` specifically affected? This
+   determines whether the bug is about the `type_ann` field
+   specifically or a broader class of optional/union-typed fields.
+2. Compare: does calling `Parser(...).parse_module()` from a
+   DIFFERENT nesting context (e.g. directly from `main()`/top-level,
+   vs. from deep inside `_selfhost_register_gimplegen`'s own call
+   stack) change the result? If nesting depth/call-stack-shape matters,
+   that points toward a codegen bug in how struct_field_types gets
+   seeded/scoped per call site rather than a single global bug.
+3. Search `gimple_codegen.py`/`gimple_module_gen.py` for wherever
+   `type_ann` (as a `mojo_compiler.AssignStmt`/`VarDecl` field name)
+   gets its ctype inferred in `struct_field_types['AssignStmt']` — is
+   there a SEPARATE/duplicate registration path for core AST classes
+   (as opposed to GimpleGen) that could explain a call-site-dependent
+   ctype? This is architecturally the closest analogue to everything
+   else this whole investigation has been about, just for a built-in
+   AST class instead of a user-defined one.
+
 ## Followups (not fixed this session, worth a future audit)
 
 - **The `.name`/`.type_ann` attribute-read corruption on objects from
