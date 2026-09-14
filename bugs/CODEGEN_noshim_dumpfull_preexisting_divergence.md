@@ -265,3 +265,130 @@ be practical without a more targeted address or call-site condition).
   2 are real, complete, verified fixes landed this session, closing
   ~95% of the original divergence (shim/no-shim size gap: ~5MB → ~196KB).
   Finding 4 is precisely isolated but not yet root-caused.
+
+## Finding 4 — actually TWO bugs, 2 of 3 fixed, 1 remains (session 2)
+
+Continued via lldb on a real -O0 `mojoc_dbg2` build (Makefile's stage2
+recipe doesn't pass `-O`, so gcc defaults to -O0; `python3 mojo.py build
+... -O0` did NOT actually change codegen — confirmed by identical
+`nm`-reported addresses/disassembly between a "-O0" and a default build,
+so that flag path is untrustworthy for debug builds; built manually via
+direct `gcc-mp-15 -fgimple ... -x c mojo.ci ...` instead, mirroring
+`stage2/mojo`'s recipe exactly). Breakpoints on the compiler's own
+compiled functions (`_declare_var`, `_quick_type`, even their
+`GimpleGen__*` trampolines) never fired despite the bug clearly
+occurring — root cause never found; abandoned that angle.
+
+Root-caused via shim-side instrumentation instead (a `_sce_simple_emit`
+monkeypatch printing a traceback whenever the R2 chokepoint's container-
+kind check is about to fire, run via `python3 mojo.py <file>
+--dump-full` — safe since it's the shim, not self-hosted source). This
+reproduces `myinterpreter.py`'s `from_base` bug family AND revealed it's
+actually two independent, real logic bugs in the compiler itself (not
+self-host-only — the shim hits them too when compiling the compiler's
+OWN source as a target, e.g. `python3 mojo.py gimple_module_gen.py
+--dump-full`):
+
+**Bug A (FIXED)** — `gimple_gen_methods.py`'s `_lower_method_call`: when
+a method receiver's static type is unresolved (opaque `int64_t`, e.g. a
+`self`/`gen`-typed struct field the self-hosting param-typing pass
+hasn't reached), the code guessed the receiver's real type purely from
+the METHOD NAME being called. `.update()` is real on BOTH `dict` and
+`set` in Python, but the guess unconditionally forced `MojoDict *`
+(unlike `.add()`/`.discard()`, correctly routed to `MojoSet *`, or
+`.clear()`/`.remove()`, already runtime-dispatched via
+`mojo_is_registered_dict`/`_set` per DESIGN.html R5). Concrete trigger:
+`gimple_module_gen.py`'s own `self._selfhost_locked_param_types.update(
+(...))` — `_selfhost_locked_param_types` is a genuine `set`, so forcing
+`MojoDict *` then coercing the tuple-literal argument (materialized as
+`MojoList *`) against `MojoDict *` tripped DESIGN.html R2's chokepoint.
+Fixed by giving `.update()` on an opaque receiver the same
+`mojo_is_registered_set`-gated runtime dispatch as `clear`/`remove`,
+with a static short-circuit straight to the set-loop path (no dict
+branch emitted at all) when the argument's OWN static type is provably
+`MojoList *`/`MojoSet *` — emitting the dict branch's `_coerce_to_type`
+unconditionally in THAT case trips the same R2 chokepoint at EMISSION
+time regardless of which branch runs at C runtime, since the chokepoint
+is a compile-time check on the generated C, not a runtime one.
+
+**Bug B (FIXED)** — `gimple_module_gen.py`'s `_scan_body_for_local_field_
+access` (the "phantom scalar field" scanner, used so `getattr`-style
+dynamic-looking member access on a struct doesn't silently stub to a
+no-op): it walked every `MemberExpr` on an unambiguously-typed local
+regardless of whether it was the callee of a `CallExpr` (`obj.method(
+...)`, a real method call) or a bare value read, and minted a phantom
+`int` field for any name not already a known field AND not in a narrow
+builtin-container-method allowlist. A real, custom method
+(`DispatchPattern.add_call_site`/`.add_callee` in `gimple_solvers.py`)
+fell through this gap. Fixed by checking `target_def.methods` (and one
+level of `bases`) for a matching method name before minting a field.
+
+Both verified: `compile_stdlib.py` 664/664 unchanged across all landed
+states, `check-linkmode`/`check-selfhost`/`make bootstrap` all green,
+and both measurably closed part of the shim-vs-noshim gap on the real
+target (`mojo.py --dump-full mojo.py`): first-diff offset moved from
+2390 (original) through several intermediate points as each fix
+landed, gap size dropped from the original ~5MB down to ~5.8MB... at
+one intermediate point it temporarily GREW (noshim > shim) because Bug
+A's fix, compiling `myinterpreter.py` cleanly, let the build reach
+Bug B's location where it hadn't before — a reminder that gap SIZE
+isn't monotonic evidence by itself; always check the first-diff offset
+too.
+
+**Bug C (found, NOT fixed — reverted after breaking the build)** — the
+remaining divergence after A+B: `mojo.py --dump-full mojo.py` first
+differs at offset 19260, noshim ~5.8MB larger. Root cause: `class
+GimpleGen` (defined in `gimple_codegen.py`) is registered TWICE into
+this compile's shared `struct_field_types['GimpleGen']` — once via a
+SYNTHETIC ~40-field stand-in (`_selfhost_gimplegen_stmts`, a frozen
+parse used so extracted-helper functions like `_declare_var(gen, ...)`
+can type their `gen`/`self` first param as `GimpleGen *` even in a
+temp_gen that never sees the real class in its own file's transitive
+closure — see `_selfhost_gen_self_param_ctype`'s docstring in
+`gimple_gen_funcs.py`), and again by the REAL `class GimpleGen` node
+once it's found in SOME temp_gen's own `stmts + imported_stmts`
+(`gen_module_impl`'s "yield ownership to the REAL node" block,
+`gimple_module_gen.py` ~line 2927). `_struct_name_owner['GimpleGen']`
+correctly transfers to the real node, but `struct_field_types[
+'GimpleGen']` (the FIELD dict actually used for typedef emission)
+is never reset — it keeps whichever fields were populated FIRST,
+synthetic-stand-in fields unioned with real ones, in whatever order
+self-hosted vs shim happen to process temp_gens (a dict/set-iteration-
+order difference between the two, the same recurring bug class as
+every other self-host-only divergence in this codebase). Confirmed via
+a byte diff: noshim's typedef body for `GimpleGen` includes ~40 extra
+synthetic fields (`BUILTIN_VALUE_MAP`, `_KNOWN_SIGS`, `_CALL_RENAMES`,
+...) the shim's own struct doesn't carry at this position.
+
+Attempted fix: reset `struct_field_types['GimpleGen'] = {}` at the
+ownership-transfer point when the previous owner differs from the real
+node, letting the real struct's own field-scan passes repopulate it
+fresh. This is WRONG and was reverted: `struct_field_types['GimpleGen']`
+is also fed by `_selfhost_scan_gimplegen_extra_fields` (fields ONLY
+ever written in extracted-helper files like `gimple_gen_infra.py`, e.g.
+`gen._cpp_gen_self_fields = {}`, never in `class GimpleGen`'s own
+body since those methods were extracted OUT of the class) — a blind
+reset discards those too, and nothing re-populates them from the real
+struct's own (helper-file-blind) method scan. Worse: because
+`gen_module_impl` runs once per file in the transitive closure and
+functions get lowered (their C text finalized) as each file is
+processed, resetting this SHARED dict mid-compile invalidates the field
+TYPE some already-emitted function used for a value CAST while a
+later-emitted function sees the NEW (reset) field type for the same
+struct's DECLARATION — a declared-vs-assigned type mismatch. Manually
+rebuilding `mojoc` with this change hit exactly that: hard `gcc -fgimple`
+errors ("non-trivial conversion in 'var_decl'") for `self->_cpp_gen_
+self_fields = _t48;` (an `int64_t` value into a `struct MojoDict *`
+field) and several sibling fields. **Reverted** — confirmed the revert
+restores byte-for-byte the pre-attempt `gimple_module_gen.py` state and
+rebuilds clean.
+
+A correct fix needs the registration to happen EXACTLY ONCE, before any
+code referencing a `GimpleGen` field gets emitted for ANY file in the
+closure — not as a per-file, re-triggerable check inside
+`gen_module_impl`. That's an architectural change (move the real-vs-
+synthetic resolution to the same one-time pre-pass that already parses
+`_selfhost_gimplegen_stmts`, i.e. `_selfhost_register_gimplegen` in
+`gimple_codegen.py`, before `gen_module_impl` ever runs for ANY file),
+not a quick patch — left for a future session. Bugs A and B are real,
+safe, and landed.

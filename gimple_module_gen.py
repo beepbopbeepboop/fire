@@ -3337,6 +3337,27 @@ def gen_module_impl(self, stmts):
                         and not any(m.name == fn for m in
                                     (target_def.methods if target_def else ()))):
                     continue
+                # `fn` is a genuinely declared METHOD on this struct (or one
+                # of its bases) — an ordinary `obj.method(...)` call, not a
+                # field access at all. `_scan_stmt_member_candidates` walks
+                # every `MemberExpr` regardless of whether it's the callee
+                # of a CallExpr or a bare value read, so a real method whose
+                # name isn't one of the narrow builtin-container names above
+                # (e.g. `DispatchPattern.add_call_site`/`.add_callee`) fell
+                # through to the unconditional phantom-field mint below —
+                # a determinism gap between the shim and the self-hosted
+                # binary's own (differently-ordered) struct/method
+                # registration passes, whichever run happened to resolve
+                # `target_struct`'s method list before vs after this scan.
+                # See bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md.
+                if target_def is not None and any(
+                        m.name == fn for m in target_def.methods):
+                    continue
+                if target_def is not None and any(
+                        m.name == fn
+                        for _base_name in (getattr(target_def, 'bases', None) or [])
+                        for m in getattr(_struct_by_name.get(_base_name), 'methods', ())):
+                    continue
                 self.struct_field_types[target_struct][fn] = 'int'
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):

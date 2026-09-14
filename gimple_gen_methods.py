@@ -2537,8 +2537,89 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._emit_label(bb_after)
         return 'int', result
 
+    # `.update()` on a boxed/opaque receiver is genuinely ambiguous by
+    # method name alone: it's real on BOTH dict and set (unlike
+    # 'keys'/'values'/'items'/'get', which only exist on dict among this
+    # runtime's builtin containers). The old code here unconditionally
+    # guessed MojoDict* — correct for `d.update(...)` but silently wrong
+    # for `s.update(...)` on a set whose static type never resolved (e.g.
+    # a `gen`/`self`-typed struct field the self-hosting param-typing
+    # pass didn't reach): the set was force-cast to MojoDict* and its
+    # `update(<iterable-of-scalars>)` argument, correctly materialized as
+    # a MojoList* for a real set, got coerced against `MojoDict *` —
+    # DESIGN.html R2's chokepoint refusal ("incompatible container
+    # kinds"). Runtime-dispatch via the kind registries instead, exactly
+    # like the 'clear'/'remove' ambiguity fix above (DESIGN.html R5). See
+    # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md Finding 4.
+    if ot in ('int', 'int64_t') and not _get_float_timeout and method == 'update' and node.args:
+        ip = gen._new_temp('int64_t')
+        ov_local = gen._ensure_local(ot, ov)
+        if ot == 'int64_t':
+            gen._emit(f"  {ip} = {ov_local};")
+        else:
+            gen._emit(f"  {ip} = (int64_t){ov_local};")
+        other_type, other_val = gen.lower_expr(node.args[0])
+
+        def _emit_set_update_loop(sp):
+            lv = gen._materialize_as_list(other_type, other_val)
+            _elem = gen._elem_of(lv)
+            _suf = gimple_ctypes.TypeLattice.list_suffix(_elem) if _elem else 'int'
+            _len = gen._new_val('int64_t', f"mojo_list_len ({lv})")
+            _idx = gen._new_val('int64_t', "(int64_t)0")
+            bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_loop_after = gen._new_bb()
+            gen._emit(f"  goto {bb_cond};")
+            gen._emit_label(bb_cond)
+            cond_t = gen._new_val('_Bool', f"{_idx} < {_len}")
+            gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_loop_after};")
+            gen._emit_label(bb_body)
+            if _suf == 'str':
+                _elv = gen._new_val('char *', f"mojo_list_get_str ({lv}, {_idx})")
+                gen._emit(f"  mojo_set_add_str ({sp}, {_elv});")
+            else:
+                _elv = gen._new_val('int64_t', f"mojo_list_get_int ({lv}, {_idx})")
+                gen._emit(f"  mojo_set_add_int ({sp}, {_elv});")
+            _one = gen._new_val('int64_t', "(int64_t)1")
+            _nxt = gen._new_val('int64_t', f"{_idx} + {_one}")
+            gen._emit(f"  {_idx} = {_nxt};")
+            gen._emit(f"  goto {bb_cond};")
+            gen._emit_label(bb_loop_after)
+
+        # A statically MojoList*/MojoSet*-typed argument can NEVER be a
+        # valid dict.update() argument in this runtime (mojo_dict_update
+        # only ever accepts another MojoDict*) — unambiguous set.update()
+        # evidence, so skip the runtime dict/set dispatch and its dict
+        # branch entirely. Emitting that dict branch anyway would call
+        # `_coerce_to_type(other_type, 'MojoDict *', ...)` with a
+        # STATICALLY incompatible container-kind pair, which trips
+        # DESIGN.html R2's chokepoint at EMISSION time regardless of the
+        # runtime `if` guarding which branch actually executes — the
+        # chokepoint is a compile-time check on the C being generated,
+        # not a runtime one.
+        if other_type in ('MojoList *', 'MojoSet *'):
+            sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
+            _emit_set_update_loop(sp)
+            return 'int', gen._new_val('int', '0')
+
+        bb_set = gen._new_bb(); bb_not_set = gen._new_bb(); bb_after = gen._new_bb()
+        iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', ip)])
+        gen._emit(f"  if ({iss}) goto {bb_set}; else goto {bb_not_set};")
+        gen._emit_label(bb_set)
+        sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
+        _emit_set_update_loop(sp)
+        gen._emit(f"  goto {bb_after};")
+        gen._emit_label(bb_not_set)
+        dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
+        _od_sub = gen._dict_subclass_of(other_type)
+        if _od_sub:
+            other_val = gen._new_val('MojoDict *', f"{other_val}->_data")
+            other_type = 'MojoDict *'
+        other_val_cast = gen._coerce_to_type(other_type, 'MojoDict *', other_val)
+        gen._emit(f"  mojo_dict_update ({dp}, {other_val_cast});")
+        gen._emit_label(bb_after)
+        return 'int', gen._new_val('int', '0')
+
     if ot in ('int', 'int64_t') and not _get_float_timeout and method in (
-        'keys', 'values', 'items', 'get', 'update', 'pop', 'copy',
+        'keys', 'values', 'items', 'get', 'pop', 'copy',
         'append', 'extend', 'sort', 'reverse',
         'add', 'discard',
         'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
@@ -2551,7 +2632,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit(f"  {ip} = {ov_local};")  # same type, no cast
         else:
             gen._emit(f"  {ip} = (int64_t){ov_local};")
-        if method in ('keys', 'values', 'items', 'get', 'update'):
+        if method in ('keys', 'values', 'items', 'get'):
             dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
             if ov in gen._dict_val_types:
                 gen._dict_val_types[dp] = gen._dict_val_types[ov]
