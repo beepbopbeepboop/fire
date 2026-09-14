@@ -415,6 +415,46 @@ from the self-hosted build) confirmed via <code>git stash</code> bisection to ex
 untouched <code>b00955c</code> tree, unrelated to this session's R1/R3/R5 work — see
 <code>bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md</code>, tracked separately.</p>
 </div>
+
+<h2>Status update — 2026-09-13, check-noshim-dumpfull root-cause via lldb</h2>
+<div class="card">
+<p>Used <code>tools/gdbtool</code> (lldb) directly on the self-hosted <code>mojoc</code> binary
+to root-cause the pre-existing divergence above, per the "when the writer is in the compiler,
+instrument the compiler" methodology in <code>HOW-TO-DEBUG.html</code> — with one correction:
+instrumenting the compiler's OWN SOURCE proved actively dangerous (see below), so the real work
+was done with lldb breakpoints/backtraces against the already-built binary instead.</p>
+<p><span class="lbl">Found and fixed 2 real bugs.</span> A conditional breakpoint on
+<code>mojo_exc_msg_set</code> caught a <code>zip()</code>-nested-tuple <code>ValueError</code>
+(meant to be caught locally by a <code>try/except</code> and fall back gracefully) escaping to
+the module-level handler — but only while a COMPILED PYTHON GENERATOR
+(<code>gimple_gen_stmts._iter_ast</code> / <code>gimple_gen_coro._walk</code>, both
+<code>yield</code>-based AST-tree walkers used internally by this compiler) was suspended
+mid-<code>yield</code> on the call stack, confirmed via the backtrace showing
+<code>__mojo_coro_yield</code> / <code>__mgco__iter_ast_body</code> frames at the exact moment of
+the raise. A <code>yield</code> function compiles to a REAL stack-switching coroutine in this
+codegen, and this runtime's own docs already state "a coroutine body can't use setjmp/longjmp
+directly" — a <code>try</code> block's <code>setjmp</code> captured on the resuming stack,
+<code>longjmp</code>'d to from code running on the coroutine's own separate fiber stack, is
+undefined behavior. Neither function's many call sites needed laziness, so both were rewritten
+as plain iterative list-building functions, eliminating the coroutine machinery for these two
+internal walks entirely. Verified: the shim-vs-noshim size gap dropped from ~4MB to ~196KB, and
+<code>gimple_gen_coro</code> is now byte-for-byte present in both builds.</p>
+<p><span class="lbl">Important lesson, paid for the hard way:</span> adding new debug-tracing
+code directly into this compiler's own self-hosted source — even a plain, always-disabled
+<code>bool</code> flag guarding dead-at-runtime <code>print()</code> calls — broke
+<code>make mojoc</code>'s own SHIM-compiled build outright (undefined-struct errors), because
+this compiler does WHOLE-FUNCTION type unification and new code can shift how OTHER, unrelated
+variables in the same function get statically typed. All such instrumentation was reverted;
+further investigation used lldb directly against the built binary instead.</p>
+<p>A THIRD, much smaller divergence remains: the <code>myinterpreter</code> module still drops
+self-hosted, root-caused (via lldb backtrace) to <code>from_base = set()</code> in
+<code>execute_StructDef</code> being mis-inferred as <code>MojoDict *</code>. Precisely bisected
+(by truncating a working copy of the real file and re-running <code>--dump-full</code>, ~15s per
+iteration) to: the mistyping requires the mere PRESENCE, anywhere later in the same class, of a
+<code>self.&lt;attr&gt;.update(...)</code> call — specifically the method name
+<code>"update"</code> on a <code>self.</code> attribute, regardless of which attribute or what
+argument. Root mechanism not yet found despite ruling out several specific candidates (see the
+bug doc for the full elimination list) — tracked for further work.</p>
 </div>
 
 </div>
