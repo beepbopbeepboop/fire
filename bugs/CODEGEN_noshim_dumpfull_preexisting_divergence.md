@@ -833,6 +833,55 @@ need for the standalone-binary approach and its unrelated blockers):
    else this whole investigation has been about, just for a built-in
    AST class instead of a user-defined one.
 
+## Finding 5 UPDATE 3 — reentrancy/nesting-depth hypothesis tested and ELIMINATED
+
+Recommended step 2 from "Finding 5 UPDATE 2" above was carried out:
+does the `.type_ann` corruption depend on HOW DEEP the nested
+`Parser(...).parse_module()` call sits within an already-executing
+compile? Moved the identical mini-repro (tiny synthetic class, same
+call shape) from deep inside `_selfhost_register_gimplegen` (called
+partway through `gen_module`, well after the outer compile's own
+parse/tokenize/codegen work is underway) to the very FIRST line of
+`_run_pipeline` itself — literally before the outer file's own
+`tokens = py_tokenize(mojo_src)` / `Parser(tokens)...` call, as
+shallow/early as any nested nested nested invocation could possibly
+be within a real self-hosted compile.
+
+**Result: corruption reproduces identically at both nesting
+depths/timings.** `is_str=False`, `is_none=False` at the "early"
+position too — exactly the same symptom as the "deep" position. This
+RULES OUT reentrancy/call-stack-depth as the trigger; whatever a
+"nested"/"secondary" `Parser(...).parse_module()` invocation is doing
+wrong, it's wrong from the very first opportunity, not something that
+accumulates or gets triggered by stack depth or by how much of the
+outer compile's own state has already been touched.
+
+**Refined framing** (supersedes "Finding 5 UPDATE 2"'s "call-context-
+dependent" language, which implied nesting/timing mattered — it
+doesn't): the bug is simply that ANY `Parser(...).parse_module()`
+invocation OTHER than `_run_pipeline`'s own single canonical call for
+the outer file produces an `AssignStmt` whose `.type_ann` reads
+wrong self-hosted — regardless of when in the process that second
+invocation happens. This is architecturally close to "the compiled
+binary's `Parser`/tokenizer/AST-rewrite machinery only works
+correctly the ONE time `_run_pipeline` itself calls it" — worth
+testing directly in a future session: does a **third** invocation (two
+nested calls in a row, not just one) behave the same way, or does it
+get progressively worse/different? Does the SAME symptom appear for a
+`VarDecl`'s `type_ann` (constructed at a different call site,
+`mojo_compiler.py:2293`/`2459`/`4444`) or is it specifically tied to
+`AssignStmt`'s construction site (`mojo_compiler.py:2280`)? These two
+checks would help decide between "any second invocation of Parser
+breaks" (a single, central culprit) vs. "type_ann specifically is
+broken on ANY AssignStmt regardless of which Parser call created it,
+including the outer one, and the outer one only 'looks fine' because
+nothing downstream in the REAL compile of mojo.py ever critically
+depends on the correctness of the SPECIFIC handful of `AssignStmt`
+nodes whose `.type_ann` would have been wrong" (a MUCH bigger, harder-
+to-see bug that's been silently present all along, just never load-
+bearing until this investigation's synthetic tests started actually
+reading `.type_ann` back and checking it).
+
 ## Followups (not fixed this session, worth a future audit)
 
 - **The `.name`/`.type_ann` attribute-read corruption on objects from
