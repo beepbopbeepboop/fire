@@ -574,24 +574,52 @@ self-hosted vs shim", which could stem from import-graph traversal
 order, `self._module_stmts`/`self._compiled_modules` iteration
 somewhere, or something else entirely in the do_imports driver loop.
 
-**Not root-caused this session** — this needs fresh instrumentation
-aimed at the RIGHT layer (file/module compile order, not a
-struct-tracking dict inside one file's own emission pass), and given
-how much runway the `track_best` red herring consumed, is better
-started fresh in a future session with a clear head, following the
-method below.
+**Second hypothesis tested, ALSO disproven**: instrumented
+`_compile_imported_module` (gimple_gen_resolve.py) to log `module_name`
+as each module starts compiling, gated behind `MOJO_ORDER_DEBUG`
+(first attempt used `gimple_ctypes.os.environ.get(...)` and silently
+produced zero output self-hosted — a real, separate self-hosted
+reliability wrinkle in accessing `os` via a re-exported module
+attribute rather than a direct `import os`; switching to the file's
+own already-present `import os` and calling `os.environ.get(...)`
+directly fixed the debug output itself). Result: **the full 280-entry
+module-compile sequence is IDENTICAL self-hosted vs shim**, confirmed
+via a complete `diff` (not just eyeballing the first N lines) — same
+280 modules, same order, from `build_config` first through to the
+last. So module-compile order is NOT the mechanism either.
 
-**Next steps for a future session**: instrument
-`_compile_imported_module` itself (or wherever the top-level
-`do_imports=True` driver loop decides which module to compile next)
-to log `module_name` + a sequence counter as each module starts
-compiling, self-hosted vs shim, and diff the two sequences directly.
-If that sequence differs, the next question is WHY (a dict/set whose
-iteration order determines "what's next in the work queue", most
-likely) — same "compare a specific counter/sequence between
-self-hosted and shim after each candidate fix" method that cracked
-Bug C's several layers, just aimed one level higher (module-compile
-order, not struct-list order within one module's own emission).
+**Status at end of session 3: both obvious iteration-order hypotheses
+eliminated, true mechanism still unknown.** Two independent, cleanly
+disproven candidates:
+1. `track_best`'s dict iteration order within one module's own
+   struct-emission pass — matched exactly, byte output still diverged.
+2. Module compile order itself (which module's
+   `_compile_imported_module` call happens when) — matched exactly
+   (all 280 entries), byte output still diverges at the same position
+   (first differing byte ~19215, `GimpleGen` right after `Generator`
+   self-hosted vs `GlobalStmt` there in the shim).
+
+**Next steps for a future session**: given both "when does X get
+iterated/visited" hypotheses are eliminated, the remaining candidate
+is HOW the already-correctly-ordered pieces get assembled into the
+final text — i.e. look at the actual STRING CONCATENATION / list-
+building logic (`parts.append(...)`/`parts.extend(...)`-style
+assembly, or wherever per-module C-code fragments get joined into the
+final `.ci` text) rather than any iteration-order question. It's also
+worth directly checking whether `Generator`'s and `GimpleGen`'s
+STRUCTS are even coming from the same emission pass in both
+self-hosted and shim at all — the `track_best`/`emit_struct_defs`
+block investigated here might simply not be the site responsible for
+this specific pair (recall gimple_module_gen.py has at least 10
+separate `typedef struct` emission call sites — `_stub_guard_name`
+call sites at lines ~4078, 4084, 5228, 6769, 6863, 6960, 7950, 8115,
+8153 hint at several distinct struct-stub-emission code paths beyond
+the one instrumented here). A more direct approach: add a one-off
+`print`/log statement immediately before EVERY `parts.append(f"typedef
+struct {X} {{"` call site (there are ~10), each tagged with its own
+site identifier, then compare self-hosted vs shim to see WHICH site
+actually emits `Generator`/`GimpleGen`/`GlobalStmt` — this was not
+attempted this session and is the recommended starting point.
 
 ## Followups (not fixed this session, worth a future audit)
 
