@@ -2613,20 +2613,26 @@ def gen_module_impl(self, stmts):
         if isinstance(_ggs, StructDef) and _as_str(_as_structdef_node(_ggs).name) == 'GimpleGen':
             _gg_have_infile = True
             break
+    # Gated on a DEDICATED flag (`_gg_synth_struct_registered`), not on
+    # `'GimpleGen' not in self.struct_field_types` — that dict key now
+    # gets seeded deterministically and unconditionally, once, by
+    # `gimple_codegen._selfhost_register_gimplegen` (before ANY temp_gen
+    # processes ANY file), specifically so the field SET converges
+    # regardless of self-hosted-vs-shim temp_gen processing order (see
+    # that function's own docstring and bugs/CODEGEN_noshim_dumpfull_
+    # preexisting_divergence.md's Finding 4 Bug C). Using the dict key as
+    # this gate too — its ORIGINAL role — would make this whole block
+    # (which does far more than seed fields: it registers the SYNTHETIC
+    # StructDef into `_imported_typedef_structs`, required for method
+    # extern emission) permanently skip for every temp_gen once the key
+    # exists, even ones that still need it because they never encounter
+    # the real `class GimpleGen` in their own `stmts + imported_stmts` —
+    # confirmed via `make check-selfhost` regressing to hundreds of
+    # "implicit declaration of function 'GimpleGen__*'" errors.
     if (_gg_stmts is not None and _is_selfhost_file
-            and 'GimpleGen' not in self.struct_field_types
+            and not getattr(self, '_gg_synth_struct_registered', False)
             and not _gg_have_infile):
-        # Rebuild via an indexed loop, not `dict(x)` — the self-hosted
-        # backend's dict-copy-constructor path is untested/unreliable for
-        # this shape (see `_render_struct_typedef_body`'s matching fix,
-        # same underlying erased-key class of bug); build the copy through
-        # explicit key iteration + `_as_str` instead of trusting `dict()`
-        # to preserve key/value C types across the copy.
-        _gg_src = self._selfhost_gimplegen_extra_fields
-        _gg_ft0: dict = {}
-        for _gg_k in _gg_src:
-            _gg_ft0[_as_str(_gg_k)] = _as_str(_gg_src[_gg_k])
-        self.struct_field_types['GimpleGen'] = _gg_ft0
+        self._gg_synth_struct_registered = True
         self._imported_struct_names.add('GimpleGen')
         self._struct_name_owner.setdefault('GimpleGen', _gg_stmts)
         self._imported_typedef_structs.append(_gg_stmts)
@@ -2744,8 +2750,19 @@ def gen_module_impl(self, stmts):
     _merge_struct_inheritance(all_struct_defs)
     self._exc_descendants = _compute_exc_descendants(all_struct_defs)
     for _s in all_struct_defs:
-        if isinstance(_s, StructDef) and _s.name not in self.struct_field_types:
-            self.struct_field_types[_s.name] = {}
+        if isinstance(_s, StructDef):
+            # `_as_str(_s.name)` — `_s.name` is a boxed self-hosted AST
+            # field read; comparing/keying on it directly can silently
+            # miss an already-present entry (e.g. one seeded elsewhere
+            # via a properly `_as_str()`-normalized key, like
+            # `gimple_codegen._selfhost_register_gimplegen`'s GimpleGen
+            # field-dict seed), making this `not in` guard spuriously
+            # True and WIPING that entry back to `{}` right here. See
+            # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md
+            # Finding 4 Bug C.
+            _s_name = _as_str(_s.name)
+            if _s_name not in self.struct_field_types:
+                self.struct_field_types[_s_name] = {}
 
     # --- builtin `dict` subclassing: `class Counter(dict)`, `class
     # OrderedDict(dict)`, and transitive subclasses of those ---

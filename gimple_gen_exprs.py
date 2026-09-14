@@ -2609,7 +2609,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # pointer or int64 handle (real: zipfile `_write_end_record`'s
     # `struct.pack(...) + extra_data`).
     if op == '+' and (lt == 'MojoBytes *') != (rt == 'MojoBytes *'):
-        def _as_bytes(ct, cv):
+        # Explicit `str` param annotations: an unannotated closure param
+        # used only in an f-string default-typed to int64_t self-hosted,
+        # so `cv` (a proper `_tNN` variable-reference string) got boxed
+        # and read back as its raw pointer bits -- confirmed by hand:
+        # `b'...' + x.encode()` emitted `mojo_bytes_from_cstr
+        # (39775495952)` (a heap address, non-deterministic run to run)
+        # self-hosted instead of `mojo_bytes_from_cstr (_t4)`, while the
+        # shim (CPython) produced the correct form from the identical
+        # source. Matches this codebase's established "hoisted closures
+        # need explicit param annotations self-hosted" pattern.
+        def _as_bytes(ct: str, cv: str):
             if ct == 'MojoBytes *':
                 return cv
             if ct == 'char *':

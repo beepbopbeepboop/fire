@@ -1907,7 +1907,14 @@ class GimpleGen:
         # gimple_module_gen.py mis-fire and drop the ~1400-line GimpleGen
         # method-extern block from stage2's mojo.ci under MOJO_NO_SHIM=1).
         self._selfhost_gimplegen_stmts = None
-        self._selfhost_gimplegen_extra_fields: dict = {}
+        # Bare `dict = {}` left the value ctype unresolved self-hosted, so
+        # `gen._selfhost_gimplegen_extra_fields[k]` read back the raw
+        # MojoDict-value pointer bits reinterpreted as int64_t (e.g. printed
+        # as a huge decimal like 4374397560) instead of dereferencing it as
+        # `char *` -- explicit `dict[str, str]` forces the correct value
+        # ctype. Root cause of Finding 4 Bug C's GimpleGen struct_field_
+        # types corruption (257/183-wrong vs 290 fields shim).
+        self._selfhost_gimplegen_extra_fields: dict[str, str] = {}
         self._selfhost_gimplegen_sigs = None
         self._selfhost_gimplegen_dict_vts: dict = {}
         self._selfhost_gimplegen_registered = False
@@ -3969,9 +3976,59 @@ def _selfhost_register_gimplegen(gen):
         return
     gen._selfhost_gimplegen_stmts = _cls
     gen._selfhost_gimplegen_extra_fields = \
-        gfn._selfhost_gimplegen_field_types(_cls)
+        gfn._selfhost_gimplegen_field_types(_cls, gen._selfhost_src_dir or None)
     gen._selfhost_gimplegen_sigs = gfn._selfhost_gimplegen_frozen_sigs(gen, _cls)
     gen._selfhost_gimplegen_dict_vts = gfn._selfhost_gimplegen_dict_val_types(_cls)
+    # Seed `struct_field_types['GimpleGen']` from the extracted-helper field
+    # scan HERE, unconditionally, exactly once (this function itself only
+    # runs once per top-level compile) — NOT inside `gen_module_impl`'s
+    # per-file "not _gg_have_infile" branch. `gimple_module_gen.py`'s own
+    # unconditional re-merge of this same dict (`if _gg_sigs and 'GimpleGen'
+    # in self.struct_field_types:`) only fires once the key already exists,
+    # so whether these extracted-helper fields (`_cpp_gen_self_fields`,
+    # `_prepass_struct`, `_dispatch_solver`, ... — written ONLY in
+    # extracted-helper files like gimple_gen_infra.py, never inside class
+    # GimpleGen's own body, since those methods were extracted OUT of the
+    # class) end up in the final struct at all previously depended on
+    # whether some OTHER temp_gen happened to take the synthetic-
+    # registration path BEFORE the one processing the real `class
+    # GimpleGen` — a self-hosted-vs-shim dict/set-iteration-order
+    # difference (the same recurring bug class as everywhere else in this
+    # codebase) that produced a real shim-vs-noshim `--dump-full` byte
+    # divergence (~5.8MB, first differing at the GimpleGen typedef). Always
+    # seeding here makes the baseline deterministic regardless of temp_gen
+    # processing order; the real struct's own later field-scan passes
+    # (class-body annotations, `self.X = <literal>` in its OWN methods) can
+    # only ADD to this baseline, never remove from it, so the two runs
+    # converge on the same final field set either way. See bugs/CODEGEN_
+    # noshim_dumpfull_preexisting_divergence.md's Finding 4 Bug C.
+    if 'GimpleGen' not in gen.struct_field_types:
+        gen.struct_field_types['GimpleGen'] = {}
+    _gg_ft_seed = gen.struct_field_types['GimpleGen']
+    # `_as_str()` on BOTH key and value, not a bare `.items()` unpack —
+    # the self-hosted backend's dict `.items()`/copy path has a known,
+    # separately-documented unreliability for this exact shape (see the
+    # sibling comment at gimple_module_gen.py's own former identical copy,
+    # "Rebuild via an indexed loop, not `dict(x)`... build the copy
+    # through explicit key iteration + `_as_str`"): confirmed by hand here
+    # too — without the `_as_str()` calls, self-hosted `mojoc` silently
+    # dropped every value back to the `int64_t` default (`_actual_types`,
+    # `_all_closures`, ... all lost their real `MojoDict *`/`MojoSet *`
+    # type) while the python3 shim, running the exact same source,
+    # preserved them correctly — a real, reproduced shim-vs-noshim
+    # `--dump-full` byte divergence this cast fixes.
+    for _gg_fk in gen._selfhost_gimplegen_extra_fields:
+        _gg_fk_s = _as_str(_gg_fk)
+        _gg_fc_s = _as_str(gen._selfhost_gimplegen_extra_fields[_gg_fk])
+        _gg_cur = _gg_ft_seed.get(_gg_fk_s)
+        # A generic default must yield to ANY more specific ctype, not just
+        # a pointer type -- see the matching fix + comment on
+        # `_selfhost_merge_field` in gimple_gen_funcs.py (identical bug: a
+        # `_Bool` field seen after an `int64_t` default was silently kept
+        # at `int64_t` because only `_ct.endswith(' *')` was accepted).
+        if _gg_cur is None or (_gg_cur in ('int', 'int64_t', '_Bool')
+                                and (_gg_fc_s.endswith(' *') or _gg_fc_s == '_Bool')):
+            _gg_ft_seed[_gg_fk_s] = _gg_fc_s
     gen._selfhost_gimplegen_registered = True
 
 

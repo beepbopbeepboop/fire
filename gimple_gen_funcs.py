@@ -823,20 +823,42 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 
 
-_SELFHOST_LITERAL_CTM = {DictExpr: 'MojoDict *', ListExpr: 'MojoList *',
-                         TupleExpr: 'MojoList *', SetExpr: 'MojoSet *',
-                         StringLiteral: 'char *', BoolLiteral: '_Bool',
-                         IntLiteral: 'int64_t'}
-_SELFHOST_CALL_CTM = {'set': 'MojoSet *', 'frozenset': 'MojoSet *',
-                      'dict': 'MojoDict *', 'list': 'MojoList *'}
-
-
 def _selfhost_literal_ctype(_val):
-    """ctype for a literal / builtin-container-call RHS, or None."""
-    _ct = _SELFHOST_LITERAL_CTM.get(type(_val))
-    if _ct is None and isinstance(_val, CallExpr) and isinstance(_val.func, IdentExpr):
-        _ct = _SELFHOST_CALL_CTM.get(_val.func.name)
-    return _ct
+    """ctype for a literal / builtin-container-call RHS, or None.
+
+    Deliberately an isinstance chain, NOT a `type(_val)`-keyed dict
+    lookup: confirmed by hand that `type()` yields an unreliable
+    (non-uniquely-identifying) tag self-hosted — the exact same bug
+    class already found and fixed for `_WALK_FIELD_NAMES_CACHE` in
+    gimple_exprtypes.py. A `dict.get(type(_val))` lookup against real
+    class-object keys silently returned None for almost every value
+    self-hosted (confirmed: ctok dropped from 141 matches via the shim
+    to 22 self-hosted with the dict-lookup form), even though the
+    lookup worked perfectly via the shim (CPython's `type()` IS a
+    real, uniquely-identifying class object)."""
+    if isinstance(_val, DictExpr):
+        return 'MojoDict *'
+    if isinstance(_val, ListExpr):
+        return 'MojoList *'
+    if isinstance(_val, TupleExpr):
+        return 'MojoList *'
+    if isinstance(_val, SetExpr):
+        return 'MojoSet *'
+    if isinstance(_val, StringLiteral):
+        return 'char *'
+    if isinstance(_val, BoolLiteral):
+        return '_Bool'
+    if isinstance(_val, IntLiteral):
+        return 'int64_t'
+    if isinstance(_val, CallExpr) and isinstance(_val.func, IdentExpr):
+        _fn = _as_str(_val.func.name)
+        if _fn == 'set' or _fn == 'frozenset':
+            return 'MojoSet *'
+        if _fn == 'dict':
+            return 'MojoDict *'
+        if _fn == 'list':
+            return 'MojoList *'
+    return None
 
 
 _SELFHOST_ANN_CTM = {'dict': 'MojoDict *', 'Dict': 'MojoDict *',
@@ -871,13 +893,104 @@ def _selfhost_ann_ctype(_ann):
     return None
 
 
-def _selfhost_merge_field(_fields: dict, _name: str, _ct: str):
+def _selfhost_merge_field(_fields: dict[str, str], _name: str, _ct: str):
     _cur = _fields.get(_name)
-    if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _ct.endswith(' *')):
+    # A generic default (`int`/`int64_t`) must yield to ANY more specific
+    # ctype seen later for the same field, not just a pointer type -- the
+    # earlier `_ct.endswith(' *')`-only check let a `_Bool` literal seen
+    # after an `int64_t` default get silently dropped (a real, confirmed
+    # shim-vs-noshim divergence: `_selfhost_gimplegen_registered` etc.
+    # stuck at `int64_t` self-hosted while the shim correctly settled on
+    # `_Bool`).
+    if _cur is None or (_cur in ('int', 'int64_t', '_Bool')
+                         and (_ct.endswith(' *') or _ct == '_Bool')):
         _fields[_name] = _ct
 
 
-def _selfhost_scan_gimplegen_extra_fields() -> dict:
+def _selfhost_walk_stmts_for_assign_targets(stmts, p0, fields):
+    """Narrow, statement-only recursive walker used ONLY by
+    `_selfhost_scan_gimplegen_extra_fields` — deliberately NOT the shared
+    `gimple_exprtypes._walk_ast` (a full generic-dataclass-reflection
+    walker used ~48 places across the compiler, and the documented
+    subject of a well-known, actively-tracked O(N^2) whole-program
+    rescan cost — see bugs/hard/PERF_nested_module_compile_walk_ast_
+    quadratic_rescan.md). `self.x = <literal>` assignments are always
+    direct statements, never nested inside an expression, so this only
+    needs to recurse into STATEMENT-level body-bearing fields (if/while/
+    for/try/with/match/comptime blocks) — far cheaper and, critically,
+    self-hosted-safe: an attempt to instead fix `_walk_ast` itself
+    (reordering its `dataclasses.is_dataclass` check ahead of its
+    scalar-leaf isinstance checks, which were found to misclassify real
+    AST dataclass instances as scalars self-hosted) made the shared
+    walker recurse correctly for the FIRST time self-hosted — and that
+    alone was enough to trigger the above O(N^2) rescan's real cost on
+    literally any file's `--dump-full` self-compile (confirmed
+    reproducing standalone on `gimple_gen_loops.py` alone, unrelated to
+    this scan), causing multi-GB RSS growth and a SIGSEGV. Fixing the
+    shared utility is out of scope for this investigation; this
+    dedicated walker sidesteps it entirely for GimpleGen's own narrow
+    need. Mutates `fields` via `_selfhost_merge_field`; no return value.
+
+    NOTE: `isinstance(x, (A, B))` with a tuple of types is unreliable
+    self-hosted (always evaluates False) — every check below is a
+    separate `isinstance(x, A) or isinstance(x, B)` chain instead."""
+    for _n in stmts:
+        if isinstance(_n, MultiAssignStmt):
+            _targets = _n.targets
+        elif isinstance(_n, AssignStmt):
+            _targets = [_n.target]
+        else:
+            _targets = None
+        if _targets is not None:
+            for _tgt in _targets:
+                # `_as_str()` on `_tgt.obj.name` — a boxed self-hosted
+                # AST-field read compared directly with `==` against
+                # `p0` is the exact established bug class this codebase
+                # has hit repeatedly; confirmed by hand this was the
+                # single remaining self-hosted divergence at this layer.
+                if (isinstance(_tgt, MemberExpr)
+                        and isinstance(_tgt.obj, IdentExpr)
+                        and _as_str(_tgt.obj.name) == _as_str(p0)):
+                    _ct = _selfhost_literal_ctype(_n.value)
+                    if _ct is not None:
+                        # `_as_str()` on the field name — a boxed
+                        # self-hosted AST-field read used directly as a
+                        # dict key is a recurring corruption bug class
+                        # in this codebase.
+                        _selfhost_merge_field(fields, _as_str(_tgt.member), _ct)
+        if isinstance(_n, IfStmt):
+            _selfhost_walk_stmts_for_assign_targets(_n.then_body, p0, fields)
+            for _ec, _eb in _n.elifs:
+                _selfhost_walk_stmts_for_assign_targets(_eb, p0, fields)
+            if _n.else_body:
+                _selfhost_walk_stmts_for_assign_targets(_n.else_body, p0, fields)
+        elif isinstance(_n, ComptimeIfStmt):
+            _selfhost_walk_stmts_for_assign_targets(_n.then_body, p0, fields)
+            for _ec, _eb in _n.elifs:
+                _selfhost_walk_stmts_for_assign_targets(_eb, p0, fields)
+            if _n.else_body:
+                _selfhost_walk_stmts_for_assign_targets(_n.else_body, p0, fields)
+        elif isinstance(_n, WhileStmt) or isinstance(_n, ForStmt) or isinstance(_n, ComptimeForStmt):
+            _selfhost_walk_stmts_for_assign_targets(_n.body, p0, fields)
+            _eb2 = getattr(_n, 'else_body', None)
+            if _eb2:
+                _selfhost_walk_stmts_for_assign_targets(_eb2, p0, fields)
+        elif isinstance(_n, TryStmt):
+            _selfhost_walk_stmts_for_assign_targets(_n.body, p0, fields)
+            for _h in _n.handlers:
+                _selfhost_walk_stmts_for_assign_targets(_h.body, p0, fields)
+            if _n.else_body:
+                _selfhost_walk_stmts_for_assign_targets(_n.else_body, p0, fields)
+            if _n.finally_body:
+                _selfhost_walk_stmts_for_assign_targets(_n.finally_body, p0, fields)
+        elif isinstance(_n, WithStmt):
+            _selfhost_walk_stmts_for_assign_targets(_n.body, p0, fields)
+        elif isinstance(_n, MatchStmt):
+            for _c in _n.cases:
+                _selfhost_walk_stmts_for_assign_targets(_c.body, p0, fields)
+
+
+def _selfhost_scan_gimplegen_extra_fields(_src_dir=None) -> dict[str, str]:
     """`{attr_name: ctype}` for every GimpleGen instance attribute first
     bound OUTSIDE `class GimpleGen`'s own body — i.e. `gen.<attr> = <literal>`
     / `self.<attr> = <literal>` inside the ~344 extracted backend helper
@@ -888,15 +1001,40 @@ def _selfhost_scan_gimplegen_extra_fields() -> dict:
 
     Only literal RHS is trustworthy for a ctype; `gen.x = f()` gives nothing
     and is left to `_inferred_param_types` / the frozen table. Cached on the
-    mtime set of all `gimple_*.py` under _SELFHOST_DIR."""
-    import glob as _glob
-    _sd = gimple_codegen._SELFHOST_DIR
-    _files = sorted(_glob.glob(gimple_ctypes.os.path.join(_sd, 'gimple_*.py')))
+    mtime set of all `gimple_*.py` under the resolved source dir.
+
+    `_src_dir` (`gen._selfhost_src_dir`, threaded through from
+    `_selfhost_register_gimplegen`) is tried FIRST, same fallback order as
+    `_selfhost_load_gimplegen_class` in gimple_codegen.py: in the COMPILED
+    binary `_SELFHOST_DIR` is `dirname(abspath(__file__))`, and `__file__`
+    there is `<bootstrap>`, so it can resolve to a directory with no
+    `gimple_*.py` siblings at all.
+
+    Uses `os.listdir()` + manual filename filtering, NOT `glob.glob()`:
+    confirmed by hand that `glob.glob(os.path.join(d, 'gimple_*.py'))`
+    silently returns 0 matches self-hosted regardless of directory
+    correctness, while `os.listdir(d)` + `startswith('gimple_')`/
+    `endswith('.py')` filtering finds the same 17 files the shim finds."""
+    _files: list = []
+    for _cand_dir in (_src_dir, gimple_codegen._SELFHOST_DIR, '.', '..'):
+        if _cand_dir is None:
+            continue
+        try:
+            _cand_names = sorted(os.listdir(_cand_dir))
+        except OSError:
+            continue
+        _cand_files = []
+        for _cn in _cand_names:
+            if _cn.startswith('gimple_') and _cn.endswith('.py'):
+                _cand_files.append(gimple_ctypes.os.path.join(_cand_dir, _cn))
+        if _cand_files:
+            _files = _cand_files
+            break
     _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('k')
     if _hit is not None and _hit[0] == _key:
         return _hit[1]
-    _fields: dict = {}
+    _fields: dict[str, str] = {}
     for _f in _files:
         try:
             _mod = ast_rewriter.rewrite(
@@ -908,36 +1046,12 @@ def _selfhost_scan_gimplegen_extra_fields() -> dict:
                     and _fn.params[0][0].lstrip('*') in ('gen', 'self')):
                 continue
             _p0 = _fn.params[0][0].lstrip('*')
-            for _n in gimple_exprtypes._walk_ast(_fn.body):
-                # A chained assignment (`units = gen._stackswitch_coro_c_
-                # units = []`, gimple_gen_coro.py's own lazy-init idiom)
-                # parses as MultiAssignStmt (multiple `targets`), not
-                # AssignStmt (one `target`) -- missing this case here left
-                # `_stackswitch_coro_c_units` (and any other field first
-                # bound this way) undetected, so `gen`/`self` stayed typed
-                # as an opaque struct with no such member, and a real
-                # self-hosted compile of the module doing the chained
-                # assignment failed to resolve it ("'GimpleGen' has no
-                # member named ...").
-                if isinstance(_n, MultiAssignStmt):
-                    _targets = _n.targets
-                elif isinstance(_n, AssignStmt):
-                    _targets = [_n.target]
-                else:
-                    continue
-                for _tgt in _targets:
-                    if not (isinstance(_tgt, MemberExpr)
-                            and isinstance(_tgt.obj, IdentExpr)
-                            and _tgt.obj.name == _p0):
-                        continue
-                    _ct = _selfhost_literal_ctype(_n.value)
-                    if _ct is not None:
-                        _selfhost_merge_field(_fields, _tgt.member, _ct)
+            _selfhost_walk_stmts_for_assign_targets(_fn.body, _p0, _fields)
     _SELFHOST_EXTRA_FIELD_CACHE['k'] = (_key, _fields)
     return _fields
 
 
-def _selfhost_gimplegen_field_types(gg_cls) -> dict:
+def _selfhost_gimplegen_field_types(gg_cls, _src_dir=None) -> dict:
     """`{field_name: ctype}` for `class GimpleGen` — its own `__init__` /
     method / class-body `self.X = <literal>` writes (compact literal-only
     inference, everything else → `int64_t`, refined later by
@@ -953,7 +1067,7 @@ def _selfhost_gimplegen_field_types(gg_cls) -> dict:
     # rebuild via an indexed loop + _as_str instead of trusting dict() to
     # preserve key/value C types across the copy.
     _fields: dict = {}
-    _sf_src = _selfhost_scan_gimplegen_extra_fields()
+    _sf_src = _selfhost_scan_gimplegen_extra_fields(_src_dir)
     for _sfk in _sf_src:
         _fields[_as_str(_sfk)] = _as_str(_sf_src[_sfk])
     if gg_cls is None:

@@ -499,6 +499,18 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         except:
             py_ldflags = []
 
+        # 512MB main-thread stack (default is 8MB) -- same flag/rationale as
+        # driver.py's link-mode path: the self-hosted compiler's own regex
+        # engine and generic AST walkers (_walk_ast_into) are deeply
+        # CPS-recursive, and an 8MB stack overflows (SIGSEGV, no diagnostic)
+        # partway through a real MOJO_NO_SHIM=1 --dump-full self-compile.
+        # `mojo.py build` links via THIS path (build_executable), not
+        # driver.py's, so it needs its own copy of the flag.
+        if _IS_DARWIN:
+            py_ldflags += ['-Wl,-stack_size,0x20000000']
+        else:
+            py_ldflags += ['-Wl,-z,stacksize=536870912']
+
         result = link_executable([o_file, runtime_o] + extra_objs, exe_file, py_ldflags, cxx=cxx_link)
         if result.returncode != 0:
             print(f"Linking failed: {result.stderr}", file=sys.stderr)
