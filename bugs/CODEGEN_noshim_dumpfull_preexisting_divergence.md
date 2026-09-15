@@ -1188,3 +1188,170 @@ in available memory, then reapply this exact, already-written fix; or
 to unblock check-noshim-dumpfull specifically, while (1) is addressed
 separately. No further attempt at THIS specific fix is worth making on
 this machine without one of those two prerequisites.
+
+### CORRECTION (session 5, 2026-09-14 later): the "OOM" diagnosis above was wrong — real cause is a NULL-pointer SIGSEGV
+
+The "died silently, consistent with OOM" conclusion above was itself a
+misdiagnosis, caused by an investigation artifact: the process had been
+launched with explicit shell backgrounding (`(...&)`), which obscured
+its real exit code from the calling shell — a silent death with an
+empty log looked identical to an OOM kill (SIGKILL/137) from the
+outside. Re-running the exact same reproduction command WITHOUT the
+extra `&` (still inside the harness's own `run_in_background`, but as
+a plain synchronous foreground command) captured the true exit status:
+**139 = 128+11 = SIGSEGV**, not SIGKILL. `ulimit -a` showed all
+memory-related limits as "unlimited," and no core file was produced in
+`/cores/`.
+
+Following `HOW-TO-DEBUG.html`'s methodology, reproduced under lldb with
+ASLR disabled:
+
+```
+lldb -o "settings set target.disable-aslr true" \
+     -o "settings set target.env-vars MOJO_NO_SHIM=1" \
+     -o "run gimple_gen_loops.py --dump-full" \
+     -o "bt" -o "quit" ./mojoc
+```
+
+This gave a clean, reproducible backtrace:
+
+```
+* thread #1, stop reason = EXC_BAD_ACCESS (code=1, address=0x0)
+  frame #0: libsystem_platform.dylib`_platform_strcmp$VARIANT$Base + 148
+  frame #1: mojoc`_dict_lookup(d=<unavailable>, key=0x0) at mojo_runtime.c:2570:13
+  frame #2: mojoc`mojo_dict_get_str(d=<unavailable>, key=0x0) at mojo_runtime.c:2592:21
+  frame #3: mojoc`gimple_module_gen__gmi_collect_self_assigns_2f4586(...)
+      at gimple_module_gen.py:1117:10
+  frame #4: mojoc`gimple_module_gen_gen_module_impl_7e9a9f(...) at gimple_module_gen.py:3259:3
+  [... nested GimpleGen.gen_module -> _compile_imported_module recursion
+   across gimple_solvers, gimple_gen_methods, gimple_gen_exprs,
+   gimple_gen_calls, gimple_cpp_core, gimple_cpp_async, gimple_codegen ...]
+```
+
+A genuine NULL-pointer dereference, not memory exhaustion — full log
+saved at session time in `/tmp/lldb_crash.log` (not committed, local
+artifact only).
+
+**Root cause**: `_gmi_collect_self_assigns` (`gimple_module_gen.py`,
+function starts at line 1108) computes `_existing_fn_ft =
+found.get(fn)` at line 1117 BEFORE checking whether `fn` is `None`.
+`fn = _gmi_self_member(node.target)` legitimately returns `None` for
+any `AssignStmt` whose target is not a `self.X` attribute (e.g. a
+plain local variable assignment) — a completely normal, frequent case.
+In CPython, `dict.get(None)` on a dict with no `None` key is a safe
+no-op returning `None`. Self-hosted, `mojo_dict_get_str`/`_dict_lookup`
+erase a `None` key to a NULL `char *` with no NULL guard, and
+`_dict_lookup` unconditionally calls `strcmp(NULL, existing_key)` —
+segfaulting the instant it's ever called with a `None` key.
+
+This bug was invisible until now because the `_walk_ast` walker's own
+bug (isinstance-before-is_dataclass misclassification, documented
+above) meant `_gmi_collect_self_assigns` almost never actually reached
+a real `AssignStmt` node at all — the `_walk_ast` reorder fix (still
+correct, still not landed — see below) is what let this function
+finally see real, non-self assignment targets at scale for the first
+time, surfacing this second, independent, previously-dormant bug.
+
+**Fix identified and syntax-tested (not committed as of this
+correction)**:
+
+```python
+for node in _walk_ast(body):
+    if isinstance(node, AssignStmt):
+        fn = _gmi_self_member(node.target)
+        if fn is None:
+            continue
+        _existing_fn_ft = found.get(fn)
+        if (fn not in found
+                or (_existing_fn_ft in ('int', 'int64_t')
+                    and _existing_fn_ft is not None)):
+            v = node.value
+            ...
+```
+
+**Status after this correction**: both the `_walk_ast_into` reorder
+(`gimple_exprtypes.py`) and this `None`-guard fix (`gimple_module_gen.py`)
+were applied TOGETHER and run once: `MOJO_NO_SHIM=1 ./mojoc
+gimple_gen_loops.py --dump-full` ran **6 minutes 44 seconds** without
+crashing or completing — far longer than any single-fix attempt above
+(which either crashed within ~90s-2min, or, for the one successful
+unmodified-baseline control run, completed in ~1 minute). This was
+killed rather than let run further, and both changes were reverted
+(`git checkout -- gimple_exprtypes.py gimple_module_gen.py`, confirmed
+clean via `git status --short`), `mojoc` rebuilt from the clean
+committed state (`f8ddab4`). Whether that 6:44 run represents a
+genuinely correct-but-slow traversal that was about to finish, a
+separate still-undiagnosed stall, or the earlier heavy-memory-usage
+concern in a different guise, is **not yet known** — this is the
+concrete next step for a future session, not "run out of RAM" as
+previously concluded. The severe RSS growth documented above may still
+be real and separately worth investigating (the "never frees"
+arena-allocator observation appears independently confirmed), but it
+is no longer believed to be what killed the fourth attempt — that was
+SIGSEGV, diagnosed above, in a completely different function
+(`_gmi_collect_self_assigns`) than the `_walk_ast` reorder itself.
+
+**Recommended next steps**: (1) re-apply both fixes together again,
+this time either running under lldb from the start (so a second crash,
+if any, gets an immediate backtrace instead of another silent kill) or
+adding progress instrumentation/timeouts to distinguish "still working"
+from "stuck"; (2) if it does complete, verify `LayoutSolver`'s
+`HEAP`/`STACK` fields are now present and re-run the full
+`test_noshim_dumpfull.py` for the true final diff; (3) update this
+doc's earlier "OOM" framing (now superseded) once resolved either way.
+
+### FOLLOW-UP (session 5, same day): re-tried properly under lldb — confirms genuine unbounded memory growth, not a hang or a second crash
+
+Re-applied both fixes (the `_walk_ast_into` reorder and the
+`_gmi_collect_self_assigns` `fn is None` guard) and reran under lldb
+from process launch (`disable-aslr`, `MOJO_NO_SHIM=1`, `run ... bt
+quit`), this time to get an immediate backtrace if it crashed again
+instead of inferring from exit code. One confound found and fixed
+along the way: an earlier, separately-killed `process launch` attempt
+had left an ORPHANED duplicate `mojoc` process running unsupervised
+(`pkill -f "lldb.*mojoc"` doesn't match a bare `mojoc` command line) —
+two ~20-24GB compiles were competing for memory simultaneously for
+several minutes, which likely explains the previous attempt's
+anomalous 6:44 runtime. Killed the orphan; only the lldb-supervised
+process continued.
+
+With only one process running, `mojoc` ran cleanly (no crash, no
+deadlock — CPU-bound and progressing) for over 28 minutes, climbing
+from the baseline's usual ~5GB start past 58GB RSS, and by the ~30
+minute mark `top` showed its total memory footprint at **189GB (147GB
+compressed)**, with the system down to under 16MB of free physical
+pages. This is unsustainable on a 128GB machine and risks the whole
+system, not just this process — killed deliberately (`kill -9`) rather
+than let it continue. Memory recovered normally afterward, confirming
+this was the `mojoc` process's own footprint, not a separate leak.
+
+**This is a materially different, more precise finding than either
+prior conclusion.** It is not the SIGSEGV from the `_gmi_collect_
+self_assigns` bug (both fixes were applied; no crash occurred, the
+process was killed by hand while still healthy/progressing). It is
+also not quite the earlier "died silently ~57-62GB, presumed OOM"
+reading either — this run was allowed to continue well past that
+point, under direct observation, and kept growing past 189GB total
+footprint without dying on its own; it was killed pre-emptively. Both
+fixes are very likely functionally CORRECT (no crash, no infinite
+loop/hang — genuine forward progress the whole time) — the blocker is
+squarely the self-hosted runtime's memory model: completing this one
+file's whole-transitive-closure compile with a truly correct AST walk
+requires memory in the hundreds-of-GB range, because (as noted above)
+nothing is ever freed. This is no longer a "maybe," it's measured.
+
+**Revised conclusion**: fixing `check-noshim-dumpfull`'s remaining gap
+via this `_walk_ast` correction is blocked on the self-hosted runtime's
+allocator, not on any remaining logic bug in these two fixes. Both
+fixes were reverted again (`git checkout -- gimple_exprtypes.py
+gimple_module_gen.py`) and `mojoc` rebuilt clean from the last
+committed state for safety — running either fix on this machine again
+without first addressing the runtime's memory management (freeing/
+reusing intermediate allocations, or at minimum giving `_walk_ast`'s
+output list a bounded/streaming consumer instead of retaining the full
+flattened node list for a whole nested-module compile) is expected to
+reproduce the same multi-hundred-GB growth, not a new bug. The actual
+fix content (both diffs) is fully preserved in this doc and in
+`gimple_module_gen.py:1108`/`gimple_exprtypes.py:34`'s pre-fix code
+for a future session to reapply once the memory-model prerequisite is
+addressed.
