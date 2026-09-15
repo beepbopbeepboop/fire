@@ -4143,9 +4143,19 @@ def _function_has_reachable_fallthrough(fn) -> bool:
 
 
 def _is_free_eligible_function(fn) -> bool:
-    """True if `fn` (a mojo_compiler.FunctionDef) contains no `try`/
-    `except`, no nested `def`/`async def`, and no `lambda` ANYWHERE in its
-    body — see the section banner above for why each disqualifies.
+    """True if `fn` (a mojo_compiler.FunctionDef) contains no nested `def`/
+    `async def` and no `lambda` ANYWHERE in its body — see the section
+    banner above for why each disqualifies. A `try`/`except` in `fn`'s own
+    body no longer disqualifies it (doc/OWNERSHIP_MODEL.md's TODO item 3,
+    landed 2026-09-15): the cleanup-thunk registry (`maybe_push_owned_
+    local`/`mojo_cleanup_checkpoint_save`/`mojo_raise`'s unwind, see
+    runtime/mojo_runtime.c) now makes a candidate's constructing
+    assignment and its return/fallthrough free safe to straddle a `try`
+    in the SAME function, exactly the same way it already made them safe
+    to straddle a callee's own exception. A nested `def`/`lambda` still
+    disqualifies because a closure's capture could extend a binding's
+    real lifetime past this function's own return — an unrelated,
+    still-open problem (the async/coroutine cross-cutting section).
 
     Also excludes `fn` itself being `async`/a generator (`fn.is_async` /
     `fn.is_generator`) — NOT just nested ones. A coroutine/generator body's
@@ -4160,7 +4170,7 @@ def _is_free_eligible_function(fn) -> bool:
     if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
         return False
     for n in gimple_exprtypes._walk_ast(fn.body):
-        if isinstance(n, (TryStmt, FunctionDef, LambdaExpr)):
+        if isinstance(n, (FunctionDef, LambdaExpr)):
             return False  # any nested FunctionDef disqualifies regardless
                            # of its own is_async/is_generator flags
     return True

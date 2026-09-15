@@ -25,11 +25,10 @@ Kept at the top and updated in place as items land (checked, with a one-
 line note) or split into sub-items — this is the actual work queue, not a
 historical log; see the phase sections below for full context on each.
 
-Current priority order (2026-09-15, updated later same day): **1 (landed,
-gate clean) → 3 (core mechanism landed, gate clean; `_is_free_eligible_
-function`'s try/except exclusion still open as its own follow-up) → 2
-(investigated, design updated; coroutine `return e` insertion point still
-not started, now unblocked to revisit since item 3's landed)**.
+Current priority order (2026-09-15, updated later still): **1 (landed,
+gate clean) → 3 (fully landed incl. the try/except-eligibility widening,
+gate clean) → 2 (investigated, design updated; coroutine `return e`
+insertion point still not started, now the last blocker on that gap)**.
 
 1. [x] **Wire `ownership_destruct.py`'s analysis into codegen — narrow
    scope first.** LANDED 2026-09-15. Emits real `mojo_*_free` calls for
@@ -175,22 +174,35 @@ not started, now unblocked to revisit since item 3's landed)**.
      window and ~530KB gap as that doc's own same-day baseline, both
      sides up ~28KB from this session's own new code being dumped
      identically on both, not new divergence.
-   - [ ] **Remaining scope, not yet done**: `_is_free_eligible_function`
-     (`gimple_gen_infra.py`) still excludes any function that ITSELF
-     contains a `try`/`except` from Phase-3 destruction at all — that
-     exclusion predates this fix and is now more conservative than it
-     needs to be (the new checkpoint/thunk machinery is exactly what
-     would make such a function's OWN locals safe to free too). Widening
-     it is a natural, still-open follow-up, not required to close the
-     motivating leak above.
+   - [x] **Widened `_is_free_eligible_function` past its own `try`/
+     `except` exclusion — LANDED 2026-09-15, later still.** A function
+     containing its own `try`/`except` is now Phase-3 eligible too: the
+     checkpoint/thunk machinery above already makes a candidate's
+     construction and free safe to straddle a `try` in the SAME
+     function, the identical reasoning that made it safe across a
+     callee's. Verified with a candidate (`d = {}`) whose lifetime spans
+     a `try` in its OWN function, caught locally (never propagating) —
+     correctness checked by hand-computing the expected accumulated
+     result over 200,000 iterations (exact match, not just "didn't
+     crash"), and the SAME peak-footprint methodology as above: **112.5MB
+     peak → 8.6MB peak** for the identical repro, measured by stashing/
+     restoring just this change. Full gate re-run clean end to end
+     (`test_gimple.py` 308/308, `test_module_cache.py` 76/76,
+     `test_ownership_check.py` 24/24, `test_ownership_destruct.py`
+     20/20, `make check-linkmode` 3/3, `make check-selfhost` 1/1,
+     stdlib dylib rebuild 0 skips, `compile_stdlib.py` 664/664 0
+     unexpected, `make bootstrap` 180/180); `check-noshim-dumpfull`
+     re-confirmed as the SAME pre-existing divergence a third time (see
+     that bug doc's newest entry — same first-differing-byte offset
+     21086, ~530KB gap unchanged, only a ~3KB shift on each side from
+     more functions now emitting push/cancel calls).
    - [ ] Coroutine `return e` insertion point (item 2's own follow-up,
      above) is unaffected by this — still not started.
 
-Not yet scheduled, tracked here so they aren't lost: widening
-`_is_free_eligible_function` past its `try`/`except` exclusion (item 3's
-own follow-up, just above), Python-interop-aware destructor dispatch,
-loop-body-scoped destruction (item 1's own follow-up, above), and Phase
-4-6 (real calling convention, move-vs-copy, stack allocation).
+Not yet scheduled, tracked here so they aren't lost: Python-interop-aware
+destructor dispatch, loop-body-scoped destruction (item 1's own
+follow-up, above), and Phase 4-6 (real calling convention, move-vs-copy,
+stack allocation).
 
 ## Why this matters, not just "more spec compliance"
 

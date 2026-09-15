@@ -1,5 +1,17 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-15, later still — re-confirmed pre-existing a third time, widening Phase 3 eligibility to try/except-containing functions)
+
+Same gate failure a third time this session, now after widening
+`_is_free_eligible_function` (`gimple_gen_infra.py`) to stop excluding a
+function containing its own `try`/`except` — item 3's cleanup-thunk
+registry (previous entry below) makes that safe. This run:
+shim=36291056 bytes, no-shim=35761631 bytes, first differing byte still
+at the SAME offset 21086, gap 529425 (~530KB, unchanged) — only a ~3KB
+shift on each side from more functions now qualifying for the
+push/cancel emission, not a new divergence source. Same standing
+conclusion.
+
 ## Status (2026-09-15, later same day — re-confirmed pre-existing a second time, during the ownership-model exception-unwinding fix)
 
 Hit this same gate failure again running the full CLAUDE.md gate for
