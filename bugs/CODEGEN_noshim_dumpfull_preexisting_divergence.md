@@ -1119,12 +1119,72 @@ module_compile_walk_ast_quadratic_rescan.md` already tracks, just
 newly reproduced with concrete, fresh RSS numbers this session rather
 than only cited from the earlier session's history.
 
+**UPDATE — the "two attempts both blow up" reading above was itself
+partly a false alarm, corrected by a third and fourth attempt.**
+A controlled comparison run AFTER the two reverts above — the
+UNMODIFIED, already-committed baseline (zero code changes), same exact
+command (`MOJO_NO_SHIM=1 ./mojoc gimple_gen_loops.py --dump-full`),
+watched patiently instead of killed early — showed the IDENTICAL
+climbing-RSS pattern (peaking ~38-40GB) and then completed NORMALLY
+with exit 0 in about a minute. That climb is pre-existing, unrelated
+behavior of this specific whole-transitive-closure self-hosted
+compile (this compiler's own largest files) — not something either
+`_walk_ast` fix attempt caused. Both attempts above were killed
+partway through their own natural climb on a mistaken assumption of
+an unbounded runaway.
+
+Re-tried a third time with an added hard total-node-count safety cap
+(on top of the existing depth cap) as an extra precaution — this also
+showed the same climbing pattern (since the cap wasn't actually the
+relevant variable) and was, in hindsight, ALSO killed prematurely.
+
+Reapplied the SIMPLEST form of the fix a fourth time (the direct
+`_walk_ast_into` reorder, no dedicated-walker workaround needed) and
+this time let it run to genuine completion rather than killing on a
+high-but-still-climbing RSS reading. Result: RSS climbed past the
+baseline's own peak — into the 57-62GB range — and the process then
+died silently (vanished from `ps`, zero-byte log, no error text),
+consistent with a real OS OOM kill this time, not a false alarm.
+
+**This gives a materially more precise diagnosis than "O(N²) blowup,
+suspected cycle."** The fix is not wrong in the sense of an infinite
+loop or a true graph cycle — `_walk_ast_into`'s depth cap (900) and,
+separately, the node-count cap tried in the third attempt, both did
+exactly what they were supposed to; the walker terminates. The real
+issue: correctly completing this traversal (which the original bug
+accidentally prevented, by barely recursing and therefore barely
+allocating) requires substantially more REAL, legitimate memory than
+the already-heavy broken baseline — and this self-hosted runtime
+appears to never free intermediate allocations at all (consistent
+with an arena/bump-allocator memory model, common in from-scratch C
+runtimes for simplicity and allocation speed, at the cost of retaining
+everything until process exit). The baseline's ~38-40GB peak is
+already large for compiling one file's transitive closure; a genuinely
+complete traversal pushes far enough past it to exceed what was
+available on this machine.
+
+Confirmed identical in both the broken and fixed versions (so this is
+not something introduced by the fix): worth tracking as its own,
+separate, real inefficiency in the self-hosted runtime's memory
+management — likely the actual reason this whole class of self-hosted
+compile is so memory-hungry in the first place, and a genuine
+prerequisite for `_walk_ast`'s bug to be fixable in practice (not just
+in principle) without requiring a machine with substantially more RAM
+than this one.
+
 **Conclusion**: check-noshim-dumpfull's zero-diff goal was not reached
-this session, and is CONFIRMED — via two independent, differently-
-scoped implementation attempts, not merely theorized — to require the
-separate `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-rescan.md` project to be solved FIRST. No further variation on "fix
-the check order, walk correctly" is worth attempting again without
-that prerequisite work landing first (a third such attempt would very
-likely reproduce the identical blowup for the identical reason) — a
-future session should start there instead.
+this session. The `_walk_ast` fix itself was reverted a fourth time
+(clean revert confirmed via `git status --short`, mojoc rebuilt and
+stability-verified from the last committed state, `c9a0e79`) — not
+because it is incorrect, but because completing it correctly currently
+requires more real memory than this machine has for this specific
+compile, given the self-hosted runtime's apparent never-frees
+allocator design. A future session has two viable paths, in order of
+likely leverage: (1) address the self-hosted runtime's memory
+management (freeing/reusing intermediate allocations, or at least this
+specific walker's transient node lists) so the correct traversal fits
+in available memory, then reapply this exact, already-written fix; or
+(2) run the fix on a machine with substantially more RAM as a stopgap
+to unblock check-noshim-dumpfull specifically, while (1) is addressed
+separately. No further attempt at THIS specific fix is worth making on
+this machine without one of those two prerequisites.
