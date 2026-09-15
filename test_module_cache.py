@@ -498,8 +498,12 @@ def test_reflected_struct_import(wd):
         check("reflect: client links the dylib's struct methods and runs",
               _run(exe).stdout.startswith('rs'))
         sz = os.path.getsize(co)
+        # Budget covers the always-emitted-per-module generic-repr helpers
+        # (_mojo_repr_list/_dict/_set, _mojo_dispatch_repr, etc.) — bumped
+        # from 8192 when _mojo_repr_set was added alongside the existing
+        # list/dict repr helpers.
         check("reflect: client object is tiny — bodies live in the dylib",
-              sz < 8192, f"{sz} bytes")
+              sz < 9216, f"{sz} bytes")
     finally:
         os.remove(libpath)
 

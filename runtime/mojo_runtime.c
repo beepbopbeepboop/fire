@@ -2519,14 +2519,12 @@ static void _dict_grow(MojoDict *d)
     free(old);
 }
 
-/* Slot indices for d->slots, in insertion order (ascending by _DictSlot.seq)
- * — used only by generic repr()'s dict formatting (_mojo_repr_dict) so it
- * matches Python's insertion-order-preserving dict printing instead of raw
- * open-addressing hash-slot order. Real iteration (MojoDictIter,
- * .keys()/.values()/.items()) is unaffected and still walks slots in hash
- * order — deliberately scoped to the debug-dump path only, not a behavior
- * change for compiled programs. Returns a malloc'd array of d->used
- * entries (NULL if empty); caller must free() it. */
+/* Slot indices for d->slots, in insertion order (ascending by _DictSlot.seq).
+ * Backs BOTH generic repr()'s dict formatting (_mojo_repr_dict) and real
+ * iteration (MojoDictIter, .keys()/.values()/.items()), so all of them walk
+ * Python's insertion-order-preserving dict order, not raw open-addressing
+ * hash-slot order. Returns a malloc'd array of d->used entries (NULL if
+ * empty); caller must free() it. */
 static int _cmp_seqidx(const void *a, const void *b) {
     int64_t sa = ((const int64_t *)a)[0];
     int64_t sb = ((const int64_t *)b)[0];
@@ -5330,6 +5328,28 @@ MojoList *mojo_set_sorted(MojoSet *s) {
         }
     }
     return is_str ? mojo_list_sorted_str(out) : mojo_sorted(out);
+}
+
+/* Insertion-order materialization — the set analogue of mojo_dict_keys.
+ * Unlike mojo_set_sorted (for Python's explicit sorted(some_set)), this
+ * backs iterable-consuming ops (all()/any()/enumerate()/str.join()/...)
+ * so they see the SAME order as a plain `for x in s:` loop, which itself
+ * walks mojo_set_order_indices — see that function's docstring for why
+ * insertion order (not hash-slot order) is this runtime's determinism
+ * requirement for sets. */
+MojoList *mojo_set_to_list(MojoSet *s) {
+    MojoList *out = mojo_list_new();
+    if (!s || s->used == 0) return out;
+    int64_t *order = mojo_set_order_indices(s);
+    for (int64_t oi = 0; oi < s->used; oi++) {
+        int64_t i = order[oi];
+        if (s->slots[i].tag == 0)
+            mojo_list_append_int(out, s->slots[i].val_i);
+        else
+            mojo_list_append_str(out, s->slots[i].val_s);
+    }
+    free(order);
+    return out;
 }
 
 MojoList *mojo_dict_sorted_keys(MojoDict *d) {

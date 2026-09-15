@@ -2390,6 +2390,7 @@ class GimpleGen:
         'mojo_sorted':           ('MojoList *', ['void *']),
         'mojo_list_sorted_str':  ('MojoList *', ['MojoList *']),
         'mojo_set_sorted':       ('MojoList *', ['MojoSet *']),
+        'mojo_set_to_list':      ('MojoList *', ['MojoSet *']),
         'mojo_dict_sorted_keys': ('MojoList *', ['MojoDict *']),
         'mojo_dict_items_sorted': ('MojoList *', ['MojoDict *']),
         'mojo_reversed':         ('void *',     ['void *']),

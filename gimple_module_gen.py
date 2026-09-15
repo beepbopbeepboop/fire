@@ -826,6 +826,20 @@ def _emit_reflection_dispatch(self, parts):
                "  free(_order);\n"
                "  return mojo_str_cat(_buf, \"}\");\n"
                "}\n"
+               "static char * _mojo_repr_set (MojoSet *s) {\n"
+               "  if (!s || s->used == 0) return \"set()\";\n"
+               "  char *_buf = strdup(\"{\");\n"
+               "  int64_t *_order = mojo_set_order_indices(s);\n"
+               "  for (int64_t _oi = 0; _oi < s->used; _oi++) {\n"
+               "    int64_t _i = _order[_oi];\n"
+               "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
+               "    _buf = mojo_str_cat(_buf, s->slots[_i].tag == 1\n"
+               "        ? mojo_repr_str(s->slots[_i].val_s)\n"
+               "        : mojo_repr_int(s->slots[_i].val_i));\n"
+               "  }\n"
+               "  free(_order);\n"
+               "  return mojo_str_cat(_buf, \"}\");\n"
+               "}\n"
             )
         )
         parts.append('')

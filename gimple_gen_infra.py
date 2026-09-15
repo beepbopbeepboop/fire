@@ -2725,9 +2725,12 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     but whose runtime primitive only operates on a MojoList*.
 
     A dict materializes its KEYS (real Python semantics — iterating a dict
-    yields keys); a set materializes via mojo_set_sorted (no unsorted
-    set->list runtime helper exists, and a Python set's iteration order is
-    unspecified anyway, so a stable materialization is fine). Anything else
+    yields keys); a set materializes via mojo_set_to_list, which walks the
+    SAME insertion order as a plain `for x in s:` loop (mojo_set_order_
+    indices) — mojo_set_sorted would silently give a set consumed here a
+    DIFFERENT observable order than one consumed by an ordinary loop, for
+    no ordering guarantee gained (real Python's set order is unspecified
+    either way, so there is no correctness reason to sort). Anything else
     goes through the ordinary R2 chokepoint unchanged.
 
     This exact "materialize dict-keys/set-sorted/else-coerce" shape was
@@ -2750,7 +2753,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._elem_types[_dk] = 'char *'  # dict keys are always strings
         return _dk
     if src_type == 'MojoSet *':
-        return gen._call_expr('MojoList *', 'mojo_set_sorted', [('MojoSet *', value)])
+        return gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
         it64 = gen._to_int64(src_type, value)
         result = gen._new_temp('MojoList *')
@@ -2769,7 +2772,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit(f"  if ({iss}) goto {bb_set}; else goto {bb_not_set};")
         gen._emit_label(bb_set)
         _sp = gen._coerce_to_type('int64_t', 'MojoSet *', it64)
-        _sl = gen._call_expr('MojoList *', 'mojo_set_sorted', [('MojoSet *', _sp)])
+        _sl = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', _sp)])
         gen._emit(f"  {result} = {_sl};")
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_set)

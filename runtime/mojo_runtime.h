@@ -446,11 +446,11 @@ typedef struct {
     char    *key;   /* NULL = empty slot */
     int64_t  val;
     int64_t  seq;   /* insertion order, assigned once when the key is first
-                     * added — lets generic repr() print keys in Python's
-                     * insertion-preserving order instead of raw hash-slot
-                     * order; see mojo_dict_order_indices(). Real iteration
-                     * (MojoDictIter, .keys()/.values()/.items()) is
-                     * unaffected and still walks slots in hash order. */
+                     * added — via mojo_dict_order_indices(), this drives
+                     * BOTH generic repr() and real iteration (MojoDictIter,
+                     * .keys()/.values()/.items()), matching Python's
+                     * insertion-preserving dict guarantee, not raw
+                     * hash-slot order. */
     int64_t  kind;  /* what `val` actually holds, needed by consumers that
                      * must re-interpret the untagged slot (runtime dict-keyed
                      * %-formatting): 0 = plain int64_t, 1 = double bit-cast,
@@ -708,6 +708,7 @@ void *mojo_sorted(void *iterable);
 void *mojo_reversed(void *iterable);
 MojoList *mojo_list_sorted_str(MojoList *src);
 MojoList *mojo_set_sorted(MojoSet *s);
+MojoList *mojo_set_to_list(MojoSet *s);  /* insertion order, see mojo_runtime.c */
 MojoList *mojo_dict_sorted_keys(MojoDict *d);
 MojoList *mojo_dict_items_sorted(MojoDict *d);
 
