@@ -36,6 +36,17 @@ import gimple_exprtypes
 import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
+import ownership_destruct
+# `from X import Y` works under this project's own self-hosted compile
+# (used throughout this codebase — e.g. gimple_codegen.py's `from
+# module_loader import load_module, get_symbol_type`), but `from X import
+# Y as Z` (a RENAMED single-name import) does not: found for real via
+# `make check-noshim-dumpfull` reporting "_owned_block_terminates:
+# unavailable in compiled mode (imported from an unresolved external/
+# relative module)" — grep confirms this file was the only place in the
+# entire tree using that aliased form. No other local module import uses
+# `as` this way; don't reintroduce it here or elsewhere.
+from ownership_check import _block_terminates
 
 # Separator for `function_calls`' `name<sep>index` composite strings — see
 # `analyze_param_usage`. U+001F (ASCII Unit Separator): never appears in a
@@ -4096,3 +4107,163 @@ def _dedup_variadic_externs(parts: list) -> str:
         if not drop:
             kept.append(p)
     return '\n'.join(kept)
+
+
+# ── Phase 3 (doc/OWNERSHIP_MODEL.md) codegen wiring — TODO item 1 ──────────
+#
+# Scope, deliberately narrow (see the doc's TODO checklist): only emits a
+# real `mojo_*_free` for a local container this function PROVABLY, solely,
+# permanently owns (ownership_destruct.py's analysis — escape analysis
+# composed with definite-assignment, both validated against a 664-file real
+# Modular stdlib sweep before this wiring existed), and ONLY for a function
+# containing no `try`/`except` and no nested `def`/`async def`/`lambda`
+# anywhere in its body. Both exclusions sidestep open, unresolved problems
+# rather than guess at them: a `try`/`except` here would need the free to
+# survive `mojo_raise`'s raw `longjmp` unwind (it currently would NOT —
+# see doc/OWNERSHIP_MODEL.md's exception-handling cross-cutting section),
+# and a nested closure's capture could extend a binding's real lifetime
+# past this function's own return (the async/coroutine cross-cutting
+# section, still just a design TODO, not implemented). Loop-body-scoped
+# containers are also out of scope for now — not because of a codegen
+# limitation, but because ownership_destruct.py's own escape analysis
+# only ever credits a name assigned via a SINGLE static assignment in the
+# whole function (its rule 2), which a loop-body assignment never is.
+
+def _function_has_reachable_fallthrough(fn) -> bool:
+    """True if `fn`'s body can fall off its own end (not every path ends
+    in an explicit return/raise/break/continue) — reuses
+    ownership_check.py's own `_terminates` logic so "does this function
+    have a genuine fallthrough exit" is answered identically to how that
+    module already decides it for its OWN diagnostics, rather than a
+    second, possibly-diverging notion of the same question."""
+    return not _block_terminates(fn.body)
+
+
+def _is_free_eligible_function(fn) -> bool:
+    """True if `fn` (a mojo_compiler.FunctionDef) contains no `try`/
+    `except`, no nested `def`/`async def`, and no `lambda` ANYWHERE in its
+    body — see the section banner above for why each disqualifies.
+
+    Also excludes `fn` itself being `async`/a generator (`fn.is_async` /
+    `fn.is_generator`) — NOT just nested ones. A coroutine/generator body's
+    `return e` is rewritten by gimple_gen_coro.py into `__mojo_coro_set_
+    return(...)` + falling off, a genuinely different lowering than the
+    plain `return` this wiring was written and validated against (see
+    doc/OWNERSHIP_MODEL.md's async/coroutine cross-cutting section) — this
+    was a real gap found DURING that section's own investigation (the
+    original check only ever walked for a NESTED FunctionDef, never
+    checked whether `fn` itself carried these flags), fixed before it
+    could matter rather than after."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return False
+    for n in gimple_exprtypes._walk_ast(fn.body):
+        if isinstance(n, (TryStmt, FunctionDef, LambdaExpr)):
+            return False  # any nested FunctionDef disqualifies regardless
+                           # of its own is_async/is_generator flags
+    return True
+
+
+def _compute_owned_free_candidates(fn) -> set:
+    """Returns the set of local names in `fn` safe to `mojo_*_free` at
+    every return/fallthrough point, or an empty set if `fn` isn't eligible
+    at all (see `_is_free_eligible_function`) or the analysis found none.
+    `{}, {}` for ownership_destruct's callee-resolution tables: this
+    codegen layer has no ready-made whole-module function/method lookup
+    to hand it yet, so calls-to-`read`-parameters don't get the analysis'
+    full precision here (a real widening for later) — passing empty
+    tables only ever makes this MORE conservative (fewer candidates
+    found), never unsound, since an unresolved call is already the
+    analysis' safe default."""
+    if not _is_free_eligible_function(fn):
+        return set()
+    try:
+        return ownership_destruct.analyze_function(fn, {}, {})
+    except Exception:
+        # This is an OPTIONAL memory-usage improvement, not a correctness
+        # requirement of compiling the program at all — a bug in the
+        # (still-new) analysis must never fail a build. Silently skip
+        # freeing anything for this function instead (today's pre-existing
+        # leak, unchanged) rather than raise through gen_func.
+        return set()
+
+
+_OWNED_FREE_RUNTIME_FN = {
+    'MojoDict *': 'mojo_dict_free',
+    'MojoList *': 'mojo_list_free',
+    'MojoSet *': 'mojo_set_free',
+}
+
+
+def _emit_owned_local_frees(gen):
+    """Emits a `mojo_*_free(name);` call for every name in
+    `gen._owned_free_candidates` whose C type is currently known (via
+    `gen.var_types`) to be one of the three boxed container types — called
+    once per `return` statement (gimple_gen_stmts.py's
+    `_gen_stmt_ReturnStmt`) and once more for a function's natural
+    fallthrough exit (gimple_gen_funcs.py's `gen_func`), so a function
+    with N return points gets its eligible locals freed on all N of them,
+    consistent with `ownership_destruct.py`'s definite-assignment
+    guarantee (assigned, and never escaped, on every path to every exit).
+    A candidate whose type isn't resolved to one of the three container
+    types by the time this runs (e.g. codegen hadn't reached its
+    constructing assignment yet, or it inferred to something else) is
+    silently skipped — this is a memory-usage improvement layered on top
+    of an already-working compiler, never a step that may itself turn a
+    correct program incorrect, so any uncertainty here resolves to "don't
+    free" (today's pre-existing leak), not "free anyway"."""
+    # sorted(): `_owned_free_candidates` is a plain Python `set` (from
+    # ownership_destruct.py), whose iteration order depends on hash-seed
+    # randomization — iterating it directly here made the ORDER of
+    # emitted free calls (for a function with 2+ candidates) vary between
+    # otherwise-identical process invocations. This is exactly the class
+    # of bug `make bootstrap`'s byte-identity check exists to catch, and
+    # it did: stage1-vs-stage2 `mojo.ci` differed with this bug present.
+    # A fixed, deterministic order is required output, not a style choice.
+    for name in sorted(getattr(gen, '_owned_free_candidates', ())):
+        ctype = gen.var_types.get(name)
+        runtime_fn = _OWNED_FREE_RUNTIME_FN.get(ctype)
+        if runtime_fn:
+            gen._emit(f"  {runtime_fn} ({name});")
+
+
+# ── Public entry points — the ONLY things gimple_gen_funcs.py/
+# gimple_gen_stmts.py should call for this feature. Everything above this
+# line (the eligibility check, the candidate analysis, the runtime-
+# function table, `gen._owned_free_candidates` as the storage attribute)
+# is a private implementation detail of THIS module; a caller needing a
+# behavior change here should never need to know that attribute name or
+# reach past these three functions. Keeping the whole feature's logic in
+# this one file (this section plus the private helpers just above it) —
+# not spread across the two codegen files that merely call in at the two
+# points they naturally own (a function's start, and each return
+# statement) — is deliberate, per doc/OWNERSHIP_MODEL.md's engineering
+# standard for this project's own code, not just the Mojo semantics it
+# implements.
+
+def begin_function(gen, fn) -> None:
+    """Call once, in gimple_gen_funcs.py's `gen_func`, before lowering
+    `fn`'s body. Must run before any statement is lowered, since
+    `emit_return_frees` below needs the result available at every
+    `return` encountered DURING that lowering, not just after it."""
+    gen._owned_free_candidates = _compute_owned_free_candidates(fn)
+
+
+def emit_return_frees(gen) -> None:
+    """Call at the top of gimple_gen_stmts.py's `_gen_stmt_ReturnStmt`,
+    before anything else in that function runs (see that call site for
+    why it's safe to run unconditionally before evaluating the returned
+    expression)."""
+    if getattr(gen, '_owned_free_candidates', None):
+        _emit_owned_local_frees(gen)
+
+
+def emit_fallthrough_frees(gen, fn) -> None:
+    """Call once in `gen_func`, immediately after lowering every statement
+    in `fn`'s body, before anything else (the `main`-specific implicit-
+    return patch, assembling the final `lines` list) runs. A no-op unless
+    `fn` both has eligible candidates AND can actually fall off its own
+    end (see `_function_has_reachable_fallthrough` — a function whose
+    every path already returns has nothing left for this to do; whatever
+    follows in `gen.body_lines` would be unreachable C)."""
+    if gen._owned_free_candidates and _function_has_reachable_fallthrough(fn):
+        _emit_owned_local_frees(gen)

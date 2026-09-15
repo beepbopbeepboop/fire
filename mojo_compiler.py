@@ -2618,6 +2618,19 @@ class Parser:
 
     # Ownership/convention keywords preserved in param_convs
     _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned'}
+    # Canonical spelling for each convention keyword — old-style Mojo syntax
+    # (`inout`/`borrowed`) and new-style (`mut`/`read`) are semantically
+    # identical, and a parameter-position `var` means the same thing as
+    # `owned` (the callee receives the value outright). Storing the
+    # canonical form in param_convs means every later consumer (the
+    # ownership_check.py move/borrow analysis, eventually codegen) checks
+    # one spelling instead of tracking both historical names everywhere —
+    # see doc/OWNERSHIP_MODEL.md's Phase 0. `ref`/`out`/`deinit` have no
+    # older synonym and pass through unchanged.
+    _CONV_CANON = {'inout': 'mut', 'borrowed': 'read', 'var': 'owned'}
+    @classmethod
+    def _canon_conv(cls, conv):
+        return cls._CONV_CANON.get(conv, conv)
     def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
@@ -2670,7 +2683,7 @@ class Parser:
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     params.append(("**" + pname, ptype))
-                    if conv is not None: param_convs[pname] = conv
+                    if conv is not None: param_convs[pname] = self._canon_conv(conv)
                     if self._peek().kind == "COMMA": self._advance()
                     while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
                         self._advance()
@@ -2699,7 +2712,7 @@ class Parser:
                         param_has_default[pname] = True
                         param_defaults[pname] = default_expr
                     params.append(("*" + pname, ptype))
-                    if conv is not None: param_convs[pname] = conv
+                    if conv is not None: param_convs[pname] = self._canon_conv(conv)
                     if self._peek().kind == "COMMA": self._advance()
                     while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
                         self._advance()
@@ -2729,7 +2742,7 @@ class Parser:
                 param_has_default[pname] = True
                 param_defaults[pname] = default_expr
             params.append((pname, ptype))
-            if conv is not None: param_convs[pname] = conv
+            if conv is not None: param_convs[pname] = self._canon_conv(conv)
             if seen_bare_star: kwonly.append(pname)
             # Skip trailing comma and newlines
             if self._peek().kind == "COMMA": self._advance()

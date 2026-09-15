@@ -2521,10 +2521,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._emit_label(bb_set)
         sp = gen._coerce_to_type('int64_t', 'MojoSet *', ip)
         if at == 'char *':
-            gen._emit_call('void', '', 'mojo_set_discard', [('MojoSet *', sp), ('char *', av)])
+            gen._emit_call('void', '', 'mojo_set_discard_str', [('MojoSet *', sp), ('char *', av)])
         else:
             av64 = gen._to_int64(at, av)
-            gen._emit_call('void', '', 'mojo_set_discard', [('MojoSet *', sp), ('int64_t', av64)])
+            gen._emit_call('void', '', 'mojo_set_discard_int', [('MojoSet *', sp), ('int64_t', av64)])
         gen._emit(f"  {result} = 0;")
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_set)
@@ -3386,9 +3386,9 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
     if method == 'discard' and args:
         at, av = gen.lower_expr(args[0])
         if at == 'char *':
-            return gen._void_call('mojo_set_discard', [('MojoSet *', ov), (at, av)])
+            return gen._void_call('mojo_set_discard_str', [('MojoSet *', ov), (at, av)])
         av64 = gen._to_int64(at, av)
-        return gen._void_call('mojo_set_discard', [('MojoSet *', ov), ('int64_t', av64)])
+        return gen._void_call('mojo_set_discard_int', [('MojoSet *', ov), ('int64_t', av64)])
     if method == 'copy':
         return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_copy', [('MojoSet *', ov)])
     if method == 'clear':

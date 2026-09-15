@@ -611,7 +611,8 @@ MojoSet *mojo_set_intersection(MojoSet *a, MojoSet *b);
 MojoSet *mojo_set_difference(MojoSet *a, MojoSet *b);
 MojoSet *mojo_set_copy(MojoSet *s);
 void     mojo_set_update(MojoSet *dst, MojoSet *src);
-void     mojo_set_discard(MojoSet *s, int64_t v);
+void     mojo_set_discard_int(MojoSet *s, int64_t v);
+void     mojo_set_discard_str(MojoSet *s, char *v);
 
 int64_t *mojo_set_order_indices(MojoSet *s);
 

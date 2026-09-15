@@ -83,7 +83,8 @@ check: check-gimple check-runner check-modcache check-selfhost check-runtimediff
 # to one of these must re-run the gates that compile the compiler.
 GIMPLE_SOURCES := gimple_codegen.py $(wildcard gimple_gen_*.py) \
                   $(wildcard gimple_cpp_*.py) gimple_ctypes.py \
-                  gimple_solvers.py gimple_exprtypes.py
+                  gimple_solvers.py gimple_exprtypes.py \
+                  ownership_check.py ownership_destruct.py
 
 check-gimple: $(GIMPLE_SOURCES) test_gimple.py
 	python3 checked_run.py check-gimple --extra test_gimple.py -- python3 test_gimple.py

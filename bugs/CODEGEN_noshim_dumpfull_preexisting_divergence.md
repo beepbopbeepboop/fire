@@ -1,5 +1,40 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-15 — re-confirmed pre-existing during an unrelated feature session; still failing, symptom shape changed again)
+
+Hit this gate failure while running the FULL CLAUDE.md quality gate for
+the doc/OWNERSHIP_MODEL.md Phase 3 codegen-wiring work
+(`gimple_gen_infra.py`'s `begin_function`/`emit_return_frees`/
+`emit_fallthrough_frees`, `ownership_check.py`, `ownership_destruct.py` —
+see that doc's TODO item 1). Before assuming the new feature caused it,
+verified definitively via a clean `git worktree add /tmp/... HEAD` (no
+uncommitted changes at all) rebuild of `mojoc`: the exact same class of
+shim-vs-noshim divergence reproduces on an untouched checkout, confirming
+(again, independently of the 2026-09-13/14 sessions below) that this is
+not caused by that session's work either. Today's specific symptom:
+`LayoutSolver` (`gimple_solvers.py`) — a struct whose only real instance
+fields are `_struct_types`/`_ea` (see its `__init__`) — gets TWO EXTRA
+struct members in the shim's build, `int64_t HEAP; int64_t STACK;`,
+matching the class's own class-level string constants (`STACK = 'stack'`,
+`HEAP = 'heap'`) being (incorrectly, in the shim's version) swept into the
+instance struct layout; the no-shim/self-hosted build omits them. First
+divergence around byte offset ~20800-21100, both today's clean-HEAD run
+and the with-my-changes run — consistent with this being the SAME
+systematic self-host struct-field-inference divergence this doc has
+tracked since 2026-09-13, now presenting as a per-class extra/missing
+FIELD PAIR rather than a whole dropped module. Byte-count gap this run:
+shim=36259862, no-shim=35729822 (~530KB, shim larger) — same order of
+magnitude as session 4's "~350KB, not yet zero" state below, consistent
+with "still open," not a fresh regression.
+
+**Confirms this doc's own standing conclusion still holds**: gate step 5
+(`check-noshim-dumpfull`) should be expected to keep failing on this repo
+until the work below (or its continuation) is finished — that is a
+pre-existing, tracked condition of the gate itself, not something an
+unrelated feature session should be blocked on or expected to fix as a
+side effect. Do not spend further time chasing this from an unrelated
+session without first reading this doc's full history below.
+
 ## Status (2026-09-14, session 4 — 7 more root causes fixed; diff narrowed ~3.8MB → ~350KB; NOT yet zero, 8th blocker precisely diagnosed and deferred)
 
 See "## Session 4 final summary (2026-09-14)" near the end of this doc

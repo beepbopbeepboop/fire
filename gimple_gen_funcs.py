@@ -36,6 +36,7 @@ import gimple_exprtypes
 import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
+import gimple_gen_infra as ginf
 
 def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # A nested `async def` (not an async generator) — whether nested
@@ -2790,8 +2791,13 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._genexp_narrow_names = set()
     gen._genexp_list_locals = {}
     gen._seed_genexp_list_narrowing(node)
+    # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
+    # gimple_gen_infra.py's "Public entry points" section for the whole
+    # feature; this file only ever calls in at these two points.
+    ginf.begin_function(gen, node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
+    ginf.emit_fallthrough_frees(gen, node)
 
     # Add implicit return 0 for main if it returns int but has no explicit return
     if node.name == 'main' and ret_type == 'int' and not gen.body_lines[-1:] == ['  return 0;']:

@@ -35,6 +35,7 @@ import gimple_exprtypes
 import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
+import gimple_gen_infra as ginf
 
 def gen_stmt(gen, node):
     # Emit #line directive to track source location. Critical for debugging:
@@ -1933,6 +1934,14 @@ def _gen_stmt_AugAssignStmt(gen, node):
 
 
 def _gen_stmt_ReturnStmt(gen, node):
+    # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
+    # gimple_gen_infra.py's "Public entry points" section for the whole
+    # feature. Safe to call unconditionally before evaluating `node.value`
+    # below (not just before a bare `return`): a candidate here can never
+    # be part of the returned expression at all — being returned is one
+    # of ownership_destruct.py's own disqualifying rules (rule 3),
+    # enforced long before this code ever sees the candidate set.
+    ginf.emit_return_frees(gen)
     if node.value is None:
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':

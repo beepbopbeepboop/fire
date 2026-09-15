@@ -477,6 +477,8 @@ MojoList *mojo_list_new(void)
 
 void mojo_list_free(MojoList *l)
 {
+    if (_mojo_list_registry) mojo_set_discard_int(_mojo_list_registry, (int64_t)(intptr_t)l);
+    if (_mojo_tuple_registry) mojo_set_discard_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
     free(l->data);
     free(l);
 }
@@ -2433,6 +2435,8 @@ MojoDict *mojo_dict_new(void)
 
 void mojo_dict_free(MojoDict *d)
 {
+    if (_mojo_dict_registry) mojo_set_discard_int(_mojo_dict_registry, (int64_t)(intptr_t)d);
+    if (_mojo_bool_dict_registry) mojo_set_discard_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
     for (int64_t i = 0; i < d->cap; i++) free(d->slots[i].key);
     free(d->slots);
     free(d);
@@ -2883,6 +2887,14 @@ MojoSet *mojo_set_new(void)
 
 void mojo_set_free(MojoSet *s)
 {
+    /* `_busy` guard mirrors mojo_set_new's: freeing the registry set
+     * itself (or a set encountered while discarding from it) must not
+     * recurse into mojo_set_discard_int touching the registry mid-walk. */
+    if (_mojo_set_registry && s != _mojo_set_registry && !_mojo_set_registry_busy) {
+        _mojo_set_registry_busy = 1;
+        mojo_set_discard_int(_mojo_set_registry, (int64_t)(intptr_t)s);
+        _mojo_set_registry_busy = 0;
+    }
     for (int64_t i = 0; i < s->cap; i++)
         if (s->slots[i].tag == 1) free(s->slots[i].val_s);
     free(s->slots);
@@ -3001,6 +3013,67 @@ void mojo_set_add_str(MojoSet *s, char *v)
         s->slots[idx].seq   = s->next_seq++;
         s->used++;
     }
+}
+
+/* Home slot (the index its own hash probes from, before any collision
+ * displacement) for whatever's currently in `s->slots[idx]` — needed by
+ * the backward-shift deletion below to decide whether a later slot may
+ * be moved back to fill a hole without breaking its own probe chain. */
+static int64_t _set_home_slot(MojoSet *s, int64_t idx)
+{
+    _SetSlot *sl = &s->slots[idx];
+    if (sl->tag == 0) {
+        uint64_t h = (uint64_t)sl->val_i * 2654435761ULL;
+        h ^= h >> 32;
+        return (int64_t)(h % (uint64_t)s->cap);
+    }
+    return (int64_t)(_str_hash(sl->val_s ? sl->val_s : "") % (uint64_t)s->cap);
+}
+
+/* Standard backward-shift deletion for open addressing with linear
+ * probing (Knuth vol. 3, algorithm R): removing a slot outright (just
+ * marking it empty) would break the probe chain for any later-inserted
+ * entry that collided into a slot past it — a lookup for that entry would
+ * stop at the now-empty slot before reaching it. Instead, walk forward
+ * from the freed slot and pull back any entry whose home slot lies at or
+ * before the hole (cyclically), repeating until a genuinely empty slot is
+ * hit. Shared by both int- and str-tagged slots since the check only
+ * needs each slot's own home position, not its value's type. */
+static void _set_erase_slot(MojoSet *s, int64_t i)
+{
+    if (s->slots[i].tag == 1) free(s->slots[i].val_s);
+    s->slots[i].tag = -1;
+    s->slots[i].val_s = NULL;
+    s->used--;
+    int64_t j = i;
+    for (;;) {
+        j = (j + 1) % s->cap;
+        if (s->slots[j].tag == -1) break;
+        int64_t k = _set_home_slot(s, j);
+        int movable = (i <= j) ? (k <= i || k > j) : (k <= i && k > j);
+        if (movable) {
+            s->slots[i] = s->slots[j];
+            s->slots[j].tag = -1;
+            s->slots[j].val_s = NULL;
+            i = j;
+        }
+    }
+}
+
+void mojo_set_discard_int(MojoSet *s, int64_t v)
+{
+    if (!s) return;
+    int64_t idx = _set_slot_int(s, v);
+    if (idx < 0 || s->slots[idx].tag != 0) return;
+    _set_erase_slot(s, idx);
+}
+
+void mojo_set_discard_str(MojoSet *s, char *v)
+{
+    if (!s) return;
+    int64_t idx = _set_slot_str(s, v);
+    if (idx < 0 || s->slots[idx].tag != 1) return;
+    _set_erase_slot(s, idx);
 }
 
 /* ── int/str view equivalence ──────────────────────────────────────────
@@ -4624,9 +4697,6 @@ int64_t mojo_list_index_int(MojoList *l, int64_t v) {
     }
     return -1;
 }
-void mojo_set_discard(MojoSet *s, int64_t v) { (void)s; (void)v; /* stub */ }
-
-
 /* Missing stubs for imported modules */
 /* tokenize is provided by compiled mojo_compiler code, not the runtime */
 
