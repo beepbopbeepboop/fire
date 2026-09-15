@@ -1,5 +1,24 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-15, later same day — re-confirmed pre-existing a second time, during the ownership-model exception-unwinding fix)
+
+Hit this same gate failure again running the full CLAUDE.md gate for
+doc/OWNERSHIP_MODEL.md's TODO item 3 (the cleanup-thunk-registry
+exception-unwinding fix: `mojo_cleanup_push_dict/list/set`,
+`mojo_cleanup_cancel_n`, `mojo_cleanup_checkpoint_save` in
+`runtime/mojo_runtime.{c,h}`, wired from `gimple_gen_stmts.py`/
+`gimple_gen_infra.py`). This run: shim=36288039 bytes,
+no-shim=35758312 bytes, first differing byte at offset 21086 — same
+~20800-21100 first-divergence window and same ~530KB
+(36288039-35758312=529727) gap as the entry just below from earlier
+today, both up by ~28KB on each side from this session's own added
+code being dumped identically on both the shim and no-shim sides
+(28177 / 28490 bytes respectively — consistent with new code being
+counted, not new divergence). Confirms, independently of that entry's
+own `git worktree` check, that this specific feature session isn't the
+cause either. Not investigated further — same standing conclusion as
+below.
+
 ## Status (2026-09-15 — re-confirmed pre-existing during an unrelated feature session; still failing, symptom shape changed again)
 
 Hit this gate failure while running the FULL CLAUDE.md quality gate for

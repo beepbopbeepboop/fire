@@ -26,6 +26,77 @@ void mojo_exc_pop(void)
     --_mojo_exc_top;
 }
 
+/* Cleanup-thunk registry — see mojo_runtime.h for the design rationale.
+ * Kind-tagged rather than raw function pointers: every entry is one of
+ * exactly three known container frees, so a switch in the unwind loop
+ * below is simpler and avoids introducing function-pointer calls into a
+ * hot path for no benefit. */
+typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET } mojo_cleanup_kind_t;
+#define MOJO_CLEANUP_STACK_MAX 8192
+static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
+static void                *_mojo_cleanup_ptr[MOJO_CLEANUP_STACK_MAX];
+int _mojo_cleanup_top = -1;
+/* Indexed by _mojo_exc_top (the try/except LEVEL, not a stack of its own):
+ * the cleanup-stack depth that level's own exception path should unwind
+ * back down to. */
+static int _mojo_cleanup_checkpoint[MOJO_EXC_STACK_MAX];
+
+static void _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
+{
+    if (_mojo_cleanup_top + 1 >= MOJO_CLEANUP_STACK_MAX) {
+        /* Degrade to today's pre-existing "leaks on an exception path"
+         * behavior rather than crash a program that would otherwise run
+         * fine — this registry is a memory-usage improvement, not a
+         * correctness requirement for programs that never raise. */
+        fprintf(stderr, "mojo_cleanup_push: cleanup stack overflow (>%d live owned locals)\n",
+                MOJO_CLEANUP_STACK_MAX);
+        return;
+    }
+    ++_mojo_cleanup_top;
+    _mojo_cleanup_kind[_mojo_cleanup_top] = kind;
+    _mojo_cleanup_ptr[_mojo_cleanup_top] = ptr;
+}
+
+void mojo_cleanup_push_dict(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DICT, p); }
+void mojo_cleanup_push_list(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIST, p); }
+void mojo_cleanup_push_set(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET, p); }
+
+void mojo_cleanup_cancel_n(int64_t n)
+{
+    _mojo_cleanup_top -= (int)n;
+}
+
+void mojo_cleanup_checkpoint_save(void)
+{
+    if (_mojo_exc_top >= 0 && _mojo_exc_top < MOJO_EXC_STACK_MAX)
+        _mojo_cleanup_checkpoint[_mojo_exc_top] = _mojo_cleanup_top;
+}
+
+/* Run every cleanup thunk pushed since the checkpoint recorded for the
+ * try/except level `mojo_raise` is about to longjmp into. Must run BEFORE
+ * the longjmp: `longjmp` itself skips every C statement between the raise
+ * site and the setjmp point, so this is the only place left that these
+ * owned locals' frees can happen on an exception path (see
+ * doc/OWNERSHIP_MODEL.md's exception-handling section). A thunk here is,
+ * by construction, one this same call stack already pushed and never
+ * cancelled — cancellation always happens at the exact free call the
+ * normal path already emits, so a thunk surviving to this point means
+ * that free call never ran, i.e. an exception genuinely reached or passed
+ * this local's owning frame without it. */
+static void _mojo_cleanup_unwind_to(int chk)
+{
+    while (_mojo_cleanup_top > chk) {
+        mojo_cleanup_kind_t kind = _mojo_cleanup_kind[_mojo_cleanup_top];
+        void *ptr = _mojo_cleanup_ptr[_mojo_cleanup_top];
+        --_mojo_cleanup_top;
+        switch (kind) {
+            case MOJO_CLEANUP_DICT: mojo_dict_free((MojoDict *)ptr); break;
+            case MOJO_CLEANUP_LIST: mojo_list_free((MojoList *)ptr); break;
+            case MOJO_CLEANUP_SET:  mojo_set_free((MojoSet *)ptr);  break;
+        }
+    }
+}
+
 void mojo_raise(void)
 {
     /* _mojo_exc_top < 0 means no enclosing try/with is active — either a
@@ -45,6 +116,7 @@ void mojo_raise(void)
                 MOJO_EXC_STACK_MAX);
         exit(1);
     }
+    _mojo_cleanup_unwind_to(_mojo_cleanup_checkpoint[_mojo_exc_top]);
     longjmp((void *)&_mojo_exc_stack[_mojo_exc_top], 1);
 }
 

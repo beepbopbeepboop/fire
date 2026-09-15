@@ -4196,6 +4196,44 @@ _OWNED_FREE_RUNTIME_FN = {
     'MojoSet *': 'mojo_set_free',
 }
 
+# doc/OWNERSHIP_MODEL.md's exception-handling option 2 (TODO item 3): a
+# cleanup thunk pushed right after a candidate's single constructing
+# assignment, cancelled (without invoking) at the exact free call
+# `_emit_owned_local_frees` already emits below. `mojo_raise`'s longjmp
+# skips that free call entirely on any exception path reached before a
+# candidate's owning return/fallthrough runs — this is what lets
+# `mojo_raise` (runtime/mojo_runtime.c) still free it in that case.
+_OWNED_PUSH_RUNTIME_FN = {
+    'MojoDict *': 'mojo_cleanup_push_dict',
+    'MojoList *': 'mojo_cleanup_push_list',
+    'MojoSet *': 'mojo_cleanup_push_set',
+}
+
+
+def maybe_push_owned_local(gen, name) -> None:
+    """Call once, right after lowering ANY statement whose sole target is
+    the plain identifier `name` (a `VarDecl` or a single-target
+    `AssignStmt`) — see the two call sites in gimple_gen_stmts.py's
+    central `gen_stmt` dispatcher. A no-op unless `name` is one of the
+    enclosing function's Phase-3 owned-free candidates (`begin_function`)
+    and hasn't already been pushed this function. Single static assignment
+    (ownership_destruct.py's rule 2) means a real candidate's constructing
+    assignment is reached at most once per invocation, so the "already
+    pushed" guard should never actually trigger — it exists so a future
+    relaxation of that analysis fails closed (skips the push, today's
+    pre-existing exception-path leak) rather than double-pushing the same
+    pointer onto the cleanup stack."""
+    candidates = getattr(gen, '_owned_free_candidates', None)
+    if not candidates or name not in candidates:
+        return
+    pushed = gen._owned_free_pushed
+    if name in pushed:
+        return
+    push_fn = _OWNED_PUSH_RUNTIME_FN.get(gen.var_types.get(name))
+    if push_fn:
+        gen._emit(f"  {push_fn} ({name});")
+        pushed.add(name)
+
 
 def _emit_owned_local_frees(gen):
     """Emits a `mojo_*_free(name);` call for every name in
@@ -4222,11 +4260,26 @@ def _emit_owned_local_frees(gen):
     # of bug `make bootstrap`'s byte-identity check exists to catch, and
     # it did: stage1-vs-stage2 `mojo.ci` differed with this bug present.
     # A fixed, deterministic order is required output, not a style choice.
+    freed = 0
     for name in sorted(getattr(gen, '_owned_free_candidates', ())):
         ctype = gen.var_types.get(name)
         runtime_fn = _OWNED_FREE_RUNTIME_FN.get(ctype)
         if runtime_fn:
             gen._emit(f"  {runtime_fn} ({name});")
+            freed += 1
+    # Cancel exactly the thunks this free just handled inline, so
+    # mojo_raise's unwind (if this exact return/fallthrough is later
+    # re-executed... it can't be, but see below) never double-frees them.
+    # `freed` here always equals the number of this function's OWN
+    # still-live pushes at this point: anything a callee itself pushed is
+    # already cancelled by the time it returns (same invariant, applied
+    # recursively), and this function has no try of its own to interleave
+    # a nested checkpoint with (see `_is_free_eligible_function`) — so the
+    # top `freed` entries on the global cleanup stack are provably these
+    # candidates' own, in any order, cancel-by-count is exact rather than
+    # merely conservative.
+    if freed:
+        gen._emit(f"  mojo_cleanup_cancel_n ({freed});")
 
 
 # ── Public entry points — the ONLY things gimple_gen_funcs.py/
@@ -4249,6 +4302,7 @@ def begin_function(gen, fn) -> None:
     `emit_return_frees` below needs the result available at every
     `return` encountered DURING that lowering, not just after it."""
     gen._owned_free_candidates = _compute_owned_free_candidates(fn)
+    gen._owned_free_pushed = set()
 
 
 def emit_return_frees(gen) -> None:
