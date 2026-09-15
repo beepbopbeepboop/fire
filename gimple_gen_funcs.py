@@ -1195,11 +1195,29 @@ def _selfhost_walk_stmts_for_self_assigns(stmts, fields, init_param_ct):
             # `.name`/`.type_ann` specifically, so a real fix likely needs
             # to avoid re-parsing `class GimpleGen` via this runtime path
             # at all rather than patching individual field reads.
+            _swfsa_member = _as_str(_n.target.member)
+            if _swfsa_member == '_dispatch_solver':
+                # `self._dispatch_solver: DispatchSolver | None = None` --
+                # confirmed by hand (env-gated diagnostic) that `.type_ann`
+                # reads back as neither a string NOR None self-hosted for
+                # THIS one assignment (genuine value corruption on this
+                # object graph, not a comparison/typing bug any `_as_str()`
+                # cast can fix -- unlike every other `X | None`-annotated
+                # GimpleGen field, all of which use a BUILTIN type name
+                # (list/str/dict) resolved via `_SELFHOST_ANN_CTM` rather
+                # than this function's separate bare-CapWord-struct-name
+                # branch). `DispatchSolver` is a real, always-known struct
+                # (gimple_solvers.py) for this one specific field, so
+                # hardcode it directly -- same shape of narrow, name-based
+                # exception `_struct_method_qualifier` already uses for
+                # `Span`/`GimpleGen`.
+                _selfhost_merge_field(fields, _swfsa_member, 'DispatchSolver *')
+                continue
             _ct = (_selfhost_ann_ctype(getattr(_n, 'type_ann', None))
                    or _selfhost_literal_ctype(_n.value))
             if _ct is None and isinstance(_n.value, IdentExpr):
                 _ct = init_param_ct.get(_as_str(_n.value.name))
-            _selfhost_merge_field(fields, _as_str(_n.target.member), _ct or 'int64_t')
+            _selfhost_merge_field(fields, _swfsa_member, _ct or 'int64_t')
         if isinstance(_n, IfStmt):
             _selfhost_walk_stmts_for_self_assigns(_n.then_body, fields, init_param_ct)
             for _ec, _eb in _n.elifs:
