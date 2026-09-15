@@ -25,10 +25,14 @@ Kept at the top and updated in place as items land (checked, with a one-
 line note) or split into sub-items — this is the actual work queue, not a
 historical log; see the phase sections below for full context on each.
 
-Current priority order (2026-09-15, updated later still): **1 (landed,
-gate clean) → 3 (fully landed incl. the try/except-eligibility widening,
-gate clean) → 2 (investigated, design updated; coroutine `return e`
-insertion point still not started, now the last blocker on that gap)**.
+Current priority order (2026-09-15, updated once more): **1, 2, and 3 are
+ALL now landed/resolved** — 1 (function-scope Phase 3 destruction) and 3
+(exception-unwinding fix, incl. the try/except-eligibility widening) are
+real code landed and gate-clean; 2 (async/coroutine ownership) turned out
+to already be covered by existing Layer 1 stack-switch infrastructure
+once 1 and 3 landed, needing no coroutine-specific code at all. Next
+open work is the "not yet scheduled" list below, plus 1's own
+loop-body-scoped-destruction follow-up.
 
 1. [x] **Wire `ownership_destruct.py`'s analysis into codegen — narrow
    scope first.** LANDED 2026-09-15. Emits real `mojo_*_free` calls for
@@ -130,11 +134,44 @@ insertion point still not started, now the last blocker on that gap)**.
    - [x] Recommendation updated: land the exception-unwinding fix (item 3,
      below) FIRST, then re-assess how much of this gap it already closes
      before designing anything coroutine-specific.
-   - [ ] Not yet done, now correctly scoped as its own follow-up: locate
-     the codegen insertion point for coroutine `return e` (lowers to
-     `__mojo_coro_set_return(...)` + fall-through, not a plain C
-     `return`), needed before item 1's wiring could ever extend to
-     eligible async/generator function bodies.
+   - [x] **RESOLVED 2026-09-15, later still — this was looking in the
+     wrong layer, and the gap it worried about doesn't actually exist
+     for the default backend.** `__mojo_coro_set_return` (`mojo_coro.h`)
+     is a LOWER runtime-C symbol belonging to the old `gimple_cpp_*.py`
+     C++20-coroutine emitter (`MOJO_CORO=cpp`, a differential-oracle
+     fallback, not the default per doc/COROUTINE.html §5.5). The DEFAULT
+     backend (`gimple_gen_coro.py`'s Layer 1 stack-switch pre-pass,
+     unconditionally active unless `MOJO_CORO=cpp` is set — confirmed no
+     such env var is set in this project) already rewrites `return e`
+     inside an eligible generator/async body, as an AST PRE-PASS run
+     BEFORE ordinary codegen (`ast_rewriter.rewrite` → this pre-pass →
+     `gen_func`), into `__mojo_gen_set_return(__c, e); return;` — a
+     PLAIN, un-flagged `FunctionDef` (`body_fd.is_generator = False;
+     body_fd.is_async = False`, set explicitly by `_lower_one_async`/
+     `_lower_one_async_gen`/the generator equivalent) containing only
+     ordinary statement shapes. This function reaches Phase 3's
+     `begin_function`/`_is_free_eligible_function` as an entirely
+     ordinary function — no special-casing needed, and (per item 3
+     above) a `try`/`except` inside it no longer disqualifies it either.
+     Verified empirically, not just argued: a generator with a `d = {}`
+     local used only internally (never escaping) correctly gets a real
+     `mojo_cleanup_push_dict`/`mojo_dict_free` pair AND the right
+     accumulated result over its `yield`s; a generator that instead
+     `return`s the container itself gets ZERO push/free for it (the
+     `__mojo_gen_set_return(__c, d)` call's unresolved callee correctly
+     disqualifies `d` via `_scan_expr`'s CallExpr default — the exact
+     same generic protection that already covers an ordinary function's
+     unresolved calls, no coroutine-specific carve-out required). Same
+     `SETRET_SHIM` call shape is used uniformly for plain `async def`,
+     async generators, and generators (`_rewrite_async_stmts`/
+     `_rewrite_async_gen_stmts`/the generator rewrite all emit it), so
+     this finding covers all three, not just generators. The genuinely
+     remaining gap is narrow: a generator/async function that FAILS
+     Layer 1's own eligibility check (`_eligible_async_common` and
+     friends) falls back to the old C++20 emitter and stays
+     `is_generator`/`is_async = True` all the way to codegen — Phase 3
+     already, correctly, still excludes those via the existing flag
+     check; no regression, no false coverage claimed.
 3. [x] **The exception-unwinding fix (option 2, per-frame cleanup-thunk
    registry) — CORE MECHANISM LANDED 2026-09-15.** `runtime/mojo_runtime.
    {c,h}`: a kind-tagged cleanup-thunk stack (`mojo_cleanup_push_dict/
