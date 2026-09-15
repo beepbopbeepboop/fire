@@ -1,5 +1,17 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-14, session 4 — 7 more root causes fixed; diff narrowed ~3.8MB → ~350KB; NOT yet zero, 8th blocker precisely diagnosed and deferred)
+
+See "## Session 4 final summary (2026-09-14)" near the end of this doc
+for the complete accounting of this session's work: seven independent,
+gate-verified fixes landed (commits `5cc83e5`, `078c103`, `972850f`,
+following on from `585879c`/`dba69b8` in session 3), all downstream/gate
+impact confirmed (a real external project, a GCC frontend vendoring this
+compiler, went from 9944 gcc errors to 0), and the remaining gap is now
+tied to a specific, already-tracked, separate deferred project
+(`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`)
+rather than being open-ended or unknown.
+
 ## Status (2026-09-13 — found, NOT fixed, confirmed pre-existing)
 
 `make check-noshim-dumpfull` (`test_noshim_dumpfull.py`, added in commit
@@ -918,3 +930,161 @@ reading `.type_ann` back and checking it).
   session; the real mechanism is believed to be per-FILE compile
   order (which module gets compiled when), not any single dict's
   iteration order within one module's own struct-emission pass.
+
+## Session 4 final summary (2026-09-14)
+
+Continuing directly from session 3's Bug C work (`585879c`/`dba69b8`) and
+the Finding 5 investigative arc (`89d4d7d` through `fbf73dc`). Landed
+seven independent, gate-verified fixes (three commits: `5cc83e5`,
+`078c103`, `972850f`), each confirmed via `make check-selfhost` at
+minimum, several via the FULL gate (check-linkmode, check-selfhost,
+compile_stdlib.py 664/664 0 unexpected, make bootstrap 180/180). Diff
+narrowed from ~3.8MB (session start) to ~350KB (session end) — real,
+substantial, verified progress — but check-noshim-dumpfull is **not
+yet zero**.
+
+### The seven fixes
+
+1. **`AssignStmt`/`VarDecl.type_ann` ambiguous-boxed-`int64_t` isinstance
+   bug** (`gimple_gen_funcs.py`'s `_selfhost_ann_ctype`, plus two sibling
+   `f.type_ann` call sites). Root cause: these fields are hardcoded
+   ambiguous `int64_t` in `gimple_module_gen.py`'s `struct_field_types`
+   (`struct_boxed_fields`), and `mojo_isinstance`/`mojo_isinstance_p`
+   (`runtime/mojo_runtime.c`) never implement `type_id 4` (str) for an
+   ambiguous boxed value — they unconditionally return 0. So
+   `isinstance(x, str)` was FALSE self-hosted for every real string
+   value in that field, not just malformed ones — this was the actual
+   mechanism behind the whole "Finding 5" `.type_ann` corruption saga
+   documented earlier in this file. Fixed via `is None` + `_as_str()`
+   cast instead of `isinstance`.
+2. **Hardcoded `_SELFHOST_DIR` path-identity comparisons.** New
+   `gimple_codegen._is_selfhost_source_dir()` helper (later relocated,
+   see #6) replacing `_cur_abs == _SELFHOST_DIR` (or `.startswith`)
+   checks in `gimple_module_gen.py` with a path-independent "does
+   `mojo_compiler.py` sit next to this file" signal (mirroring
+   `_run_pipeline`'s own `_selfhost_register_gimplegen` gate). Found via
+   a REAL downstream project: `/Users/mrs/net/gcc/gcc/fire`, a GCC
+   frontend vendoring a byte-identical copy of this compiler at a
+   different filesystem path, failed with 9944 gcc errors (`implicit
+   declaration of function 'GimpleGen__new_val'` etc. — `gen` params
+   boxed to generic `int64_t` instead of `GimpleGen *`) because
+   `_SELFHOST_DIR` is hardcoded to wherever `gimple_codegen.py` was
+   loaded from, silently disabling self-hosting-only typing for any
+   OTHER, otherwise-identical checkout.
+3. **Qualifier early-override bug.** `_func_qualifier`/
+   `_struct_method_qualifier` (`gimple_gen_funcs.py`) had an early
+   `if self-hosting file: return ''` short-circuit that unconditionally
+   bare-ified EVERY reference made from a self-hosting-flagged file —
+   including genuine references to a DIFFERENT, non-self-hosting
+   submodule (fire's own `jit/arm64.py`, one directory below its
+   sibling `mojo_compiler.py`). Removed; a no-op for genuine self-
+   hosting-internal references (the existing tier 1-3 priority
+   resolution already finds nothing for those, falling through to the
+   same trailing `return ''`).
+4. **GimpleGen-specific qualifier exemption.** Removing #3 broke
+   `make check-selfhost` (undefined symbols `_GimpleGen__overload_
+   suffix`/`_GimpleGen_overload_suffix_for`): GimpleGen has one real
+   home file (`gimple_codegen.py`, correctly resolved via
+   `_local_struct_names` there) but is ALSO synthetically registered
+   for every OTHER `gimple_*.py` file's compile — those files have no
+   import-registry entry for it and fell through to bare, a mismatch
+   against the qualified definition. Added back a narrow, name-based
+   exemption (`if struct_name == 'GimpleGen': return ''`) mirroring the
+   pre-existing `Span` exemption right above it.
+5. **Qualified-call convention bug.** `gimple_codegen._is_selfhost_
+   source_dir(...)` (a qualified `module.function()` CALL, as opposed
+   to a plain attribute read like `gimple_codegen._SELFHOST_DIR`) hit a
+   self-hosted-only "stubbed" no-op fallback — confirmed via the
+   generated `.ci` showing `/* int64_t._is_selfhost_source_dir()
+   stubbed */`, the receiver erased to ambiguous `int64_t`. This
+   codebase's established, working convention for cross-file function
+   calls is always `from module import name` + bare call; fixed
+   accordingly (temporarily — see #6).
+6. **Broken cross-module `_parsed_import` resolution for
+   `gimple_codegen` specifically.** Even the bare-import fix (#5) hit
+   ANOTHER self-hosted-only stub ("unavailable in compiled mode
+   (imported from an unresolved external/relative module)"). Root-
+   caused via a debug diagnostic: `_local_sibling_module_exports`'s
+   `gen._parsed_import('gimple_codegen')` itself returns a falsy path
+   self-hosted (confirmed: `ENTER module=gimple_codegen path=0`), even
+   though the shim resolves the exact same import fine. Every OTHER
+   name gimple_module_gen.py imports from gimple_codegen.py on the same
+   import line survives because it resolves via one of two unrelated
+   mechanisms that never touch this broken path (a struct/class type,
+   or a `gen`/`self`-first-param "extracted helper" already covered by
+   the separate, independently-working `_selfhost_extracted_fn_index`
+   mechanism) — `_is_selfhost_source_dir` was the only plain utility
+   function actually depending on it. Rather than chase the deeper
+   `_parsed_import` bug, relocated the function directly into
+   `gimple_module_gen.py` (its only remaining caller), sidestepping the
+   cross-module resolution path entirely.
+7. **`DispatchSolver` field-corruption special-case.** The last
+   remaining wrong field in GimpleGen's self-hosted struct (down from
+   ~19 originally, after fix #1): `self._dispatch_solver: DispatchSolver
+   | None = None` is the ONLY GimpleGen field annotated with a real
+   user-defined struct name in an `X | None` shape (every other such
+   field uses a builtin type resolved via a hardcoded lookup table).
+   Confirmed via diagnostic that `.type_ann` reads back as genuinely
+   corrupted (neither str nor None) specifically for this one
+   assignment — an old code comment had already flagged this exact
+   field by name. Architecturally different from #1 (the VALUE itself
+   is wrong here, not just misclassified by isinstance) — fixed via a
+   narrow, name-based hardcode (`if member == '_dispatch_solver':
+   ctype = 'DispatchSolver *'`), the same shape of exception as the
+   `Span`/`GimpleGen` qualifier special-cases.
+
+### The 8th blocker (not fixed — separate, already-tracked, deferred)
+
+After all seven fixes, the first differing byte moved from ~19260
+(GimpleGen's struct position) to 20846 — a DIFFERENT struct,
+`LayoutSolver` (`gimple_solvers.py`), missing two fields entirely
+(`HEAP`, `STACK` — class-level string constants, `self.HEAP`/
+`self.STACK` read inside a method). Root-caused to `gimple_module_gen.
+py`'s `_scan_stmt_member_candidates` (~line 3316), the GENERIC pass
+that discovers a struct's fields by scanning for `self.X` reads across
+ALL structs (not just GimpleGen) — it calls `gimple_exprtypes._walk_
+ast` directly, the SAME shared utility already documented in this file
+(session 3, Bug C item 5) as having a confirmed, still-unfixed
+self-hosted bug (`isinstance(node, str/int/float/bool)` misclassifies
+real AST dataclass instances, so the walker barely recurses).
+
+Unlike the seven fixes above, this is **not** a quick, narrow patch:
+every other `_walk_ast`-dependent bug fixed so far (in GimpleGen's own
+scanners) was worked around with a DEDICATED, narrow, statement-only
+walker because the shape needed was simple ("find `self.X = <literal>`
+assignment TARGETS"). `_scan_stmt_member_candidates` needs to find
+EVERY `MemberExpr` READ anywhere in arbitrarily-nested EXPRESSIONS
+across a whole method body — a shape general enough that writing a
+correct dedicated walker for it would mean essentially re-implementing
+`_walk_ast` itself correctly, which is exactly what session 3 already
+found exposes a DIFFERENT, catastrophic O(N²) whole-program rescan cost
+(15GB+ RSS growth, SIGSEGV) — see `bugs/hard/PERF_nested_module_
+compile_walk_ast_quadratic_rescan.md` for that issue's own multi-phase,
+multi-week history. Fixing `_walk_ast` properly requires that
+performance issue to be solved first.
+
+**This was not left as a theoretical risk — directly attempted and
+tested this session.** Reordered `_walk_ast_into`'s check
+(`gimple_exprtypes.py`) so `dataclasses.is_dataclass(node)` runs FIRST,
+trusting it exclusively (matching session 3's own prior finding that
+this reordering fixes the misclassification). Rebuilt `mojoc` and ran
+`MOJO_NO_SHIM=1 ./mojoc gimple_gen_loops.py --dump-full` under careful
+RSS monitoring (sampling every 2s) — RSS climbed 5GB → 7GB → 11GB →
+14GB+ within about 15 seconds on this SINGLE-FILE compile, before being
+killed. This reproduces the exact catastrophic blowup the PERF doc
+describes, confirming that the field-name caching optimization already
+present in the code (`_WALK_FIELD_NAMES_CACHE`, computed once per class
+rather than per node — itself a real, already-landed perf fix,
+"Phase 5" per that function's own docstring) does NOT by itself resolve
+the underlying O(N²) whole-program rescan cost. The change was cleanly
+reverted (`git checkout -- gimple_exprtypes.py`, confirmed zero diff)
+and `mojoc` rebuilt from the last committed, known-good state
+(`972850f`) before continuing.
+
+**Conclusion**: check-noshim-dumpfull's zero-diff goal was not reached
+this session, and is CONFIRMED (not merely theorized) to require the
+separate `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+rescan.md` project to be solved FIRST — no amount of iterating on
+`_scan_stmt_member_candidates` (or `_walk_ast`'s own check ordering)
+in isolation can close this gap without that prerequisite work landing
+first. A future session should start there.
