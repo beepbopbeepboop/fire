@@ -161,6 +161,34 @@ extern int64_t _mojo_exc_type;
 void    mojo_exc_type_set(int64_t type_id);
 int64_t mojo_exc_type_get(void);
 
+/* ── Cleanup-thunk registry (doc/OWNERSHIP_MODEL.md, exception-handling
+ * option 2) ──────────────────────────────────────────────────────────────
+ * `mojo_raise`'s `longjmp` skips every C statement between the raise site
+ * and the catching try's `setjmp` — including any `mojo_*_free` call
+ * gimple_gen_infra.py's Phase 3 wiring emitted for an owned local, since
+ * those live at the function's return/fallthrough points, not on the
+ * exception path. This registry is a userland reimplementation of what a
+ * real unwinder's landing pads give for free: codegen pushes a thunk right
+ * after constructing an owned local eligible for Phase-3 freeing, and
+ * cancels it (without invoking) right at the same free call it already
+ * emits on the normal path. `mojo_raise` walks and invokes every thunk
+ * still live back down to the catching try's checkpoint before it
+ * longjmps, so an owned local created here-or-in-a-callee is freed exactly
+ * once, on whichever path (normal or exceptional) actually runs. */
+extern int _mojo_cleanup_top;
+void mojo_cleanup_push_dict(void *p);
+void mojo_cleanup_push_list(void *p);
+void mojo_cleanup_push_set(void *p);
+/* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
+ * immediately at a point that is itself about to (or just did) free those
+ * same `n` locals inline. */
+void mojo_cleanup_cancel_n(int64_t n);
+/* Snapshot the current cleanup-stack depth as the level `_mojo_exc_top`
+ * (already incremented) should unwind back down to. Call immediately
+ * after bumping `_mojo_exc_top` for a new try/except level, before its
+ * `setjmp`. */
+void mojo_cleanup_checkpoint_save(void);
+
 /* ── Compiled-generator (C++20 coroutine) exception boundary ─────────────
  * A coroutine body can't use setjmp/longjmp directly (the C stack frame
  * that ran setjmp() no longer exists once the coroutine has suspended by

@@ -87,8 +87,11 @@ def gen_stmt(gen, node):
         gen._gen_stmt_PassStmt(node)
     elif isinstance(node, gimple_ctypes.VarDecl):
         gen._gen_stmt_VarDecl(node)
+        ginf.maybe_push_owned_local(gen, node.name)
     elif isinstance(node, gimple_ctypes.AssignStmt):
         gen._gen_stmt_AssignStmt(node)
+        if isinstance(node.target, IdentExpr):
+            ginf.maybe_push_owned_local(gen, node.target.name)
     elif isinstance(node, gimple_ctypes.AugAssignStmt):
         gen._gen_stmt_AugAssignStmt(node)
     elif isinstance(node, gimple_ctypes.MultiAssignStmt):
@@ -3615,6 +3618,11 @@ def _gen_stmt_TryStmt(gen, node):
     gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
     gen._emit(f"  _mojo_exc_top = {temp_inc};")
     gen._emit(f"  {temp_top2} = _mojo_exc_top;")
+    # Snapshot the cleanup-thunk stack depth this level unwinds back down to
+    # on an exception (doc/OWNERSHIP_MODEL.md's exception-handling option 2)
+    # — must happen after the _mojo_exc_top bump above (it indexes the
+    # checkpoint table by that level) and before setjmp.
+    gen._emit("  mojo_cleanup_checkpoint_save ();")
     # GIMPLE: pass array element directly to setjmp (decays to int*)
     gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
     gen._emit(f"  {cond_t} = {sj_ret} != 0;")
@@ -4069,6 +4077,8 @@ def _gen_stmt_WithStmt(gen, node):
         gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
         gen._emit(f"  _mojo_exc_top = {temp_inc};")
         gen._emit(f"  {temp_top2} = _mojo_exc_top;")
+        # See _gen_stmt_TryStmt's identical checkpoint-save call for why.
+        gen._emit("  mojo_cleanup_checkpoint_save ();")
         # GIMPLE: pass array element directly to setjmp (decays to int*)
         gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
         gen._emit(f"  {cond_t} = {sj_ret} != 0;")

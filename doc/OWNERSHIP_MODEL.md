@@ -25,9 +25,11 @@ Kept at the top and updated in place as items land (checked, with a one-
 line note) or split into sub-items — this is the actual work queue, not a
 historical log; see the phase sections below for full context on each.
 
-Current priority order (2026-09-15): **1 (landed, gate pending) → 2
-(investigated, design updated) → 3 (exception-unwinding fix, not started,
-now the real next dependency for both remaining open gaps)**.
+Current priority order (2026-09-15, updated later same day): **1 (landed,
+gate clean) → 3 (core mechanism landed, gate clean; `_is_free_eligible_
+function`'s try/except exclusion still open as its own follow-up) → 2
+(investigated, design updated; coroutine `return e` insertion point still
+not started, now unblocked to revisit since item 3's landed)**.
 
 1. [x] **Wire `ownership_destruct.py`'s analysis into codegen — narrow
    scope first.** LANDED 2026-09-15. Emits real `mojo_*_free` calls for
@@ -134,18 +136,61 @@ now the real next dependency for both remaining open gaps)**.
      `__mojo_coro_set_return(...)` + fall-through, not a plain C
      `return`), needed before item 1's wiring could ever extend to
      eligible async/generator function bodies.
-3. [ ] **The exception-unwinding fix** (per-frame cleanup-thunk registry —
-   see the cross-cutting section's "Exception handling" write-up for the
-   3 options and the recommended one). Promoted from "not yet scheduled"
-   to its own numbered item since item 2's investigation now makes it a
-   direct dependency of BOTH the exception-handling gap AND (per above)
-   most of the async/coroutine gap — fixing it once plausibly unblocks
-   two TODO items, not one. Not started.
+3. [x] **The exception-unwinding fix (option 2, per-frame cleanup-thunk
+   registry) — CORE MECHANISM LANDED 2026-09-15.** `runtime/mojo_runtime.
+   {c,h}`: a kind-tagged cleanup-thunk stack (`mojo_cleanup_push_dict/
+   list/set`, `mojo_cleanup_cancel_n`, `mojo_cleanup_checkpoint_save`),
+   wired into `mojo_raise()` so it walks and frees every still-live owned
+   local back down to the catching try's recorded checkpoint BEFORE the
+   `longjmp` that used to skip past all of them silently. Codegen side
+   (`gimple_gen_stmts.py`/`gimple_gen_infra.py`): try/with entry now
+   saves the checkpoint right after bumping `_mojo_exc_top`; every
+   `VarDecl`/single-target `AssignStmt` pushes a thunk when its target is
+   a Phase-3 owned-free candidate; the existing return/fallthrough free
+   sites now also cancel the matching thunk count (normal path unchanged
+   — still exactly one free — only the exception path gains coverage).
+   - [x] This closes the doc's own original motivating example exactly:
+     "a function allocates a MojoDict, then something three calls deep
+     raises" — the allocating function doesn't need a try of its own,
+     only a try somewhere up the call stack, which is the case this
+     fixes. Verified, not just argued: a repro (a `{}`-candidate `dict`
+     built then unconditionally raised past on every call, 200,000
+     iterations from an outer `try/except`) measured **109.5MB peak
+     footprint → 8.6MB peak** before/after (built both ways from the
+     same source by stashing/restoring the fix, `leaks --atExit`'s
+     "0 leaks" summary alone is NOT reliable evidence here — the
+     container registries make every leaked container still technically
+     "reachable," so peak physical footprint is the real signal, same
+     methodology item 1 used).
+   - [x] Full gate run clean: `test_gimple.py` 308/308,
+     `test_module_cache.py` 76/76, `test_ownership_check.py` 24/24,
+     `test_ownership_destruct.py` 20/20, `make check-linkmode` 3/3,
+     `make check-selfhost` 1/1, from-scratch stdlib dylib rebuild (0
+     skips), `compile_stdlib.py` 664/664 (0 unexpected, up from 663/664),
+     `make bootstrap` 180/180 byte-identical across 3 stages.
+     `make check-noshim-dumpfull` FAILS but re-confirmed as the SAME
+     pre-existing, already-tracked divergence (see
+     `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s new
+     2026-09-15 "later same day" entry) — same ~20800-21100 first-byte
+     window and ~530KB gap as that doc's own same-day baseline, both
+     sides up ~28KB from this session's own new code being dumped
+     identically on both, not new divergence.
+   - [ ] **Remaining scope, not yet done**: `_is_free_eligible_function`
+     (`gimple_gen_infra.py`) still excludes any function that ITSELF
+     contains a `try`/`except` from Phase-3 destruction at all — that
+     exclusion predates this fix and is now more conservative than it
+     needs to be (the new checkpoint/thunk machinery is exactly what
+     would make such a function's OWN locals safe to free too). Widening
+     it is a natural, still-open follow-up, not required to close the
+     motivating leak above.
+   - [ ] Coroutine `return e` insertion point (item 2's own follow-up,
+     above) is unaffected by this — still not started.
 
-Not yet scheduled, tracked here so they aren't lost: Python-interop-aware
-destructor dispatch, loop-body-scoped destruction (item 1's own follow-up,
-above), and Phase 4-6 (real calling convention, move-vs-copy, stack
-allocation).
+Not yet scheduled, tracked here so they aren't lost: widening
+`_is_free_eligible_function` past its `try`/`except` exclusion (item 3's
+own follow-up, just above), Python-interop-aware destructor dispatch,
+loop-body-scoped destruction (item 1's own follow-up, above), and Phase
+4-6 (real calling convention, move-vs-copy, stack allocation).
 
 ## Why this matters, not just "more spec compliance"
 
