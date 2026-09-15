@@ -1081,10 +1081,50 @@ reverted (`git checkout -- gimple_exprtypes.py`, confirmed zero diff)
 and `mojoc` rebuilt from the last committed, known-good state
 (`972850f`) before continuing.
 
+**A second, independently-scoped attempt was ALSO tried and ALSO
+failed the same way.** Theorizing that the blowup came specifically
+from fixing the SHARED `_walk_ast` (multiplying the extra recursion
+cost across its dozens of call sites simultaneously), tried a
+narrower fix instead: a new, separate sibling function
+(`_walk_ast_correct`/`_walk_ast_into_correct` in `gimple_exprtypes.py`,
+same corrected check order, left `_walk_ast` itself completely
+untouched) used ONLY by `_scan_stmt_member_candidates` — which already
+caches its own result by `id(stmt)` in a dict shared across every
+nested temp_gen in the whole-program compile
+(`self._field_scan_member_cache`), so each distinct statement tree
+would be walked with the corrected-but-costlier logic AT MOST ONCE
+program-wide, not repeatedly. Built and RSS-monitored the identical
+way: `MOJO_NO_SHIM=1 ./mojoc gimple_gen_loops.py --dump-full` — RSS
+climbed 5.6GB → 10GB → 11GB → 15GB → 16GB+ within seconds, the exact
+same catastrophic pattern, on the exact same single-file test. Killed
+immediately, cleanly reverted (`git checkout -- gimple_exprtypes.py
+gimple_module_gen.py`, confirmed zero diff via `git status --short`),
+`mojoc` rebuilt and stability-verified again.
+
+That a SECOND, differently-scoped implementation (dedicated walker,
+single cached caller, only one file even touched by the fix) hits the
+identical wall as the first (global reorder of the widely-shared
+function) is strong evidence this isn't "many callers each paying a
+moderate extra cost" — it's that correctly recursing this self-hosted
+AST representation via `is_dataclass`-first ordering, in this codebase,
+at all, triggers something closer to true exponential blowup even for
+ONE statement tree in ONE file. The most likely mechanism (consistent
+with `_walk_ast_into`'s own docstring, which explicitly flags "no
+id()-based visited set — id() is unreliable in the compiled runtime"):
+the self-hosted AST has genuinely shared/aliased sub-structures
+reachable via more than one path, and a naive recursive walk with no
+cycle/revisit detection re-walks each shared subtree once per distinct
+path to it — which is exactly the shape of bug `bugs/hard/PERF_nested_
+module_compile_walk_ast_quadratic_rescan.md` already tracks, just
+newly reproduced with concrete, fresh RSS numbers this session rather
+than only cited from the earlier session's history.
+
 **Conclusion**: check-noshim-dumpfull's zero-diff goal was not reached
-this session, and is CONFIRMED (not merely theorized) to require the
+this session, and is CONFIRMED — via two independent, differently-
+scoped implementation attempts, not merely theorized — to require the
 separate `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-rescan.md` project to be solved FIRST — no amount of iterating on
-`_scan_stmt_member_candidates` (or `_walk_ast`'s own check ordering)
-in isolation can close this gap without that prerequisite work landing
-first. A future session should start there.
+rescan.md` project to be solved FIRST. No further variation on "fix
+the check order, walk correctly" is worth attempting again without
+that prerequisite work landing first (a third such attempt would very
+likely reproduce the identical blowup for the identical reason) — a
+future session should start there instead.
