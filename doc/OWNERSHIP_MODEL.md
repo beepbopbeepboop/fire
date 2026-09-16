@@ -644,6 +644,28 @@ Once Phase 1-3 exist, make the C ABI reflect the declared convention
 instead of "everything's an aliasable pointer":
 - `owned`/transferred-`^` arguments: caller emits no free for that value
   (ownership left with the callee); callee is now responsible per Phase 3.
+
+  **BLOCKED 2026-09-15 — do not implement without Phase 5 first, this is
+  a real, verified hazard, not just caution.** Checked `^`'s ACTUAL
+  codegen (`gimple_gen_exprs.py:662`): `if node.op == '^': return ot, ov`
+  — a complete no-op. There is no move, no copy, no source invalidation;
+  `f(d^)` and `f(d)` compile to byte-identical C, a plain pointer
+  pass-through either way. Real Mojo's rule is that passing a bare value
+  (no `^`) to an `owned` parameter triggers an IMPLICIT COPY (caller and
+  callee end up independently owning separate values); only an explicit
+  `^` is a genuine move. This codegen implements neither distinction.
+  Consequence: making a callee free its own `owned` parameter (this
+  bullet's plan) would be unconditionally unsafe for ANY call site that
+  passes a value to an `owned` parameter without `^` — which real Mojo
+  code is free to do, relying on the implicit copy — since the callee
+  would free memory the caller still holds and expects to remain valid
+  (or, if the caller's own copy is itself a Phase-3 candidate, freed
+  again at the caller's own return: a guaranteed double-free). This is
+  exactly what Phase 5 (real move vs. copy) is a prerequisite for, now
+  confirmed by direct inspection rather than inferred from the doc's own
+  ordering. Do not attempt this bullet until Phase 5 lands and every
+  `owned`-parameter call site either does a real copy or the compiler
+  hard-rejects a missing `^`.
 - `read` arguments: today's plain pointer pass-through is *already*
   functionally a read-only-in-practice borrow as long as codegen never
   emits a mutating call through a `read`-declared parameter — add a
@@ -651,9 +673,43 @@ instead of "everything's an aliasable pointer":
   call/assignment through a `read` parameter, rather than a runtime
   distinction; the C representation doesn't need to change, just what's
   allowed to compile.
+
+  **NOT started.** Unlike the `mut` bullet below, this rule doesn't exist
+  in `ownership_check.py` at all yet — it needs a genuinely new analysis
+  (walk a function body, flag any assignment/mutating-method-call/
+  mutating-argument-position through a `read`-declared parameter), not
+  just wiring up something already validated. Deferred rather than
+  rushed given the remaining session time went to the `mut` bullet
+  instead (see below) — enumerating "what counts as mutating" exhaustively
+  and correctly is real, unrushed design work of its own.
 - `mut` arguments: same representation as today, but Phase 2's exclusivity
   rule is now enforced, which is the actual safety property real Mojo
   sells here.
+
+  **LANDED 2026-09-15.** `ownership_check.check_module` (Phase 1 move-
+  tracking + Phase 2 exclusivity, both landed and fixture-validated since
+  earlier the same day) had never actually been wired into a real
+  compile — reachable only from its own test suite and `__main__` block,
+  so a real violation compiled clean either way. Before wiring it in as a
+  hard gate, re-ran it (fresh, not from memory) against the full 664-file
+  real Modular stdlib AND this project's own 60-file self-hosted-
+  compiler/test corpus (724 files total): 0 diagnostics, 0 crashes —
+  the empirical basis for treating a violation as a hard compile error
+  (`SyntaxError`) rather than a warning. Wired into `gimple_codegen.py`'s
+  `_run_pipeline`, right after parsing and BEFORE `ast_rewriter.rewrite`
+  (the same AST shape the 724-file sweep was run against). Verified with
+  a real fixture (`consume(x^); print(x)`, a genuine use-after-move):
+  correctly rejected with a clear `file:line:col: use of moved value 'x'`
+  message; verified the escape hatch (`MOJO_SKIP_OWNERSHIP_CHECK=1`,
+  matching this project's `MOJO_CORO=cpp`/`MOJO_NO_SHIM=1` convention)
+  bypasses it. Full gate re-run clean (test suites incl. the two
+  ownership fixture suites, `check-linkmode`, `check-selfhost` — the
+  compiler's own self-compile hits zero false positives — stdlib dylib
+  rebuild 0 skips, `compile_stdlib.py` 664/664 matching the standalone
+  sweep exactly, `make bootstrap` 180/180); `check-noshim-dumpfull`
+  verification handed off mid-session to another agent already doing
+  that specific A/B work — not independently re-confirmed here for this
+  change.
 
 ### Phase 5 — real move vs. copy for `@value` structs
 Give `__moveinit__` a real body distinct from `__copyinit__`: a move

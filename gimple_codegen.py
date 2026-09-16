@@ -32,6 +32,7 @@ from mojo_compiler import (
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
+import ownership_check
 import mlir
 import gimple_gen_coro
 import regex_compile
@@ -4034,6 +4035,35 @@ def _selfhost_register_gimplegen(gen):
     gen._selfhost_gimplegen_registered = True
 
 
+# doc/OWNERSHIP_MODEL.md Phase 4 — `mut` exclusivity ENFORCEMENT (Phase 2's
+# analysis had been landed and validated since 2026-09-15 but never actually
+# wired into a real compile — `ownership_check.check_module` was reachable
+# only from its own test suite and `__main__` block, so a real violation
+# compiled clean either way). Wired in here, right after parsing and BEFORE
+# `ast_rewriter.rewrite` (matching exactly the AST shape the 664-file real
+# Modular stdlib sweep + this project's own 60-file self-hosted-compiler/
+# test-corpus sweep were run against on 2026-09-15 before this was wired in:
+# 0 diagnostics, 0 crashes across all 724 files — the empirical basis for
+# treating this as a hard error rather than a warning). `MOJO_SKIP_OWNERSHIP_
+# CHECK=1` is the escape hatch (matching this project's own MOJO_CORO=cpp/
+# MOJO_NO_SHIM=1 convention) for the first time this surfaces a real false
+# positive on code broader than that sweep, so a single bad diagnostic can't
+# block an otherwise-working build while it's investigated.
+def _check_ownership(stmts, filename: str) -> None:
+    if os.environ.get('MOJO_SKIP_OWNERSHIP_CHECK'):
+        return
+    diags = ownership_check.check_module(stmts)
+    if not diags:
+        return
+    label = filename or '<source>'
+    lines = [f"{label}:{d}" for d in diags]
+    raise SyntaxError(
+        "ownership violation" + ("s" if len(diags) > 1 else "") + ":\n"
+        + "\n".join(lines)
+        + "\n(set MOJO_SKIP_OWNERSHIP_CHECK=1 to bypass while investigating)"
+    )
+
+
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False):
     """Shared driver behind every public compile_* entry point.
@@ -4056,7 +4086,9 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # ALL modes — link mode historically skipped this (REF.html B1).
     _emitted_unresolved_stub_syms.clear()
     tokens = py_tokenize(mojo_src)
-    stmts = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
+    stmts = Parser(tokens).with_filename(filename).parse_module()
+    _check_ownership(stmts, filename)
+    stmts = ast_rewriter.rewrite(stmts)
     # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
