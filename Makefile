@@ -25,7 +25,7 @@ CORO_RUNTIME_SRC = runtime/mojo_coro.c runtime/mojo_coro_gen.c runtime/mojo_asyn
 STDLIB_DYLIB = build/libmojostdlib.dylib
 MOJO_CLI     = build/mojo
 # The canonical source that all three stages compile
-MOJO_MAIN    = mojo.py
+MOJO_MAIN    = fire.py
 
 GCC_MP15     = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
@@ -43,7 +43,7 @@ export SDKROOT
 # All Mojo source files to validate (top-level + mojo/ subdirectory)
 MOJO_FILES := $(wildcard *.mojo) $(wildcard mojo/*.mojo)
 # Core Python compiler/tool files to validate through the Mojo system
-PY_FILES   := mojo.py mojo_compiler.py myinterpreter.py \
+PY_FILES   := fire.py mojo_compiler.py myinterpreter.py \
               module_loader.py mojo_main.py generated_dispatch.py
 
 # ── Dev targets ──────────────────────────────────────────────────────────────
@@ -91,25 +91,25 @@ check-gimple: $(GIMPLE_SOURCES) test_gimple.py
 
 # test_runner.py only existence-checks the prebuilt `build/mojo`, doesn't require it
 # to be up-to-date. We build it here to ensure it exists for the test.
-check-runner: build/mojo test_runner.py myinterpreter.py mojo.py mojo_main.py $(RUNTIME_SRC) $(RUNTIME_HDR)
+check-runner: build/mojo test_runner.py myinterpreter.py fire.py mojo_main.py $(RUNTIME_SRC) $(RUNTIME_HDR)
 	python3 checked_run.py check-runner \
-		--extra test_runner.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
+		--extra test_runner.py --extra myinterpreter.py --extra fire.py --extra mojo_main.py \
 		--extra $(RUNTIME_SRC) --extra $(RUNTIME_HDR) \
 		-- python3 test_runner.py
 
-check-modcache: $(GIMPLE_SOURCES) test_module_cache.py myinterpreter.py mojo.py mojo_main.py
+check-modcache: $(GIMPLE_SOURCES) test_module_cache.py myinterpreter.py fire.py mojo_main.py
 	python3 checked_run.py check-modcache \
-		--extra test_module_cache.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
+		--extra test_module_cache.py --extra myinterpreter.py --extra fire.py --extra mojo_main.py \
 		-- python3 test_module_cache.py
 
 # Self-host compile guard: mojo.py must compile itself to a linked binary with
 # zero GCC errors / ICEs / undefined symbols (the --jit mojo.py path, minus
 # execution — the runtime still SIGSEGVs, a separate frontier). Locks compile+
 # link cleanliness so it can't silently regress.
-check-selfhost: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py mojo_main.py test_selfhost.py
+check-selfhost: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py mojo_main.py test_selfhost.py
 	python3 checked_run.py check-selfhost \
 		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
-		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
+		--extra mojo_compiler.py --extra myinterpreter.py --extra fire.py --extra mojo_main.py \
 		--extra test_selfhost.py \
 		-- python3 test_selfhost.py
 
@@ -119,10 +119,10 @@ check-selfhost: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py mojo
 # distinctly (the compiled path falls back to the interpreter, which would
 # otherwise mask a divergence). Currently 23 pass, 1 JIT-COMPILE-FAILED
 # (generator_simple — the C++ coroutine frontier).
-check-runtimediff: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py test_runtime_diff.py
+check-runtimediff: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py test_runtime_diff.py
 	python3 checked_run.py check-runtimediff \
 		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
-		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py \
+		--extra mojo_compiler.py --extra myinterpreter.py --extra fire.py \
 		--extra test_runtime_diff.py \
 		-- python3 test_runtime_diff.py
 
@@ -133,10 +133,10 @@ check-runtimediff: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py t
 # build_stdlib_dylib.py) uses instead — a link-mode-only bug in import/
 # module-value registration is invisible to all of them. See
 # test_link_mode.py's own module docstring.
-check-linkmode: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py driver.py test_link_mode.py
+check-linkmode: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py driver.py test_link_mode.py
 	python3 checked_run.py check-linkmode \
 		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
-		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra driver.py \
+		--extra mojo_compiler.py --extra myinterpreter.py --extra fire.py --extra driver.py \
 		--extra test_link_mode.py \
 		-- python3 test_link_mode.py
 
@@ -212,7 +212,7 @@ stage1: clean-bootstrap
 	@echo "=== Stage 1: Python → stage1/ ==="
 	@FAILED=0; \
 	run_dump() { \
-	    out=$$(cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump "../$$1" 2>&1); \
+	    out=$$(cd stage1 && PYTHONPATH=.. python3 ../fire.py --dump "../$$1" 2>&1); \
 	    rc=$$?; \
 	    [ -n "$$out" ] && echo "$$out"; \
 	    if [ $$rc -ne 0 ] || echo "$$out" | grep -q "mojo_unsupported_iter"; then \
@@ -240,12 +240,12 @@ stage1: clean-bootstrap
 	# writes {basename}.ci for mojo.py (single-module, do_imports=False), which
 	# would otherwise clobber this transitive-closure .ci and leave stage2
 	# linking a skeleton with undefined symbols (py_tokenize etc.).
-	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
+	cd stage1 && PYTHONPATH=.. python3 ../fire.py --dump-full ../$(MOJO_MAIN)
 
 # ── mojoc: one-step self-host build (equivalent to stage2/mojo, no staging needed) ──
 mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
-	@echo "=== Building mojoc from mojo.py ==="
-	python3 mojo.py build mojo.py -o mojoc
+	@echo "=== Building mojoc from fire.py ==="
+	python3 fire.py build fire.py -o mojoc
 	@echo "✓ mojoc ready"
 
 # ── stage2/mojo: compile stage1 output into a real binary ────────────────────
@@ -482,7 +482,7 @@ preflight:
 FORCE:
 
 mojo.ci: $(MOJO_MAIN) FORCE
-	PYTHONPATH=. python3 mojo.py --dump-full $(MOJO_MAIN) 2>/dev/null
+	PYTHONPATH=. python3 fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
 
 build/system.o: mojo.ci
 	@mkdir -p build
