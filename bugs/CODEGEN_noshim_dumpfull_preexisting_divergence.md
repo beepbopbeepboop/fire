@@ -1409,3 +1409,66 @@ fix content (both diffs) is fully preserved in this doc and in
 `gimple_module_gen.py:1108`/`gimple_exprtypes.py:34`'s pre-fix code
 for a future session to reapply once the memory-model prerequisite is
 addressed.
+
+### RETRY (session 6, 2026-09-15): memory-model prerequisite partially landed — single large file now succeeds, whole-program self-compile still blows past safe limits
+
+A separate agent landed a real ownership model this session
+(`aa67b68`/`9b3216c` — a per-frame cleanup registry so `mojo_raise()`'s
+longjmp actually frees owned locals instead of always leaking them, plus
+Phase 0-3 groundwork for freeing dict/list/set values generally). This
+is real forward progress on exactly the "memory-model prerequisite"
+named above, so both reverted fixes (`_walk_ast_into` is_dataclass-first
+reorder in `gimple_exprtypes.py`, the `_gmi_collect_self_assigns`
+`fn is None` guard in `gimple_module_gen.py`) were reapplied verbatim
+and retested against the now-ownership-managed runtime.
+
+**Single-file repro (`MOJO_NO_SHIM=1 ./mojoc gimple_gen_loops.py
+--dump-full`), the doc's own established repro case: now SUCCEEDS.**
+RSS-monitored every 2-10s for the full run: climbed to a peak of ~93GB
+around the 3-minute mark, then — unlike every prior attempt — actually
+DECLINED, oscillating down through ~60GB, ~50GB, and settling around
+~54GB before completing normally (exit 0, `✓ Generated
+gimple_gen_loops.ci (transitive closure)`, 38,466,963 bytes) after
+~35 minutes wall time. The oscillating-then-recovering pattern (vs. the
+old strictly-monotonic climb to 189GB) is itself evidence real frees are
+now happening, not just a smaller absolute number.
+
+**Whole-program self-compile (the actual `check-noshim-dumpfull` gate,
+`MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full`): still unsafe.** Same
+monitoring approach, same fixes. RSS climbed to ~97-102GB in the first
+~2 minutes, then oscillated in a 74-83GB band for roughly 15 minutes
+(again showing real frees, not monotonic growth) — but then, in the gap
+between two 10s-interval samples (last observed reading: 52GB), it spiked
+far past a 112GB safety cap that had correctly bounded every earlier
+sample. The user observed it directly at **230GB** and killed it by hand
+before it endangered the system; no kernel/jetsam log entry was found
+for the kill (consistent with a manual `kill -9`, not an OS-level OOM
+reaper), and system memory fully recovered afterward, confirming it was
+this process's own footprint. **Both fixes reverted again**
+(`git checkout -- gimple_exprtypes.py gimple_module_gen.py`, confirmed
+clean via `git status --short`) and `mojoc` rebuilt from the clean
+committed state — leaving either fix applied would make a ROUTINE `make
+check-noshim-dumpfull` run (which exercises exactly this whole-program
+path) capable of reproducing the same multi-hundred-GB spike, an
+unacceptable hazard for a gate step that's supposed to be safe to run
+routinely.
+
+**Sharper conclusion than before**: the memory-model prerequisite is
+real progress but only PARTIAL — sufficient to bound one large file's
+transitive-closure compile (~93GB peak, recovers), but NOT sufficient
+for the full `mojo.py` self-compile's much larger transitive closure
+(peaked at least 230GB, still climbing when killed — the true ceiling is
+unknown). The gap is plausibly proportional to program size (more
+distinct AST subtrees × the ownership model's current coverage not yet
+reaching every allocation site Phase 0-3 was scoped to, per
+`doc/OWNERSHIP_MODEL.md`'s own "Remaining work" if any). A future
+session should either (1) extend ownership/free coverage further before
+retrying the full self-compile, ideally under a hard resource cap this
+time (`ulimit -v` or ideally a cgroup/job-object equivalent, NOT just
+polled monitoring — a fast spike can outrun a 10s poll interval, as
+happened this session) so a runaway is killed automatically rather than
+relying on a human or a lucky sample; or (2) profile which specific
+allocation sites dominate the full self-compile's footprint (something
+this session did not do — only RSS was observed, not attributed to any
+particular allocator call site) to find the next-highest-leverage free
+site rather than assuming uniform coverage is needed everywhere.
