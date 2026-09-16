@@ -1939,13 +1939,30 @@ def _gen_stmt_AugAssignStmt(gen, node):
 def _gen_stmt_ReturnStmt(gen, node):
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
-    # feature. Safe to call unconditionally before evaluating `node.value`
-    # below (not just before a bare `return`): a candidate here can never
-    # be part of the returned expression at all — being returned is one
-    # of ownership_destruct.py's own disqualifying rules (rule 3),
-    # enforced long before this code ever sees the candidate set.
-    ginf.emit_return_frees(gen)
+    # feature.
+    #
+    # IMPORTANT: for a `return <value>`, this call must run AFTER
+    # `gen.lower_expr(node.value)` below, not before it — see the second
+    # call site further down. A candidate can never be the returned VALUE
+    # ITSELF (rule 3 disqualifies `return d`/`return d, x`), but rule 3
+    # does NOT — and was never meant to — disqualify a candidate merely
+    # READ from in the return expression (`return d["x"]`, `return
+    # d.get(k)`, `return len(d)`, ...): `_scan_expr`'s subscript/member
+    # safe-receiver carve-outs correctly say this doesn't make `d`
+    # ESCAPE, but escaping and "still needed to compute the value on
+    # THIS statement" are different questions. Freeing `d` before
+    # evaluating `d["x"]` was a real, confirmed use-after-free (found
+    # 2026-09-15 investigating Phase 6, reproduced as a `MallocScribble`
+    # segfault via `d = {}; d["x"] = 1; return d["x"]`, which used to
+    # free `d` in the generated C, THEN read `mojo_dict_get_int(d, ...)`
+    # from it, on the same line) — worked "by accident" in every case
+    # exercised before that, because a freed small allocation isn't
+    # necessarily corrupted before it's read back on this allocator.
+    # A bare `return` (no value) has no such expression to protect, so
+    # its call site (below, in the `if node.value is None` branch) is
+    # unaffected and unchanged.
     if node.value is None:
+        ginf.emit_return_frees(gen)
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -1980,6 +1997,10 @@ def _gen_stmt_ReturnStmt(gen, node):
             gen._emit(gimple_codegen._RETURN)
     else:
         vtype, v = gen.lower_expr(node.value)
+        # See this function's own top comment: must run AFTER the value is
+        # computed, not before — a candidate can still be legitimately
+        # READ from (subscript/member/method) while computing `v` above.
+        ginf.emit_return_frees(gen)
         # Record the returned container's element type so CALL SITES can
         # unpack/iterate it with the right accessor. The old condition
         # required vtype == 'MojoList *' (only fired for `return <list

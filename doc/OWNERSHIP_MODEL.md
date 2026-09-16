@@ -34,6 +34,55 @@ once 1 and 3 landed, needing no coroutine-specific code at all. Next
 open work is the "not yet scheduled" list below, plus 1's own
 loop-body-scoped-destruction follow-up.
 
+**Two real, serious bugs found and fixed 2026-09-15, later still, while
+investigating Phase 6 (directed to start next, ahead of Phases 4-5 per
+explicit instruction) — both were live in the item-1/item-3 code above
+from the moment it landed, only surfaced once a repro happened to hit the
+exact shape:**
+1. **Stale `_owned_free_candidates`/`_owned_free_pushed` leaking into
+   struct methods and toplevel code — a confirmed use-after-free
+   (reproduced as a `MallocScribble` segfault).** `gimple_gen_funcs.py`'s
+   `_gen_struct_method` and `_gen_toplevel` share `gen.gen_stmt`/
+   `_gen_stmt_ReturnStmt` (and therefore `emit_return_frees`) with
+   ordinary functions, but neither ever called `begin_function` to reset
+   the owned-free state — only `gen_func` does. A struct method (or
+   toplevel code) whose own local happened to share a bare NAME with an
+   unrelated free function's real Phase-3 candidate got that stale
+   candidate's `mojo_*_free` silently spliced into its own return,
+   freeing a value that may have just escaped (e.g. `self.field =
+   local_with_same_name`). Fixed: a new `reset_no_candidates(gen)` public
+   entry point in `gimple_gen_infra.py`, called from both sites — Phase 3
+   still doesn't support methods (out of scope), but now correctly means
+   "zero candidates" instead of "whatever leaked in."
+2. **`emit_return_frees` ran BEFORE evaluating the return expression, not
+   after — a confirmed use-after-free for any `return <expr using the
+   candidate>`** (`return d["x"]`, `return d.get(k)`, `return len(d)`,
+   ...). `ownership_destruct.py`'s rule 3 only disqualifies a candidate
+   that IS the returned value (`return d`); it correctly does NOT
+   disqualify a candidate merely READ from in the return expression
+   (`_scan_expr`'s subscript/member safe-receiver carve-outs), but the
+   codegen call site freed the candidate before that read ever ran.
+   Reproduced as a minimal `d = {}; d["x"] = 1; return d["x"]` returning
+   `0` instead of `1` once freed memory happened to get zeroed, and as an
+   outright segfault under `MallocScribble`. Every earlier verification
+   in this doc that "looked correct" (own_try_test's 640000, the
+   generator's 10, etc.) was unknowingly relying on freed-but-not-yet-
+   reused memory still reading back correctly — allocator luck, not a
+   correct program. Fixed: `_gen_stmt_ReturnStmt` (`gimple_gen_stmts.py`)
+   now calls `emit_return_frees` AFTER `gen.lower_expr(node.value)`
+   computes the return value, not before.
+   Both fixes re-verified against the full gate (test suites, check-
+   linkmode, check-selfhost, stdlib dylib rebuild 0 skips,
+   `compile_stdlib.py` 664/664, `make bootstrap` 180/180) and against
+   every earlier repro in this doc, now re-checked under `MallocScribble`/
+   `dangerouslyDisableSandbox` (all pass with exit 0, not just "printed a
+   plausible-looking number"). `check-noshim-dumpfull` re-confirmed as
+   the same pre-existing divergence via a proper same-worktree `--no-
+   cache` A/B (see that bug doc's newest entry — the naive "compare to a
+   number written down earlier" methodology used for the previous three
+   confirmations turned out to be unreliable, since the metric is
+   sensitive to build/cache state, not just source content).
+
 1. [x] **Wire `ownership_destruct.py`'s analysis into codegen — narrow
    scope first.** LANDED 2026-09-15. Emits real `mojo_*_free` calls for
    eligible function-scoped locals via three public entry points in

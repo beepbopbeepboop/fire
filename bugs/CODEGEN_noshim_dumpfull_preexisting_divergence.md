@@ -1,5 +1,40 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-15, later still — re-confirmed pre-existing a fourth time, via a proper same-worktree A/B, after noticing the naive before/after byte-count comparison used in this doc's last two entries is NOT reliable)
+
+Hit this gate failure a fourth time fixing two real bugs found while
+investigating Phase 6 (a stale-`_owned_free_candidates` use-after-free in
+`_gen_struct_method`/`_gen_toplevel`, and a free-before-reading-the-return-
+value ordering bug in `_gen_stmt_ReturnStmt` — see `doc/OWNERSHIP_MODEL.md`
+and the `gimple_gen_infra.py`/`gimple_gen_funcs.py`/`gimple_gen_stmts.py`
+fixes). This time the raw before/after byte counts moved by MILLIONS of
+bytes and the first-differing-byte offset shifted too (36288039/35758312 →
+36295109/32414925), which would normally read as "made it much worse" —
+**but re-running `check-noshim-dumpfull` on the SAME unchanged commit
+(`468be20`) a few minutes apart, in the SAME working directory, gave YET
+ANOTHER wildly different number (51771695/52766688)**. That ruled out the
+naive "compare this run's absolute byte count to a number written down in
+an earlier session/entry of this doc" methodology this doc's last two
+entries used — the metric is sensitive to something in the surrounding
+BUILD/CACHE STATE (stdlib dylib freshness, CAS warm/cold, or similar),
+not source-code content alone, so two absolute byte counts from
+different points in time are not comparable even for byte-identical code.
+
+**Correct methodology used instead**: a `git worktree add` of clean HEAD,
+`check-noshim-dumpfull --no-cache` run fresh TWICE in a row there to
+confirm same-build-state reproducibility (51771695/52766719 then
+51771695/52766719 — offset 21167 both times, no-shim size stable to
+within 31 bytes: genuinely deterministic once build state is held
+fixed), THEN `git apply`ing this session's exact uncommitted diff into
+that SAME worktree and rebuilding `mojoc`/re-running fresh there:
+51776558/52771708, offset 21167 — IDENTICAL offset, gap essentially
+unchanged (995024 → 995150 bytes, a ~126-byte difference consistent with
+this session's own small code addition being reflected equally on both
+the shim and no-shim sides, not a new divergence). This is the
+methodology future sessions hitting this gate should use — a same-
+environment, same-worktree, `--no-cache` A/B — not a bare "compare
+today's number to what an earlier doc entry wrote down."
+
 ## Status (2026-09-15, later still — re-confirmed pre-existing a third time, widening Phase 3 eligibility to try/except-containing functions)
 
 Same gate failure a third time this session, now after widening

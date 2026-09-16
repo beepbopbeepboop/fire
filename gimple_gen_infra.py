@@ -4315,6 +4315,30 @@ def begin_function(gen, fn) -> None:
     gen._owned_free_pushed = set()
 
 
+def reset_no_candidates(gen) -> None:
+    """Call once, before lowering any OTHER function-like body that shares
+    `gen.gen_stmt`'s statement dispatcher (and therefore
+    `_gen_stmt_ReturnStmt`/`emit_return_frees`) but that this feature
+    doesn't (yet) analyze — currently `gimple_gen_funcs.py`'s
+    `_gen_struct_method` and `_gen_toplevel`. Without this, `emit_return_
+    frees` runs against WHATEVER `_owned_free_candidates`/`_owned_free_
+    pushed` a PREVIOUSLY processed ordinary function (the one and only
+    thing that calls `begin_function`) left behind — a real, confirmed
+    bug found 2026-09-15 investigating Phase 6: a struct method sharing a
+    local's bare NAME with an unrelated free function's genuine Phase-3
+    candidate got that stale candidate's `mojo_*_free` silently spliced
+    into ITS OWN return, freeing a value that had just escaped via
+    `self.field = local` two lines earlier — confirmed via `lldb`/
+    `MallocScribble` as a real, reproducible use-after-free (segfault),
+    not just a theoretical risk. `reset_no_candidates` is intentionally
+    the ONLY option here (as opposed to running the real analysis on
+    method/toplevel bodies) — Phase 3 doesn't support methods yet (see
+    `_is_free_eligible_function`'s docstring), so the safe, correct
+    behavior for them today is exactly zero candidates, not stale ones."""
+    gen._owned_free_candidates = set()
+    gen._owned_free_pushed = set()
+
+
 def emit_return_frees(gen) -> None:
     """Call at the top of gimple_gen_stmts.py's `_gen_stmt_ReturnStmt`,
     before anything else in that function runs (see that call site for

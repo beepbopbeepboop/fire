@@ -2909,6 +2909,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
 def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     """Generate _toplevel() or _{module}_toplevel() function for top-level statements."""
     gen._reset_func(toplevel_stmts)
+    ginf.reset_no_candidates(gen)
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     # Choose function name based on whether this is the root module or a library module
@@ -4176,6 +4177,7 @@ def _struct_method_csym_static(qualifier: str, struct_name: str, method_name: st
 
 def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, overload_id: str = '') -> str:
     gen._reset_func(node.body, node.params)
+    ginf.reset_no_candidates(gen)
     # Set module context for global field access -- mirrors the identical
     # line in gen_func/_gen_toplevel (this method was missing it entirely).
     # Without this, `self._current_module_ctx` keeps whatever value the
