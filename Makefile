@@ -414,6 +414,45 @@ check-abshim: mojoc $(GIMPLE_SOURCES) test_ab_shim.py
 check-noshim-dumpfull: mojoc $(GIMPLE_SOURCES) test_noshim_dumpfull.py
 	python3 checked_run.py check-noshim-dumpfull --extra test_noshim_dumpfull.py -- python3 test_noshim_dumpfull.py
 
+# ── aside/bside/compare-a-b: per-file self-host A/B sweep at scale ───────────
+# check-noshim-dumpfull's whole-transitive-closure self-compile is both the
+# only test of the self-hosted BINARY's own codegen and, per
+# bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md's 2026-09-15 retry,
+# capable of spiking past 230GB RSS on the full mojo.py self-compile — a
+# single all-or-nothing process that's both dangerous to run repeatedly and
+# uninformative when it fails (one diff offset for the WHOLE program).
+#
+# This decomposes the same shim-vs-self-hosted question into one `--dump`
+# (do_imports=False, no transitive-closure accumulation — see mojo.py's own
+# dump_full-vs-dump branch) per file, for every .py file in this repo's own
+# root plus every .mojo file across the stdlib's tracked subtrees (same file
+# set compile_stdlib.py already exercises, ~782 files total as of writing).
+# Each file's compile is its own bounded, independent process — no O(N²)
+# transitive rescan, no unbounded memory growth, and a crash on one file
+# can't take down the whole sweep. `ab.mk` (generated) gives each file its
+# own real Make target so `-j20` parallelizes at the file level, not just
+# inside one Python process.
+#
+# Usage: `make -j20 aside bside && make compare-a-b` — prints only FAIL:
+# lines (see tools/ab_compare.py's own docstring for the failure
+# categories) plus a totals line; no PASS output by design, since the
+# intended workflow is to sweep once at scale, then work the FAIL list by
+# hand, one file at a time. `make ab-clean` before a full re-sweep after any
+# compiler-source change (per-rule Make caching only tracks each rule's own
+# input file + mojoc, not the whole compiler source graph).
+ab.mk: tools/gen_ab_makefile.py tools/ab_filelist.py
+	python3 tools/gen_ab_makefile.py > ab.mk
+
+-include ab.mk
+
+.PHONY: aside bside compare-a-b ab-clean
+aside: ab.mk $(ASIDE_TARGETS)
+bside: ab.mk mojoc $(BSIDE_TARGETS)
+compare-a-b:
+	python3 tools/ab_compare.py
+ab-clean:
+	rm -rf aside bside ab.mk .ab_locks
+
 # ── check-no-new-casts: grow-only allowlist on ad-hoc container casts (DESIGN.html R3) ──
 # Pure text scan, no compile needed - deliberately cheap so it runs on every
 # `make check`. See test_no_new_container_casts.py's own docstring.

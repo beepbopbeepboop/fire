@@ -40,3 +40,9 @@ mojoc.dbg
 
 # tools/codeindex.py derived artifact -- rebuild with `python3 tools/codeindex.py build`
 .codeindex.sqlite3
+
+# aside/bside A/B dump-compare harness (tools/ab_*.py, `make aside bside`)
+/aside/
+/bside/
+/ab.mk
+/.ab_locks/
