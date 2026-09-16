@@ -4270,10 +4270,16 @@ def _emit_owned_local_frees(gen):
     # of bug `make bootstrap`'s byte-identity check exists to catch, and
     # it did: stage1-vs-stage2 `mojo.ci` differed with this bug present.
     # A fixed, deterministic order is required output, not a style choice.
+    stack_allocated = getattr(gen, '_owned_stack_allocated', ())
     freed = 0
     for name in sorted(getattr(gen, '_owned_free_candidates', ())):
         ctype = gen.var_types.get(name)
-        runtime_fn = _OWNED_FREE_RUNTIME_FN.get(ctype)
+        # A stack-allocated candidate (Phase 6) must be torn down via
+        # `_destroy` (buffer-only), never `_free` — the struct itself
+        # lives in this function's own stack frame, not on the heap; see
+        # this file's "Phase 6" section.
+        table = _OWNED_DESTROY_RUNTIME_FN if name in stack_allocated else _OWNED_FREE_RUNTIME_FN
+        runtime_fn = table.get(ctype)
         if runtime_fn:
             gen._emit(f"  {runtime_fn} ({name});")
             freed += 1
@@ -4292,14 +4298,121 @@ def _emit_owned_local_frees(gen):
         gen._emit(f"  mojo_cleanup_cancel_n ({freed});")
 
 
+# ── Phase 6 (doc/OWNERSHIP_MODEL.md) — stack allocation ─────────────────
+#
+# Scope, deliberately narrow (directed to start here, ahead of Phases 4-5,
+# 2026-09-15): only a Phase-3 candidate whose single constructing
+# assignment is an EMPTY container literal/call (`{}`, `[]`, `set()`,
+# bare `dict()`/`list()`/`set()` with no args) gets stack-allocated. This
+# sidesteps reusing `_lower_dict_literal`/`_lower_list_literal`/
+# `_lower_set_literal`'s much more involved non-empty-population logic
+# (element-type inference, spread handling, per-element append dispatch)
+# entirely — an empty container needs no population at all, just an
+# `_init` call, and every subsequent statement that fills it in
+# (`d[k] = v`, `lst.append(x)`) already works identically against a
+# stack-backed `MojoDict *`/`MojoList *` as it does against a heap one,
+# since those go through the exact same runtime setter calls either way.
+# A non-empty-literal candidate (e.g. `l: List[Int] = [1]`, a real
+# ownership_destruct.py-validated stdlib example) is simply NOT stack-
+# allocated in this v0 — it keeps today's exact heap alloc + `mojo_*_free`
+# behavior, tracked via `_owned_stack_allocated` staying empty for it, so
+# nothing here can ever leak or double-free a case it doesn't explicitly
+# handle: the "did this get stack-allocated" question always has a
+# concrete, per-name answer, never an assumption.
+#
+# Verified safe to take `&<local struct>` here at all (this project's own
+# history has a real precedent for `-fgimple` REJECTING address-taken
+# locals — see `_seed_addressed_locals`/`general-mut-closure-capture-fix`
+# in memory): confirmed empirically via `gcc -fgimple -fsyntax-only` that
+# an ordinary, non-`__GIMPLE`-tagged function accepts this exact pattern
+# (`MojoDict __d_storage; MojoDict * d; d = &__d_storage;`) while the
+# identical code marked `__GIMPLE` does not. Phase-3 candidates only ever
+# live in plain top-level functions — `_is_free_eligible_function`
+# excludes any function containing a nested `def`/`lambda`/being itself
+# `async`/a generator, and `gen_func`'s own top-level function header
+# emission never applies the `__GIMPLE` tag at all (only struct methods
+# and a few synthesized helpers do, via `gimple_gen_funcs.py`'s
+# `_gen_struct_method`/`gimple_module_gen.py`'s `_alloc_<sn>` — neither of
+# which Phase 3 ever computes candidates for; see `reset_no_candidates`
+# above) — so this is unconditionally safe for every candidate this
+# module can ever produce, not just the cases actually tested.
+
+_OWNED_STACK_KIND = {
+    'MojoDict *': ('mojo_dict_init', 'MojoDict'),
+    'MojoList *': ('mojo_list_init', 'MojoList'),
+    'MojoSet *':  ('mojo_set_init',  'MojoSet'),
+}
+
+_OWNED_DESTROY_RUNTIME_FN = {
+    'MojoDict *': 'mojo_dict_destroy',
+    'MojoList *': 'mojo_list_destroy',
+    'MojoSet *':  'mojo_set_destroy',
+}
+
+_OWNED_STACK_PUSH_RUNTIME_FN = {
+    'MojoDict *': 'mojo_cleanup_push_dict_stack',
+    'MojoList *': 'mojo_cleanup_push_list_stack',
+    'MojoSet *':  'mojo_cleanup_push_set_stack',
+}
+
+
+def _empty_ctor_ctype(node) -> str | None:
+    """`node` (an AssignStmt/VarDecl's `.value`) is an EMPTY container
+    constructor -> its ctype ('MojoDict *'/'MojoList *'/'MojoSet *'), else
+    None. Covers the same four shapes `ownership_destruct._is_constructor_
+    expr` recognizes, narrowed to the empty case (see banner above)."""
+    if isinstance(node, DictExpr):
+        return 'MojoDict *' if not node.pairs else None
+    if isinstance(node, ListExpr):
+        return 'MojoList *' if not node.elements else None
+    if isinstance(node, SetExpr):
+        return 'MojoSet *' if not node.elements else None
+    if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+            and not node.args and not node.kwargs):
+        return {'dict': 'MojoDict *', 'list': 'MojoList *', 'set': 'MojoSet *'}.get(node.func.name)
+    return None
+
+
+def maybe_stack_alloc_owned_ctor(gen, name, value) -> bool:
+    """Call from gimple_gen_stmts.py's central `gen_stmt` dispatcher
+    BEFORE lowering a `VarDecl`/single-target `AssignStmt` normally (a
+    plain identifier `name` bound to `value`) — returns True if it fully
+    handled the statement (stack-allocated `name`), in which case the
+    caller must SKIP its own normal lowering of this statement entirely;
+    False means "not applicable, lower it normally" (not a candidate, not
+    an empty-constructor shape, or — belt-and-suspenders — already
+    handled, which single static assignment should make impossible)."""
+    candidates = getattr(gen, '_owned_free_candidates', None)
+    if not candidates or name not in candidates:
+        return False
+    pushed = gen._owned_free_pushed
+    if name in pushed:
+        return False
+    ctype = _empty_ctor_ctype(value)
+    if ctype is None:
+        return False
+    init_fn, struct_name = _OWNED_STACK_KIND[ctype]
+    gen.temp_counter += 1
+    storage = f'_owned_storage{gen.temp_counter}_{name}'
+    gen.decls.append(f"  {struct_name} {storage};")
+    gen._emit(f"  {init_fn} (&{storage});")
+    gen._declare_var(name, ctype)
+    gen._emit(f"  {gen._write_dest(name)} = &{storage};")
+    push_fn = _OWNED_STACK_PUSH_RUNTIME_FN[ctype]
+    gen._emit(f"  {push_fn} ({gen._cname(name)});")
+    pushed.add(name)
+    gen._owned_stack_allocated.add(name)
+    return True
+
+
 # ── Public entry points — the ONLY things gimple_gen_funcs.py/
 # gimple_gen_stmts.py should call for this feature. Everything above this
 # line (the eligibility check, the candidate analysis, the runtime-
 # function table, `gen._owned_free_candidates` as the storage attribute)
 # is a private implementation detail of THIS module; a caller needing a
 # behavior change here should never need to know that attribute name or
-# reach past these three functions. Keeping the whole feature's logic in
-# this one file (this section plus the private helpers just above it) —
+# reach past these public entry points. Keeping the whole feature's logic
+# in this one file (this section plus the private helpers just above it) —
 # not spread across the two codegen files that merely call in at the two
 # points they naturally own (a function's start, and each return
 # statement) — is deliberate, per doc/OWNERSHIP_MODEL.md's engineering
@@ -4313,6 +4426,7 @@ def begin_function(gen, fn) -> None:
     `return` encountered DURING that lowering, not just after it."""
     gen._owned_free_candidates = _compute_owned_free_candidates(fn)
     gen._owned_free_pushed = set()
+    gen._owned_stack_allocated = set()
 
 
 def reset_no_candidates(gen) -> None:
@@ -4337,6 +4451,7 @@ def reset_no_candidates(gen) -> None:
     behavior for them today is exactly zero candidates, not stale ones."""
     gen._owned_free_candidates = set()
     gen._owned_free_pushed = set()
+    gen._owned_stack_allocated = set()
 
 
 def emit_return_frees(gen) -> None:

@@ -30,8 +30,18 @@ void mojo_exc_pop(void)
  * Kind-tagged rather than raw function pointers: every entry is one of
  * exactly three known container frees, so a switch in the unwind loop
  * below is simpler and avoids introducing function-pointer calls into a
- * hot path for no benefit. */
-typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET } mojo_cleanup_kind_t;
+ * hot path for no benefit.
+ *
+ * The three `_STACK` kinds (doc/OWNERSHIP_MODEL.md Phase 6) are for a
+ * stack-allocated candidate (gimple_gen_infra.py's `maybe_stack_alloc_
+ * owned_ctor`): the struct itself lives in the OWNING FUNCTION's own
+ * stack frame, not the heap, so an exception unwinding PAST that frame
+ * must tear down only its internal buffers (`mojo_*_destroy`) and never
+ * call `free()` on the struct pointer itself (`mojo_*_free` would free a
+ * stack address — undefined behavior, corrupting the heap allocator). */
+typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
+               MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK
+             } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
 static void                *_mojo_cleanup_ptr[MOJO_CLEANUP_STACK_MAX];
@@ -60,6 +70,9 @@ static void _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
 void mojo_cleanup_push_dict(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DICT, p); }
 void mojo_cleanup_push_list(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIST, p); }
 void mojo_cleanup_push_set(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET, p); }
+void mojo_cleanup_push_dict_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DICT_STACK, p); }
+void mojo_cleanup_push_list_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STACK, p); }
+void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET_STACK, p); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -93,6 +106,9 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_DICT: mojo_dict_free((MojoDict *)ptr); break;
             case MOJO_CLEANUP_LIST: mojo_list_free((MojoList *)ptr); break;
             case MOJO_CLEANUP_SET:  mojo_set_free((MojoSet *)ptr);  break;
+            case MOJO_CLEANUP_DICT_STACK: mojo_dict_destroy((MojoDict *)ptr); break;
+            case MOJO_CLEANUP_LIST_STACK: mojo_list_destroy((MojoList *)ptr); break;
+            case MOJO_CLEANUP_SET_STACK:  mojo_set_destroy((MojoSet *)ptr);  break;
         }
     }
 }
@@ -536,22 +552,34 @@ int mojo_is_bound_method(void *p) {
     return mojo_set_contains_int(_mojo_bound_method_registry, v);
 }
 
-MojoList *mojo_list_new(void)
+/* mojo_list_init/mojo_list_destroy: see mojo_set_init/mojo_set_destroy's
+ * comment just above (same Phase 6 rationale, same refactor shape). */
+void mojo_list_init(MojoList *l)
 {
-    MojoList *l = malloc(sizeof(MojoList));
     l->data = NULL;
     l->len  = 0;
     l->cap  = 0;
     if (!_mojo_list_registry) _mojo_list_registry = mojo_set_new();
     mojo_set_add_int(_mojo_list_registry, (int64_t)(intptr_t)l);
+}
+
+void mojo_list_destroy(MojoList *l)
+{
+    if (_mojo_list_registry) mojo_set_discard_int(_mojo_list_registry, (int64_t)(intptr_t)l);
+    if (_mojo_tuple_registry) mojo_set_discard_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
+    free(l->data);
+}
+
+MojoList *mojo_list_new(void)
+{
+    MojoList *l = malloc(sizeof(MojoList));
+    mojo_list_init(l);
     return l;
 }
 
 void mojo_list_free(MojoList *l)
 {
-    if (_mojo_list_registry) mojo_set_discard_int(_mojo_list_registry, (int64_t)(intptr_t)l);
-    if (_mojo_tuple_registry) mojo_set_discard_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
-    free(l->data);
+    mojo_list_destroy(l);
     free(l);
 }
 
@@ -2493,24 +2521,36 @@ int mojo_is_registered_dict(int64_t addr) {
     return mojo_set_contains_int(_mojo_dict_registry, addr);
 }
 
-MojoDict *mojo_dict_new(void)
+/* mojo_dict_init/mojo_dict_destroy: see mojo_set_init/mojo_set_destroy's
+ * comment (same Phase 6 rationale, same refactor shape). */
+void mojo_dict_init(MojoDict *d)
 {
-    MojoDict *d = malloc(sizeof(MojoDict));
     d->cap      = 8;
     d->used     = 0;
     d->next_seq = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
     if (!_mojo_dict_registry) _mojo_dict_registry = mojo_set_new();
     mojo_set_add_int(_mojo_dict_registry, (int64_t)(intptr_t)d);
-    return d;
 }
 
-void mojo_dict_free(MojoDict *d)
+void mojo_dict_destroy(MojoDict *d)
 {
     if (_mojo_dict_registry) mojo_set_discard_int(_mojo_dict_registry, (int64_t)(intptr_t)d);
     if (_mojo_bool_dict_registry) mojo_set_discard_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
     for (int64_t i = 0; i < d->cap; i++) free(d->slots[i].key);
     free(d->slots);
+}
+
+MojoDict *mojo_dict_new(void)
+{
+    MojoDict *d = malloc(sizeof(MojoDict));
+    mojo_dict_init(d);
+    return d;
+}
+
+void mojo_dict_free(MojoDict *d)
+{
+    mojo_dict_destroy(d);
     free(d);
 }
 
@@ -2936,9 +2976,17 @@ int mojo_is_registered_set(int64_t addr) {
     return mojo_set_contains_int(_mojo_set_registry, addr);
 }
 
-MojoSet *mojo_set_new(void)
+/* mojo_set_init/mojo_set_destroy: the in-place halves of mojo_set_new/
+ * mojo_set_free, factored out for doc/OWNERSHIP_MODEL.md's Phase 6
+ * (stack allocation of Phase-3-owned locals, see gimple_gen_infra.py's
+ * "Phase 6" section) — a stack-declared `MojoSet` has no `malloc`/`free`
+ * for the struct itself, only for its `slots` buffer and registry
+ * membership, which these two do exactly like `_new`/`_free` always did
+ * (`_new`/`_free` are now thin wrappers around them, not a duplicate
+ * implementation — this project's own "consolidate duplicates"
+ * convention, not a special case for this feature). */
+void mojo_set_init(MojoSet *s)
 {
-    MojoSet *s = malloc(sizeof(MojoSet));
     s->cap   = 8;
     s->used  = 0;
     s->next_seq = 0;
@@ -2952,12 +3000,11 @@ MojoSet *mojo_set_new(void)
         mojo_set_add_int(_mojo_set_registry, (int64_t)(uintptr_t)s);
         _mojo_set_registry_busy = 0;
     }
-    return s;
 }
 
-void mojo_set_free(MojoSet *s)
+void mojo_set_destroy(MojoSet *s)
 {
-    /* `_busy` guard mirrors mojo_set_new's: freeing the registry set
+    /* `_busy` guard mirrors mojo_set_init's: freeing the registry set
      * itself (or a set encountered while discarding from it) must not
      * recurse into mojo_set_discard_int touching the registry mid-walk. */
     if (_mojo_set_registry && s != _mojo_set_registry && !_mojo_set_registry_busy) {
@@ -2968,6 +3015,18 @@ void mojo_set_free(MojoSet *s)
     for (int64_t i = 0; i < s->cap; i++)
         if (s->slots[i].tag == 1) free(s->slots[i].val_s);
     free(s->slots);
+}
+
+MojoSet *mojo_set_new(void)
+{
+    MojoSet *s = malloc(sizeof(MojoSet));
+    mojo_set_init(s);
+    return s;
+}
+
+void mojo_set_free(MojoSet *s)
+{
+    mojo_set_destroy(s);
     free(s);
 }
 

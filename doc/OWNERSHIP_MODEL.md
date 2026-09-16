@@ -665,8 +665,10 @@ required for Phase 3's destruction logic to be correct for struct values,
 not just raw containers.
 
 ### Phase 6 — performance payoff (the actual "compete with Rust" step)
-Only attempt once Phases 1-5 are solid and gated. With real ownership
-known statically:
+Directed to start here 2026-09-15, ahead of Phases 4-5, despite this
+section's own original "only attempt once Phases 1-5 are solid" caution
+— see the v0 landing below for how the scope was narrowed to stay safe
+anyway. With real ownership known statically:
 - Non-escaping containers/structs (Phase 3 already proves this) can be
   **stack-allocated** instead of `malloc`'d through `mojo_*_new` at all,
   eliminating the per-container heap round-trip entirely for the common
@@ -676,6 +678,56 @@ known statically:
   memory: MSL/Metal offload long-term goal) — stack-allocating hot-path
   containers is a prerequisite for tight GPU-adjacent loops, not just a
   CPU-side win.
+
+  **v0 LANDED 2026-09-15**: only a Phase-3 candidate whose single
+  constructing assignment is an EMPTY container literal/call (`{}`,
+  `[]`, `set()`, bare `dict()`/`list()`/`set()` with no args) is stack-
+  allocated — deliberately narrower than "every Phase-3 candidate," to
+  avoid reimplementing `_lower_dict_literal`/`_lower_list_literal`/
+  `_lower_set_literal`'s non-empty-population logic (element-type
+  inference, spread handling, per-element append dispatch) against a
+  stack pointer; a non-empty-literal candidate keeps today's exact heap
+  alloc + `mojo_*_free`, tracked via a per-name `_owned_stack_allocated`
+  set so nothing can ever apply the wrong teardown to the wrong case.
+  `runtime/mojo_runtime.{c,h}`: `mojo_dict/list/set_init`/`_destroy`
+  (the in-place halves of `_new`/`_free`, which are now thin wrappers
+  around them) — `_destroy` tears down only the internal buffers/
+  registry membership, never the struct pointer itself. The cleanup-
+  thunk registry (Phase 3/item 3) gained 3 more kinds
+  (`mojo_cleanup_push_{dict,list,set}_stack`) so an exception unwinding
+  past a stack-allocated candidate calls `_destroy`, never `_free`
+  (which would `free()` a stack address). `gimple_gen_infra.py`'s
+  `maybe_stack_alloc_owned_ctor` (called from the central `gen_stmt`
+  dispatcher, before normal `VarDecl`/`AssignStmt` lowering) emits
+  `{StructType} __name_storage; {init_fn}(&__name_storage); {CType}
+  name; name = &__name_storage;` and skips normal lowering entirely for
+  that one statement — every later use of `name` (subscript, method
+  calls, ...) is unchanged, since it's just an ordinary `MojoDict *`-
+  typed C variable from then on, oblivious to its stack-vs-heap origin.
+  Verified `-fgimple` accepts this pattern (`gcc -fgimple -fsyntax-only`
+  on the exact generated shape) BEFORE writing the codegen, given this
+  project's own precedent of `-fgimple` rejecting address-taken locals
+  in a different context (`_seed_addressed_locals`/the closure-capture
+  fix) — confirmed safe specifically because Phase-3 candidates only
+  ever live in plain top-level functions, which `gen_func` never
+  `__GIMPLE`-tags (only struct methods and a couple of synthesized
+  helpers get tagged, and Phase 3 computes zero candidates for methods
+  — see `reset_no_candidates`). Real, measured performance win: a loop
+  constructing+destroying 2,000,000 dict locals went from 0.647s (heap)
+  to 0.357s (stack) — build-and-run both ways from the same source via
+  stash/restore, not simulated. Correctness re-checked under
+  `MallocScribble` for every existing repro in this doc PLUS two new
+  ones targeting the exact risk this feature introduces: a candidate
+  whose empty-literal construction is followed by escaping via a struct
+  field assignment (correctly still excluded as a candidate at all, not
+  stack-allocated-then-dangling), and the struct-method name-collision
+  case from item 3's own fix (still correct with Phase 6 active). Full
+  gate re-run clean (test suites, check-linkmode, check-selfhost, stdlib
+  dylib rebuild 0 skips, `compile_stdlib.py` 664/664, `make bootstrap`
+  180/180); `check-noshim-dumpfull` re-confirmed as the same pre-existing
+  divergence via the same-worktree `--no-cache` A/B methodology (see
+  that bug doc's newest entry — identical first-differing-byte offset,
+  gap changed by only ~5KB, consistent with the new code itself).
 - `read` borrows become truly zero-cost (already almost are, at the ABI
   level) once Phase 4's compile-time enforcement exists, since a `read`
   parameter can safely alias without any runtime check.

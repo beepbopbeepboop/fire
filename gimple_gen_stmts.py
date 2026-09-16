@@ -86,12 +86,19 @@ def gen_stmt(gen, node):
     if isinstance(node, gimple_ctypes.PassStmt):
         gen._gen_stmt_PassStmt(node)
     elif isinstance(node, gimple_ctypes.VarDecl):
-        gen._gen_stmt_VarDecl(node)
-        ginf.maybe_push_owned_local(gen, node.name)
+        if isinstance(node.name, str) and ginf.maybe_stack_alloc_owned_ctor(gen, node.name, node.value):
+            pass  # fully handled — see gimple_gen_infra.py's Phase 6 section
+        else:
+            gen._gen_stmt_VarDecl(node)
+            ginf.maybe_push_owned_local(gen, node.name)
     elif isinstance(node, gimple_ctypes.AssignStmt):
-        gen._gen_stmt_AssignStmt(node)
-        if isinstance(node.target, IdentExpr):
-            ginf.maybe_push_owned_local(gen, node.target.name)
+        if (isinstance(node.target, IdentExpr)
+                and ginf.maybe_stack_alloc_owned_ctor(gen, node.target.name, node.value)):
+            pass  # fully handled — see gimple_gen_infra.py's Phase 6 section
+        else:
+            gen._gen_stmt_AssignStmt(node)
+            if isinstance(node.target, IdentExpr):
+                ginf.maybe_push_owned_local(gen, node.target.name)
     elif isinstance(node, gimple_ctypes.AugAssignStmt):
         gen._gen_stmt_AugAssignStmt(node)
     elif isinstance(node, gimple_ctypes.MultiAssignStmt):

@@ -179,6 +179,12 @@ extern int _mojo_cleanup_top;
 void mojo_cleanup_push_dict(void *p);
 void mojo_cleanup_push_list(void *p);
 void mojo_cleanup_push_set(void *p);
+/* Stack-allocated variants (doc/OWNERSHIP_MODEL.md Phase 6) -- an
+ * exception unwinding past this thunk calls `mojo_*_destroy` (buffer-only
+ * teardown), never `mojo_*_free` (which would `free()` a stack address). */
+void mojo_cleanup_push_dict_stack(void *p);
+void mojo_cleanup_push_list_stack(void *p);
+void mojo_cleanup_push_set_stack(void *p);
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
@@ -242,6 +248,12 @@ int mojo_in_dispatch_int(int64_t container, int64_t needle);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
 void      mojo_list_free(MojoList *l);
+/* mojo_list_init/mojo_list_destroy: the in-place halves of mojo_list_new/
+ * mojo_list_free, for a stack-declared MojoList (doc/OWNERSHIP_MODEL.md
+ * Phase 6) -- init/destroy never touch the MojoList* itself with
+ * malloc/free, only its `data` buffer and registry membership. */
+void      mojo_list_init(MojoList *l);
+void      mojo_list_destroy(MojoList *l);
 
 void    mojo_list_append_int(MojoList *l, int64_t v);
 void    mojo_list_append_double(MojoList *l, double v);
@@ -499,6 +511,10 @@ typedef struct {
 MojoDict   *mojo_dict_new(void);
 int64_t    *mojo_dict_order_indices(MojoDict *d);
 void        mojo_dict_free(MojoDict *d);
+/* mojo_dict_init/mojo_dict_destroy: see mojo_list_init/mojo_list_destroy's
+ * comment above (same Phase 6 rationale, same shape). */
+void        mojo_dict_init(MojoDict *d);
+void        mojo_dict_destroy(MojoDict *d);
 void        mojo_dict_clear(MojoDict *d);
 void        mojo_mark_dict_bool_values(MojoDict *d);
 int         mojo_is_bool_dict(MojoDict *d);
@@ -626,6 +642,10 @@ typedef struct {
 
 MojoSet *mojo_set_new(void);
 void     mojo_set_free(MojoSet *s);
+/* mojo_set_init/mojo_set_destroy: see mojo_list_init/mojo_list_destroy's
+ * comment above (same Phase 6 rationale, same shape). */
+void     mojo_set_init(MojoSet *s);
+void     mojo_set_destroy(MojoSet *s);
 void     mojo_set_clear(MojoSet *s);
 
 void     mojo_set_add_int(MojoSet *s, int64_t v);

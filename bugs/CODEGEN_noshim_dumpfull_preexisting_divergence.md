@@ -1,5 +1,16 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-15, later still — re-confirmed pre-existing a fifth time, via the same-worktree A/B methodology, for the Phase 6 stack-allocation landing)
+
+Same-worktree `--no-cache` A/B (see the entry just below for why this is
+the correct methodology, not a bare byte-count comparison): clean HEAD
+(`d30bd0e`) gave shim=51967687/no-shim=52981667, offset 21168, gap
+1013980; with the Phase 6 diff (`mojo_dict/list/set_init/_destroy` +
+`maybe_stack_alloc_owned_ctor`) applied in the SAME worktree and
+rebuilt fresh: shim=52051290/no-shim=53070381, offset 21168 (IDENTICAL),
+gap 1019091 (+5111 bytes, consistent with the new code itself being
+reflected equally on both sides, not a new divergence source).
+
 ## Status (2026-09-15, later still — re-confirmed pre-existing a fourth time, via a proper same-worktree A/B, after noticing the naive before/after byte-count comparison used in this doc's last two entries is NOT reliable)
 
 Hit this gate failure a fourth time fixing two real bugs found while
