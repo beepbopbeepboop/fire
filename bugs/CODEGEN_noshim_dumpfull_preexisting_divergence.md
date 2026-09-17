@@ -1,5 +1,53 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-17 — 5-module silent drop FIXED; baseline restored to the documented offset 21086)
+
+A self-hosted `fire.py --dump-full` was silently DROPPING 5 modules
+(`gimple_codegen`, `gimple_solvers`, `imports`, `jit.arm64`,
+`myinterpreter`), producing a 4.4 MB `.ci` instead of ~36 MB (first diff
+offset 2091, gap ~31.7 MB) — far worse than the divergence this doc has
+tracked. The root cause was NOT this doc's tracked field-typing
+divergence. `gimple_gen_calls._lower_ctor_from_iterable` synthesizes a
+`gimple_ctypes.Generator(...)` node for `list(x)`/`set(x)`; the hardcoded
+self-host AST-node struct table in `gimple_module_gen.gen_module_impl`
+listed `Comprehension` but not `Generator`, so the module-qualified
+constructor found no registered field layout, fell through to the opaque
+`(int64_t)0` placeholder, and the synthetic comprehension's `generators`
+list ended up holding a NULL. `_lower_comprehension`'s `gen0.iterable`
+then raised `AttributeError: iterable` (confirmed via lldb backtrace and
+`MOJO_ATTR_DBG=1`, which showed `obj=0x0 tag=0`), and
+`_compile_imported_module`'s per-module `except` dropped each affected
+module. Fixed by adding the `Generator` entry
+(`target`/`iterable`/`conditions`/`line`/`col`), mirroring the adjacent
+`Comprehension` entry.
+
+After the fix: all 35 modules present, 0 `# ERROR` lines, and the gate is
+back to this doc's long-standing pre-existing condition —
+`shim=36179239` / `no-shim=35819290`, gap ~360 KB, first differing byte at
+**offset 21086** (the same offset recorded throughout 2026-09-15, and
+slightly better than the ~530 KB gap seen then). Confirmed concurrently:
+`make check-gimple check-runner check-modcache check-linkmode
+check-selfhost check-runtimediff check-no-new-casts` all green; stdlib
+dylib rebuild 0 module skips; `compile_stdlib.py` 664/664, 0 unexpected.
+
+**Not a regression from this session's earlier work — was latent at the
+old HEAD.** At clean `563ec43` the `mojoc` target itself fails (`python3
+fire.py build fire.py -o mojoc` exits 1 — the imported-prototype conflicts
+fixed in `921bf26`), so `check-noshim-dumpfull` was not runnable at all;
+the 5-module drop only became observable once `921bf26` made `mojoc`
+buildable again.
+
+**`make bootstrap` residue (pre-existing, separate):** bootstrap now
+reaches the stage1-vs-stage2 comparison (stage2 could not even be built
+before `921bf26`), and fails only on 4 `.ast` dumps
+(`fire`, `fire_compiler`, `module_loader`, `myinterpreter`) where
+`Generator.iterable` prints as a raw boxed pointer
+(`iterable=52068159136`) instead of the nested node the shim prints. That
+is the pre-existing shim-vs-compiled AST-repr class this doc already
+tracks — `Comprehension`'s `element` has always been typed `int64_t` in
+the same table and behaves identically — not a `.ci` codegen divergence.
+Bootstrap remains the aspirational, non-`check`-gated target.
+
 ## Status (2026-09-15, later still — re-confirmed pre-existing a fifth time, via the same-worktree A/B methodology, for the Phase 6 stack-allocation landing)
 
 Same-worktree `--no-cache` A/B (see the entry just below for why this is

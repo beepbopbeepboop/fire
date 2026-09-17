@@ -2556,6 +2556,26 @@ def gen_module_impl(self, stmts):
         'key': 'int64_t',
         'generators': 'MojoList *',
     }
+    # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
+    # node (`target`/`iterable`/`conditions`), and the struct
+    # `gimple_gen_calls._lower_ctor_from_iterable` synthesizes for
+    # `list(x)`/`set(x)`. This table is the self-hosted backend's reliable
+    # field-layout source for AST nodes; without an entry here the module-
+    # qualified constructor `gimple_ctypes.Generator(...)` found no
+    # registered layout, fell through to the opaque 0 placeholder, and the
+    # synthesized comprehension's `generators` list ended up holding a NULL
+    # — `_lower_comprehension`'s `gen0.iterable` then raised
+    # `AttributeError: iterable` and the whole module was dropped (5
+    # modules lost from a self-hosted fire.py --dump-full: gimple_codegen,
+    # gimple_solvers, imports, jit.arm64, myinterpreter). `Comprehension`
+    # directly above was the only node of the pair that was listed.
+    self.struct_field_types['Generator'] = {
+        'target': 'char *',
+        'iterable': 'int64_t',
+        'conditions': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+    }
     self.struct_field_types['IdentExpr'] = {
         'name': 'char *',
     }
