@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -592,7 +592,7 @@ def _gen_stmt_FromImportStmt(gen, node):
         # a minimal repro (`from _colorize import can_colorize` inside
         # a method, then `if can_colorize(): ...`) and seen at scale
         # across Lib/argparse.py (~15x), Lib/enum.py (~10x),
-        # Lib/gettext.py (~5x) in a `mojo.py build
+        # Lib/gettext.py (~5x) in a `fire.py build
         # Lib/subprocess.py` run.
         sig = gen._KNOWN_SIGS.get(symbol_name)
         ret = sig[0] if sig else 'int64_t'
@@ -776,12 +776,12 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     WHICHEVER temp_gen happens to currently be compiling SOME file, not
     necessarily the file `node` (the function whose param we're typing) was
     itself defined in. A direct measurement (MOJO_DEBUG_SELFHOST_GEN,
-    instrumenting the old file-based check) on a real `--dump-full mojo.py`
+    instrumenting the old file-based check) on a real `--dump-full fire.py`
     run showed every single rejection was `bad_basename` — meaning this
     function gets asked to type a gen/self param belonging to a
     gimple_gen_*.py-defined helper WHILE `gen._current_filename` is set to
-    some OTHER, non-"gimple"-prefixed file (mojo_compiler.py, module_
-    loader.py, myinterpreter.py, mojo.py, ...) that merely REFERENCES that
+    some OTHER, non-"gimple"-prefixed file (fire_compiler.py, module_
+    loader.py, myinterpreter.py, fire.py, ...) that merely REFERENCES that
     helper — e.g. during a signature/forward-decl computation triggered
     from that other file's own compile, which then gets cached (`func_
     param_types` etc, shared dicts, first-computation-wins) and never
@@ -898,7 +898,7 @@ def _selfhost_ann_ctype(_ann):
     # gimple_module_gen.py's struct_field_types (the field is legitimately
     # `str | None`, but the table lumps it in with the polymorphic
     # target/value slots). `mojo_isinstance`/`mojo_isinstance_p`
-    # (runtime/mojo_runtime.c) never implement type_id 4 (str) for an
+    # (runtime/fire_runtime.c) never implement type_id 4 (str) for an
     # ambiguous boxed int64_t -- they unconditionally return 0 -- so
     # `isinstance(_ann, str)` is FALSE self-hosted for every real string
     # value here, not just malformed ones (confirmed: this is what made
@@ -1370,7 +1370,7 @@ def _sgfs_fn_delegate_target(_m, _idx: dict):
     nondeterministically allocated its env struct elsewhere this session
     (see gimple_gen_exprs.py's `_lb_as_set`/`_lower_binary_set_op`, and
     this same bug class's own occurrence right here — confirmed via a real
-    --dump-full mojo.py determinism diff showing `_alloc_..._inferred_env
+    --dump-full fire.py determinism diff showing `_alloc_..._inferred_env
     ()` vs `(...*)0` for the SAME call site across two runs)."""
     _body = [s for s in _m.body
              if not (isinstance(s, ExprStmt)
@@ -1398,7 +1398,7 @@ def _sgfs_inferred(gen, _inf_cache: dict, _fn):
 def _sgfs_resolve_ann(gen, _ann: str) -> str:
     """`gen._resolve_type(_ann)`, but checking the compiler's own FIXED
     AST-node classes (FunctionDef, VarDecl, ...) FIRST — these are real
-    Python classes always importable from `gimple_ctypes`/`mojo_compiler`,
+    Python classes always importable from `gimple_ctypes`/`fire_compiler`,
     unlike an arbitrary user struct, which only becomes a known name once
     something registers it into the (deliberately near-empty, for this
     frozen-sig pass) `gen.struct_field_types`. Without this, an explicitly
@@ -1489,7 +1489,7 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
     The four helper closures this used to nest directly (`_fn_delegate_
     target`, `_inferred`, `_param_ct`, `_ret_ct`) are now module-level
     functions (`_sgfs_*`, above) taking `gen`/`_inf_cache`/`_idx` explicitly
-    — a real --dump-full mojo.py determinism diff caught one of them
+    — a real --dump-full fire.py determinism diff caught one of them
     (`_inferred`'s lifted-closure env) being allocated on one run and
     replaced with a null pointer on another, for the identical call site."""
     if gg_cls is None:
@@ -2037,7 +2037,7 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
     both define a function with the SAME bare name — e.g. one file with
     two different nested scopes each locally importing a same-named
     function from two different sibling modules (do_imports=True; a
-    real repro found via `mojo.py build`, not build_stdlib_dylib.py's
+    real repro found via `fire.py build`, not build_stdlib_dylib.py's
     per-module-standalone-compile path, which never shares/nests
     GimpleGen instances this way). It does NOT fire across DIFFERENT
     compile instances (e.g. two sibling WRAPPER modules each importing
@@ -2146,7 +2146,7 @@ def _resolve_import_module_qualifier(gen, mod: str) -> str:
                 path = None
         if not path or not gimple_ctypes.os.path.exists(path):
             # Not a stdlib/test module (e.g. a sibling project module,
-            # `alpha_module` in a mojo.py build test dir) — fall back to
+            # `alpha_module` in a fire.py build test dir) — fall back to
             # the module string itself, matching the do_imports
             # inline-compile loop, which keys its registrations by the
             # module string.
@@ -2212,7 +2212,7 @@ def _func_qualifier(gen, bare_name: str) -> str:
 
     Three-tier priority, most-specific first — this ordering is
     load-bearing, not cosmetic, and was tightened twice after two
-    DIFFERENT real miscompiles surfaced via `mojo.py build`'s actual
+    DIFFERENT real miscompiles surfaced via `fire.py build`'s actual
     multi-file driver path (do_imports=True inline compilation), neither
     of which build_stdlib_dylib.py's per-module-standalone-compile tests
     could ever exercise (its GimpleGen instances are never shared or
@@ -2306,7 +2306,7 @@ def _func_qualifier(gen, bare_name: str) -> str:
     # EVERY reference made from within any self-hosting-flagged file,
     # including one that genuinely imports a DIFFERENT, non-self-hosting
     # submodule (a downstream project's own nested package, e.g. a `jit/`
-    # subdirectory that sits one level below the sibling `mojo_compiler.py`
+    # subdirectory that sits one level below the sibling `fire_compiler.py`
     # check) — those callees are correctly compiled WITH a real module
     # prefix (tier 3 below resolves it correctly), so a caller-side bare
     # override produced an undeclared-symbol reference instead. Removing
@@ -2800,7 +2800,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     ginf.emit_fallthrough_frees(gen, node)
 
     # Add implicit return 0 for main if it returns int but has no explicit return
-    if node.name == 'main' and ret_type == 'int' and not gen.body_lines[-1:] == ['  return 0;']:
+    if node.name == 'main' and ret_type in ('int', 'int64_t') and not gen.body_lines[-1:] == ['  return 0;']:
         # Check if last statement is a return
         if not (gen.body_lines and gen.body_lines[-1].strip().startswith('return')):
             gen._emit('  return 0;')
@@ -3352,7 +3352,7 @@ def _ris_base(ann) -> str:
 def _ris_collect(params_by_struct: dict, fn) -> None:
     """Hoisted out of `_register_imported_structs` (module-level, not a
     nested, RECURSIVE closure mutating a captured dict) — a real
-    --dump-full mojo.py determinism diff showed `_register_imported_
+    --dump-full fire.py determinism diff showed `_register_imported_
     structs__collect (_env__collect, _t60);` on one run vs `..., 0);` (an
     extra, spurious trailing argument) on another for the IDENTICAL call
     site — the lifted-closure env for this closure's own recursive self-
@@ -3644,7 +3644,8 @@ def _parsed_import(gen, module: str):
     """(path, source_text, stmts) for an imported module, parsed once and
     cached. (None, '', None) on failure."""
     cache = gen._imported_src_cache
-    if module not in cache:
+    closure_module = gen.do_imports and module in gen._compiled_modules
+    if module not in cache or (closure_module and not cache[module][0]):
         try:
             import imports as _imp
             path = _imp.resolve_source(module) or gen._resolve_test_relative_module(module)
@@ -3674,22 +3675,8 @@ def _parsed_import(gen, module: str):
             # file's directory, handles the dot-count-as-level Python
             # semantics, and tries `.py` before `.mojo`) — it was already
             # correct, just never wired into this cache-filling helper.
-            # Gated to `module.startswith('.')` (a genuine relative ref)
-            # ONLY — widening this fallback to every otherwise-
-            # unresolvable ABSOLUTE bare name too (the first attempt at
-            # this fix did) regressed `make check-selfhost`:
-            # `_module_candidate_paths`' broad search (CWD, ancestor
-            # dirs, this repo's own script_dir) can spuriously MATCH an
-            # unrelated same-named file for a bare name that was always
-            # intentionally left unresolved (a real external/unmodeled
-            # package), changing struct/generic type-resolution behavior
-            # across the whole self-hosted build in ways this fix has
-            # nothing to do with.
-            if not path and module.startswith('.'):
-                for _cand in gen._module_candidate_paths(module):
-                    if gimple_ctypes.os.path.exists(_cand):
-                        path = _cand
-                        break
+            if not path and (module.startswith('.') or closure_module):
+                path = gen._submodule_source_path(module)
             src = open(path).read() if path else ''
             cache[module] = (path, src,
                              ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)
@@ -3975,7 +3962,7 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     being empty — module_name is NOT reliably empty for a self-hosted
     file: do_imports=True's _compile_imported_module recursion passes a
     real dotted-module-name-derived module_name for EVERY imported
-    module, including when mojo.py's own self-hosting bootstrap pulls in
+    module, including when fire.py's own self-hosting bootstrap pulls in
     gimple_codegen.py/monomorphize.py/etc. as sibling imports of ITSELF
     (confirmed regression: those nested compiles got
     module_name='gimple_codegen'/'monomorphize', producing calls like
@@ -4194,7 +4181,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # `_root_globals` instead of `_typing_globals` -- "struct
     # '_root_toplev' has no member named '_lazy_annotationlib'" at gcc
     # -fsyntax-only stage. Confirmed via direct `.ci` inspection on a
-    # `mojo.py build .../Lib/glob.py` run (typing.py transitively
+    # `fire.py build .../Lib/glob.py` run (typing.py transitively
     # imported): `typing__LazyAnnotationLib___getattr__`'s body wrote
     # `_root_globals._lazy_annotationlib = ...` even though the function
     # itself is correctly module-qualified "typing__"-prefixed and

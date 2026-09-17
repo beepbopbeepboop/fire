@@ -26,7 +26,7 @@ open.
 
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
 
-Fresh `MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Fresh `MOJO_DEBUG=1 python3 fire.py build /Users/mrs/net/Python-3.14.6/
 Tools/gdb/libpython.py` against current tree (`a913ab8`): exit 1,
 byte-for-byte the same error family as the 2026-08-25 entry below —
 `expected primary-expression before '.'`, `begin`/`end` not declared
@@ -307,7 +307,7 @@ shared machinery causing broad silent regressions, this is
 deliberately NOT attempted here — left as an accurate, honest
 structural-limitation record instead. `relaxed_imports` (which would
 turn this into a per-function stub-and-continue instead of a hard
-raise) is never set `True` for a root module by `mojo.py`'s own build
+raise) is never set `True` for a root module by `fire.py`'s own build
 entry points, so this is a hard, whole-module refusal for this file as
 things stand today, independent of the two now-stale findings below.
 

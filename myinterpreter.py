@@ -20,7 +20,7 @@ import math
 import collections
 import threading
 from dataclasses import dataclass
-import mojo_compiler as N
+import fire_compiler as N
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -121,21 +121,21 @@ class MojoFunction:
         self.body = body
         self.closure_scope = closure_scope
         # Names from `def f[dtype: DType, ...](...)`'s bracketed generic
-        # parameter list (see mojo_compiler.py's _parse_generic_params_capture)
+        # parameter list (see fire_compiler.py's _parse_generic_params_capture)
         # — bound by `__getitem__` when the call site subscripts the
         # function (`f[Int32](...)`, not passed as regular arguments.
         self.comptime_params = comptime_params or []
         if param_defaults:
             self._pd = param_defaults
         # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
-        # mirrors FunctionDef.is_generator (see mojo_compiler.py) — copied
+        # mirrors FunctionDef.is_generator (see fire_compiler.py) — copied
         # onto the MojoFunction at construction time (see
         # execute_FunctionDef/execute_StructDef/execute_TraitDef) so
         # `_invoke` can branch to the generator-construction path without
         # needing the original FunctionDef node around at call time.
         self.is_generator = is_generator
         # Milestone 3b of bugs/INTERP_generator_yield_entirely_unimplemented.md:
-        # mirrors FunctionDef.is_async (see mojo_compiler.py) exactly the
+        # mirrors FunctionDef.is_async (see fire_compiler.py) exactly the
         # same way is_generator mirrors FunctionDef.is_generator above —
         # copied onto the MojoFunction at construction time so `_invoke`
         # can branch to the coroutine-construction path without needing
@@ -348,7 +348,7 @@ class _ThreadedGenerator:
 
     Why not just a plain Python generator function (as originally
     implemented -- see git history)? myinterpreter.py is itself one of the
-    sources this project self-hosts (`mojo.py` compiling its own source,
+    sources this project self-hosts (`fire.py` compiling its own source,
     `myinterpreter.py` included, via gimple_codegen.py). gimple_codegen.py's
     generator detection (added for real Mojo-language `yield` support)
     operates on the raw syntax tree it parses this file's own source into
@@ -364,7 +364,7 @@ class _ThreadedGenerator:
     `make check-selfhost`: other self-hosted modules calling into
     `Interpreter` methods generate a properly-typed extern declaration for
     them from myinterpreter.py's (normally available) static type info,
-    while mojo.py's own compiled code -- unable to get that info once
+    while fire.py's own compiled code -- unable to get that info once
     myinterpreter.py falls back -- instead emits a bare variadic stub
     declaration for the very same C symbol. Two conflicting declarations of
     one symbol in a single linked program is a hard GCC error
@@ -436,12 +436,12 @@ class _ThreadedGenerator:
                 self._to_caller.set()
 
         # Deep *Mojo-level* recursion inside a generator body fans out into
-        # many nested Python frames per Mojo call the same way mojo.py's own
+        # many nested Python frames per Mojo call the same way fire.py's own
         # `interpret_and_execute` worker thread does (eval_expr ->
         # eval_CallExpr -> invoke -> _invoke -> execute -> ...) — the default
         # OS thread stack is nowhere near big enough. threading.stack_size()
         # is a process-global setting applied to threads created after the
-        # call, matching the same pattern mojo.py itself already uses.
+        # call, matching the same pattern fire.py itself already uses.
         _old_stack_size = threading.stack_size()
         threading.stack_size(1024 * 1024 * 1024)
         try:
@@ -1201,7 +1201,7 @@ class MojoClass:
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
                 # AssignStmt has a single `.target`, not a `.targets` list
-                # (mojo_compiler.py's AssignStmt dataclass) — this branch
+                # (fire_compiler.py's AssignStmt dataclass) — this branch
                 # raised "'AssignStmt' object has no attribute 'targets'"
                 # on any instantiation of a class with a bare `NAME = value`
                 # class-body attribute (e.g. `class Foo: count = 0`).
@@ -1332,7 +1332,7 @@ class _MojoPointer:
     model here — it's a Python list (`buffer`) playing the role of the
     pointee's backing storage, plus an `offset` into it, so pointer
     arithmetic (`ptr + n`) and dereference (`ptr[]`, which the parser lowers
-    to `ptr[0]` — see mojo_compiler.py's subscript parsing) both fall out of
+    to `ptr[0]` — see fire_compiler.py's subscript parsing) both fall out of
     plain list indexing. `UnsafePointer(to=x)` boxes `x` into a fresh
     single-element buffer: reads/writes through the returned pointer work,
     but (unlike real Mojo) don't alias back to the original variable `x` —
@@ -1520,7 +1520,7 @@ def _mojo_as_dim3(d):
 
 class MojoComplex:
     """Minimal runtime representation of Python's `j`/`J`-suffixed imaginary
-    literal (`0j`, `1.5j`, `3J` — see mojo_compiler.py's `ImagLiteral`) and
+    literal (`0j`, `1.5j`, `3J` — see fire_compiler.py's `ImagLiteral`) and
     the complex values that result from combining one with a real number via
     `+`/`-`. This deliberately does NOT implement the full Python `complex`
     API (no `*`, `/`, `conjugate()`, `abs()`, comparisons, ...) — per
@@ -2575,8 +2575,8 @@ class _SysProxy:
     while forwarding everything else to the real `sys` module. Without this,
     interpreted code that reads `sys.argv` sees the *host* process's live
     argv instead of its own — harmless for most scripts, but fatal for
-    self-referential ones: `mojo run mojo.py help` would otherwise have the
-    nested interpretation of mojo.py re-read the unchanged host argv, take
+    self-referential ones: `mojo run fire.py help` would otherwise have the
+    nested interpretation of fire.py re-read the unchanged host argv, take
     the same branch, and re-interpret itself forever."""
     def __init__(self, argv):
         self.argv = argv
@@ -2623,7 +2623,7 @@ class Interpreter:
         try:
             with open(file_path) as f:
                 src = f.read()
-            from mojo_compiler import py_tokenize, Parser
+            from fire_compiler import py_tokenize, Parser
             tokens = py_tokenize(src)
             stmts = Parser(tokens).parse_module()
             for stmt in stmts:
@@ -2816,7 +2816,7 @@ class Interpreter:
 
         with open(found) as f:
             src = f.read()
-        from mojo_compiler import py_tokenize, Parser
+        from fire_compiler import py_tokenize, Parser
         tokens = py_tokenize(src)
         mod_stmts = Parser(tokens).parse_module()
         mod_interp = Interpreter(filename=found, argv=self.argv)
@@ -2855,7 +2855,7 @@ class Interpreter:
         setattr(obj, parts[-1], mod)
 
     def _is_instance(self, obj, class_name):
-        """Check if obj is an instance of class_name from mojo_compiler."""
+        """Check if obj is an instance of class_name from fire_compiler."""
         cls = getattr(N, class_name, None)
         return cls is not None and isinstance(obj, cls)
 
@@ -2869,7 +2869,7 @@ class Interpreter:
         # Real Python sets this to '' for a script run directly (not
         # imported as part of a package) — asyncio/log.py's module-scope
         # `logging.getLogger(__package__)` raised "name '__package__' is
-        # not defined" since mojo.py always runs files this way.
+        # not defined" since fire.py always runs files this way.
         self.scope.define('__package__', '')
 
         # Built-in functions
@@ -3138,7 +3138,7 @@ class Interpreter:
 
         # Parser and compiler functions
         try:
-            from mojo_compiler import py_tokenize, Parser as MojoParser
+            from fire_compiler import py_tokenize, Parser as MojoParser
             self.scope.define('py_tokenize', py_tokenize)
             self.scope.define('Parser', MojoParser)
         except ImportError:
@@ -3154,7 +3154,7 @@ class Interpreter:
     def _loc(self, node: object = None) -> str:
         """Format a gcc-style `file:line:col: ` prefix for a runtime diagnostic.
         Omits the filename segment when the interpreter wasn't given one
-        (e.g. the REPL), matching mojo_compiler.Parser's `_loc`."""
+        (e.g. the REPL), matching fire_compiler.Parser's `_loc`."""
         line = getattr(node, 'line', 0) if node is not None else 0
         col = getattr(node, 'col', 0) if node is not None else 0
         if self.filename:
@@ -3185,7 +3185,7 @@ class Interpreter:
     def _extract_param_names(node):
         """Extract parameter names from a FunctionDef's various param formats.
         Mojo's `*name`/`**name` prefixes (keyword-only marker / kwargs
-        catch-all — see mojo_compiler.py's param parsing) are stripped since
+        catch-all — see fire_compiler.py's param parsing) are stripped since
         MojoFunction binds everything positional-or-keyword by plain name."""
         params = []
         if hasattr(node, 'params') and node.params:
@@ -3231,7 +3231,7 @@ class Interpreter:
         matching: (required positional names, optional/defaulted positional
         names, keyword-only names, has-**kwargs-catch-all).
 
-        Keyword-only names come from two places in mojo_compiler.py's parsed
+        Keyword-only names come from two places in fire_compiler.py's parsed
         params: a `*name` prefix (the `*args`-style variadic form), or plain
         (unprefixed) names listed in `node.kwonly` — the far more common
         `def f(x, *, y):` bare-`*,`-separator form leaves `y` looking
@@ -3460,8 +3460,8 @@ class Interpreter:
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
         # importlib.import_module('sys'). Re-binding the real module here is
-        # what turned `mojo run mojo.py help` into unbounded recursion — the
-        # nested interpretation of mojo.py would re-read the host's live
+        # what turned `mojo run fire.py help` into unbounded recursion — the
+        # nested interpretation of fire.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
             self.scope.define(alias or 'sys', self.scope.get('sys'))
@@ -3619,7 +3619,7 @@ class Interpreter:
                 del obj[idx]
             elif self._is_instance(target, 'SliceExpr'):
                 # `del a[b:c]` — a bare single-slice subscript parses as a
-                # SliceExpr with .obj attached directly (mojo_compiler.py's
+                # SliceExpr with .obj attached directly (fire_compiler.py's
                 # `_parse_postfix` never wraps that shape in a SubscriptExpr;
                 # see gimple_codegen.py's _gen_stmt_DelStmt for the identical
                 # note), so this needs its own branch alongside SubscriptExpr
@@ -3659,7 +3659,7 @@ class Interpreter:
         value = self.eval_expr(node.value)
         # `var a, b = expr` (tuple unpacking) is parsed as a single VarDecl
         # whose `name` is a comma-joined string ("a,b") — see
-        # mojo_compiler.py's `_parse_var_decl`. A plain single name never
+        # fire_compiler.py's `_parse_var_decl`. A plain single name never
         # contains a comma, so this only fires for the unpacking case.
         if ',' in node.name:
             names = node.name.split(',')
@@ -3771,7 +3771,7 @@ class Interpreter:
             # element may be starred (`*row, last = data` / `first, *rest =
             # data`, real Python extended-unpacking syntax) — the parser
             # represents a starred target as UnaryOp(op='*', operand=<the
-            # real target>) inside `elements` (see mojo_compiler.py), a
+            # real target>) inside `elements` (see fire_compiler.py), a
             # different representation from _bind_comprehension_target's
             # comma-joined-STRING for-loop targets, so this needs its own
             # star handling rather than delegating to that helper. The
@@ -3835,7 +3835,7 @@ class Interpreter:
         """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
         Switch-style equality dispatch, not full PEP 634 structural pattern
-        matching — see mojo_compiler.py's MatchStmt docstring for why (bare
+        matching — see fire_compiler.py's MatchStmt docstring for why (bare
         names in real Python match patterns are irrefutable captures, but
         every real use here wants a value comparison against an
         already-defined constant)."""
@@ -3854,7 +3854,7 @@ class Interpreter:
                     # Bare name that isn't an already-defined constant: a
                     # PEP 634 capture pattern, not a switch-style equality
                     # comparison (see MatchStmt's docstring in
-                    # mojo_compiler.py — every *other* real use here is
+                    # fire_compiler.py — every *other* real use here is
                     # `case SOME_CONSTANT:`, which stays equality-dispatch
                     # via the eval_expr branch below since that name IS
                     # already bound). A capture always matches and binds
@@ -3926,7 +3926,7 @@ class Interpreter:
     def execute_ForStmt(self, node: N.ForStmt):
         """Execute for statement."""
         if getattr(node, 'is_async', False):
-            # `async for` — ForStmt.is_async (see mojo_compiler.py's
+            # `async for` — ForStmt.is_async (see fire_compiler.py's
             # docstring: a parser-only flag since Milestone 3a). Driving an
             # async iterable's `__aiter__`/`__anext__` (and propagating a
             # StopAsyncIteration) is a real protocol this interpreter has
@@ -3950,7 +3950,7 @@ class Interpreter:
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
         for value in iterable:
-            # node.target is always a plain string from mojo_compiler.py's
+            # node.target is always a plain string from fire_compiler.py's
             # _parse_for (possibly comma-joined for tuple unpacking, e.g.
             # "op, i" or "(op, i)"), never an Expr node or list — was
             # binding the literal string "(op, i)" as a variable name
@@ -4053,7 +4053,7 @@ class Interpreter:
     def execute_WithStmt(self, node: N.WithStmt):
         """Execute with statement."""
         if getattr(node, 'is_async', False):
-            # `async with` — WithStmt.is_async (see mojo_compiler.py's
+            # `async with` — WithStmt.is_async (see fire_compiler.py's
             # docstring: a parser-only flag since Milestone 3a). Entering
             # via `await __aenter__()`/exiting via `await __aexit__()` is
             # the async context-manager protocol this interpreter has never
@@ -4082,7 +4082,7 @@ class Interpreter:
                 contexts.append((ctx, entered))
                 if item.alias:
                     # item.alias is the same comma-joined unpacking-target
-                    # string mojo_compiler.py's _parse_unpack_target
+                    # string fire_compiler.py's _parse_unpack_target
                     # produces for for-loop targets (a bare name, or a
                     # parenthesized tuple like "(a, b)") — bind it through
                     # the same shared helper for-loop/comprehension targets
@@ -4205,7 +4205,7 @@ class Interpreter:
                         except NameError:
                             should_handle = False
                     elif isinstance(exc_type, list):
-                        # `except (A, B):` — mojo_compiler.py's _parse_try
+                        # `except (A, B):` — fire_compiler.py's _parse_try
                         # stores a parenthesized exception tuple as a plain
                         # list of dotted-name strings, not an AST node (see
                         # its own comment: "codegen ORs the tag match across
@@ -4294,7 +4294,7 @@ class Interpreter:
         path's `_lower_LambdaExpr` instead lifts the lambda to a named
         function; a MojoFunction is this dialect's runtime equivalent).
 
-        Lambda params are `(name, default_expr)` pairs (see mojo_compiler.py's
+        Lambda params are `(name, default_expr)` pairs (see fire_compiler.py's
         lambda parser) — names come from `_extract_param_names`, defaults are
         passed through as raw expression nodes and evaluated lazily by
         `_invoke` exactly like a `def`'s defaults."""
@@ -4309,7 +4309,7 @@ class Interpreter:
         currently running on THIS OS thread — see
         MojoGeneratorObject/MojoCoroutine/_ThreadedGenerator. `None` means
         eval_YieldExpr/eval_YieldFromExpr/eval_AwaitExpr is somehow running
-        outside any generator/coroutine body, which mojo_compiler.py's
+        outside any generator/coroutine body, which fire_compiler.py's
         parser-level `is_generator`/`yield_bearing_node_ids` detection
         (Milestone 1) and `is_async` detection (Milestone 3a) should make
         unreachable in practice — a plain SyntaxError-style message rather
@@ -4487,7 +4487,7 @@ class Interpreter:
         value = expr.value
         is_fstring = value.startswith('f"') or value.startswith("f'")
         # Mojo's `t"..."` template-string literal shares f-string's `{expr}`/
-        # `{{`-escape interpolation syntax (see mojo_compiler.py's
+        # `{{`-escape interpolation syntax (see fire_compiler.py's
         # _strip_string_prefix_and_quotes) — real Mojo turns it into a
         # Template-like object, but every use we've seen immediately feeds it
         # to `String(...)` anyway, so evaluating it as a plain f-string (via
@@ -4498,7 +4498,7 @@ class Interpreter:
         if is_fstring or is_tstring:
             body = value[1:]  # strip the leading f/t prefix
             # Detect a triple-quoted body without ever writing a literal
-            # triple-quote substring in this file's own source: mojo_compiler's
+            # triple-quote substring in this file's own source: fire_compiler's
             # replace_multiline_strings does a whole-source, nesting-unaware
             # sweep for opening/closing """ or ''' runs, so a literal '"""'
             # constant here would itself get mistaken for the start of a new
@@ -4736,7 +4736,7 @@ class Interpreter:
         # using CPythons own operators/semantics directly, bypassing this
         # interpreters own dispatch (eval_BinaryOp, eval_CallExpr, etc.)
         # entirely.
-        from mojo_compiler import py_tokenize, Parser
+        from fire_compiler import py_tokenize, Parser
         tokens = py_tokenize(expr_text)
         node = Parser(tokens)._parse_expr(0)
         return self.eval_expr(node)
@@ -4753,7 +4753,7 @@ class Interpreter:
     def _spread_operand(node, op):
         """If `node` is a `*expr`/`**expr` spread marker (a UnaryOp with the
         given op, produced by `_parse_unary` for spreads inside collection
-        displays — see mojo_compiler.py's `_parse_unary` and
+        displays — see fire_compiler.py's `_parse_unary` and
         `_parse_dict_or_set`/`_parse_dict_entry`), return the spread
         operand AST node; otherwise return None. Spreading isn't a real
         unary operation — there's no single value `*x` evaluates to outside
@@ -4780,7 +4780,7 @@ class Interpreter:
         """Evaluate dict literal, expanding any `**expr` spread pairs (PEP
         448 mapping unpacking, e.g. `{**a, **b}`). A spread pair is
         represented as `(UnaryOp(op='**', operand=<mapping expr>), None)` by
-        the parser (see mojo_compiler.py). Pairs are applied in source
+        the parser (see fire_compiler.py). Pairs are applied in source
         order, matching Python: a later spread or key overwrites an earlier
         one on key collision."""
         result = {}
@@ -4843,7 +4843,7 @@ class Interpreter:
     def _resolve_ambiguous_empty_braces(left, right):
         """Mojo's bare `{}` literal is polymorphic (empty Dict or empty Set,
         inferred from context); this interpreter always parses it as an empty
-        dict (Python's default — see mojo_compiler.py's `{}` handling). When
+        dict (Python's default — see fire_compiler.py's `{}` handling). When
         one side of a set-algebra operator is already a real set, treat an
         empty-dict operand as the empty set Mojo would have inferred, instead
         of raising a TypeError Mojo code would never hit (`set() & {}`)."""
@@ -4863,7 +4863,7 @@ class Interpreter:
         # side would still run and raise (AttributeError: no `.name`) even
         # when the left side was falsy and specifically meant to prevent
         # that. Found via 3-levels-deep self-referential interpretation
-        # (`mojo.py run mojo.py run mojo.py help`) tripping over exactly
+        # (`fire.py run fire.py run fire.py help`) tripping over exactly
         # this pattern in the project's own source.
         if op == 'and':
             left = self.eval_expr(expr.left)
@@ -4988,7 +4988,7 @@ class Interpreter:
     def eval_CallExpr(self, expr: N.CallExpr):
         """Evaluate function call."""
         func = self.eval_expr(expr.func)
-        # Call-site unpacking: `g(*args)` / `g(**opts)`. mojo_compiler.py's
+        # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
         # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument
         # expression in UnaryOp(op='*'/'**', operand=...) instead of
         # consuming the star itself, so the marker survives into the AST.
@@ -5008,7 +5008,7 @@ class Interpreter:
                 args.append(self.eval_expr(arg))
 
         # Evaluate keyword arguments. CallExpr stores these as `kwargs`, a
-        # list of (name, expr) tuples (see mojo_compiler.py's CallExpr and
+        # list of (name, expr) tuples (see fire_compiler.py's CallExpr and
         # ast_nodes.py) — not a `keywords` dict. The old attribute-name
         # mismatch meant `hasattr(expr, 'keywords')` was always False, so
         # every keyword argument to every call was silently dropped in
@@ -5095,38 +5095,38 @@ class Interpreter:
             return self.eval_expr(expr.else_val)
 
     def eval_TupleExpr(self, expr):
-        """Evaluate tuple expression (mojo_compiler naming; TupleExpr is
-        TupleLiteral — see mojo_compiler.py's `TupleLiteral = TupleExpr`)."""
+        """Evaluate tuple expression (fire_compiler naming; TupleExpr is
+        TupleLiteral — see fire_compiler.py's `TupleLiteral = TupleExpr`)."""
         return self.eval_TupleLiteral(expr)
 
-    # Aliases for mojo_compiler node types (ListExpr, DictExpr, SetExpr)
+    # Aliases for fire_compiler node types (ListExpr, DictExpr, SetExpr)
     def eval_ListExpr(self, expr):
-        """Evaluate list expression (mojo_compiler naming)."""
+        """Evaluate list expression (fire_compiler naming)."""
         return self.eval_ListLiteral(expr)
 
     def eval_DictExpr(self, expr):
-        """Evaluate dict expression (mojo_compiler naming)."""
+        """Evaluate dict expression (fire_compiler naming)."""
         return self.eval_DictLiteral(expr)
 
     def eval_SetExpr(self, expr):
-        """Evaluate set expression (mojo_compiler naming)."""
+        """Evaluate set expression (fire_compiler naming)."""
         return self.eval_SetLiteral(expr)
 
     def _bind_comprehension_target(self, target_str, value):
         """A comprehension/generator `for` clause's target is a plain string
         (possibly comma-joined for tuple unpacking, e.g. "a, b" or "(a, b)"
-        — see mojo_compiler.py's _parse_generator_target), not an Expr node.
+        — see fire_compiler.py's _parse_generator_target), not an Expr node.
         Mirrors execute_VarDecl's handling of the same comma-joined-string
         representation for `var a, b = ...`.
 
         One element of the comma-list may be starred (e.g. "a, *rest" or
-        "*rest, a, b" — see mojo_compiler.py's _parse_for_target), matching
+        "*rest, a, b" — see fire_compiler.py's _parse_for_target), matching
         Python's extended-unpacking-in-for-target semantics: the starred
         name collects whatever's left over after the non-starred names on
         either side of it have each claimed one value.
 
         One element may also be a dotted attribute-access expression
-        (e.g. "st.lineno", possibly chained "a.b.c" — see mojo_compiler.py's
+        (e.g. "st.lineno", possibly chained "a.b.c" — see fire_compiler.py's
         _parse_for_target), which SETS an existing object's attribute each
         iteration instead of binding a fresh local; see _bind_single_target."""
         name = target_str.strip()
@@ -5194,13 +5194,13 @@ class Interpreter:
         "d[\"k\"]", or a chained/mixed "targets[1][0]" / "a.b[0].c" into
         the equivalent IdentExpr/MemberExpr/SubscriptExpr AST, for
         _bind_single_target to hand to _assign_target. See
-        mojo_compiler.py's _parse_unpack_target docstring for the string
+        fire_compiler.py's _parse_unpack_target docstring for the string
         representation this consumes (bracket contents are literal,
         re-parseable Mojo source text; the whole string is never itself
         re-tokenized as one expression because a bare leading NAME
         followed by "[" would otherwise parse as a subscript of an
         as-yet-undefined variable rather than the intended target path)."""
-        from mojo_compiler import py_tokenize, Parser
+        from fire_compiler import py_tokenize, Parser
         i = 0
         n = len(name)
         # Leading identifier (the base name). Deliberately NOT `name[i].isalnum()`
@@ -5210,7 +5210,7 @@ class Interpreter:
         # also in _C_RESERVED_FUNCS, so it silently mangles to an
         # undefined-at-link-time `char_mojo_isalnum` symbol instead of
         # raising a compile-time error. Range comparisons on the char are
-        # well-supported (see mojo_compiler.py's own `_pfx_c == 'f'`-style
+        # well-supported (see fire_compiler.py's own `_pfx_c == 'f'`-style
         # single-char comparisons in its multiline-string-prefix scanner)
         # and avoid the gap entirely.
         start = i
@@ -5268,7 +5268,7 @@ class Interpreter:
         list(), etc.) accepts any iterable, so the laziness itself is never
         actually needed.
 
-        For a dict comprehension, mojo_compiler.py's parser stores the KEY
+        For a dict comprehension, fire_compiler.py's parser stores the KEY
         expression in `.element` and the VALUE expression in `.key` (yes,
         swapped from what the names suggest — see _parse_dict_or_set)."""
         results = []

@@ -112,7 +112,7 @@ fix this doc's 2026-08-14 entry describes, and the later generator-
 consumption-ordering fix). The blocker has SHIFTED — it is no longer
 `iter_decls`'s dynamic-callee `**kwargs` forward (that shape is still
 correctly, safely refused, but it's no longer the first thing hit). Fresh
-repro (`python3 mojo.py build .../c_analyzer/__init__.py`) now reports
+repro (`python3 fire.py build .../c_analyzer/__init__.py`) now reports
 THREE separate ineligible generators, none of which are the kwargs-forward
 case:
 
@@ -258,7 +258,7 @@ established, correct logic.
 
 **Verified against the exact repro this doc originally specified**
 (`target`/`gen_forward`, `b` overridden via `**kwargs`) — the interpreter
-(`python3 mojo.py run`) and the compiled path (`python3 mojo.py build ...
+(`python3 fire.py run`) and the compiled path (`python3 fire.py build ...
 && <out>`) now both print `205`, `206`, `207` (not `300`, `301`, `302`,
 the wrong values a static-default guess would produce). Also verified
 the no-override case (`gen_forward(3)`, no `b=`) still gets the real

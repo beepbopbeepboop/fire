@@ -46,7 +46,7 @@ previously known, and NOT all handled by the collision-dedup stopgap:**
   them here" pass never compiles a body for it at all (it relies on
   elaboration at a call site, which never happens when
   `build_stdlib_dylib.py` compiles each module standalone). Was crashing
-  **every** `mojo.py` invocation at `dlopen` because `reflect.py`'s mirror
+  **every** `fire.py` invocation at `dlopen` because `reflect.py`'s mirror
   of that drop condition had a separate bug (only matched `fn`, not `def`
   — fixed) and kept advertising it as an export anyway. `build_stdlib_dylib.py`'s
   `build()` now has a general safety net that drops any export whose
@@ -92,7 +92,7 @@ previously known, and NOT all handled by the collision-dedup stopgap:**
   bare un-bracketed `UnsafePointer`) are still special-cased locally before
   delegating. Verified: fresh from-scratch `libmojostdlib.dylib` build,
   `nm -u` on the dylib no longer references any `coro_destroy_fn_*` symbol,
-  and `python3 mojo.py hello.mojo` runs end-to-end with no dyld error.
+  and `python3 fire.py hello.mojo` runs end-to-end with no dyld error.
   Regression test: `test_module_cache.py`'s
   `test_cross_module_free_func_mangling_agrees` recreates the same shape
   (an underscore-prefixed function taking an unresolvable-type parameter,
@@ -182,7 +182,7 @@ baseline, since the concrete `mojo_abs` collision had already evaporated
 independently).
 
 **A real bug in the first version of this fix (`bf96f55`), found by
-independent verification via `mojo.py build`'s actual CLI path (NOT
+independent verification via `fire.py build`'s actual CLI path (NOT
 `build_stdlib_dylib.py`'s per-module-standalone-compile pipeline, which
 never shares/nests `GimpleGen` instances the way `do_imports=True` builds
 do) — fixed same day:**
@@ -263,7 +263,7 @@ do) — fixed same day:**
     Also confirmed, separately and NOT fixed here (pre-existing on vanilla
     master before any SB-1 work, unrelated to overload-mangling): aliased
     free-function-VALUE imports (`from X import f as g`) never resolve
-    their call site to the real mangled symbol via `mojo.py build`'s
+    their call site to the real mangled symbol via `fire.py build`'s
     `do_imports=True` path at all (falls to a generic `(...)` vararg stub
     that never links) — even for a single, non-colliding aliased import.
     This is what stops the ORIGINAL coordinator-reported repro (two sibling
@@ -273,7 +273,7 @@ do) — fixed same day:**
     confirmed, but a different code path from anything SB-1 touches.
 
     Regression tests: `test_sb1_mojo_build_cli_wrapper_modules` (real
-    `mojo.py build` CLI subprocess, wrapper-module shape, asserts distinct
+    `fire.py build` CLI subprocess, wrapper-module shape, asserts distinct
     correct results 112/223) and
     `test_sb1_per_scope_import_distinct_modules` (asserts the nested-scope
     shape now compiles and prints both distinct, correct values 112/223,

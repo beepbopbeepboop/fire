@@ -4,12 +4,12 @@
 Historically this ran the (since-removed) mojo/tokenizer.mojo through the
 interpreter and compared its py_tokenize output against Python's reference
 tokenizer. The old `parser.py`/`mojo/` layout was consolidated into the
-root mojo_compiler.py (see CLAUDE.md), so this now parses+executes a real
+root fire_compiler.py (see CLAUDE.md), so this now parses+executes a real
 source file with the current parser and still cross-checks py_tokenize.
 """
 
 import sys
-import mojo_compiler as N
+import fire_compiler as N
 from myinterpreter import Interpreter
 
 

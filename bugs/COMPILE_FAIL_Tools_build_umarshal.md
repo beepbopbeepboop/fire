@@ -6,7 +6,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/umarshal.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, build still exits 0
 
-Fresh `python3 mojo.py build .../Tools/build/umarshal.py` against this
+Fresh `python3 fire.py build .../Tools/build/umarshal.py` against this
 worktree (fast-forwarded to master `43fb291`): `Built: .../umarshal`,
 exit 0. All 17 prior compile errors remain fixed; the file stays
 compile-RESOLVED. Runtime death remains purely the documented stubbed
@@ -15,7 +15,7 @@ codegen defect. Not attempted further; no code change.
 
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): still exits 0; runtime death precisely located at loads()'s own assert on stubbed-marshal output
 
-Fresh `python3 mojo.py build` against current master (f0f6e78):
+Fresh `python3 fire.py build` against current master (f0f6e78):
 **exits 0**, binary built in ~71s. Running it crashes with SIGTRAP and
 zero output — lldb pinpoints frame #0 at umarshal.py:304,
 `assert isinstance(data, bytes)` inside `loads()`: main()'s self-test
@@ -28,11 +28,11 @@ no codegen defect involved; every compile-side fix from the 2026-08-25
 entry below holds. Doc remains compile-RESOLVED / runtime-blocked-on-
 stubs.
 
-## Status (updated 2026-08-25, worktree fix/opencode-group2 — ALL 17 compile errors FIXED via a shared root cause; `mojo.py build` now EXITS 0; runtime reaches the self-test but depends on stubbed C-extension modules)
+## Status (updated 2026-08-25, worktree fix/opencode-group2 — ALL 17 compile errors FIXED via a shared root cause; `fire.py build` now EXITS 0; runtime reaches the self-test but depends on stubbed C-extension modules)
 
 Re-verified fresh: the 16 `'MojoList' has no member named 'co_*'`
 errors AND the `'main' undeclared here` error are all GONE —
-`python3 mojo.py build .../Tools/build/umarshal.py` now **exits 0**
+`python3 fire.py build .../Tools/build/umarshal.py` now **exits 0**
 (verified twice, second run after clearing stale CAS entries). Two
 real fixes in shared compiler source (commit `cb85bf6`), both narrower
 than the "per-branch retyping vs dynamic-dispatch routing" dilemma this
@@ -83,7 +83,7 @@ treats the non-stdlib sibling `import umarshal` as an empty module).
 
 ## Status (re-verified 2026-08-09): still genuinely broken, root cause now fully traced — confirmed structural
 
-Re-ran fresh against current master (`python3 mojo.py build
+Re-ran fresh against current master (`python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Tools/build/umarshal.py`): still fails,
 17 errors — the 16 `'MojoList' has no member named 'co_*'` errors
 below reproduce identically (the old `'Code' has no member named
@@ -95,7 +95,7 @@ inside that same `if` block, a distinct, narrow, NOT investigated
 here). Also confirmed via a fully independent, non-cached path: wrote
 the freshly-generated `.ci` to a `.c` file and compiled it directly
 with the real toolchain (`/opt/local/bin/gcc-mp-15 -fgimple -fPIC
--Iruntime -c`, bypassing `mojo.py`/CAS entirely) — same 17 errors,
+-Iruntime -c`, bypassing `fire.py`/CAS entirely) — same 17 errors,
 ruling out any caching artifact.
 
 **Root cause, now precisely traced** (previous update below said "not
@@ -188,8 +188,8 @@ a safe, narrow patch.
 See `bugs/COMPILE_FAIL_Tools_build_deepfreeze.md` for an important,
 separate finding: that file's OWN direct compile bug (unrelated,
 narrow, `max()`/`min()` on mixed `char`/`char *` args) IS fixed there,
-but `python3 mojo.py build` now reports overall success for
-`deepfreeze.py` NOT because this bug got fixed — `mojo.py build`'s
+but `python3 fire.py build` now reports overall success for
+`deepfreeze.py` NOT because this bug got fixed — `fire.py build`'s
 primary "link mode" path (`driver.compile_program`) silently drops
 `deepfreeze.py`'s `import umarshal` as an unresolvable sibling
 dependency (confirmed: the built binary has zero `Reader`/`_r_object`/

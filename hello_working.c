@@ -1,7 +1,7 @@
 /* Working GIMPLE from gcc compilation */
 #include <Python.h>
 #include <stdio.h>
-#include "runtime/mojo_runtime.h"
+#include "runtime/fire_runtime.h"
 
 void mojo_print(const char *str);
 

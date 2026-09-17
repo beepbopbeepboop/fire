@@ -6,7 +6,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical two-function refusal, unchanged
 
-Fresh `python3 mojo.py build .../Tools/importbench/importbench.py`
+Fresh `python3 fire.py build .../Tools/importbench/importbench.py`
 against this worktree (fast-forwarded to master `43fb291`): identical
 refusal naming exactly `benchmark_wo_bytecode` (unresolved callee
 `cache_from_source(...)`) and `from_cache` (non-plain assignment target
@@ -152,7 +152,7 @@ without emitting silently wrong or broken code; falling back to
 interpreting this module from source instead
 ```
 
-`MOJO_DEBUG=1 python3 mojo.py build importbench.py` pins down each of
+`MOJO_DEBUG=1 python3 fire.py build importbench.py` pins down each of
 the 6 refused functions to one of two ALREADY-TRACKED, deliberately-
 deferred structural gaps in the coroutine (`.cpp`) generator-body
 codegen — no new root cause found, and this file doesn't reveal any

@@ -11,7 +11,7 @@ from io import StringIO
 from build_config import find_gcc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUNTIME_HDR = os.path.join(HERE, 'runtime', 'mojo_runtime.h')
+RUNTIME_HDR = os.path.join(HERE, 'runtime', 'fire_runtime.h')
 
 _PASS = 0
 _FAIL = 0
@@ -36,7 +36,7 @@ def compile_mojo_to_gimple_exe(mojo_src: str) -> str:
             [find_gcc(), '-fgimple',
              f'-I{runtime_dir}',
              '-o', exe_file, c_file,
-             os.path.join(runtime_dir, 'mojo_runtime.c')],
+             os.path.join(runtime_dir, 'fire_runtime.c')],
             capture_output=True,
             text=True,
             timeout=30

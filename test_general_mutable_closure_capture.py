@@ -32,7 +32,7 @@ Root causes fixed:
     surfaced by std/memory/span.mojo's own `Span.count` during this fix's
     stdlib-dylib regression check).
 
-This file compiles + links + RUNS each repro (interpreter via `mojo.py run`
+This file compiles + links + RUNS each repro (interpreter via `fire.py run`
 AND the compiled path via a real gcc -fgimple build+link) and asserts on
 real output, not just that the pieces compile/parse.
 """
@@ -61,7 +61,7 @@ def check(name, cond, detail=""):
 
 def _build_and_run_compiled(mojo_src: str, filename: str = 'prog.mojo') -> str:
     """Real compile+link+run through the same driver.compile_program path
-    `python3 mojo.py <file.mojo>` (build mode) itself uses -- mirrors
+    `python3 fire.py <file.mojo>` (build mode) itself uses -- mirrors
     test_comptime_bracket_params.py's identical harness."""
     wd = tempfile.mkdtemp(prefix='mojo_general_mut_capture_')
     src_path = os.path.join(wd, filename)
@@ -78,14 +78,14 @@ def _build_and_run_compiled(mojo_src: str, filename: str = 'prog.mojo') -> str:
 
 
 def _run_interpreted(mojo_src: str, filename: str = 'prog.mojo') -> str:
-    """Real interpretation through `mojo.py run` (myinterpreter.py's own
+    """Real interpretation through `fire.py run` (myinterpreter.py's own
     evaluator), captured via a subprocess so this test genuinely exercises
-    the same code path a user's `python3 mojo.py <file.mojo> run` would."""
+    the same code path a user's `python3 fire.py <file.mojo> run` would."""
     wd = tempfile.mkdtemp(prefix='mojo_general_mut_capture_interp_')
     src_path = os.path.join(wd, filename)
     with open(src_path, 'w') as f:
         f.write(mojo_src)
-    r = subprocess.run([sys.executable, os.path.join(HERE, 'mojo.py'), 'run', src_path],
+    r = subprocess.run([sys.executable, os.path.join(HERE, 'fire.py'), 'run', src_path],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"interpreter run exited {r.returncode}, stderr={r.stderr}")
@@ -108,7 +108,7 @@ def main() raises:
 
 def test_ordinary_mut_capture_interpreted():
     """The bug doc's exact, real-Mojo-verified repro, via the interpreter.
-    Real Mojo (tools/mojo): prints 3. Before this fix, mojo.py run printed
+    Real Mojo (tools/mojo): prints 3. Before this fix, fire.py run printed
     0 (each call silently rebound a fresh local `counter` inside `inc`)."""
     out = _run_interpreted(_ORDINARY_MUT_SRC)
     check("interpreter: {mut} closure capture propagates across 3 calls -> 3",
@@ -116,7 +116,7 @@ def test_ordinary_mut_capture_interpreted():
 
 
 def test_ordinary_mut_capture_compiled():
-    """Same repro, via the compiled (gimple) path. Before this fix, `mojo.py
+    """Same repro, via the compiled (gimple) path. Before this fix, `fire.py
     build` + running the binary also printed 0 (by-value-only capture)."""
     out = _build_and_run_compiled(_ORDINARY_MUT_SRC)
     check("compiled: {mut} closure capture propagates across 3 calls -> 3",

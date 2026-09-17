@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """No-shim self-hosted --dump-full artifact-content guard (DESIGN.html R6).
 
-`MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full` exercises the self-hosted
+`MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full` exercises the self-hosted
 compiler binary compiling itself, using its OWN compiled codegen instead of
 the python3 shim every other check-* target drives through. A codegen bug
 specific to that self-hosted path can silently produce a WRONG-BUT-SUCCESSFUL
-mojo.ci (a whole sibling module gets dropped, an operator gets miscompiled,
+fire.ci (a whole sibling module gets dropped, an operator gets miscompiled,
 ...) with exit code 0 — no other gate step would ever see it, because they
 all compile through the shim. This is not hypothetical: it is exactly what
 happened on 2026-09-13 (see the mojo-reference2 project memory
@@ -26,13 +26,13 @@ import sys
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 MOJOC = os.path.join(REPO, "mojoc")
-MOJO_MAIN = os.path.join(REPO, "mojo.py")
+MOJO_MAIN = os.path.join(REPO, "fire.py")
 
 
 def _dump_full(env_extra: dict, use_mojoc: bool, cwd: str) -> tuple[int, bytes | None]:
-    """Run --dump-full on mojo.py inside `cwd`, return (exit_code, .ci bytes
+    """Run --dump-full on fire.py inside `cwd`, return (exit_code, .ci bytes
     or None if not produced)."""
-    ci_path = os.path.join(cwd, "mojo.ci")
+    ci_path = os.path.join(cwd, "fire.ci")
     if os.path.exists(ci_path):
         os.remove(ci_path)
     env = dict(os.environ)
@@ -56,14 +56,14 @@ def run() -> tuple[bool, str]:
 
     shim_rc, shim_ci = _dump_full({}, use_mojoc=False, cwd=REPO)
     if shim_rc != 0 or not shim_ci:
-        return False, f"shim (python3 mojo.py --dump-full) itself failed: exit {shim_rc}, {len(shim_ci or b'')} bytes"
+        return False, f"shim (python3 fire.py --dump-full) itself failed: exit {shim_rc}, {len(shim_ci or b'')} bytes"
 
     noshim_rc, noshim_ci = _dump_full(
         {"MOJO_NO_SHIM": "1", "MOJO_HOME": REPO}, use_mojoc=True, cwd=REPO)
 
     if noshim_ci is None:
         return False, (
-            f"MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full produced NO mojo.ci "
+            f"MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full produced NO fire.ci "
             f"(exit {noshim_rc}) - the known original SIGBUS in "
             f"_rewrite_assign_stmt writes the correct file before crashing, "
             f"so an ABSENT file is a worse regression, not the known issue")
@@ -87,8 +87,8 @@ def run() -> tuple[bool, str]:
         # artifact itself is provably correct. Report distinctly from the
         # content-mismatch case above.
         return False, (
-            f"MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full exited {noshim_rc} "
-            f"(SIGBUS/crash) even though the written mojo.ci IS byte-"
+            f"MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full exited {noshim_rc} "
+            f"(SIGBUS/crash) even though the written fire.ci IS byte-"
             f"identical to the shim's - known issue, see "
             f"selfhost-dump-full-module-drop project memory")
 
@@ -104,7 +104,7 @@ def main() -> int:
         return 1
     if ok:
         print("Results: 1 passed, 0 failed")
-        print(f"✓ MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full matches shim ({msg})")
+        print(f"✓ MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full matches shim ({msg})")
         return 0
     print("Results: 0 passed, 1 failed")
     print(f"✗ {msg}")

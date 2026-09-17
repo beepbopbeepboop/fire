@@ -69,7 +69,7 @@ ABI_VERSION = "2"
 # Auto-discovery makes "new compiler source file" self-registering.
 _COMPILER_SOURCES = [
     'mlir.py', 'module_loader.py', 'ast_rewriter.py',
-    'generated_dispatch.py', 'mojo_compiler.py',
+    'generated_dispatch.py', 'fire_compiler.py',
     'elaborate.py', 'monomorphize.py', 'comptime.py',
     'imports.py', 'reflect.py', 'build_stdlib_dylib.py',
     'version.py', 'build_config.py',
@@ -82,8 +82,8 @@ for _p in sorted(_glob.glob(os.path.join(HERE, 'gimple_*.py'))):
 # runtime). A change to either MUST invalidate the cache, or stale objects link
 # against a mismatched ABI. These live under runtime/, not next to the .py files.
 _RUNTIME_SOURCES = [
-    os.path.join('runtime', 'mojo_runtime.h'),
-    os.path.join('runtime', 'mojo_runtime.c'),
+    os.path.join('runtime', 'fire_runtime.h'),
+    os.path.join('runtime', 'fire_runtime.c'),
 ]
 
 # In-process hit/miss instrumentation (and reset for tests).
@@ -260,7 +260,7 @@ def hash_parts(*parts) -> str:
 
 
 def runtime_fingerprint() -> str:
-    """Hash of just the runtime sources (mojo_runtime.h/.c). For artifacts whose
+    """Hash of just the runtime sources (fire_runtime.h/.c). For artifacts whose
     only compiler-side input is the runtime — e.g. a gcc syntax check of already-
     generated C, which #includes the header via -I — this is the right, narrow
     fingerprint: folding in compiler_fingerprint() instead would needlessly
@@ -312,7 +312,7 @@ def gcc_syntax_key(gcc_variant: str, flags: tuple, c_source: str) -> str:
     """Key (`gcc-syntax/<hash>`) for caching gcc -fsyntax-only results.
 
     Folds in the toolchain fingerprint (gcc version, platform, flags), the
-    runtime fingerprint (the C #includes mojo_runtime.h via -I), and the C
+    runtime fingerprint (the C #includes fire_runtime.h via -I), and the C
     source — so a gcc upgrade or a runtime-header edit invalidates stale
     syntax-check results."""
     return 'gcc-syntax/' + _hash(

@@ -6,7 +6,7 @@ integrated into the gimple_codegen.py compilation pipeline.
 """
 
 from gimple_codegen import GimpleGen
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 import sys
 from io import StringIO
 

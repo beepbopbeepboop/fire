@@ -20,7 +20,7 @@
 <body>
 
 <h1>A/B + Interpreter Parity — 100% Python Compatibility</h1>
-<p><strong>Goal:</strong> (1) byte-identical <code>.ci</code> between <code>python3 mojo.py --dump X.mojo</code> and <code>MOJO_NO_SHIM=1 ./mojoc X.mojo --dump</code>; (2) runtime output parity between <code>python3 mojo.py run X.mojo</code> (interpreter) and <code>python3 mojo.py --jit X.mojo</code> (compiled); (3) all existing quality gates stay green after every change.</p>
+<p><strong>Goal:</strong> (1) byte-identical <code>.ci</code> between <code>python3 fire.py --dump X.mojo</code> and <code>MOJO_NO_SHIM=1 ./mojoc X.mojo --dump</code>; (2) runtime output parity between <code>python3 fire.py run X.mojo</code> (interpreter) and <code>python3 fire.py --jit X.mojo</code> (compiled); (3) all existing quality gates stay green after every change.</p>
 
 <h2>Architecture reality</h2>
 <p>Both <code>gimple_codegen.py</code> and <code>myinterpreter.py</code> dispatch on AST nodes via <code>getattr(self, f'handler_{type(node).__name__}')(node)</code>. As Python both work. But <code>mojoc</code> is gimple_codegen.py <em>compiled to C</em> — the <code>getattr(self, name)(node)</code> compiles to an indirect call stubbed to <code>(int64_t)0</code>, so <strong>every statement/expression body is dropped</strong> in the native output. This is the linchpin (Class B).</p>
@@ -58,7 +58,7 @@
 
 <h2>Track B — Interpreter parity + runtime harness (parallel)</h2>
 <ol>
-<li><strong>B1. Runtime-diff harness.</strong> New harness: run corpus via <code>mojo.py run</code> and <code>mojo.py --jit</code>, diff stdout+exit. Corpus: 7 A/B files → test_simple + builtins → stdlib tests. Wire into <code>make check</code>.</li>
+<li><strong>B1. Runtime-diff harness.</strong> New harness: run corpus via <code>fire.py run</code> and <code>fire.py --jit</code>, diff stdout+exit. Corpus: 7 A/B files → test_simple + builtins → stdlib tests. Wire into <code>make check</code>.</li>
 <li><strong>B2. Close interp-vs-compiled gaps</strong> (per the table above: LambdaExpr, ImagLiteral, MatchStmt capture, DelStmt, async for/with, failure mode alignment).</li>
 <li><strong>B3. Cross-path lockstep discipline.</strong> Apply each fix to BOTH paths with a cross-path test (pattern: <code>bugs/CHAINED_COMPARISON_WRONG_RESULT.md</code>). Add per-fix coverage to the runtime-diff harness.</li>
 </ol>

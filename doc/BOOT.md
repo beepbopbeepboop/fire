@@ -118,7 +118,7 @@ All diffs empty = bootstrap verified.
 
 | Stage failure | Fix location |
 |--------------|-------------|
-| `make transpile` | Fix apex `skills/solver_py2mojo.py`; re-run transpile |
+| `make transpile` | Fix apex `skills/solver_py2fire.py`; re-run transpile |
 | `make stage1` | Fix Mojo parser/compiler for syntax that broke; fix `mojo_main.mojo` |
 | `make stage2` | Fix determinism bug in compiler or entry-point |
 | `make verify` | Narrow via individual `--dump-*` flags; fix codegen nondeterminism |

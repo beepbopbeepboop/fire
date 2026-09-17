@@ -130,7 +130,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py`
 
 ## Status (re-verified 2026-08-23 against master 626f3f0 — unchanged, STILL-OPEN structural)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 importlib/resources/readers.py` fresh: still fails with the IDENTICAL
 up-front refusal, byte-for-byte the 2026-08-09 message —
 `cannot compile module: function(s) _candidate_paths (generator
@@ -150,7 +150,7 @@ write-up for the full shape requirements.
 
 ## Status (re-verified 2026-08-09 — historical): blocker changed, now a confirmed structural gap
 
-Re-ran `python3 mojo.py build .../readers.py` fresh against current
+Re-ran `python3 fire.py build .../readers.py` fresh against current
 master. The 2026-08-06 blocker below (the `NamespaceReader.__init__`
 unannotated-param `int64_t` mistype) no longer surfaces — presumably
 fixed as a side effect of other recent type-inference work on sibling
@@ -176,7 +176,7 @@ def _candidate_paths(cls, path_str: str) -> Iterator[abc.Traversable]:
 `gimple_codegen.py`'s `gen_module` (`gimple_codegen.py` around line
 30564) does an upfront, whole-module scan for any function containing
 `yield`/`yield from` or declared `async def`, and — when not running
-under `relaxed_imports` (stdlib-build fallback mode; `mojo.py build`
+under `relaxed_imports` (stdlib-build fallback mode; `fire.py build`
 on a direct entry file always runs strict) — raises immediately,
 before any per-function codegen (including whatever
 `NamespaceReader.__init__` now does) is even attempted. This is the

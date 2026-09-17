@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -518,13 +518,9 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
         # stdlib/test module. `load_module` raises "Only stdlib and test
         # imports supported" for those, and the compiled backend's
         # try/except around this call does NOT reliably catch a raised
-        # ValueError, so `./mojoc --dump mojo.py` died on
+        # ValueError, so `./mojoc --dump fire.py` died on
         # `from build_config import ...`. Pre-filter: those siblings carry
         # no stdlib externs anyway.
-        if ('.' not in mod and not mod.startswith('std')
-                and gimple_ctypes.os.path.isfile(gimple_ctypes.os.path.join(
-                    gimple_codegen._SELFHOST_DIR, mod + '.py'))):
-            continue
         # Guard BEFORE calling, not just try/except around the call: this
         # codegen's compiled `try`/`except` does not reliably catch a
         # raised exception, so a real (non-mojo-stdlib) Python import —
@@ -712,7 +708,7 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
             # `gimple_codegen._SELFHOST_DIR`, not `_mlmod2.__file__`: a
             # compiled-in module object has no `__file__` attribute, so
             # `os.path.abspath(_mlmod2.__file__)` raised `AttributeError:
-            # __file__` and killed the whole `./mojoc --dump mojo.py`
+            # __file__` and killed the whole `./mojoc --dump fire.py`
             # self-compile. `_SELFHOST_DIR` is the same sibling directory
             # (it's `dirname(abspath(gimple_codegen.__file__))`, and every
             # compiler `.py` lives in one directory) and is already the
@@ -910,7 +906,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         # built). Every OTHER call site compiled afterwards then sees the
         # concrete signature and silently skips packing, casting the
         # first loose vararg straight to MojoList* instead — found via a
-        # real crash: `self._is_kw("as")` (Parser__is_kw, mojo_compiler.py)
+        # real crash: `self._is_kw("as")` (Parser__is_kw, fire_compiler.py)
         # reinterpreted the "as" string's raw pointer bits as a MojoList*
         # and segfaulted deep in mojo_list_contains_str. The sentinel form
         # survives untouched in _mangled_signature_ctypes (Pass 2b-bis
@@ -1020,7 +1016,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         elif ptype == 'char *' and atype in ('int', 'int64_t', 'char'):
             # A raw single char whose DECLARED type was widened to
             # int64_t (joining another assignment site in the same
-            # function — e.g. `qch = stmt[i]` in mojo_compiler.py's own
+            # function — e.g. `qch = stmt[i]` in fire_compiler.py's own
             # `_process_nested_tstrings`) still has its real type
             # tracked in _actual_types (actual_atype, resolved just
             # above) even though the bare `atype` check below can't see
@@ -1092,7 +1088,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             #     int64_t-typed local holding a string handle passed to
             #     one must keep the by-value handle pass-through
             #     (confirmed via make check-selfhost: auto-addressing
-            #     those regressed mojo.py's own self-compilation with
+            #     those regressed fire.py's own self-compilation with
             #     dozens of GIMPLE errors). Pointer-to-numeric-scalar
             #     (`*UInt64` -> 'uint64_t *', `*Int64` -> 'int64_t *',
             #     ...) is exactly the raw-pointer OUT-parameter spelling
@@ -1392,7 +1388,7 @@ def _resolve_type(gen, ann: str | None) -> str:
             if elem_ann in gen.struct_field_types and elem_ann not in gimple_ctypes._TYPE_MAP:
                 return f"{elem_ann} *"
     # Same gap as above, for Mojo's OTHER raw-pointer spelling: `*T`
-    # (`fn f(p: *SomeStruct)`), parsed by mojo_compiler.py as the literal
+    # (`fn f(p: *SomeStruct)`), parsed by fire_compiler.py as the literal
     # text "*" + T. `_mojo_type` (module-level, no struct_field_types
     # access) now resolves `*Int8`/`*Int64`/... via its own exact-
     # _TYPE_MAP-key check, but a struct element type needs this
@@ -1465,7 +1461,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # looks identical to list/sequence indexing to this analysis. Without
     # this, any unannotated closure parameter that is both subscripted
     # AND string-only-method-called (a very common shape for hand-rolled
-    # char-by-char scanners, e.g. mojo_compiler.py's own
+    # char-by-char scanners, e.g. fire_compiler.py's own
     # `replace_multiline_strings(src)`) was inferred as `MojoList *`
     # instead of `char *`. That produced a compiled function whose `src`
     # parameter was declared as a MojoList* while the caller actually
@@ -1566,7 +1562,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         # signal as a str-only method call, just one indirection removed.
         # Found chasing gimple_codegen's `_lower_slice`/`_decode_str_
         # literal_text` quote-corruption bug back to its real source:
-        # mojo_compiler.py's own `_strip_string_prefix_and_quotes(raw)`
+        # fire_compiler.py's own `_strip_string_prefix_and_quotes(raw)`
         # does `prefix, rest = raw[:n], raw[n:]` (rest is a SLICE of the
         # param, one step removed) then `first = rest[0]; ... if first ==
         # '"' or first == "'": ...` (first is a subscript of THAT, two
@@ -1689,8 +1685,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # `bindings[k]` to `mojo_list_get_int`/`mojo_list_set_int`.
             # Those index `((MojoList *)dict)->data[key_ptr]`, i.e.
             # `dict->slots + 8 * (int64_t)"key"` — ~34GB past the slot
-            # array — so `MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full`
-            # took SIGBUS on mojo.py's own line 27 (`os.environ['PATH']
+            # array — so `MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full`
+            # took SIGBUS on fire.py's own line 27 (`os.environ['PATH']
             # = ...`, the one statement that reaches
             # `_rewrite_assign_stmt`) 200/200 runs, before writing any
             # output at all. Same class as the `src[i]` ->
@@ -1912,7 +1908,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # ignored here, so a parameter *only* ever used as
                     # os.path.basename(param) got no type hint at all and
                     # defaulted to int64_t. Real bug found via
-                    # build_executable(input_file, ...) in mojo.py, where
+                    # build_executable(input_file, ...) in fire.py, where
                     # input_file is used via
                     # os.path.basename(os.path.splitext(input_file)) —
                     # the parameter held a real char* pointer throughout,
@@ -1962,7 +1958,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 if isinstance(node, gimple_ctypes.AssignStmt):
                     if isinstance(node.target, gimple_ctypes.TupleExpr) and isinstance(node.value, gimple_ctypes.TupleExpr):
                         # `prefix, rest = raw[:n], raw[n:]` — pair up each
-                        # target/value slot, same as mojo_compiler.py's own
+                        # target/value slot, same as fire_compiler.py's own
                         # `_strip_string_prefix_and_quotes`.
                         for t_el, v_el in zip(node.target.elements, node.value.elements):
                             _track_derivation(t_el, v_el)
@@ -2115,7 +2111,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # 2-tuple form is keyed by the TUPLE's own heap address once
             # self-hosted — a fresh allocation per `.get()` — so a lookup
             # spuriously misses (or hits a stale unrelated entry, which fed
-            # mojo_compiler.py's `_emit_pair`'s `v` a `_value` field access
+            # fire_compiler.py's `_emit_pair`'s `v` a `_value` field access
             # it never makes -> inferred `_MojoPointerBase *`). `id(func)` is
             # still address-based, but it is a within-run-stable per-object
             # int used ONLY as a memo key here (never emitted), exactly like
@@ -2163,7 +2159,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             #
             # This flag is load-bearing for DETERMINISM, not just accuracy:
             # it is what keeps a genuinely polymorphic parameter at int64_t.
-            # `mojo_compiler.py`'s own `_scan_yield_bearing(node, out_ids)`
+            # `fire_compiler.py`'s own `_scan_yield_bearing(node, out_ids)`
             # is exactly that — `node` is a list, a dataclass, or None — and
             # when this came out False the `is_subscripted or is_iterated`
             # rule below typed `node` as `MojoList *` on the strength of the
@@ -2324,7 +2320,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 # comprehension form (2-tuple `.items()` target + an
                 # `all(genexpr)` whose inner `f in sfields` reads the dict
                 # value slot) miscompiled on the self-hosted path — every
-                # unannotated struct-typed parameter (e.g. mojo.py's own
+                # unannotated struct-typed parameter (e.g. fire.py's own
                 # `format_token(tok)` -> `Token *`) stayed int64_t.
                 # `sorted(struct_evidence)`, not a bare `for f in
                 # struct_evidence`: iterating a str-SET lowers to
@@ -2864,7 +2860,7 @@ def _fstring_sub_exprs(gen, node) -> list:
             continue
         try:
             # Module-level `Parser`/`py_tokenize` (see _lower_StringLiteral's
-            # matching fix): a function-scoped `from mojo_compiler import
+            # matching fix): a function-scoped `from fire_compiler import
             # ... as _P` is unresolvable in the self-hosted compiler.
             expr_node = Parser(py_tokenize(text))._parse_expr(0)
             expr_node = gimple_ctypes.ast_rewriter.rewrite_node(expr_node)
@@ -3733,7 +3729,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # its own comment), EXCEPT a comprehension's target string is NOT
     # guaranteed to be paren-wrapped for a bare (unparenthesized)
     # tuple target the way ForStmt.target always is:
-    # `_parse_generator_target` (mojo_compiler.py) only wraps in
+    # `_parse_generator_target` (fire_compiler.py) only wraps in
     # parens when the SOURCE itself wrote them (`for (a, b) in ...`);
     # `for a, b in ...` inside a comprehension parses to the literal
     # string "a, b" with no parens at all, unlike `_parse_unpack_
@@ -4143,13 +4139,13 @@ def _function_has_reachable_fallthrough(fn) -> bool:
 
 
 def _is_free_eligible_function(fn) -> bool:
-    """True if `fn` (a mojo_compiler.FunctionDef) contains no nested `def`/
+    """True if `fn` (a fire_compiler.FunctionDef) contains no nested `def`/
     `async def` and no `lambda` ANYWHERE in its body — see the section
     banner above for why each disqualifies. A `try`/`except` in `fn`'s own
     body no longer disqualifies it (doc/OWNERSHIP_MODEL.md's TODO item 3,
     landed 2026-09-15): the cleanup-thunk registry (`maybe_push_owned_
     local`/`mojo_cleanup_checkpoint_save`/`mojo_raise`'s unwind, see
-    runtime/mojo_runtime.c) now makes a candidate's constructing
+    runtime/fire_runtime.c) now makes a candidate's constructing
     assignment and its return/fallthrough free safe to straddle a `try`
     in the SAME function, exactly the same way it already made them safe
     to straddle a callee's own exception. A nested `def`/`lambda` still
@@ -4212,7 +4208,7 @@ _OWNED_FREE_RUNTIME_FN = {
 # `_emit_owned_local_frees` already emits below. `mojo_raise`'s longjmp
 # skips that free call entirely on any exception path reached before a
 # candidate's owning return/fallthrough runs — this is what lets
-# `mojo_raise` (runtime/mojo_runtime.c) still free it in that case.
+# `mojo_raise` (runtime/fire_runtime.c) still free it in that case.
 _OWNED_PUSH_RUNTIME_FN = {
     'MojoDict *': 'mojo_cleanup_push_dict',
     'MojoList *': 'mojo_cleanup_push_list',
@@ -4268,7 +4264,7 @@ def _emit_owned_local_frees(gen):
     # emitted free calls (for a function with 2+ candidates) vary between
     # otherwise-identical process invocations. This is exactly the class
     # of bug `make bootstrap`'s byte-identity check exists to catch, and
-    # it did: stage1-vs-stage2 `mojo.ci` differed with this bug present.
+    # it did: stage1-vs-stage2 `fire.ci` differed with this bug present.
     # A fixed, deterministic order is required output, not a style choice.
     stack_allocated = getattr(gen, '_owned_stack_allocated', ())
     freed = 0

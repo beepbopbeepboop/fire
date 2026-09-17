@@ -164,7 +164,7 @@ absent from the no-shim one. Confirmed this isn't just the declaration:
 `grep -c "_gimple_gen_coro_" ` finds 380 occurrences in the shim's `.ci`
 vs only 26 in the no-shim one — the self-hosted `mojoc` is dropping nearly
 all of `gimple_gen_coro.py`'s own compiled content from its transitive
-closure when compiling `mojo.py --dump-full`, matching the
+closure when compiling `fire.py --dump-full`, matching the
 `selfhost-dump-full-module-drop` project memory's prior incident shape
 (a whole sibling module silently missing, exit code 0).
 
@@ -233,7 +233,7 @@ much-outer MODULE-level handler, meaning the intended LOCAL catch is
 being skipped somehow. **Root cause not yet isolated** — ruled out
 "try/except doesn't work at all self-hosted" (a standalone 2-level
 nested try/except repro, built and RUN as an ordinary compiled target
-program via `mojo.py build`, correctly caught a `ValueError` raised
+program via `fire.py build`, correctly caught a `ValueError` raised
 from a helper two calls deep), and ruled out "only one unprotected call
 site" (`_gen_for_zip` has exactly one caller, and it IS wrapped in
 try/except). The exact mechanism by which THIS SPECIFIC try/except
@@ -393,7 +393,7 @@ be practical without a more targeted address or call-site condition).
 ## Finding 4 — actually TWO bugs, 2 of 3 fixed, 1 remains (session 2)
 
 Continued via lldb on a real -O0 `mojoc_dbg2` build (Makefile's stage2
-recipe doesn't pass `-O`, so gcc defaults to -O0; `python3 mojo.py build
+recipe doesn't pass `-O`, so gcc defaults to -O0; `python3 fire.py build
 ... -O0` did NOT actually change codegen — confirmed by identical
 `nm`-reported addresses/disassembly between a "-O0" and a default build,
 so that flag path is untrustworthy for debug builds; built manually via
@@ -405,12 +405,12 @@ occurring — root cause never found; abandoned that angle.
 
 Root-caused via shim-side instrumentation instead (a `_sce_simple_emit`
 monkeypatch printing a traceback whenever the R2 chokepoint's container-
-kind check is about to fire, run via `python3 mojo.py <file>
+kind check is about to fire, run via `python3 fire.py <file>
 --dump-full` — safe since it's the shim, not self-hosted source). This
 reproduces `myinterpreter.py`'s `from_base` bug family AND revealed it's
 actually two independent, real logic bugs in the compiler itself (not
 self-host-only — the shim hits them too when compiling the compiler's
-OWN source as a target, e.g. `python3 mojo.py gimple_module_gen.py
+OWN source as a target, e.g. `python3 fire.py gimple_module_gen.py
 --dump-full`):
 
 **Bug A (FIXED)** — `gimple_gen_methods.py`'s `_lower_method_call`: when
@@ -450,7 +450,7 @@ level of `bases`) for a matching method name before minting a field.
 Both verified: `compile_stdlib.py` 664/664 unchanged across all landed
 states, `check-linkmode`/`check-selfhost`/`make bootstrap` all green,
 and both measurably closed part of the shim-vs-noshim gap on the real
-target (`mojo.py --dump-full mojo.py`): first-diff offset moved from
+target (`fire.py --dump-full fire.py`): first-diff offset moved from
 2390 (original) through several intermediate points as each fix
 landed, gap size dropped from the original ~5MB down to ~5.8MB... at
 one intermediate point it temporarily GREW (noshim > shim) because Bug
@@ -460,7 +460,7 @@ isn't monotonic evidence by itself; always check the first-diff offset
 too.
 
 **Bug C (found, NOT fixed — reverted after breaking the build)** — the
-remaining divergence after A+B: `mojo.py --dump-full mojo.py` first
+remaining divergence after A+B: `fire.py --dump-full fire.py` first
 differs at offset 19260, noshim ~5.8MB larger. Root cause: `class
 GimpleGen` (defined in `gimple_codegen.py`) is registered TWICE into
 this compile's shared `struct_field_types['GimpleGen']` — once via a
@@ -552,7 +552,7 @@ each masking the next once the prior one was fixed):
    isinstance(node, int) or isinstance(node, float) or
    isinstance(node, bool)` evaluates TRUE for essentially every real AST
    dataclass instance self-hosted (confirmed via instrumentation: of
-   5457 total `_walk_ast_into` calls compiling `mojo.py` self-hosted,
+   5457 total `_walk_ast_into` calls compiling `fire.py` self-hosted,
    5027 were misclassified as scalar leaves and never recursed into;
    the `dataclasses.is_dataclass` branch was reached 0 times). Reordering
    to check `is_dataclass` FIRST fixes the walker correctly — verified
@@ -596,7 +596,7 @@ each masking the next once the prior one was fixed):
    gap** — confirmed via debug counters matching the shim exactly
    (`total-fields=88`, all 5 spot-checked fields with correct types)
    after this specific change and no earlier one.
-8. **`mojo.py`'s own `build_executable`/`link_executable` link path was
+8. **`fire.py`'s own `build_executable`/`link_executable` link path was
    missing the 512MB stack-size linker flag** that `driver.py`'s
    link-mode path already has (`otool -l mojoc` showed `stacksize 0`
    instead of `536870912`) — an unrelated infra gap discovered while
@@ -618,7 +618,7 @@ skips), compile_stdlib.py (664/664, 0 unexpected), make bootstrap
 
 ### A separate bug found and fixed in the same session: bytes-literal concat non-determinism
 
-While re-verifying the full `mojo.py --dump-full` comparison after the
+While re-verifying the full `fire.py --dump-full` comparison after the
 above, found `test_noshim_dumpfull.py` still failing — but for a
 DIFFERENT reason, confirmed unrelated to Bug C: `mojo_bytes_from_cstr
 (<huge decimal number>)` calls appearing in the generated C for any
@@ -682,7 +682,7 @@ surrounding code, this loop is gated by `if sd.name not in
 self._emitted_structs:` — meaning it is a "catch anything not already
 emitted" fallback/dedup pass, not the primary emission path. The
 actual likely mechanism (not yet confirmed, just inferred from the
-codebase's overall shape): `mojo.py`'s transitive closure is compiled
+codebase's overall shape): `fire.py`'s transitive closure is compiled
 FILE BY FILE (`_compile_imported_module`, once per module), and each
 file's own compile likely emits ITS OWN locally-first-seen struct
 typedefs into that file's C-code fragment as they're encountered,
@@ -999,7 +999,7 @@ checks would help decide between "any second invocation of Parser
 breaks" (a single, central culprit) vs. "type_ann specifically is
 broken on ANY AssignStmt regardless of which Parser call created it,
 including the outer one, and the outer one only 'looks fine' because
-nothing downstream in the REAL compile of mojo.py ever critically
+nothing downstream in the REAL compile of fire.py ever critically
 depends on the correctness of the SPECIFIC handful of `AssignStmt`
 nodes whose `.type_ann` would have been wrong" (a MUCH bigger, harder-
 to-see bug that's been silently present all along, just never load-
@@ -1492,7 +1492,7 @@ old strictly-monotonic climb to 189GB) is itself evidence real frees are
 now happening, not just a smaller absolute number.
 
 **Whole-program self-compile (the actual `check-noshim-dumpfull` gate,
-`MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full`): still unsafe.** Same
+`MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full`): still unsafe.** Same
 monitoring approach, same fixes. RSS climbed to ~97-102GB in the first
 ~2 minutes, then oscillated in a 74-83GB band for roughly 15 minutes
 (again showing real frees, not monotonic growth) — but then, in the gap
@@ -1514,7 +1514,7 @@ routinely.
 **Sharper conclusion than before**: the memory-model prerequisite is
 real progress but only PARTIAL — sufficient to bound one large file's
 transitive-closure compile (~93GB peak, recovers), but NOT sufficient
-for the full `mojo.py` self-compile's much larger transitive closure
+for the full `fire.py` self-compile's much larger transitive closure
 (peaked at least 230GB, still climbing when killed — the true ceiling is
 unknown). The gap is plausibly proportional to program size (more
 distinct AST subtrees × the ownership model's current coverage not yet

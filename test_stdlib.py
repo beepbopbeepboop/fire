@@ -7,7 +7,7 @@ import os, sys, subprocess, concurrent.futures
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STDLIB = "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib"
-MOJO = os.path.join(HERE, "mojo.py")
+MOJO = os.path.join(HERE, "fire.py")
 MAX_WORKERS = 20
 
 
@@ -91,15 +91,15 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1].startswith("--mode="):
         m = sys.argv[1].split("=", 1)[1]
         if m == "interp":
-            modes = [("interp", "interpreter (mojo.py run)")]
+            modes = [("interp", "interpreter (fire.py run)")]
         elif m == "jit":
-            modes = [("jit", "JIT compiler (mojo.py --jit)")]
+            modes = [("jit", "JIT compiler (fire.py --jit)")]
         else:
             print(f"ERROR: unknown mode {m!r}", file=sys.stderr)
             sys.exit(1)
     else:
-        modes = [("interp", "interpreter (mojo.py run)"),
-                 ("jit", "JIT compiler (mojo.py --jit)")]
+        modes = [("interp", "interpreter (fire.py run)"),
+                 ("jit", "JIT compiler (fire.py --jit)")]
 
     print(f"Found {len(files)} test/benchmark files in stdlib")
     print(f"Stdlib root: {STDLIB}")

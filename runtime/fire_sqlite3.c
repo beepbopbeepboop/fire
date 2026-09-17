@@ -1,5 +1,5 @@
-#include "mojo_sqlite3.h"
-#include "mojo_runtime.h"
+#include "fire_sqlite3.h"
+#include "fire_runtime.h"
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>

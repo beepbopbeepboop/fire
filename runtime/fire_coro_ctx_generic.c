@@ -9,7 +9,7 @@
    Selection is by the build (a single -D or file choice); this file and an
    arch .S are mutually exclusive in a link. */
 #define _XOPEN_SOURCE 700
-#include "mojo_coro_ctx.h"
+#include "fire_coro_ctx.h"
 
 /* <ucontext.h> is deprecated on macOS (still present and functional on
    arm64); this file is the portability fallback, not the primary path. */

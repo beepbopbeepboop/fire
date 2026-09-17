@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The type system successfully identifies and categorizes real compilation errors from `mojo.py --jit mojo.py`.
+The type system successfully identifies and categorizes real compilation errors from `fire.py --jit fire.py`.
 
 **Result**: ✅ **TYPE SYSTEM VALIDATED ON REAL CODE**
 

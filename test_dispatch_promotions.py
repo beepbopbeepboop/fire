@@ -5,7 +5,7 @@ This tests the new extensions to DispatchSolver for identifying functions
 that can be compiled to C and for promoting types across the full closure.
 """
 
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver, FunctionCompilability, TypePromotionSolver
 
 # Test case 1: Functions with full signatures (compilable)

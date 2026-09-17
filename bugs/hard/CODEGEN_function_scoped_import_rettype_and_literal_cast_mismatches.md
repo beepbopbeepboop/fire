@@ -10,9 +10,9 @@ f"{base_name} *"` derived-to-base cast; `gimple_gen_exprs.py:909`'s
 PascalCase-import guard). Attempted a fresh full `subprocess.py`/
 `enum.py` isolated-compile re-run to reproduce the doc's own
 error-count methodology, but this session's system is running 5+
-concurrent `mojo.py build` processes from other campaign agents
+concurrent `fire.py build` processes from other campaign agents
 (opencode groups on ctypes/dyld/analyzer/util, other worktrees) —
-every attempted repro (both the full `mojo.py build subprocess.py` and
+every attempted repro (both the full `fire.py build subprocess.py` and
 a standalone `compile_to_gimple(enum.py)` isolated-compile) exceeded
 the mandated wall-clock safety bound (~300s, RSS stayed low so this is
 contention, not a runaway) before reaching GCC or a result, and was
@@ -44,7 +44,7 @@ Mechanism 3's derived-to-base `self` materializing cast at
 `gimple_gen_methods.py:440-441`; Mechanism 4's PascalCase-import guard at
 `gimple_gen_exprs.py:891`. Mechanism 1's own minimal repro
 (`Foo.bar` with a function-scoped `from _colorize import can_colorize`)
-builds via `mojo.py build` with **zero** `invalid conversion in gimple
+builds via `fire.py build` with **zero** `invalid conversion in gimple
 call` errors. The previously documented remainders are unchanged:
 Mechanism 4's `Parameter(...)` constructor-call shape stays open for the
 documented cross-module resolution-ordering risk reasons, and the
@@ -59,7 +59,7 @@ Confirmed all four fixes below are present and committed on `master`
 *"` derived-to-base cast at :11086, and the PascalCase-import
 `_lower_MemberExpr` guard at :8994-9001 — `git blame` shows these landed
 in the commits this doc already describes; nothing since has touched
-them). Re-ran `python3 mojo.py build
+them). Re-ran `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/subprocess.py`: 0 occurrences of
 `non-trivial conversion in 'integer_cst'` (Mechanism 2/3's target,
 still fully gone) and only 2 residual `invalid conversion in gimple
@@ -84,7 +84,7 @@ as-is per this session's "hard bugs" conservatism guidance.
 
 Follow-up to `bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
 defined.md`'s "Follow-up fix" section: once that doc's `os.py`
-`'relpath' is ambiguous` fix landed, `python3 mojo.py build
+`'relpath' is ambiguous` fix landed, `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/subprocess.py` stopped failing on that
 issue and exposed a different, much larger cluster of real GIMPLE type
 errors dominated by `Lib/argparse.py`, `Lib/typing.py`, `Lib/enum.py`,
@@ -105,7 +105,7 @@ All four fixes are in `gimple_codegen.py` only. Verified via the full
 
 ## Symptom (baseline, before this session's fixes)
 
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/subprocess.py
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/subprocess.py
 2>&1 | grep 'error:' | sort | uniq -c | sort -rn` — 785 total `error:`
 lines, dominated by:
 
@@ -187,7 +187,7 @@ class Foo:
             return 1
         return 0
 ```
-`python3 mojo.py build` on this (any `.py` file) fails:
+`python3 fire.py build` on this (any `.py` file) fails:
 ```
 error: invalid conversion in gimple call
 int
@@ -342,7 +342,7 @@ individually in the isolated `typing.py`-only count above).
 
 ### Symptom
 
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/typing.py`
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/typing.py`
 (pulls in `enum.py` transitively) — repeated, identical-looking errors:
 
 ```

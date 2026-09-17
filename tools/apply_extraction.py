@@ -165,7 +165,7 @@ IMPORT_BLOCK = """from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,

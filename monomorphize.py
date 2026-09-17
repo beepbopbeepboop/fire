@@ -22,7 +22,7 @@ import subprocess
 import cas
 from build_config import find_gcc, find_gxx
 from gimple_codegen import GimpleGen
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')

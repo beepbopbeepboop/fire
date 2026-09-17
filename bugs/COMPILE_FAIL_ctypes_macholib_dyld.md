@@ -113,7 +113,7 @@ stdlib dylib rebuild 0 skips / 0 errors.
 
 ## Status (re-verified 2026-08-25, wtOpencode_group3): unchanged — dyld.py's own compile unit still contributes ZERO errors
 
-Fresh safety-wrapped `mojo.py build`: rc=1 with **183 total `error:`
+Fresh safety-wrapped `fire.py build`: rc=1 with **183 total `error:`
 lines, ZERO matching `macholib/dyld.py`** — the file's own compile
 unit remains clean (this session's shared fixes — coroutine-body
 isinstance semantics, str split-family, statement-level fnptr-call
@@ -125,14 +125,14 @@ doc's scope.
 
 ## Status (re-verified 2026-08-25): unchanged; dyld.py's own compile unit still clean
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 ctypes/macholib/dyld.py` fresh (full run, under this session's
 safety-wrapped watcher, completed within budget) against current
 master (past the struct-method cross-call scalar contract "Pass 1.3e",
 generator-consumption-ordering fixed-point retry + defaults-aware arg
 padding, `**kwargs`-forward slot-alignment fix, and coroutine-body
 `int()`/`float()` builtin support landed since the 2026-08-24 entry
-below). `python3 mojo.py build` still exits 1 overall (315 `error:`
+below). `python3 fire.py build` still exits 1 overall (315 `error:`
 lines, up from ~300, same noise-level shift as `socket.py`'s doc), but
 `grep "macholib/dyld.py:" | grep error` returns ZERO hits — the ONLY
 line matching this file's own path is a harmless `warning: variable
@@ -153,7 +153,7 @@ typing derived from a callee's own inferred return ctype, plus a
 static dict/list container-shape scan of module-level functions for
 subscript lowering inside a generator body) — this directly targets
 every one of the five bullets in the "2026-08-06" entry below. Re-ran
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 ctypes/macholib/dyld.py`: **`dyld.py` (and `ctypes/macholib/
 framework.py`) now compile with ZERO errors** — only harmless
 unused-variable/unused-label warnings — where before the whole
@@ -166,7 +166,7 @@ iteration, `name.startswith`/`path.endswith` no longer fail on a
 mistyped `int64_t` param, and no more `co_yield` int64_t/char*
 conversion errors.
 
-`python3 mojo.py build` for this file still exits 1 overall, but the
+`python3 fire.py build` for this file still exits 1 overall, but the
 remaining ~300 errors are entirely in OTHER, transitively-imported
 modules with their own separate, pre-existing, unrelated failure
 classes — `collections`/`inspect` (subscript-store fallback, benign),
@@ -189,7 +189,7 @@ should look at the remaining OTHER modules' failures, not this one.
 
 ## Status (re-verified 2026-08-23, triage pass): identical failure, all five generator-codegen bullets still reproduce
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 ctypes/macholib/dyld.py`: fails at the same `dyld_gen.cpp` C++-coroutine
 stage with the same error cluster — `'framework_info' was not declared
 in this scope` (sibling module-level function called from inside a
@@ -277,7 +277,7 @@ stdlib dylib rebuild 0 skips, compile_stdlib.py -j8 664/664 0 unexpected.
 
 ### 2. NOT FIXED: generator/coroutine codegen gaps, now exposed by fix #1
 
-With the arity error out of the way, this file's actual `mojo.py build`
+With the arity error out of the way, this file's actual `fire.py build`
 now proceeds into a totally different code path — `dyld_gen.cpp` (the
 C++20-coroutine generator codegen), because `dyld_image_suffix_search`
 (and several sibling functions: `dyld_default_search`,
@@ -336,7 +336,7 @@ its own dedicated hard-bug investigation or grouping with the existing
 
 ### Re-verified 2026-08-09 against master `d3d4c68` — reproduces identically, no regressions/fixes in this cluster since 2026-08-06
 
-Full rebuild (`python3 mojo.py build .../ctypes/macholib/dyld.py`)
+Full rebuild (`python3 fire.py build .../ctypes/macholib/dyld.py`)
 still stops at exactly the same `dyld_gen.cpp` compile stage, and every
 one of the five bullets above still reproduces line-for-line against
 the current generated `dyld_gen.cpp`:

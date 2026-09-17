@@ -34,7 +34,7 @@ non-linear repeated variables, and variadic argument lists.
 """
 import dataclasses
 
-from mojo_compiler import (
+from fire_compiler import (
     IdentExpr, BinaryOp, CallExpr, MemberExpr, SubscriptExpr, TernaryExpr,
     AssignStmt, ExprStmt, IntLiteral, UnaryOp, _as_str, _as_list, _as_dict,
 )
@@ -110,7 +110,7 @@ class Node:
         # for any real term and EVERY registered rewrite (os.environ.get(
         # ...), sys.stdin.read(), subprocess.run(...), ...) silently
         # never fired once self-hosted. Root-caused via a --dump-full
-        # mojo.py sibling-import module drop (gimple_gen_coro.py's own
+        # fire.py sibling-import module drop (gimple_gen_coro.py's own
         # `os.environ.get(_ENV, _MODE)` left un-rewritten, raising an
         # uncaught AttributeError once codegen tried to treat the bare
         # `os` identifier as a real object) and reproduced standalone with
@@ -195,7 +195,7 @@ class RewriteRule:
 # stub, same situation as mojo_obj_getattr — see the module docstring and
 # the os.environ bug hunt this rewriter grew out of). Every place that needs
 # "which AST node class is this" uses this literal isinstance chain instead,
-# the same idiom mojo_compiler.py/gimple_codegen.py already use for AST
+# the same idiom fire_compiler.py/gimple_codegen.py already use for AST
 # dispatch. Only covers the node classes any *pattern* actually references
 # today (P.ident/member/call/subscript/binop) — extend this list when a new
 # pattern constructor needs to match on a node type not listed here.
@@ -447,7 +447,7 @@ def _path_str(path):
 # recover. Both call sites (build_trie, candidate_rules) now inline the
 # same "<path>|<kind>:<value>" construction directly instead, removing
 # the cross-call-site unification entirely. Root-caused via a --dump-full
-# mojo.py sibling-import module drop (gimple_gen_coro.py's own
+# fire.py sibling-import module drop (gimple_gen_coro.py's own
 # `os.environ.get(_ENV, _MODE)` left un-rewritten because this trie
 # never matched a single rule once self-hosted) and reproduced standalone
 # with a 2-line `import os` + `os.environ.get('X')`.
@@ -555,7 +555,7 @@ def build_trie(rules: list):
         # dropping EVERY registered rewrite rule (os.environ.get(...),
         # sys.stdin.read(), subprocess.run(...), ...) once self-hosted,
         # with no error: `try_rewrite` just always returned None. Found
-        # via a --dump-full mojo.py sibling-import module drop
+        # via a --dump-full fire.py sibling-import module drop
         # (gimple_gen_coro.py's own `os.environ.get(_ENV, _MODE)` at line
         # 72 raising an uncaught AttributeError once un-rewritten, since
         # there is no real `os` runtime object for `mojo_obj_getattr` to
@@ -672,7 +672,7 @@ def _rewrite_assign_stmt(node, trie):
     bindings = match_pattern(_OS_ENVIRON_ASSIGN_TARGET, node.target, {})
     if bindings is not None:
         # NOTE (still open, see selfhost-dump-full-module-drop.md): this
-        # exact statement (`os.environ['PATH'] = ...`, mojo.py's own
+        # exact statement (`os.environ['PATH'] = ...`, fire.py's own
         # line 27) is the ONLY real call site in this whole transitive
         # closure that ever reaches this branch with `bindings is not
         # None`, and `bindings['key']` crashes with a real SIGBUS inside
@@ -815,7 +815,7 @@ def _build_sys_stdin_read(b):
 # a bare marker (see _gen_stmt_ImportStmt), so `re.MULTILINE` has no runtime
 # object to look the flag up on — these rules give the constants their real
 # values directly. NOTE: the regex engine backing this runtime (see
-# mojo_re_sub_fn, runtime/mojo_runtime.c) hardcodes REG_EXTENDED and doesn't
+# mojo_re_sub_fn, runtime/fire_runtime.c) hardcodes REG_EXTENDED and doesn't
 # actually consume a flags argument yet, so a pattern compiled `re.MULTILINE`
 # won't behave differently at runtime — this only fixes the crash evaluating
 # the constant itself. See BACKLOG-CODEGEN.md.

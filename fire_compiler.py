@@ -121,7 +121,7 @@ class IntLiteral:
     # runtime has no bignum type), so a literal whose true value exceeds
     # int64_t range (e.g. the all-ones 64-bit mask 0xFFFFFFFFFFFFFFFF) prints
     # as -1 via `value` alone — a real, otherwise-unfixable mismatch against
-    # Python's own dump. See mojo_int_literal_decimal in mojo_runtime.c.
+    # Python's own dump. See mojo_int_literal_decimal in fire_runtime.c.
     raw: str = ''
 
 @dataclass
@@ -835,7 +835,7 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
                 # brace-depth tracking exists for real t-string
                 # interpolation, where `{`/`}` are guaranteed balanced —
                 # applying that same assumption to an ordinary string's
-                # literal content (e.g. mojo.py's own C-code-snippet string
+                # literal content (e.g. fire.py's own C-code-snippet string
                 # literals, full of unbalanced `{`/`}` as plain text) scans
                 # past the real closing quote entirely, misreading unrelated
                 # later source as part of this "string". A plain string
@@ -896,7 +896,7 @@ def _split_on_separators(s: str) -> list[str]:
     has no such thing as a semicolon inside an expression at all), so it's
     left in place for the surrounding bracketed text to consume whole. This
     matters for a fixed-size-array type-annotation position, `var x:
-    [ElemType; N]` (see mojo_compiler.py's `_parse_type_ann_inner` LBRACKET
+    [ElemType; N]` (see fire_compiler.py's `_parse_type_ann_inner` LBRACKET
     branch / `_capture_bracketed_text`, and gimple_codegen.py's
     `_FIXED_ARRAY_ANN_RE`) — without bracket-depth tracking here, the ';'
     was treated as an ordinary statement separator and silently DROPPED
@@ -995,7 +995,7 @@ def py_tokenize(src: str) -> list[Token]:
                 # (always returns False), so under self-hosting this loop
                 # never advanced and every string prefix (f/r/b/...) went
                 # undetected — the sole remaining cause of make bootstrap's
-                # mojo.tok/.ast divergence (an f-string at mojo.py's own line
+                # mojo.tok/.ast divergence (an f-string at fire.py's own line
                 # 174 tokenized as one run-on NAME instead of a STRING).
                 # Explicit `==` comparisons are the same proven-safe pattern
                 # Parser._strip_string_prefix_and_quotes already uses for this
@@ -1033,7 +1033,7 @@ def py_tokenize(src: str) -> list[Token]:
                     # common case) to a single-line placeholder shifted
                     # every subsequent physical line number by (that
                     # string's line count - 1) — real bug, found via `for`
-                    # loops later in this exact file (mojo.py has a
+                    # loops later in this exact file (fire.py has a
                     # top-of-file module docstring) reporting a diagnostic
                     # line number dozens of lines before the loop's actual
                     # location, off by roughly the cumulative length of
@@ -3281,7 +3281,7 @@ class Parser:
         if t.value == "if":  return self._parse_comptime_if()
         if t.value == "for": return self._parse_comptime_for()
         # comptime assert expr[, msg]
-        if t.value == "assert": 
+        if t.value == "assert":
             return self._parse_assert(is_comptime=True)
         # comptime NAME [TypeParams] [: Type] = expr
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))

@@ -16,7 +16,7 @@ import sys
 import zlib
 import dataclasses
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -65,7 +65,7 @@ def _debug_note(where: str, detail: object = '') -> None:
     the propagated exception still carries the original failure's message
     text, making the real cause (this line) invisible from the outside.
     Concretely: `_gen_stmt_ForStmt`'s zip-loop fallback (gimple_gen_stmts.py)
-    calls this on a caught `ValueError`, and self-hosted `--dump-full mojo.py`
+    calls this on a caught `ValueError`, and self-hosted `--dump-full fire.py`
     would silently DROP an entire sibling module (gimple_gen_coro.py) whose
     `for (a, b), c in zip(...)` shape hit that fallback, with only a
     misleadingly-labeled "# ERROR: ...: zip() lowering needs a tuple loop
@@ -236,7 +236,7 @@ _TYPE_MAP: dict[str | None, str] = {
     'Float16': '__fp16',
     'Float32': 'float',
     'Float64': 'double',
-    # Bare Python `float` (e.g. FloatLiteral.value: float in mojo_compiler.py's
+    # Bare Python `float` (e.g. FloatLiteral.value: float in fire_compiler.py's
     # own AST node) had no entry at all — only the Mojo-style Float16/32/64
     # names above — so it silently fell through to the int64_t boxed-object
     # default. That default type made generic repr() call mojo_repr_int()
@@ -572,7 +572,7 @@ def _class_attr_ctype(v) -> str | None:
 
 
 # Fixed-size-array struct-field-annotation shape: `var x: [ElemType; N]`
-# (mojo_compiler.py's `_parse_type_ann_inner` LBRACKET branch captures the
+# (fire_compiler.py's `_parse_type_ann_inner` LBRACKET branch captures the
 # bracket contents verbatim via `_capture_bracketed_text`, which joins
 # tokens with single spaces — so `[Block; MAX_BLOCKS]` round-trips as the
 # string "[Block ; MAX_BLOCKS]"). `N` may be a decimal-literal size or a
@@ -688,7 +688,7 @@ def _mojo_type(ann: str | type | None) -> str:
         ann = base
     # Raw C-pointer annotation: `*Int8`, `*Int64`, `*Float32`, ... — Mojo's
     # `@cdecl` bridge-function pointer-parameter syntax (`fn f(buf: *Int8)`),
-    # parsed by mojo_compiler.py's `_parse_type_ann_inner` as the literal
+    # parsed by fire_compiler.py's `_parse_type_ann_inner` as the literal
     # text "*" + base-type-name (see its "Handle * prefix" branch). This is
     # a DIFFERENT, concrete use of a leading '*' than the unbound generic
     # variadic-type-pack placeholder (`*Ts`, `*T`) that also parses to the
@@ -777,7 +777,7 @@ def _c_var_decl(ctype: str, name: str) -> str:
     """A variable declaration for `ctype name` (no trailing `;`) — almost
     always just `f"{ctype} {name}"`, EXCEPT a function-pointer ctype (e.g.
     `'void (*)(int64_t)'`, this file's own spelling for the resume_fn/
-    destroy_fn parameters of runtime/mojo_async_runtime.h's
+    destroy_fn parameters of runtime/fire_async_runtime.h's
     AsyncRT_DeviceContext_enqueueHostFunction(Range) stubs — see
     _LIBC_SIGS' entries for those two names), whose C declarator syntax
     embeds the variable NAME INSIDE the parentheses (`void (*name)
@@ -1185,14 +1185,14 @@ _CPP_OPAQUE_PTR_STRUCTS = frozenset({
 })
 
 # Runtime-owned, FIXED-layout C structs this codegen itself defines (in
-# runtime/mojo_runtime.h or its own emitted preamble), as opposed to a
+# runtime/fire_runtime.h or its own emitted preamble), as opposed to a
 # struct arising from a user's own `class`/`struct` statement (those are
 # never hardcoded here — they're always discovered via StructDef
 # processing into `self.struct_field_types`, which is mutable/extensible:
 # a not-yet-seen field on a USER struct legitimately grows the struct, see
 # `_collect_self_assigns`). A fixed-layout runtime struct has no such
 # extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self; }`,
-# hardcoded in mojo_runtime.h, forever) — an attribute name that isn't one
+# hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
 # of its real C fields must route through the same dynamic-attribute
 # dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
 # `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
@@ -1530,7 +1530,7 @@ def _used_idents_node(node) -> set[str]:
         # gimple_module_gen.py's _scan_for_closures `free = used - ...`)
         # makes a nested closure's capture set — and therefore its env
         # struct allocation (`_alloc_X_env()` vs `(X *)0`) — flip run to
-        # run, a dominant --dump-full mojo.py nondeterminism source.
+        # run, a dominant --dump-full fire.py nondeterminism source.
         for _kv in node.pairs:
             r2 |= _used_idents_node(_kv[0]) | _used_idents_node(_kv[1])
         return r2

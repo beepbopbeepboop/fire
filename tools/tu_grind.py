@@ -4,7 +4,7 @@
 For each source file (smallest first), compare
 
     MOJO_NO_SHIM=1 stage2/mojo --dump <file>     (compiled codegen)
-    python3 mojo.py --dump <file>                (reference codegen)
+    python3 fire.py --dump <file>                (reference codegen)
 
 and classify the outcome:
 
@@ -80,7 +80,7 @@ def classify(src, timeout=180):
         return 'GCCERR', '%d errors; %s' % (n, first[0] if first else '')
 
     # Reference
-    rc3, _, err3 = _run([sys.executable, os.path.join(HERE, 'mojo.py'),
+    rc3, _, err3 = _run([sys.executable, os.path.join(HERE, 'fire.py'),
                          '--dump', abs_src], cwd=py_dir, timeout=timeout,
                         env={'MOJO_HOME': HERE, 'PYTHONPATH': HERE})
     if rc3 != 0 or not os.path.exists(py_ci):

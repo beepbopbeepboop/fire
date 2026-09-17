@@ -182,7 +182,7 @@ if stored_type == 'int64_t':
 
 ## Files Affected
 - **gimple_codegen.py**: Primary issue (12 major locations)
-- **mojo.py**: Uses generated code
+- **fire.py**: Uses generated code
 - **module_loader.py**: Module imports (indirect impact)
 
 ## Next Steps

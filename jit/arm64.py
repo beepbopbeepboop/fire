@@ -15,8 +15,7 @@ import platform
 import hashlib
 from pathlib import Path
 
-from gimple_codegen import compile_to_gimple
-from build_config import find_gcc
+from build_config import find_gcc, find_gxx
 
 
 _IS_DARWIN = platform.system() == 'Darwin'
@@ -40,23 +39,22 @@ def _toolchain_id() -> str:
         f"arch={platform.machine()}",
         f"system={platform.system()}",
     ]
-    # gcc version string
-    try:
-        ver = subprocess.run([_GCC_BIN, "--version"],
-                             capture_output=True, text=True, timeout=10)
-        parts.append("gcc_ver=" + ver.stdout.strip().splitlines()[0])
-    except Exception:
-        parts.append("gcc_ver=?")
-    # Runtime source/header contents — a runtime change must invalidate caches.
-    runtime_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runtime")
-    for name in ("mojo_runtime.c", "mojo_runtime.h"):
-        path = os.path.join(runtime_dir, name)
+    for compiler in (_GCC_BIN, find_gxx()):
         try:
-            with open(path, "rb") as f:
-                parts.append(f"{name}=" + hashlib.sha256(f.read()).hexdigest())
+            ver = subprocess.run([compiler, "--version"],
+                                 capture_output=True, text=True, timeout=10)
+            parts.append(f"{compiler}=" + ver.stdout.strip().splitlines()[0])
         except Exception:
-            parts.append(f"{name}=?")
+            parts.append(f"{compiler}=?")
+    script_dir = Path(__file__).resolve().parent.parent
+    sources = [script_dir / 'fire.py', script_dir / 'jit' / 'arm64.py']
+    sources.extend(sorted((script_dir / 'runtime').glob('fire_*')))
+    for path in sources:
+        if path.suffix not in ('.py', '.c', '.h', '.cpp', '.S'):
+            continue
+        name = path.relative_to(script_dir)
+        with path.open('rb') as f:
+            parts.append(f"{name}=" + hashlib.sha256(f.read()).hexdigest())
     cached = "\0".join(parts)
     _toolchain_id._cached = cached
     return cached
@@ -119,6 +117,7 @@ class ARM64JIT:
             f"filename={filename}",          # feeds module-name derivation + #line
             f"opt={self.opt_flag}",
             f"debug={self.debug_flag or ''}",
+            f"coro={os.environ.get('MOJO_CORO', 'stackswitch')}",
             _toolchain_id(),
             f"compiler={_compiler_id()}",   # codegen-source fingerprint + version
         ])
@@ -207,7 +206,7 @@ int main() {{
         module-name derivation and #line directives).
 
         `program_args` are forwarded as the executed binary's argv (after the
-        binary path itself), matching how `mojo.py run` and `mojo.py build` work.
+        binary path itself), matching how `fire.py run` and `fire.py build` work.
         """
         try:
             # Check cache first
@@ -224,68 +223,17 @@ int main() {{
                     return False
                 return True
 
-            # Generate GIMPLE code with transitive closure (do_imports=True)
-            gimple_code = compile_to_gimple(mojo_src, do_imports=True, filename=filename)
+            from fire import build_executable
 
-            # Setup temporary compilation directory
-            if self.temp_dir is None:
-                self.temp_dir = tempfile.mkdtemp(prefix="mojo_jit_")
-
-            c_file = os.path.join(self.temp_dir, f"{source_hash}.c")
-
-            # Write GIMPLE code to C file
-            with open(c_file, 'w') as f:
-                f.write(gimple_code)
-
-            # Get runtime directory for includes
-            script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            runtime_dir = os.path.join(script_dir, 'runtime')
-            runtime_src = os.path.join(runtime_dir, 'mojo_runtime.c')
-
-            # Compile to object file with -fgimple, honoring the requested
-            # optimization/debug flags (these are also folded into the cache key).
-            o_file = os.path.join(self.temp_dir, f"{source_hash}.o")
-            compile_cmd = [
-                _GCC_BIN,
-                *self._codegen_flags(),
-                "-fgimple",
-                f"-I{runtime_dir}",
-                "-c",
-                "-o", o_file,
-                "-x", "c",
-                c_file
-            ]
-
-            if os.environ.get('DEBUG_JIT'):
-                print(f"JIT compile command: {' '.join(compile_cmd)}", file=sys.stderr)
-
-            result = subprocess.run(compile_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"JIT compilation failed: {result.stderr}", file=sys.stderr)
-                return False
-
-            # Compile runtime
-            runtime_o = os.path.join(self.temp_dir, f"{source_hash}_runtime.o")
-            runtime_cmd = [
-                _GCC_BIN,
-                *self._codegen_flags(),
-                f"-I{runtime_dir}",
-                "-c",
-                "-o", runtime_o,
-                runtime_src
-            ]
-
-            result = subprocess.run(runtime_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"JIT runtime compilation failed: {result.stderr}", file=sys.stderr)
-                return False
-
-            # Link executable to cache location
-            link_cmd = [_GCC_BIN, "-o", cache_file, o_file, runtime_o]
-            result = subprocess.run(link_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"JIT linking failed: {result.stderr}", file=sys.stderr)
-                return False
+            with tempfile.TemporaryDirectory(prefix='.build-', dir=self.cache_dir) as build_dir:
+                exe_file = os.path.join(build_dir, source_hash)
+                if not build_executable(
+                        filename, mojo_src, output=exe_file,
+                        opt_flag=self.opt_flag, debug_flag=self.debug_flag or '-g0',
+                        work_dir=build_dir, quiet=True):
+                    print('JIT compilation failed: executable build failed', file=sys.stderr)
+                    return False
+                os.replace(exe_file, cache_file)
 
             if os.environ.get('DEBUG_JIT'):
                 print(f"Cached binary saved to: {cache_file}", file=sys.stderr)

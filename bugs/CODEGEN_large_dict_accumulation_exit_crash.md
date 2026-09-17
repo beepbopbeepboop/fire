@@ -16,14 +16,14 @@ def main():
     print("done")
 ```
 
-Compiled via `python3 mojo.py build`, the resulting binary prints `done`
+Compiled via `python3 fire.py build`, the resulting binary prints `done`
 (correct output) and then exits with status 140 (128+12 — SIGSYS on
 macOS), both inside and outside this session's sandbox (`dangerouslySandbox`
 made no difference), both under `lldb` (which reported the process simply
 "exited with status = 140" rather than stopping on a caught signal — `bt`
 had nothing to show) and standalone. Confirmed independent of every fix
 landed in this same session: reproduces with zero struct/class code, zero
-Phase-3 candidates, on plain `mojo.py build` output.
+Phase-3 candidates, on plain `fire.py build` output.
 
 Not investigated further — this session's focus was the ownership-model
 exception-unwinding fix and a separate stale-candidate correctness bug

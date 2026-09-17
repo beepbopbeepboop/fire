@@ -154,7 +154,7 @@ The issue appears to be with how dictionary operations and eval() calls are bein
 
 **Before Fixes**: 10 errors
 ```
-mojo.py:281 - interpret_and_execute type mismatch (2 errors)
+fire.py:281 - interpret_and_execute type mismatch (2 errors)
 gimple_codegen.py - _funcptr_ syntax errors (2 errors)
 gimple_codegen.py - nested function calls (4 errors)
 myinterpreter.py - f-string evaluation (2 errors)

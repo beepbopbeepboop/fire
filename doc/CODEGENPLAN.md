@@ -98,7 +98,7 @@ All TODOs are **defensive fallbacks** for edge cases:
 
 - **Compiled REPL segfaults** — `stage2/mojo repl` enters REPL successfully but segfaults when evaluating expressions
   - Root cause: Not yet diagnosed (likely in stub functions or interpreter interaction)
-  - Workaround: Use Python REPL (`python3 mojo.py repl`) which works correctly
+  - Workaround: Use Python REPL (`python3 fire.py repl`) which works correctly
   - Status: TODO — investigate tokenize/Parser/Interpreter interaction in compiled context
 
 ---

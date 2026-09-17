@@ -250,7 +250,7 @@ file's blocker, but the file genuinely still doesn't build.
 
 ## Status (re-verified 2026-08-09)
 
-Re-ran against current master (`python3 mojo.py build .../c_common/
+Re-ran against current master (`python3 fire.py build .../c_common/
 tables.py`). The previously-documented `ColumnSpec._parse`
 `cls(*values)` spread-call-against-opaque-callee GCC error ("type
 mismatch in binary expression" at line 289) no longer surfaces — but
@@ -321,7 +321,7 @@ identical reset-per-unit convention).
 
 Confirmed fixed: `parse_table`'s g++ signature-parse failure
 ("expected ',' or '...' before 'default'") is gone — re-running
-`python3 mojo.py build .../c_common/tables.py` no longer produces that
+`python3 fire.py build .../c_common/tables.py` no longer produces that
 error or any of its cascaded "not declared in this scope" follow-on
 errors.
 

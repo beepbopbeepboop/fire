@@ -6,7 +6,7 @@ still selects the old path for the shapes it still uniquely covers), links
 it against the small, do_imports=False-friendly A3 runtime object set
 (mirrors test_coro_nested_async_capture.py's own build helper -- these
 fixtures are self-contained, no stdlib imports, so there's no need to pay
-build_stdlib_dylib's ~664-module link cost per test the way a full `mojo.py
+build_stdlib_dylib's ~664-module link cost per test the way a full `fire.py
 build`/driver.compile_program invocation would), RUNS the resulting binary,
 and asserts on its ACTUAL stdout. Falls back to the cpp companion-unit link
 (g++, mojo_async_runtime.cpp) for the rarer shape not yet stack-switch-
@@ -32,7 +32,7 @@ _CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
 # Runtime object set for a stack-switch (A3) program: compiled ONCE, reused
 # by every test in this file (these never change across test cases).
 _SS_RUNTIME_SRCS = [
-    os.path.join(RUNTIME_DIR, 'mojo_runtime.c'),
+    os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
     os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
     os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
     os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
@@ -102,13 +102,13 @@ def _build_generator_program(mojo_src: str) -> str:
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}")
-    runtime_o = os.path.join(wd, 'mojo_runtime.o')
+    runtime_o = os.path.join(wd, 'fire_runtime.o')
     r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o,
-                        os.path.join(RUNTIME_DIR, 'mojo_runtime.c')],
+                        os.path.join(RUNTIME_DIR, 'fire_runtime.c')],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"gcc compile of mojo_runtime.c failed: {r.stderr}")
-    import mojo
+        raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
+    import fire
     r = mojo.link_executable(
         [os.path.join(wd, 'prog.o'), os.path.join(wd, 'prog_gen.o'), runtime_o],
         exe, cxx=True)
@@ -160,7 +160,105 @@ def test_generator_c_compiles(name: str, mojo_src: str):
         _FAIL += 1
 
 
+def run_next_method_tests():
+    test_generator_stdout("generator_next_method_values_and_shared_cursor", """\
+def counter():
+    yield 10
+    yield 20
+    yield 30
+
+def main():
+    g = counter()
+    print(g.__next__())
+    print(next(g))
+    print(g.__next__())
+""", "10\n20\n30\n")
+
+    test_generator_stdout("generator_next_method_string_values", """\
+def words():
+    yield "first"
+    yield "second"
+
+def main():
+    g = words()
+    print(g.__next__())
+    print(g.__next__())
+""", "first\nsecond\n")
+
+    test_generator_stdout("generator_next_method_exhaustion", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(1)
+    print(g.__next__())
+    try:
+        print(g.__next__())
+    except StopIteration:
+        print("done")
+    try:
+        print(g.__next__())
+    except StopIteration:
+        print("still done")
+    empty = counter(0)
+    try:
+        print(empty.__next__())
+    except StopIteration:
+        print("empty")
+""", "0\ndone\nstill done\nempty\n")
+
+    test_generator_stdout("generator_next_method_exception_after_yield", """\
+def broken():
+    yield 7
+    raise ValueError("boom")
+
+def main():
+    g = broken()
+    print(g.__next__())
+    try:
+        print(g.__next__())
+    except StopIteration:
+        print("wrong exception")
+    except ValueError as e:
+        print(e)
+    print("caught")
+""", "7\nboom\ncaught\n")
+
+    test_generator_stdout("generator_next_method_exception_before_yield", """\
+def broken():
+    raise KeyError("early")
+    yield 1
+
+def main():
+    g = broken()
+    try:
+        print(g.__next__())
+    except StopIteration:
+        print("wrong exception")
+    except KeyError as e:
+        print(e)
+    print("caught")
+""", "early\ncaught\n")
+
+    test_generator_stdout("generator_next_method_receiver_evaluated_once", """\
+def argument():
+    print("argument")
+    return 42
+
+def single(value):
+    print("resumed")
+    yield value
+
+def main():
+    print(single(argument()).__next__())
+""", "argument\nresumed\n42\n")
+
+
 def run_tests():
+    run_next_method_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning
@@ -635,7 +733,7 @@ def main():
 
     # Milestone C step 4 (this step): compiled generators as first-class
     # values — bugs/CODEGEN_compiled_generator_not_first_class_value.md's
-    # exact repro. Before this step `python3 mojo.py build` failed with a
+    # exact repro. Before this step `python3 fire.py build` failed with a
     # genuine gcc compile error ("invalid use of void expression") the
     # moment a generator call's result was assigned to a variable before
     # being consumed, rather than being consumed inline as the `for` loop's
@@ -816,7 +914,7 @@ def main():
     # (real C++ exceptions confined to the generator's own .cpp translation
     # unit, translated to the pre-existing mojo_exc_type/msg/obj global state
     # only at the extern "C" `_resume` boundary — see gimple_codegen.py's
-    # _cpp_try_stmt/_cpp_raise_stmt and mojo_runtime.h's _mojo_exc_pending.)
+    # _cpp_try_stmt/_cpp_raise_stmt and fire_runtime.h's _mojo_exc_pending.)
 
     # A raise CAUGHT by the generator's OWN internal try/except — continues
     # yielding correctly afterward (not just "doesn't crash").

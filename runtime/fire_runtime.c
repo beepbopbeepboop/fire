@@ -1,4 +1,4 @@
-#include "mojo_runtime.h"
+#include "fire_runtime.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -26,7 +26,7 @@ void mojo_exc_pop(void)
     --_mojo_exc_top;
 }
 
-/* Cleanup-thunk registry — see mojo_runtime.h for the design rationale.
+/* Cleanup-thunk registry — see fire_runtime.h for the design rationale.
  * Kind-tagged rather than raw function pointers: every entry is one of
  * exactly three known container frees, so a switch in the unwind loop
  * below is simpler and avoids introducing function-pointer calls into a
@@ -167,7 +167,7 @@ void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
 int64_t mojo_exc_type_get(void) { return _mojo_exc_type; }
 
 /* Compiled-generator (C++20 coroutine) exception-boundary flag — see the
- * long comment on this in mojo_runtime.h. Set only by a generator's
+ * long comment on this in fire_runtime.h. Set only by a generator's
  * extern "C" `<base>_resume()` (compiled .cpp side, gimple_codegen.py's
  * _gen_cpp_generator_unit) when an exception escaped that coroutine's own
  * body uncaught; consumed (checked, then cleared) by whichever ordinary,
@@ -1676,7 +1676,7 @@ char *mojo_memoryview_repr(MojoMemoryView *m)
 }
 
 /* ── struct module: binary pack / unpack ──────────────────────────────
- * See mojo_runtime.h for the format mini-language and calling convention.
+ * See fire_runtime.h for the format mini-language and calling convention.
  * A compiled format expands to one MojoStructOp per value ('x' padding is
  * folded into offsets and produces no op; 's'/'c' are a single op of
  * `nbytes` bytes). */
@@ -2478,7 +2478,7 @@ MojoList *mojo_str_rpartition(char *s, char *sep) {
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoDict — open-addressing hash map, string keys, int64_t slots
  * ═══════════════════════════════════════════════════════════════════════*/
-/* (struct definitions now in mojo_runtime.h) */
+/* (struct definitions now in fire_runtime.h) */
 
 static uint64_t _str_hash(char *s)
 {
@@ -2563,7 +2563,7 @@ void mojo_dict_free(MojoDict *d)
  * same GimpleGen instance (one per function during gen_module) then freed the
  * dangling pointer again — macOS libmalloc's "pointer being freed was not
  * allocated" abort, the intermittent SIGABRT (heap-layout dependent, ~40%).
- * Mirrors mojo_list_clear's in-place semantics (runtime/mojo_runtime.c:2601). */
+ * Mirrors mojo_list_clear's in-place semantics (runtime/fire_runtime.c:2601). */
 void mojo_dict_clear(MojoDict *d)
 {
     if (!d) return;
@@ -2959,7 +2959,7 @@ void mojo_dict_iter_free(MojoDictIter *it) { free(it->order); free(it); }
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoSet — hash set backed by the same open-addressing scheme
  * ═══════════════════════════════════════════════════════════════════════*/
-/* (struct definitions now in mojo_runtime.h) */
+/* (struct definitions now in fire_runtime.h) */
 
 /* Registry of every MojoSet this runtime allocates — the set-shaped
  * sibling of _mojo_list_registry above, and for the same reason: a set
@@ -4550,7 +4550,7 @@ fallback:
     if (!result_buf) { result_cap = 1 << 12; result_buf = malloc(result_cap); }
     snprintf(result_buf, result_cap,
         "/* gimple_codegen_compile_to_gimple: Python call failed */\n"
-        "#include \"mojo_runtime.h\"\n"
+        "#include \"fire_runtime.h\"\n"
         "int _gimple_main(void) { return 0; }\n"
         "int main(int argc, char **argv) {\n"
         "  mojo_set_argv(argc, argv);\n"
@@ -5694,7 +5694,7 @@ char *mojo_str_from_int(int64_t v) {
 }
 
 /* Python's divmod(a, b) builtin: (a // b, a % b) as a real 2-tuple, using
- * the SAME floor-division adjustment __mojo_floordiv (mojo_runtime.h) uses
+ * the SAME floor-division adjustment __mojo_floordiv (fire_runtime.h) uses
  * for `//`, so the remainder here is always consistent with that quotient
  * (same sign as b) -- not C's truncating a % b. */
 MojoList *mojo_divmod(int64_t a, int64_t b) {
@@ -5835,8 +5835,8 @@ char *mojo_int_literal_decimal(char *raw) {
  * groups, and the quantifiers * + ? {m,n} greedy and non-greedy. No
  * lookaround, no backreferences, no \b, no flags — not a general `re`
  * implementation. Kept in this file (rather than its own object) so every
- * existing build site that already links mojo_runtime.c gets it for free.
- * ReNode/ReRange/ReClassInfo are declared once, in mojo_runtime.h. */
+ * existing build site that already links fire_runtime.c gets it for free.
+ * ReNode/ReRange/ReClassInfo are declared once, in fire_runtime.h. */
 
 #define RE_OP_CHAR   0
 #define RE_OP_ANY    1

@@ -60,9 +60,9 @@ def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags, link_driver):
 
     `link_driver`: the FINAL link step's driver (gcc or g++ — see
     compile_program's `needs_cxx` handling). Every individual .c/.ci
-    compile step (the client itself, mojo_runtime.c, ...) is completely
+    compile step (the client itself, fire_runtime.c, ...) is completely
     unaffected — this only changes which driver performs the final link,
-    mirroring mojo.py's own build_executable's identical `cxx_link` split
+    mirroring fire.py's own build_executable's identical `cxx_link` split
     (a real C++ object, e.g. one with coroutine frames/exception tables,
     generally needs a C++-aware final link even though every OTHER object
     on the line is ordinary -fgimple C)."""
@@ -111,7 +111,7 @@ def _build_client_cpp_object(cpp_code: str, gcc: str, objflags) -> bytes:
     reached only via an elaborated generic — see compile_linked's own
     docstring for how the two differ) to a CAS-cached object with g++.
     Mirrors monomorphize.instantiate's identical per-instantiation cpp
-    build, and mojo.py's build_executable's own "Milestone B" companion-
+    build, and fire.py's build_executable's own "Milestone B" companion-
     .cpp compile step for its separate (non-link-mode) pipeline — same
     idea, applied here to link-mode's own client-level .cpp instead of an
     elaborated fragment's."""
@@ -157,10 +157,10 @@ def compile_program(input_file, src, output=None, run=True,
     if ('__mgco_' in c_code or '__mojo_coro_yield_i' in c_code
             or '__mojo_future_' in c_code or '__mojo_event_' in c_code):
         _plain = ('-fPIC', f'-I{RUNTIME}') + flags
-        _arch = ('mojo_coro_ctx_aarch64.S'
+        _arch = ('fire_coro_ctx_aarch64.S'
                  if platform.machine().lower() in ('arm64', 'aarch64')
-                 else 'mojo_coro_ctx_generic.c')
-        for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', 'mojo_async_sched.c', _arch):
+                 else 'fire_coro_ctx_generic.c')
+        for _cs in ('fire_coro_gen.c', 'fire_coro.c', 'fire_async_sched.c', _arch):
             _p = os.path.join(RUNTIME, _cs)
             _key = cas.module_key(open(_p).read(), [], gcc, _plain + (_cs,))
 
@@ -235,7 +235,7 @@ def _expand_dylib_modules(input_files):
     case) or are part of the separately-built, already-complete real stdlib
     dylib; auto-expanding into that huge tree here would be wasteful and
     risks re-exporting symbols that collide with it."""
-    import mojo_compiler as mc
+    import fire_compiler as mc
     import imports as _imp
     gen = gimple_codegen.GimpleGen(emit_entry_points=False)
     seen = set()
@@ -279,7 +279,7 @@ def compile_dylib(input_files, output=None, jobs=1, opt_flag=None):
     same as compiling any other module) — just exposed as a first-class
     driver entry point instead of only being reachable by hand-importing
     build_stdlib_dylib.py. `link_runtime=False` (the same "production" mode
-    the real stdlib dylib itself uses): mojo_runtime.c/mojo_async_runtime.cpp
+    the real stdlib dylib itself uses): fire_runtime.c/mojo_async_runtime.cpp
     are compiled and folded directly into the output dylib, so the result
     is fully self-contained — a C/C++ host links or dlopen()s ONE file, with
     no separate mojo runtime dylib to also manage.
@@ -298,7 +298,7 @@ def compile_dylib(input_files, output=None, jobs=1, opt_flag=None):
     `opt_flag` defaults to '-O2': unlike the internal stdlib dylib (compiled
     once, at -O0, optimized for build time and CAS cache-friendliness — see
     build_stdlib_dylib.build()'s own docstring), a `mojo dylib` artifact is
-    meant to be linked into a real program and actually run — mojo.py's CLI
+    meant to be linked into a real program and actually run — fire.py's CLI
     passes through an explicit -O0/-O1/-O3/-Os/-Oz/-Og if the caller gave
     one (via the same `_extract_codegen_flags` every other subcommand uses),
     so this default only applies when nothing was specified."""

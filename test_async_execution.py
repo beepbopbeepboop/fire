@@ -26,7 +26,7 @@ approximation.
 import asyncio
 import sys
 import time
-import mojo_compiler as N
+import fire_compiler as N
 from myinterpreter import Interpreter, MojoCoroutine
 
 _PASS = 0

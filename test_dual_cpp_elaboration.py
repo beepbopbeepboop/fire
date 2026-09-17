@@ -16,7 +16,7 @@ generic_call` used to refuse outright rather than risk (see bugs/CODEGEN_
 comptime_bracket_parametrized_function_calls_silently_wrong.md).
 
 This file compiles + links + RUNS each repro (via driver.compile_program,
-the real `mojo.py build`/`run` module-cache pipeline -- not compile-only)
+the real `fire.py build`/`run` module-cache pipeline -- not compile-only)
 and asserts on real stdout, plus a couple of pure unit tests for the
 substitution-safety helper itself.
 """
@@ -46,7 +46,7 @@ def check(name, cond, detail=""):
 
 def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
     """Real compile+link+run through driver.compile_program -- the actual
-    pipeline `python3 mojo.py build`/`run` uses (module-cache/link mode,
+    pipeline `python3 fire.py build`/`run` uses (module-cache/link mode,
     the ONLY path that supports generic elaboration's own recorded link
     objects at all)."""
     wd = tempfile.mkdtemp(prefix='mojo_dual_cpp_elab_')

@@ -2,12 +2,12 @@
 mojo_main.py - Bootstrap compiler (Python version for Stage 1)
 
 Uses Python implementation:
-- mojo_compiler (Python tokenizer, parser)
+- fire_compiler (Python tokenizer, parser)
 - gimple_codegen (Python GIMPLE code generator)
 """
 
 import sys
-from mojo_compiler import py_tokenize
+from fire_compiler import py_tokenize
 
 def main():
     """Entry point when run as Python script."""

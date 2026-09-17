@@ -25,7 +25,7 @@ prior).
 Attempted per session task: extend generator-body LambdaExpr support to
 `iter_files`'s parameterized shape (`lambda *a, **k: _walk(*a,
 walk=_files, **k)`). Investigated end-to-end with minimal synthetic
-probe files (each shape isolated, built via `MOJO_DEBUG=1 mojo.py
+probe files (each shape isolated, built via `MOJO_DEBUG=1 fire.py
 build`). No code change; conclusions below.
 
 **First, a correction of this doc's recorded picture**: the module does
@@ -41,7 +41,7 @@ iter_files_by_suffix call to unresolved callee '_iter_files(...)' (param-aliased
 process_filenames    call to unresolved callee 'set(...)' (+ tuple-yield gap 2 behind it)
 ```
 Since `gen_module` hard-fails when ANY module-level generator is
-refused, `mojo.py build` cannot exit 0 for this file until ALL SIX
+refused, `fire.py build` cannot exit 0 for this file until ALL SIX
 clear. Fixing gap 1 alone therefore cannot turn this build green under
 any circumstances.
 
@@ -175,7 +175,7 @@ yield is untouched.
 
 ## Status (updated 2026-08-09, re-verified: TWO blockers now, both known structural gaps)
 
-Re-verified fresh via `MOJO_DEBUG=1 python3 mojo.py build`. `iter_files`
+Re-verified fresh via `MOJO_DEBUG=1 python3 fire.py build`. `iter_files`
 still hits the exact same `LambdaExpr`-in-generator-body blocker as the
 2026-08-07 finding below (`unsupported expression in generator body:
 LambdaExpr`) — unchanged, still tracked at
@@ -267,11 +267,11 @@ either way).
 ## Current error (2026-08-05, after commit 12ff719)
 
 ```
-$ python3 mojo.py build Tools/c-analyzer/c_common/fsutil.py
+$ python3 fire.py build Tools/c-analyzer/c_common/fsutil.py
 Error building: cannot compile module: function(s) iter_files (generator function(s), contain a `yield`/`yield from`) — this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen for async functions, yet, so these cannot be represented as compiled C without emitting silently wrong or broken code; falling back to interpreting this module from source instead
 ```
 
-Exit code: 1 (despite the message claiming a fallback, `mojo.py build`
+Exit code: 1 (despite the message claiming a fallback, `fire.py build`
 does not actually fall back — no object file is produced).
 
 ## Original report (2026-07-xx, superseded — kept for history)

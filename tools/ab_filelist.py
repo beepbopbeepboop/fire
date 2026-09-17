@@ -29,7 +29,7 @@ def discover():
     """Yield (key, abs_path) for every file this harness A/B-tests.
 
     `key` is a stable, slash-separated, extension-free identifier used to
-    mirror the source tree under aside/<key>.ci and bside/<key>.ci (mojo.py
+    mirror the source tree under aside/<key>.ci and bside/<key>.ci (fire.py
     --dump names its outputs after the input's own basename, so the key's
     last path component doubles as that basename).
     """

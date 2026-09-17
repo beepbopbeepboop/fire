@@ -98,7 +98,7 @@ def main():
 ```
 
 ```
-python3 mojo.py build -o leak_check leak_check.mojo
+python3 fire.py build -o leak_check leak_check.mojo
 codesign -s - -f --entitlements entitlements.plist leak_check   # get-task-allow, so `leaks` can inspect the process at all
 leaks --atExit -- ./leak_check
 ```

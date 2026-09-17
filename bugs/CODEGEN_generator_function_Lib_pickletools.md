@@ -64,7 +64,7 @@ Not attempted. No code change; doc stays open.
 
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical refusal
 
-Fresh real `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Fresh real `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 pickletools.py` against current master (f0f6e78): dies at pickletools'
 own module compile with the byte-identical honest refusal —
 `Unsupported shape(s): _genops: a call to unresolved callee
@@ -106,7 +106,7 @@ no code change; no gate run.
 
 ## Status (updated 2026-08-24, worktree fix/gen-core — the 2026-08-23 "`_genops` now compiles" claim was stale; `_genops` refuses again, honestly, on a real remaining gap)
 
-Re-verified from scratch (a real `python3 mojo.py build .../Lib/
+Re-verified from scratch (a real `python3 fire.py build .../Lib/
 pickletools.py`, and an isolated `compile_to_gimple_with_cpp(do_imports
 =False)` matching the exact repro the entry below used). Both now
 raise: `` cannot compile module: function(s) _genops (generator
@@ -170,7 +170,7 @@ Verified against this file's real `_genops`: the 3-tuple site
 gated 4-tuple site is unchanged; both eligibility passes unify to 4 slots.
 Isolated `compile_to_gimple_with_cpp(do_imports=False)` on pickletools.py:
 compiles clean, `_genops` emitted through the coroutine path (previously
-the hard refusal). A real `python3 mojo.py build .../Lib/pickletools.py`
+the hard refusal). A real `python3 fire.py build .../Lib/pickletools.py`
 now shows **0 errors attributed to pickletools.py's own source** — the
 build still exits non-zero solely on the already-documented transitive
 cascade (`codecs.py`, `argparse.py`, `enum.py`; e.g. argparse's
@@ -214,7 +214,7 @@ carry a value, and all values must agree on one scalar type
 `_genops` yields both a 3-tuple (`yield opcode, arg, pos`) and a
 4-tuple (`yield opcode, arg, pos, getpos()`) at two call sites in the
 same body — the tuple-valued/varying-arity-yield structural gap,
-entirely independent of `LambdaExpr`/bound-methods. This file's `mojo.py
+entirely independent of `LambdaExpr`/bound-methods. This file's `fire.py
 build` therefore still fails end-to-end; doc kept open (not deleted —
 see `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`'s own
 2026-08-20 update for why THAT doc's LambdaExpr-specific scope IS
@@ -222,7 +222,7 @@ closed even though this file as a whole is not yet unblocked).
 
 ## Status (updated 2026-08-11, real fix attempted — found genuinely stacked, not narrow)
 
-Re-verified against current master via a real `python3 mojo.py build
+Re-verified against current master via a real `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/pickletools.py`: identical `_genops`/
 `LambdaExpr` refusal reproduces exactly, unchanged from below.
 
@@ -280,7 +280,7 @@ classification. Doc kept open.
 ## Status (updated 2026-08-09, re-verified — unchanged)
 
 Re-verified against current master (`c79a013`) via a real
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/pickletools.py`.
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/pickletools.py`.
 Identical refusal reproduces exactly:
 
 ```
@@ -316,7 +316,7 @@ master (`2b0c4c5`) — the 2026-07-30 note's diagnosis was correct; this
 elaborates it.
 
 ```
-$ MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/pickletools.py
+$ MOJO_DEBUG=1 python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/pickletools.py
 [gimple_codegen] generator '_genops' not eligible for C++ coroutine path, falling back to honest refusal: unsupported expression in generator body: LambdaExpr
 Error building: cannot compile module: function(s) _genops (generator function(s), contain a `yield`/`yield from`) — ... falling back to interpreting this module from source instead
 ```
@@ -340,7 +340,7 @@ generator's own body. The coroutine codegen's expression lowering
 it doesn't recognize is refused via `_UnsupportedGeneratorShape` at that
 statement, and (same escalation as the struct-typed-param and dynamic-
 `raise` gaps found elsewhere in this cluster) refusing a MODULE-LEVEL
-generator like this one hard-fails the entire file's `mojo.py build`.
+generator like this one hard-fails the entire file's `fire.py build`.
 
 **New, narrow gap — not yet folded into a hard-bug doc** (only one
 instance seen in this cluster so far). A `lambda` literal used as a

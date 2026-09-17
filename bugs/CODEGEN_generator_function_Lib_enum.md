@@ -86,7 +86,7 @@ change; doc stays open.
 
 ## Status (re-verified 2026-08-26, wtRest19b): unchanged — same 6 `cls`-access refusal lines
 
-Fresh `MOJO_DEBUG=1 python3 mojo.py build .../Lib/enum.py` against
+Fresh `MOJO_DEBUG=1 python3 fire.py build .../Lib/enum.py` against
 current tree (fix/rest-remainder19b, heavy concurrent build load from
 other campaign agents noted but debug-mode run completed): identical
 refusal set, byte-for-byte the same message text as 2026-08-25 —
@@ -103,7 +103,7 @@ fix. Not attempted; no code change.
 
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — re-verified fresh; unchanged refusal, still feature-sized, one prior sub-gap now closed upstream)
 
-Re-ran a fresh, safety-wrapped `python3 mojo.py build
+Re-ran a fresh, safety-wrapped `python3 fire.py build
 .../Lib/enum.py` on current master (`4220964`): the module still refuses
 on exactly 3 named generator functions — `_iter_member_`,
 `_iter_member_by_def_`, `_iter_member_by_value_` (the body-level alias
@@ -185,7 +185,7 @@ generator-method-API registration gap for classmethod generators.
 Re-verified with `GimpleGen(do_imports=False, relaxed_imports=True)`
 (bypasses the 4 already-documented `cls`-attribute refusals so the REST
 of the file still gets a `.cpp` emitted, rather than the hard whole-
-module `RuntimeError` a plain `mojo.py build`/non-relaxed isolated
+module `RuntimeError` a plain `fire.py build`/non-relaxed isolated
 compile produces — same methodology `dis.py`'s doc already uses). This
 surfaces 2 further, previously-masked issues once past those 4 refusals:
 
@@ -215,7 +215,7 @@ open.
 
 ## Status (updated 2026-08-23 — re-verified unchanged; refusals remain the verified-correct ones)
 
-Re-ran `MOJO_DEBUG=1 mojo.py build` + isolated compile: identical 4 refusal
+Re-ran `MOJO_DEBUG=1 fire.py build` + isolated compile: identical 4 refusal
 lines (Flag/IntFlag `_iter_member_by_value_`/`_iter_member_by_def_`,
 "cls referenced in an unsupported way") escalating to the standard fatal
 module refusal. This session's three generic generator-codegen fixes
@@ -358,7 +358,7 @@ this worktree and an independent baseline worktree (checked out at
 (no regression).
 
 **enum.py's own status, re-verified — both methods STILL refused, now for
-verified-correct reasons.** `MOJO_DEBUG=1 python3 mojo.py build
+verified-correct reasons.** `MOJO_DEBUG=1 python3 fire.py build
 .../Lib/enum.py`:
 ```
 generator method Flag.'_iter_member_by_value_' not eligible ...: a @classmethod generator that references `cls` in its body in an unsupported way is not supported (only a class-level-attribute read, or a call to a real compiled classmethod/static method of the enclosing class, are supported for `cls.<...>` access in a compiled generator)
@@ -504,7 +504,7 @@ corpus scan found was gated on struct-pointer-yield type inference
 alone).
 
 **enum.py's own status, re-verified — UNCHANGED, as expected.**
-`MOJO_DEBUG=1 python3 mojo.py build .../Lib/enum.py` still produces the
+`MOJO_DEBUG=1 python3 fire.py build .../Lib/enum.py` still produces the
 exact same 4 refusal lines it did before this fix, verbatim: `Flag`/
 `IntFlag`'s `_iter_member_by_value_`/`_iter_member_by_def_` are still
 refused for "a @classmethod generator that references `cls` in its body
@@ -617,11 +617,11 @@ separate, already out-of-scope gap closed too.
 ## Status (updated 2026-08-09, re-verified — consolidated)
 
 **STILL FAILING**, re-confirmed against current master with
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/enum.py`
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/enum.py`
 (this file as the build root):
 
 ```
-$ MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/enum.py
+$ MOJO_DEBUG=1 python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/enum.py
 [gimple_codegen] generator method Flag.'_iter_member_by_value_' not eligible for C++ coroutine path, falling back to honest refusal: _iter_member_by_value_: a @classmethod generator that references `cls` in its body is not supported (no class-level attribute/method access exists yet for compiled generators)
 [gimple_codegen] generator method Flag.'_iter_member_by_def_' not eligible for C++ coroutine path, falling back to honest refusal: _iter_member_by_def_: a @classmethod generator that references `cls` in its body is not supported (no class-level attribute/method access exists yet for compiled generators)
 [gimple_codegen] generator method IntFlag.'_iter_member_by_value_' not eligible for C++ coroutine path, falling back to honest refusal: _iter_member_by_value_: a @classmethod generator that references `cls` in its body is not supported (no class-level attribute/method access exists yet for compiled generators)

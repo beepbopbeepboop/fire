@@ -2,7 +2,7 @@
 
 ## Status (re-verified 2026-08-23 — no new work)
 
-Re-ran all three repro shapes via `mojo.py build` + executing the binary:
+Re-ran all three repro shapes via `fire.py build` + executing the binary:
 direct-literal `Widget("hello")` → `hello`/`5`; the 2026-08-18
 IdentExpr-case fix `s = "hello"; w = Widget(s)` → `hello`/`5`; and the
 conflicting-call-site case (`Thing("str")` + `Thing(3.5)`) still correctly
@@ -134,7 +134,7 @@ or literal) is likewise still unresolved, same as before this fix (see the
 
 ## Status (re-verified 2026-08-09 — unchanged, still PARTIALLY FIXED)
 
-Re-ran both minimal repros against current master via `python3 mojo.py
+Re-ran both minimal repros against current master via `python3 fire.py
 build <file>.py` + running the resulting binary:
 
 - Covered case (direct literal constructor argument — `class Widget:
@@ -321,7 +321,7 @@ Confirmed: adding an explicit annotation (`def __init__(self, label:
 str):`) makes it print correctly ("hello") — annotated fields are NOT
 affected, only unannotated ones.
 
-Confirmed via the interpreter (`mojo.py run`, the SEPARATE, correct
+Confirmed via the interpreter (`fire.py run`, the SEPARATE, correct
 implementation): prints "hello" correctly — this is exclusively a
 compiled-path (`gimple_codegen.py`) bug.
 
@@ -381,7 +381,7 @@ constructor parameters the same treatment.
 - `test_gimple.py`/`test_module_cache.py`: don't happen to cover this
   exact shape with a runtime-value assertion (a compile-only or a
   differently-shaped test wouldn't catch it).
-- `make check-selfhost`: only checks that mojo.py compiling itself
+- `make check-selfhost`: only checks that fire.py compiling itself
   produces a working binary — this compiler's OWN source (gimple_codegen.
   py, mojo_compiler.py, etc.) may simply not have many `self.field =
   unannotated_param` shapes where the WRONG type silently still compiles

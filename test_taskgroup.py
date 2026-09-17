@@ -35,12 +35,12 @@ import tempfile
 os.environ.setdefault('MOJO_CORO', 'cpp')
 
 import gimple_codegen
-import mojo
+import fire
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
-RUNTIME_C = os.path.join(RUNTIME_DIR, 'mojo_runtime.c')
+RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
 ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
 GCC = find_gcc()
 GXX = find_gxx()
@@ -62,7 +62,7 @@ def check(name, cond, detail=""):
 def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
     """Mirrors test_mutable_async_capture.py's/test_async_void_return.py's
     identical harness shape: real gcc -fgimple / g++ -std=c++20 compile,
-    real link via mojo.py's link_executable(cxx=True), real run, real
+    real link via fire.py's link_executable(cxx=True), real run, real
     stdout."""
     wd = tempfile.mkdtemp(prefix='mojo_taskgroup_')
     src_path = os.path.join(wd, 'prog.mojo')
@@ -76,7 +76,7 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
         f.write(c_code)
 
     c_o = os.path.join(wd, 'prog.o')
-    runtime_o = os.path.join(wd, 'mojo_runtime.o')
+    runtime_o = os.path.join(wd, 'fire_runtime.o')
     exe = os.path.join(wd, 'prog.exe')
     objs = [c_o, runtime_o]
 
@@ -88,11 +88,11 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
     r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"gcc compile of mojo_runtime.c failed: {r.stderr}")
+        raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
 
     # `cpp_code` is empty for a repro with no async/generator content at
     # all (e.g. the pure nested-for-loop-fix isolation test below) --
-    # compile+link only the ordinary .c/mojo_runtime.c side in that case,
+    # compile+link only the ordinary .c/fire_runtime.c side in that case,
     # matching how a plain, non-async Mojo program is genuinely built.
     cxx = bool(cpp_code)
     if cxx:

@@ -1,8 +1,8 @@
 /* test_mojo_async_sched.c -- Layer 2 async: the plain-C scheduler
    (mojo_async_sched.c) driving hand-written coroutine bodies that stand
    in for what gimple_gen_coro.py's `async def`/`await` lowering emits. */
-#include "mojo_coro.h"
-#include "mojo_wd.h"
+#include "fire_coro.h"
+#include "fire_wd.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>

@@ -192,7 +192,7 @@ deleted) — 1 of 2 generators fixed, but the file still doesn't build.
 
 ## Status (re-verified 2026-08-09)
 
-Re-ran against current master (`python3 mojo.py build .../c_common/
+Re-ran against current master (`python3 fire.py build .../c_common/
 scriptutil.py`); still an honest up-front refusal, not a GCC error, now
 naming both generator functions in the file:
 

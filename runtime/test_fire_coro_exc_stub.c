@@ -1,8 +1,8 @@
 /* test_mojo_coro_exc_stub.c -- minimal standalone implementation of the
-   handful of mojo_runtime exception symbols that runtime/mojo_coro.c uses,
+   handful of fire_runtime exception symbols that runtime/mojo_coro.c uses,
    so the Layer 2 unit test (test_mojo_coro.c) links without dragging in
-   mojo_runtime.c (which needs <Python.h>). The real build links the real
-   mojo_runtime.c; this is test scaffolding only and mirrors that file's
+   fire_runtime.c (which needs <Python.h>). The real build links the real
+   fire_runtime.c; this is test scaffolding only and mirrors that file's
    semantics for these symbols exactly. */
 #include <setjmp.h>
 #include <stdint.h>
@@ -35,7 +35,7 @@ void mojo_raise(void)
 }
 
 /* minimal MojoList so mojo_coro_gen.c's __mojo_tuple_box_* link in the
-   unit test (the real build links runtime/mojo_runtime.c) */
+   unit test (the real build links runtime/fire_runtime.c) */
 typedef struct { int64_t *d; int n, cap; } _TestList;
 void *mojo_list_new(void)
 {

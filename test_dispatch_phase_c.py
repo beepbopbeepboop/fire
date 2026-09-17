@@ -2,7 +2,7 @@
 """Test DispatchSolver Phase C: GimpleGen integration and dispatch table emission."""
 
 import gimple_codegen
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 from gimple_codegen import GimpleGen
 
 

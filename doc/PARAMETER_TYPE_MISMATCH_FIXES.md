@@ -14,7 +14,7 @@
 - Reduction: 134 lines eliminated
 
 ### Type System Violations: 26+ → 31 errors
-- Identified: 26+ real type violations in actual mojo.py code
+- Identified: 26+ real type violations in actual fire.py code
 - Fixed: 13+ parameter mismatch errors
 - Remaining: 31 errors (mostly variable inference issues)
 
@@ -159,7 +159,7 @@ result = _coerce_to_type(arg_type, param_type, arg_value)
 ## Key Achievements
 
 1. ✅ **Parameter Type Mismatch Solution**: Generic, scalable, no function-name awareness
-2. ✅ **Real Validation**: Tested on actual mojo.py code with real violations
+2. ✅ **Real Validation**: Tested on actual fire.py code with real violations
 3. ✅ **Architectural Soundness**: Reuses proven code, follows DRY principle
 4. ✅ **Error Reduction**: 44% reduction in error output
 5. ✅ **Systematic Approach**: Tackled root causes, not symptoms

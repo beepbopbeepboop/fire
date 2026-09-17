@@ -70,7 +70,7 @@ Companion suites (run via `make check`):
 | GIMPLE backend unit tests | `make check-gimple` | 159 / 159 |
 | Execution tests | `make check-runner` | 17 / 17 |
 | Module-cache tests | `make check-modcache` | 53 / 53 |
-| Self-host compile guard | `make check-selfhost` | mojo.py compiles itself to a linked binary |
+| Self-host compile guard | `make check-selfhost` | fire.py compiles itself to a linked binary |
 
 `make check` = all four of the above (`check-gimple`, `check-runner`,
 `check-modcache`, `check-selfhost`). The self-hosting **bootstrap**
@@ -89,7 +89,7 @@ target, not gated into `check`.
   per-feature behavior, and `PLAN.md` for known runtime-behavior gaps (e.g.
   `re` module flags, typed exception dispatch).
 - **`make bootstrap` is a separate, stronger check.** It self-hosts the
-  compiler (`mojo.py` compiling itself, linking, and running the result),
+  compiler (`fire.py` compiling itself, linking, and running the result),
   which exercises real end-to-end execution rather than syntax-checking —
   and, as of 2026-07-06, passes cleanly (stage1/stage2/stage3/`verify`; see
   `IMPL.md`'s "Recent Work (2026-07)"). `validate-all` still fails a

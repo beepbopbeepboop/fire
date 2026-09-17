@@ -14,7 +14,7 @@ record the object on the link line.
 import re
 
 import monomorphize as mm
-from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef, TraitDef
+from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, TraitDef
 from gimple_codegen import _mojo_type
 
 

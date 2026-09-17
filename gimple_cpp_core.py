@@ -10,7 +10,7 @@ import dataclasses
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -102,7 +102,7 @@ def _cpp_short_circuit_bool(gen, node) -> bool | None:
 
 def _cpp_in_link(gen, a: str, a_node, b: str, b_node, negate: bool) -> str:
     """Lower `a in b` / `a not in b` for the C++20-coroutine generator body,
-    mirroring the GIMPLE path's _lower_in_dispatch (mojo_runtime.h
+    mirroring the GIMPLE path's _lower_in_dispatch (fire_runtime.h
     membership helpers) rather than emitting Python's `in`/`not in`
     keyword text, which is invalid C++ (`not` is a keyword and `in` is not
     an operator). `a` is the element/needle, `b` is the container/haystack
@@ -651,7 +651,7 @@ def _cpp_string_literal_expr(gen, val: str) -> str:
             try:
                 # Module-level `Parser`/`py_tokenize` (see
                 # _lower_StringLiteral's matching fix): a function-scoped
-                # `from mojo_compiler import ... as _P` is unresolvable in
+                # `from fire_compiler import ... as _P` is unresolvable in
                 # the self-hosted compiler.
                 expr_node = Parser(py_tokenize(part_text))._parse_expr(0)
                 # Parsed fresh from raw source text (this expression never
@@ -1851,7 +1851,7 @@ def _cpp_expr(gen, e) -> str:
             if _pf is not None:
                 return _pf
         if e.op in ('in', 'not in'):
-            # `'x' not in s` is parsed as a BinaryOp (mojo_compiler.py),
+            # `'x' not in s` is parsed as a BinaryOp (fire_compiler.py),
             # not a CompareChain — so the CompareChain 'in'/'not in' branch
             # above never fires for the overwhelmingly common single-membership
             # test. Reuse the same runtime-helper dispatch
@@ -2080,7 +2080,7 @@ def _cpp_expr(gen, e) -> str:
                     return f"int_exists(0, (int64_t)(char *)({a[0]}))"
                 # isfile: real S_ISREG stat check — mirrors the GIMPLE
                 # path's own os.path.isfile dispatch (int_isfile in
-                # runtime/mojo_runtime.c; the GIMPLE side previously
+                # runtime/fire_runtime.c; the GIMPLE side previously
                 # stubbed this to a literal 0, which made
                 # `if not os.path.isfile(p): continue` unconditional).
                 # normpath/relpath: mirror the GIMPLE path's own
@@ -2092,7 +2092,7 @@ def _cpp_expr(gen, e) -> str:
                     return a[0]
                 # basename/dirname/splitext/expanduser/abspath — the
                 # remaining real-runtime os.path helpers, mirroring the
-                # GIMPLE path's own dispatch (mojo_runtime.h's
+                # GIMPLE path's own dispatch (fire_runtime.h's
                 # int64_t_basename/int64_t_splitext/int64_t_expanduser/
                 # int_abspath/int_dirname). Without these, dyld.py's
                 # generator bodies emitted raw `os.path.basename(name)`
@@ -2435,7 +2435,7 @@ def _cpp_expr(gen, e) -> str:
             # `_char_replace_impl` runtime helper the ordinary GIMPLE
             # path's own `str.replace(...)` lowering already uses
             # (already declared via the wholesale `#include
-            # <mojo_runtime.h>` every generated .cpp file has — no new
+            # <fire_runtime.h>` every generated .cpp file has — no new
             # extern declaration needed). Real: save_env.py's
             # `resource_info`: `name.replace('.', '_')`.
             _str_obj_ctype = _cpp_receiver_ctype(gen, e.func.obj)
@@ -2666,7 +2666,7 @@ def _cpp_expr(gen, e) -> str:
             # (cwriter.py's CWriter.set_position compiles clean through
             # it; header_guard's @contextlib.contextmanager companion is
             # the generator-body sibling of the same shape). Both runtime
-            # helpers are declared via the wholesale <mojo_runtime.h>
+            # helpers are declared via the wholesale <fire_runtime.h>
             # every generated .cpp includes, so no new extern plumbing.
             # Before this, the generic fallback below emitted raw C++
             # member-call syntax on a plain int64_t field — a hard g++
@@ -2729,7 +2729,7 @@ def _cpp_expr(gen, e) -> str:
             # Python builtins that map directly onto runtime helpers —
             # mirrors the GIMPLE path's own builtin lowering (len/range/
             # str/repr/hasattr), since the generator-body emitter shares
-            # the same <mojo_runtime.h> helpers. Without this, `len(x)`,
+            # the same <fire_runtime.h> helpers. Without this, `len(x)`,
             # `range(...)`, etc. inside a generator body would emit as
             # bare undeclared C++ calls (a real failure: pprint.py's
             # `len(object)`, argparse.py's `range(...)`, zipapp.py's
@@ -3557,7 +3557,7 @@ def _cpp_expr(gen, e) -> str:
             # cases key on — long before this scalar coroutine-body
             # emitter ever sees the expression. Every one of these names
             # is a fixed `extern "C"` wrapper unconditionally declared in
-            # <mojo_runtime.h> (which every generated .cpp already
+            # <fire_runtime.h> (which every generated .cpp already
             # #includes wholesale, same as the len()/ord() dispatch
             # above), with the exact param/return C types the rewrite
             # rules already produce arguments for — so, unlike the
@@ -3653,7 +3653,7 @@ def _cpp_expr(gen, e) -> str:
         # SubscriptExpr read lowering -- NOT the raw C++ `(obj)[idx]`
         # this branch used to emit for a declared MojoList*/MojoDict*
         # object: neither type overloads operator[] anywhere in
-        # mojo_runtime.h (confirmed by grep -- no such overload exists;
+        # fire_runtime.h (confirmed by grep -- no such overload exists;
         # the "those containers expose operator[]" claim this comment
         # used to make was never actually true), so `g++` rejected it
         # outright the moment a declared-typed container reached this
@@ -4203,7 +4203,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # GIMPLE path's identical `_fname_var_ctype in ('int', 'int64_t',
         # 'void *', '_Bool')` guard in _lower_call/_gen_stmt_ExprStmt —
         # see _lower_fnptr_call). Uses the SAME mojo_fnptr_call_N()
-        # runtime helper (declared `static inline` in mojo_runtime.h,
+        # runtime helper (declared `static inline` in fire_runtime.h,
         # which this .cpp translation unit already #includes) rather
         # than inventing a second indirect-call convention — only 0-4
         # scalar arguments are supported, matching that helper's own
@@ -4264,7 +4264,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # case (both just bind N names from N elements; the target
             # brackets vs. parens are a syntax choice, not a semantic
             # one), and `ListExpr`/`TupleExpr` share the exact same
-            # `.elements` field shape (see mojo_compiler.py), so no
+            # `.elements` field shape (see fire_compiler.py), so no
             # separate branch is needed — just widen the isinstance
             # check to accept both. Before this, `[tup] = [...]` (real:
             # Lib/test/crashers/gc_inspection.py's own generator `g`)
@@ -4436,7 +4436,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # NOT a raw C++ `obj[idx] = val`, which was this branch's
             # ORIGINAL lowering and is actually invalid C++ for a real
             # MojoList*/MojoDict* target: neither exposes operator[]
-            # anywhere in mojo_runtime.h (confirmed by grep -- no such
+            # anywhere in fire_runtime.h (confirmed by grep -- no such
             # overload exists), so `g++` rejected it outright ("no
             # viable overloaded '='") the moment a declared MojoList*/
             # MojoDict* identifier actually reached this branch, e.g.
@@ -4525,7 +4525,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # (`orig[:] = saved`) and iter_builtin_types (`subs[:] =
             # []`), both exactly this shape -- start=stop=step=None.
             # `x[a:b] = y` parses to a bare SliceExpr TARGET (not
-            # wrapped in SubscriptExpr -- see mojo_compiler.py's
+            # wrapped in SubscriptExpr -- see fire_compiler.py's
             # `_parse_postfix`), so it falls into this MemberExpr/
             # SubscriptExpr-shaped branch, not the arr[i]=val one
             # above. Unlike the sys.stderr elision above, this is
@@ -6575,7 +6575,7 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
         raise gimple_exprtypes._UnsupportedAsyncShape("`async for`/`else` is not supported")
     # `ForStmt.target` is a plain Python str (the loop variable's bare
     # name), not an IdentExpr -- unlike most other expression slots in
-    # this AST (confirmed against mojo_compiler.py's actual parse
+    # this AST (confirmed against fire_compiler.py's actual parse
     # output; ForStmt predates the rest of this narrow-scope codegen
     # entirely, and multi-target/tuple-unpacking `for` isn't supported
     # here so it's always a single str, never a tuple).
@@ -6687,7 +6687,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         # that path has no element-type tracking for a MemberExpr-rooted
         # (class-attribute) list object and falls all the way through to
         # a raw C++ `(obj)[idx]`, which isn't valid on a `MojoList *` (no
-        # `operator[]` overload anywhere in mojo_runtime.h) — instead,
+        # `operator[]` overload anywhere in fire_runtime.h) — instead,
         # build the read directly via `mojo_list_get_str`, matching the
         # char*-message convention this narrow model already established
         # for every other "caught exception value" representation.
@@ -7256,7 +7256,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         # already translated any exception that escaped ITS body,
         # uncaught, into the shared mojo_exc_* globals + the pending
         # flag, and reported "done" the same as ordinary exhaustion so
-        # this loop above exits either way (see mojo_runtime.h's long
+        # this loop above exits either way (see fire_runtime.h's long
         # comment). Disambiguate here: if it was really a pending
         # exception, re-throw a FRESH _MojoCppExc built from those same
         # globals, right here inside the delegating (outer) generator's

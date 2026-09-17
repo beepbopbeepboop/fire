@@ -3,7 +3,7 @@
 MODULES = \
 	generated_dispatch \
 	module_loader \
-	mojo_compiler \
+	fire_compiler \
 	mojo_main \
 	simple_compiler
 

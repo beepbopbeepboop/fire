@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Shared test harness for running Python-3.14.6 stdlib files through
-mojo.py build. Single source of truth for categorization + caching, used by
+fire.py build. Single source of truth for categorization + caching, used by
 test_py314_full.py and rerun_and_consolidate_v2.py (previously each had its
 own copy-pasted, and slightly drifted, version of this logic).
 """
@@ -15,7 +15,7 @@ import py314_cache
 from build_config import find_gcc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MOJO_PY = os.path.join(HERE, "mojo.py")
+MOJO_PY = os.path.join(HERE, "fire.py")
 GCC = find_gcc()
 
 
@@ -77,7 +77,7 @@ def _build_uncached(filepath, timeout=90):
 
 
 def run_build(filepath, timeout=90, use_cache=True):
-    """Run mojo.py build on filepath, categorize the result, and cache it.
+    """Run fire.py build on filepath, categorize the result, and cache it.
 
     Cache key folds in the compiler+toolchain fingerprint and the file's own
     bytes (see py314_cache.build_key), so a hit is only ever served for the

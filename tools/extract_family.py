@@ -21,12 +21,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gimple_ctypes, gimple_solvers, gimple_exprtypes  # noqa: E402
-import mojo_compiler  # noqa: E402
+import fire_compiler  # noqa: E402
 
 CT = {n for n in dir(gimple_ctypes) if not n.startswith('__')}
 SV = {n for n in dir(gimple_solvers) if not n.startswith('__')}
 ET = {n for n in dir(gimple_exprtypes) if not n.startswith('__')}
-MC = {n for n in dir(mojo_compiler) if not n.startswith('_')}
+MC = {n for n in dir(fire_compiler) if not n.startswith('_')}
 HEADER_DEFINED = MC | CT | SV | ET | {
     'os', 're', 'regex_compile', 'dataclasses', 'zlib', 'hashlib', 'sys',
     'gimple_ctypes', 'gimple_solvers', 'gimple_exprtypes', 'gimple_codegen'}

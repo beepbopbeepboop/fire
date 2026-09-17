@@ -873,7 +873,7 @@ class ModuleLoader:
         # this call site emits a bare `extern <type> sym(...);` declaration
         # into a DIFFERENT file's translation unit that has no reason to
         # have that typedef too -- "unknown type name 'Span'". Unlike
-        # MojoList/MojoDict/MojoSet (always available via mojo_runtime.h,
+        # MojoList/MojoDict/MojoSet (always available via fire_runtime.h,
         # included everywhere), Span has no globally-available typedef, so
         # box it to the same opaque-handle convention every other
         # not-locally-declared struct type already uses in this codebase

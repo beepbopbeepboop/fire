@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -266,7 +266,7 @@ def _iter_ast(n):
 
     Deliberately NOT a generator (it used to be): a `yield`/`yield from`
     function compiles to a REAL stack-switching coroutine in this
-    codegen, and this runtime's own docs (runtime/mojo_runtime.h) already
+    codegen, and this runtime's own docs (runtime/fire_runtime.h) already
     flag that "a coroutine body can't use setjmp/longjmp directly" — the
     C stack frame that ran `setjmp()` for some OTHER try/except elsewhere
     in this compiler's own pipeline no longer exists once a coroutine has
@@ -658,7 +658,7 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
     which is why `prefix, rest = raw[:n], raw[n:]`-style tuple
     assignments (unlike an equivalent plain `rest = raw[n:]`) left
     `rest` with no actual-type record at all: found via
-    mojo_compiler.py's own _strip_string_prefix_and_quotes, where
+    fire_compiler.py's own _strip_string_prefix_and_quotes, where
     `len(rest)`/`rest[0]` on the tuple-unpacked `rest` misread it as a
     MojoList* and segfaulted deep in mojo_list_get_int."""
     if dst != 'int64_t':
@@ -801,7 +801,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # Extended unpacking: one target may be starred (`*row, last =
         # data` / `first, *rest = data` — real Python syntax, parses as
         # UnaryOp(op='*', operand=<real target>) inside `elements`, see
-        # mojo_compiler.py). The starred target collects whatever's
+        # fire_compiler.py). The starred target collects whatever's
         # left over after the non-starred targets on either side have
         # each claimed one element — mirrors the interpreter's
         # identical before/star/after split in myinterpreter.py's
@@ -1158,7 +1158,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # `sys.argv = [...]` — a whole-list rebind. Reads lower to
         # mojo_get_argv() (see _lower_MemberExpr's sys/argv case), so the
         # write needs the matching runtime store or it is silently
-        # dropped: mojo.py's own CLI strips its `--dump`/`--dump-full`
+        # dropped: fire.py's own CLI strips its `--dump`/`--dump-full`
         # flags exactly this way before `input_file = sys.argv[1]`, and
         # without this the compiled binary kept the unstripped argv and
         # used the FLAG as the input filename (bootstrap stage 2/3 wrote
@@ -1219,7 +1219,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # intentional no-op fallback for values with NO type tag,
             # not a real implementation; found via
             # `s._fieldwise_ctor_synthesized = True` in
-            # _synthesize_fieldwise_inits (mojo_compiler.py) never taking
+            # _synthesize_fieldwise_inits (fire_compiler.py) never taking
             # effect once compiled.
             member_str = node.target.member
             key_slit = gen._intern_string(gimple_ctypes._c_escape(member_str))
@@ -1375,7 +1375,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # _dict_val_types entry and fell back to the char*-values
             # default, misreading the boxed struct pointer as a raw C
             # string and corrupting memory on the first `.attr` access.
-            # Found via mojo_compiler.py's own `_parse_postfix`'s
+            # Found via fire_compiler.py's own `_parse_postfix`'s
             # `keywords: dict = {}` (populated with parsed expression AST
             # nodes, then read back via `keywords.items()`) segfaulting
             # once self-hosted.
@@ -1391,7 +1391,7 @@ def _gen_stmt_AssignStmt(gen, node):
             else:
                 # Mark so generic repr() prints True/False instead of 1/0
                 # for this dict's values — see mojo_mark_dict_bool_values's
-                # doc comment in runtime/mojo_runtime.c.
+                # doc comment in runtime/fire_runtime.c.
                 if isinstance(node.value, gimple_ctypes.BoolLiteral):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
                 # Pass actual vtype so _emit_call can coerce pointers to int64_t
@@ -1728,7 +1728,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
         # `sys.argv = [...]` — a whole-list rebind. Reads lower to
         # mojo_get_argv() (see _lower_MemberExpr's sys/argv case), so the
         # write needs the matching runtime store or it is silently
-        # dropped: mojo.py's own CLI strips its `--dump`/`--dump-full`
+        # dropped: fire.py's own CLI strips its `--dump`/`--dump-full`
         # flags exactly this way before `input_file = sys.argv[1]`, and
         # without this the compiled binary kept the unstripped argv and
         # used the FLAG as the input filename (bootstrap stage 2/3 wrote
@@ -2068,7 +2068,7 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         # mojo_dict_contains, on virtually any `if <cond>:`/`while <cond>:`
         # whose scalar int64_t condition simply isn't a tracked container
         # value — i.e. almost every ordinary boolean condition in a real
-        # program (surfaced only once compiling mojo.py's own full source
+        # program (surfaced only once compiling fire.py's own full source
         # actually reached a deeply-nested closure this small test corpus
         # never exercised).
         if _real_ctype is not None and _real_ctype in gen._CONTAINER_LEN_FN:
@@ -2306,13 +2306,13 @@ def _gen_stmt_IfStmt(gen, node):
 def _gen_stmt_DelStmt(gen, node):
     """`del a[b]`, `del a[b:c]`, `del a[b], c[d]` — one DelStmt per
     statement, node.targets holding each comma-separated target (see
-    mojo_compiler.py's DelStmt docstring).
+    fire_compiler.py's DelStmt docstring).
 
     Previously COMPLETELY unimplemented: gen_stmt's dispatch chain had
     no DelStmt case at all, so it silently fell through to the generic
     "unknown statement dropped" fallback (a bare `/* TODO */` comment,
     no-op). This was flat-out WRONG, not just incomplete, for
-    mojo_compiler.py's own `_process_nested_tstrings`: its
+    fire_compiler.py's own `_process_nested_tstrings`: its
     `del result[-len(prefix):]` (removing a stray prefix character
     already appended to `result` char-by-char before the scanner
     realized it was actually part of a string literal's prefix) never
@@ -2332,7 +2332,7 @@ def _gen_stmt_DelStmt(gen, node):
     _gen_for_iter's identical boxed-int64_t dict-vs-list dispatch). Bare
     `del name` / `del obj.attr` are NOT reachable anywhere in this
     codebase's own self-hosted closure (grep-confirmed across
-    mojo_compiler.py/myinterpreter.py/mojo.py/mojo_main.py/
+    fire_compiler.py/myinterpreter.py/fire.py/mojo_main.py/
     module_loader.py/generated_dispatch.py) and would need much
     broader "this variable/attribute can become undefined" plumbing to
     support correctly in a compiled — not interpreted — target; left as
@@ -2342,7 +2342,7 @@ def _gen_stmt_DelStmt(gen, node):
     for target in node.targets:
         # A bare single-slice subscript (`x[a:b]`) parses as a SliceExpr
         # with .obj attached directly, NOT wrapped in a SubscriptExpr —
-        # see mojo_compiler.py's own `_parse_postfix`: "if len(items) ==
+        # see fire_compiler.py's own `_parse_postfix`: "if len(items) ==
         # 1: if isinstance(only, SliceExpr): only.obj = expr; expr =
         # only" (a single non-slice index DOES still wrap in
         # SubscriptExpr — that path is unaffected). `del result[-len(
@@ -2426,7 +2426,7 @@ def _gen_stmt_DelStmt(gen, node):
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
-    Switch-style equality dispatch (see mojo_compiler.py's MatchStmt
+    Switch-style equality dispatch (see fire_compiler.py's MatchStmt
     docstring for why this isn't full structural pattern matching):
     lowered as a chain of `if (subject == p1 | subject == p2 | ...)`
     checks, reusing the existing `==` lowering (_lower_BinaryOp already
@@ -3295,7 +3295,8 @@ def _gen_stmt_ExprStmt(gen, node):
                                 and fname not in gen._KNOWN_SIGS
                                 and raw_name not in gen.BUILTIN_VALUE_MAP
                                 and raw_name not in gimple_ctypes._C_RESERVED_FUNCS
-                                and fname not in gimple_codegen._SELFHOST_HARDCODED_FUNCS)
+                                and fname not in gimple_codegen._SELFHOST_HARDCODED_FUNCS
+                                and raw_name not in gimple_codegen._SELFHOST_HARDCODED_FUNCS)
             if _is_unknown_stmt and fname not in gen._auto_stubbed:
                 _stub_guard = gimple_ctypes._stub_guard_name(fname)
                 if raw_name in gen._unresolved_import_aliases:
@@ -3428,7 +3429,7 @@ def _handler_exc_name(gen, h):
         # against this project's own interpreter: `except e: print(e)`
         # after `raise Error(...)` silently never caught anything
         # before this fix, exactly mirroring the bug this method's own
-        # bare-string branch had). mojo_compiler.py's parser has no
+        # bare-string branch had). fire_compiler.py's parser has no
         # symbol table at parse time, so it can't distinguish these
         # up front — it always stores a bare identifier in `exc_type`
         # (see _parse_try's "the common case is a single ... exception
@@ -3467,7 +3468,7 @@ def _handler_bind_name(gen, h):
     caught exception to, or None if it doesn't bind one at all. Usually
     just `h.name` (an explicit `except ... as e:`) — but Mojo's `except
     e:` idiom (a bare identifier, no `as`) parses the name into
-    `h.exc_type` instead (mojo_compiler.py has no symbol table at parse
+    `h.exc_type` instead (fire_compiler.py has no symbol table at parse
     time to tell "real type" and "bind-all name" apart — see
     _handler_exc_name's own docstring for the full rationale), so when
     `h.name` is empty but `h.exc_type` is a string _handler_exc_name
@@ -3503,7 +3504,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
     # string "e" always missed both dicts and fell back to a plain
     # `(int64_t)0` default instead of reading the correctly-bound
     # `char *` temp holding the caught exception's value. Confirmed via
-    # a --dump-full mojo.py sibling-import diff (mojo_exc_obj_get()'s
+    # a --dump-full fire.py sibling-import diff (mojo_exc_obj_get()'s
     # result silently discarded at every `except Exception as e:` call
     # site referencing `e`) and reproduced standalone with a 2-line
     # `except Exception as e: note(e)`.
@@ -3832,7 +3833,7 @@ def _gen_stmt_TryStmt(gen, node):
         # `handler_bbs[id(h)]` read came back an erased int64_t (the bb-
         # name string's address) and emitted `goto <decimal address>;` —
         # invalid C, different every run (confirmed via a real --dump-full
-        # mojo.py determinism diff at myinterpreter.py:634's `except
+        # fire.py determinism diff at myinterpreter.py:634's `except
         # (GeneratorExit, StopIteration):`). Build it explicitly and
         # `_as_str`-guard every read.
         handler_bbs: dict = {}

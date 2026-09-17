@@ -97,7 +97,7 @@ gap #3's read path now genuinely functional.
 
 ## Status (re-verified 2026-08-25, wtOpencode_group3): consistent with the entry below — no util.py-attributed errors; full build again exceeded this session's watcher budget
 
-Fresh safety-wrapped `mojo.py build` attempt: watcher-killed at the
+Fresh safety-wrapped `fire.py build` attempt: watcher-killed at the
 300s cap during transitive-import processing (machine contended by
 concurrent agents' builds), but `grep 'ctypes/util.py:.*error:'` over
 the partial log is **0** throughout — same picture as the 2026-08-25
@@ -108,7 +108,7 @@ errors stop masking them. No code change. Doc kept open.
 
 ## Status (re-verified 2026-08-25): unchanged; gap #1's fix still holds, still no `ctypes/util.py`-specific errors
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 ctypes/util.py` fresh against current master (past the struct-method
 cross-call scalar contract "Pass 1.3e", generator-consumption-ordering
 fixed-point retry + defaults-aware arg padding, `**kwargs`-forward
@@ -141,7 +141,7 @@ as needed. (It also walks the importer's ancestor directories, bounded
 6 levels, for nested-package-relative imports — found via `dyld.py`'s
 own `from ctypes.macholib.framework import framework_info`.)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 ctypes/util.py` end-to-end (full run, ~4 min): **the previously-
 documented failure at `util.py:500`/`502` (`variable or field '_t21'
 declared void'` / `invalid use of void expression`, from `cdll` being
@@ -150,7 +150,7 @@ lowered as the generic weak int64_t stub) no longer reproduces —
 is now genuinely inline-compiled into the whole-program unit (confirms
 gap #1 is fixed, not just coincidentally unreached).
 
-`python3 mojo.py build` for this file still exits 1 overall: 265 real
+`python3 fire.py build` for this file still exits 1 overall: 265 real
 compiler errors remain, but ALL in other transitively-imported
 modules (`_collections_abc.py`, `argparse.py`, `ast.py`, `dataclasses.
 py`, `operator.py`, `os.py`, `pickle.py`, `types.py`, etc.) — none at
@@ -173,13 +173,13 @@ real progress, not a full resolution.
 
 ## Status (re-verified 2026-08-23, triage pass): identical failure; root cause refined into three stacked gaps
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 ctypes/util.py`: byte-identical failure — same two errors at the same
 lines (`util.py:500`/`502`, `variable or field '_t21' declared void` /
 `invalid use of void expression`), `cdll` still lowered as the generic
 weak int64_t stub, and the generated code at line 500 still
 dereferences `_funcptr_cdll` (`_t20 = _funcptr_cdll; _t21 = *_t20;`).
-Also re-confirmed `python3 mojo.py build .../Lib/ctypes/__init__.py`
+Also re-confirmed `python3 fire.py build .../Lib/ctypes/__init__.py`
 builds clean end-to-end (exit 0) and, compiled standalone, gives
 `cdll` a REAL type (`_global_var_types['cdll'] == 'LibraryLoader *'`,
 stored in `_root_globals.cdll` with a typed accessor) — so upstream
@@ -223,14 +223,14 @@ remains dead test-only `def test():` never invoked by anything.
 
 ## Status (updated 2026-08-09)
 
-Re-verified fresh via `python3 mojo.py build`. Symptom is byte-for-byte
+Re-verified fresh via `python3 fire.py build`. Symptom is byte-for-byte
 identical to the 2026-08-06 finding below: same two errors at the same
 lines (`util.py:500`/`502`, `variable or field '_t21' declared void` /
 `invalid use of void expression`), and the generated `.ci` still shows
 `cdll` lowered as the same generic weak int64_t-returning stub
 (`__attribute__((weak)) int64_t cdll (...) { mojo_print (...); return
 (int64_t)0; }`). Notably, `ctypes/__init__.py` itself now compiles
-clean end-to-end (`python3 mojo.py build .../ctypes/__init__.py` exits
+clean end-to-end (`python3 fire.py build .../ctypes/__init__.py` exits
 0) — a real improvement since this doc's last update — but that alone
 wasn't enough to fix `util.py`'s cross-module view of `cdll`: nothing
 in this session's fixes touched cross-module resolution of a MODULE-

@@ -60,7 +60,7 @@ Still feature-sized; untouched.
 
 ## Status (updated 2026-08-25 -- re-verified, unchanged)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 test/test_ensurepip.py` fresh against current master (past the
 struct-method cross-call scalar contract "Pass 1.3e",
 generator-consumption-ordering fixed-point retry + defaults-aware arg
@@ -95,7 +95,7 @@ the pre-change baseline of exactly 0 skips.
 ## Status (updated 2026-08-12 — re-verified, still not attempted; scoped a concrete design for a real fix)
 
 Re-verified against current master with a real `MOJO_DEBUG=1 python3
-mojo.py build`: still reproduces byte-for-byte identically (same
+fire.py build`: still reproduces byte-for-byte identically (same
 `unsupported statement in generator body: StructDef` refusal on
 `fake_pip`).
 
@@ -160,7 +160,7 @@ still a single instance in this cluster, not promoted to `bugs/hard/`.
 ## Status (updated 2026-08-09)
 
 Re-verified again against current master (`42faf64`) with a real
-`MOJO_DEBUG=1 python3 mojo.py build`: still reproduces byte-for-byte
+`MOJO_DEBUG=1 python3 fire.py build`: still reproduces byte-for-byte
 identically (same `unsupported statement in generator body: StructDef`
 refusal on `fake_pip`). No relevant `_cpp_stmt`/`StructDef` handling has
 been added since the prior verification. Classification and disposition
@@ -184,7 +184,7 @@ gaps. Still only one instance in this cluster — not promoted to a
 (`2b0c4c5`) with a precisely identified, new gap.
 
 ```
-$ MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/test/test_ensurepip.py
+$ MOJO_DEBUG=1 python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/test/test_ensurepip.py
 [gimple_codegen] generator 'fake_pip' not eligible for C++ coroutine path, falling back to honest refusal: unsupported statement in generator body: StructDef
 Error building: cannot compile module: function(s) fake_pip (generator function(s), ...) — falling back to interpreting this module from source instead
 ```

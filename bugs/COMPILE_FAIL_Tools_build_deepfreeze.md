@@ -6,7 +6,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, build still exits 0
 
-Fresh `python3 mojo.py build .../Tools/build/deepfreeze.py` against
+Fresh `python3 fire.py build .../Tools/build/deepfreeze.py` against
 this worktree (fast-forwarded to master `43fb291`): `Built: .../
 deepfreeze`, exit 0, 0 `error:` lines. Both open items (link-mode
 sibling-import degradation; argparse-runtime `AttributeError: verbose`,
@@ -16,7 +16,7 @@ change.
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): build still exits 0, 0 error lines, both open items unchanged
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/build/
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/build/
 deepfreeze.py` against this worktree (fast-forwarded to master
 `e60b9cd`): `Built: .../deepfreeze`, exit 0, 0 `error:` lines —
 byte-identical outcome to the entry directly below. Both open items
@@ -29,7 +29,7 @@ narrow compile bug). Not attempted; no code change.
 
 ## Status (re-verified + root cause CORRECTED, 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — build still exits 0; the "argparse runtime AttributeError" blocker re-root-caused: argparse is never compiled into the binary at all, in EITHER mode)
 
-Fresh `mojo.py build` (safety-wrapped): still exits 0 with 0 own-file
+Fresh `fire.py build` (safety-wrapped): still exits 0 with 0 own-file
 error lines. Re-investigation this pass CORRECTS item 2's diagnosis
 from the entries below:
 
@@ -74,7 +74,7 @@ inline Lib resolution) plus, past those, contextlib's async feature.
 
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c — build still exits 0 with 0 errors; both remaining gaps re-investigated, neither newly tractable)
 
-Fresh `mojo.py build .../Tools/build/deepfreeze.py`: still exits 0, 0
+Fresh `fire.py build .../Tools/build/deepfreeze.py`: still exits 0, 0
 error lines, binary runs. Re-checked both open items:
 
 1. **Link-mode sibling-import degradation** (item 1 below) — unchanged,
@@ -112,7 +112,7 @@ Doc stays open, reclassified status unchanged from the entry below.
 
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — build exits 0 with 0 errors; the shared umarshal root cause is FIXED; remaining gaps are link-mode sibling-import degradation + argparse runtime, both outside this compile-fail doc's subject)
 
-Re-verified fresh: `python3 mojo.py build .../Tools/build/deepfreeze.py`
+Re-verified fresh: `python3 fire.py build .../Tools/build/deepfreeze.py`
 **exits 0 with 0 error lines**, and deepfreeze.py's OWN source compiles
 clean in isolation too (fresh `do_imports=False` + `gcc -fgimple
 -fsyntax-only`: 0 errors — the 2026-08-09 entry's own-file `max()` fix
@@ -181,14 +181,14 @@ pattern immediately above it in the same file. Verified: this specific
 error is gone from a fresh, independent (non-cached, direct
 `gcc-mp-15 -fgimple`) compile of `deepfreeze.py`'s own generated code.
 
-**Important caveat — do not read "`mojo.py build` reports success" as
+**Important caveat — do not read "`fire.py build` reports success" as
 this bug or the shared umarshal.py bug being fixed.** After this fix,
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/build/
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/build/
 deepfreeze.py` does report `Built: ...` with 0 errors, reproducibly
 (3 separate runs, including one with a fully isolated, empty
 `GMOJO_HOME` to rule out a stale-cache false positive). But this is
 NOT evidence the shared `umarshal.py` structural bug is fixed —
-tracing `mojo.py build`'s actual dispatch (`mojo.py`'s `build`
+tracing `fire.py build`'s actual dispatch (`fire.py`'s `build`
 handling) showed it tries `driver.compile_program` (`gimple_codegen.
 compile_linked`, the newer "link mode" path — separately-compiled,
 cached per-module dylibs) FIRST, falling back to the older, simpler

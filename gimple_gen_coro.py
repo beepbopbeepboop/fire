@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import os
 
-import mojo_compiler as N
+import fire_compiler as N
 # `_is_asyncio_sleep_call`/`_is_asyncio_sock_recv_call` used to be defined
 # a second time here, byte-for-byte the same structural check as gimple_
 # exprtypes.py's own (the cpp-path's identical `asyncio.sleep`/`sock_recv`
 # call-shape recognizers) -- two top-level functions in two different
 # `.py` siblings sharing the exact same bare name collided under a single
-# self-hosted whole-program compile (mojo.py compiling its own source):
+# self-hosted whole-program compile (fire.py compiling its own source):
 # both got attributed to whichever module's `_compile_imported_module`
 # pass reached the shared-by-bare-name `_imported_func_home` entry FIRST,
 # so both ended up mangled to the SAME C symbol -- a GCC "redefinition"
@@ -81,7 +81,7 @@ def _walk(node):
 
     Deliberately NOT a generator (it used to be): a `yield`/`yield from`
     function compiles to a REAL stack-switching coroutine in this
-    codegen, and this runtime's own docs (runtime/mojo_runtime.h) already
+    codegen, and this runtime's own docs (runtime/fire_runtime.h) already
     flag that "a coroutine body can't use setjmp/longjmp directly" — a
     `mojo_raise()` firing (from a try/except ELSEWHERE in this compiler's
     own pipeline) while this walk is mid-iteration can longjmp across

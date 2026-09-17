@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test DispatchSolver Phase B: dispatch table planning and C code generation."""
 
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver, DispatchTable
 
 # Test case: myinterpreter pattern

@@ -3,7 +3,7 @@
 coroutine-codegen work (doc/COROUTINE.html §5.1).
 
 For every bug report in bugs/ and bugs/hard/ that names a `Source file:`,
-run `python3 mojo.py build` on it and record the outcome:
+run `python3 fire.py build` on it and record the outcome:
 
     compile  -> .ci/.o produced
     link     -> an executable produced
@@ -78,7 +78,7 @@ def _classify(report, src):
     exe = os.path.join(wd, 'a.out')
     env = dict(os.environ)
     try:
-        cp = subprocess.run([sys.executable, os.path.join(HERE, 'mojo.py'),
+        cp = subprocess.run([sys.executable, os.path.join(HERE, 'fire.py'),
                              'build', src, '-o', exe],
                             capture_output=True, text=True, timeout=600, cwd=wd, env=env)
     except subprocess.TimeoutExpired:

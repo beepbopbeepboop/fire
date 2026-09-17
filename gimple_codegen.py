@@ -1,6 +1,6 @@
 """GIMPLE backend for the Mojo compiler.
 
-Consumes AST produced by mojo_compiler.py and emits C source with
+Consumes AST produced by fire_compiler.py and emits C source with
 __GIMPLE-annotated functions for gcc-mp-15 -fgimple.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import hashlib
 import zlib
 import dataclasses
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -44,7 +44,7 @@ from generated_dispatch import (
 )
 # Module-level (not per-GimpleGen-instance) because a fresh GimpleGen is
 # constructed once per file during whole-program/transitive-closure
-# flattening (--dump-full, mojo.py build), so an instance attribute would
+# flattening (--dump-full, fire.py build), so an instance attribute would
 # reset for every file and never actually dedup anything. Tracks which
 # unresolved-import stub/definition C symbol names have already been
 # emitted into the CURRENT flattened output, so importing the same
@@ -94,7 +94,7 @@ _CPP_OPAQUE_PTR_STRUCTS = frozenset({
 
 
 # Fixed-size-array struct-field-annotation shape: `var x: [ElemType; N]`
-# (mojo_compiler.py's `_parse_type_ann_inner` LBRACKET branch captures the
+# (fire_compiler.py's `_parse_type_ann_inner` LBRACKET branch captures the
 # bracket contents verbatim via `_capture_bracketed_text`, which joins
 # tokens with single spaces — so `[Block; MAX_BLOCKS]` round-trips as the
 # string "[Block ; MAX_BLOCKS]"). `N` may be a decimal-literal size or a
@@ -108,14 +108,14 @@ _FIXED_ARRAY_ANN_RE = re.compile(
 
 
 # Runtime-owned, FIXED-layout C structs this codegen itself defines (in
-# runtime/mojo_runtime.h or its own emitted preamble), as opposed to a
+# runtime/fire_runtime.h or its own emitted preamble), as opposed to a
 # struct arising from a user's own `class`/`struct` statement (those are
 # never hardcoded here — they're always discovered via StructDef
 # processing into `self.struct_field_types`, which is mutable/extensible:
 # a not-yet-seen field on a USER struct legitimately grows the struct, see
 # `_collect_self_assigns`). A fixed-layout runtime struct has no such
 # extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self; }`,
-# hardcoded in mojo_runtime.h, forever) — an attribute name that isn't one
+# hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
 # of its real C fields must route through the same dynamic-attribute
 # dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
 # `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
@@ -360,12 +360,33 @@ _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
 _SELFHOST_HARDCODED_FUNCS = frozenset({
     'Parser_parse_module',
     'Parser___init__',
+    'Parser_with_filename',
+    'Parser__parse_expr',
     'Interpreter___init__',
     'Interpreter_execute',
     'jit_compile_and_execute',
     '_merge_struct_inheritance',
     '_compute_exc_descendants',
 })
+
+# Return types for self-host hardcoded functions, keyed by the bare
+# (unqualified) name as used in `_SELFHOST_HARDCODED_FUNCS`.  When a call
+# site in a self-host file (that does not directly import the defining
+# module) invokes one of these, the codegen needs to know the real return
+# type so it declares the result temp with the correct C type — the
+# `int64_t` default would silently truncate/pointer-widen (e.g.
+# `Parser *` -> `int64_t` on arm64).
+_SELFHOST_FUNC_RETURN_TYPES = {
+    'Parser_parse_module': 'MojoList *',
+    'Parser___init__': 'void',
+    'Parser_with_filename': 'Parser *',
+    'Parser__parse_expr': 'int64_t',
+    'Interpreter___init__': 'void',
+    'Interpreter_execute': 'int64_t',
+    'jit_compile_and_execute': 'int64_t',
+    '_merge_struct_inheritance': 'void',
+    '_compute_exc_descendants': 'int64_t',
+}
 
 
 # Sentinel stored in GimpleGen._own_imported_func_home when a bare free-
@@ -565,7 +586,7 @@ class GimpleGen:
         # codegen's OWN generic resume/destroy pair instead, which operate
         # on the SAME plain-int64_t coroutine-handle representation this
         # codegen's own `_take_handle()` lowering produces (see runtime/
-        # mojo_async_runtime.h's own docstring on `mojo_coro_resume_generic`/
+        # fire_async_runtime.h's own docstring on `mojo_coro_resume_generic`/
         # `mojo_coro_destroy_generic` for why one generic pair suffices for
         # every compiled coroutine, and _lower_method_call's `_take_handle`
         # special case).
@@ -643,7 +664,7 @@ class GimpleGen:
         # below) is part of GimpleGen's own instance state, which is real
         # Python running the compiler normally but becomes actual compiled
         # Mojo/C when this compiler's own source is self-hosted (test_
-        # selfhost.py / `mojo.py --jit mojo.py`). This runtime's MojoDict
+        # selfhost.py / `fire.py --jit fire.py`). This runtime's MojoDict
         # has no representation for a tuple key (keys are always coerced
         # to char * at the C level, see _char_to_cstr), so a genuine tuple
         # key here would either silently mis-stringify on write or (worse,
@@ -810,7 +831,7 @@ class GimpleGen:
         # Concatenated .cpp text (one C++20 translation unit) for every
         # supported generator in this module, or '' if none. Set at the very
         # end of gen_module, once the API is fully known — the caller
-        # (mojo.py / build_stdlib_dylib.py) reads this attribute off the
+        # (fire.py / build_stdlib_dylib.py) reads this attribute off the
         # GimpleGen instance after calling gen_module to decide whether a
         # second (g++-compiled) object file needs linking in alongside the
         # ordinary -fgimple .o. Deliberately NOT threaded through
@@ -975,7 +996,7 @@ class GimpleGen:
         # Per-function refusal reason recorded whenever a generator/async
         # unit compile attempt raises _UnsupportedGeneratorShape (keyed by
         # the function's Python name, first reason wins). Surfaced in
-        # gen_module's strict-mode whole-module refusal so `mojo.py build`
+        # gen_module's strict-mode whole-module refusal so `fire.py build`
         # failures name the actual unsupported shape instead of only the
         # generic category list (previously visible only under MOJO_DEBUG).
         self._cpp_refusal_reasons: dict[str, str] = {}
@@ -1145,7 +1166,7 @@ class GimpleGen:
         # real-world need: Lib/pathlib/_os.py's `err.filename`/`err.filename2`
         # are always strings.
         self._except_attr_str_fields: set[str] = set()
-        # Fixed-size-array struct fields (`var x: [ElemType; N]`, mojo_compiler.py's
+        # Fixed-size-array struct fields (`var x: [ElemType; N]`, fire_compiler.py's
         # `_parse_type_ann_inner` LBRACKET-annotation shape): struct_name ->
         # field_name -> (elem_ctype, N). The field's C type in struct_field_types
         # is the marker string f"{elem_ctype}[{N}]" (distinguishable from every
@@ -1362,7 +1383,7 @@ class GimpleGen:
         # scan. Must be shared across every temp_gen sub-compile the same way
         # struct_field_types itself is (do_imports's per-module recursion),
         # not just local to one gen_module call: two unrelated same-named
-        # classes reached via *different* modules (mojo_compiler.py's
+        # classes reached via *different* modules (fire_compiler.py's
         # FunctionDef vs ast_nodes.py's own FunctionDef, both present once
         # myinterpreter.py — which imports ast_nodes purely for method-
         # signature type annotations — is compiled) are scanned by two
@@ -1487,7 +1508,7 @@ class GimpleGen:
         # CODEGEN_multiple_inheritance_duplicate_method_symbols.md, whose
         # original multiple-inheritance/struct-merge hypothesis this
         # superseded: the real, confirmed cause is this self-shadowing
-        # import, not the inheritance-merge machinery — `python3 mojo.py
+        # import, not the inheritance-merge machinery — `python3 fire.py
         # build Lib/importlib/abc.py` produced a genuinely WHOLE-FILE
         # duplicate `#line 1 ".../abc.py"` section, not merely inflated
         # per-class method lists). Shared by direct object reference across
@@ -1906,7 +1927,7 @@ class GimpleGen:
         # field load, never a `getattr` that erases to a boxed int64 on the
         # compiled path (which made the `_gg_stmts is not None` guard in
         # gimple_module_gen.py mis-fire and drop the ~1400-line GimpleGen
-        # method-extern block from stage2's mojo.ci under MOJO_NO_SHIM=1).
+        # method-extern block from stage2's fire.ci under MOJO_NO_SHIM=1).
         self._selfhost_gimplegen_stmts = None
         # Bare `dict = {}` left the value ctype unresolved self-hosted, so
         # `gen._selfhost_gimplegen_extra_fields[k]` read back the raw
@@ -1962,7 +1983,7 @@ class GimpleGen:
         # _register_link_imports, both of which operate on `stmts` — this
         # instance's own compile unit — never a nested/sibling module's).
         # Deliberately NOT shared across nested temp_gens (contrast
-        # _imported_func_home above): a real bug (found via `mojo.py build`
+        # _imported_func_home above): a real bug (found via `fire.py build`
         # on two sibling modules that each define a same-named free function
         # and are each wrapped by their OWN importer module — e.g.
         # alpha_wrapper.mojo doing `from alpha_module import f` and
@@ -2209,7 +2230,7 @@ class GimpleGen:
         'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
-        # mojo_map/mojo_filter (runtime/mojo_runtime.{h,c}): `void *mojo_map(void
+        # mojo_map/mojo_filter (runtime/fire_runtime.{h,c}): `void *mojo_map(void
         # *func, void *iterable)` is a pointer-returning passthrough shim (it
         # just hands back `iterable` today — no actual per-element mapping is
         # performed at the runtime-helper level). Without this entry, the temp
@@ -2334,7 +2355,7 @@ class GimpleGen:
                                            'int64_t *', 'int64_t *', 'int64_t *', 'int64_t *']),
         'mojo_regex_lastgroup':  ('char *', ['const char * *', 'int', 'int64_t *']),
         'mojo_regex_substr':     ('char *', ['char *', 'int64_t', 'int64_t']),
-        # Matches runtime/mojo_runtime.h's own declaration exactly
+        # Matches runtime/fire_runtime.h's own declaration exactly
         # (`int mojo_getattr(int obj, char *attr)` — the honest
         # always-return-0 stub). The old entry here claimed
         # ('int64_t', ['void *', 'char *']), so every call site coerced
@@ -2429,7 +2450,7 @@ class GimpleGen:
         'getgid':                ('unsigned int', []),
         'sysconf':               ('long',        ['int']),
         # Python's hex()/oct()/bin() builtins -- real implementations in
-        # runtime/mojo_runtime.c, routed here via BUILTIN_VALUE_MAP. (The
+        # runtime/fire_runtime.c, routed here via BUILTIN_VALUE_MAP. (The
         # bare 'hex' name used to be declared as if it were a real libc
         # function via _LIBC_DECLARED/_NEEDS_SELF_EXTERN -- no such libc
         # function exists, so every caller of Python's hex() got an
@@ -2631,7 +2652,7 @@ class GimpleGen:
         'mojo_memcpy':  ('void', ['int64_t', 'int64_t', 'int64_t']),
         # mojo_memmove: UnsafePointer params lower to int64_t* (element-based memmove)
         'mojo_memmove': ('void', ['int64_t *', 'int64_t *', 'int64_t']),
-        # char_replace is a macro in mojo_runtime.h — suppress conflicting stub declaration
+        # char_replace is a macro in fire_runtime.h — suppress conflicting stub declaration
         'char_replace':  ('int64_t', ['int64_t', 'int64_t', 'int64_t']),
         # Call the real function directly rather than through the char_replace
         # macro — some self-hosted call sites triggered a GCC -fgimple parse
@@ -2788,7 +2809,7 @@ class GimpleGen:
         'signal', 'raise',
         # Wide char (wchar.h)
         'wcslen', 'wcscmp', 'wcscat',
-        # runtime/mojo_async_runtime.h — already declared there (included in
+        # runtime/fire_async_runtime.h — already declared there (included in
         # any module's preamble with a supported async function/closure —
         # see gen_module), with real function-POINTER-typed parameters
         # (resume_fn/destroy_fn); external_call["AsyncRT_DeviceContext_
@@ -2804,7 +2825,7 @@ class GimpleGen:
 
     # Correct signatures for C standard library functions to prevent conflicts
     _LIBC_SIGS: dict[str, tuple[str, list[str]]] = {
-        # runtime/mojo_async_runtime.h's own honest-synchronous-simplification
+        # runtime/fire_async_runtime.h's own honest-synchronous-simplification
         # stubs (see _LIBC_DECLARED's matching entries above) — real
         # function-pointer parameter types, matching the header exactly, so
         # external_call's own arg-count padding/coercion logic (which reads
@@ -4099,19 +4120,19 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
         gimple_gen_coro.register(gen, _coro_meta)
     gen._current_filename = filename
     # Self-hosting bootstrap: when compiling this compiler's own source as a
-    # transitive closure (`python3 mojo.py build mojo.py`, `--dump-full
-    # mojo.py`, `--dump-full mojo_compiler.py`, `make bootstrap` stage 1,
+    # transitive closure (`python3 fire.py build fire.py`, `--dump-full
+    # fire.py`, `--dump-full fire_compiler.py`, `make bootstrap` stage 1,
     # `make check-selfhost`), seed the GimpleGen registry so the extracted
     # backend helpers can be typed. do_imports/link only, and only for a
     # file directly under the compiler's own source dir — never for
     # `--dump <userfile>` or a compile_stdlib.py worker.
     #
-    # Originally gated to `basename in ('mojo.py', 'mojo_main.py')` only —
-    # too narrow: `--dump-full mojo_compiler.py`'s transitive closure also
+    # Originally gated to `basename in ('fire.py', 'mojo_main.py')` only —
+    # too narrow: `--dump-full fire_compiler.py`'s transitive closure also
     # reaches gimple_gen_exprs.py (e.g. `_lb_as_set`/`_lower_binary_set_op`,
     # hoisted module-level helpers taking `gen` as their first param per
     # `_selfhost_gen_self_param_ctype`'s own documented convention), but
-    # with `filename == 'mojo_compiler.py'` the registration above never
+    # with `filename == 'fire_compiler.py'` the registration above never
     # ran, so `_selfhost_gimplegen_registered` stayed False for the WHOLE
     # compile and every such `gen` param fell through to generic inference
     # -> int64_t. Confirmed via the emitted C signature itself:
@@ -4150,24 +4171,24 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # Basename allowlisting is the one dimension that correctly separates
     # "genuinely one of the compiler's own named entry files" from "any
     # relative-looking filename that happens to share this process's CWD" —
-    # restored it, just widened to also cover 'mojo_compiler.py' (the
+    # restored it, just widened to also cover 'fire_compiler.py' (the
     # actual motivating case for broadening this at all).
     # `_SELFHOST_DIR` is `dirname(abspath(__file__))` — in the COMPILED
     # binary `__file__` is `<bootstrap>`, so `_SELFHOST_DIR` resolves to the
     # process CWD (e.g. `stage2/`), never the real source dir, and the
     # `== _SELFHOST_DIR` check always failed there. That is why
     # `MOJO_NO_SHIM=1 make bootstrap` never registered the synthetic
-    # GimpleGen struct and stage2's mojo.ci was missing ~1400 lines of
+    # GimpleGen struct and stage2's fire.ci was missing ~1400 lines of
     # `GimpleGen__*` method externs + the full typedef vs stage1. Accept a
     # second, path-independent signal: the entry file is one of the
-    # compiler's own named files AND `mojo_compiler.py` sits right next to
+    # compiler's own named files AND `fire_compiler.py` sits right next to
     # it (only true for a genuine compiler-source checkout, never for a
-    # user program that happens to be named `mojo.py`).
+    # user program that happens to be named `fire.py`).
     _sh_dir = os.path.dirname(filename)
-    _sh_sibling = os.path.isfile(os.path.join(_sh_dir, 'mojo_compiler.py')) if _sh_dir else \
-        os.path.isfile('mojo_compiler.py')
+    _sh_sibling = os.path.isfile(os.path.join(_sh_dir, 'fire_compiler.py')) if _sh_dir else \
+        os.path.isfile('fire_compiler.py')
     if ((do_imports or link_mode) and filename
-            and os.path.basename(filename) in ('mojo.py', 'mojo_main.py', 'mojo_compiler.py')
+            and os.path.basename(filename) in ('fire.py', 'mojo_main.py', 'fire_compiler.py')
             and (os.path.abspath(_sh_dir) == _SELFHOST_DIR or _sh_sibling)):
         # Hand the resolved source dir to `_selfhost_load_gimplegen_class`:
         # in the compiled binary `_SELFHOST_DIR` (== CWD) is wrong, so its
@@ -4219,7 +4240,7 @@ _IMPORT_LINE_RE = re.compile(r'^\s*(?:from|import)\s+([.\w]+)', re.MULTILINE)
 
 def _dep_sources_texts(mojo_src: str, filename: str) -> dict:
     """The transitive import closure of sibling modules resolved next to the
-    entry file, as {abs_path: source_text} — both .mojo and .py (mojo.py's
+    entry file, as {abs_path: source_text} — both .mojo and .py (fire.py's
     own bootstrap dumps inline .py siblings like myinterpreter.py). Mirrors
     how codegen finds them (imports.resolve_source, then
     _resolve_test_relative_module's walk up the entry file's ancestors).
@@ -4379,7 +4400,7 @@ def module_may_have_supported_generator(mojo_src: str, filename: str = "") -> bo
     intentionally over-triggers (a dumb substring check) rather than
     under-triggers. Name kept as-is (not renamed to something like
     "..._or_async") despite now covering both generator and async codegen —
-    it has exactly one call site (mojo.py's build_executable) and its
+    it has exactly one call site (fire.py's build_executable) and its
     return value's MEANING ("routing through compile_to_gimple_with_cpp is
     worth trying") hasn't changed, only the set of source shapes that can
     make that true.
@@ -4431,9 +4452,9 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     this function (the `.c` side has no problem referencing the coroutine
     unit's symbols) but FAILED TO LINK when driven through driver.py's
     `compile_program` (plain `gcc`, no companion .cpp ever compiled) —
-    silently papered over in practice only because `mojo.py build`/`run`
+    silently papered over in practice only because `fire.py build`/`run`
     fall back to a completely different, simpler inline pipeline
-    (`mojo.py`'s own `build_executable`, which already had this handling)
+    (`fire.py`'s own `build_executable`, which already had this handling)
     whenever `driver.compile_program` fails, masking the gap."""
     code, gen = _run_pipeline(mojo_src, filename=filename, link_mode=True)
     # `gen._link_needs_cxx_box[0]`: a coroutine unit discovered several

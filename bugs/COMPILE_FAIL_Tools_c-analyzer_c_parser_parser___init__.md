@@ -185,7 +185,7 @@ compiled-generator project scope; not attempted.
 
 ## Status (re-verified 2026-08-09): still fails, same generator/coroutine gap, confirmed precisely
 
-Re-ran on current `master` (`python3 mojo.py build .../c_parser/parser/__init__.py`,
+Re-ran on current `master` (`python3 fire.py build .../c_parser/parser/__init__.py`,
 exit 1). Error set in the generated `__init___gen.cpp` is unchanged from
 2026-08-06 (`invalid conversion from 'MojoBoundMethod*' to 'int64_t'`,
 `'ParsedItem' was not declared in this scope`, `request for member

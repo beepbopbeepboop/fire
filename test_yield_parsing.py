@@ -8,7 +8,7 @@ Interpreter execution of generators is explicitly out of scope for this
 milestone; `myinterpreter.py` is not touched or exercised here.
 """
 import sys
-import mojo_compiler as N
+import fire_compiler as N
 
 _PASS = 0
 _FAIL = 0

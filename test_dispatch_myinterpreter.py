@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration test: DispatchSolver on myinterpreter.mojo patterns."""
 
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver
 
 # Simplified version of the interpreter's execute pattern

@@ -149,7 +149,7 @@ Re-verified against current master (fast-forwarded to `bf1ead2`, after
 several sibling `Tools/c-analyzer/` bugs and the related
 `_write_atomic.__code__` bug (see
 `bugs/COMPILE_FAIL_importlib__bootstrap_external.md`) got fixed this
-session). `python3 mojo.py build` on this file still fails with the
+session). `python3 fire.py build` on this file still fails with the
 EXACT SAME four errors as the 2026-08-07 note below, character for
 character (`'fmt_brief_0c85c9' undeclared here (not in a function)`,
 etc.) — none of the intervening fixes touched this "generator function

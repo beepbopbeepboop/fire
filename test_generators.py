@@ -14,7 +14,7 @@ single-mutable-attribute hazard — see MojoGeneratorObject's docstring in
 myinterpreter.py).
 """
 import sys
-import mojo_compiler as N
+import fire_compiler as N
 from myinterpreter import Interpreter
 
 _PASS = 0

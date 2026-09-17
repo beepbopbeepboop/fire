@@ -6,7 +6,7 @@
      cc -O2 -o /tmp/t runtime/test_mojo_coro_ctx.c runtime/mojo_coro_ctx_generic.c && /tmp/t
      cc -O2 -o /tmp/t runtime/test_mojo_coro_ctx.c runtime/mojo_coro_ctx_aarch64.S && /tmp/t
 */
-#include "mojo_coro_ctx.h"
+#include "fire_coro_ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

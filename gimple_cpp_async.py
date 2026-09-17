@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -492,7 +492,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # the identical bare `_mojogen_walk_start`, producing a hard
         # "conflicting types" GCC error across the whole-program
         # compile the moment both were transitively reachable (real:
-        # `python3 mojo.py build .../Lib/os.py`) — see
+        # `python3 fire.py build .../Lib/os.py`) — see
         # CODEGEN_generator_function_symbol_not_module_qualified.md.
         # `_func_qualifier` is called here EXACTLY as `_func_csym` calls
         # it for an ordinary function's definition: `fn.name` is always
@@ -930,14 +930,14 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
         f"    if (h.done()) return false;",
         # Cleared right before resuming (not after — see
-        # mojo_exc_pending_get's docstring in mojo_runtime.h): this
+        # mojo_exc_pending_get's docstring in fire_runtime.h): this
         # resume call is the only thing that could set it again before
         # anyone looks, so this is just belt-and-suspenders against a
         # flag some earlier, unrelated call left set without a
         # consumer ever clearing it.
         f"    mojo_exc_pending_set(0);",
         f"    h.resume();",
-        # See mojo_runtime.h's long comment on _mojo_exc_pending: this
+        # See fire_runtime.h's long comment on _mojo_exc_pending: this
         # is the ONE place a compiled generator's own escaped exception
         # is translated into the shared, pre-existing mojo_exc_type/
         # msg/obj slots -- every ordinary (never-suspended) consumer of
@@ -2031,7 +2031,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         # coroutine to completion (genuinely never-suspended ordinary
         # GIMPLE C code at that call site, exactly like the generator
         # convention's own `_resume()` boundary -- see
-        # _gen_cpp_generator_unit's unhandled_exception()/mojo_runtime.h's
+        # _gen_cpp_generator_unit's unhandled_exception()/fire_runtime.h's
         # long comment on _mojo_exc_pending), never from inside another
         # coroutine's own body (composition's rethrow-into-caller,
         # above, handles that case instead -- this function and that

@@ -1,7 +1,7 @@
 /* test_mojo_coro_gen.c -- the Mojo-facing int64_t shim (mojo_coro_gen.c),
    driven by hand-written "bodies" that stand in for gimple_gen_coro.py's
    output. Everything crosses the boundary as int64_t. */
-#include "mojo_coro.h"
+#include "fire_coro.h"
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>

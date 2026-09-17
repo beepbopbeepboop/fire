@@ -28,7 +28,7 @@ bare function-pointer VALUES). Under MOJO_CORO=stackswitch this exercises:
      only bookkeeping that stays empty here).
 
 This compiles the REAL generated C with `gcc -fgimple`, links against this
-project's own runtime (mojo_runtime.c, mojo_async_runtime.cpp,
+project's own runtime (fire_runtime.c, mojo_async_runtime.cpp,
 mojo_coro.c/mojo_coro_gen.c/mojo_async_sched.c/mojo_coro_ctx_*), runs the
 executable, and asserts on real stdout.
 """
@@ -66,7 +66,7 @@ def check(name, cond, detail=""):
 
 
 _RUNTIME_SRCS = [
-    os.path.join(RUNTIME_DIR, 'mojo_runtime.c'),
+    os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
     os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp'),
     os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
     os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),

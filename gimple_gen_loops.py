@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -225,7 +225,7 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
 
 def _emit_unsupported_iter(gen, it_type: str, node=None) -> None:
     """Abort at runtime instead of silently running a for-loop body zero
-    times — see mojo_unsupported_iter in runtime/mojo_runtime.c.
+    times — see mojo_unsupported_iter in runtime/fire_runtime.c.
 
     Includes the source file:line of the offending `for` loop (when the
     caller has it) — the runtime warning alone gives no way to tell
@@ -257,7 +257,7 @@ def _try_const_fold_str(gen, expr) -> str | None:
     side effect of ordinary AssignStmt/VarDecl lowering in program
     order) without running the program. Needed for re.sub(pattern,
     callback, src) call sites whose pattern isn't a bare string literal
-    but is still fully known ahead of time, e.g. mojo_compiler.py's own
+    but is still fully known ahead of time, e.g. fire_compiler.py's own
     `_dq = '"' * 3; pattern = r'...' + _dq + r'...' + _dq` in
     replace_multiline_strings — that pattern needs this codegen's real
     regex engine (see _gen_for_regex_iter/regex_compile.py), not
@@ -345,7 +345,7 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
 def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     """`for m in <pattern>.finditer(text): ... m.lastgroup/.group()/.start() ...`
     — lowered to a real scan loop over the small regex engine in
-    runtime/mojo_runtime.c, instead of _gen_for_iter's generic
+    runtime/fire_runtime.c, instead of _gen_for_iter's generic
     unsupported-iterable fallback. See regex_compile.py and
     BACKLOG-CODEGEN.md §4f. Only .lastgroup/.group()/.start() on the
     loop variable are supported (that's everything py_tokenize's own
@@ -359,7 +359,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     """
     var = node.target
     # NOTE: `node.target` is ALWAYS a plain Python str (see
-    # _parse_unpack_target in mojo_compiler.py) — the old
+    # _parse_unpack_target in fire_compiler.py) — the old
     # `if isinstance(node.target, str) else node.target.name` split
     # existed only because the field is typed `object`/boxed int64_t in
     # struct_field_types, so in the COMPILED binary the isinstance fell
@@ -510,7 +510,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
 
     var = node.target
     # NOTE: `node.target` is ALWAYS a plain Python str (see
-    # _parse_unpack_target in mojo_compiler.py and _gen_for_regex_iter's
+    # _parse_unpack_target in fire_compiler.py and _gen_for_regex_iter's
     # identical fix) — the old `if isinstance(node.target, str) else
     # node.target.name` split existed only because the field is typed
     # `object`/boxed int64_t in struct_field_types, so in the COMPILED
@@ -1664,7 +1664,7 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     branch existed anywhere in _gen_for_iter's dispatch, so any such
     loop silently fell through to the generic "unsupported iterable"
     fallback (mojo_unsupported_iter — the body runs ZERO times, no
-    error). A striking real consequence: mojo_compiler.py's own
+    error). A striking real consequence: fire_compiler.py's own
     `_process_nested_tstrings` computes `needs_brace_aware_scan =
     any(c in ('t','T','f','F') for c in prefix)` — a generator
     expression over exactly this shape — which therefore ALWAYS
@@ -2198,7 +2198,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     gen._emit(f"  goto {bb_cond};")
     # `_resume` reporting "no value" is ambiguous between genuine
     # exhaustion and an uncaught exception that unwound the whole
-    # generator body (Milestone D — see mojo_runtime.h's long comment
+    # generator body (Milestone D — see fire_runtime.h's long comment
     # on _mojo_exc_pending). Disambiguate before treating this as an
     # ordinary end-of-loop.
     gen._emit_label(bb_check_exc)
@@ -2218,7 +2218,7 @@ def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
     clear the flag and call mojo_raise() for real — safe here because
     this call site is ordinary GIMPLE C code that was never itself
     suspended, so the longjmp only crosses live, ordinary C frames (see
-    mojo_runtime.h). Otherwise falls through to `bb_not_pending`
+    fire_runtime.h). Otherwise falls through to `bb_not_pending`
     (ordinary ends-of-iteration handling, unchanged)."""
     pending_t = gen._new_val('int', "mojo_exc_pending_get ()")
     bb_pending = gen._new_bb()

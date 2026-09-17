@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Runtime-diff harness: run the same Mojo program through BOTH the
-interpreter (`python3 mojo.py run X.mojo`) and the JIT-compiled path
-(`python3 mojo.py --jit X.mojo`), then diff their stdout + exit code.
+interpreter (`python3 fire.py run X.mojo`) and the JIT-compiled path
+(`python3 fire.py --jit X.mojo`), then diff their stdout + exit code.
 
 This is the concrete measure of "runtime parity" between the two execution
 engines (myinterpreter.py's evaluator vs the gimple_codegen-compiled native
-binaries). The interpreter is the ultimate correctness backstop (mojo.py falls
+binaries). The interpreter is the ultimate correctness backstop (fire.py falls
 back to interpreting on compile failure), so a program that silently compiles
 to *different* behavior is the divergence this harness exists to catch.
 
@@ -15,7 +15,7 @@ Statuses:
                     is reported; exit-code differences include the JIT's
                     "JIT execution failed with code N" note when present)
   JIT-COMPILE-FAILED the program cannot be JIT-compiled at all (gcc / codegen
-                    error, seen via mojo.py's "JIT compilation failed" /
+                    error, seen via fire.py's "JIT compilation failed" /
                     "JIT error" stderr markers). This is reported distinctly
                     rather than as a plain stdout diff because the compiled
                     path falls back to the interpreter on failure — a naive
@@ -36,10 +36,10 @@ import tempfile
 import textwrap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MOJO = os.path.join(HERE, 'mojo.py')
+MOJO = os.path.join(HERE, 'fire.py')
 TIMEOUT = 120  # seconds per (program, mode) run
 
-# mojo.py's jit_compile_and_execute prints one of these to stderr when the
+# fire.py's jit_compile_and_execute prints one of these to stderr when the
 # program fails in the COMPILE stage (codegen / gcc / link). The compiled
 # binary never ran, so parity is unevaluable.
 JIT_COMPILE_FAIL_MARKERS = (
@@ -56,8 +56,8 @@ JIT_RUN_FAIL_MARKER = "JIT execution failed with code"
 def run_one(mode: str, fpath: str) -> tuple:
     """Run fpath through one execution engine.
 
-    mode is 'interp' (`python3 mojo.py run X.mojo`) or 'jit'
-    (`python3 mojo.py --jit X.mojo`). Returns (status, stdout, exit_code,
+    mode is 'interp' (`python3 fire.py run X.mojo`) or 'jit'
+    (`python3 fire.py --jit X.mojo`). Returns (status, stdout, exit_code,
     stderr). status is 'ok', 'timeout', or 'error'.
     """
     cmd = [sys.executable, MOJO, 'run' if mode == 'interp' else '--jit', fpath]
@@ -73,16 +73,24 @@ def run_one(mode: str, fpath: str) -> tuple:
 
 def _first_stdout_diff(stdout_a: str, stdout_b: str) -> str:
     """Describe the first line where two stdout streams differ."""
-    lines_a = stdout_a.splitlines()
-    lines_b = stdout_b.splitlines()
+    if stdout_a == stdout_b:
+        return 'stdout identical'
+    lines_a = stdout_a.splitlines(keepends=True)
+    lines_b = stdout_b.splitlines(keepends=True)
     for i, (la, lb) in enumerate(zip(lines_a, lines_b)):
         if la != lb:
             return (f"stdout line {i + 1}: "
                     f"interp={la!r}  jit={lb!r}")
     i = min(len(lines_a), len(lines_b))
-    which = "jit" if len(lines_a) < len(lines_b) else "interp"
-    extra = (lines_b[i] if len(lines_a) < len(lines_b)
-             else lines_a[i])
+    if i < len(lines_a):
+        which = "interp"
+        extra = lines_a[i]
+    elif i < len(lines_b):
+        which = "jit"
+        extra = lines_b[i]
+    else:
+        return (f"stdout length differs ({len(lines_a)} vs {len(lines_b)} lines) "
+                f"but all lines match")
     return (f"stdout length differs ({len(lines_a)} vs {len(lines_b)} lines); "
             f"first {which}-only line at {i + 1}: {extra!r}")
 
@@ -370,7 +378,7 @@ def run_file(path: str) -> str:
 
 def main():
     print("=" * 60)
-    print("RUNTIME DIFF — interpreter (mojo.py run) vs JIT (mojo.py --jit)")
+    print("RUNTIME DIFF — interpreter (fire.py run) vs JIT (fire.py --jit)")
     print("=" * 60)
     print()
 

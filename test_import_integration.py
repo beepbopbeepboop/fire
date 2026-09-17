@@ -9,7 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from gimple_codegen import compile_to_gimple, GimpleGen
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 import ast_rewriter
 from build_config import find_gcc
 
@@ -67,23 +67,23 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
         with open(main_c_file, 'w') as f:
             f.write(main_c)
 
-        # mojo_runtime.o provides the print/repr/dispatch helpers every
+        # fire_runtime.o provides the print/repr/dispatch helpers every
         # compiled Mojo program references — build it fresh for the host
-        # arch rather than trusting any prebuilt runtime/mojo_runtime.o
+        # arch rather than trusting any prebuilt runtime/fire_runtime.o
         # (which may be stale for a different architecture).
-        runtime_obj = os.path.join(tmpdir, 'mojo_runtime.o')
+        runtime_obj = os.path.join(tmpdir, 'fire_runtime.o')
         # Use the project's own selected gcc (not the bare `cc` alias, which
         # on macOS is clang defaulting to a strict-ISO-C mode that rejects
-        # mojo_runtime.h's `int mojo_type(...)` GNU-extension-style
+        # fire_runtime.h's `int mojo_type(...)` GNU-extension-style
         # unnamed-leading-param variadic prototype) -- matches
-        # build_stdlib_dylib.py's own mojo_runtime.c compile flags.
+        # build_stdlib_dylib.py's own fire_runtime.c compile flags.
         rt_result = subprocess.run(
             [find_gcc(), '-fPIC', '-c', f'-I{HERE}/runtime', '-o', runtime_obj,
-             f'{HERE}/runtime/mojo_runtime.c'],
+             f'{HERE}/runtime/fire_runtime.c'],
             capture_output=True, text=True, timeout=30
         )
         if rt_result.returncode != 0:
-            print("Failed to compile mojo_runtime.c:")
+            print("Failed to compile fire_runtime.c:")
             print(rt_result.stderr)
             return None
 
@@ -112,7 +112,7 @@ def test_multi_name_import_interpreter():
     comma-separated targets past the first) was silently dropped, so using
     e.g. `argparse` after `import sys, os, difflib, argparse` raised a
     NameError."""
-    from mojo_compiler import py_tokenize, Parser
+    from fire_compiler import py_tokenize, Parser
     from myinterpreter import Interpreter
 
     src = "import sys, os, difflib, argparse\n"

@@ -5,7 +5,7 @@
      cc -O2 -I runtime -o /tmp/t runtime/test_mojo_coro.c runtime/mojo_coro.c \
         runtime/mojo_coro_ctx_aarch64.S runtime/test_mojo_coro_exc_stub.c && /tmp/t
 */
-#include "mojo_coro.h"
+#include "fire_coro.h"
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>

@@ -47,7 +47,7 @@ Two fresh probes, no compiler change:
    `self._visible[header] = self[header]`). Consistent with the
    2026-08-25 entry's finding that this refusal does NOT fire on the
    real whole-program path.
-2. A fresh safety-watched full `python3 mojo.py build .../Lib/mailbox.py`
+2. A fresh safety-watched full `python3 fire.py build .../Lib/mailbox.py`
    (own watcher, killed at my 905s budget): did NOT reach GCC stage
    within the budget under today's heavy concurrent-build load — it
    spent the entire time inline-interpreting refused transitive imports
@@ -85,7 +85,7 @@ no value-carrying `return <expr>` inside a generator body.
 Re-confirmed via a fresh isolated `compile_to_gimple_with_cpp(do_imports=
 False)`: mailbox.py's own generator bodies (5 `yield`/`yield from` sites)
 still compile with zero own-source errors, matching the 2026-08-25 entry.
-Did not re-run the full ~13-minute whole-program `mojo.py build` this pass
+Did not re-run the full ~13-minute whole-program `fire.py build` this pass
 (no mechanism exists that would change its outcome — nothing touched by
 today's two landed fixes is reachable from this file's own source, and the
 remaining 291 errors are entirely the already-itemized transitive cascade
@@ -97,7 +97,7 @@ this doc's own generator-codegen concern remains fully resolved since
 ## Status (updated 2026-08-25, worktree fix/opencode-group2 — whole-program build no longer refuses at the Python stage; mailbox's OWN source now contributes ZERO real errors; the last "own" error line (32) fixed via a shared root cause)
 
 Re-verified fresh with a safety-wrapped, RSS/watchdog-guarded
-`python3 mojo.py build .../Lib/mailbox.py` (full ~13-min run, EXIT=1):
+`python3 fire.py build .../Lib/mailbox.py` (full ~13-min run, EXIT=1):
 
 1. **The 2026-08-24 entry's `Message[...] = ...` subscript-store refusal
    does NOT fire on the real build path** — it reproduces ONLY under the
@@ -259,7 +259,7 @@ worktree, restored after) — mailbox.py's own distinct errors went from
 4 (2 target arity errors + 2 unrelated: `mailbox.py:32` int/pointer
 mismatch, `mailbox.py:404` `cte` not callable) down to 2 (the same 2
 unrelated ones, confirmed still present and NOT touched by this fix).
-Also verified via a real `mojo.py build` whole-program run (not just
+Also verified via a real `fire.py build` whole-program run (not just
 isolated compile) — same result, 4 -> 2 own-file errors, `grep -c
 "too many arguments\|too few arguments"` for `Mailbox___init__`/
 `_ProxyFile__read` specifically: zero after, matching before.
@@ -323,7 +323,7 @@ instance found: `Lib/typing.py`'s own `_CallableGenericAlias`, bare-name
 identical to `Lib/_collections_abc.py`'s unrelated class of the same
 name, hit the exact same mechanism and is now also fixed).
 
-Verified via a fresh `python3 mojo.py build
+Verified via a fresh `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/mailbox.py`: zero
 `email_message_Message_*`/`email_message_*` redefinition errors (was
 48). **mailbox.py still does not build** — 11 errors of its own plus
@@ -348,7 +348,7 @@ expected — they go through link mode, not this inline-path mechanism).
 ## Status (updated 2026-08-11 — RECLASSIFIED: generator/tuple-yield concern now fully FIXED; file blocked by 3 unrelated, pre-existing structural bugs, none generator-related)
 
 Re-verified against current master via a fresh
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/mailbox.py`.
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/mailbox.py`.
 
 **The generator-codegen issue this doc originally tracked (tuple-valued
 `yield (key, value)` in `Mailbox.iteritems`, and the follow-on
@@ -417,7 +417,7 @@ on the first one, concrete blockers found on both:
    already documented and deliberately deprioritized for **structs** in
    `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`.
    That doc currently asserts the bug is "structurally unreachable"
-   through `mojo.py build`'s primary (link-mode) path and only reachable
+   through `fire.py build`'s primary (link-mode) path and only reachable
    via the inline fallback or `--dump-full`; this file is a **live,
    concrete counter-example** — `driver.compile_program` fails for
    mailbox.py and falls back to the inline path, which is exactly where
@@ -454,7 +454,7 @@ is scoped to re-verifying/fixing the generator concern specifically.
 Investigated this session's cross-cutting task tracing a recurring
 `invalid use of undefined type 'struct _<modname>_toplev'` GCC error
 across 9 bug docs (this file included, per the 2026-08-06 entry below).
-Confirmed via a fresh `python3 mojo.py build` rebuild: this file has
+Confirmed via a fresh `python3 fire.py build` rebuild: this file has
 **zero** occurrences of that exact error — it was already fully fixed
 by the two already-landed mechanism-1/mechanism-2 fixes referenced
 below (`bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
@@ -515,7 +515,7 @@ blocker, but the file genuinely still doesn't build.
 ## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
 
 Re-verified against current master (`5ba7d4b`) via a real
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/mailbox.py`.
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/mailbox.py`.
 The build now fails immediately, before reaching any GCC-stage error, on
 a hard Python-level `RuntimeError` from `gen_module`
 (`gimple_codegen.py:30968`):

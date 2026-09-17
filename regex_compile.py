@@ -2,7 +2,7 @@
 Python regex syntax into a flat node array that a matching C runtime function
 can execute at compile time and runtime, respectively.
 
-Scope: this project's self-hosted tokenizer (mojo_compiler.py's _TOKEN_RE) is
+Scope: this project's self-hosted tokenizer (fire_compiler.py's _TOKEN_RE) is
 the only re.compile(...).finditer(...) call anywhere in the self-hosted
 codebase (see BACKLOG-CODEGEN.md §4f) — it, and patterns like it, use:
 literals, '.', character classes with ranges/negation, \\d \\s \\S \\w \\W
@@ -276,7 +276,7 @@ def parse_regex(pattern: str):
 
 
 # ─── Serialize to a flat C node array ────────────────────────────────────
-# Opcodes (must match runtime/mojo_runtime.c's RE_OP_* / re_match_node):
+# Opcodes (must match runtime/fire_runtime.c's RE_OP_* / re_match_node):
 OP_CHAR, OP_ANY, OP_CLASS, OP_CONCAT, OP_ALT, OP_GROUP, OP_REPEAT = range(7)
 
 
@@ -375,7 +375,7 @@ def compile_pattern(pattern: str, c_prefix: str) -> dict:
     lines.append(f"static const ReNode {prog_var}[] = {{{', '.join(node_items)}}};")
 
     # Group-index -> name table (index 0 unused; NULL for unnamed/non-capturing
-    # groups), for m.lastgroup — see mojo_regex_lastgroup in runtime/mojo_runtime.c.
+    # groups), for m.lastgroup — see mojo_regex_lastgroup in runtime/fire_runtime.c.
     idx_to_name = {v: k for k, v in group_names.items()}
     names_var = f"_{c_prefix}_names"
     _null = "(const char *)0"

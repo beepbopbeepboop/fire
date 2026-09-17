@@ -80,7 +80,7 @@
         <div class="task done"><strong>MojoString extensions</strong>: read_text, splitlines-&gt;MojoString[], unsafe_ptr <span class="priority p1">P1</span></div>
         <div class="task done"><strong>_MojoGenericCtor</strong>: Remove duplicate class definition, fix __init__ <span class="priority p1">P1</span></div>
         <div class="task done"><strong>ComptimeIfStmt</strong>: comptime for/if/assert handling <span class="priority p1">P1</span></div>
-        <div class="task done"><strong>AST consolidation</strong>: ast_nodes.py removed, mojo_compiler.py is single source of truth <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>AST consolidation</strong>: ast_nodes.py removed, fire_compiler.py is single source of truth <span class="priority p1">P1</span></div>
     </div>
 
     <h2>Phase 4: Test Suite (<span class="count"><span class="pass">34</span>/<span class="count">325</span></span> passing)</h2>
@@ -174,7 +174,7 @@
     <h2>Key Files to Modify</h2>
     <ul>
         <li><code>myinterpreter.py</code> — _setup_builtins, _load_mojo_sibling_module, eval_X methods, MojoString, MojoInstance, _MojoPointer</li>
-        <li><code>mojo_compiler.py</code> — already single source of truth for AST nodes</li>
+        <li><code>fire_compiler.py</code> — already single source of truth for AST nodes</li>
         <li><code>CLAUDE.md</code> — conventions documented</li>
     </ul>
 </body>

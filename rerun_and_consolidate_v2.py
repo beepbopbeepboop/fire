@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Re-run the newly-discovered failing files from PY314_FULL_SCAN_SUMMARY.json
-through mojo.py build, capturing FULL stderr (the first pass's per-file .md
+through fire.py build, capturing FULL stderr (the first pass's per-file .md
 reports truncated to 50 lines, which mis-signatured files whose real error
 was preceded by many warnings). Group by accurate root-cause signature and
 write consolidated reports directly (no intermediate per-file .md files).

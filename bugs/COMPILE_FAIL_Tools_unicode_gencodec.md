@@ -26,7 +26,7 @@ not narrow gaps. No code change. Doc stays open.
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged, both remaining gaps confirmed genuinely missing runtime/codegen machinery)
 
 Fresh end-to-end rebuild + run against current tree (`a913ab8`):
-`python3 mojo.py build .../Tools/unicode/gencodec.py` exits 0; running
+`python3 fire.py build .../Tools/unicode/gencodec.py` exits 0; running
 the binary on a 2-file test dir prints both `converting ...` lines
 identical to real CPython and writes `readme.py`/`readme.mapping` (this
 took a moment to reproduce correctly — real CPython's own
@@ -251,7 +251,7 @@ Honest-stub territory, harmless here, but not byte-equivalent.
 ## COMPILED end-to-end (both old issues fixed);
 ## runtime smoke test exposed the (now-fixed) iteration gap.
 
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 exits 0 and produces a real arm64 executable on branch `fix/tools-misc`
 (`c16c05c`). Issue 1 (bare `len(t)` statement) was already fixed per the
 2026-08-09 note. Issue 2 (nested tuple-unpack target `for e,(u,c) in
@@ -305,7 +305,7 @@ fixed here (see the `strided_load`/`strided_store`, `exit`/`quit`, closure-call
 cases immediately around it).
 
 Verified: `gencodec.py` no longer produces the `mojo_len` pointer/integer
-error; `python3 mojo.py build` now gets past this line entirely.
+error; `python3 fire.py build` now gets past this line entirely.
 
 ### 2. Nested tuple-unpack target in a `for ... in dict.items():` loop — STRUCTURAL, NOT fixed
 
@@ -324,7 +324,7 @@ error: 'u' undeclared (first use in this function)
 (Reported source lines 381/396/398 are misattributed to the caller —
 `convertdir()` — not `marshalmap()` itself; the actual bug is inside
 `marshalmap`, confirmed by stripping `#line` directives from the raw
-generated C and locating GCC's real line numbers directly. `mojo.py build`'s
+generated C and locating GCC's real line numbers directly. `fire.py build`'s
 link-mode path (`GimpleGen(link_imports=True)`) and a direct
 `compile_to_gimple(do_imports=True)` call produce byte-identical output here,
 so this isn't a caching/link-mode artifact.)

@@ -411,7 +411,7 @@ since then; not independently re-investigated here, just honestly
 noted as no longer blocking during this session's re-verification.
 
 **ipaddress.py's own code has zero errors, but the file still does not
-achieve a full `mojo.py build` end-to-end** — the whole-program,
+achieve a full `fire.py build` end-to-end** — the whole-program,
 `do_imports=True` build still fails, entirely on errors in
 transitively-imported files (`operator.py`, `_collections_abc.py`,
 etc.), none attributable to ipaddress.py's own source anywhere in the
@@ -461,7 +461,7 @@ stdlib dylib rebuild 0 skips, `compile_stdlib.py` 664/664 (0
 unexpected).
 
 **ipaddress.py itself still does not build.** Re-verifying the whole
-file (both the real `mojo.py build` full transitive compile — zero
+file (both the real `fire.py build` full transitive compile — zero
 errors attributable to ipaddress.py's own code anywhere in that log,
 same as the 2026-08-10 entry already found — and a direct isolated
 `do_imports=False` compile + g++, for a clean read unclouded by other
@@ -545,7 +545,7 @@ transitively-imported files, same pattern as calendar.py's doc).
 ## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
 
 Re-verified against current master (`5ba7d4b`) via a real
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ipaddress.py`.
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/ipaddress.py`.
 The build now fails immediately, BEFORE reaching any GCC-stage error, on
 a hard Python-level `RuntimeError` from `gen_module`
 (`gimple_codegen.py:30968`):

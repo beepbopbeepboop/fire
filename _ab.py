@@ -8,7 +8,7 @@ for name, src in sorted(T.BUILTIN_TESTS.items()):
     def dump(env):
         e = dict(os.environ); e.update(env)
         if os.path.exists(ci): os.remove(ci)
-        subprocess.run((["./mojoc","--dump",f] if env.get("MOJO_NO_SHIM") else ["python3","mojo.py","--dump",f]), cwd=root, env=e, capture_output=True)
+        subprocess.run((["./mojoc","--dump",f] if env.get("MOJO_NO_SHIM") else ["python3","fire.py","--dump",f]), cwd=root, env=e, capture_output=True)
         return open(ci,"rb").read() if os.path.exists(ci) else None
     py = dump({}); nc = dump({"MOJO_NO_SHIM":"1","MOJO_HOME":root})
     if os.path.exists(ci): os.remove(ci)

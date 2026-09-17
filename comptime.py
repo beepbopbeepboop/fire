@@ -21,7 +21,7 @@ import subprocess
 import cas
 from build_config import find_gcc
 from gimple_codegen import GimpleGen
-from mojo_compiler import py_tokenize, Parser, FunctionDef
+from fire_compiler import py_tokenize, Parser, FunctionDef
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
@@ -75,7 +75,7 @@ def _build_dylib(src: str, fn_name: str, gcc: str) -> str:
             f.write(c)
         subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile], check=True)
         subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', rt_o,
-                        os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
+                        os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
         subprocess.run([gcc, '-dynamiclib', '-o', dy, ofile, rt_o], check=True)
         with open(dy, 'rb') as f:
             return f.read()

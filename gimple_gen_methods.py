@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -138,7 +138,7 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
     """Lower a method referenced as a plain value (not called at this
     site): `f = self.b`, `readline.set_completer(self.complete)`.
 
-    Produces a `MojoBoundMethod *` (runtime/mojo_runtime.h) pairing the
+    Produces a `MojoBoundMethod *` (runtime/fire_runtime.h) pairing the
     method's real C function pointer with the already-lowered `self`
     receiver, reusing the same static-void*-var mechanism `_lower_
     IdentExpr` already uses to take the address of a free function used
@@ -737,7 +737,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # (cas.py/build_stdlib_dylib.py/py314_cache.py) that actually calls
     # hashlib, so exact digest-byte compatibility with CPython's real
     # blake2b/md5/sha256 is not required (see mojo_bytes_hash_hexdigest's
-    # own comment in runtime/mojo_runtime.c).
+    # own comment in runtime/fire_runtime.c).
     if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'hashlib'
             and func.member in ('blake2b', 'md5', 'sha1', 'sha256', 'sha512')):
         for a in node.args: gen.lower_expr(a)
@@ -836,7 +836,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         handle_expr = _wait_obj.name
         gen._emit(f"  mojo_async_run_until_complete ();")
         gen._emit(f"  {base}_translate_pending_exc ({handle_expr});")
-        # 'int', not '_Bool': mojo_runtime.h's real prototype is `int
+        # 'int', not '_Bool': fire_runtime.h's real prototype is `int
         # mojo_exc_pending_get(void);` -- a '_Bool'-typed temp here is
         # invalid under STRICT `-fgimple` mode ("invalid conversion in
         # gimple call"), confirmed via a hand-reduced repro. Silently
@@ -1075,7 +1075,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # confirmed via a `super().__dir__()`/`__mro_entries__()`/
         # `copy_with()` multi-level-inheritance repro against
         # Lib/typing.py's `_LiteralGenericAlias`/`_SpecialGenericAlias`/
-        # `_CallableType`/etc. chains (~11 occurrences in a `mojo.py
+        # `_CallableType`/etc. chains (~11 occurrences in a `fire.py
         # build Lib/subprocess.py` run). A base-class pointer cast is
         # always a valid, safe C conversion (same struct-pointer-cast
         # convention every OTHER method-dispatch site in this file
@@ -1136,7 +1136,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     #     reinterpreted as the plain `int64_t` handle representation
     #     `mojo_coro_resume_generic`/`mojo_coro_destroy_generic` (and
     #     the AsyncRT_DeviceContext_enqueueHostFunction(Range) stubs)
-    #     expect — see runtime/mojo_async_runtime.h's own docstring on
+    #     expect — see runtime/fire_async_runtime.h's own docstring on
     #     why handles are plain int64_t there, matching real Mojo's
     #     own AnyCoroutine representation.
     #
@@ -1430,7 +1430,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return arg_type, arg_val
             elif outer_member == 'isfile' and len(node.args) == 1:
                 # os.path.isfile(p) — real S_ISREG stat check (int_isfile in
-                # runtime/mojo_runtime.c), mirroring the isdir/exists cases
+                # runtime/fire_runtime.c), mirroring the isdir/exists cases
                 # above. Previously a literal-0 stub ("not a file"), which
                 # made `if not os.path.isfile(p): continue` unconditional —
                 # every loop iteration silently skipped (found via
@@ -1506,7 +1506,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # has no \s/\S/\d/\w shorthand classes and no non-greedy
                 # quantifiers, so any such pattern makes regcomp() fail,
                 # and mojo_re_sub_fn silently returns its input UNCHANGED
-                # on a compile failure — found via mojo_compiler.py's own
+                # on a compile failure — found via fire_compiler.py's own
                 # replace_multiline_strings, whose `"""[\s\S]*?"""`-style
                 # patterns (built as `lit + _dq + lit + _dq`, not a bare
                 # literal, hence not caught by the simpler _regex_patterns
@@ -1665,7 +1665,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     src_val = src_cast
                 # do_imports/filename are almost always passed as KEYWORD args
                 # at the real call site (`compile_to_gimple(src, do_imports=True,
-                # filename=input_file)`, e.g. mojo.py's own --dump handler) —
+                # filename=input_file)`, e.g. fire.py's own --dump handler) —
                 # node.args is positional-only, so len(node.args) >= 2/3 was
                 # never true for that shape and both silently defaulted to
                 # False/"" here, regardless of what the caller actually passed.
@@ -1696,7 +1696,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # rule only matches `obj=IdentExpr('os')`, so the qualified
                 # form stayed a real attr access on the opaque `os` module
                 # marker and raised `AttributeError: environ` when a
-                # self-hosted mojoc lowered mojo.py's own
+                # self-hosted mojoc lowered fire.py's own
                 # `gimple_codegen.compile_to_gimple(...)` call sites (in
                 # `build_executable` / the `--dump` handler) — silently
                 # truncating those functions from the output.
@@ -1856,7 +1856,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # same-bare-name-collision hazard `bugs/hard/CODEGEN_same_
         # bare_name_struct_collision_across_modules.md` documents for
         # struct fields, and broke `make check-selfhost` for real
-        # (`mojo_compiler.py`'s own `re.compile(...)` silently called a
+        # (`fire_compiler.py`'s own `re.compile(...)` silently called a
         # DIFFERENT, unrelated 2-argument `compile` elsewhere in the
         # self-hosted source). This version is safe against that
         # exact hazard: it registers the call's OWN, syntactically-known
@@ -1975,6 +1975,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if ot == 'MojoBoundMethod *':
         ot, ov = _auto_invoke_bound_method_value(gen, ov)
     method = func.member
+
+    if (method == '__next__' and not node.args
+            and not getattr(node, 'kwargs', None)
+            and gen._get_actual_type(ot, ov) == 'MojoGenerator *'):
+        api = gen._generator_var_api.get(ov)
+        if api is not None:
+            return ggc._lower_generator_next(gen, ov, api)
 
     # struct.Struct instance methods (s.pack / s.unpack / s.unpack_from /
     # s.pack_into) — receiver holds a compiled `MojoStructFmt *`.
@@ -3230,7 +3237,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
         # back through a named variable whose declared type was widened to
         # int64_t by joining with other assignment sites in the same
         # function (see the AssignStmt fix tracking this). Found via
-        # mojo_compiler.py's own `_split_on_separators`'s `c = s[i]` then
+        # fire_compiler.py's own `_split_on_separators`'s `c = s[i]` then
         # `buf.append(c)` / `"".join(buf)`.
         if at == 'char' or gen._actual_types.get(av) == 'char':
             cv = av if at == 'char' else gen._new_val('char', f"(char){av}")
@@ -3616,7 +3623,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         return 'char *', gen._new_val('char *', f"(char *){t}")
     # Character-class predicates (str.isalnum/isdigit/...) — real runtime
     # helpers, previously hardcoded-0 stubs (always False), which broke
-    # e.g. mojo_compiler.py's own `raw[i].isdigit()` / `prev.isalnum()`.
+    # e.g. fire_compiler.py's own `raw[i].isdigit()` / `prev.isalnum()`.
     _STR_PREDICATES = {
         'isalnum': 'mojo_str_isalnum', 'isdigit': 'mojo_str_isdigit',
         'isalpha': 'mojo_str_isalpha', 'isspace': 'mojo_str_isspace',
@@ -4123,7 +4130,8 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             and f'{struct_name}_{method}{_method_overload_suffix}' not in gen.func_return_types
             and f'{struct_name}_{method}' not in gen.func_return_types
             and mangled not in gen._auto_stubbed
-            and mangled not in gimple_codegen._SELFHOST_HARDCODED_FUNCS):
+            and mangled not in gimple_codegen._SELFHOST_HARDCODED_FUNCS
+            and f'{struct_name}_{method}' not in gimple_codegen._SELFHOST_HARDCODED_FUNCS):
         _stub_guard = gimple_ctypes._stub_guard_name(f'{struct_name}_{method}')
         # A struct with at least one base class we couldn't resolve to a
         # known StructDef (e.g. `class IDGatherer(html.parser.HTMLParser)`

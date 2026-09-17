@@ -6,7 +6,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical refusal, unchanged
 
-Fresh `python3 mojo.py build .../Tools/jit/_targets.py` against this
+Fresh `python3 fire.py build .../Tools/jit/_targets.py` against this
 worktree (fast-forwarded to master `43fb291`): identical up-front
 refusal of exactly `_build_stencils`/`_compile`/`_parse`, pinned to the
 same trigger — `` `with` inside an async function body is only
@@ -46,7 +46,7 @@ Not attempted; no code change.
 
 ## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical refusal, unchanged
 
-Fresh safety-wrapped `mojo.py build`: identical up-front refusal of
+Fresh safety-wrapped `fire.py build`: identical up-front refusal of
 exactly `_build_stencils`/`_compile`/`_parse`, pinned to the same
 trigger — `` `with` inside an async function body is only supported
 for a recognized no-op guard type (['BlockingScopedLock', 'Trace']),
@@ -90,7 +90,7 @@ wrong or broken code; falling back to interpreting this module from
 source instead
 ```
 
-`MOJO_DEBUG=1 python3 mojo.py build _targets.py` pins the actual
+`MOJO_DEBUG=1 python3 fire.py build _targets.py` pins the actual
 trigger down precisely: `_Target._build_stencils` (an `async def`
 method) does
 

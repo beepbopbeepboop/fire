@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -58,7 +58,7 @@ def _lbn_target_names(t) -> list:
 def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
     """Hoisted out of `_locally_bound_names` (module-level, not a nested,
     RECURSIVE closure mutating two captured sets) — a real --dump-full
-    mojo.py crash (SIGSEGV in mojo_set_update -> mojo_set_add_str ->
+    fire.py crash (SIGSEGV in mojo_set_update -> mojo_set_add_str ->
     _set_slot_str -> _str_hash, address 0x1) traced here via lldb: the
     lifted-closure env carrying `bound`/`global_declared` across this
     closure's OWN recursive self-calls wasn't reliably allocated/valid at
@@ -165,7 +165,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
 
     # Look for module relative to the IMPORTING FILE's own directory and
     # the CWD first; only fall back to script_dir (this repo's own
-    # top-level tool scripts — mojo_compiler.py, elaborate.py, lexer.py,
+    # top-level tool scripts — fire_compiler.py, elaborate.py, lexer.py,
     # parser.py, ast_nodes.py, ...) once neither has a match. This repo
     # ships several very generically-named top-level modules — of all
     # things, `parser.py` and `lexer.py` — because it IS a Mojo compiler.
@@ -181,7 +181,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
     # parser.mojo, and cross-module field access on the real Parser
     # struct failed because its fields were never registered).
     # Self-hosting the compiler on ITS OWN sources still works exactly as
-    # before: those entry files (mojo.py, gimple_codegen.py, ...) already
+    # before: those entry files (fire.py, gimple_codegen.py, ...) already
     # live IN script_dir, so their "importing file's own directory" IS
     # script_dir — it's just no longer checked ahead of a closer, more
     # specific match for everyone else.
@@ -612,7 +612,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # per-instance: each module's import bindings are its own.
                 temp_gen._generator_home_api = gen._generator_home_api
                 # share: link mode's own link-line accumulators
-                # (dylibs/objects the final `mojo.py build` link step
+                # (dylibs/objects the final `fire.py build` link step
                 # needs — see compile_linked's own docstring) must be
                 # visible to and mutated by EVERY nested temp_gen this
                 # do_imports=True recursion spins up, not just the one
@@ -1263,7 +1263,7 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     # stub and the `isinstance(x, (A, B, ...))` OR-accumulator seed)
     # producing "_Bool / int / _tN = 0;" on Lib/typing.py's
     # `_BaseGenericAlias.__mro_entries__`/`_GenericAlias._make_
-    # substitution` (~22 occurrences in a `mojo.py build
+    # substitution` (~22 occurrences in a `fire.py build
     # Lib/subprocess.py` run) — GCC's C frontend does NOT apply the
     # usual implicit int->_Bool conversion under `-fgimple`'s stricter
     # verifier, same as it doesn't for int->int64_t. Both need the
@@ -1464,7 +1464,7 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # instead reinterprets the char's BYTE VALUE as a pointer
             # address (e.g. '_' → (char *)0x5f), which then segfaults the
             # instant anything dereferences it (strcmp/mojo_cstr_cmp/...).
-            # Found via mojo_compiler.py's own
+            # Found via fire_compiler.py's own
             # `prev = src[k-1] if k>0 else ''` followed by `prev == '_'`
             # crashing the self-hosted `--dump` — the last 2/152
             # mojo.tok/.ast divergence in `make bootstrap` (a real
@@ -1622,7 +1622,7 @@ def _quick_type(gen, node) -> str:
         # pattern; `if dump:`'s char*-truthiness coercion
         # (_ensure_bool_cond -> mojo_truthy_cstr) dereferences that
         # bit pattern as a pointer — a real crash for `dump = True`
-        # (address 0x1). Found chasing self-hosted mojo.py evaluating
+        # (address 0x1). Found chasing self-hosted fire.py evaluating
         # its own `dump = '--dump' in sys.argv`.
         # _CMP_OPS (generated_dispatch.py) also contains 'and'/'or' —
         # correct for the STATEMENT-condition dispatch table it's really
@@ -1792,7 +1792,7 @@ def _quick_type(gen, node) -> str:
             # below is always empty for a `with open(...) as f:` handle
             # at this point — falls through to the int64_t default,
             # regardless of what `mod` actually is. Real bug found via
-            # `with open(input_file) as f: src = f.read()` in mojo.py's
+            # `with open(input_file) as f: src = f.read()` in fire.py's
             # own main(): `src` got declared int64_t while every value
             # written to it was really a char* pointer to the file
             # content, so len(src) and print(src) both read it as a
@@ -1876,7 +1876,7 @@ def _quick_type(gen, node) -> str:
         # real lowering (the os.path.* block in lower_expr): basename/
         # expanduser return char*, splitext returns a 2-element char*
         # list. Real bug found via
-        # `os.path.splitext(os.path.basename(input_file))[0]` in mojo.py's
+        # `os.path.splitext(os.path.basename(input_file))[0]` in fire.py's
         # build_executable: the parameter fix above still left this local
         # variable declared int64_t (a real char* pointer value shown as
         # a raw address by print()).
@@ -1897,7 +1897,7 @@ def _quick_type(gen, node) -> str:
         # IdentExpr)` branch above never matches this shape at all. Same
         # class of gap as the os.path.* chained case just above: without
         # this, format_token()'s `tok.value.replace(...).replace(...)`
-        # (mojo_compiler.py's own tokenizer dump helper) declared its
+        # (fire_compiler.py's own tokenizer dump helper) declared its
         # result int64_t, corrupting the pointer on every read.
         if (node.func.member in ('expandtabs', 'lstrip', 'rstrip', 'strip', 'lower',
                     'upper', 'title', 'capitalize', 'swapcase',
@@ -1953,7 +1953,7 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.Comprehension):
         # `[x for x in y]`/`{k: v for ...}`/`{x for x in y}`/a
         # generator-expression — a distinct AST node from the literal
-        # ListExpr/DictExpr/SetExpr cases just above (mojo_compiler.py),
+        # ListExpr/DictExpr/SetExpr cases just above (fire_compiler.py),
         # which this method had NO case for at all: falling through to
         # the int64_t default at the bottom of this method while the
         # REAL emission (_lower_comprehension, below) constructs and
@@ -1995,7 +1995,7 @@ def _quick_type(gen, node) -> str:
         # the `sys`/`argv` MemberExpr lowering), but `obj` here is a
         # MemberExpr, not a tracked IdentExpr — this pre-pass had no case
         # for it at all, so it fell through to the int64_t default below.
-        # Real bug found via `input_file = sys.argv[1]` in mojo.py's own
+        # Real bug found via `input_file = sys.argv[1]` in fire.py's own
         # build command handling: the variable got declared int64_t while
         # every value stored in it was actually a char* pointer (same
         # bit pattern, so no crash — just wrong for any later use, e.g.
@@ -2632,7 +2632,7 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the
         # address placeholder (mojo_repr_obj) for anything else, same
-        # as before. Real bug found via mojo.py's own `--dump`'s
+        # as before. Real bug found via fire.py's own `--dump`'s
         # `repr(ast)` on a parsed AST list: every node printed as a
         # meaningless `<object at 0x...>` instead of its real fields,
         # since only mojo_repr_obj (no field-metadata table) existed.
@@ -2668,7 +2668,7 @@ def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
         _pfx_end += 1
     prefix = val[:_pfx_end]
     val = val[_pfx_end:]
-    # mojo_compiler.py's Parser already strips the outer quotes from a plain
+    # fire_compiler.py's Parser already strips the outer quotes from a plain
     # (non-f/t-string) StringLiteral's value at tokenize time. So if what's
     # left after the prefix walk does NOT start with a quote, it is a plain
     # string whose content is final — return it verbatim (plus any
@@ -2845,7 +2845,7 @@ def _cast_for_list(gen, elem_type: str, val: str, suf: str) -> str:
     # when _actual_types records one (set wherever a pointer got stored
     # into an int64_t elsewhere, see _gen_stmt_AssignStmt). Build a real
     # 1-char string in the unambiguous/small-value cases instead of
-    # numeric-casting. Found via mojo_compiler.py's own
+    # numeric-casting. Found via fire_compiler.py's own
     # `c in ('"', "'", '`')`, where `c`'s declared type ended up `int64_t`
     # (joined across other assignment sites in the same function) even
     # though every value actually stored in it here is a raw char byte.
@@ -3244,7 +3244,7 @@ def _is_none_literal(el) -> bool:
     """`None` is parsed as a bare `IdentExpr(name='None')`, not a
     dedicated literal node (see `_lower_IdentExpr`'s/`_quick_type`'s own
     `name == 'None'` checks — this file has no case that ever
-    constructs `NoneLiteral`, despite mojo_compiler.py defining the
+    constructs `NoneLiteral`, despite fire_compiler.py defining the
     class). Centralized here so every None-in-a-literal check in this
     file recognizes the same shape."""
     return isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'
@@ -3424,7 +3424,7 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     unsupported here (no 'char *' case in _lower_comprehension's
     dispatch), matching _gen_for_iter's identical gap for a plain
     `for c in s:` statement loop — see _gen_for_cstr's own docstring
-    for the real-world impact this had (mojo_compiler.py's own
+    for the real-world impact this had (fire_compiler.py's own
     `any(c in (...) for c in prefix)` silently evaluating empty/False
     for every self-hosted-compiled program). Mirrors _compr_str_loop's
     identical index-loop shape, just over mojo_strlen/_mojo_at_char
@@ -3491,7 +3491,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # e.g. `any(c in (...) for c in prefix)` always evaluated
         # False/0. Found chasing make bootstrap's verify byte-identity
         # failures back through _gen_for_cstr's own motivating bug
-        # (mojo_compiler.py's `_process_nested_tstrings` uses exactly
+        # (fire_compiler.py's `_process_nested_tstrings` uses exactly
         # this any(genexpr) shape).
         # Index the 2-tuple return rather than `et, ev = ...`: the unpack
         # boxes `et` on the self-hosted path, and `_elem_types[res] = et`

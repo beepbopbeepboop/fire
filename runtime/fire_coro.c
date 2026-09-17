@@ -9,8 +9,8 @@
    (and everything else the normal codegen emits) works verbatim inside a
    coroutine body with no special-casing.
 */
-#include "mojo_coro.h"
-#include "mojo_coro_ctx.h"
+#include "fire_coro.h"
+#include "fire_coro_ctx.h"
 
 #include <setjmp.h>
 #include <stdlib.h>
@@ -19,8 +19,8 @@
 #include <sys/mman.h>
 
 /* The exception machinery we ride on. Declared locally (rather than
-   #include "mojo_runtime.h") so Layer 2 stays decoupled from that header's
-   GNU-extension prototypes; the real build links the real mojo_runtime.c,
+   #include "fire_runtime.h") so Layer 2 stays decoupled from that header's
+   GNU-extension prototypes; the real build links the real fire_runtime.c,
    the unit test links test_mojo_coro_exc_stub.c -- both define these with
    identical semantics. */
 #ifndef MOJO_EXC_STACK_MAX
@@ -40,7 +40,7 @@ extern int     mojo_exc_pending_get(void);
 
 /* Deterministic exception-class tags -- must match GimpleGen._exc_type_id
    ((zlib.crc32(b"Name") & 0x7fffffff) or 1). Same hardcoding pattern as
-   mojo_runtime.c's _MOJO_EXC_TAG_* block. */
+   fire_runtime.c's _MOJO_EXC_TAG_* block. */
 #define MOJO_TAG_GENERATOREXIT  2146172193
 #define MOJO_TAG_STOPITERATION   590612416
 

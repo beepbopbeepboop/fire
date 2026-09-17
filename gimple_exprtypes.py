@@ -16,7 +16,7 @@ from gimple_ctypes import (
 )
 import dataclasses
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, BoolLiteral,
     IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr,
     SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr,
@@ -874,7 +874,7 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # `.lower()`/`.upper()` (0 args) — mirror `_cpp_expr`'s matching
         # CallExpr/MemberExpr cases below (all route through existing
         # `mojo_str_*`/`string_*` runtime helpers already declared via
-        # every generated .cpp's wholesale `#include <mojo_runtime.h>`,
+        # every generated .cpp's wholesale `#include <fire_runtime.h>`,
         # same convention as `.replace` just above), always returning
         # `char *`. Without a matching entry here, a first-assigned
         # local like zipfile/_path/__init__.py's `path = path.rstrip(
@@ -1046,7 +1046,7 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
 #
 # `std::function<int64_t()>`, not `MojoBoundMethod *` (the ordinary
 # non-coroutine GIMPLE path's own bound-method-as-value representation,
-# `_lower_bound_method_value`/mojo_runtime.h): a real capturing C++ lambda
+# `_lower_bound_method_value`/fire_runtime.h): a real capturing C++ lambda
 
 def _c_to_cpp_scalar_type(ctype: str) -> str:
     """'_Bool' is a valid C99 type but NOT a valid C++ type name (`bool` is)
@@ -1586,7 +1586,7 @@ def _struct_type_id(name: str) -> int:
     leading `__mojo_type_id` field) and any isinstance(x, name) call site
     (which compares against it) always agree without a shared registry, even
     across separately-compiled modules. See mojo_read_type_tag in
-    runtime/mojo_runtime.c for the read side.
+    runtime/fire_runtime.c for the read side.
 
     Deliberately a plain `while`-loop over `name[i]` + `ord(c)`, NOT
     `for c in name` — the self-hosted compiler has no lowering for iterating

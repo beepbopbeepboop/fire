@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <setjmp.h>
-#include <stdlib.h>  /* malloc — mojo_bound_method_new below; mojo_runtime.c includes this
+#include <stdlib.h>  /* malloc — mojo_bound_method_new below; fire_runtime.c includes this
                        * header before its own <stdlib.h>, so the header must self-provide it. */
 
 /* Milestone D (compiled-generator exception boundary) is the first thing in
@@ -11,7 +11,7 @@
  * mojo_exc_msg_get/mojo_exc_obj_get/mojo_exc_pending_get/set at the extern
  * "C" `_resume()` boundary — see that .cpp's own preamble). Without this
  * guard, every declaration below gets C++ (mangled) linkage when included
- * from a .cpp file, while mojo_runtime.c itself is always compiled as plain
+ * from a .cpp file, while fire_runtime.c itself is always compiled as plain
  * C — a real link failure ("symbol not found ... declaration possibly
  * missing 'extern \"C\"'"), found and fixed via this milestone's own
  * required real compile+link+run verification, not just a syntax-only
@@ -88,7 +88,7 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
 typedef struct { void *fn; void *self; } MojoBoundMethod;
 
 /* Real (non-inline) so the single bound-method registry lives in one TU
- * (mojo_runtime.c) — mojo_is_bound_method below consults it to tell a
+ * (fire_runtime.c) — mojo_is_bound_method below consults it to tell a
  * `MojoBoundMethod *` value apart from a plain function pointer at a
  * dynamically-dispatched call site (`if c: f = lambda: 1 else: f =
  * self.m; f()`). */
@@ -156,7 +156,7 @@ extern void *_mojo_exc_obj;
 void        mojo_exc_obj_set(void *obj);
 void *      mojo_exc_obj_get(void);
 
-/* Exception type tag (see mojo_runtime.c for the dispatch rationale). */
+/* Exception type tag (see fire_runtime.c for the dispatch rationale). */
 extern int64_t _mojo_exc_type;
 void    mojo_exc_type_set(int64_t type_id);
 int64_t mojo_exc_type_get(void);
@@ -311,7 +311,7 @@ MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
 char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
- * slice - see mojo_cstr_region_eq's comment in mojo_runtime.c for why this
+ * slice - see mojo_cstr_region_eq's comment in fire_runtime.c for why this
  * exists (a real, profiled hot path: mojo_compiler.py's own self-hosted
  * tokenizer scanning for a closing triple-quote does exactly this, once per
  * character scanned, and was spending ~90% of total runtime in
@@ -553,7 +553,7 @@ int64_t     MojoList_index(MojoList *l, int v);
 
 /* Generic Python-object attribute accessor (used by GIMPLE codegen for
  * opaque int nodes) — real per-object dynamic-attribute storage, raises a
- * genuine, catchable AttributeError on a miss. See mojo_runtime.c's own
+ * genuine, catchable AttributeError on a miss. See fire_runtime.c's own
  * doc comment above the definition and bugs/hard/CODEGEN_dynamic_
  * attribute_on_generic_object.md. */
 int64_t     mojo_obj_getattr(void *obj, char *attr);
@@ -597,7 +597,7 @@ void        mojo_raise_key_error(char *key);
 char       *mojo_str_format_dict(char *fmt, MojoDict *vals);
 void        mojo_unsupported_iter(const char *type_name);
 
-/* Real `hash(x)` builtin -- see mojo_runtime.c's docstring above their
+/* Real `hash(x)` builtin -- see fire_runtime.c's docstring above their
  * definitions. mojo_hash_str for a statically-known string argument,
  * mojo_hash for the generic (statically-opaque-type) fallback. */
 int64_t     mojo_hash_str(char *s);
@@ -697,7 +697,7 @@ char *mojo_input(char *prompt);
 /* Both take the handle at FULL width — a 32-bit `obj` silently truncated
  * every heap pointer past 4 GB and made isinstance(x, list/dict) answer NO
  * for real containers once the self-hosted compile grew past that. See the
- * definition in mojo_runtime.c. */
+ * definition in fire_runtime.c. */
 int mojo_isinstance(int64_t obj, int type_id);
 int mojo_isinstance_p(int64_t obj, int type_id);
 int64_t mojo_read_type_tag(int64_t addr);
@@ -715,7 +715,7 @@ int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
 /* Real per-object dynamic-attribute storage (see mojo_obj_getattr's own
- * doc comment in mojo_runtime.c) — no longer a no-op. */
+ * doc comment in fire_runtime.c) — no longer a no-op. */
 void mojo_setattr(void *obj, char *attr, int64_t val);
 void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
@@ -756,7 +756,7 @@ void *mojo_sorted(void *iterable);
 void *mojo_reversed(void *iterable);
 MojoList *mojo_list_sorted_str(MojoList *src);
 MojoList *mojo_set_sorted(MojoSet *s);
-MojoList *mojo_set_to_list(MojoSet *s);  /* insertion order, see mojo_runtime.c */
+MojoList *mojo_set_to_list(MojoSet *s);  /* insertion order, see fire_runtime.c */
 MojoList *mojo_dict_sorted_keys(MojoDict *d);
 MojoList *mojo_dict_items_sorted(MojoDict *d);
 
@@ -965,7 +965,7 @@ char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env
 char *mojo_re_sub_str(char *pattern, char *repl, char *src);
 
 
-/* ── Small, bounded regex engine (see mojo_runtime.c's own section comment
+/* ── Small, bounded regex engine (see fire_runtime.c's own section comment
  * and regex_compile.py for the compile-time parser/emitter; BACKLOG-CODEGEN.md
  * §4f for why this exists) ─────────────────────────────────────────────── */
 typedef struct {

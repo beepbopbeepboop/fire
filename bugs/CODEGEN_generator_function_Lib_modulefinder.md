@@ -184,7 +184,7 @@ open.
 
 ## Status (updated 2026-08-11 — re-verified still refused; deepened root-cause to 3 independent, stacked gaps, real fix attempt not made — genuinely out of narrow-fix scope)
 
-Re-verified against current master: `python3 mojo.py build
+Re-verified against current master: `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/modulefinder.py` still fails with the
 identical `RuntimeError: cannot compile module: function(s)
 scan_opcodes ...` before any C is emitted — unchanged from 2026-08-10.
@@ -307,7 +307,7 @@ refused, now for a more precisely diagnosed reason.
 ## Status (updated 2026-08-09 — RECLASSIFIED: `scan_opcodes`'s tuple-valued yield is now the blocking error)
 
 Re-verified against current master (`5ba7d4b`) via a real
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/modulefinder.py`.
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/modulefinder.py`.
 The build now fails immediately, before reaching any GCC-stage error
 (i.e. before the `_quick_type` fix documented just below even gets a
 chance to matter), on a hard Python-level `RuntimeError` from
@@ -409,7 +409,7 @@ same reasoning already established there.
 (`compile_to_gimple_with_cpp(..., do_imports=False)`) now declares
 `MojoList * ModuleFinder_find_all_submodules(...)` (was `int64_t`), and
 the original `:296:1` GCC error is gone from both the isolated compile
-and the full `python3 mojo.py build .../modulefinder.py` re-run.
+and the full `python3 fire.py build .../modulefinder.py` re-run.
 
 **Remaining, NOT fixed (out of scope, matches an already-deferred hard
 bug)**: 2 new-visibility errors at line 284 (`passing argument 3 of

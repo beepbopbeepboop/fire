@@ -18,7 +18,7 @@
    and _generator_api[g] points the ordinary for/next/yield-from consumers
    at __mgco_g_{start,resume,value,destroy} exactly as today.
 */
-#include "mojo_coro.h"
+#include "fire_coro.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -357,7 +357,7 @@ __mojo_box_set_p(int64_t box, char *v)
 }
 
 /* ── async def / await bridge (runtime/mojo_async_sched.c) ────────────── */
-#include "mojo_wd.h"
+#include "fire_wd.h"
 
 extern uint64_t __mojo_async_now_ns(void);
 extern void     __mojo_async_run(MojoCoro *c);
@@ -489,7 +489,7 @@ typedef struct MojoFutureCB {
     struct MojoFutureCB *next;
 } MojoFutureCB;
 
-/* Mirror of runtime/mojo_runtime.h's MojoBoundMethod -- a method or
+/* Mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
    capturing closure referenced as a value: { fn, self }. Kept local so
    this TU needn't pull in the whole runtime header. */
 typedef struct { void *fn; void *self; } MojoCoroBoundMethod;
@@ -517,7 +517,7 @@ typedef struct MojoFuture {
        capturing closure (env carried as `self`). Lowered via
        `mojo_bound_method_new(fn, self)`; invoke as `fn(self, fut)` -- the
        same "self, then N ordinary args" convention every compiled method
-       uses, i.e. runtime/mojo_runtime.h's mojo_bound_method_call_1.
+       uses, i.e. runtime/fire_runtime.h's mojo_bound_method_call_1.
 
    A NULL / obviously-non-pointer handle is ignored. */
 void

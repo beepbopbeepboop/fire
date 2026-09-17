@@ -4,7 +4,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical 16-generator refusal, unchanged
 
-Fresh `python3 mojo.py build .../Modules/_decimal/tests/randdec.py`
+Fresh `python3 fire.py build .../Modules/_decimal/tests/randdec.py`
 against this worktree (fast-forwarded to master `43fb291`, which
 includes the loop-as-expression, Float64(str), and StringSlice
 char*-passthrough landings noted in this session's task brief — none
@@ -20,7 +20,7 @@ campaign-sized, not narrow fixes. Not attempted; no code change.
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): identical 17-generator refusal, unchanged
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Modules/
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Modules/
 _decimal/tests/randdec.py` against this worktree (fast-forwarded to
 master `e60b9cd`): byte-identical refusal list to the same-day entries
 below — all 17 generators, same per-generator causes (8 x unresolved
@@ -34,7 +34,7 @@ no code change.
 
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): identical 17-generator refusal, unchanged
 
-Fresh safety-wrapped `python3 mojo.py build .../randdec.py` against
+Fresh safety-wrapped `python3 fire.py build .../randdec.py` against
 this worktree (includes this session's dict-keyed %-formatting landing,
 commit `e1e12bb` — unrelated to any of the four causes below):
 byte-identical refusal list to the same-day entries below — all 17
@@ -83,7 +83,7 @@ anything since. No code change this pass; doc re-verified only.
 
 ## Status (updated 2026-08-25, wtOpencode_randdec — doc's headline blocker is OBSOLETE (varying-arity tuple yields already fixed by later work); true remaining causes re-diagnosed per-generator; one real latent honesty bug found on this file's exact mixed-yield shape FIXED (commit 3dcd224); whole file still does not build)
 
-Fresh repro on this branch tip (`python3 mojo.py build .../randdec.py`,
+Fresh repro on this branch tip (`python3 fire.py build .../randdec.py`,
 under the mandated RAM/wall-clock watcher). The doc's previous framing is
 substantially stale; current ground truth:
 
@@ -222,7 +222,7 @@ must agree on both arity and — with a char*-preference merge rule —
 each slot's type; see this fix's own commit for the full design), not a
 general variadic/heterogeneous-shape promise.
 
-Re-verified this file's whole-program refusal list (`python3 mojo.py
+Re-verified this file's whole-program refusal list (`python3 fire.py
 build .../randdec.py`, do_imports=True, Python-level eligibility check
 only): it now names only 4 of the original 14 refused generators —
 **`all_binary`, `all_ternary`, `all_unary`, `bin_close_numbers`,
@@ -267,7 +267,7 @@ file as a whole still doesn't build.
 ## purely the known tuple-valued-yield structural gap, not the `nan`/
 ## `randfloat.py` issues the previous status section described)
 
-Re-ran `python3 mojo.py build
+Re-ran `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py` fresh
 against current master. The previously-reported `nan()`-vs-C99-`nan()`
 name-collision and the separate `randfloat.py` pointer/int mismatch are

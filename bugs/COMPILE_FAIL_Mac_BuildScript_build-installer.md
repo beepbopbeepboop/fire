@@ -6,7 +6,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, single error, only root cause 1 remains
 
-Fresh `python3 mojo.py build .../Mac/BuildScript/build-installer.py`
+Fresh `python3 fire.py build .../Mac/BuildScript/build-installer.py`
 against this worktree (fast-forwarded to master `43fb291`, which
 includes this session's loop-as-expression/Float64(str)/StringSlice
 landings — none touch global-type prescan or `%`-formatting): exactly
@@ -18,7 +18,7 @@ analysis below; not attempted. No code change.
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — unchanged, only root cause 1 remains)
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Mac/
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Mac/
 BuildScript/build-installer.py` against this worktree (fast-forwarded
 to master `e60b9cd`, which already includes the `e1e12bb` dict-format
 fix below): exit 1, exactly one `error:` line remaining —
@@ -32,7 +32,7 @@ attempted. Doc stays open on root cause 1 alone.
 
 ## Status (updated 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — ROOT CAUSE 2 FIXED in shared source; only the excluded high-risk root cause 1 remains)
 
-Fresh safety-wrapped `mojo.py build`: of the three long-standing
+Fresh safety-wrapped `fire.py build`: of the three long-standing
 diagnostics, **the two `%`-format errors (`1447:17` / `1456:17`,
 `int64_t % MojoDict *`) are GONE.** Fixed by commit `e1e12bb`:
 
@@ -70,7 +70,7 @@ attributable). Doc stays open on root cause 1 alone.
 
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c): byte-identical errors, both root causes unchanged
 
-Fresh `mojo.py build`: exact same three diagnostics
+Fresh `fire.py build`: exact same three diagnostics
 (`704:17` char*+MojoList*; `1447:17`/`1456:17` int64_t % MojoDict*),
 zero new own-file errors. Root cause 1 (Phase-1.7 global prescan blind
 to cross-function `global` reassignment) is explicitly high-risk shared
@@ -82,7 +82,7 @@ prescan or `%`-formatting). Not attempted. No code change.
 
 ## Status (re-verified 2026-08-25, wtOpencode_group3): byte-identical errors, both root causes unchanged
 
-Fresh safety-wrapped `mojo.py build`: rc=1 with exactly the same
+Fresh safety-wrapped `fire.py build`: rc=1 with exactly the same
 three diagnostics (`704:17` char*+MojoList*; `1447:17`/`1456:17`
 int64_t % MojoDict*) and zero new own-file errors. Root cause 1
 (Phase-1.7 global prescan blind to cross-function `global`
@@ -93,7 +93,7 @@ project — untouched. No code change; doc stays open.
 
 ## Status (2026-08-25, worktree fix/rest-remainder12): re-verified — STILL-OPEN, byte-identical errors.
 
-Re-ran `python3 mojo.py build .../Mac/BuildScript/build-installer.py`
+Re-ran `python3 fire.py build .../Mac/BuildScript/build-installer.py`
 fresh (safety-bounded per this session's memory-hazard protocol),
 after this session's coroutine-body emitter fixes landed elsewhere
 (see COMPILE_FAIL_Apple___main__.md) — none relevant here, this file
@@ -124,7 +124,7 @@ change to this file's outcome). The exact same two errors from the
 2026-08-06 note below still reproduce byte-for-byte:
 
 ```
-$ python3 mojo.py build /Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py
+$ python3 fire.py build /Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py
 .../build-installer.py:704:17: error: invalid operands to binary + (have 'char *' and 'MojoList *')
 .../build-installer.py:1447:17: error: invalid operands to binary % (have 'int64_t' {aka 'long long int'} and 'MojoDict *')
 .../build-installer.py:1456:17: error: invalid operands to binary % (have 'int64_t' {aka 'long long int'} and 'MojoDict *')

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mojo.py - Mojo interpreter/compiler system
+fire.py - Mojo interpreter/compiler system
 
 Modes:
 - mojo                             Interactive REPL
@@ -57,7 +57,7 @@ def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
     """Does this statement list call `main()` anywhere reachable at module
     scope — including the extremely common Python idiom
     `if __name__ == '__main__': main()`? A first version of this check only
-    looked for a *bare* top-level `main()` call, so mojo.py's own
+    looked for a *bare* top-level `main()` call, so fire.py's own
     `if __name__ == '__main__': main()` guard wasn't recognized as already
     having called it — main() got invoked once by that guard executing
     normally, then a second time by the auto-invoke fallback below,
@@ -97,9 +97,9 @@ def interpret_and_execute(src_code, filename=None, argv=None):
     # Real Python modules the interpreted script imports (argparse, etc.)
     # read the real sys.argv directly, bypassing myinterpreter.py's
     # _SysProxy (which only intercepts the script's own `sys` binding).
-    # Left unpatched, real sys.argv still holds mojo.py's own leftover
+    # Left unpatched, real sys.argv still holds fire.py's own leftover
     # CLI state (e.g. after popping the "run" subcommand it looks like
-    # [mojo.py, <script path>]), so argparse.parse_args() would bind
+    # [fire.py, <script path>]), so argparse.parse_args() would bind
     # the script's own path to the first declared positional instead of
     # correctly erroring out on a missing required argument.
     old_argv = sys.argv
@@ -107,7 +107,7 @@ def interpret_and_execute(src_code, filename=None, argv=None):
     def _run():
         try:
             sys.argv = argv if argv is not None else [filename or "<stdin>"]
-            from mojo_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
+            from fire_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
             from myinterpreter import Interpreter
             tokens = py_tokenize(src_code)
             stmts = Parser(tokens).with_filename(filename or "<stdin>").parse_module()
@@ -234,7 +234,7 @@ _repl_expr()
 def run_repl():
     """Interactive REPL for Mojo code."""
     try:
-        from mojo_compiler import py_tokenize, Parser
+        from fire_compiler import py_tokenize, Parser
         from myinterpreter import Interpreter
     except ImportError as e:
         print(f"Error: Could not import interpreter components: {e}")
@@ -306,9 +306,12 @@ def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
     return subprocess.run(link_cmd, capture_output=True, text=True)
 
 
-def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=None):
+def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=None,
+                     work_dir=None, quiet=False):
     """Compile Mojo source to executable using GIMPLE codegen."""
-    basename = os.path.splitext(os.path.basename(input_file))[0]
+    basename = os.path.splitext(os.path.basename(input_file))[0] or 'main'
+    if work_dir is not None:
+        basename = os.path.join(work_dir, basename)
     # Default to a debuggable unoptimized build; -O*/-g* on the command line override.
     # -ftrivial-auto-var-init=zero: matches Makefile's stage2/mojo build (see
     # its own comment there for the full story) — the generated .ci reads
@@ -329,7 +332,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         # Resolve paths relative to mojo-reference directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
         runtime_dir = os.path.join(script_dir, 'runtime')
-        runtime_src = os.path.join(runtime_dir, 'mojo_runtime.c')
+        runtime_src = os.path.join(runtime_dir, 'fire_runtime.c')
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
         # do_imports=True: inline transitive closure for a standalone binary
@@ -404,7 +407,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
             cxx_link = True
 
             # Step B (compiled-path async/await codegen): this module's
-            # generated .c/.ci preamble includes <mojo_async_runtime.h>
+            # generated .c/.ci preamble includes <fire_async_runtime.h>
             # exactly when gimple_codegen's async pre-pass actually
             # compiled at least one `async def` (see GimpleGen.gen_module's
             # "if self._supported_async:" preamble block) — a reliable
@@ -415,15 +418,15 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
             # (no separate flag threaded out of gen_module needed). Compiled
             # with g++ (same toolchain as the generator .cpp unit, and for
             # the same reason: real C++20 coroutines), linked in as its own
-            # object file alongside mojo_runtime.o and the generator/async
-            # .cpp unit's own object — mirrors mojo_runtime.c always being
+            # object file alongside fire_runtime.o and the generator/async
+            # .cpp unit's own object — mirrors fire_runtime.c always being
             # linked in for ordinary programs, just conditional on actually
             # needing it (this repo's own runtime/mojo_async_runtime.cpp has
-            # never been linked into a real mojo.py build before this step —
+            # never been linked into a real fire.py build before this step —
             # Step A only proved it out via test_async_runtime_scaffold.py's
             # own hand-written, separately-linked test binary).
-            if 'mojo_async_runtime.h' in c_code:
-                async_rt_src = os.path.join(runtime_dir, 'mojo_async_runtime.cpp')
+            if 'fire_async_runtime.h' in c_code:
+                async_rt_src = os.path.join(runtime_dir, 'fire_async_runtime.cpp')
                 async_rt_o = f"{basename}_async_runtime.o"
                 art_cmd = ([_GXX_BIN] + cg_flags +
                            ["-std=c++20", "-I", runtime_dir, "-c", "-o", async_rt_o, async_rt_src])
@@ -457,10 +460,10 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         # link the small runtime (Layer 1 shim + Layer 2 + arch Layer 3).
         if '__mgco_' in c_code or '__mojo_coro_yield_i' in c_code:
             import platform as _plat
-            _arch_src = ('mojo_coro_ctx_aarch64.S'
+            _arch_src = ('fire_coro_ctx_aarch64.S'
                          if _plat.machine().lower() in ('arm64', 'aarch64')
-                         else 'mojo_coro_ctx_generic.c')
-            for _cs in ('mojo_coro_gen.c', 'mojo_coro.c', 'mojo_async_sched.c', _arch_src):
+                         else 'fire_coro_ctx_generic.c')
+            for _cs in ('fire_coro_gen.c', 'fire_coro.c', 'fire_async_sched.c', _arch_src):
                 _co = f"{basename}_{os.path.splitext(_cs)[0]}.o"
                 _cc = [_GCC_BIN, *cg_flags, '-I', runtime_dir, '-c', '-o', _co,
                        os.path.join(runtime_dir, _cs)]
@@ -504,7 +507,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         # engine and generic AST walkers (_walk_ast_into) are deeply
         # CPS-recursive, and an 8MB stack overflows (SIGSEGV, no diagnostic)
         # partway through a real MOJO_NO_SHIM=1 --dump-full self-compile.
-        # `mojo.py build` links via THIS path (build_executable), not
+        # `fire.py build` links via THIS path (build_executable), not
         # driver.py's, so it needs its own copy of the flag.
         if _IS_DARWIN:
             py_ldflags += ['-Wl,-stack_size,0x20000000']
@@ -518,7 +521,8 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
 
         # Make executable
         os.chmod(exe_file, 0o755)
-        print(f"Built: {exe_file}")
+        if not quiet:
+            print(f"Built: {exe_file}")
         return True
 
     except Exception as e:
@@ -656,7 +660,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
 
     input_file = sys.argv[1]
     # Everything after the input file is the executed program's own argv,
-    # not a mojo.py flag — keep it isolated from mojo.py's own CLI parsing.
+    # not a fire.py flag — keep it isolated from fire.py's own CLI parsing.
     program_args = sys.argv[2:]
 
     # Bootstrap case: if interpreting a .py file with 'repl' next arg,
@@ -726,13 +730,13 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             # O(source length) tokenizer pass over the same source a second
             # time for no reason (confirmed via a real call-count profile
             # while chasing the stage2-bootstrap performance blowup - see
-            # doc/PLAN.md - self-hosted --dump of mojo.py itself was making
+            # doc/PLAN.md - self-hosted --dump of fire.py itself was making
             # tens of millions of calls into runtime allocators for a ~900KB
             # file; this was one concrete, provable contributor, though not
             # the whole story). Parsing (.ast) still gets its own try/except
             # so a parse failure doesn't take .tok down with it.
             try:
-                from mojo_compiler import py_tokenize
+                from fire_compiler import py_tokenize
                 tokens = py_tokenize(src)
             except Exception as e:
                 print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
@@ -755,7 +759,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                     any_failed = True
 
                 try:
-                    from mojo_compiler import Parser
+                    from fire_compiler import Parser
                     ast = Parser(tokens).with_filename(input_file).parse_module()
                     with open(f"{basename}.ast", "w") as f:
                         f.write(repr(ast))

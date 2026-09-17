@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run all stdlib benchmarks and test code through mojo.py --jit and run.
+"""Run all stdlib benchmarks and test code through fire.py --jit and run.
 
 Usage:
   python3 run_stdlib_tests.py                          # run all benchmarks + tests
@@ -22,7 +22,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HERE = Path(__file__).parent.resolve()
-MOJO_PY = HERE / "mojo.py"
+MOJO_PY = HERE / "fire.py"
 RESULTS_FILE = HERE / ".stdlib_test_results.json"
 
 from module_loader import STDLIB_PATH
@@ -164,7 +164,7 @@ def main():
     args = parser.parse_args()
 
     if not MOJO_PY.exists():
-        print("ERROR: mojo.py not found at", MOJO_PY)
+        print("ERROR: fire.py not found at", MOJO_PY)
         sys.exit(1)
 
     # Collect files

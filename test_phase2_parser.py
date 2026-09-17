@@ -9,7 +9,7 @@ sys.path.insert(0, 'mojo')
 
 from myinterpreter import Interpreter
 from parser import parse as python_parse
-from mojo_compiler import py_tokenize
+from fire_compiler import py_tokenize
 
 def mojo_to_python(src: str) -> str:
     """Convert Mojo syntax to Python."""

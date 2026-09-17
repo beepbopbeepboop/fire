@@ -1,5 +1,5 @@
-#include "mojo_zlib.h"
-#include "mojo_runtime.h"
+#include "fire_zlib.h"
+#include "fire_runtime.h"
 #include <zlib.h>
 #include <stdlib.h>
 #include <string.h>

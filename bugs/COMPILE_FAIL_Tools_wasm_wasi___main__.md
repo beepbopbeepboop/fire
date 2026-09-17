@@ -6,7 +6,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): unchanged — sole remaining blocker still the `nonlocal` gap
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/wasm/
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/wasm/
 wasi/__main__.py` against this worktree (fast-forwarded to master
 `e60b9cd`): exactly ONE own-file error, unchanged:
 `__main__.py:104:30: invalid call to non-function before ';' token`
@@ -17,7 +17,7 @@ this session's mandate, not attempted.
 
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): unchanged — sole remaining blocker still the `nonlocal` gap
 
-Fresh safety-wrapped `python3 mojo.py build .../Tools/wasm/wasi/
+Fresh safety-wrapped `python3 fire.py build .../Tools/wasm/wasi/
 __main__.py` against this worktree (includes this session's dict-keyed
 %-formatting landing, commit `e1e12bb` — unrelated): `step(context)`
 confirmed still fixed; the build fails with exactly ONE own-file error,
@@ -33,7 +33,7 @@ No code change this round.
 
 ## Status (re-verified 2026-08-26, wtRest19b): unchanged — sole remaining blocker still `nonlocal` gap
 
-Fresh safety-wrapped `mojo.py build` against current tree
+Fresh safety-wrapped `fire.py build` against current tree
 (fix/rest-remainder19b): `step(context)` (build_steps) confirmed still
 fixed — no longer appears in the error output. The build now fails
 with exactly one error, unchanged from 2026-08-25: `__main__.py:104:30:
@@ -127,7 +127,7 @@ the only thing still blocking this file.
    `try`/`except ImportError` fallback mechanism fix
    (`bugs/hard/CODEGEN_try_except_import_fallback_both_branches_
    compiled.md`) landed and covers this file's instance too (confirmed
-   via a fresh `python3 mojo.py build`; sibling file `Tools/ssl/
+   via a fresh `python3 fire.py build`; sibling file `Tools/ssl/
    multissltests.py` was independently re-verified clean earlier this
    session as well).
 

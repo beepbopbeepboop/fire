@@ -4,7 +4,7 @@ sole, permanent owner for their entire lifetime: candidates for a future
 `mojo_*_free` call at every point the binding is still live at function
 exit.
 
-This module does NOT touch codegen, and nothing calls it from `mojo.py`'s
+This module does NOT touch codegen, and nothing calls it from `fire.py`'s
 build pipeline. It is a pure analysis/reporting layer, deliberately kept
 separate from actually emitting any free — see doc/OWNERSHIP_MODEL.md's
 "Codegen integration in general" cross-cutting section for why that's a
@@ -26,7 +26,7 @@ simplifications" below):
      an ALIAS of whatever `y` already owns, not a fresh allocation. This
      is the single most important rule: aliasing is exactly how the
      existing `mojo_dict_clear` double-free war story
-     (`runtime/mojo_runtime.c:2441-2449`, cited in doc/OWNERSHIP_MODEL.md)
+     (`runtime/fire_runtime.c:2441-2449`, cited in doc/OWNERSHIP_MODEL.md)
      happened, and this analysis must not reproduce that class of bug.
   2. `x` is assigned EXACTLY ONCE, statically, in the whole function.
      (Multiple constructor-assignments to the same name, e.g. inside a
@@ -95,7 +95,7 @@ documented tradeoffs):
 """
 
 import dataclasses
-import mojo_compiler as N
+import fire_compiler as N
 from ownership_check import _terminates, _block_terminates
 
 

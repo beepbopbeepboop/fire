@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Toolchain/runtime proof for Step A of the compiled-path async/await
-codegen project (see runtime/mojo_async_runtime.h/.cpp for the design
+codegen project (see runtime/fire_async_runtime.h/.cpp for the design
 rationale). Mirrors test_mixed_cpp_link.py's structure exactly: this
 compiles+links+runs through the REAL project build system
 (build_config.find_gxx() + mojo.link_executable(cxx=True)), not a bypassed
@@ -39,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from build_config import find_gxx
-import mojo
+import fire
 
 GXX = find_gxx()
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
@@ -61,9 +61,9 @@ def check(name, cond, detail=""):
 
 HAND_WRITTEN_MAIN_CPP = r"""
 // Hand-written (NOT Mojo-compiled) C++20 coroutine test exercising
-// mojo_async_runtime's scheduler for real. See mojo_async_runtime.h for the
+// mojo_async_runtime's scheduler for real. See fire_async_runtime.h for the
 // extern "C" API this drives.
-#include "mojo_async_runtime.h"
+#include "fire_async_runtime.h"
 
 #include <coroutine>
 #include <cstdio>

@@ -4,7 +4,7 @@
            'statements);\nreturns the generated C source string.\n"""\n'
            'from __future__ import annotations\n'
            '\nimport os\nimport re\nimport sys\n'
-           '\nfrom mojo_compiler import (\n'
+           '\nfrom fire_compiler import (\n'
            '    IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,\n'
            '    EllipsisLiteral, NoneLiteral,\n'
            '    IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,\n'

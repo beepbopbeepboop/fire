@@ -10,7 +10,7 @@ scope for this milestone; `myinterpreter.py` is not touched or exercised
 here, matching test_yield_parsing.py's own scope statement.
 """
 import sys
-import mojo_compiler as N
+import fire_compiler as N
 
 _PASS = 0
 _FAIL = 0

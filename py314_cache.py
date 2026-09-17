@@ -3,11 +3,11 @@
 
 Same idea as cas.py's content-addressed artifact store, but a different shape:
 we're not caching compiled objects, we're caching a *test outcome* (category +
-stderr) for "does mojo.py build accept this .py file", so a single flat JSON
+stderr) for "does fire.py build accept this .py file", so a single flat JSON
 file keyed by hash is the right fit rather than a splayed content store.
 
 The key reuses cas.py's compiler_fingerprint()/toolchain_fingerprint() so the
-cache is automatically invalidated the moment mojo_compiler.py, gimple_codegen.py,
+cache is automatically invalidated the moment fire_compiler.py, gimple_codegen.py,
 myinterpreter.py, or any other codegen source changes (including uncommitted
 edits) - a cache hit is only ever served for "this exact source, against this
 exact compiler+toolchain", never a stale answer from before a fix landed.
@@ -42,7 +42,7 @@ def _load():
 
 
 def build_key(filepath: str, gcc: str, flags: tuple = ()) -> str:
-    """Cache key for 'run mojo.py build on this file' - folds in the compiler
+    """Cache key for 'run fire.py build on this file' - folds in the compiler
     fingerprint, the toolchain fingerprint, and the file's own content, so any
     change to any of the three (fix a codegen bug, switch gcc, edit the test
     file) is a guaranteed miss rather than a stale hit."""

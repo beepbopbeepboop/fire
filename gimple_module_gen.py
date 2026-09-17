@@ -10,7 +10,7 @@ import os
 import re
 import sys
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -46,7 +46,7 @@ def _is_selfhost_source_dir(_dir: str) -> bool:
     """Is `_dir` a directory holding a genuine checkout of this compiler's
     own source (not necessarily THIS checkout)? Every real call site that
     used to compare `_cur_abs == _SELFHOST_DIR` (or a `.startswith` prefix
-    of it) broke the moment the compiler's own `gimple_*.py`/mojo_compiler.py
+    of it) broke the moment the compiler's own `gimple_*.py`/fire_compiler.py
     sources are compiled from a DIFFERENT checkout than the one currently
     running as the driver — e.g. a downstream project (a GCC frontend)
     vendoring a byte-identical copy of this compiler's backend at its own
@@ -55,7 +55,7 @@ def _is_selfhost_source_dir(_dir: str) -> bool:
     FALSE for any other, otherwise-identical checkout (confirmed:
     `/Users/mrs/net/gcc/gcc/fire`'s vendored copy). Same path-independent
     signal `_run_pipeline`'s own `_selfhost_register_gimplegen` gate
-    already uses successfully (`_sh_sibling`): a `mojo_compiler.py` living
+    already uses successfully (`_sh_sibling`): a `fire_compiler.py` living
     right next to `_dir` is true only for a genuine compiler-source
     directory, never for an ordinary user program's directory that
     happens to contain a same-named file.
@@ -81,7 +81,7 @@ def _is_selfhost_source_dir(_dir: str) -> bool:
     if not _dir:
         return False
     return (_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
-            or os.path.isfile(os.path.join(_dir, 'mojo_compiler.py')))
+            or os.path.isfile(os.path.join(_dir, 'fire_compiler.py')))
 
 
 _SELFHOST_MODGLOBAL_CACHE: dict = {}
@@ -136,7 +136,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     import glob as _glob
     _files = sorted(_glob.glob(os.path.join(sd, 'gimple_*.py'))
                     + [os.path.join(sd, n) for n in
-                       ('mojo_compiler.py', 'module_loader.py', 'monomorphize.py',
+                       ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
                         'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',
                         'reflect.py', 'mlir.py', 'regex_compile.py', 'cas.py',
                         'elaborate.py', 'myinterpreter.py')])
@@ -211,7 +211,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
     The ordinary field-value-type scan (`_collect_self_assigns`, the
     `_field_dict_val_types.setdefault(...)` there) only runs on structs whose
     full method BODIES are in `stmts`/`imported_stmts`. In a per-module
-    `mojo.py build` compile a sibling class like `GimpleGen` arrives as a
+    `fire.py build` compile a sibling class like `GimpleGen` arrives as a
     materialized imported struct with signature-only methods, so its
     `_str_pool: dict[str, str]` value type was lost — `for k, v in
     self._str_pool.items()` then unpacked `v` as int64 and `str()`'d the
@@ -219,7 +219,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
     import glob as _glob
     _files = sorted(_glob.glob(os.path.join(sd, 'gimple_*.py'))
                     + [os.path.join(sd, n) for n in
-                       ('module_loader.py', 'mojo_compiler.py')])
+                       ('module_loader.py', 'fire_compiler.py')])
     _files = [f for f in _files if os.path.isfile(f)]
     _key = tuple((f, os.path.getmtime(f)) for f in _files)
     _hit = _SELFHOST_MODGLOBAL_CACHE.get('sdfvt')
@@ -270,7 +270,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
 def _seed_selfhost_struct_dict_field_types(self):
     """Seed `_field_dict_val_types` from `_selfhost_struct_dict_field_val_types`
     so a sibling compiler struct's annotated `dict[str, str]` field keeps its
-    value type through a per-module `mojo.py build` compile."""
+    value type through a per-module `fire.py build` compile."""
     for _sn, _fields in _selfhost_struct_dict_field_val_types(_SELFHOST_DIR).items():
         _dst = self._field_dict_val_types.setdefault(_sn, {})
         for _fn, _vt in _fields.items():
@@ -285,14 +285,14 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
     `_lower_struct_method_call` / `_lower_named_call` look up.
 
     Pass-2c body inference (`_infer_return_elem_type`) can miss these when a
-    slot is a reassigned local or a ternary, and in a per-module `mojo.py
+    slot is a reassigned local or a ternary, and in a per-module `fire.py
     build` compile the defining function's body isn't even scanned from an
     importing module — so `GimpleGen._decode_str_literal_text`'s
     `(char*, char*)` return was unpacked via `mojo_list_get_int` and every
     user `StringLiteral`'s text read back as 0 (empty string-pool entries)."""
     import glob as _glob
     _files = sorted(_glob.glob(os.path.join(sd, 'gimple_*.py'))
-                    + [os.path.join(sd, n) for n in ('module_loader.py', 'mojo_compiler.py')])
+                    + [os.path.join(sd, n) for n in ('module_loader.py', 'fire_compiler.py')])
     _files = [f for f in _files if os.path.isfile(f)]
     _key = tuple((f, os.path.getmtime(f)) for f in _files)
     _hit = _SELFHOST_MODGLOBAL_CACHE.get('httrf')
@@ -433,7 +433,7 @@ def _render_struct_typedef_body(struct_name, fields):
         # "ARM64JIT", never involved in the GimpleGen bug this was meant
         # to fix) get inferred as a list, so `fields[field_name]` compiled
         # as `mojo_list_get_int` and segfaulted on the very next --dump-
-        # full mojo.py run. The real fix for the GimpleGen-only corrupted-
+        # full fire.py run. The real fix for the GimpleGen-only corrupted-
         # key symptom lives at the SOURCE of those keys instead (the
         # `dict(x)` copy replaced by an indexed loop + _as_str a few
         # hundred lines below, in gen_module_impl) — this loop shape was
@@ -581,7 +581,7 @@ def _emit_reflection_dispatch(self, parts):
     # loop correctly skipped the field-less ones — emitting
     # `return _mojo_getattr_Layout((Layout *)obj, attr);` against a helper
     # that was never generated ("implicit declaration of function
-    # '_mojo_getattr_Layout'", the head of mojo_compiler.py's error list).
+    # '_mojo_getattr_Layout'", the head of fire_compiler.py's error list).
     reflect_emitted = []
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
@@ -994,7 +994,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
         self._note_own_func_home(_sk, _qual)
 def _gmi_prefold_toplevel_comptime(self, _node_list):
     """Hoisted out of `gen_module_impl` (module-level, not a nested,
-    RECURSIVE closure) — a real --dump-full mojo.py determinism diff
+    RECURSIVE closure) — a real --dump-full fire.py determinism diff
     showed this closure (and several siblings in the same ~8000-line
     function) called with an inconsistent apparent arity across runs
     (`f(env, x)` vs `f(env, x, 0)`), the lifted-closure-env instability
@@ -1899,7 +1899,7 @@ def gen_module_impl(self, stmts):
     # ultimately returning '' (no qualifier) — so an imported sibling
     # module's own function definition compiled under its BARE name
     # while every caller correctly called the QUALIFIED name, an
-    # undefined-symbol link failure for any --dump-full/mojo.py build
+    # undefined-symbol link failure for any --dump-full/fire.py build
     # closure with more than one module defining free functions.
     self._local_top_level_func_names = {
         _as_funcdef_node(s).name for s in stmts if isinstance(s, FunctionDef)}
@@ -2327,6 +2327,11 @@ def gen_module_impl(self, stmts):
             '_FLOAT_TYPE_NAMES': 'MojoSet *',
             '_gen_tls': 'void *',
         }
+        # Interpreter is DEFINED in myinterpreter.py — same reasoning
+        # as Parser above: register in _imported_struct_home so
+        # _struct_method_qualifier returns 'myinterpreter' for
+        # Interpreter methods at call sites that hardcode the layout.
+        self._imported_struct_home['Interpreter'] = 'myinterpreter'
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',
             '_pos': 'int64_t',
@@ -2335,6 +2340,17 @@ def gen_module_impl(self, stmts):
             '_known_traits': 'MojoSet *',
             '_CONV_KWS': 'MojoSet *',
         }
+        # Parser is DEFINED in fire_compiler.py, so its methods are
+        # mangled with the fire_compiler qualifier (e.g.
+        # fire_compiler_Parser___init__). Register it in
+        # _imported_struct_home so _struct_method_qualifier returns
+        # 'fire_compiler' for Parser methods at call sites in modules
+        # that hardcode the struct layout above but don't directly
+        # `from fire_compiler import Parser` — without this, those call
+        # sites emit bare Parser___init__ while the definition is
+        # fire_compiler_Parser___init__, producing undefined-symbol link
+        # errors. See _struct_method_qualifier's three-tier lookup.
+        self._imported_struct_home['Parser'] = 'fire_compiler'
         self.struct_field_types['Scope'] = {
             'parent': 'Scope *',
             'vars': 'MojoDict *',
@@ -2344,7 +2360,7 @@ def gen_module_impl(self, stmts):
         self.func_param_types['Scope_get']    = ['Scope *', 'char *']
         self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int']
         self.func_param_types['Scope___init__'] = ['Scope *', 'Scope *']
-        # Runtime helpers whose real C signature (mojo_runtime.h) takes
+        # Runtime helpers whose real C signature (fire_runtime.h) takes
         # int64_t-boxed pointers. `_KNOWN_SIGS` carries these for the
         # Python build but is an EMPTY dict once mojoc runs its own
         # codegen (the class-attr emitter only populates str->str dict
@@ -2633,7 +2649,7 @@ def gen_module_impl(self, stmts):
     # variable as an opaque int64_t, so `m.name` goes through the boxed
     # dynamic-getattr path and `m.params` cannot be typed at all. These
     # mirror the `list[FunctionDef]` / `list[tuple[str, str]]` annotations on
-    # the corresponding dataclasses in mojo_compiler.py (the single source of
+    # the corresponding dataclasses in fire_compiler.py (the single source of
     # truth) — the same declarative seed the field-type tables above already
     # are, kept here because those tables are what a compile of an arbitrary
     # user file has available. Only genuinely HOMOGENEOUS fields are listed:
@@ -2761,8 +2777,8 @@ def gen_module_impl(self, stmts):
         # shape, this one's inner dict never got a type-inferred `MojoDict *`
         # container and the subscript write lowered as a LIST-index store
         # instead. Only reachable once GimpleGen registration stopped being
-        # limited to mojo.py/mojo_main.py (see _run_pipeline's own registry
-        # gate) — `--dump-full mojo_compiler.py` is the first entry point
+        # limited to fire.py/mojo_main.py (see _run_pipeline's own registry
+        # gate) — `--dump-full fire_compiler.py` is the first entry point
         # to exercise this branch at all.
         if 'GimpleGen' not in self._class_attrs:
             self._class_attrs['GimpleGen'] = {}
@@ -3351,7 +3367,7 @@ def gen_module_impl(self, stmts):
         # UnaryOp/CompareChain/BinaryOp/WalrusExpr/TernaryExpr as the loop
         # refines the expression — must not mint fields on ANY of them: a
         # member access guarded by `isinstance(left, CompareChain)` at runtime
-        # (`left.operands`, mojo_compiler.py:3292) otherwise registered
+        # (`left.operands`, fire_compiler.py:3292) otherwise registered
         # phantom `operands`/`ops`/`name` fields on TernaryExpr/UnaryOp,
         # growing their C structs (typed `int`) and making compiled repr() of
         # every such node print extra "operands=0, ops=0, name=0" tail fields
@@ -3881,7 +3897,7 @@ def gen_module_impl(self, stmts):
             #
             # NOTE: this loop's `self.var_types[pname[1:]] = 'MojoList *'`
             # was ALSO hit by a real, separate parser bug (now fixed in
-            # `_parse_postfix`, mojo_compiler.py): `X[Y[a:b]]` — a subscript
+            # `_parse_postfix`, fire_compiler.py): `X[Y[a:b]]` — a subscript
             # whose single index is itself a nested slice expression —
             # mis-attached the nested slice's already-resolved `.obj` (Y)
             # to the OUTER object (X), silently turning `self.var_types
@@ -4107,7 +4123,7 @@ def gen_module_impl(self, stmts):
         # compiled path, so `s.methods` / `s.name` erased to
         # `_mojo_dispatch_getattr` and `range(len(s.methods))` was `range(0)`
         # — NO `GimpleGen__*` method externs emitted at all (~1400 lines of
-        # the MOJO_NO_SHIM=1 stage1-vs-stage2 mojo.ci divergence).
+        # the MOJO_NO_SHIM=1 stage1-vs-stage2 fire.ci divergence).
         s = _as_structdef_node(s)
         if not s.methods:
             continue
@@ -4772,7 +4788,7 @@ def gen_module_impl(self, stmts):
                 self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
         elif isinstance(_gm_stmt, FromImportStmt):
             # `FromImportStmt.names` is `[(name, alias|None), ...]`
-            # (mojo_compiler.py) -- NOT a flat list of bound-name
+            # (fire_compiler.py) -- NOT a flat list of bound-name
             # strings. Adding the raw `(name, alias)` TUPLE here (the
             # previous code) meant `_cpp_early_global_names` never
             # actually contained the real local binding name for ANY
@@ -5660,7 +5676,7 @@ def gen_module_impl(self, stmts):
             # fails to subtract a real param name from `free` below, so
             # the param leaks in as a spurious capture and the closure's
             # env struct allocation flips (`_alloc_X_env()` vs `(X *)0`)
-            # run to run — a dominant --dump-full mojo.py nondeterminism.
+            # run to run — a dominant --dump-full fire.py nondeterminism.
             _ipn: set = set()
             for _p in inner.params:
                 _ipn.add(_as_str(_p[0]))
@@ -6447,6 +6463,37 @@ def gen_module_impl(self, stmts):
             if self._toplevel_calls_main:
                 break
 
+    # Register return types and param types for self-host hardcoded
+    # forward-declared symbols BEFORE any function body is lowered.
+    # These symbols are defined in sibling self-host modules (fire_compiler,
+    # myinterpreter) but called from THIS module's bodies — the types aren't
+    # in func_return_types/imported_symbols (the defining module owns those),
+    # so _emit_call's argument coercion would leave temps as int64_t,
+    # causing -Wint-conversion errors (e.g. int64_t -> char * / Parser *).
+    if _is_selfhost_file:
+        _sh_ret = {
+            'fire_compiler_Parser_parse_module': 'MojoList *',
+            'fire_compiler_Parser___init__': 'void',
+            'fire_compiler_Parser_with_filename': 'Parser *',
+            'fire_compiler_Parser__parse_expr': 'int64_t',
+            'myinterpreter_Interpreter___init__': 'void',
+            'myinterpreter_Interpreter_execute': 'int64_t',
+        }
+        _sh_params = {
+            'fire_compiler_Parser_parse_module': ['Parser *'],
+            'fire_compiler_Parser___init__': ['Parser *', 'MojoList *'],
+            'fire_compiler_Parser_with_filename': ['Parser *', 'char *'],
+            'fire_compiler_Parser__parse_expr': ['Parser *', 'int64_t'],
+            'myinterpreter_Interpreter___init__': ['Interpreter *', 'char *', 'MojoList *'],
+            'myinterpreter_Interpreter_execute': ['Interpreter *', 'int64_t'],
+        }
+        for _shn, _shr in _sh_ret.items():
+            if _shn not in self.func_return_types:
+                self.func_return_types[_shn] = _shr
+        for _shn, _shp in _sh_params.items():
+            if _shn not in self.func_param_types:
+                self.func_param_types[_shn] = _shp
+
     for stmt in stmts:
         if isinstance(stmt, FunctionDef):
             if (stmt.name in self._supported_generators or stmt.name in self._supported_async
@@ -6668,11 +6715,11 @@ def gen_module_impl(self, stmts):
         '#if USE_PYTHON',
         '#include <Python.h>',
         '#endif',
-        '#include <mojo_runtime.h>',
-        '#include <mojo_sqlite3.h>',
-        '#include <mojo_zlib.h>',
-        '#include <mojo_ssl.h>',
-        '#include <mojo_ncurses.h>',
+        '#include <fire_runtime.h>',
+        '#include <fire_sqlite3.h>',
+        '#include <fire_zlib.h>',
+        '#include <fire_ssl.h>',
+        '#include <fire_ncurses.h>',
         *(( '/* A3 stack-switch coroutine shim (runtime/mojo_coro_gen.c) */',
             'extern int64_t __mojo_coro_yield_i (int64_t, int64_t);',
             'extern int64_t __mojo_coro_yield_p (int64_t, void *);',
@@ -6767,7 +6814,7 @@ def gen_module_impl(self, stmts):
         '#ifdef strncat',
         '#undef strncat',
         '#endif',
-        '/* Undefine exception-name macros from mojo_runtime.h that clash with',
+        '/* Undefine exception-name macros from fire_runtime.h that clash with',
         '   Mojo struct/class names in generated code. */',
         '#ifdef StopIteration',
         '#undef StopIteration',
@@ -7673,7 +7720,7 @@ def gen_module_impl(self, stmts):
             # tuples>` compares HANDLES, not contents, and a freshly built
             # triple never matches an equal-valued one already in the list.
             #
-            # The visible damage: mojo_compiler.py has `import sys` at
+            # The visible damage: fire_compiler.py has `import sys` at
             # module level AND inside a function, so `sys` registered twice
             # and its own translation unit failed to compile at all with
             # "duplicate member 'sys'" in `struct _root_toplev`.
@@ -8025,7 +8072,7 @@ def gen_module_impl(self, stmts):
     # str`, whose `strcmp` hits a NULL entry and SEGFAULTs before any
     # per-element `_ptr_slot_in_range` guard in the loop body could skip it
     # — the `mojo_list_sorted_str + 112` crash on `MOJO_NO_SHIM=1 --dump-
-    # full mojo.py`. Mirror the same pre-sort clean-list pattern already
+    # full fire.py`. Mirror the same pre-sort clean-list pattern already
     # used for `_mojo_at_<T>` emission.
     _sa_names = []
     for _sx in self._struct_allocs_needed:
@@ -8139,7 +8186,8 @@ def gen_module_impl(self, stmts):
         sym_info = _as_dict(_imp_syms[_sn])
         if sym_info.get('return_type') == 'unknown':
             continue
-        if _sn in inline_defined or _sn in self._global_inline_defs:
+        if (_sn in inline_defined
+                or (_sn in self._global_inline_defs and 'signature' not in sym_info)):
             continue
         if _sn in self.struct_field_types:
             continue
@@ -8235,7 +8283,7 @@ def gen_module_impl(self, stmts):
         # method_api`'s matching declaration) has a bare `dict` nested-value
         # annotation, not `dict[str, dict[str, str]]` — the same "no nested-
         # value-type hint" gap fixed for `_class_attrs` earlier this
-        # session. Confirmed via a real --dump-full mojo.py determinism
+        # session. Confirmed via a real --dump-full fire.py determinism
         # diff: `extern MojoGenerator *55158457152_start (void);` — an
         # erased dict VALUE ('base') printed as a decimal address and
         # spliced directly into a symbol name, invalid C, different every
@@ -8314,11 +8362,11 @@ def gen_module_impl(self, stmts):
     if _needs_async_runtime_h and not (self._supported_async or self._supported_async_closures
                                         or self._nested_async_api):
         parts.append('typedef struct MojoAsync MojoAsync;')
-        parts.append('#include <mojo_async_runtime.h>')
+        parts.append('#include <fire_async_runtime.h>')
         parts.append('')
     if self._supported_async or self._supported_async_closures or self._nested_async_api:
         parts.append('typedef struct MojoAsync MojoAsync;')
-        parts.append('#include <mojo_async_runtime.h>')
+        parts.append('#include <fire_async_runtime.h>')
         for _api in list(self._async_api.values()) + list(self._nested_async_api.values()):
             _base, _vct = _api['base'], _api['value_ctype']
             _aptypes = ', '.join(_api.get('params') or []) or 'void'
@@ -8372,7 +8420,7 @@ def gen_module_impl(self, stmts):
             self.func_param_types[fdef.name] = param_ctypes
         ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
         _c_fn_name = self._func_csym(fdef.name)
-        _guard_name = _c_fn_name if fdef.name in _C_RESERVED_FUNCS else fdef.name
+        _guard_name = _c_fn_name
         stub_guard = _stub_guard_name(_guard_name)
         parts.append(f'#ifndef {stub_guard}')
         parts.append(f"{ret} {_c_fn_name} ({ptypes});")
@@ -8438,17 +8486,44 @@ def gen_module_impl(self, stmts):
         parts.append('')
 
     if _is_selfhost_file:
-        parts.append("MojoList * Parser_parse_module (Parser *);")
-        parts.append("void Parser___init__ (Parser *, MojoList *);")
+        # Struct methods defined in self-host siblings are emitted via
+        # _struct_method_csym, which qualifies the symbol with the DEFINING
+        # module's name — fire_compiler_Parser___init__, fire_compiler_
+        # Parser_parse_module (Parser defined in fire_compiler.py), and
+        # myinterpreter_Interpreter___init__, myinterpreter_Interpreter_
+        # execute (Interpreter defined in myinterpreter.py). The forward
+        # declarations here must match the qualified definition symbol, not
+        # a bare name that disagrees at link time. _struct_method_csym
+        # depends on the CURRENT module knowing the struct (via
+        # _local_struct_names or _imported_struct_home) — many self-host
+        # files don't import Parser/Interpreter, so that lookup returns
+        # '' (bare) here. Use _struct_method_csym_static with the known
+        # DEFINING module name instead.
+        _parser_init = _ggf_dup._struct_method_csym_static(
+            'fire_compiler', 'Parser', '__init__', '')
+        _parser_parse = _ggf_dup._struct_method_csym_static(
+            'fire_compiler', 'Parser', 'parse_module', '')
+        _parser_with_fn = _ggf_dup._struct_method_csym_static(
+            'fire_compiler', 'Parser', 'with_filename', '')
+        _parser_parse_expr = _ggf_dup._struct_method_csym_static(
+            'fire_compiler', 'Parser', '_parse_expr', '')
+        _interp_init = _ggf_dup._struct_method_csym_static(
+            'myinterpreter', 'Interpreter', '__init__', '')
+        _interp_exec = _ggf_dup._struct_method_csym_static(
+            'myinterpreter', 'Interpreter', 'execute', '')
+        parts.append(f"MojoList * {_parser_parse} (Parser *);")
+        parts.append(f"void {_parser_init} (Parser *, MojoList *);")
+        parts.append(f"Parser * {_parser_with_fn} (Parser *, char *);")
+        parts.append(f"int64_t {_parser_parse_expr} (Parser *, int64_t);")
         # gimple_module_gen.py's `from gimple_codegen import ...` of these two
         # unannotated single-def helpers (see _NO_OVERLOAD_MANGLE). Their sole
         # `all_struct_defs` param is a list — usage-inferred `MojoList *` on
         # the definition side, and the call passes a real list too.
         parts.append("void _merge_struct_inheritance (MojoList *);")
         parts.append("int64_t _compute_exc_descendants (MojoList *);")
-        parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
-        parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
-        parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
+        parts.append(f"void {_interp_init} (Interpreter *, char *, MojoList *);")
+        parts.append(f"int64_t {_interp_exec} (Interpreter *, int64_t);")
+        parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t);  /* from fire.py */")
     parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
     parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
     parts.append("static MojoList * _mojo_dispatch_fields (void *);")
@@ -8580,7 +8655,7 @@ def gen_module_impl(self, stmts):
     # `MojoDict *` operand to a boxed int64_t, so the truthiness test became
     # "pointer non-null" and this section (a literal comment line) was
     # emitted for a module with no dispatch tables at all — a byte-parity
-    # divergence vs `python3 mojo.py --dump`. Same at the typedef site above.
+    # divergence vs `python3 fire.py --dump`. Same at the typedef site above.
     if self.emit_struct_defs and self._dispatch_solver and len(self._dispatch_tables) > 0:
         parts.append("/* Dispatch table initializations (virtual method tables) */")
         for callee_set, dispatch_table in self._dispatch_tables.items():
@@ -8646,7 +8721,7 @@ def gen_module_impl(self, stmts):
             '#include <functional>',
             '#include <vector>',
             '#include <algorithm>',
-            '#include <mojo_runtime.h>',
+            '#include <fire_runtime.h>',
             '',
             'extern "C" { typedef struct MojoGenerator MojoGenerator; }',
             'extern "C" { typedef struct MojoAsync MojoAsync; }',
@@ -8674,7 +8749,7 @@ def gen_module_impl(self, stmts):
             '   GimpleGen._cpp_raise_stmt/_cpp_try_stmt). Carries exactly the',
             '   same tri-part representation the ordinary (non-generator) GIMPLE',
             '   path already uses for its mojo_exc_type/msg/obj globals (see',
-            '   mojo_runtime.h) -- reused, not reinvented, so the extern "C"',
+            '   fire_runtime.h) -- reused, not reinvented, so the extern "C"',
             '   `_resume` boundary below can translate one directly into the',
             '   other with no lossy conversion. */',
             'struct _MojoCppExc {',
@@ -8704,7 +8779,7 @@ def gen_module_impl(self, stmts):
         ]
         if (self._supported_async or self._supported_async_gen
                 or self._supported_async_closures or self._nested_async_api):
-            cpp_parts.append('#include <mojo_async_runtime.h>')
+            cpp_parts.append('#include <fire_async_runtime.h>')
             cpp_parts.append('#include <unistd.h>')
             cpp_parts.append('')
             cpp_parts.append('struct _mojoasync_SleepAwaiter {')

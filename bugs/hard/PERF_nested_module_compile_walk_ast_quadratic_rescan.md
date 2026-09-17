@@ -235,7 +235,7 @@ change either, so no file's pass/fail status against a timeout harness
 changes as a result of Phase 1 alone).
 
 `Lib/poplib.py` (one of the doc's other named affected files) was
-re-checked directly: `python3 mojo.py build Lib/poplib.py` completes in
+re-checked directly: `python3 fire.py build Lib/poplib.py` completes in
 ~7s wall time (well within any reasonable timeout) — either it was never
 as badly affected as `contextlib.py`'s 36-module worst case, or an
 unrelated prior fix already improved it; not otherwise investigated
@@ -621,7 +621,7 @@ not attributable to one fixable site:
 
 ## Symptom
 
-`python3 mojo.py build <file>.py` (`do_imports=True`) takes minutes (or
+`python3 fire.py build <file>.py` (`do_imports=True`) takes minutes (or
 times out entirely against the 60-90s harness timeout) for any file whose
 transitive import graph is moderately large, even though the file itself
 is small and the actual GIMPLE/C++ codegen for it is fast in isolation.

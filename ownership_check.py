@@ -4,7 +4,7 @@
              mutable" rule, scoped to conflicts visible within one call's
              own argument list).
 
-This is a pure static-analysis pass over the parsed AST (mojo_compiler.py's
+This is a pure static-analysis pass over the parsed AST (fire_compiler.py's
 node types) — it never touches codegen or the interpreter, and produces
 only Diagnostic objects for the caller to report or reject on. It does not
 implement destruction (Phase 3) or cross-statement borrow lifetimes.
@@ -98,7 +98,7 @@ value). Re-run that sweep after any change to this file.
 """
 
 import dataclasses
-import mojo_compiler as N
+import fire_compiler as N
 
 
 @dataclasses.dataclass

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test DispatchSolver Phase A implementation."""
 
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver
 
 # Test case 1: Simple direct call graph

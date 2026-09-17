@@ -26,7 +26,7 @@ import cas
 import reflect
 from build_config import find_gcc, find_gxx
 from gimple_codegen import GimpleGen, FromImportStmt
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 from module_loader import load_module, STDLIB_PATH, module_name_for_path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -338,7 +338,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
           extra_exports: list = None, jobs: int = 1, opt_flag: str = None,
           track_local_deps: bool = True) -> str:
     """`opt_flag` (e.g. '-O2'): folded into every module's AND the runtime's
-    (mojo_runtime.c/mojo_async_runtime.cpp) own object-compile flags, and
+    (fire_runtime.c/fire_async_runtime.cpp) own object-compile flags, and
     into their CAS keys (so an -O2 build never serves a stale -O0-compiled
     object, or vice versa) — `_OBJ_FLAGS`/plain `toolchain_fingerprint(gcc,
     ())` on their own carry NO optimization flag (gcc's implicit -O0),
@@ -474,10 +474,10 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         print(f"  ({excluded} modules excluded for symbol collisions)", file=sys.stderr)
 
     # Runtime handling:
-    # - For production (link_runtime=False): compile mojo_runtime.c into an object
+    # - For production (link_runtime=False): compile fire_runtime.c into an object
     #   and fold it into the dylib (no separate runtime dylib needed)
     # - For testing (link_runtime=True): build separate runtime dylib and link against it
-    rt_src = os.path.join(RUNTIME, 'mojo_runtime.c')
+    rt_src = os.path.join(RUNTIME, 'fire_runtime.c')
     rt_cflags = ('-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
     rt_key = 'rtobj/' + cas._hash(
         'mojo-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
@@ -494,13 +494,13 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     else:
         # For production: include runtime object directly
         def _build_rt_obj():
-            o = os.path.join(workdir, 'mojo_runtime.o')
+            o = os.path.join(workdir, 'fire_runtime.o')
             subprocess.run([gcc, *rt_cflags, '-c', '-o', o, rt_src], check=True)
             return open(o, 'rb').read()
         rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
         objs.append(rt_o)
 
-        # runtime/mojo_async_runtime.cpp's mojo_coro_resume_generic/
+        # runtime/fire_async_runtime.cpp's mojo_coro_resume_generic/
         # mojo_coro_destroy_generic (+ the AsyncRT_DeviceContext_
         # enqueueHostFunction(Range) stubs) — needed the moment ANY
         # compiled stdlib module references `_coro_resume_fn`/
@@ -517,8 +517,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # dyld "symbol not found in flat namespace" crash the first time a
         # real program actually calls into the affected stdlib code at
         # runtime. Compiled with g++ (C++20; the .cpp needs real coroutine/
-        # exception support mojo_runtime.c's plain-C -fgimple objects
-        # don't), CAS-cached exactly like mojo_runtime.o's own object above
+        # exception support fire_runtime.c's plain-C -fgimple objects
+        # don't), CAS-cached exactly like fire_runtime.o's own object above
         # — folded into the SAME production dylib (not a separate runtime
         # piece) via a C++ link driver (find_gxx()) so the final link pulls
         # in libstdc++ correctly. Scoped to ONLY this (production) branch —
@@ -527,7 +527,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # (test_module_cache.py's stage3 "exactly 2 cache ops" assertions),
         # even though that path never used the result (runtime_dylib()
         # already builds its own copy, untracked by cas.stats — see there).
-        async_rt_src = os.path.join(RUNTIME, 'mojo_async_runtime.cpp')
+        async_rt_src = os.path.join(RUNTIME, 'fire_async_runtime.cpp')
         async_rt_cflags = ('-std=c++20', '-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
         async_rt_key = 'rtobj/' + cas._hash(
             'mojo-async-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
@@ -542,7 +542,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
 
         # A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the
         # default backend now, gimple_gen_coro.py): the same "fold in
-        # unconditionally" treatment as mojo_async_runtime.cpp just above,
+        # unconditionally" treatment as fire_async_runtime.cpp just above,
         # for the identical reason -- a stdlib module compiled with a
         # generator/async function/nested async closure (e.g. std/gpu/
         # host/device_context.mojo's enqueue_cpu_function, hoisted as a
@@ -556,12 +556,12 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # no generator/async anywhere in it, crashed with `symbol not
         # found ... '___mojo_gen_destroy'` purely from linking against
         # this dylib). Plain C + one arch-specific file, all -fgimple-free
-        # (unlike mojo_runtime.o, these use ordinary strict C / asm).
+        # (unlike fire_runtime.o, these use ordinary strict C / asm).
         _ss_cflags = ('-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
-        _ss_arch = ('mojo_coro_ctx_aarch64.S'
+        _ss_arch = ('fire_coro_ctx_aarch64.S'
                     if platform.machine().lower() in ('arm64', 'aarch64')
-                    else 'mojo_coro_ctx_generic.c')
-        for _ss_name in ('mojo_coro.c', 'mojo_coro_gen.c', 'mojo_async_sched.c', _ss_arch):
+                    else 'fire_coro_ctx_generic.c')
+        for _ss_name in ('fire_coro.c', 'fire_coro_gen.c', 'fire_async_sched.c', _ss_arch):
             _ss_src = os.path.join(RUNTIME, _ss_name)
             _ss_key = 'rtobj/' + cas._hash(
                 'mojo-ss-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
@@ -586,8 +586,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     # advertised as a normal export even though gen_module's own "overloaded
     # top-level functions ... can't be emitted as distinct C symbols, drop
     # them here" pass never compiled a body for it, or a stale prototype in
-    # mojo_runtime.h (e.g. MojoList__write_to) was never actually defined in
-    # mojo_runtime.c. Either way the reflection table would forward-declare
+    # fire_runtime.h (e.g. MojoList__write_to) was never actually defined in
+    # fire_runtime.c. Either way the reflection table would forward-declare
     # and take the address of a symbol with zero definitions anywhere in the
     # dylib — `extern void sym();` with nothing behind it — which links fine
     # (production dylibs use `-undefined dynamic_lookup`) but crashes EVERY
@@ -645,7 +645,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     # link_driver=gxx: the production dylib now always folds in mojo_
     # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
     # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
-    # mojo.py's own link_executable(cxx=True) convention exactly.
+    # fire.py's own link_executable(cxx=True) convention exactly.
     if link_runtime:
         # For test modules: link against runtime dylib, all symbols must resolve
         link = _dylink(gcc, out, objs, undefined=False, extra_libs=[rt_path],
@@ -708,18 +708,18 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
     `_coro_resume_fn`/`_coro_destroy_fn` used as bare values, or define a
     compiled async function/closure, independent of link_runtime mode. Since
     §5.5 (doc/COROUTINE.html) made the A3 stack-switch backend the default,
-    also folds in the stack-switch runtime (mojo_coro.c/mojo_coro_gen.c/
-    mojo_async_sched.c + the arch context-switch file) for the identical
+    also folds in the stack-switch runtime (fire_coro.c/fire_coro_gen.c/
+    fire_async_sched.c + the arch context-switch file) for the identical
     reason — see build()'s own matching comment for the hand-verified crash
     this fixes."""
     gcc = gcc or find_gcc()
     gxx = find_gxx()
-    src = open(os.path.join(RUNTIME, 'mojo_runtime.c')).read()
-    async_src = open(os.path.join(RUNTIME, 'mojo_async_runtime.cpp')).read()
-    ss_arch = ('mojo_coro_ctx_aarch64.S'
+    src = open(os.path.join(RUNTIME, 'fire_runtime.c')).read()
+    async_src = open(os.path.join(RUNTIME, 'fire_async_runtime.cpp')).read()
+    ss_arch = ('fire_coro_ctx_aarch64.S'
                if platform.machine().lower() in ('arm64', 'aarch64')
-               else 'mojo_coro_ctx_generic.c')
-    ss_names = ('mojo_coro.c', 'mojo_coro_gen.c', 'mojo_async_sched.c', ss_arch)
+               else 'fire_coro_ctx_generic.c')
+    ss_names = ('fire_coro.c', 'fire_coro_gen.c', 'fire_async_sched.c', ss_arch)
     ss_srcs = [open(os.path.join(RUNTIME, n)).read() for n in ss_names]
     key = 'rtdylib/' + cas._hash(
         'mojo-rtdylib-v3', cas.ABI_VERSION, cas.compiler_fingerprint(),
@@ -728,12 +728,12 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
     if not os.path.exists(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
         wd = tempfile.mkdtemp(prefix='mojo_rt_')
-        o = os.path.join(wd, 'mojo_runtime.o')
+        o = os.path.join(wd, 'fire_runtime.o')
         subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
-                        os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
+                        os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
         async_o = os.path.join(wd, 'mojo_async_runtime.o')
         subprocess.run([gxx, '-std=c++20', '-fPIC', f'-I{RUNTIME}', '-c', '-o', async_o,
-                        os.path.join(RUNTIME, 'mojo_async_runtime.cpp')], check=True)
+                        os.path.join(RUNTIME, 'fire_async_runtime.cpp')], check=True)
         ss_objs = []
         for n in ss_names:
             so = os.path.join(wd, os.path.splitext(n)[0] + '.o')
@@ -747,7 +747,7 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
 
 def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1) -> str:
     """Build the monolithic stdlib dylib from all auto-discovered library modules."""
-    rt_header = os.path.join(RUNTIME, 'mojo_runtime.h')
+    rt_header = os.path.join(RUNTIME, 'fire_runtime.h')
     rt_exports = reflect.collect_runtime_exports_h(rt_header)
     # track_local_deps=False: every module here IS a stdlib module, and the
     # whole stdlib closure is already folded into each one's key via

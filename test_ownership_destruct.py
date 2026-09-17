@@ -6,7 +6,7 @@ nothing," which matters as much as a non-empty hit given this module's
 deliberately conservative, low-recall design.
 """
 
-import mojo_compiler as N
+import fire_compiler as N
 from ownership_destruct import analyze_module
 
 
@@ -89,7 +89,7 @@ def main():
     ("appended_element_excluded_but_outer_container_still_fine", """
 # `d` is correctly excluded (now reachable through `outer`, an unresolved
 # `.append()` call). `outer` itself is still a valid candidate: freeing it
-# alone is genuinely safe because `mojo_list_free` (runtime/mojo_runtime.c)
+# alone is genuinely safe because `mojo_list_free` (runtime/fire_runtime.c)
 # does NOT recursively free contained elements, so this doesn't double-free
 # `d` -- `d` just leaks (a miss, not corruption), which is exactly the
 # conservative direction this analysis is allowed to err in.

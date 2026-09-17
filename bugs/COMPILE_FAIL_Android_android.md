@@ -43,7 +43,7 @@ attempted; no code change.
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd` — DOCUMENTED-NOT-FIXED, unchanged)
 
-Fresh safety-wrapped `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
+Fresh safety-wrapped `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
 against this worktree (fast-forwarded to master `e60b9cd`, the current
 integration tip). Byte-for-byte identical refusal to every prior pass:
 the same 10 `async def` functions + `async_process` async generator,
@@ -56,7 +56,7 @@ tracked async-codegen feature project), not attempted. No change.
 
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — DOCUMENTED-NOT-FIXED, unchanged)
 
-Fresh safety-wrapped `python3 mojo.py build .../Android/android.py`
+Fresh safety-wrapped `python3 fire.py build .../Android/android.py`
 against this worktree (includes this session's dict-keyed %-formatting
 landing, commit `e1e12bb`): byte-for-byte identical refusal to every
 prior pass — the same 10 `async def` functions + `async_process` async
@@ -69,7 +69,7 @@ attempted. No change.
 
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder17 — DOCUMENTED-NOT-FIXED, unchanged)
 
-Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Android/
+Fresh full `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/
 android.py` against this worktree (branched from master `1e0f3f2`,
 `build/libmojostdlib.dylib` freshly rebuilt, 0 skips). Byte-for-byte
 identical refusal to every prior pass: the same 10 `async def`
@@ -85,7 +85,7 @@ attempted. No change.
 
 ## Status (re-verified 2026-08-25, worktree fix/rest-remainder14 — DOCUMENTED-NOT-FIXED, unchanged)
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Android/android.py`
 against this worktree (branched from master `f65502d`), run under the
 safety-rule watcher. Byte-for-byte identical refusal to every prior
 pass: the same 10 `async def` functions + `async_process` async

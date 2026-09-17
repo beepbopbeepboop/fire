@@ -114,18 +114,18 @@ still a real, broader gap. Not deprioritized-as-unreachable anymore
 though: this session's fix demonstrates the narrower method-symbol slice
 of the mechanism WAS reachable and fixable at acceptable risk; whoever
 picks up the remaining field-identity work should re-assess reachability
-given `mojo.py build`'s inline fallback is evidently exercised more often
+given `fire.py build`'s inline fallback is evidently exercised more often
 in practice than the "structurally unreachable" framing below assumed.
 
 ## Cross-reference (2026-08-11 — live counter-example found to the "unreachable via primary path" claim, PLUS the same mechanism confirmed for free functions, not just structs)
 
 Investigating `bugs/CODEGEN_generator_function_Lib_mailbox.md` (a
 different, generator-focused doc) found a live, concrete instance of
-this exact bare-name-collision mechanism reachable through `mojo.py
+this exact bare-name-collision mechanism reachable through `fire.py
 build`'s documented inline fallback: `driver.compile_program` (link
-mode) returns `None` for `Lib/mailbox.py`, so `mojo.py build` falls
+mode) returns `None` for `Lib/mailbox.py`, so `fire.py build` falls
 back to the whole-program `do_imports=True` inline path — precisely
-the path this doc's 2026-08-08 entry calls "only reached as `mojo.py
+the path this doc's 2026-08-08 entry calls "only reached as `fire.py
 build`'s degraded fallback" with "no known live, reachable instance."
 mailbox.py IS such an instance. So the claim that the two named
 real-world triggers (`tkinter/filedialog.py`/`tkinter/simpledialog.py`)
@@ -165,7 +165,7 @@ entry-module value for the whole `GimpleGen` instance's lifetime).
 ## Status (re-verified 2026-08-09 — unchanged, still deprioritized/not fixed)
 
 Re-ran both named repros again against current master via plain
-`python3 mojo.py build <file>.py`:
+`python3 fire.py build <file>.py`:
 
 - `Lib/tkinter/filedialog.py` — still builds clean (exit 0, no
   struct-collision errors in the compile log).
@@ -174,7 +174,7 @@ Re-ran both named repros again against current master via plain
 No change from the 2026-08-08 assessment below — both real-world
 triggers still go through `driver.py`'s link-mode path (each imported
 module its own translation unit), so the collision this doc describes
-remains structurally unreachable on the primary `mojo.py build` entry
+remains structurally unreachable on the primary `fire.py build` entry
 point for these two files. The underlying `do_imports=True` inline-path
 gap itself was not re-derived or re-attempted here (lightweight
 re-check only, per this session's assignment) — the 2026-08-08 analysis
@@ -184,21 +184,21 @@ below still stands.
 
 Re-verified both originally-confirmed real-world triggers against current
 master using the actual, default, user-facing command
-(`python3 mojo.py build <file>.py`):
+(`python3 fire.py build <file>.py`):
 
 - `Lib/tkinter/filedialog.py` — **builds clean**, no struct-collision
   errors (runs, hits an unrelated separate bug at runtime —
   `AttributeError: curdir` from an unresolved-import stub, out of scope).
 - `Lib/tkinter/simpledialog.py` — **builds clean** as well.
 
-Neither reproduces via `mojo.py build` anymore. Root cause: `mojo.py
+Neither reproduces via `fire.py build` anymore. Root cause: `fire.py
 build` now goes through `driver.py`'s module-cache "link mode" FIRST
 (`driver.compile_program`, see its own docstring: "compiles the client
 in link mode (extern decls)... content-addresses the whole program...
 If the link path can't produce a binary we return None so the caller
 can fall back to the inline builder"), only falling back to the
 `do_imports=True` whole-program inline builder
-(`gimple_codegen.compile_to_gimple_cached`, `mojo.py build_executable`)
+(`gimple_codegen.compile_to_gimple_cached`, `fire.py build_executable`)
 on failure. Link mode compiles EACH imported module as its OWN separate
 translation unit/dylib — `tkinter/dialog.py`'s `Dialog` and
 `tkinter/commondialog.py`'s unrelated `Dialog` are never in the same
@@ -230,13 +230,13 @@ bare-name race. This would fail with both a C redefinition error
 error, exactly matching this doc's originally-documented symptoms.
 
 Today, in practice, this inline `do_imports=True` entry point is only
-reached as `mojo.py build`'s degraded fallback (triggered when link
+reached as `fire.py build`'s degraded fallback (triggered when link
 mode itself fails for unrelated reasons — driver.py's own docstring:
 "we accept things break, but a program that can build still does") and
 by `--dump-full`. Since link mode is tried first and both originally-
 confirmed real-world instances succeed on it, this bug currently has
 **no known live, reachable instance** through any of this project's
-primary, supported entry points (`mojo.py build`, `compile_stdlib.py`,
+primary, supported entry points (`fire.py build`, `compile_stdlib.py`,
 the stdlib dylib build). Given the fix this doc's own plan calls for
 touches genuinely foundational, shared struct-identity machinery
 (referenced by field access, method dispatch, reflection, construction,
@@ -260,7 +260,7 @@ inheritance couldn't even be resolved before, so this never got compiled
 far enough to reach the current failure.
 
 **2026-08-07**: repro re-confirmed reproducing byte-for-byte identically
-on current master (`python3 mojo.py build
+on current master (`python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/tkinter/filedialog.py` — same
 `conflicting types for 'tkinter_commondialog_Dialog___init__'`/`'Dialog'
 has no member named 'widgetName'/'parent'/'result'/'initial_focus'`
@@ -291,7 +291,7 @@ budget rather than attempting a partial version under time pressure.
 
 **2026-08-07 (Track B session)**: a second, independent real-world
 instance found (not investigated/fixed, purely logged per this
-project's "elaborate the bugs database" convention) — `python3 mojo.py
+project's "elaborate the bugs database" convention) — `python3 fire.py
 build /Users/mrs/net/Python-3.14.6/Lib/typing.py`: `Lib/_collections_
 abc.py` defines `class _CallableGenericAlias(GenericAlias):` and `Lib/
 typing.py` INDEPENDENTLY defines its OWN, unrelated `class
@@ -338,7 +338,7 @@ local `Dialog` compiled clean — the real files' actual trigger involves
 through `tkinter/__init__.py`'s own re-exports, a shape not yet isolated
 down to a minimal case). The two REAL, directly-confirmed repros
 (`Lib/tkinter/filedialog.py`, `Lib/tkinter/simpledialog.py`, both via
-plain `python3 mojo.py build <file>.py`) are solid, reproducing evidence
+plain `python3 fire.py build <file>.py`) are solid, reproducing evidence
 on their own — see their exact errors above, captured directly from the
 real compiler.
 

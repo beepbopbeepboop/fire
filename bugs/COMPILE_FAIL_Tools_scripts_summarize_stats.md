@@ -26,12 +26,12 @@ they RETURN a nested closure that captures their own params. That is the
 genuinely feature-sized "callable value / closure compilation" case the
 new helper compiler deliberately excludes (a helper whose body contains a
 further nested `def` is skipped). So the generator stays honestly refused
-on those two callees. No regression — `mojo.py build` behaviour on this
+on those two callees. No regression — `fire.py build` behaviour on this
 file is byte-identical to before.
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical refusal, unchanged
 
-Fresh `python3 mojo.py build .../Tools/scripts/summarize_stats.py`
+Fresh `python3 fire.py build .../Tools/scripts/summarize_stats.py`
 against this worktree (fast-forwarded to master `43fb291`): identical
 refusal naming exactly `iter_optimization_tables`
 (`calc_histogram_table(...)`) and `iter_specialization_tables`

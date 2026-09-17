@@ -72,7 +72,7 @@ stdlib dylib rebuild exit 0 with 0 `skip <module>:` lines.
 
 ## Status (updated 2026-08-25, worktree fix/rest-remainder12 — COMPILE stage now fully fixed end-to-end; RUNTIME crash found, separate gap, NOT fixed)
 
-`python3 mojo.py build .../Apple/__main__.py` now exits 0 and produces a
+`python3 fire.py build .../Apple/__main__.py` now exits 0 and produces a
 working executable. Four root-cause fixes landed in the coroutine/
 generator-body C++ emitter (`gimple_cpp_core.py`), each found by walking
 this file's blocker one step at a time:
@@ -295,7 +295,7 @@ for-loop dict-unpacking target specifically rather than a parameter or
 chained assignment — a distinct, separate gap from this doc's original
 `len()` bug and out of scope for a narrow fix here per this task's
 guidance (broad type-inference-machinery change, not a one-spot fix).
-Not attempted. Doc kept (this file still fails `mojo.py build`
+Not attempted. Doc kept (this file still fails `fire.py build`
 end-to-end) rather than deleted.
 
 ```

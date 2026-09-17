@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -210,8 +210,8 @@ def _lower_StringLiteral(gen, node):
             # Expression: try to evaluate and convert to char*
             try:
                 # `Parser` / `py_tokenize` are imported at MODULE level
-                # (added to the `from mojo_compiler import (...)` block
-                # above) — NOT via a function-scoped `from mojo_compiler
+                # (added to the `from fire_compiler import (...)` block
+                # above) — NOT via a function-scoped `from fire_compiler
                 # import Parser as _P, ...`. The self-hosted compiler
                 # cannot resolve a function-scoped import of a compiled
                 # sibling symbol: `_P`/`_tok` were treated as unknown call
@@ -316,7 +316,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # `if __name__ == '__main__': main()` guard fired too, running
         # that script's CLI entry point as a side effect of merely being
         # imported into the closure (found via build_stdlib_dylib.py's
-        # main() executing during a plain `--dump` of mojo.py).
+        # main() executing during a plain `--dump` of fire.py).
         own_name = gen.module_name if gen.module_name else "__main__"
         t = gen._new_val('char *', f'{gen._intern_string(own_name)}')
         return 'char *', t
@@ -428,14 +428,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # already recorded which module actually owns it — skip this
     # branch (fall through to the ordinary "unknown identifier"
     # placeholder below) unless it's OUR OWN module's global. Found
-    # via `mojo.py`'s self-host build: a lambda inside gimple_codegen.
+    # via `fire.py`'s self-host build: a lambda inside gimple_codegen.
     # py's own `compile_to_gimple_cached` closing over its enclosing
     # function's `filename` PARAMETER (an ordinary, if imperfectly-
     # supported, closure capture — see the sibling `mojo_src`/
     # `do_imports` captures right next to it, which already correctly
     # fall through to the same placeholder) got misresolved as
     # `_gimple_codegen_globals.filename` — a field gimple_codegen.py
-    # never declares — because `mojo_compiler.py`'s OWN unrelated
+    # never declares — because `fire_compiler.py`'s OWN unrelated
     # top-level `filename = sys.argv[1] if ... else "<stdin>"` (inside
     # its `if __name__ == "__main__":` block) is also named `filename`
     # and is reachable via the whole-tree scan. See bugs/CODEGEN_
@@ -665,7 +665,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
     # the list/call context handles iteration. `**` has no other meaning
     # in this codebase (no real double-pointer dereference use), so it's
     # always a spread marker regardless of operand type. A bare `*` is
-    # ambiguous with real pointer dereference (mojo_compiler.py's parser
+    # ambiguous with real pointer dereference (fire_compiler.py's parser
     # produces the identical UnaryOp(op='*', ...) node shape for both
     # `*ptr` and a spread `*args`), so treat it as a spread pass-through
     # when the operand is one of the boxed container types a spread
@@ -740,7 +740,7 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
     # so any side effect in the untaken branch (I/O, a function call)
     # still happened — a real correctness bug, not just waste, and one
     # every ternary in the self-hosted closure was exposed to (see
-    # BACKLOG-CODEGEN.md §4d; found via mojo_compiler.py's own
+    # BACKLOG-CODEGEN.md §4d; found via fire_compiler.py's own
     # `sys.stdin.read() if len(sys.argv) < 2 else open(...).read()`
     # reading stdin unconditionally even when a file argv was given).
     # _quick_type gives each branch's C type WITHOUT evaluating it (the
@@ -1281,7 +1281,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # shape this fallback exists for in the first place — silently
     # breaking it (confirmed via `test_module_cache.py`'s SB-1 per-scope-
     # import CLI tests, which transitively pull this same builtin prelude
-    # into every `mojo.py build`: 2 tests regressed with a `dyld: symbol
+    # into every `fire.py build`: 2 tests regressed with a `dyld: symbol
     # not found ... '_block_idx'` runtime crash). `_module_alias_names`
     # is populated ONLY by the two real `import`-statement sites, never by
     # an ordinary `from X import name` binding, so it doesn't have this
@@ -1600,7 +1600,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # either register a bogus phantom field or hit the "unknown field"
     # fallback and emit an invalid raw `->__class__` C access. Lower it
     # to the object's runtime type tag (see mojo_read_type_tag in
-    # runtime/mojo_runtime.c and _struct_type_id above) — the same
+    # runtime/fire_runtime.c and _struct_type_id above) — the same
     # value identity comparisons against a class name already use, so
     # code that stores/compares `__class__` values (not just `is`
     # against a literal class name) keeps working.
@@ -1853,7 +1853,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # different AST-node subtypes across its callers (e.g. `expr =
         # self._parse_expr_or_yield()` infers `YieldExpr *`, even though
         # `_parse_expr_or_yield` can return ANY expression kind — real,
-        # in mojo_compiler.py's own `Parser._parse_stmt`). The OLD
+        # in fire_compiler.py's own `Parser._parse_stmt`). The OLD
         # fallback here guessed "the first OTHER struct that happens to
         # have a field with this name" and blindly cast to it — UNSOUND,
         # since different structs' shared field names sit at DIFFERENT
@@ -2259,7 +2259,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # mojo_cstr_slice (malloc + memcpy) just to immediately strcmp it
     # away. Profiled as ~90% of ALL runtime in the exact scanning-loop
     # shape (`while ... src[j:j+3] != quote3:`) that motivated this -
-    # see mojo_cstr_region_eq's comment in runtime/mojo_runtime.c.
+    # see mojo_cstr_region_eq's comment in runtime/fire_runtime.c.
     # Scoped tightly (plain char* slice target, no step, other operand a
     # plain char*) so it only ever fires for the shape it was measured
     # against, not a broad speculative rewrite of slice comparisons.
@@ -2329,7 +2329,7 @@ def _lb_as_set(gen, t: str, v: str) -> str:
     erasure: `_selfhost_gen_self_param_ctype`'s convention only actually
     resolves `gen` to a real `GimpleGen *` for a small minority of the
     ~330 extracted backend functions (confirmed empirically — of 345
-    gen/self-first-param functions in a real `--dump-full mojo.py` build,
+    gen/self-first-param functions in a real `--dump-full fire.py` build,
     only 12 got `GimpleGen *`; the other 333, this one included, still
     compile `gen` as plain `int64_t`) — some pre-existing ordering gap
     between when a function's forward declaration is computed and when
@@ -2428,7 +2428,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # it a string. At a list-concat site the runtime value *is* a list, so
     # concat is the correct lowering; without this we emit `MojoList * + char *`,
     # which gcc rejects. (Salvaged from the bootstrap bug-hunt; it advances the
-    # self-host build past mojo_compiler.py's emit().)
+    # self-host build past fire_compiler.py's emit().)
     if op == '+' and lt == 'MojoList *' and rt.endswith(' *'):
         rcast = rv
         if rt != 'MojoList *':
@@ -2560,12 +2560,12 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # `char * int` always means repetition, never arithmetic - without
     # this case it silently fell through to plain numeric multiplication
     # (treating the char as its byte value), producing a nonsense result
-    # (confirmed: mojo_compiler.py's own py_tokenize's
+    # (confirmed: fire_compiler.py's own py_tokenize's
     # replace_multiline_strings does `quote3 = c * 3` to build '"""'/
     # "'''" for triple-quote detection; miscompiling this as arithmetic
     # meant triple-quoted strings/docstrings were never recognized at
     # all when this file compiles itself, cascading into a severe
-    # performance blowup during self-hosted `--dump-full` of mojo.py).
+    # performance blowup during self-hosted `--dump-full` of fire.py).
     if op == '*' and lt == 'char' and rt in ('int', 'int64_t', 'uint64_t', '_Bool'):
         sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._new_temp('char *')
@@ -2688,7 +2688,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 # pointer produces a garbage address (e.g. 0x22 for '"').
                 # Build a real 1-char string instead, mirroring the same fix
                 # in _cast_for_list ('in' lowering). Found via
-                # mojo_compiler.py's own `c == "\\"` (c from `s[i]`).
+                # fire_compiler.py's own `c == "\\"` (c from `s[i]`).
                 # BUT: when the OTHER operand is a string literal (detected
                 # by the caller via _is_str_lit), an UNTRACKED int64_t is
                 # assumed to be a char*-boxed pointer, not a character
@@ -2698,7 +2698,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 # though — if _actual_types explicitly tracked this
                 # variable as 'char' (see _track_pointer_actual_type),
                 # that's direct evidence, not a guess, and must win
-                # regardless of is_other_str_lit: mojo_compiler.py's own
+                # regardless of is_other_str_lit: fire_compiler.py's own
                 # `first = rest[0]; ... if first == '"' or first == "'":`
                 # in _strip_string_prefix_and_quotes has `first` declared
                 # int64_t (widened joining another assignment site) but
@@ -2783,7 +2783,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # `ptr + char` C expression — raw pointer arithmetic on a `char *`,
     # which GIMPLE's frontend rejects outright ("internal compiler error
     # in build2"). Route the char through mojo_char_to_str first so this
-    # becomes ordinary string concatenation. Found via mojo_compiler.py's
+    # becomes ordinary string concatenation. Found via fire_compiler.py's
     # own `_decode_str_literal_text`'s `prefix += val[0]` failing to
     # self-compile with exactly that ICE.
     #
@@ -3101,7 +3101,7 @@ def _lower_percent(gen, node: gimple_ctypes.BinaryOp):
     "invalid operands to binary % (have 'int64_t' and 'MojoDict *')" hard
     error class seen in real argparse.py/build-installer.py closures.
     These lower to the new runtime primitive `mojo_str_format_dict`
-    (runtime/mojo_runtime.c), which parses %(key)[flags][width][.prec]conv
+    (runtime/fire_runtime.c), which parses %(key)[flags][width][.prec]conv
     specs and looks up each key AT RUNTIME -- honest Python semantics for
     a dynamic template, including real catchable KeyError on a miss.
     Detection is deliberately AST/type-based BEFORE anything is emitted,
@@ -3264,7 +3264,7 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     # joined on the self-hosted backend produced an erased/garbage string
     # that then compiled to `mojo_str_cat (<decimal address>, ...)` in
     # emitted C (gimple_cpp_core.py:2934's `"..." % (_tid,)`), different
-    # every --dump-full mojo.py run. `%%` (an escaped percent) is the one
+    # every --dump-full fire.py run. `%%` (an escaped percent) is the one
     # case a plain slice can't represent verbatim, so those runs are
     # accumulated in `esc_buf` (a str, concatenated — not a char list)
     # and flushed as their own 'lit' part.
@@ -3324,7 +3324,7 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
             # hosted path, and `_intern_string(_c_escape(<boxed>))` then
             # produced an erased `_slit` reference (a decimal address) —
             # `mojo_str_cat (<address>, ...)` in the emitted C, different
-            # every --dump-full mojo.py run.
+            # every --dump-full fire.py run.
             text = _as_str(part[1])
             if not text:
                 continue
@@ -3414,7 +3414,7 @@ def _lower_matmul(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # call, only ever REACHED as dead code inside a polymorphic helper
     # like `Lib/operator.py`'s `def matmul(a, b): return a @ b`, whose
     # untyped params this compiler can't know are never actually ints).
-    # Confirmed via `mojo.py build` on both Lib/socket.py and
+    # Confirmed via `fire.py build` on both Lib/socket.py and
     # Lib/runpy.py's transitive closures (both reach operator.py):
     # "error: implicit declaration of function 'int64_t___matmul__'"
     # (promoted to a hard error, not just a warning, under -fgimple).
@@ -3532,7 +3532,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
     # it here, `rt` is always 'int64_t' for e.g. `x in SOME_GLOBAL_SET`,
     # never matching any of the branches below, so membership against
     # any top-level set/dict/list constant silently always returned
-    # False. Found via `val in _KEYWORDS` (mojo_compiler.py's own
+    # False. Found via `val in _KEYWORDS` (fire_compiler.py's own
     # tokenizer) misclassifying every keyword as a plain NAME in the
     # self-hosted compiled path. len()/iteration elsewhere already
     # resolve through _get_actual_type; this call site didn't.
@@ -3646,7 +3646,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
         # _C_RESERVED_FUNCS` being dead is why the compiler stopped
         # recognising libc names and emitted a weak `int64_t abs (...)`
         # stub colliding with <stdlib.h> — one error that cascaded into
-        # 631 more in mojo_compiler.py alone.
+        # 631 more in fire_compiler.py alone.
         #
         # The runtime CAN answer this: list/dict/set are all discoverable
         # through their allocation registries. Same runtime-dispatch shape
@@ -3735,7 +3735,7 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `[at for (at, _) in arg_pairs]` — a tuple-unpack IN THE COMPREHENSION
         # FOR-CLAUSE — is the established tuple-boxing bug pattern (a 2-tuple
         # unpack re-boxes an element to int64_t even if it started as char*):
-        # confirmed here via a real --dump-full mojo.py determinism diff
+        # confirmed here via a real --dump-full fire.py determinism diff
         # showing `MojoList * (53615097216);` / `(53615097216) = (MojoList
         # *)_t237;` at this exact line (an erased comprehension-result NAME
         # printed as a decimal address, invalid C, different every run).
@@ -3756,7 +3756,7 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # Same tuple-unpack-in-comprehension-for-clause bug as the
             # `_proto_params` fix a few lines up (4d922cc) — a second,
             # separate occurrence in this same function, missed the first
-            # time and confirmed via a real --dump-full mojo.py determinism
+            # time and confirmed via a real --dump-full fire.py determinism
             # diff still pinpointing this exact line.
             gen.func_param_types[cname] = [_as_str(_ap[0]) for _ap in arg_pairs]
 
@@ -3789,7 +3789,7 @@ def _lower_mlir_mem(gen, kind: str, arg_pairs: list) -> tuple[str, str]:
     # subscript result (`at, av = arg_pairs[0]`) — the established boxing
     # bug: a 2-tuple unpack re-boxes an element to int64_t even if it
     # started as char*/a pointer. Confirmed here via a real --dump-full
-    # mojo.py determinism diff pinpointing this exact function (inlined
+    # fire.py determinism diff pinpointing this exact function (inlined
     # into _lower_external_call_2dbb98) as a source of `MojoList *
     # (<address>);` / `_t48 = (MojoList *)<address>;` — different every run.
     if kind == 'load':
@@ -4062,7 +4062,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     gen._emit(f"  {t} = mojo_list_new ();")
     # Mark as a tuple (not a plain list) so generic repr() picks `(...)`
     # over `[...]` — see mojo_mark_as_tuple's doc comment in
-    # runtime/mojo_runtime.c; there is otherwise no runtime distinction
+    # runtime/fire_runtime.c; there is otherwise no runtime distinction
     # between the two, since both lower to the same MojoList.
     gen._emit(f"  mojo_mark_as_tuple ({t});")
     # Explicit loop, NOT `[(el, *gen.lower_expr(el)) for el in ...]`: the

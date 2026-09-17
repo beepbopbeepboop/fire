@@ -83,7 +83,7 @@ path) done — including subagent work — run ALL of the following, not just
 is optional or "extra":
 
 0. `make check-linkmode` (or `python3 test_link_mode.py`) — the real
-   `driver.compile_program` link-mode pipeline `mojo.py build` uses by
+   `driver.compile_program` link-mode pipeline `fire.py build` uses by
    default. Every OTHER step in this gate, PLUS `compile_stdlib.py`/
    `build_stdlib_dylib.py`, drives codegen through the single-translation-
    unit `do_imports=False` inline path instead — a bug specific to
@@ -94,7 +94,7 @@ is optional or "extra":
    *.md` docs — were all invisible to every other gate step and only
    found by adding this one). Added 2026-08-28 after those bugs
    surfaced.
-1. `make check-selfhost` (mojo.py compiling its own source). A parser AST
+1. `make check-selfhost` (fire.py compiling its own source). A parser AST
    change (e.g. a new node shape for some syntax) can be invisible to the
    interpreter-focused test suites yet silently break the compiled path,
    since gimple_codegen.py's lowering of that node shape is a separate,
@@ -106,7 +106,7 @@ is optional or "extra":
    `test_gimple.py`/`test_module_cache.py` both stayed green throughout.
 2. A from-scratch stdlib dylib build (`rm -f build/libmojostdlib.dylib`
    then `python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib()"`,
-   or just `python3 mojo.py <any file>.mojo`) — check for `skip <module>:`
+   or just `python3 fire.py <any file>.mojo`) — check for `skip <module>:`
    lines in the output. The stdlib build is far larger and more varied than
    this repo's own source, and a type-resolution change can regress dozens
    of real stdlib modules from clean-compiling to falling back to source
@@ -130,7 +130,7 @@ is optional or "extra":
    or any `gimple_*.py` — the fullest-coverage check available; `make
    check-selfhost` alone is a faster subset, not a substitute.
 5. `make check-noshim-dumpfull` (or `python3 test_noshim_dumpfull.py`) —
-   diffs `MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full`'s actual output
+   diffs `MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full`'s actual output
    BYTE-FOR-BYTE against the shim's own `--dump-full`, not just exit code.
    Steps 0-4 all drive codegen through the python3 SHIM; only this one
    exercises the self-hosted `mojoc` BINARY's own compiled codegen running

@@ -15,8 +15,8 @@
    generators) until it reaches this scheduler, which is the only thing
    that ever interprets the kind.
 */
-#include "mojo_coro.h"
-#include "mojo_wd.h"
+#include "fire_coro.h"
+#include "fire_wd.h"
 
 #include <stdint.h>
 #include <stdlib.h>

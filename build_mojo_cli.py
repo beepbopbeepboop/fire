@@ -119,7 +119,7 @@ def _collect_stmts(entry_path, visited=None):
     Local .mojo imports are resolved relative to the entry file's directory;
     stdlib / site-package imports are skipped (they have no .mojo peer).
     """
-    from mojo_compiler import py_tokenize, Parser, ImportStmt, FromImportStmt
+    from fire_compiler import py_tokenize, Parser, ImportStmt, FromImportStmt
 
     if visited is None:
         visited = {}   # path -> [(path, stmts), ...]  (memoised per root call)
@@ -181,7 +181,7 @@ def _compile_transitive_interpreter(entry_path):
     Uses the Python interpreter to validate code and generate C,
     avoiding gimple_codegen issues during bootstrap.
     """
-    from mojo_compiler import compile_with_interpreter
+    from fire_compiler import compile_with_interpreter
 
     ordered = _collect_stmts(entry_path)
 
@@ -204,7 +204,7 @@ def handle_dump(flag, input_file):
         sys.exit(1)
 
     try:
-        from mojo_compiler import py_tokenize, Parser
+        from fire_compiler import py_tokenize, Parser
 
         want_all = (flag == '--dump-all')
 
@@ -237,7 +237,7 @@ def handle_dump(flag, input_file):
         if flag == '--dump-c' or want_all:
             if want_all:
                 print("=== C ===")
-            from mojo_compiler import compile as mojo_compile
+            from fire_compiler import compile as mojo_compile
             with open(input_file) as f:
                 src = f.read()
             print(mojo_compile(src))

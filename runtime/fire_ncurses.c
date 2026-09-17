@@ -1,4 +1,4 @@
-#include "mojo_ncurses.h"
+#include "fire_ncurses.h"
 #include <ncurses.h>
 #include <stdlib.h>
 

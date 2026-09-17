@@ -15,13 +15,13 @@ plumbing a later milestone will need:
 
   1. build_config.find_gxx() locates a real g++ (MacPorts g++-mp-15 here),
      mirroring find_gcc()'s fallback chain.
-  2. mojo_runtime.h compiles clean under g++ -std=c++20 (verified separately,
-     see runtime/mojo_runtime.h; no changes were needed).
-  3. mojo.py's link_executable(..., cxx=True) — the REAL link-command
+  2. fire_runtime.h compiles clean under g++ -std=c++20 (verified separately,
+     see runtime/fire_runtime.h; no changes were needed).
+  3. fire.py's link_executable(..., cxx=True) — the REAL link-command
      builder factored out of build_executable() — picks g++ as the final
      link driver when told to, while build_stdlib_dylib.py's _dylink(...,
      link_driver=...) offers the same override for dylib links. This test
-     exercises mojo.py's link_executable directly (the exe-producing path,
+     exercises fire.py's link_executable directly (the exe-producing path,
      matching "compile, link, run, assert output" below) and additionally
      sanity-checks _dylink's link_driver plumbing builds a valid command
      list without actually needing a runnable dylib for this proof.
@@ -29,7 +29,7 @@ plumbing a later milestone will need:
 Concretely: a trivial extern "C" C++ function (poc_add) is compiled with
 g++; a trivial C file that calls it is compiled with `gcc -fgimple`
 (matching this project's normal C compile flags); the two objects are
-linked into one executable via mojo.py's real link_executable(cxx=True);
+linked into one executable via fire.py's real link_executable(cxx=True);
 the executable is run and its output is checked.
 """
 import os
@@ -42,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from build_config import find_gcc, find_gxx
-import mojo
+import fire
 import build_stdlib_dylib as bsd
 
 GCC = find_gcc()
@@ -103,7 +103,7 @@ def test_mixed_compile_link_run(wd):
     check("g++ compiles poc.cpp -> poc.o", r.returncode == 0, detail=r.stderr)
 
     # Compile the C translation unit with gcc -fgimple, matching this
-    # project's normal C compile flags (see mojo.py's build_executable /
+    # project's normal C compile flags (see fire.py's build_executable /
     # build_stdlib_dylib.py's _OBJ_FLAGS).
     r = subprocess.run([GCC, '-fgimple', '-c', '-o', c_o, c_file],
                         capture_output=True, text=True)
@@ -112,7 +112,7 @@ def test_mixed_compile_link_run(wd):
     if not (os.path.exists(cpp_o) and os.path.exists(c_o)):
         return
 
-    # Link through the REAL project code: mojo.py's link_executable(), the
+    # Link through the REAL project code: fire.py's link_executable(), the
     # exact function build_executable() itself calls for its final link
     # step, with cxx=True selecting g++ (find_gxx()) as the link driver —
     # required to correctly pull in the C++ runtime bits (libstdc++) a real
@@ -157,7 +157,7 @@ def test_link_executable_default_still_gcc():
 
 def test_dylink_driver_override():
     """build_stdlib_dylib.py's _dylink(..., link_driver=...) — the dylib-link
-    equivalent of mojo.py's link_executable(cxx=True) — builds a command
+    equivalent of fire.py's link_executable(cxx=True) — builds a command
     list using the override driver, and defaults to `gcc` unchanged when no
     override is given (ordinary stdlib dylib builds are unaffected)."""
     cmd_default = bsd._dylink(GCC, '/tmp/out.dylib', ['a.o', 'b.o'])

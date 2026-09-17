@@ -7,7 +7,7 @@ test_type_system.py's fixture-list structure per the design doc's own
 Phase 1 test plan.
 """
 
-import mojo_compiler as N
+import fire_compiler as N
 from ownership_check import check_module
 
 

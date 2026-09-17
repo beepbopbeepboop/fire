@@ -25,7 +25,7 @@ def check_file(path: Path, base: Path) -> tuple[bool, str]:
     src = path.read_text()
     try:
         proc = subprocess.run(
-            ["python3", "mojo_compiler.py"],
+            ["python3", "fire_compiler.py"],
             input=src, capture_output=True, text=True, timeout=5, cwd=REPO
         )
         if proc.returncode != 0:

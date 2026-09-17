@@ -36,7 +36,7 @@ def analyze_errors():
     checker = InvariantChecker(verbose=True)
 
     print("=" * 100)
-    print("TYPE SYSTEM ANALYSIS: Real Compilation Errors from mojo.py --jit mojo.py")
+    print("TYPE SYSTEM ANALYSIS: Real Compilation Errors from fire.py --jit fire.py")
     print("=" * 100)
 
     # Error 1: OPAQUE_POINTER_TRACKING violation

@@ -267,7 +267,7 @@ blind spot into 34 GB of wild pointer arithmetic.
 
   <li><strong>Add a gate step that runs the self-hosted binary on real work and checks the
       artifact (R6).</strong> Not exit code — artifact size and content.
-      <code>MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full</code> producing a 0-byte
+      <code>MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full</code> producing a 0-byte
       <code>mojo.ci</code> must fail loudly. This one check would have caught the regression
       the moment it appeared.</li>
 </ol>

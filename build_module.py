@@ -9,7 +9,7 @@ import argparse
 from pathlib import Path
 
 from gimple_codegen import compile_to_gimple_cached, compile_to_gimple, GimpleGen
-from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef
+from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef
 from build_config import find_gcc
 
 
@@ -90,7 +90,7 @@ def build_module(input_file, output_so, output_symbols=None):
         cc, '-fgimple', '-fPIC', '-shared',
         '-I', 'runtime',
         '-o', output_so,
-        temp_c, 'runtime/mojo_runtime.c'
+        temp_c, 'runtime/fire_runtime.c'
     ]
 
     print(f"Compiling {input_file} to {output_so}...")

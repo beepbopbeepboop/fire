@@ -67,7 +67,7 @@ feature project, not scoped to this file) unchanged. Untouched.
 
 ## Status (updated 2026-08-25 -- re-verified, unchanged)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 test/test_frame.py` fresh against current master (past the struct-method
 cross-call scalar contract "Pass 1.3e", generator-consumption-ordering
 fixed-point retry + defaults-aware arg padding, `**kwargs`-forward
@@ -126,11 +126,11 @@ not just by absence of a grep hit:
 - Built and ran a real, non-generator repro
   (`try: z = x // y except ZeroDivisionError: print("caught")` with `y`
   a genuine runtime-computed `0`, not a literal) via
-  `python3 mojo.py build` + running the binary: **no exception fires**.
+  `python3 fire.py build` + running the binary: **no exception fires**.
   Output was `no exception 0` — division by zero silently produced `0`
   (this machine is Apple Silicon/arm64, where integer `SDIV` by zero
   returns 0 rather than trapping with SIGFPE, unlike x86). The identical
-  source run via `python3 mojo.py run` (the tree-walking interpreter,
+  source run via `python3 fire.py run` (the tree-walking interpreter,
   which lowers `//` straight to Python's own `//` operator) DOES print
   `caught`, confirming the interpreter path is fine and this really is a
   compiled-path-only gap, and a gap in the *plain* GIMPLE path, not
@@ -182,7 +182,7 @@ single test file's build.
 ## Status (re-verified 2026-08-09)
 
 Re-verified against current master (fast-forwarded to `e5daa1d`) via a
-real `MOJO_DEBUG=1 python3 mojo.py build` run — reproduces byte-for-byte
+real `MOJO_DEBUG=1 python3 fire.py build` run — reproduces byte-for-byte
 identically to 2026-08-07: `generator 'g' not eligible for C++ coroutine
 path ...: unsupported expression statement in generator body (BinaryOp)`,
 same whole-module fallback naming `g` (generator) and `t3` (async).

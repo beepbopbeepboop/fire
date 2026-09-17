@@ -2,7 +2,7 @@
 async_runtime.h Step A's sibling): compiles a Mojo async function's dual
 output (.c/.ci via gcc -fgimple, .cpp via g++ -std=c++20) for real, links it
 together with Step A's runtime/mojo_async_runtime.cpp AND runtime/
-mojo_runtime.c via mojo.py's link_executable(cxx=True), RUNS the resulting
+fire_runtime.c via fire.py's link_executable(cxx=True), RUNS the resulting
 binary, and asserts on its ACTUAL stdout — mirrors
 test_gimple_generator_runner.py's role/shape exactly, but for the async
 promise_type/extern "C" API (_start/_is_done/_value/_destroy, no `_resume`
@@ -17,11 +17,11 @@ import time
 
 from build_config import find_gcc, find_gxx
 import gimple_codegen
-import mojo
+import fire
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
-RUNTIME_C = os.path.join(RUNTIME_DIR, 'mojo_runtime.c')
+RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
 ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
 
 _PASS = 0
@@ -32,9 +32,9 @@ def _build_async_program(mojo_src: str) -> str:
     """Compile mojo_src (which must contain at least one Step-B-supported
     async function) to a real executable: .c/.ci -> gcc -fgimple -c, .cpp
     (the async function's own generated coroutine unit) -> g++ -std=c++20
-    -c, runtime/mojo_runtime.c -> gcc -c, runtime/mojo_async_runtime.cpp
+    -c, runtime/fire_runtime.c -> gcc -c, runtime/mojo_async_runtime.cpp
     (Step A's scheduler) -> g++ -std=c++20 -c, then link all four via
-    mojo.py's link_executable(cxx=True) (g++ as the final link driver, so
+    fire.py's link_executable(cxx=True) (g++ as the final link driver, so
     the C++ standard library / coroutine-support symbols resolve) — mirrors
     test_gimple_generator_runner.py's _build_generator_program exactly, plus
     the one extra object file this project's Step A added."""
@@ -54,7 +54,7 @@ def _build_async_program(mojo_src: str) -> str:
 
     c_o = os.path.join(wd, 'prog.o')
     async_o = os.path.join(wd, 'prog_async.o')
-    runtime_o = os.path.join(wd, 'mojo_runtime.o')
+    runtime_o = os.path.join(wd, 'fire_runtime.o')
     async_runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
     exe = os.path.join(wd, 'prog.exe')
 
@@ -74,7 +74,7 @@ def _build_async_program(mojo_src: str) -> str:
     r = subprocess.run([gcc, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"gcc compile of mojo_runtime.c failed: {r.stderr}")
+        raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
 
     r = subprocess.run([gxx, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o, ASYNC_RUNTIME_CPP],
                         capture_output=True, text=True, timeout=30)
@@ -141,7 +141,7 @@ def test_async_value_consumption_is_lazy(name: str, mojo_src: str, forbidden_mar
     9a3a62b had put in place for the eager-execution bug -- see
     bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md --
     with a real, lazy `MojoAsync *` handle construction instead of ever
-    reviving eager execution). `mojo.py run` (the interpreter) on the exact
+    reviving eager execution). `fire.py run` (the interpreter) on the exact
     same source independently confirms this is the right shape: it prints
     `<myinterpreter.MojoCoroutine object at 0x...>`, never the awaited
     value -- the compiled path's own printed representation is a bare
@@ -488,7 +488,7 @@ def main():
     # not-yet-started coroutine object" and this project's own
     # interpreter's MojoCoroutine) -- a genuine capability gain, not a
     # revival of the eager-execution bug: independently verified via
-    # `mojo.py run` on this exact source (prints
+    # `fire.py run` on this exact source (prints
     # `<myinterpreter.MojoCoroutine object at 0x...>`, never `42`) AND via
     # the side-effect check below (f's own `print(999999)` must never
     # appear in the compiled program's stdout -- proving the body still

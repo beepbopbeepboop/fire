@@ -10,11 +10,11 @@
  *
  * Build (stage1):
  *   build/mojo --dump-gimple mojo/mojo_main.mojo > build/mojo_logic.c
- *   gcc -fgimple -I runtime -o stage1/mojo build/mojo_logic.c runtime/compiler_main.c runtime/mojo_runtime.c
+ *   gcc -fgimple -I runtime -o stage1/mojo build/mojo_logic.c runtime/compiler_main.c runtime/fire_runtime.c
  *
  * Build (stage2):
  *   stage1/mojo --dump-gimple mojo/mojo_main.mojo > build/mojo_logic2.c
- *   gcc -fgimple -I runtime -o stage2/mojo build/mojo_logic2.c runtime/compiler_main.c runtime/mojo_runtime.c
+ *   gcc -fgimple -I runtime -o stage2/mojo build/mojo_logic2.c runtime/compiler_main.c runtime/fire_runtime.c
  */
 
 #include <stdio.h>
@@ -23,7 +23,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include "mojo_runtime.h"
+#include "fire_runtime.h"
 
 #define VERSION "0.1.0"
 
@@ -118,10 +118,10 @@ static int compile_gimple_to_elf(const char *gimple_src,
     fclose(f);
 
     char cmd[4096];
-    /* Link mojo_logic.c + mojo_runtime.c in one shot.
+    /* Link mojo_logic.c + fire_runtime.c in one shot.
      * The Mojo-compiled C is already in tmppath; runtime is separate. */
     snprintf(cmd, sizeof(cmd),
-             "%s -fgimple -I%s -o %s %s %s/mojo_runtime.c 2>&1",
+             "%s -fgimple -I%s -o %s %s %s/fire_runtime.c 2>&1",
              find_cc(), runtime_dir, out_path, tmppath, runtime_dir);
 
     int rc = system(cmd);

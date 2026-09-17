@@ -3,7 +3,7 @@
 depend on heap addresses.
 
 Every pattern here is one this project has already been bitten by. They are
-all fine under CPython — which is why `python3 mojo.py --dump` is
+all fine under CPython — which is why `python3 fire.py --dump` is
 byte-reproducible while the compiled compiler was not — and all wrong once
 self-hosted, because the backend erases the values involved to int64_t and
 the runtime then hashes/orders/compares them as raw pointers.
@@ -54,7 +54,7 @@ HERE = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 
 DEFAULT = ([f for f in sorted(os.listdir(HERE))
             if f.startswith('gimple') and f.endswith('.py')]
-           + ['mojo_compiler.py', 'module_loader.py', 'ast_rewriter.py',
+           + ['fire_compiler.py', 'module_loader.py', 'ast_rewriter.py',
               'imports.py', 'regex_compile.py'])
 
 PATTERNS = [

@@ -13,7 +13,7 @@ codegen uses, so the declared signature matches the emitted symbol exactly.
 import re
 
 import hashlib
-from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef, VarDecl
+from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, VarDecl
 from gimple_codegen import _mojo_type, _safe_name, GimpleGen
 from gimple_gen_funcs import dup_def_signature_key
 from gimple_ctypes import _c_field_name
@@ -447,7 +447,7 @@ _PROTO_RE = re.compile(
 
 def collect_runtime_exports_h(header_path: str) -> list:
     """Parse a C header for public function prototypes → reflection export entries.
-    Used to include mojo_runtime.h symbols in the stdlib dylib's reflection table
+    Used to include fire_runtime.h symbols in the stdlib dylib's reflection table
     without re-compiling the runtime (it's already linked as a first-class dylib)."""
     exports = []
     seen = set()

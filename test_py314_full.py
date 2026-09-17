@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Comprehensive test of ~/net/Python-3.14.6's .py files against mojo.py build.
+"""Comprehensive test of ~/net/Python-3.14.6's .py files against fire.py build.
 
 Differences from test_py_stdlib.py / runner.py:
   - Scans the full Python-3.14.6 source tree (Lib/, Tools/, Doc/, PC/, etc.),
     not just a homebrew Lib/ copy limited to a 100-file sample.
   - Validates each file is syntactically valid Python (ast.parse) BEFORE
-    running it through mojo.py build. Test-suite fixtures that are
+    running it through fire.py build. Test-suite fixtures that are
     *intentionally* invalid Python (e.g. Lib/test/badsyntax_*.py) are
     skipped and logged separately rather than filed as mojo bugs.
   - Dedups against bugs/ already on disk: if any category file already
     exists for a given relative path, no new bug report is written.
-  - Caches every mojo.py build outcome in py314_build_cache.json (keyed by
+  - Caches every fire.py build outcome in py314_build_cache.json (keyed by
     compiler+toolchain fingerprint + file content, via py314_cache.py/cas.py)
     so re-running against an unchanged compiler is near-instant instead of
     repeating ~15 minutes of subprocess builds for files whose answer hasn't

@@ -59,7 +59,7 @@ change; doc stays open.
 
 ## Status (updated 2026-08-25 -- re-verified, no evidence of change)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 test/test_string/test_string.py` fresh against current master (past the
 struct-method cross-call scalar contract "Pass 1.3e",
 generator-consumption-ordering fixed-point retry + defaults-aware arg
@@ -142,7 +142,7 @@ Out of scope for a narrow-bug pass.
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild (both the full
-`mojo.py build` CLI path and a direct isolated
+`fire.py build` CLI path and a direct isolated
 `compile_to_gimple_with_cpp(..., do_imports=False)` call) — reproduces
 byte-for-byte identically, same `RuntimeError` message, still with NO
 per-function "not eligible" debug note for `parse`. The probable root

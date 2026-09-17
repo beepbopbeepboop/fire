@@ -5,7 +5,7 @@ Python-3.14.6 stdlib corpus.
 Concept
 -------
 Real CPython is treated as the trusted "oracle" version, and mojo's own
-run path (`mojo.py <file>` — compile-and-run, falling back to the
+run path (`fire.py <file>` — compile-and-run, falling back to the
 interpreter on a compile failure, exactly what `mojo -h` documents as the
 default invocation) is the second, independently-implemented version
 computing nominally the same thing. For a given file we run *both*, compare
@@ -30,7 +30,7 @@ package. Rather than build separate "import mode" vs "script mode" paths
 run each file exactly one way, symmetrically on both sides:
 
     python3   <file>          (cwd = fresh isolated scratch dir)
-    mojo.py   <file>          (cwd = fresh isolated scratch dir)
+    fire.py   <file>          (cwd = fresh isolated scratch dir)
 
 Running the file directly as a script is a single, consistent scheme that
 also happens to subsume the `if __name__ == "__main__":` case for free:
@@ -76,7 +76,7 @@ import time
 import cas
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MOJO_PY = os.path.join(HERE, "mojo.py")
+MOJO_PY = os.path.join(HERE, "fire.py")
 ARTIFACTS_DIR = os.path.join(HERE, "artifacts", "fault_tolerance")
 
 DEFAULT_TIMEOUT = 20  # seconds, per side

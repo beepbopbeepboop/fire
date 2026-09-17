@@ -5,25 +5,25 @@
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-RUNTIME_SRC  = runtime/mojo_runtime.c
-RUNTIME_HDR  = runtime/mojo_runtime.h
+RUNTIME_SRC  = runtime/fire_runtime.c
+RUNTIME_HDR  = runtime/fire_runtime.h
 # A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the default
 # generator/async backend now, gimple_gen_coro.py) — needed by stage2/mojo's
 # own hardcoded link recipe below whenever the self-hosted compiler's OWN
-# source (mojo_compiler.py/myinterpreter.py/...) contains a generator/async
+# source (fire_compiler.py/myinterpreter.py/...) contains a generator/async
 # function, exactly like driver.py's compile_program / build_stdlib_dylib.py
 # already needed the identical fix (both `-undefined dynamic_lookup`-style
 # paths only surface a missing symbol as a runtime dyld crash, never a link
 # error — this one DOES fail at link time since stage2/mojo's link is a
 # plain static executable, no dynamic lookup fallback). Plain C, no
-# -fgimple needed (mirrors mojo_runtime.c's own presence in this same list
+# -fgimple needed (mirrors fire_runtime.c's own presence in this same list
 # — gcc's -fgimple only forces the strict frontend for a `.ci`-shaped
 # translation unit, not for ordinary C sources compiled alongside it).
 CORO_ARCH_SRC = $(shell test "$$(uname -m)" = "arm64" -o "$$(uname -m)" = "aarch64" \
-                  && echo runtime/mojo_coro_ctx_aarch64.S || echo runtime/mojo_coro_ctx_generic.c)
-CORO_RUNTIME_SRC = runtime/mojo_coro.c runtime/mojo_coro_gen.c runtime/mojo_async_sched.c $(CORO_ARCH_SRC)
+                  && echo runtime/fire_coro_ctx_aarch64.S || echo runtime/fire_coro_ctx_generic.c)
+CORO_RUNTIME_SRC = runtime/fire_coro.c runtime/fire_coro_gen.c runtime/fire_async_sched.c $(CORO_ARCH_SRC)
 STDLIB_DYLIB = build/libmojostdlib.dylib
-MOJO_CLI     = build/mojo
+FIRE_CLI     = build/mojo
 # The canonical source that all three stages compile
 MOJO_MAIN    = fire.py
 
@@ -43,17 +43,12 @@ export SDKROOT
 # All Mojo source files to validate (top-level + mojo/ subdirectory)
 MOJO_FILES := $(wildcard *.mojo) $(wildcard mojo/*.mojo)
 # Core Python compiler/tool files to validate through the Mojo system
-PY_FILES   := fire.py mojo_compiler.py myinterpreter.py \
-              module_loader.py mojo_main.py generated_dispatch.py
+PY_FILES   := fire.py fire_compiler.py myinterpreter.py \
+              module_loader.py fire_main.py generated_dispatch.py
 
 # ── Dev targets ──────────────────────────────────────────────────────────────
-# DEAD: we no longer generate mojo_compiler.py from .md specs via run.py /
-# compiler_gen.py. The compiler is hand-edited directly now. Do not use.
-#run:
-#	python3 run.py   # DEAD — would clobber the hand-written mojo_compiler.py
-
 demo:
-	echo "3 + 42 + 0xFF" | python3 mojo_compiler.py
+	echo "3 + 42 + 0xFF" | python3 fire_compiler.py
 
 # Everyday green gate: the GIMPLE unit suite, the execution runner, the
 # module-cache end-to-end stages, the self-host compile guard, and the stdlib
@@ -91,25 +86,25 @@ check-gimple: $(GIMPLE_SOURCES) test_gimple.py
 
 # test_runner.py only existence-checks the prebuilt `build/mojo`, doesn't require it
 # to be up-to-date. We build it here to ensure it exists for the test.
-check-runner: build/mojo test_runner.py myinterpreter.py fire.py mojo_main.py $(RUNTIME_SRC) $(RUNTIME_HDR)
+check-runner: build/mojo test_runner.py myinterpreter.py fire.py fire_main.py $(RUNTIME_SRC) $(RUNTIME_HDR)
 	python3 checked_run.py check-runner \
-		--extra test_runner.py --extra myinterpreter.py --extra fire.py --extra mojo_main.py \
+		--extra test_runner.py --extra myinterpreter.py --extra fire.py --extra fire_main.py \
 		--extra $(RUNTIME_SRC) --extra $(RUNTIME_HDR) \
 		-- python3 test_runner.py
 
-check-modcache: $(GIMPLE_SOURCES) test_module_cache.py myinterpreter.py fire.py mojo_main.py
+check-modcache: $(GIMPLE_SOURCES) test_module_cache.py myinterpreter.py fire.py fire_main.py
 	python3 checked_run.py check-modcache \
-		--extra test_module_cache.py --extra myinterpreter.py --extra fire.py --extra mojo_main.py \
+		--extra test_module_cache.py --extra myinterpreter.py --extra fire.py --extra fire_main.py \
 		-- python3 test_module_cache.py
 
 # Self-host compile guard: mojo.py must compile itself to a linked binary with
 # zero GCC errors / ICEs / undefined symbols (the --jit mojo.py path, minus
 # execution — the runtime still SIGSEGVs, a separate frontier). Locks compile+
 # link cleanliness so it can't silently regress.
-check-selfhost: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py mojo_main.py test_selfhost.py
+check-selfhost: $(GIMPLE_SOURCES) fire_compiler.py myinterpreter.py fire.py fire_main.py test_selfhost.py
 	python3 checked_run.py check-selfhost \
 		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
-		--extra mojo_compiler.py --extra myinterpreter.py --extra fire.py --extra mojo_main.py \
+		--extra fire_compiler.py --extra myinterpreter.py --extra fire.py --extra fire_main.py \
 		--extra test_selfhost.py \
 		-- python3 test_selfhost.py
 
@@ -119,10 +114,10 @@ check-selfhost: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py mojo
 # distinctly (the compiled path falls back to the interpreter, which would
 # otherwise mask a divergence). Currently 23 pass, 1 JIT-COMPILE-FAILED
 # (generator_simple — the C++ coroutine frontier).
-check-runtimediff: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py test_runtime_diff.py
+check-runtimediff: $(GIMPLE_SOURCES) fire_compiler.py myinterpreter.py fire.py test_runtime_diff.py
 	python3 checked_run.py check-runtimediff \
 		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
-		--extra mojo_compiler.py --extra myinterpreter.py --extra fire.py \
+		--extra fire_compiler.py --extra myinterpreter.py --extra fire.py \
 		--extra test_runtime_diff.py \
 		-- python3 test_runtime_diff.py
 
@@ -133,36 +128,36 @@ check-runtimediff: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py t
 # build_stdlib_dylib.py) uses instead — a link-mode-only bug in import/
 # module-value registration is invisible to all of them. See
 # test_link_mode.py's own module docstring.
-check-linkmode: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py fire.py driver.py test_link_mode.py
+check-linkmode: $(GIMPLE_SOURCES) fire_compiler.py myinterpreter.py fire.py driver.py test_link_mode.py
 	python3 checked_run.py check-linkmode \
 		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
-		--extra mojo_compiler.py --extra myinterpreter.py --extra fire.py --extra driver.py \
+		--extra fire_compiler.py --extra myinterpreter.py --extra fire.py --extra driver.py \
 		--extra test_link_mode.py \
 		-- python3 test_link_mode.py
 
 # ── check-coro: the A3 stack-switch coroutine runtime (doc/COROUTINE.html) ───
 # Standalone C unit tests for Layer 3 (context switch) and Layer 2 (coroutine
 # runtime), each run against every Layer 3 backend at -O0 and -O2.
-check-coro: runtime/mojo_coro.c runtime/mojo_coro.h runtime/mojo_coro_ctx.h \
-            runtime/mojo_coro_ctx_aarch64.S runtime/mojo_coro_ctx_generic.c \
-            runtime/test_mojo_coro.c runtime/test_mojo_coro_ctx.c \
-            runtime/test_mojo_coro_exc_stub.c test_coro_runtime.py
+check-coro: runtime/fire_coro.c runtime/fire_coro.h runtime/fire_coro_ctx.h \
+            runtime/fire_coro_ctx_aarch64.S runtime/fire_coro_ctx_generic.c \
+            runtime/test_fire_coro.c runtime/test_fire_coro_ctx.c \
+            runtime/test_fire_coro_exc_stub.c test_coro_runtime.py
 	python3 checked_run.py check-coro --extra test_coro_runtime.py \
-		--extra runtime/mojo_coro.c --extra runtime/mojo_coro_ctx_aarch64.S \
-		--extra runtime/mojo_coro_ctx_generic.c \
+		--extra runtime/fire_coro.c --extra runtime/fire_coro_ctx_aarch64.S \
+		--extra runtime/fire_coro_ctx_generic.c \
 		-- python3 test_coro_runtime.py
 
 # Run all stdlib test and benchmark files through both the interpreter
 # (mojo.py run) and the JIT compiler (mojo.py --jit).
-check-stdlib: mojo_compiler.py
+check-stdlib: fire_compiler.py
 	python3 test_stdlib.py
 
 # Run stdlib tests/benchmarks through interpreter only (mojo.py run).
-check-stdlib-interp: mojo_compiler.py
+check-stdlib-interp: fire_compiler.py
 	python3 test_stdlib.py --mode interp
 
 # Run stdlib tests/benchmarks through JIT compiler only (mojo.py --jit).
-check-stdlib-jit: mojo_compiler.py
+check-stdlib-jit: fire_compiler.py
 	python3 test_stdlib.py --mode jit
 
 check-gimple-runner:
@@ -177,17 +172,17 @@ stdlib:
 # Three-stage self-hosting verification with transitive-closure compilation:
 #
 #  Stage 1  Python mojo.py --dump-full mojo.py (single pass, all imports inline)
-#             → stage1/mojo.ci  (clean, no deduplication needed)
-#  stage2/mojo  GCC -fgimple compiles stage1/mojo.ci + runtime → compiled binary
+#             → stage1/fire.ci  (clean, no deduplication needed)
+#  stage2/mojo  GCC -fgimple compiles stage1/fire.ci + runtime → compiled binary
 #  Stage 2  stage2/mojo --dump mojo.py (single-file for individual validation)
-#             → stage2/mojo.ci  (+ .tok .ast .pyi for all source files)
+#             → stage2/fire.ci  (+ .tok .ast .pyi for all source files)
 #  Stage 3  stage2/mojo --dump mojo.py  (idempotency: same binary, same output)
-#             → stage3/mojo.ci  (+ .tok .ast .pyi for all source files)
+#             → stage3/fire.ci  (+ .tok .ast .pyi for all source files)
 #  verify   stage1 == stage2 == stage3  for all generated files
 
 # ── Stage 1: Python drives the compiler ──────────────────────────────────────
 # The --dump-full step is load-bearing: it's the single transitive-closure
-# mojo.ci that stage2/mojo gets compiled from below, and must stay exactly as
+# fire.ci that stage2/mojo gets compiled from below, and must stay exactly as
 # is. The per-file --dump loop is separate and additional — bootstrap-
 # validate.mojo (see validate-all) compares stage1/<file>.{ci,tok,ast,pyi}
 # against stage2/stage3 for every source file, but until now stage1 only
@@ -264,11 +259,11 @@ mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
 # under MOJO_NO_SHIM=1.
 stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
-	@echo "=== Compiling stage2/mojo from stage1/mojo.ci ==="
+	@echo "=== Compiling stage2/mojo from stage1/fire.ci ==="
 	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
-	    -x c stage1/mojo.ci \
+	    -x c stage1/fire.ci \
 	    -x none $(RUNTIME_SRC) \
 	    $(CORO_RUNTIME_SRC)
 	@chmod +x stage2/mojo
@@ -278,7 +273,7 @@ stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 # Runs every file's --dump (collect-all), but a per-file failure — a nonzero
 # exit from `mojo --dump`, or the runtime's `mojo_unsupported_iter` warning
 # (a real codegen gap that just doesn't SIGABRT the whole compiler, see
-# runtime/mojo_runtime.c) — is tracked and fails the target at the end, so
+# runtime/fire_runtime.c) — is tracked and fails the target at the end, so
 # real problems can't silently pass as "✓ Stage 2 complete".
 stage2: stage2/mojo
 	@mkdir -p stage2
@@ -311,11 +306,11 @@ stage2: stage2/mojo
 	fi
 	@echo "=== Stage 2: stage2/mojo → stage2/ (transitive closure) ==="
 	# Generate the bootstrap .ci LAST, mirroring stage1's identical comment/
-	# ordering: the --dump loop above also writes mojo.ci (single-module,
+	# ordering: the --dump loop above also writes fire.ci (single-module,
 	# do_imports=False, from `run_dump $(MOJO_MAIN)`), which would otherwise
 	# clobber this transitive-closure .ci and leave `verify` comparing a full
-	# closure (stage1/mojo.ci) against a single-module skeleton
-	# (stage2/mojo.ci) — a real, permanent mismatch, not a codegen bug: this
+	# closure (stage1/fire.ci) against a single-module skeleton
+	# (stage2/fire.ci) — a real, permanent mismatch, not a codegen bug: this
 	# step was simply missing from stage2/stage3's targets even though
 	# stage1's has always had it.
 	cd stage2 && MOJO_HOME=.. PYTHONPATH=.. ./mojo --dump-full ../$(MOJO_MAIN)
@@ -396,7 +391,7 @@ bootstrap: verify validate-all
 # both run from the repo root, compared byte-for-byte. All 27 are now
 # byte-identical — this is the regression guard for that parity, and the
 # green light for eventually removing the `python3 -c` subprocess shim
-# from a self-hosted `mojoc` (runtime/mojo_runtime.c). The full `mojo.py`
+# from a self-hosted `firec` (runtime/fire_runtime.c). The full `fire.py`
 # self-compile is not yet shimless (AttributeError: __file__), so
 # `make bootstrap` itself still uses the shim.
 check-abshim: mojoc $(GIMPLE_SOURCES) test_ab_shim.py
@@ -461,63 +456,63 @@ check-no-new-casts: $(GIMPLE_SOURCES) test_no_new_container_casts.py
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 preflight:
-	@test -f mojo_compiler.py || \
-	    { echo "FAIL preflight: mojo_compiler.py missing"; exit 1; }
+	@test -f fire_compiler.py || \
+	    { echo "FAIL preflight: fire_compiler.py missing"; exit 1; }
 	@test -f gimple_codegen.py || \
 	    { echo "FAIL preflight: gimple_codegen.py missing"; exit 1; }
 	@test -f $(MOJO_MAIN) || \
 	    { echo "FAIL preflight: $(MOJO_MAIN) missing"; exit 1; }
-	@python3 -c "from mojo_compiler import tokenize, Parser; print('parser OK')"
+	@python3 -c "from fire_compiler import tokenize, Parser; print('parser OK')"
 	@python3 -c "import gimple_codegen; print('codegen OK')"
 	@echo "✓ Preflight passed"
 
 # ── Dev build (non-bootstrap quick compile) ───────────────────────────────────
 # FORCE (empty recipe, always-out-of-date) rather than an explicit file list:
-# mojo.ci is do_imports=True whole-program output of mojo.py's entire transitive
-# closure (gimple_codegen.py, module_loader.py, mojo_compiler.py, ...) — any of
-# those can change without mojo.py itself changing, and a stale mojo.ci built
+# fire.ci is do_imports=True whole-program output of mojo.py's entire transitive
+# closure (gimple_codegen.py, module_loader.py, fire_compiler.py, ...) — any of
+# those can change without mojo.py itself changing, and a stale fire.ci built
 # before such a change silently gets reused otherwise (confirmed: caused a
 # bare-vs-qualified symbol mismatch after an unrelated codegen.py edit).
 .PHONY: FORCE
 FORCE:
 
-mojo.ci: $(MOJO_MAIN) FORCE
+fire.ci: $(MOJO_MAIN) FORCE
 	PYTHONPATH=. python3 fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
 
-build/system.o: mojo.ci
+build/system.o: fire.ci
 	@mkdir -p build
-	$(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c mojo.ci
+	$(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c fire.ci
 
-build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
+build/fire_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
 
 # A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the default
 # generator/async backend now) — this dev build has the identical gap
 # stage2/mojo's own recipe had (see CORO_RUNTIME_SRC's own comment above):
 # mojo.py's own source has a generator (e.g. gimple_gen_coro.py's `_walk`),
-# so `build/system.o` genuinely references __mojo_coro_yield_i/__mgco_*
+# so `build/system.o` genuinely references __fire_coro_yield_i/__firegco_*
 # once compiled, with nothing on this link line to satisfy it.
-build/mojo_coro.o: runtime/mojo_coro.c
+build/fire_coro.o: runtime/fire_coro.c
 	@mkdir -p build
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
 
-build/mojo_coro_gen.o: runtime/mojo_coro_gen.c
+build/fire_coro_gen.o: runtime/fire_coro_gen.c
 	@mkdir -p build
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
 
-build/mojo_async_sched.o: runtime/mojo_async_sched.c
+build/fire_async_sched.o: runtime/fire_async_sched.c
 	@mkdir -p build
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
 
-build/mojo_coro_ctx.o: $(CORO_ARCH_SRC)
+build/fire_coro_ctx.o: $(CORO_ARCH_SRC)
 	@mkdir -p build
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $<
 
-CORO_RUNTIME_OBJS = build/mojo_coro.o build/mojo_coro_gen.o build/mojo_async_sched.o build/mojo_coro_ctx.o
+CORO_RUNTIME_OBJS = build/fire_coro.o build/fire_coro_gen.o build/fire_async_sched.o build/fire_coro_ctx.o
 
-build/mojo: build/system.o build/mojo_runtime.o $(CORO_RUNTIME_OBJS)
+build/fire: build/system.o build/fire_runtime.o $(CORO_RUNTIME_OBJS)
 	@mkdir -p build
-	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/mojo_runtime.o $(CORO_RUNTIME_OBJS)
+	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/fire_runtime.o $(CORO_RUNTIME_OBJS)
 	@chmod +x $@
 	@echo "build/mojo linked successfully"
 

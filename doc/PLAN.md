@@ -125,13 +125,13 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
   _Original investigation log (kept for the diagnostic trail):_
 
-- **Stage2 self-hosted `--dump` of a large file (mojo.py itself, ~900KB) is
+- **Stage2 self-hosted `--dump` of a large file (fire.py itself, ~900KB) is
   still far too slow/memory-hungry to finish in reasonable time, even after
   fixing two real, confirmed contributing bugs.** Investigated 2026-07-17
   chasing what first looked like a stage2-bootstrap segfault (see the
   `compile_to_gimple` entry below) but turned out, once that crash was
   fixed, to actually hang/balloon in memory (traced live via `lldb attach`
-  + `ps` RSS sampling, not guessed): `stage2/mojo --dump ../mojo.py` grew to
+  + `ps` RSS sampling, not guessed): `stage2/mojo --dump ../fire.py` grew to
   89GB RSS at 100% CPU before being killed, entirely inside
   `py_tokenize_replace_multiline_strings` (mojo_compiler.py's own
   tokenizer, self-hosted) - no subprocess/child process involved, all
@@ -164,15 +164,15 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   cost when unset - `_mojo_prof_tick`/`_mojo_prof` near the top of the file,
   currently still in place; strip once this is fully resolved) instead of
   further manual reasoning about the generated code, per the instruction
-  above. Result: for mojo.py's ~900K-character source, `mojo_list_new`/
+  above. Result: for fire.py's ~900K-character source, `mojo_list_new`/
   `mojo_mark_as_tuple` reached **70+ million calls at 306 seconds and still
   climbing at a steady, non-decaying rate** (no plateau) - roughly **78x**
   the character count, not the small fixed multiple (~3-4x) you'd expect
-  from `mojo.py`'s `--dump` handler independently calling `py_tokenize(src)`
+  from `fire.py`'s `--dump` handler independently calling `py_tokenize(src)`
   once each for `.tok` and `.ast` plus once more inside
   `compile_to_gimple_cached` for `.ci`. `mojo_dict_new` stayed flat at 49
   the entire time (ruling out a dict-related blowup). Fixed the one
-  concretely-provable piece of that redundancy: `mojo.py`'s own `--dump`
+  concretely-provable piece of that redundancy: `fire.py`'s own `--dump`
   handler tokenized `src` twice, completely independently, for `.tok` and
   `.ast`; now tokenizes once and reuses the tokens for both (parsing still
   has its own try/except so a parse failure doesn't take `.tok` down with
@@ -251,15 +251,15 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   `j = src.find('\n', i)` (mojo_compiler.py:766, the comment-skip branch)
   compiles to `mojo_str_find(src, "\n")` - a search from position 0. Every
   `#` encountered after the file's first newline therefore jumps the cursor
-  BACK to that first newline (mojo.py's line 1 is the shebang, so position
+  BACK to that first newline (fire.py's line 1 is the shebang, so position
   22), and the scanner cycles forever between position 22 and the first
   `#` comment in the code. (The earlier "~900K characters / ~32x" framing
-  was wrong on both counts - mojo.py is 25,125 bytes and the iteration
+  was wrong on both counts - fire.py is 25,125 bytes and the iteration
   count is unbounded, not a fixed multiple.) Verified three independent
   ways: the call visibly missing its third argument in the generated
   `.ci`; a minimal repro (`s.find("\n", 4)` compiles to the 2-arg call,
   answering 2 where Python answers 5); and a simulation of the buggy
-  semantics against the real mojo.py that never passed position 802 in
+  semantics against the real fire.py that never passed position 802 in
   5,000,000 iterations, resetting the cursor to position 22 exactly
   42,017 times. **FIXED same day** per the spec in
   `bugs/CODEGEN_str_find_start_arg_dropped.md`: `mojo_str_find_from`
@@ -267,7 +267,7 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   `gimple_codegen.py`, signature-table entry, and a `test_gimple.py`
   regression case locking both forms. Independently verified: `make check`
   160/17/58/1 green, and the previously-infinite
-  `stage2/mojo --dump ../mojo.py` completes in ~5s (peak RSS ~38MB vs the
+  `stage2/mojo --dump ../fire.py` completes in ~5s (peak RSS ~38MB vs the
   pre-fix 89GB), producing `.tok`/`.ast`/`.pyi` and the full 12MB
   transitive-closure `.ci`. The temporary `MOJO_PROFILE` counters were
   stripped from `runtime/mojo_runtime.c` as planned. The interim fixes
@@ -318,7 +318,7 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   `mojo_compiler.py` ~line 776) still uses the vulnerable pattern - unlike
   `Parser._strip_string_prefix_and_quotes`, which was already rewritten
   with explicit `==` comparisons specifically because of this bug (see its
-  docstring). Symptom: an f-string at mojo.py's own line 174
+  docstring). Symptom: an f-string at fire.py's own line 174
   (`f"""def _repl_expr(): ..."""`) never has its `f` prefix recognized, so
   the placeholder ends up glued onto the leftover `f` as one run-on NAME
   token (`f__MOJO_STR_5__`) instead of a real STRING token - confirmed via
@@ -328,7 +328,7 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   documented regression** (see the `_lower_in_impl` comment): rewriting the
   loop with explicit `==` comparisons (mirroring
   `_strip_string_prefix_and_quotes`'s already-proven-safe pattern exactly)
-  made the full `--dump ../mojo.py` SIGSEGV instead of just mistokenizing -
+  made the full `--dump ../fire.py` SIGSEGV instead of just mistokenizing -
   confirmed via `lldb`: `mojo_cstr_cmp` crashes on a null-ish pointer
   inside `py_tokenize_replace_multiline_strings`, traced to the generated
   `.ci` for the new `_pc == 'f'`-style comparisons - each one lowers to

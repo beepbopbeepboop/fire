@@ -19,9 +19,9 @@ refactor_manifest.json (e.g. _C_RESERVED_FUNCS).
 """
 from __future__ import annotations
 
-# Mirrors gimple_codegen.py's own mojo_compiler import block; only the AST
+# Mirrors gimple_codegen.py's own fire_compiler import block; only the AST
 # node types these extracted regions actually reference are listed here.
-from mojo_compiler import (
+from fire_compiler import (
     AssignStmt, BinaryOp, CallExpr, CompareChain, DictExpr, ExprStmt,
     ForStmt, FunctionDef, IdentExpr, IfStmt, ListExpr, MemberExpr,
     ReturnStmt, SetExpr, SliceExpr, StringLiteral, StructDef,

@@ -20,7 +20,7 @@ SRC = '/Users/mrs/net/Python-3.14.6/Lib/ftplib.py'
 def main():
     src = open(SRC).read()
     import ast_rewriter
-    from mojo_compiler import Parser, py_tokenize
+    from fire_compiler import Parser, py_tokenize
     stmts = ast_rewriter.rewrite(Parser(py_tokenize(src)).with_filename(SRC).parse_module())
     gen = GimpleGen(do_imports=False, relaxed_imports=True)
     gen._current_filename = SRC

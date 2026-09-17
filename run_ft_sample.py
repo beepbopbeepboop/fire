@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Driver for fault_tolerance.py: discover the current mojo.py-build-PASS
+"""Driver for fault_tolerance.py: discover the current fire.py-build-PASS
 population of the Python-3.14.6 stdlib corpus, run each file through the
 two-version (CPython vs mojo) fault-tolerance check, and write a summary
 report (JSON + markdown) alongside the per-file artifacts that
@@ -7,7 +7,7 @@ fault_tolerance.py already persists under artifacts/fault_tolerance/.
 
 Two phases:
 
-  1. Discovery — which files currently PASS `mojo.py build` at all. This is
+  1. Discovery — which files currently PASS `fire.py build` at all. This is
      the natural starting population (a file mojo can't even compile isn't a
      candidate for a *runtime* behavior comparison). We don't trust any
      stale bugs/PY314_FULL_SCAN_SUMMARY.json list on disk (it only records
@@ -22,7 +22,7 @@ Two phases:
      --sample), actually run both CPython and mojo and compare, via
      fault_tolerance.run_fault_tolerant().
 
-Safety: discovery only ever *compiles* (mojo.py build), never executes.
+Safety: discovery only ever *compiles* (fire.py build), never executes.
 Only phase 2 executes code, and only after fault_tolerance.is_unsafe() has
 had a chance to veto a candidate; phase 2 also runs each side in its own
 throwaway scratch cwd/HOME with a timeout (see fault_tolerance.py).

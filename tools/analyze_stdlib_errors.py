@@ -27,7 +27,7 @@ def transpile_file(mojo_file):
             source_code = f.read()
 
         proc = subprocess.run(
-            ['python', 'mojo_compiler.py'],
+            ['python', 'fire_compiler.py'],
             input=source_code,
             capture_output=True,
             cwd=REPO_ROOT,

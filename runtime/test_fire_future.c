@@ -2,8 +2,8 @@
    Event handles with a waiter list + cross-coroutine wakeup), driving
    hand-written coroutine bodies that stand in for what gimple_gen_coro.py's
    `await <future>` / `await <event>.wait()` lowering emits. */
-#include "mojo_coro.h"
-#include "mojo_wd.h"
+#include "fire_coro.h"
+#include "fire_wd.h"
 #include <stdio.h>
 #include <stdint.h>
 

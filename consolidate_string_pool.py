@@ -148,7 +148,7 @@ def consolidate_string_pool(ci_file):
         print(f"  Renamed {len(rename_map)} conflicting IDs")
 
 if __name__ == '__main__':
-    ci_file = 'stage1/mojo.ci'
+    ci_file = 'stage1/fire.ci'
     if len(sys.argv) > 1:
         ci_file = sys.argv[1]
     consolidate_string_pool(ci_file)

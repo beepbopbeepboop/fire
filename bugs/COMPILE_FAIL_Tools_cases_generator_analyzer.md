@@ -6,7 +6,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 ## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): unchanged, build still exits 0
 
-Fresh `python3 mojo.py build .../Tools/cases_generator/analyzer.py`
+Fresh `python3 fire.py build .../Tools/cases_generator/analyzer.py`
 against this worktree (fast-forwarded to master `43fb291`): `Built:
 .../analyzer`, exit 0, 0 `error:` lines — same outcome as every prior
 entry. Both open architectural blockers (link-mode sibling-module
@@ -16,7 +16,7 @@ are unchanged; not attempted.
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): build still exits 0, same two-blocker state
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/
 cases_generator/analyzer.py` against this worktree (fast-forwarded to
 master `e60b9cd`): `Built: .../analyzer`, exit 0, 0 `error:` lines —
 same outcome as the entry directly below. Both open architectural
@@ -27,7 +27,7 @@ session's mandate, not attempted.
 
 ## Status (re-verified + next blockers sharpened, 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb` — mut-capture fix confirmed present in this tree; link-mode stubbing reproduced; NEW: the inline fallback is itself blocked, by parsing.py's BlockStmt.tokens dangling generator references at LINK time)
 
-Fresh `python3 mojo.py build .../analyzer.py` (safety-wrapped): exits
+Fresh `python3 fire.py build .../analyzer.py` (safety-wrapped): exits
 0; binary runs, exit 0, but prints ONLY the four section headers —
 reproducing the previous entry's end-to-end state exactly (the
 `_emit_mut_local_box_allocs` fix, commit `46a7a91`, IS in this worktree;
@@ -105,7 +105,7 @@ test_general_mutable_closure_capture 6/6, test_transitive_closure_capture
 2/2, test_closure_capture_comptime_func_params 4/4,
 test_mutable_async_capture 2/2.
 
-**End-to-end state after the fix:** `python3 mojo.py build …/analyzer.py`
+**End-to-end state after the fix:** `python3 fire.py build …/analyzer.py`
 exits 0; the binary runs deterministically with exit 0 (3/3 runs, no crash
 under repeated runs or lldb). Output is currently the four section headers
 only — because of the separate, precisely-root-caused gap below (NOT a
@@ -114,7 +114,7 @@ regression of this fix; verified present at the previously-"verified"
 
 **Next blocker, root-caused (architectural; deliberately not forced here):
 link-mode resolution does nothing for plain project-sibling modules.**
-In link mode (driver.compile_program — `mojo.py build`'s primary path),
+In link mode (driver.compile_program — `fire.py build`'s primary path),
 `import parser` registers the module ALIAS but nothing registers parser.py's
 functions (`parse_files` never enters `func_return_types`; the reflection/
 dylib resolver finds no dylib for a bare sibling .py), so every
@@ -127,7 +127,7 @@ empty sections. Minimal repro (two-file sibling project):
 the `from helper import f` form at least degrades LOUDLY (`f: unavailable
 in compiled mode (imported from an unresolved external/relative module)`
 then 0). The INLINE pipeline (`compile_to_gimple(do_imports=True)` /
-mojo.py's build_executable fallback) fully inlines sibling sources and
+fire.py's build_executable fallback) fully inlines sibling sources and
 resolves everything correctly — which is how the 2026-08-25 entry's
 byte-identical 2892-line run must have been produced (link mode failing
 loudly back then, triggering the inline fallback; today link mode
@@ -157,7 +157,7 @@ shape (non-2-arity, non-tuple target, non-list sequence, non-literal
 fillvalue) rolls back and falls through to the old generic path unchanged.
 
 **End-to-end verification (beyond "compiles"):**
-- `python3 mojo.py build .../cases_generator/analyzer.py` exits 0.
+- `python3 fire.py build .../cases_generator/analyzer.py` exits 0.
 - Standalone equal/unequal-length repros (struct-typed sequences,
   `is None` padding guards, attribute writes on loop vars) produce output
   byte-identical to python3 on both paths.
@@ -245,7 +245,7 @@ recorded honestly as this file's own next blocker.
 
 ## Status (re-verified 2026-08-09, historical — superseded by 2026-08-23 above): unchanged, still blocked on sibling cwriter.py ICE
 
-Re-ran on current `master` (`python3 mojo.py build .../cases_generator/analyzer.py`,
+Re-ran on current `master` (`python3 fire.py build .../cases_generator/analyzer.py`,
 exit 1). Single error, identical to 2026-08-07:
 `Tools/cases_generator/cwriter.py:35:3: internal compiler error: in
 build2, at tree.cc:5204`. This file (`analyzer.py`) itself is not

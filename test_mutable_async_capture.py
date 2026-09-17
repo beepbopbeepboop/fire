@@ -36,12 +36,12 @@ import tempfile
 # stack-switch backend the default, so pin cpp explicitly.
 os.environ.setdefault('MOJO_CORO', 'cpp')
 import gimple_codegen
-import mojo
+import fire
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
-RUNTIME_C = os.path.join(RUNTIME_DIR, 'mojo_runtime.c')
+RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
 ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
 GCC = find_gcc()
 GXX = find_gxx()
@@ -63,7 +63,7 @@ def check(name, cond, detail=""):
 def _build_and_run(mojo_src: str) -> str:
     """Mirrors test_async_void_return.py's/test_gimple_async_runner.py's
     identical harness shape: real gcc -fgimple / g++ -std=c++20 compile,
-    real link via mojo.py's link_executable(cxx=True), real run, real
+    real link via fire.py's link_executable(cxx=True), real run, real
     stdout."""
     wd = tempfile.mkdtemp(prefix='mojo_mut_capture_')
     src_path = os.path.join(wd, 'prog.mojo')
@@ -85,7 +85,7 @@ def _build_and_run(mojo_src: str) -> str:
 
     c_o = os.path.join(wd, 'prog.o')
     async_o = os.path.join(wd, 'prog_async.o')
-    runtime_o = os.path.join(wd, 'mojo_runtime.o')
+    runtime_o = os.path.join(wd, 'fire_runtime.o')
     async_runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
     exe = os.path.join(wd, 'prog.exe')
 
@@ -102,7 +102,7 @@ def _build_and_run(mojo_src: str) -> str:
     r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"gcc compile of mojo_runtime.c failed: {r.stderr}")
+        raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
 
     r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o,
                         ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=30)

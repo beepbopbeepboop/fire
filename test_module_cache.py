@@ -72,7 +72,7 @@ def test_stage1_extern_boundary(wd):
               and 's1_add (int64_t a, int64_t b)\n{' not in cC)
         # build library artifact separately, link, run
         from gimple_codegen import GimpleGen
-        from mojo_compiler import py_tokenize, Parser
+        from fire_compiler import py_tokenize, Parser
         lib_c = GimpleGen(emit_entry_points=False, module_name='s1lib').gen_module(
             Parser(py_tokenize(libsrc)).parse_module())
         cc, lc = os.path.join(wd, 'c1.c'), os.path.join(wd, 'l1.c')
@@ -81,7 +81,7 @@ def test_stage1_extern_boundary(wd):
         subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)
         subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', lo, lc], check=True)
         exe = os.path.join(wd, 'c1')
-        subprocess.run([GCC, '-o', exe, co, lo, os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
+        subprocess.run([GCC, '-o', exe, co, lo, os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
         check("stage1: linked client+artifact runs (cross-boundary call)",
               _run(exe).stdout.startswith('s1'))
     finally:
@@ -192,7 +192,7 @@ def test_stage5_monomorphization(wd):
                            'extern int64_t s5_id_Int64(int64_t);\n'
                            'int main(void){printf("%lld\\n",(long long)s5_id_Int64(7));return 0;}\n')
     exe = os.path.join(wd, 'um')
-    subprocess.run([GCC, '-o', exe, cmain, o1, os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
+    subprocess.run([GCC, '-o', exe, cmain, o1, os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
     check("stage5: cached instantiation links + runs", _run(exe).stdout.strip() == '7')
 
 
@@ -607,7 +607,7 @@ def test_def_overload_not_dangling_export(wd):
     static link time (production dylibs use `-undefined dynamic_lookup`) but
     crashes EVERY dlopen of the dylib at runtime — real repro was
     std/gpu/host/_nvidia_cuda.mojo's two `def CUDA(...)` overloads, which made
-    every single `mojo.py` interpreter/compiler invocation crash at startup
+    every single `fire.py` interpreter/compiler invocation crash at startup
     (dyld: symbol not found in flat namespace), regardless of the input file."""
     src = ("def CUDA(x: Int64) -> Int64:\n"
            "    return x + 1\n"
@@ -663,7 +663,7 @@ def test_cross_module_free_func_mangling_agrees(wd):
     function-pointer value, never called — exercising gimple_codegen.py's
     Name-lowering "C function name used as a value" path, ~line 5151, which
     calls `_func_csym`/`_overload_suffix`) expected `_coro_destroy_fn_fa7153`
-    instead — an orphaned reference that crashed `dlopen` on EVERY mojo.py
+    instead — an orphaned reference that crashed `dlopen` on EVERY fire.py
     invocation, not just ones that use coroutines.
 
     This is the minimal shape of that same bug: `corolike.mojo` (placed
@@ -737,7 +737,7 @@ def test_sb1_cross_module_same_c_param_overload_mangling(wd):
     # qualified symbol for each module's own definition (the whole point of
     # this mangling scheme: codegen and the reflection-table emitter agree).
     from gimple_codegen import GimpleGen
-    from mojo_compiler import py_tokenize, Parser
+    from fire_compiler import py_tokenize, Parser
     for path, name, src in ((path_a, 'sb1_mod_a', src_a), (path_b, 'sb1_mod_b', src_b)):
         gen = GimpleGen(emit_entry_points=False, module_name=name)
         gen._current_filename = path
@@ -786,9 +786,9 @@ def test_sb1_cross_module_same_c_param_overload_mangling(wd):
 
 def test_sb1_mojo_build_cli_wrapper_modules(wd):
     """SB-1 follow-up (independent verification found a real bug in the first
-    fix, bf96f55): `mojo.py build`'s actual CLI path (do_imports=True inline
+    fix, bf96f55): `fire.py build`'s actual CLI path (do_imports=True inline
     compilation, gimple_codegen.compile_to_gimple / build_executable in
-    mojo.py) is a COMPLETELY DIFFERENT code path from build_stdlib_dylib.py's
+    fire.py) is a COMPLETELY DIFFERENT code path from build_stdlib_dylib.py's
     per-module-standalone-compile pipeline the first SB-1 test above
     exercises — its GimpleGen instances are nested and share state
     (_compile_imported_module), which the standalone pipeline never does.
@@ -819,13 +819,13 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
        checked ahead of the shared fallback.
 
     This test reproduces (2) — the wrapper-module shape, chosen because it
-    is fully achievable end-to-end through mojo.py build's REAL CLI (unlike
+    is fully achievable end-to-end through fire.py build's REAL CLI (unlike
     the coordinator's original top-level-ALIASED-import repro, which hits a
     SEPARATE, independently-confirmed-pre-existing bug in aliased free-
     function-value call sites — present on vanilla master before ANY SB-1
     work, unrelated to overload-mangling qualification, and explicitly out
     of scope here) — and asserts a REAL compile+link+run through the actual
-    `python3 mojo.py build <file>` subprocess gets each sibling module's own,
+    `python3 fire.py build <file>` subprocess gets each sibling module's own,
     distinct, correct result."""
     src_alpha_module = "def sb1_probe_t(x: Int64) -> Int64:\n    return x + 111\n"
     src_beta_module = "def sb1_probe_t(x: Int64) -> Int64:\n    return x + 222\n"
@@ -853,17 +853,17 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
 
     exe = os.path.join(proj, 'main')
     r = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'mojo.py'), 'build', 'main.mojo'],
+        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
         cwd=proj, capture_output=True, text=True, timeout=120)
-    check("SB-1 (mojo.py build CLI): two sibling modules' same-named free "
+    check("SB-1 (fire.py build CLI): two sibling modules' same-named free "
           "function build without a redefinition error",
           'redefinition of' not in r.stderr and 'redefinition of' not in r.stdout,
           r.stdout + r.stderr)
-    check("SB-1 (mojo.py build CLI): build succeeds and produces an executable",
+    check("SB-1 (fire.py build CLI): build succeeds and produces an executable",
           r.returncode == 0 and os.path.exists(exe), r.stdout + r.stderr)
     if os.path.exists(exe):
         run = subprocess.run([exe], capture_output=True, text=True, timeout=20)
-        check("SB-1 (mojo.py build CLI): each wrapper's call gets its own "
+        check("SB-1 (fire.py build CLI): each wrapper's call gets its own "
               "sibling module's distinct, correct result (112 / 223, not "
               "112 / 112)",
               run.stdout.strip().splitlines() == ['112', '223'],
@@ -920,9 +920,9 @@ def test_sb1_per_scope_import_distinct_modules(wd):
 
     exe = os.path.join(proj, 'main')
     r = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'mojo.py'), 'build', 'main.mojo'],
+        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
         cwd=proj, capture_output=True, text=True, timeout=120)
-    check("SB-1 per-scope-import: mojo.py build succeeds (per-lexical-scope "
+    check("SB-1 per-scope-import: fire.py build succeeds (per-lexical-scope "
           "tracking now resolves each function's own local import), doesn't "
           "silently pick one module for both call sites",
           r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
@@ -936,7 +936,7 @@ def test_sb1_per_scope_import_distinct_modules(wd):
     # The interpreter path (myinterpreter.py) is a completely separate
     # implementation; it must agree on the same two distinct, correct values.
     ri = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'mojo.py'), 'run', 'main.mojo'],
+        [sys.executable, os.path.join(HERE, 'fire.py'), 'run', 'main.mojo'],
         cwd=proj, capture_output=True, text=True, timeout=20)
     check("SB-1 per-scope-import: the INTERPRETER path (separate "
           "implementation) agrees, getting both distinct, correct values",

@@ -37,13 +37,13 @@ from-scratch **0 skips**, `compile_stdlib.py` **664/664, 0 unexpected**,
 test_gimple.py 278/0, test_gimple_runner.py 24/0, test_module_cache.py
 76/0, test_gimple_generator_runner.py 80/4 (4 pre-existing, unrelated).
 
-Still open: the whole-program `mojo.py build` PERF barrier below.
+Still open: the whole-program `fire.py build` PERF barrier below.
 
-## Status (2026-09-06 — whole-program `mojo.py build` of a dependent (asyncio/queues.py) is now PERF-bound, not codegen-bound)
+## Status (2026-09-06 — whole-program `fire.py build` of a dependent (asyncio/queues.py) is now PERF-bound, not codegen-bound)
 
 `isolated` `compile_to_gimple` of `collections/__init__.py`, `asyncio/
 queues.py` and `asyncio/futures.py` all succeed (blocker 1 fixed, below).
-A whole-program `python3 mojo.py build Lib/asyncio/queues.py` — which
+A whole-program `python3 fire.py build Lib/asyncio/queues.py` — which
 compiles the full asyncio + collections + inspect + _collections_abc
 transitive closure from scratch — was observed running >34 min at 100%
 CPU / 1.7 GB without completing: this is the separately-tracked
@@ -115,7 +115,7 @@ iteration delegation to the backing dict (Stage 4's optional tail) —
 `collections/__init__.py` compiles without it because `OrderedDict`
 defines its own and `Counter` inherits `dict`'s at the interpreter
 level; add it when a compiled program actually calls e.g.
-`counter.values()`. Doc kept open pending a whole-program (`mojo.py
+`counter.values()`. Doc kept open pending a whole-program (`fire.py
 build`) confirmation and that delegation tail; `git rm` once both land.
 
 ---
@@ -237,14 +237,14 @@ unaffected; doc stays open.
 
 Fresh verification from both directions, no compiler change:
 
-1. **As BUILD ROOT** (`python3 mojo.py build .../Lib/collections/
+1. **As BUILD ROOT** (`python3 fire.py build .../Lib/collections/
    __init__.py`, safety-wrapped; fails in ~5s, no runaway): the module
    refuses up front on the three `__reversed__` generator methods —
    "a call to unresolved callee 'reversed(...)' is not supported in a
    compiled generator/coroutine body" ×3. Byte-consistent with the
    wtRest19b/canalyzer2 entries.
 2. **As an IMPORTED dependency** (observed fresh inside a bounded
-   `mojo.py build` of `Lib/asyncio/queues.py`, which imports this
+   `fire.py build` of `Lib/asyncio/queues.py`, which imports this
    module): the nested compile surfaces the DEEPER blocker instead —
    "cannot compile module: \`Counter[...] = ...\` subscript store on
    user-defined struct 'Counter' (no `__setitem__` method and no
@@ -332,7 +332,7 @@ not attempted. No code change.
 
 ## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified; a DIFFERENT, EARLIER blocker now surfaces first, Counter's dict-subclass gap not re-reached this pass)
 
-Fresh full `python3 mojo.py build .../Lib/collections/__init__.py` against
+Fresh full `python3 fire.py build .../Lib/collections/__init__.py` against
 this worktree (branched from master `1e0f3f2`, `build/libmojostdlib.dylib`
 freshly rebuilt, 0 skips). The build now fails EARLIER than the Counter
 subscript-store refusal this doc has tracked since 2026-08-23: three

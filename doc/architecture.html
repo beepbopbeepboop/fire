@@ -37,7 +37,7 @@ subprocess at runtime.</p>
 ┌──────────────────────────────────────────────────┐
 │  Mojo source (.mojo)                             │
 │                                                  │
-│  Path A: python3 mojo.py &lt;file&gt;.mojo  ────────┐  │
+│  Path A: python3 fire.py &lt;file&gt;.mojo  ────────┐  │
 │  Path B: build/mojo &lt;file&gt;.mojo       ──────┐ │  │
 │                                             │ │  │
 │         ┌────────────────────────────────────┤ │  │
@@ -64,17 +64,17 @@ subprocess at runtime.</p>
 <h2>2. Two execution paths</h2>
 
 <h3>Path A — Python-driven (interpreted)</h3>
-<p><code>python3 mojo.py &lt;file&gt;.mojo</code></p>
+<p><code>python3 fire.py &lt;file&gt;.mojo</code></p>
 <ol>
 <li>Reads source; tokenises via <code>py_tokenize</code>; parses via <code>Parser</code>; rewrites via <code>ast_rewriter.rewrite</code>.</li>
 <li>Calls <code>gimple_codegen.compile_to_gimple*()</code> <em>in-process</em> (no subprocess for codegen).</li>
 <li>Writes <code>.ci</code> (C + <code>__GIMPLE</code> annotations); shells out to <code>gcc -fgimple</code> to compile, then links with <code>runtime/mojo_runtime.c</code>.</li>
 </ol>
-<p>The interpreter path (<code>mojo.py run</code> / <code>interpret_and_execute</code>) uses <code>myinterpreter.py</code> directly, bypassing compilation entirely.</p>
+<p>The interpreter path (<code>fire.py run</code> / <code>interpret_and_execute</code>) uses <code>myinterpreter.py</code> directly, bypassing compilation entirely.</p>
 
 <h3>Path B — Self-hosted (compiled)</h3>
 <p><code>build/mojo &lt;file&gt;.mojo</code></p>
-<p><code>build/mojo</code> is the <em>compiled</em> transitive closure of <code>mojo.py</code> — it contains compiled versions of <code>mojo_compiler.py</code>, <code>gimple_codegen.py</code>, <code>module_loader.py</code>, etc. When it compiles code, every call to <code>gimple_codegen.compile_to_gimple[_cached](...)</code> is <strong>intercepted at lowering time</strong> and replaced by the C runtime shim (§4). The compiled binary therefore never runs its own compiled codegen for <code>.ci</code> generation — it shells out to real Python.</p>
+<p><code>build/mojo</code> is the <em>compiled</em> transitive closure of <code>fire.py</code> — it contains compiled versions of <code>fire_compiler.py</code>, <code>gimple_codegen.py</code>, <code>module_loader.py</code>, etc. When it compiles code, every call to <code>gimple_codegen.compile_to_gimple[_cached](...)</code> is <strong>intercepted at lowering time</strong> and replaced by the C runtime shim (§4). The compiled binary therefore never runs its own compiled codegen for <code>.ci</code> generation — it shells out to real Python.</p>
 
 <p>Why this matters: <strong><code>.ci</code> output from the compiled binary is real Python's, not the compiled compiler's.</strong> Bug fidelity for the self-hosted backend has never been tested for <code>.ci</code>. Only the <code>.tok</code> / <code>.ast</code> diagnostic dumps call compiled <code>Parser</code> / <code>py_tokenize</code> directly — and those historically exposed many bugs (<code>doc/IMPL.md:302-309</code>).</p>
 
@@ -82,10 +82,10 @@ subprocess at runtime.</p>
 
 <table>
 <tr><th>File</th><th>Role</th></tr>
-<tr><td><code>mojo_compiler.py</code></td><td>Tokenizer (<code>py_tokenize</code>) + recursive-descent <code>Parser</code>. <strong>Single source of truth</strong> for all AST node definitions — <code>myinterpreter.py</code> and <code>gimple_codegen.py</code> both import AST nodes as <code>import mojo_compiler as N</code>.</td></tr>
+<tr><td><code>fire_compiler.py</code></td><td>Tokenizer (<code>py_tokenize</code>) + recursive-descent <code>Parser</code>. <strong>Single source of truth</strong> for all AST node definitions — <code>myinterpreter.py</code> and <code>gimple_codegen.py</code> both import AST nodes as <code>import fire_compiler as N</code>.</td></tr>
 <tr><td><code>gimple_codegen.py</code></td><td><code>GimpleGen</code> class — lowers Mojo AST → C with GNU GIMPLE annotations. Key entry points: <code>compile_to_gimple</code> (3-arg ABI pinned), <code>compile_to_gimple_cached</code> (CAS layer), <code>compile_to_gimple_with_cpp</code> (generator/async), <code>compile_to_gimple_linked</code> / <code>compile_linked</code> (link mode).</td></tr>
 <tr><td><code>ast_rewriter.py</code></td><td>AST rewrite pass (Python → Mojo normalization). Runs between parsing and codegen.</td></tr>
-<tr><td><code>myinterpreter.py</code></td><td>Tree-walking interpreter — imports AST nodes from <code>mojo_compiler</code>; executes them directly. Used by <code>mojo.py run</code>.</td></tr>
+<tr><td><code>myinterpreter.py</code></td><td>Tree-walking interpreter — imports AST nodes from <code>fire_compiler</code>; executes them directly. Used by <code>fire.py run</code>.</td></tr>
 <tr><td><code>module_loader.py</code></td><td>Stdlib import resolution, signature scanning (reflection-based), <code>tokenize</code>/<code>os</code>/<code>typing</code>/<code>ctypes</code> special-casing. Sibling file scan for <code>__init__.mojo</code> packages.</td></tr>
 <tr><td><code>reflect.py</code></td><td>Emits the <code>__mojo_reflect</code> C-ABI table per dylib (name + signature + address). Read by <code>module_loader.read_reflection</code> via ctypes.</td></tr>
 <tr><td><code>driver.py</code></td><td><code>mojo build</code> / <code>mojo run</code>: link-mode compile via <code>compile_linked</code>; CAS-cached program binary; stdlib dylib link; run.</td></tr>
@@ -104,7 +104,7 @@ subprocess at runtime.</p>
 <p>This is the bridge between the self-hosted compiled binary and the real Python compiler. It's the single most important mechanism in the bootstrap story, and the primary bug surface for "compiling code" via the self-hosted binary.</p>
 
 <h3>4.1 Lowering</h3>
-<p><code>gimple_codegen.py</code>, lines 9175-9218. When <code>GimpleGen</code> encounters a call to <code>gimple_codegen.compile_to_gimple</code> or <code>gimple_codegen.compile_to_gimple_cached</code> from <em>outside</em> that module (e.g. <code>mojo.py</code>'s <code>--dump</code> handler), it replaces the entire call with a single C function call:</p>
+<p><code>gimple_codegen.py</code>, lines 9175-9218. When <code>GimpleGen</code> encounters a call to <code>gimple_codegen.compile_to_gimple</code> or <code>gimple_codegen.compile_to_gimple_cached</code> from <em>outside</em> that module (e.g. <code>fire.py</code>'s <code>--dump</code> handler), it replaces the entire call with a single C function call:</p>
 
 <pre>gimple_codegen_compile_to_gimple(src, do_imports, filename)</pre>
 
@@ -177,10 +177,10 @@ The command buffer is 1024 bytes. A long <code>PYTHONPATH</code> or <code>filena
 
 <h3>Three stages</h3>
 <pre>
-Stage 1:  Python mojo.py --dump-full mojo.py  →  stage1/mojo.ci  (transitive closure)
+Stage 1:  Python fire.py --dump-full fire.py  →  stage1/mojo.ci  (transitive closure)
 Stage 2:  gcc -fgimple stage1/mojo.ci         →  stage2/mojo     (compiled binary)
-Stage 3:  stage2/mojo --dump mojo.py           →  stage2/mojo.ci  (+ .tok .ast .pyi)
-Stage 4:  stage2/mojo --dump mojo.py           →  stage3/mojo.ci  (idempotency check)
+Stage 3:  stage2/mojo --dump fire.py           →  stage2/mojo.ci  (+ .tok .ast .pyi)
+Stage 4:  stage2/mojo --dump fire.py           →  stage3/mojo.ci  (idempotency check)
 Verify:   stage1 == stage2 == stage3            for all artifacts
 </pre>
 
@@ -189,11 +189,11 @@ Verify:   stage1 == stage2 == stage3            for all artifacts
 <h3>Key targets</h3>
 <table>
 <tr><th>Target</th><th>What it does</th></tr>
-<tr><td><code>check-selfhost</code></td><td>Compile + link guard only (does NOT execute — runtime still SIGSEGVs). Compiles <code>mojo.py</code> → binary via <code>test_selfhost.py</code>.</td></tr>
+<tr><td><code>check-selfhost</code></td><td>Compile + link guard only (does NOT execute — runtime still SIGSEGVs). Compiles <code>fire.py</code> → binary via <code>test_selfhost.py</code>.</td></tr>
 <tr><td><code>check-gimple</code></td><td>GIMPLE codegen unit suite (<code>test_gimple.py</code>).</td></tr>
 <tr><td><code>check-runner</code></td><td>Execution tests via the interpreter (<code>test_runner.py</code>).</td></tr>
 <tr><td><code>check-modcache</code></td><td>Module cache end-to-end stages (<code>test_module_cache.py</code>).</td></tr>
-<tr><td><code>mojoc</code></td><td>One-step build: <code>python3 mojo.py build mojo.py -o mojoc</code>.</td></tr>
+<tr><td><code>mojoc</code></td><td>One-step build: <code>python3 fire.py build fire.py -o mojoc</code>.</td></tr>
 <tr><td><code>bootstrap</code></td><td>Full end-to-end: stage1→2→3 + <code>verify</code> + <code>validate-all</code>.</td></tr>
 </table>
 

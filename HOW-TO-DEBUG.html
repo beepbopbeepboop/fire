@@ -94,7 +94,7 @@ Run the bare reproduction in a loop and histogram the exit codes. Do this
 signal delivery, any of which can make a real bug shimmer.
 </p>
 <pre><code>for i in $(seq 1 200); do
-  MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full &gt;/dev/null 2&gt;&amp;1
+  MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full &gt;/dev/null 2&gt;&amp;1
   echo $?
 done | sort | uniq -c</code></pre>
 <p>
@@ -121,7 +121,7 @@ off randomization first.
 <pre><code>gdbtool "settings set target.disable-aslr true"
 gdbtool "settings set target.env-vars MOJO_NO_SHIM=1"
 gdbtool "settings set auto-confirm true"   # else 're-run?' prompts wedge the pty
-gdbtool "run mojo.py --dump-full"</code></pre>
+gdbtool "run fire.py --dump-full"</code></pre>
 <p>
 Then re-run several times and diff the fault data. Distinguish the three cases:
 </p>
@@ -293,12 +293,12 @@ Two force-multipliers here:
 <span class="tag">gimple_gen_infra.py</span>
 </p>
 <ol>
-  <li><strong>Symptom.</strong> <code>MOJO_NO_SHIM=1 ./mojoc mojo.py --dump-full</code>
+  <li><strong>Symptom.</strong> <code>MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full</code>
       → SIGBUS in 26 ms, no output. Previously mis-recorded as "byte-identical
       output, cosmetic exit code" because stdout (empty) was being diffed.</li>
   <li><strong>Fault.</strong> <code>mojo_list_get_int(l=0xbe24719c0, i=4296832280)</code>
       from <code>_rewrite_assign_stmt</code> (ast_rewriter.py:691) — the one
-      <code>os.environ['PATH'] = …</code> at mojo.py:27.</li>
+      <code>os.environ['PATH'] = …</code> at fire.py:27.</li>
   <li><strong>Wrong datum.</strong> <code>l</code> is a registered <em>dict</em>;
       <code>i</code> is the string <code>"key"</code>. Predicted fault address matched
       actual exactly.</li>

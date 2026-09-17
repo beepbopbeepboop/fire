@@ -5,7 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <setjmp.h>
-#include "mojo_runtime.h"
+#include "fire_runtime.h"
 
 static int __mojo_floordiv (int a, int b)
 {

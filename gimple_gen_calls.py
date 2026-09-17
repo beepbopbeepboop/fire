@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from mojo_compiler import (
+from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -119,6 +119,25 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     t = gen._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
     gen._generator_var_api[t] = api
     return t
+
+
+def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
+    base, vct = api['base'], api['value_ctype']
+    resumed = gen._new_val('_Bool', f"{base}_resume ({av})")
+    bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
+    bb_stopiter = gen._new_bb()
+    gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._emit_label(bb_exhausted)
+    gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
+    gen._emit_label(bb_stopiter)
+    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    gen._emit("  mojo_raise ();")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_ok)
+    result = gen._new_val(vct, f"{base}_value ({av})")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_merge)
+    return vct, result
 
 
 def _ident_call_name(gen, func_node) -> str:
@@ -238,7 +257,7 @@ def _future_done_callback_kind_tag(cb_ctype: str) -> int:
            called `((void(*)(int64_t))h)(fut)`.
       1 -- `MojoBoundMethod *`: a bound method `self.on_done` or a capturing
            closure (env carried as `self`), invoked `fn(self, fut)` a la
-           runtime/mojo_runtime.h's mojo_bound_method_call_1.
+           runtime/fire_runtime.h's mojo_bound_method_call_1.
     Keyed off the lowered C type -- authoritative for both a syntactic
     `self.cb` and a capturing closure passed by name."""
     return 1 if cb_ctype == 'MojoBoundMethod *' else 0
@@ -1042,27 +1061,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if at == 'MojoGenerator *':
             api = gen._generator_var_api.get(av)
             if api is not None:
-                base, vct = api['base'], api['value_ctype']
-                resumed = gen._new_val('_Bool', f"{base}_resume ({av})")
-                bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
-                bb_stopiter = gen._new_bb()
-                gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
-                gen._emit_label(bb_exhausted)
-                # Milestone D: `_resume` reporting false is ambiguous
-                # between real exhaustion (StopIteration, the pre-
-                # existing convention below) and an uncaught exception
-                # that unwound the generator's whole body — see
-                # _emit_generator_pending_exc_check's docstring.
-                gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
-                gen._emit_label(bb_stopiter)
-                gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-                gen._emit("  mojo_raise ();")
-                gen._emit(f"  goto {bb_merge};")
-                gen._emit_label(bb_ok)
-                result = gen._new_val(vct, f"{base}_value ({av})")
-                gen._emit(f"  goto {bb_merge};")
-                gen._emit_label(bb_merge)
-                return vct, result
+                return _lower_generator_next(gen, av, api)
             gimple_ctypes._debug_note('next() on MojoGenerator* with no known _generator_var_api entry '
                         '(unreachable in normal use — see assign-then-next() propagation)', av)
     # next(g, default) — same MojoGenerator* driving as the 1-arg form
@@ -1268,7 +1267,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # "'hi'"); anything else (list/dict/set/struct pointer) has no
     # runtime field-metadata table to reconstruct a real Python repr
     # from, so it's formatted as an address rather than silently
-    # mistaken for a number. Found via mojo.py's own `--dump`'s
+    # mistaken for a number. Found via fire.py's own `--dump`'s
     # `repr(ast)` on a parsed AST list.
     if fname_raw == 'repr' and node.args:
         rat, rav = gen.lower_expr(node.args[0])
@@ -1710,7 +1709,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # dynamic `_mojo_dispatch_getattr` on the self-hosted path, which
         # doesn't see a plain dataclass list field and returns the None
         # default, so every `Struct(field=...)` kwarg-only constructor
-        # (e.g. `CallExpr(func=IdentExpr(name='main'))` at mojo.py:127)
+        # (e.g. `CallExpr(func=IdentExpr(name='main'))` at fire.py:127)
         # silently lowered to a bare `_alloc_Struct()` with no field inits.
         return gen._lower_struct_constructor(_fname_ctor, node.args, node.kwargs)
     if gen.func_return_types.get(fname_raw) == f'{fname_raw} *':
@@ -1856,7 +1855,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # int64_t"). Blindly assuming MojoList* here — the previous,
         # only case — misroutes a boxed char* through mojo_list_len,
         # which then reads len*8 bytes off the string as if they were a
-        # MojoList header. Found via mojo_compiler.py's own
+        # MojoList header. Found via fire_compiler.py's own
         # _strip_string_prefix_and_quotes: len(rest) on a `rest` that's
         # really a string segfaulted deep in mojo_list_get_int.
         actual = gen._actual_types.get(av)
@@ -1897,7 +1896,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     if type_name in gen.struct_field_types:
         # A real user-defined struct/dataclass type: compare the
         # object's runtime type tag (see mojo_read_type_tag in
-        # runtime/mojo_runtime.c, and the tag stamped by every
+        # runtime/fire_runtime.c, and the tag stamped by every
         # _alloc_<StructName> helper) against this type's own
         # deterministic hash — NOT the always-false mojo_isinstance()
         # stub below, which only covers scalar builtins with no
@@ -2222,7 +2221,7 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # different struct layout from MojoList — mojo_sorted(set) read
     # garbage and could segfault; and sorting a list-of-strings by its
     # char* pointer values gives a non-deterministic, non-alphabetical
-    # order that diverges from `python3 mojo.py --dump` output).
+    # order that diverges from `python3 fire.py --dump` output).
     if at == 'MojoSet *':
         t = gen._call_expr('MojoList *', 'mojo_set_sorted', [(at, av)])
         # sorted() only reorders — carry the set's element type onto the
@@ -2355,7 +2354,7 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     # came out all-int-slots, so `name in _C_RESERVED_FUNCS` was False for
     # every libc name and the compiler emitted a weak `int64_t abs ()`
     # stub that collides with <stdlib.h>'s — one error cascading into 849
-    # more in mojo_compiler.py's own translation unit. mojo_set_copy
+    # more in fire_compiler.py's own translation unit. mojo_set_copy
     # dispatches per slot on its tag, so both kinds survive.
     _arg0 = node.args[0]
     if kind == 'set':
@@ -2956,7 +2955,7 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     # established boxing bug: a 2-tuple unpack re-boxes `av` to int64_t
     # even when it was a char*/pointer, and the erased value then landed
     # in `f'(int64_t){av}'` as a decimal address — confirmed via a real
-    # --dump-full mojo.py determinism diff at myinterpreter.py:1027's
+    # --dump-full fire.py determinism diff at myinterpreter.py:1027's
     # `return func(interpreter, *args, **kwargs)`.
     widened = []
     for _ap in arg_pairs:
@@ -3303,6 +3302,14 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     _ensure_libc_self_extern(gen, fname_raw)
     ret_type = gen.func_return_types.get(fname_raw, 'int64_t')
 
+    # Self-host hardcoded functions declared via concrete prototypes in
+    # gen_module's `_is_selfhost_file` block.  Their return types are not
+    # in `func_return_types` (they live in sibling modules), so fall back
+    # to the known-correct type from _SELFHOST_FUNC_RETURN_TYPES to avoid
+    # the `int64_t` default truncating pointer return values.
+    if fname in gimple_codegen._SELFHOST_HARDCODED_FUNCS:
+        ret_type = gimple_codegen._SELFHOST_FUNC_RETURN_TYPES.get(fname, 'int64_t')
+
     # Auto-stub completely unknown names (e.g. bracket params like `cmp_fn: fn(T,T)->Bool`
     # that the parser skips). Without a declaration GCC gives "implicit function declaration".
     # Skip the self-host hardcoded forward-declared symbols — gen_module's
@@ -3313,7 +3320,8 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
                    and fname not in gen._KNOWN_SIGS
                    and fname_raw not in gen.BUILTIN_VALUE_MAP
                    and fname_raw not in gimple_ctypes._C_RESERVED_FUNCS
-                   and fname not in gimple_codegen._SELFHOST_HARDCODED_FUNCS)
+                   and fname not in gimple_codegen._SELFHOST_HARDCODED_FUNCS
+                   and fname_raw not in gimple_codegen._SELFHOST_HARDCODED_FUNCS)
     if _is_unknown:
         _stub_key = gimple_ctypes._stub_guard_name(fname)
         if fname_raw in gen._unresolved_import_aliases:
@@ -4122,7 +4130,7 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
     # read falsy on the self-hosted path so a varargs candidate can still
     # arrive here; an unguarded `while len(out) < inf` then never
     # terminated — a hard hang, e.g. `MOJO_NO_SHIM=1 ./mojoc --dump
-    # mojo_compiler.py`).
+    # fire_compiler.py`).
     _pn_count = len(chosen['param_names'])
     _max_ar = chosen['max_arity']
     while len(out) < _pn_count and len(out) < _max_ar:
@@ -4277,7 +4285,7 @@ def _lower_struct_constructor(gen, struct_name: str,
         # lost emit_str_pool/emit_struct_defs/emit_entry_points=True, so the
         # self-hosted gen_module skipped its whole struct-typedef preamble),
         # while real Python kept the true defaults — an A/B divergence
-        # (python3 mojo.py --dump vs MOJO_NO_SHIM=1 ./mojoc --dump) that
+        # (python3 fire.py --dump vs MOJO_NO_SHIM=1 ./mojoc --dump) that
         # dropped every struct typedef / dispatch helper from the native
         # output.
         while len(arg_pairs) - 1 < expected:
@@ -4716,7 +4724,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # fixed alongside this) still needs real char indexing, not
             # the MojoList* fallback below: that reinterprets the
             # string's own bytes as a MojoList header and segfaults deep
-            # in mojo_list_get_int. Found via mojo_compiler.py's own
+            # in mojo_list_get_int. Found via fire_compiler.py's own
             # `rest[0]` in _strip_string_prefix_and_quotes.
             cp = gen._new_val('char *', f'(char *){gen._ensure_local(ot, ov)}')
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
@@ -4937,7 +4945,7 @@ def _lower_slice_bounds(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     else:
         # Sentinel for "to end" — must NOT be a plain -1, which a real
         # `x[:-1]` (drop the last char/element) also produces; see
-        # MOJO_SLICE_STOP_OMITTED's doc comment in mojo_runtime.h.
+        # MOJO_SLICE_STOP_OMITTED's doc comment in fire_runtime.h.
         stop_v = 'MOJO_SLICE_STOP_OMITTED'
     return start_v, stop_v
 
@@ -5024,7 +5032,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         # which happens to look right for `s[start:]` (the tail reads
         # correctly to the string's own real end) but silently drops
         # `stop` entirely for `s[:stop]`/`s[start:stop]` — no truncation
-        # ever happens. See mojo_cstr_slice in runtime/mojo_runtime.c.
+        # ever happens. See mojo_cstr_slice in runtime/fire_runtime.c.
         t = gen._new_val('char *', f"mojo_cstr_slice ({ov}, {start_v}, {stop_v})")
         return 'char *', t
 

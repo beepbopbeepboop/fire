@@ -2,7 +2,7 @@
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): unchanged, byte-for-byte identical failure
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
 against this worktree (fast-forwarded to master `e60b9cd`): exit 1,
 byte-for-byte the same `RuntimeError` naming the same 11 async
 functions (`__aenter__` x3, `__aexit__` x4, `_exit_wrapper`, `aclose`,
@@ -15,7 +15,7 @@ this session's mandate, not attempted. DOCUMENTED-NOT-FIXED.
 
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): unchanged, byte-for-byte identical failure
 
-Fresh safety-wrapped `python3 mojo.py build .../Lib/contextlib.py`
+Fresh safety-wrapped `python3 fire.py build .../Lib/contextlib.py`
 against this worktree (includes this session's dict-keyed
 %-formatting landing, commit `e1e12bb`): exit 1, byte-for-byte the same
 `RuntimeError` naming the same 11 async functions (`__aenter__` x3,
@@ -29,7 +29,7 @@ attempted. DOCUMENTED-NOT-FIXED.
 
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15): unchanged, byte-for-byte identical failure
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 contextlib.py` against current tree (`a913ab8`): exit 1, byte-for-byte
 the same `RuntimeError` naming the same 11 async functions (`__aenter__`
 x3, `__aexit__` x4, `_exit_wrapper`, `aclose`, `enter_async_context`,
@@ -47,7 +47,7 @@ DOCUMENTED-NOT-FIXED.
 
 ## Status (re-verified 2026-08-25): unchanged; unaffected by this session's intervening fixes
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
 fresh against current master (past the struct-method cross-call scalar
 contract "Pass 1.3e", generator-consumption-ordering fixed-point retry +
 defaults-aware arg padding, `**kwargs`-forward slot-alignment fix, and
@@ -66,7 +66,7 @@ C++20 coroutine codegen) — not attempted. DOCUMENTED-NOT-FIXED.
 
 Landed `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s targeted fix
 (coroutine-body local/yield typing derived from a callee's trusted
-return type). Re-ran `python3 mojo.py build /Users/mrs/net/
+return type). Re-ran `python3 fire.py build /Users/mrs/net/
 Python-3.14.6/Lib/contextlib.py`: byte-for-byte identical failure —
 same `RuntimeError` naming the same 11 async functions (`__aenter__`
 x3, `__aexit__` x4, `_exit_wrapper`, `aclose`, `enter_async_context`,
@@ -82,7 +82,7 @@ variadic coroutine-frame parameters) — not attempted here.
 
 ## Status (re-verified 2026-08-23, triage pass)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 contextlib.py`: fails identically — the same hard `RuntimeError`
 naming the same 11 async functions (`__aenter__` x3, `__aexit__` x4,
 `_exit_wrapper`, `aclose`, `enter_async_context`, `inner`) with the
@@ -96,7 +96,7 @@ DOCUMENTED-NOT-FIXED.
 
 ## Status (re-verified 2026-08-09, fresh against current master post-merge)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
 against current master (this worktree's branch was rebuilt on top of
 local master at fdd5e66, which includes all fixes from the intervening
 sessions referenced elsewhere in `bugs/` — dict-subscript augmented
@@ -121,7 +121,7 @@ with the other two docs in this cluster.
 The PERF hard bug this doc previously matched
 (`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`)
 has since had its Phase 2 fix land — `Lib/contextlib.py` no longer
-times out: `python3 mojo.py build .../contextlib.py` now completes in
+times out: `python3 fire.py build .../contextlib.py` now completes in
 ~11s. It still does NOT build, but for a completely different reason:
 a hard, honest `RuntimeError` refusal —
 
@@ -159,7 +159,7 @@ the timeout, not even the usual `drop stale export` dylib-link noise
 that normally appears seconds in). Retried standalone with a longer
 background run — still running after 9+ minutes before being killed
 for this session's time budget, on a machine also running several
-other agents' `mojo.py build` processes concurrently (this session is
+other agents' `fire.py build` processes concurrently (this session is
 one of many parallel worktree-agent-* sessions).
 
 This matches the ALREADY-DOCUMENTED performance hard bug

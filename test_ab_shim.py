@@ -18,7 +18,7 @@ MOJOC = os.path.join(HERE, 'mojoc')
 
 
 def run_python_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
-    """Run python3 mojo.py <flag> on src_path, return path to .ci file.
+    """Run python3 fire.py <flag> on src_path, return path to .ci file.
 
     MUST run from the repo root (`cwd=HERE`), same as run_native_dump: the
     self-host AST-reflection injection is CWD-gated, so a run from a temp
@@ -29,7 +29,7 @@ def run_python_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
     test_dump_full_file's docstring for why the two need separate corpora.
     """
     src_path = os.path.abspath(src_path)
-    cmd = [sys.executable, os.path.join(HERE, 'mojo.py'), flag, src_path]
+    cmd = [sys.executable, os.path.join(HERE, 'fire.py'), flag, src_path]
     subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, timeout=60)
     basename = os.path.splitext(os.path.basename(src_path))[0]
     here_ci = os.path.join(HERE, f'{basename}.ci')
@@ -117,7 +117,7 @@ def test_inline_source(name: str, source: str):
 
     The `.mojo` file is written INTO the repo root (not a temp dir): both
     dump paths' self-host/stdlib resolution is path-sensitive, and only a
-    file that lives beside `mojo.py` produces the full, comparable `.ci`.
+    file that lives beside `fire.py` produces the full, comparable `.ci`.
     """
     src_file = os.path.join(HERE, f'_abt_{name}.mojo')
     with open(src_file, 'w') as f:
@@ -173,9 +173,9 @@ def test_dump_full_multi(name: str, files: dict, driver: str):
     translation unit that never calls `_compile_imported_module`, so it
     cannot exercise cross-module `from X import Y` resolution at all. A
     real regression (BUG: `from gimple_exprtypes import ...` inside
-    gimple_gen_coro.py, and `from mojo_compiler import (...)` inside
+    gimple_gen_coro.py, and `from fire_compiler import (...)` inside
     gimple_gen_stmts.py, both reached only through the compiled backend's
-    OWN `--dump-full` self-compile of mojo.py) was invisible to the whole
+    OWN `--dump-full` self-compile of fire.py) was invisible to the whole
     27-case `--dump` corpus for exactly this reason — see
     gimple_module_gen.py's `FromImportStmt` sibling-resolution loop (the
     `can_resolve_module_path` guard added alongside this test). These
@@ -511,7 +511,7 @@ BUILTIN_TESTS = {
 
 def main():
     if not os.path.exists(MOJOC):
-        print(f"ERROR: {MOJOC} not found. Build with: MOJO_NO_SHIM=1 python3 mojo.py build mojo.py -o mojoc", file=sys.stderr)
+        print(f"ERROR: {MOJOC} not found. Build with: MOJO_NO_SHIM=1 python3 fire.py build fire.py -o mojoc", file=sys.stderr)
         sys.exit(1)
 
     passed = 0

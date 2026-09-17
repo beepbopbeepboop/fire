@@ -236,7 +236,7 @@ doc stays open.
 
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical refusal, tagged-union diagnosis stands
 
-Fresh full `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
+Fresh full `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
 against current master (f0f6e78): dies with the byte-identical
 `RuntimeError: cannot compile module: function(s) __iter__, _fwalk,
 fwalk, walk (generator function(s), contain a yield/yield from)...`
@@ -339,7 +339,7 @@ the prerequisite; documented-not-fixed stands; doc kept open.
 
 ## Status (updated 2026-08-11 — re-verified still refused; deepened root cause, confirms (not reverses) prior "needs tagged-union redesign" conclusion)
 
-Re-verified against current master: `python3 mojo.py build
+Re-verified against current master: `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/os.py` still fails with the identical
 `RuntimeError: cannot compile module: function(s) _fwalk, walk ...`,
 unchanged from 2026-08-10.
@@ -433,7 +433,7 @@ variant promise, a much larger redesign). Doc kept open (not deleted).
 ## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
 
 Re-verified against current master (`c79a013`) via a real
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`. The
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`. The
 build now fails IMMEDIATELY, on `os.py`'s OWN top-level module compile
 (`gen_module`, before any transitive-closure/GCC-stage work is even
 reached), with a hard Python-level `RuntimeError`:
@@ -495,7 +495,7 @@ no longer describe the current blocking error.
 symbol_not_module_qualified.md`, task #146) — `_gen_cpp_generator_unit`'s
 free-function base-name computation now module-qualifies via
 `_func_qualifier` (the same SB-1 machinery ordinary free functions use).
-Confirmed: `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
+Confirmed: `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
 no longer produces ANY `conflicting types for '_mojogen_walk_start'`
 error — the specific collision this doc documents is gone.
 
@@ -514,7 +514,7 @@ this file was originally classified under.
 **STILL FAILING**, but re-diagnosed from scratch against current master
 (`2b0c4c5`) — the 2026-07-31 `_DeprecatedGenericAlias`/`_CallableType`/
 `_PlaceholderType` errors no longer reproduce (fixed by unrelated later
-work). `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`'s
+work). `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`'s
 whole-program transitive-closure compile now fails with hundreds of
 errors from many different files; the ones that actually implicate
 `os.py`'s OWN generator (`os.walk`) are:

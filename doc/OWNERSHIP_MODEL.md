@@ -989,7 +989,7 @@ real static-type-driven, not guessed, before Phase 3 emits anything.
 Worth stating plainly: everything landed this session
 (`ownership_check.py`) is a standalone AST-level analysis pass that runs
 BEFORE codegen and never calls into `gimple_gen_*.py`/`gimple_codegen.py`
-at all. It has not been wired into `mojo.py`'s build pipeline, doesn't run
+at all. It has not been wired into `fire.py`'s build pipeline, doesn't run
 as part of `make check`, and produces diagnostics nobody currently reads.
 Phase 3 is where this stops being purely additive and starts requiring
 real codegen surgery (inserting actual `mojo_*_free`/`__del__` calls at

@@ -3,11 +3,11 @@
 ## Status (2026-09-07, end-to-end runtime investigated — blocked on `.py` link-mode module resolution + memoryview-in-generator, both architectural)
 
 The task was "make a real zip round-trip (`from zipfile import ZipFile`,
-`writestr`/`close`/`namelist`/`read`) actually work through `mojo.py
+`writestr`/`close`/`namelist`/`read`) actually work through `fire.py
 build`". It does NOT, and the reasons are now precisely characterised —
 this is a multi-feature stack, not a bug:
 
-1. **`mojo.py build` "succeeds" but silently stubs the whole module.**
+1. **`fire.py build` "succeeds" but silently stubs the whole module.**
    `from zipfile import ZipFile` never resolves in link/build mode.
    `imports.resolve_source()` / `imports.Resolver._find()` only probe
    `<dir>/<name>.mojo` and `<dir>/<name>/__init__.mojo` — never `.py` —
@@ -16,7 +16,7 @@ this is a multi-feature stack, not a bug:
    `(int64_t)0`, every method call becomes a `int64_t.<m>() stubbed`
    no-op, and the driver prints `Built:` **even though the final link
    emitted "Undefined symbols" / the program segfaults or prints
-   garbage** (`names: 8100139744743485279`). The `mojo.py run`
+   garbage** (`names: 8100139744743485279`). The `fire.py run`
    (interpreter) path "works" only because it delegates the import to
    host CPython's real `zipfile` — no compilation involved.
 
@@ -115,7 +115,7 @@ Regression tests: `test_gimple.py`
 `test_gimple_runner.py` (`gimple_os_path_splitdrive_splitroot`,
 `gimple_reversed_list_str_sorted` — real build-and-run).
 
-Still **NOT `git rm`'d** — a full `mojo.py build` (transitive stdlib
+Still **NOT `git rm`'d** — a full `fire.py build` (transitive stdlib
 imports) still does not complete: `_Extra(bytes)` subclassing +
 `struct.Struct` class attr + `super().__new__` end-to-end link, plus
 the broad stdlib file-object / codec surface above, remain.
@@ -158,7 +158,7 @@ the bytes-subclass shape was already syntax-clean because `_Extra` and a
 number of `ZipFile` methods that transitively reference generator code
 (`_write_end_record` → `_Extra.strip` → the `_Extra.split` classmethod
 generator, `_sanitize_windows_name`, ...) are dropped from the relaxed
-`do_imports=False` probe rather than compiled). A real `mojo.py build`
+`do_imports=False` probe rather than compiled). A real `fire.py build`
 (root module, non-relaxed) still hits the `_Extra.split` / `read` /
 `_get_decompressor` generator-codegen wall the older entries below track.
 Bytes-subclassing is no longer a blocker; the generator-codegen wall
@@ -211,7 +211,7 @@ test_gimple_generator_runner.py 85/4-known-fail, check-linkmode 3/3,
 check-selfhost clean, compile_stdlib.py 664/664 (0 unexpected), stdlib
 dylib from-scratch 0 skips, `make bootstrap` byte-identity — see commit.
 
-Still not `git rm`'d — a full `mojo.py build` (transitive stdlib
+Still not `git rm`'d — a full `fire.py build` (transitive stdlib
 imports) was not completed this session (perf-bound under concurrent
 machine load), and `_Extra(bytes)` subclassing still blocks an
 end-to-end link.
@@ -475,7 +475,7 @@ Fresh isolated generation (`compile_to_gimple_with_cpp` on the file
 alone) reproduces the documented up-front refusal byte-for-byte:
 `split: a call to unresolved callee 'memoryview(...)' is not supported
 in a compiled generator/coroutine body`. A full safety-wrapped
-`mojo.py build` was also attempted but got watcher-killed at the 300s
+`fire.py build` was also attempted but got watcher-killed at the 300s
 wall-clock cap during transitive-import processing (machine heavily
 contended by concurrent agents' builds this session; zero zipfile-
 attributed gcc errors in the partial log before the kill — consistent,

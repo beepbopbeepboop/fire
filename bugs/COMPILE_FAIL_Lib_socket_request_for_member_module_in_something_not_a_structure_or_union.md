@@ -2,7 +2,7 @@
 
 ## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): still does not build; error count 136 → 171, same already-catalogued grab-bag categories, no new failure class
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
 against this worktree (fast-forwarded to master `e60b9cd`): exit 1, 171
 `error:` lines (was 136 at the prior entry). Bucketed by normalized
 shape (`sed`-collapsed identifier/quote-strip + `sort | uniq -c`):
@@ -32,7 +32,7 @@ unaddressed. Not attempted; no code change.
 
 ## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): error count 248 → 136; the dict-keyed `%`-format class (12 argparse sites + downstream) FIXED by this session's `mojo_str_format_dict` landing; still not a build
 
-Fresh safety-wrapped `python3 mojo.py build .../Lib/socket.py` against
+Fresh safety-wrapped `python3 fire.py build .../Lib/socket.py` against
 this worktree: exit 1, **136 `error:` lines (was 248 at this doc's
 previous entry)**. The drop is attributable to THIS session's shared
 fix (commit `e1e12bb`, see
@@ -57,7 +57,7 @@ single-cause fix. Doc kept open.
 
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15): still does not build; error count 213 → 248, same already-catalogued grab-bag categories, no new failure class
 
-Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
 against current tree (`a913ab8`): exit 1, 248 `error:` lines (was 213).
 Bucketed by normalized shape: `too many arguments to function 'X'`
 (19, `re/_compiler.py`'s `__compiler__compile` — arity mismatch, same
@@ -88,7 +88,7 @@ attempted. No code change.
 
 ## Status (re-verified 2026-08-25): still does not build; error count 187 → 213, same already-catalogued grab-bag categories, no new failure class
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
 fresh against current master (past the struct-method cross-call scalar
 contract "Pass 1.3e", generator-consumption-ordering fixed-point retry +
 defaults-aware arg padding, `**kwargs`-forward slot-alignment fix, and
@@ -119,7 +119,7 @@ open — still not a narrow, single-cause fix.
 Landed the `_cpp_trusted_fn_return_types`/`_cpp_fn_container_shape`
 coroutine-body-typing feature (see `bugs/COMPILE_FAIL_ctypes_
 macholib_dyld.md`'s 2026-08-24 entry for what it targets — it does
-NOT target this file's failure class at all). Re-ran `python3 mojo.py
+NOT target this file's failure class at all). Re-ran `python3 fire.py
 build /Users/mrs/net/Python-3.14.6/Lib/socket.py`: 187 `error:` lines
 (was 178). Did a controlled A/B (`git stash` the fix, rebuild, diff
 the exact sorted error sets against the fix applied) rather than trust
@@ -152,7 +152,7 @@ dylib rebuild 0 skips.
 
 ## Status (updated 2026-08-23): error count 201 → 178; the last cross-module "undeclared here" collision class (`Repr_repr*`) fixed via dispatch-table qualification
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 socket.py`: 178 `error:` lines (was 201). The "'X' undeclared here"
 collision pattern is now ZERO (was 13 at the 2026-08-20 update): all
 11 remaining instances were `Repr_repr*` — reprlib.Repr's prefix-
@@ -192,7 +192,7 @@ the general risk assessment — this is a narrower, lower-risk fix than
 task #141's own doc's general "qualify struct FIELD tables too" plan,
 which remains unattempted and out of scope here).
 
-Re-verified via a fresh `python3 mojo.py build
+Re-verified via a fresh `python3 fire.py build
 /Users/mrs/net/Python-3.14.6/Lib/socket.py`: error count dropped from
 650 to 201, and the "'X' undeclared here ... did you mean 'Y_X'"
 collision pattern dropped from 370 to 13 occurrences. **socket.py
@@ -226,7 +226,7 @@ bare, unqualified `perror (...)` C call that collides with libc's real
 `bugs/CODEGEN_generator_function_Lib_tokenize.md`'s matching
 2026-08-18 entry.
 
-Re-verified via a real `mojo.py build` of
+Re-verified via a real `fire.py build` of
 `/Users/mrs/net/Python-3.14.6/Lib/socket.py`: `grep -c "conflicting
 types for 'perror'"` on the build output is now 0. The build **still
 fails overall** — none of the other blockers below (task #141 cross-
@@ -239,7 +239,7 @@ skipped modules before and after) all pass with no regression.
 
 ## Status (re-verified 2026-08-09, fresh against current master post-merge): still not PASS, same two blocker classes, error count 669→650
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
 against current master (this worktree's branch was rebuilt on top of
 local master at fdd5e66, including all intervening-session fixes —
 none targeted at this file's remaining blockers). Result: still fails,
@@ -312,7 +312,7 @@ all. Not a shared root cause with the other two docs in this cluster.
 The PERF hard bug this doc previously matched
 (`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`)
 has since had its Phase 2 fix land — `Lib/socket.py` no longer times
-out: it now completes (via `mojo.py build`'s `build_executable`
+out: it now completes (via `fire.py build`'s `build_executable`
 fallback path) in ~61s, generating ~10 MB of C, and reaches a real GCC
 error stage.
 
@@ -360,7 +360,7 @@ Re-ran with a 150s timeout: got partway through (produced the usual
 ambiguous` transitive-compile-fallback note) then TIMED OUT with no
 further output. Retried standalone in the background — still running
 after 9+ minutes before being killed for this session's time budget
-(on a machine also running several other agents' `mojo.py build`
+(on a machine also running several other agents' `fire.py build`
 processes concurrently).
 
 `socket.py` has a large transitive import graph (imports `os`, `sys`,

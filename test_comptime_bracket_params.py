@@ -10,7 +10,7 @@ out and every `f[N](...)` call site fell through `_lower_call`'s final
 '0')` catch-all — a SILENT wrong-value miscompile (no exception, valid
 -fgimple output), not a refusal. This compiles the exact repro from the bug
 report all the way to a real executable (gcc -fgimple -c + link against
-runtime/mojo_runtime.c via mojo.py's link_executable), RUNS it, and asserts
+runtime/fire_runtime.c via fire.py's link_executable), RUNS it, and asserts
 on its ACTUAL stdout — mirrors test_gimple_generator_runner.py's/
 test_gimple_async_runner.py's "real build+link+run, not compile-only" shape.
 """
@@ -28,7 +28,7 @@ _FAIL = 0
 
 def _build_and_run(mojo_src: str, filename: str = 'prog.mojo') -> str:
     """Compile+link+run mojo_src through the REAL, real-program driver
-    (driver.compile_program — the exact path `python3 mojo.py <file.mojo>`
+    (driver.compile_program — the exact path `python3 fire.py <file.mojo>`
     itself uses): link mode (gimple_codegen.compile_linked), which records
     and links in the elaborated per-call-site instantiation objects a
     comptime-bracket-parametrized call produces (unlike the plain

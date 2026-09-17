@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, '/Users/mrs/claude/mojo-reference')
 
 from gimple_codegen import GimpleGen
-from mojo_compiler import py_tokenize, Parser
+from fire_compiler import py_tokenize, Parser
 
 BENCHMARK_DIR = '/Users/mrs/claude/pyperformance/b'
 

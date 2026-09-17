@@ -147,7 +147,7 @@ refusal). Doc kept open (not deleted).
 
 ## Status (re-verified 2026-08-09)
 
-Re-ran against current master (`python3 mojo.py build .../c_parser/
+Re-ran against current master (`python3 fire.py build .../c_parser/
 datafiles.py`). The previously-documented 472-error cascade rooted in
 the transitively-imported `c_parser/info.py` no longer surfaces — NOT
 because those four candidate mechanisms were fixed, but because this

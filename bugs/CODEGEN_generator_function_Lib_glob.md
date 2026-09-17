@@ -200,7 +200,7 @@ collision family) also remains as documented. No change.
 ## Status (updated 2026-08-20 — a NEW blocker found+fixed: bound-value reference to a generator method crashed with an undeclared-symbol GCC error)
 
 Re-verified against current master (`f0bdc29`). A fresh full build
-(`python3 mojo.py build .../Lib/glob.py`, transitive `do_imports=True`)
+(`python3 fire.py build .../Lib/glob.py`, transitive `do_imports=True`)
 now surfaces a *different* first blocker than the 2026-08-10 entry
 below documented (that entry's `translate_584a43` arity bug and the
 `_join_abb124` return-type bug are apparently both still latent further
@@ -262,7 +262,7 @@ raises a clear, immediate
 `RuntimeError: cannot compile module: 'self.select_exists' on struct
 '_GlobberBase' is a compiled GENERATOR method referenced as a plain
 value ...` from Python, with ZERO generated C referencing the
-undeclared symbol. A real `mojo.py build` of glob.py confirms the exact
+undeclared symbol. A real `fire.py build` of glob.py confirms the exact
 GCC "'_GlobberBase_select_exists' undeclared" error is gone (0
 occurrences in a fresh build log; the build still fails, now via the
 honest `RuntimeError` instead). The existing `bound_method_as_value`
@@ -273,7 +273,7 @@ ordinary case is unaffected by the new generator-method guard.
 Full mandatory gate (CLAUDE.md) re-run after this fix:
 - `python3 test_gimple.py`: 248 passed, 0 failed
 - `python3 test_module_cache.py`: 76 passed, 0 failed
-- `make check-selfhost`: clean (mojo.py compiling its own source)
+- `make check-selfhost`: clean (fire.py compiling its own source)
 - From-scratch `build/libmojostdlib.dylib` rebuild: 0 `skip <module>:` lines
 - `python3 compile_stdlib.py`: 664/664 passed, 0 unexpected
 
@@ -361,7 +361,7 @@ Verified via a direct isolated compile (both `do_imports=False` and the
 full `do_imports=True` build): `_t3 = _join_abb124(_t5, _t7);` now (no
 more int64_t detour), `_join`'s own definition/forward-declaration were
 already correct (`char * _join_abb124 (char *, char *)`) and unchanged.
-Whole-build error count for the SAME full `mojo.py build`: 505 → 504
+Whole-build error count for the SAME full `fire.py build`: 505 → 504
 (exactly the one fixed error; a full before/after error-message-set
 diff confirms zero new error categories introduced — the other 2
 pre-existing `-Wint-conversion` "int64_t from char*" instances
@@ -370,7 +370,7 @@ elsewhere in the build, unrelated call sites, are untouched).
 Full mandatory gate (CLAUDE.md) re-run after BOTH fixes together:
 - `python3 test_gimple.py`: 247 passed, 0 failed
 - `python3 test_module_cache.py`: 76 passed, 0 failed
-- `make check-selfhost`: clean (mojo.py compiling its own source)
+- `make check-selfhost`: clean (fire.py compiling its own source)
 - From-scratch `build/libmojostdlib.dylib` rebuild: 0 `skip <module>:` lines
 - `python3 compile_stdlib.py` (no `-j`): 664/664 passed, 0 unexpected
 
@@ -404,7 +404,7 @@ True` transitive compile, not module-qualified, first/last-write-wins
 — so glob.py's own `translate` call site ends up reading fnmatch.py's
 `translate`'s signature (1 param) instead of its own (4 params),
 padding zero extra arguments instead of the 3 needed. This reproduces
-even though `mojo.py build`'s PRIMARY path (`driver.py`'s per-module
+even though `fire.py build`'s PRIMARY path (`driver.py`'s per-module
 link mode) would normally make this class of collision unreachable
 (each module its own translation unit there) — glob.py's build falls
 through to the vulnerable `do_imports=True` WHOLE-PROGRAM inline path

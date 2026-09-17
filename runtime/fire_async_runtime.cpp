@@ -8,7 +8,7 @@
  * links this in yet — that is Step B, once gimple_codegen.py actually emits
  * `async def`/`await` codegen that needs it.
  */
-#include "mojo_async_runtime.h"
+#include "fire_async_runtime.h"
 
 #include <coroutine>
 #include <queue>

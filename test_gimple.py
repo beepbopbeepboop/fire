@@ -2063,7 +2063,7 @@ f()
     # gen_module/compile_to_gimple) rather than silently miscompiled into a
     # single straight-line C function that just drops the yield. Milestone 1
     # of bugs/INTERP_generator_yield_entirely_unimplemented.md — see
-    # mojo_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
+    # fire_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
     # and gimple_codegen.py's gen_module pre-pass. A generator taking a
     # plain scalar parameter (`def f(n): yield n`) is now COMPILED, not
     # refused — see generator_param_shape_compiles_via_cpp_path below — as
@@ -5100,11 +5100,11 @@ class Slot:
         # path (not this file's generated C -- that's the fixed dispatch
         # chokepoint every opaque getattr funnels through) genuinely calls
         # mojo_raise_attribute_error instead of the old silent stub.
-        _runtime_c = open(os.path.join(_RUNTIME_INC, 'mojo_runtime.c')).read()
+        _runtime_c = open(os.path.join(_RUNTIME_INC, 'fire_runtime.c')).read()
         name2 = "dynamic_attribute_runtime_getattr_miss_calls_raise_attributeerror"
         if 'mojo_raise_attribute_error' not in _runtime_c:
             print(f"FAIL  {name2}: mojo_raise_attribute_error not found "
-                  "anywhere in runtime/mojo_runtime.c")
+                  "anywhere in runtime/fire_runtime.c")
             _FAIL += 1
         else:
             _getattr_start = _runtime_c.find('int64_t mojo_obj_getattr')
@@ -5125,7 +5125,7 @@ class Slot:
     # 'int64_t' and 'MojoDict *')" hard-error class in real argparse.py /
     # Mac/BuildScript/build-installer.py closures (see
     # bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md root cause 2).
-    # Now routed to runtime/mojo_runtime.c's mojo_str_format_dict, which
+    # Now routed to runtime/fire_runtime.c's mojo_str_format_dict, which
     # resolves %(key)... specs against the dict AT RUNTIME.
     _dictfmt_src = """\
 def main():
@@ -5193,10 +5193,10 @@ def mf(a: Float64, b: Float64) -> Float64:
     # int from a bit-cast double or char*), mirroring the
     # dynamic_attribute_runtime check's structure above.
     name = "runtime_str_format_dict_present_with_kind_tracking"
-    _runtime_c = open(os.path.join(_RUNTIME_INC, 'mojo_runtime.c')).read()
+    _runtime_c = open(os.path.join(_RUNTIME_INC, 'fire_runtime.c')).read()
     if 'mojo_str_format_dict' not in _runtime_c:
         print(f"FAIL  {name}: mojo_str_format_dict missing from "
-              "runtime/mojo_runtime.c")
+              "runtime/fire_runtime.c")
         _FAIL += 1
     elif '_dict_set_raw_seq_kind' not in _runtime_c:
         print(f"FAIL  {name}: dict setters no longer record per-slot "

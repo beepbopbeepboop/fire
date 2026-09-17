@@ -61,10 +61,10 @@ else:
     print("✓ No TODO comments for imports")
 
 # Verify it's valid GIMPLE syntax (check for required headers).
-# gimple_codegen.py emits mojo_runtime.h as an angle-bracket system include
+# gimple_codegen.py emits fire_runtime.h as an angle-bracket system include
 # (relying on -I<runtime dir>), not a quoted local include — this test used
 # to assert the quoted form, which was never actually emitted.
-if '#include <stdint.h>' in c_code and '#include <mojo_runtime.h>' in c_code:
+if '#include <stdint.h>' in c_code and '#include <fire_runtime.h>' in c_code:
     print("✓ Required headers present")
 else:
     print("✗ Missing required headers")

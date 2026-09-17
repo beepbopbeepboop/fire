@@ -23,7 +23,7 @@ conservatively skipped rather than emitted with a guessed parameter type
 Closing it needs struct-typed-loop-variable field typing threaded into
 the nested-helper parameter inference. `Sectioned.read` remains blocked
 on `filter_(...)` (a bare callable PARAMETER — the separately-documented
-"harder mechanism" case). A full `mojo.py build` now also surfaces
+"harder mechanism" case). A full `fire.py build` now also surfaces
 downstream `Counter[...] = ...` / `OrderedDict[...] = ...` subscript-store
 gaps in transitively-imported `collections`. No regression.
 
@@ -209,7 +209,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py`
 
 ## Status (updated 2026-08-23 — compiler-side emission bug FIXED (fd909e9); module itself STILL does not compile, blocker now precisely characterized)
 
-Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+Re-ran `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/
 importlib/metadata/__init__.py` fresh against master `626f3f0`. The
 2026-08-09 "invalid conversion in return statement" cluster below is
 GONE — both former problem functions (`Sectioned.read`,

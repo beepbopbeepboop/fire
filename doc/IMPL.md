@@ -49,7 +49,7 @@ current stdlib transpilation status, what fails, and remaining gaps.
   `_lower_in_impl` root cause still worth investigating separately (it may
   affect other, not-yet-discovered code using that operator shape).
   `validate-all` still fails its file-count check — a real but separate,
-  pre-existing gap: the `stage1:` Makefile target only ever dumps `mojo.py`
+  pre-existing gap: the `stage1:` Makefile target only ever dumps `fire.py`
   itself, never loops over the other ~40 test/core files the way
   `stage2`/`stage3` do.
 
@@ -64,7 +64,7 @@ current stdlib transpilation status, what fails, and remaining gaps.
   — the same dispatch any other Mojo expression goes through. `ascii()`/
   `format()` have no compiled-path runtime backing, so the conversion/
   format-spec step uses `repr`/`str` (already real-builtin-backed) plus a
-  small hand-rolled fill/align/width formatter instead. (2) `mojo.py` had a
+  small hand-rolled fill/align/width formatter instead. (2) `fire.py` had a
   hardcoded special case that re-exec'd itself as plain Python whenever the
   input file was named `bootstrap-validate.mojo`, instead of genuinely
   interpreting it; removed, and confirmed the interpreter handles the file
@@ -139,7 +139,7 @@ current stdlib transpilation status, what fails, and remaining gaps.
     recursion (`fib`) matching interpreted references; the dylib is compiled once
     and reused across calls (2 misses / 4 hits). `_eval_const_*` remains the
     fallback (foundation-first).
-  - **Wired into the CLI** (`imports.py`, `driver.py`, `mojo.py`): `mojo build`/
+  - **Wired into the CLI** (`imports.py`, `driver.py`, `fire.py`): `mojo build`/
     `run` now go through the module-cache system. `import` is the seam — it
     resolves each module to its CAS dylib, wires the `__mojo_reflect` ABI, and
     **records the dylib on the program's link line** (`gen._link_dylibs`;
@@ -200,7 +200,7 @@ the handler, so every compiled `try/except` took the non-exception path and
 
 That fix was necessary but not sufficient: the "stage-2 bootstrap segfault"
 class turned out to be at least nine separate, independent bugs, found one at
-a time by running `stage2/mojo --dump ../mojo.py` (then every `.mojo`/`.py`
+a time by running `stage2/mojo --dump ../fire.py` (then every `.mojo`/`.py`
 file) under lldb until they stopped crashing:
 
 - `os.environ.get`/`[]`/`in`/assignment had no lowering (fell to
@@ -311,7 +311,7 @@ directly, in-process, which is exactly where this surfaced.
 An interim step made the gap loud instead of silent:
 `mojo_unsupported_iter(type_name)` prints a greppable diagnostic instead of
 emitting nothing (deliberately not `abort()`, since this is a legitimate,
-cataloged feature gap that `mojo.py`'s own dump handler wraps in
+cataloged feature gap that `fire.py`'s own dump handler wraps in
 `try`/`except`, and `abort()`'s `SIGABRT` can't be caught at the Mojo level).
 
 The real fix: `regex_compile.py` (new file) is a compile-time-only Python

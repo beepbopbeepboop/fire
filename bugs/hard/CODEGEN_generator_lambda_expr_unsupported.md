@@ -341,7 +341,7 @@ raised at `gimple_codegen.py`'s `_cpp_expr`, around the final
 generator body: {type(e).__name__}")` fallthrough. Same fatal
 whole-module escalation pattern as every other sibling gap in this
 cluster when the refused generator is module-level (`gen_module`
-re-raises as a hard `RuntimeError`, `mojo.py build` produces no object
+re-raises as a hard `RuntimeError`, `fire.py build` produces no object
 file at all for the file).
 
 ## Confirmed occurrences

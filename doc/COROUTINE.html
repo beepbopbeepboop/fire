@@ -246,7 +246,7 @@ point: one new <code>.S</code> file implementing three functions.</p>
 <li>Freeze the acceptance suite: <code>test_gimple_generator_runner.py</code> (58),
     <code>test_gimple_async_runner.py</code> (38), plus <code>test_coro_scoreboard.py</code>
     — runs every <code>bugs/CODEGEN_generator_*</code> and coroutine-gated
-    <code>COMPILE_FAIL_*</code> source through <code>mojo.py build</code> + run and records
+    <code>COMPILE_FAIL_*</code> source through <code>fire.py build</code> + run and records
     compile/link/run status. Monotonic non-regression from here on.</li>
 </ul>
 
@@ -477,7 +477,7 @@ Layer 2.</p>
     (yield/return rewrites; params → <code>__mojo_gen_arg</code> prologue) that the
     <strong>ordinary broad codegen lowers</strong> + 4 C trampolines; registers
     <code>_generator_api[g]</code> + <code>_supported_generators</code> so for/next/yield-from
-    consumers are unchanged. <code>mojo.py</code>/<code>driver.py</code> link the runtime.</td>
+    consumers are unchanged. <code>fire.py</code>/<code>driver.py</code> link the runtime.</td>
     <td class="rec">VERTICAL SLICE WORKING — <code>for x in rng(2,6)</code> → 2 3 4 5 and a
     squares(5) sum → 30 via real stack-switch coroutines through the ordinary path;
     default path byte-unchanged (test_gimple 266/0)</td><td><code>73f8701</code></td></tr>

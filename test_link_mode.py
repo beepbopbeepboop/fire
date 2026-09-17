@@ -3,7 +3,7 @@
 
 `compile_stdlib.py`/`build_stdlib_dylib.py` (and by extension
 `test_gimple.py`) all drive codegen through the single-translation-unit
-`do_imports=False` inline path — NOT the real default `mojo.py build`
+`do_imports=False` inline path — NOT the real default `fire.py build`
 pipeline, which is link-mode: per-import dylibs + CAS + reflection,
 `driver.compile_program`. A bug specific to link-mode's own module/import
 registration is invisible to every other gate step. This test exercises
