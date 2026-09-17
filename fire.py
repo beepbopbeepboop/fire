@@ -306,8 +306,9 @@ def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
     return subprocess.run(link_cmd, capture_output=True, text=True)
 
 
-def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=None,
-                     work_dir=None, quiet=False):
+def build_executable(input_file: str, src: str, output: str = None,
+                     opt_flag: str = None, debug_flag: str = None,
+                     work_dir: str = None, quiet: bool = False) -> bool:
     """Compile Mojo source to executable using GIMPLE codegen."""
     basename = os.path.splitext(os.path.basename(input_file))[0] or 'main'
     if work_dir is not None:

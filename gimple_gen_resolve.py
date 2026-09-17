@@ -429,6 +429,9 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # the gimple_codegen ↔ gimple_gen_resolve import cycle → RSS
             # runaway on `MOJO_NO_SHIM=1 --dump-full`.
             _ap_key = _as_str(_abspath)
+            if _ap_key in gen._inline_module_qualifiers:
+                _module_key = module_name.lstrip('.').replace('.', '_').replace('-', '_')
+                gen._inline_module_qualifiers[_module_key] = gen._inline_module_qualifiers[_ap_key]
             if _ap_key in gen._compiling_file_paths:
                 # This candidate resolves (by real file identity, not by
                 # the module NAME being looked up) to a file already
@@ -493,6 +496,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                                      relaxed_imports=True)
                 temp_gen._current_filename = path  # Set filename for #line directives
                 temp_gen._compiled_modules = gen._compiled_modules
+                temp_gen._inline_module_qualifiers = gen._inline_module_qualifiers
                 temp_gen._compiling_file_paths = gen._compiling_file_paths  # share: path-identity self-import guard (see its own declaration)
                 temp_gen._asdict_dispatch_needed = gen._asdict_dispatch_needed  # share: __dict__/vars() usage flag (see its own declaration)
                 temp_gen._emitted_structs = gen._emitted_structs

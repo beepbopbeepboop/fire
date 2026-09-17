@@ -2112,6 +2112,13 @@ def _resolve_import_module_qualifier(gen, mod: str) -> str:
     when the module can't be resolved (callers then skip scope tracking
     for that import, falling back to the flat dict / existing tiers)."""
     import module_loader as _mlmod
+    if gen.do_imports and gen._inline_module_qualifiers:
+        inline_path = gen._submodule_source_path(mod)
+        if inline_path:
+            inline_key = os.path.abspath(inline_path)
+            if inline_key in gen._inline_module_qualifiers:
+                mod_key = mod.lstrip('.').replace('.', '_').replace('-', '_')
+                gen._inline_module_qualifiers[mod_key] = gen._inline_module_qualifiers[inline_key]
     path = None
     if mod.startswith('.'):
         fn = getattr(gen, '_current_filename', '') or ''
@@ -2300,7 +2307,9 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # call_segfault.md. Stripping leading dots here makes every
         # qualifier path converge on the same plain-name spelling
         # regardless of which one happened to run first.
-        return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+        key = q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+        resolved = gen._inline_module_qualifiers.get(key, key)
+        return resolved.lstrip('.').replace('.', '_').replace('-', '_') if resolved else resolved
     # NOT an early `if self-hosting file: return ''` short-circuit here
     # (removed — see git history / bugs doc): that unconditionally bare-ified
     # EVERY reference made from within any self-hosting-flagged file,
@@ -3729,6 +3738,27 @@ def _local_sibling_module_exports(gen, module: str):
         return None, None
     import module_loader as _mlmod
     exports = _mlmod.load_module_from_path(path)
+    path_key = os.path.abspath(path)
+    if gen.do_imports and path_key in gen._inline_module_qualifiers:
+        module_key = module.lstrip('.').replace('.', '_').replace('-', '_')
+        gen._inline_module_qualifiers[module_key] = gen._inline_module_qualifiers[path_key]
+    if gen.do_imports and module in gen._compiled_modules:
+        exports = dict(exports)
+        for fn in (_stmts or []):
+            if not isinstance(fn, FunctionDef):
+                continue
+            info = exports.get(fn.name, {})
+            if not isinstance(info, dict) or not fn.return_type:
+                continue
+            info = dict(info)
+            ret = _sgfs_resolve_ann(gen, fn.return_type)
+            pts = gen._signature_ctypes(fn.params, fn, sentinel='MojoList *')
+            c_params = [ct + ' ' + pn.lstrip('*')
+                        for ct, (pn, pt) in zip(pts, fn.params)]
+            info['c_return_type'] = ret
+            info['c_parameters'] = c_params
+            info['signature'] = ret + ' ' + fn.name + ' (' + (', '.join(c_params) or 'void') + ')'
+            exports[fn.name] = info
     qualifier = _mlmod.module_name_for_path(path)
     return exports, (qualifier or None)
 

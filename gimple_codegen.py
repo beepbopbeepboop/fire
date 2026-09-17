@@ -438,7 +438,7 @@ STRING_POOL_BASE = 10000
 # Type system helpers
 # ---------------------------------------------------------------------------
 
-def _merge_struct_inheritance(all_struct_defs):
+def _merge_struct_inheritance(all_struct_defs: list) -> None:
     """`struct Child(Base1, Base2):` — Python-style class inheritance.
     Mutates each StructDef with `.bases` in place so `.fields`/`.methods`
     become the fully-merged view (base fields/methods first, in declaration
@@ -1977,6 +1977,7 @@ class GimpleGen:
         # and every other module's OWN local definition of that same bare
         # name would otherwise silently inherit the first one's qualifier.
         self._imported_func_home: dict = {}
+        self._inline_module_qualifiers: dict[str, str] = {}
         # Imported free-function bare name -> its home module's qualifier,
         # populated ONLY from the CURRENT gen_module call's own top-level
         # FromImportStmt scan (_emit_stdlib_import_externs /

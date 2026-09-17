@@ -943,6 +943,59 @@ def test_sb1_per_scope_import_distinct_modules(wd):
           ri.stdout.strip().splitlines() == ['112', '223'], repr(ri.stdout))
 
 
+def test_root_module_circular_import_symbol(wd):
+    """A sibling module that imports a function FROM the root entry module
+    (`from root import f`, while root itself imports the sibling) must call
+    the root module's actual emitted symbol — the root compiles its own
+    top-level defs under its BARE name (module_name '' -> no qualifier), so
+    the importer's call site must resolve the root's module name (or any
+    dotted/raw spelling of it) to that same bare symbol. The tier lookup
+    used to sanitize the raw module string ('root') and emit a phantom
+    `root_root_val_<hash>` the definition never provides: undefined symbol
+    at link. Verified through BOTH pipelines: driver.compile_program's
+    link mode (check-linkmode's own shape) and fire.build_executable's
+    do_imports=True inline mode (the shape self-host compiles fire.py
+    itself through, where the real undefined `_fire_build_executable_…`
+    surfaced)."""
+    import fire
+    proj = os.path.join(wd, 'root_circ')
+    os.makedirs(proj, exist_ok=True)
+    with open(os.path.join(proj, 'helper.mojo'), 'w') as f:
+        f.write("from root import root_val\n\n"
+                "fn helper() raises -> Int64:\n"
+                "    return root_val() + 1\n")
+    with open(os.path.join(proj, 'root.mojo'), 'w') as f:
+        f.write("from helper import helper\n\n"
+                "fn root_val() raises -> Int64:\n"
+                "    return 41\n\n"
+                "def main() raises:\n"
+                "    print(helper())\n")
+    exe = os.path.join(proj, 'root')
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'root.mojo'],
+        cwd=proj, capture_output=True, text=True, timeout=120)
+    check("root-circular-import: fire.py build succeeds", r.returncode == 0,
+          f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
+    check("root-circular-import: executable produced", os.path.exists(exe))
+    if os.path.exists(exe):
+        rr = _run(exe)
+        check("root-circular-import: binary prints correct value (42)",
+              rr.returncode == 0 and rr.stdout.strip() == '42',
+              repr(rr.stdout) + repr(rr.stderr))
+    root_path = os.path.join(proj, 'root.mojo')
+    with open(root_path) as f:
+        source = f.read()
+    inline_exe = os.path.join(proj, 'root_inline')
+    ok = fire.build_executable(root_path, source, output=inline_exe,
+                               work_dir=proj, quiet=True)
+    check("root-circular-import: inline build links", ok)
+    if ok:
+        rr = _run(inline_exe)
+        check("root-circular-import: inline binary prints 42",
+              rr.returncode == 0 and rr.stdout.strip() == '42',
+              repr(rr.stdout) + repr(rr.stderr))
+
+
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
 def test_review_fixes_monomorphize_overload(wd):
     import monomorphize as mm
@@ -1015,6 +1068,7 @@ def main():
         test_sb1_cross_module_same_c_param_overload_mangling(wd)
         test_sb1_mojo_build_cli_wrapper_modules(wd)
         test_sb1_per_scope_import_distinct_modules(wd)
+        test_root_module_circular_import_symbol(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

@@ -1602,6 +1602,8 @@ def _bytes_subclass_new_payload_name(new_fn):
 
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
+    if self._current_filename:
+        self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
     self._toplevel_dep_init_modules: list[str] = []
     _gmi_prefold_toplevel_comptime(self, stmts)
     for _fis in stmts:
