@@ -963,6 +963,8 @@ int int_import_module(int importlib_obj, char *module_name);  /* _python_import 
 char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env, char *src);
 /* re.sub(pattern, repl, src) where repl is a plain replacement string */
 char *mojo_re_sub_str(char *pattern, char *repl, char *src);
+/* re.escape(p) — backslash-escape regex metacharacters in p */
+char *mojo_re_escape(char *s);
 
 
 /* ── Small, bounded regex engine (see fire_runtime.c's own section comment

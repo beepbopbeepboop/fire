@@ -629,7 +629,7 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
             # When imported with an alias, replace the original name in the sig
             # so the extern matches the alias name used at call sites.
             if alias and name != alias:
-                sig = gimple_ctypes.re.sub(r'\b' + gimple_ctypes.re.escape(name) + r'\b', alias, sig, count=1)
+                sig = gimple_ctypes._replace_first_ident(sig, name, alias)
             # Overload-mangle the imported function's name in the extern so it
             # matches the (mangled) call sites and the defining module's symbol.
             # Only for genuinely mangled functions — reserved renames (pipe →
@@ -637,7 +637,7 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
             if gen._func_mangleable(sym):
                 _csym = gen._func_csym(sym)
                 if _csym != sym:
-                    sig = gimple_ctypes.re.sub(r'\b' + gimple_ctypes.re.escape(sym) + r'\b', _csym, sig, count=1)
+                    sig = gimple_ctypes._replace_first_ident(sig, sym, _csym)
             # Guard the extern with #ifndef so the pre-defined stubs (which use
             # the same guard macro _MOJO_STUB_<NAME>) don't produce a second
             # conflicting declaration. If the extern is emitted here, the stub

@@ -125,10 +125,27 @@ def module_name_for_path(path: str) -> str:
     into a NEW class of undefined-symbol linker error. See ABI.md's
     "Functions and methods" section and STDLIB-BUGS.md for the collision
     class this fixes."""
-    rel = os.path.relpath(path, STDLIB_PATH)
+    # Strip the STDLIB_PATH prefix with plain string slicing FIRST, rather
+    # than relying on os.path.relpath: the compiled backend lowers
+    # relpath(p, start) to a stub that returns p unchanged, so the
+    # self-hosted compiler derived this qualifier from the ABSOLUTE path
+    # (`_Users_..._stdlib_std_testing___init__`) while the python3 shim
+    # derived the relative one (`std_testing___init__`) — the same module
+    # compiled to two different symbol prefixes, and every imported-symbol
+    # extern that used the qualifier diverged between the two. Slicing is
+    # identical on both sides. Fall back to relpath for a path that isn't
+    # literally under STDLIB_PATH (the old behavior).
+    _pfx = STDLIB_PATH.rstrip('/') + '/'
+    if path.startswith(_pfx):
+        rel = path[len(_pfx):]
+    else:
+        rel = os.path.relpath(path, STDLIB_PATH)
     if rel.startswith('..'):
         return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
-    return os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
+    # '/', not os.sep: the compiled backend leaves `os.sep` opaque (see
+    # gimple_gen_exprs.py's `os` member handling), and every supported host
+    # path here is slash-separated.
+    return os.path.splitext(rel)[0].replace('/', '_').replace('-', '_')
 
 
 class ModuleLoader:

@@ -5310,6 +5310,35 @@ char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env
  * loop as mojo_re_sub_fn, minus the callback machinery — no backreference
  * support (`\1` etc in repl), since nothing in this codebase's actual usage
  * needs it. */
+/* re.escape(p) — escape the regex metacharacters in `p` so it can be
+ * embedded as a literal inside a larger pattern. Several compiler modules
+ * build identifier-anchored patterns as `rf'\b{re.escape(name)}\b'` (see
+ * gimple_gen_infra.py's qualified-symbol rename, gimple_gen_resolve.py's
+ * struct/generic scans). Before this existed the compiled backend had NO
+ * lowering for re.escape at all: the call fell to the generic
+ * scalar-receiver stub and returned 0, so the escaped identifier silently
+ * vanished from every pattern that used it (the shim, running CPython, was
+ * unaffected — a shim-vs-self-host `--dump` divergence).
+ *
+ * Mirrors CPython's re.escape (3.7+): ASCII letters, digits and '_' are
+ * left alone; every character with special meaning to the pattern grammar
+ * is backslash-escaped. */
+char *mojo_re_escape(char *s) {
+    static const char *specials = "()[]{}?*+-|^$\\.&~# \t\n\r\v\f";
+    if (!s) return strdup("");
+    size_t n = strlen(s);
+    char *out = (char *)malloc(n * 2 + 1);
+    if (!out) return strdup("");
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c && strchr(specials, (int)c)) out[j++] = '\\';
+        out[j++] = (char)c;
+    }
+    out[j] = '\0';
+    return out;
+}
+
 char *mojo_re_sub_str(char *pattern, char *repl, char *src) {
     if (!pattern || !src) return src ? src : "";
     if (!repl) repl = "";

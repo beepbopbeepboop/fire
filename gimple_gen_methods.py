@@ -1489,6 +1489,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._lower_call(_bare_node)
 
         # Check if this is a known module method
+        if module_name == 're' and method_name == 'escape' and len(node.args) == 1:
+            # re.escape(p) — escape regex metacharacters so `p` can be embedded
+            # as a literal in a larger pattern. Previously there was NO
+            # lowering at all, so the call fell to the generic
+            # scalar-receiver stub (`int64_t.escape() stubbed`) and returned
+            # 0: every `rf'\b{re.escape(name)}\b'` pattern silently lost the
+            # name it was supposed to anchor on (16 sites across this
+            # backend, e.g. _emit_stdlib_import_externs' qualified-symbol
+            # rename and _find_generic_source's struct/generic scans).
+            arg_type, arg_val = gen.lower_expr(node.args[0])
+            if arg_type not in ('char *', 'void *'):
+                # A boxed/opaque string field (`node.name`, a param the
+                # self-hosted backend erased to int64_t) — cast the bits back
+                # to char* so the call's pointer parameter type-checks, the
+                # same cast every other imported-string arg site uses.
+                arg_cast = gen._new_temp('char *')
+                gen._emit(f'  {arg_cast} = (char *){arg_val};')
+                arg_type, arg_val = 'char *', arg_cast
+            t = gen._call_expr('char *', 'mojo_re_escape', [(arg_type, arg_val)])
+            return 'char *', t
         if module_name == 're' and method_name == 'sub':
             # re.sub(pattern, callback, src) → mojo_re_sub_fn(pattern, callback, env, src)
             if len(node.args) >= 3:

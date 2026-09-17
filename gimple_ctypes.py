@@ -1102,6 +1102,43 @@ _C_RESERVED_FUNCS = frozenset({
 _FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv', 'atol', 'frexp', 'abort'})
 
 
+_IDENT_CHARS = ('abcdefghijklmnopqrstuvwxyz'
+                'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_')
+
+
+def _replace_first_ident(text: str, old: str, new: str) -> str:
+    """Replace the first STANDALONE occurrence of identifier `old` in `text`
+    with `new`, preserving every other byte — the compiled-backend-safe
+    replacement for `re.sub(r'\\b' + re.escape(old) + r'\\b', new, text,
+    count=1)`.
+
+    Under the self-hosted backend that regex silently replaced NOTHING:
+    `re.escape` had no lowering at all and returned 0, so the pattern lost
+    the identifier it was meant to anchor on, and the compiled `re.sub`
+    runs through POSIX `regcomp`, where `\\b` isn't a word boundary on
+    macOS (verified: `regexec` returns no-match for `\\bfoo\\b`, while the
+    BSD spelling `[[:<:]]foo[[:>:]]` matches). The visible symptom was a
+    bare `extern void assert_equal (...)` in the self-hosted output against
+    the defining module's real `std_testing___init___assert_equal` — the
+    largest single shim-vs-noshim `--dump` divergence class (see
+    bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md).
+
+    Plain `str.find`/slicing is identical on both sides, so callers no
+    longer depend on the regex engine at all."""
+    if not old:
+        return text
+    _l = len(old)
+    _i = text.find(old)
+    while _i >= 0:
+        _j = _i + _l
+        _ok_l = _i == 0 or _IDENT_CHARS.find(text[_i - 1:_i]) < 0
+        _ok_r = _j >= len(text) or _IDENT_CHARS.find(text[_j:_j + 1]) < 0
+        if _ok_l and _ok_r:
+            return text[:_i] + new + text[_j:]
+        _i = text.find(old, _j)
+    return text
+
+
 def _safe_name(name: str) -> str:
     # Handle backtick-quoted Mojo identifiers (e.g. `6bit` → _6bit)
     if name.startswith('`') and name.endswith('`') and len(name) > 2:

@@ -1,5 +1,78 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-17, second entry — per-file `--dump` A/B sweep + three root causes fixed)
+
+Adopted the per-file decomposition (`make -j20 aside bside && make compare-a-b`,
+779 files, ~35 s) to work the divergence one file at a time. Baseline:
+`clean=37, CI-DIFF=704, SELFHOST-CRASHED=25, AST/TOK-DIFF=8, SHIM-FAILED=5`.
+Three root causes fixed this session (all changes shim-and-nos him identical, so
+every OTHER gate stays green):
+
+1. **`gimple_ctypes.re` was never resolved at all** (183 sites in the whole-program
+   output read `(int64_t)0 /* ct param or undeclared: re */`). `re.sub` happened to
+   be special-cased by method name, but `re.escape` had NO lowering: it fell to the
+   generic scalar-receiver stub (`int64_t.escape() stubbed`) and returned 0. Every
+   `rf'\b{re.escape(name)}\b'` pattern therefore silently lost the identifier it was
+   meant to anchor on. Added a real `re.escape` lowering → new runtime
+   `mojo_re_escape` (CPython-compatible escaping) + a `char *` cast for boxed args.
+
+2. **POSIX `\b` is not a word boundary on macOS** (verified directly: `regcomp` +
+   `regexec` for `\bfoo\b` does not match; the BSD spelling `[[:<:]]foo[[:>:]]`
+   does). The compiled `re.sub` runs through `mojo_re_sub_str` → POSIX
+   `regcomp`, so even with `re.escape` fixed the rename still no-op'd. Replaced
+   the two signature-renaming `re.sub(r'\b'+escape(x)+r'\b', ...)` sites
+   (`gimple_gen_infra._emit_stdlib_import_externs`, `gimple_module_gen`'s
+   `imported_symbols` re-export block) with a new shared
+   `gimple_ctypes._replace_first_ident` — byte-preserving, regex-free. Verified:
+   the first `--dump` divergence for `stdlib/test/utils/test_select` moved
+   11278 → 19385, and both `assert_equal` externs now come out
+   `std_testing___init___assert_equal` on both sides.
+
+3. **`os.path.relpath` is a codegen stub** that returns its first argument
+   unchanged, so the self-hosted `module_name_for_path` derived its qualifier from
+   the ABSOLUTE path (`_Users_..._stdlib_std_testing___init__`) while the shim
+   derived `std_testing___init__` — the same module under two different symbol
+   prefixes. `module_name_for_path` now strips the `STDLIB_PATH` prefix with plain
+   string slicing first, falling back to `relpath` for a path outside the stdlib;
+   identical on both sides. Also via this session: the earlier `Generator`
+   struct-table fix (commit `5e5d05e`) and the `LayoutSolver` HEAP/STACK
+   class-attribute phantom-field fix (a class-level constant read as `self.X`
+   resolves through `_class_attrs` to its own global and must not be minted as an
+   uninitialized instance field — guarded in both read-mint passes).
+
+**Remaining landscape (unchanged totals after these fixes — most files have
+SEVERAL independent divergences, so a fix only moves the first-diff offset
+deeper).** Dominant `.mojo` classes, by first-diff content over 616 differing
+files:
+- **38 files: the self-hosted parser rejects valid Mojo the shim accepts**, e.g.
+  `for ref handle in ...` → `Expected KW got NAME('handle')`. Reproduced
+  minimally. Token streams are byte-identical, so it's a parser-state issue: the
+  convention-skip test `self._peek().value in self._CONV_KWS` evaluates False
+  because `Parser._CONV_KWS` is read as a (never-initialized) struct field rather
+  than its `_classattr_Parser___CONV_KWS` global — the field is added by a pass
+  other than the two read-mint passes the LayoutSolver fix guards (the field
+  survives with `cur is None` guard changes), so it is still open.
+- **~80 files: stub-extern emission differs** (noshim emits `__attribute__((weak))`
+  stubs where the shim emits nothing, or is missing a `_MOJO_STUB_*` block).
+- **21 files: imported signatures unresolved in noshim** —
+  `extern int64_t std_itertools___init___count (void);` where the shim has
+  `..._count_2dbb98 (int64_t start, int64_t step);` (no params, no overload
+  suffix), i.e. the text-scan export/signature lookup returning less self-hosted.
+- **11 files: a boxed POINTER printed as a C return type** —
+  `4332189096 mojo_frexp(...)` vs the shim's `int64_t mojo_frexp(...)`.
+- `root/*.py` (the compiler's own closure, 6/115 clean) has its own classes:
+  `char *`/`int64_t` struct-field disagreement (`Lit.value`), string-pool
+  membership differences (including a garbage literal that looks like an
+  exception message), overload suffix `_hash` vs `_hash_00b26e`, and temp-number
+  shifts after a missing `/* with: __exit__ */` comment.
+
+Gate for this batch: all `make check-*` green, stdlib dylib rebuild 0 skips,
+`compile_stdlib.py` 664/664 0 unexpected, `make bootstrap` unchanged (still only
+the 4 pre-existing `.ast` repr mismatches), `check-noshim-dumpfull` still the
+tracked offset-21577 divergence (gap shrank ~386 KB → ~340 KB). The per-file
+metric is the working one: it is bounded, parallel, and gives one small file to
+fix at a time.
+
 ## Status (2026-09-17 — 5-module silent drop FIXED; baseline restored to the documented offset 21086)
 
 A self-hosted `fire.py --dump-full` was silently DROPPING 5 modules

@@ -3334,6 +3334,19 @@ def gen_module_impl(self, stmts):
                 read_fields = {}
                 _gmi_collect_self_reads(_method_names, method.body, read_fields)
                 for fn, ft in read_fields.items():
+                    # A class-level constant read as `self.STACK` (e.g.
+                    # LayoutSolver's `STACK = 'stack'`) resolves through
+                    # `_class_attrs` to its own `_classattr_<Cls>__<X>`
+                    # global — it is NOT an instance field. Minting a phantom
+                    # `int64_t STACK;` here grew the shim's C struct by two
+                    # extra members (`int64_t HEAP; int64_t STACK;`) the
+                    # self-hosted build correctly omitted, the first
+                    # byte-level divergence of check-noshim-dumpfull (offset
+                    # 21086). The class-body-attribute pass above has already
+                    # populated `_class_attrs[s.name]`, so this lookup makes
+                    # the outcome independent of pass ordering.
+                    if fn in self._class_attrs.get(s.name, {}):
+                        continue
                     if fn not in self.struct_field_types[s.name]:
                         _base_ft = None
                         for _base_name in (getattr(s, 'bases', None) or []):
@@ -3416,6 +3429,15 @@ def gen_module_impl(self, stmts):
                 if target_struct is None:
                     continue
                 if fn in self.struct_field_types[target_struct]:
+                    continue
+                # A class-level constant read as `self.X` (e.g.
+                # LayoutSolver's `STACK = 'stack'`) resolves through
+                # `_class_attrs` to its own `_classattr_<Cls>__<X>` global —
+                # it is NOT an instance field, so this read-only phantom mint
+                # must not shadow it with an uninitialized scalar. (The same
+                # guard is applied to the sibling self-READ pass above; both
+                # are read-mint sites for the same class of member.)
+                if fn in self._class_attrs.get(target_struct, {}):
                     continue
                 # A struct that defines its own `__getattr__` resolves every
                 # unknown member dynamically (ctypes's LibraryLoader:
@@ -8247,7 +8269,8 @@ def gen_module_impl(self, stmts):
                 signature = _as_str(sym_info['signature'])
                 orig_name = sym_info.get('original_name', _sn)
                 if safe != orig_name:
-                    signature = re.sub(r'\b' + re.escape(orig_name) + r'\b', safe, signature, count=1)
+                    signature = gimple_ctypes._replace_first_ident(
+                        signature, _as_str(orig_name), safe)
                 signature = re.sub(
                     r'\b(inout|borrowed|owned|borrow|out|mut|ref|read|copy|var)\s+(?=\w)',
                     '', signature)
