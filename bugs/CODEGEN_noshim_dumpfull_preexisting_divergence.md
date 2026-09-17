@@ -1,5 +1,34 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-17, third entry — the 38-file self-hosted-parser class FIXED)
+
+The largest single `.mojo` class (38 files whose self-hosted `--dump` produced
+NOTHING while the shim parsed them fine) was the parser rejecting valid Mojo:
+`for ref handle in ...` → `Expected KW got NAME('handle')`. Reproduced minimally
+(`for ref x in xs:`; token streams byte-identical, so it was parser state, not
+the tokenizer). Two independent writers were putting the CLASS-level constant
+`Parser._CONV_KWS` into `struct_field_types['Parser']` as an instance field:
+(1) the hardcoded self-host struct table in `gen_module_impl`, and (2) the
+class-body-attribute pass, which created a field for a container-valued class
+attribute (`if cur is None or ...`). With the field present, `_lower_MemberExpr`
+returns its struct-FIELD branch before its class-attr branch, so
+`self._CONV_KWS` read a never-initialized field — NULL — and
+`_peek().value in self._CONV_KWS` tested False for every convention keyword.
+
+Fixed both: `_CONV_KWS` removed from Parser's hardcoded table (with a note; the
+sibling `_known_traits` IS a real instance field and stays), and the class-attr
+pass now only UPGRADES an existing instance field's type rather than creating
+one. Verified: `for ref x in xs:` is now byte-identical between shim and
+self-host, and `stdlib/test/gpu/host/test_metal_device_type_encoder` (previously
+0 bytes self-hosted) now emits 52 362 bytes. Sweep: empty self-hosted outputs
+38 → 28, SELFHOST-CRASHED 25 → 23. Gate: all `make check-*` green, stdlib dylib
+0 skips, `compile_stdlib.py` 664/664 0 unexpected.
+
+Note: `Interpreter._INT_TYPE_NAMES` / `_FLOAT_TYPE_NAMES` in the same hardcoded
+table are ALSO class-level constants (not instance fields) and are presumably the
+same latent bug — not touched yet, since `_known_traits`-style verification of
+every reader is still pending.
+
 ## Status (2026-09-17, second entry — per-file `--dump` A/B sweep + three root causes fixed)
 
 Adopted the per-file decomposition (`make -j20 aside bside && make compare-a-b`,

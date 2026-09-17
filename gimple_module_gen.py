@@ -2340,7 +2340,18 @@ def gen_module_impl(self, stmts):
             '_filename': 'char *',
             '_pending_decs': 'MojoList *',
             '_known_traits': 'MojoSet *',
-            '_CONV_KWS': 'MojoSet *',
+            # NOT `_CONV_KWS`: that is a CLASS-level constant
+            # (`Parser._CONV_KWS = {...}`, fire_compiler.py), not an instance
+            # field. Listing it here made `self._CONV_KWS` read this
+            # never-initialized struct field instead of its
+            # `_classattr_Parser___CONV_KWS` global — `_lower_MemberExpr`
+            # returns the struct-field branch before its class-attr branch —
+            # so `_peek().value in self._CONV_KWS` tested against NULL and
+            # the self-hosted parser stopped recognizing the convention
+            # keywords: `for ref handle in ...` failed with "Expected KW got
+            # NAME('handle')" and 38 stdlib files --dump'd to nothing while
+            # the python3 shim accepted them. `_known_traits` above IS a real
+            # instance field (`self._known_traits = set(...)`), so it stays.
         }
         # Parser is DEFINED in fire_compiler.py, so its methods are
         # mangled with the fire_compiler qualifier (e.g.
@@ -3086,8 +3097,19 @@ def gen_module_impl(self, stmts):
                         ctype = _class_attr_ctype(v)
                         if ctype is not None:
                             self._global_var_types[mangled] = ctype
+                            # UPGRADE an already-registered instance field's
+                            # type only — do NOT create one for a pure
+                            # class-level attribute. A container-valued class
+                            # attr (`Parser._CONV_KWS = {...}`) otherwise gets
+                            # a struct field here, and `_lower_MemberExpr`
+                            # returns its struct-FIELD branch before its
+                            # class-attr branch — so `self._CONV_KWS` read the
+                            # (never-initialized) field, not the
+                            # `_classattr_<Cls>__<X>` global, and the
+                            # self-hosted parser stopped recognizing
+                            # convention keywords (`for ref x in ...`).
                             cur = self.struct_field_types[s.name].get(aname)
-                            if cur is None or cur in ('int', 'int64_t'):
+                            if cur is not None and cur in ('int', 'int64_t'):
                                 self.struct_field_types[s.name][aname] = ctype
                             if ctype == 'MojoList *' and isinstance(v, (ListExpr, TupleExpr)):
                                 self._field_elem_types.setdefault(s.name, {})[aname] = (
