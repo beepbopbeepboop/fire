@@ -7795,6 +7795,29 @@ def gen_module_impl(self, stmts):
                 continue
             _declared_globals[gname] = True
             _gscan_declare_global(gname, stmt.value)
+            # Fallback type inference so the two scans agree on which names
+            # are real fields (this function's own docstring's requirement).
+            # `_gscan_declare_global`'s own `isinstance(value, StringLiteral)`
+            # chain can miss self-hosted for a NESTED assignment (one reached
+            # through `_gmi_collect_global_stmts`' recursion): the name then
+            # lands in `_declared_globals` but NOT in `_global_var_types`, and
+            # the field-freeze loop below SKIPS any name missing from the
+            # latter — so `y = "a"` inside a top-level `if` got no struct
+            # field at all (`char * y` absent from `_root_toplev`), while the
+            # shim emitted it.
+            if gname not in self._global_var_types:
+                _fb_t = _phase17_value_type(stmt.value)
+                if _fb_t:
+                    self._global_var_types[gname] = _fb_t
+                    self._global_c_decl_types[gname] = _fb_t
+                    # Own-overlay + owner, exactly like the ImportStmt branch
+                    # below: without `_own_global_var_types` the top-level
+                    # body still treated the name as a LOCAL (it declared
+                    # `char * y;` inside `_toplevel` instead of using the
+                    # `_root_globals.y` field the struct now exposes).
+                    self._own_global_var_types[gname] = _fb_t
+                    if gname not in self._global_to_module:
+                        self._global_to_module[gname] = _phase17_mod
             _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
         elif (isinstance(stmt, ComptimeVarStmt)
                 and isinstance(stmt.value, (ListExpr, TupleExpr))):
