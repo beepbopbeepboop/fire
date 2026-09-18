@@ -1128,9 +1128,17 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
     for node in _walk_ast(body):
         if isinstance(node, AssignStmt):
             fn = _gmi_self_member(node.target)
+            # `if not fn: continue` BEFORE `found.get(fn)`: a non-`self`
+            # assignment target (`var x = 1` -> IdentExpr, `a.b = 1` ->
+            # some other obj) makes `_gmi_self_member` return None, and
+            # `found.get(None)` lowers to `mojo_dict_get_str(d, NULL)` ->
+            # `strcmp(NULL)` -> SIGSEGV. Latent until nested/other bodies
+            # were actually walked (`_walk_ast` doesn't recurse reliably
+            # self-hosted).
+            if not fn:
+                continue
             _existing_fn_ft = found.get(fn)
-            if fn is not None and (
-                    fn not in found
+            if (fn not in found
                     or (_existing_fn_ft in ('int', 'int64_t')
                         and _existing_fn_ft is not None)):
                 v = node.value
@@ -1252,6 +1260,20 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
             fn = _gmi_self_member(node.target)
             if fn is not None and fn not in found:
                 found[fn] = 'int64_t'
+    # Nested classes/functions: the shared `_walk_ast` above does not
+    # reliably RECURSE self-hosted (a nested `StructDef`/`FunctionDef` node
+    # is misclassified as a scalar leaf — see `_walk_ast`'s own documented
+    # history), so a nested `class _Suite: def __init__(self, fns):
+    # self._fns = fns` was found by the shim (CPython) and folded onto the
+    # ENCLOSING struct (the nested class gets no separate layout —
+    # `TestSuite._fns`) but was missed self-hosted (`int _dummy`). Descend
+    # explicitly here, matching the shim, without touching the shared walker.
+    for _nn in body:
+        if isinstance(_nn, StructDef):
+            for _mm in _nn.methods:
+                _gmi_collect_self_assigns(self, _sname, _mm.body, param_types, found)
+        elif isinstance(_nn, FunctionDef):
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
 
 
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
