@@ -1274,6 +1274,43 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                 _gmi_collect_self_assigns(self, _sname, _mm.body, param_types, found)
         elif isinstance(_nn, FunctionDef):
             _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+        # Control-flow bodies, same reasoning: `_walk_ast` does not recurse
+        # into them reliably self-hosted, so an assignment nested one level
+        # down (`with self._cond: self._thread = threading.Thread(...)` in
+        # myinterpreter.py's `_ThreadedGenerator.start`) was never seen and
+        # its field stayed unregistered. Mirrors the explicit per-node-type
+        # recursion `_selfhost_walk_stmts_for_assign_targets` already uses.
+        elif isinstance(_nn, IfStmt):
+            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found)
+            for _ei in range(len(_nn.elifs)):
+                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ei][1], param_types, found)
+            if _nn.else_body:
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
+        elif isinstance(_nn, ComptimeIfStmt):
+            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found)
+            for _ec2 in range(len(_nn.elifs)):
+                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ec2][1], param_types, found)
+            if _nn.else_body:
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
+        elif (isinstance(_nn, WhileStmt) or isinstance(_nn, ForStmt)
+                or isinstance(_nn, ComptimeForStmt)):
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+            _eb3 = getattr(_nn, 'else_body', None)
+            if _eb3:
+                _gmi_collect_self_assigns(self, _sname, _eb3, param_types, found)
+        elif isinstance(_nn, TryStmt):
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+            for _hi in range(len(_nn.handlers)):
+                _gmi_collect_self_assigns(self, _sname, _nn.handlers[_hi].body, param_types, found)
+            if _nn.else_body:
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
+            if _nn.finally_body:
+                _gmi_collect_self_assigns(self, _sname, _nn.finally_body, param_types, found)
+        elif isinstance(_nn, WithStmt):
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+        elif isinstance(_nn, MatchStmt):
+            for _ci in range(len(_nn.cases)):
+                _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found)
 
 
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
