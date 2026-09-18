@@ -6407,12 +6407,21 @@ def gen_module_impl(self, stmts):
             for _bstmt in _flatten_resolved_conditionals(_blist):
                 _pairs = []
                 if isinstance(_bstmt, AssignStmt) and isinstance(_bstmt.target, IdentExpr):
-                    _pairs.append((_bstmt.target.name, _bstmt.value))
+                    _pairs.append((_as_str(_bstmt.target.name), _bstmt.value))
                 elif isinstance(_bstmt, MultiAssignStmt):
                     for _tgt in _bstmt.targets:
                         if isinstance(_tgt, IdentExpr):
-                            _pairs.append((_tgt.name, _bstmt.value))
-                for _gname, _gvalue in _pairs:
+                            _pairs.append((_as_str(_tgt.name), _bstmt.value))
+                # Indexed iteration + `_as_str`, NOT `for _gname, _gvalue in
+                # _pairs:` — a 2-tuple unpack over a boxed list miscompiles
+                # self-hosted (both slots box to int64_t), so `_joined` got a
+                # DECIMAL pointer key and the global was registered into
+                # `_global_var_types` under that key instead of its name; the
+                # field-freeze loop's `gname in _global_var_types` then missed
+                # and the struct field never appeared.
+                for _pi in range(len(_pairs)):
+                    _gname = _as_str(_pairs[_pi][0])
+                    _gvalue = _pairs[_pi][1]
                     _t = _phase17_value_type(_gvalue)
                     _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
                                        if _gname in _joined else _t)
@@ -6450,8 +6459,11 @@ def gen_module_impl(self, stmts):
         is left unscanned (out of scope; no observed real-world
         instance needs it)."""
         _branch_lists = [_if_stmt.then_body or []]
-        for _cond2, _elif_body2 in (getattr(_if_stmt, 'elifs', None) or []):
-            _branch_lists.append(_elif_body2 or [])
+        # Indexed, NOT `for _cond2, _elif_body2 in ...` (2-tuple unpack over a
+        # boxed list miscompiles self-hosted).
+        _elif_list = getattr(_if_stmt, 'elifs', None) or []
+        for _eci in range(len(_elif_list)):
+            _branch_lists.append(_elif_list[_eci][1] or [])
         if isinstance(_if_stmt.else_body, list):
             _branch_lists.append(_if_stmt.else_body)
         _joined = {}
@@ -6459,12 +6471,20 @@ def gen_module_impl(self, stmts):
             for _bstmt in _flatten_resolved_conditionals(_blist):
                 _pairs = []
                 if isinstance(_bstmt, AssignStmt) and isinstance(_bstmt.target, IdentExpr):
-                    _pairs.append((_bstmt.target.name, _bstmt.value))
+                    _pairs.append((_as_str(_bstmt.target.name), _bstmt.value))
                 elif isinstance(_bstmt, MultiAssignStmt):
                     for _tgt in _bstmt.targets:
                         if isinstance(_tgt, IdentExpr):
-                            _pairs.append((_tgt.name, _bstmt.value))
-                for _gname, _gvalue in _pairs:
+                            _pairs.append((_as_str(_tgt.name), _bstmt.value))
+                # Indexed iteration + `_as_str` for the same reason as the
+                # TryStmt sibling: the 2-tuple unpack boxed the name into a
+                # decimal key, so the global landed in `_global_var_types`
+                # under that key and the field-freeze loop missed the field
+                # entirely — a top-level `if cond(): y = "a"` got no
+                # `char * y` struct field self-hosted (the shim did).
+                for _pi in range(len(_pairs)):
+                    _gname = _as_str(_pairs[_pi][0])
+                    _gvalue = _pairs[_pi][1]
                     _t = _phase17_value_type(_gvalue)
                     _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
                                        if _gname in _joined else _t)
