@@ -61,7 +61,20 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
         return False
     cur_abs = gimple_ctypes.os.path.abspath(cf)
     sd = gimple_codegen._SELFHOST_DIR
-    if not (cur_abs == sd or cur_abs.startswith(sd + '/')):
+    # Path-INDEPENDENT sibling signal (`fire_compiler.py` next to the file),
+    # mirroring gimple_module_gen._is_selfhost_source_dir. The bare
+    # `_SELFHOST_DIR` equality/prefix check alone is FALSE when the compiler
+    # is compiled from a DIFFERENT checkout than the one acting as driver —
+    # a downstream GCC frontend vendoring a byte-identical copy at its own
+    # path (confirmed: /Users/mrs/net/gcc/gcc/fire). Without this, every
+    # sibling-qualified reference (`gimple_codegen.GimpleGen._cpp_kwfwd_counter`,
+    # `gimple_solvers.LayoutSolver.HEAP`) missed this gate in that build and
+    # fell through to the "class-as-value not modeled" stub / a
+    # `_mojo_dispatch_setattr` on a bogus pointer. Re-derived locally rather
+    # than imported cross-module (see _is_selfhost_source_dir's own docstring
+    # for the self-hosted resolution gap that forces the duplication).
+    if not (cur_abs == sd or cur_abs.startswith(sd + '/')
+            or os.path.isfile(os.path.join(os.path.dirname(cur_abs), 'fire_compiler.py'))):
         return False
     if module_name in getattr(gen, '_module_alias_names', ()):
         _info = (getattr(gen, 'imported_symbols', {}) or {}).get(module_name) or {}
