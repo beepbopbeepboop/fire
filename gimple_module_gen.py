@@ -7462,8 +7462,19 @@ def gen_module_impl(self, stmts):
     for stmt in all_scan:
         if isinstance(stmt, FromImportStmt):
             for alias in stmt.names:
-                orig_name = alias[0]
-                local_name = alias[1] if len(alias) > 1 and alias[1] else orig_name
+                # `_as_str` on both tuple slots: `alias[0]`/`alias[1]` come
+                # back boxed self-hosted, so `check_name in
+                # _dispatch_dict_names` (a set of plain strs) missed and a
+                # `from generated_dispatch import _EXPR_DISPATCH` /
+                # `_FLOAT` / `_STMT_DISPATCH` / `_BIN_OPS` alias never got
+                # its `MojoDict *` field in the importing module's
+                # `_<mod>_toplev` struct (the shim emitted it), nor did the
+                # alias name land in `_global_var_types` for
+                # `_phase17_value_type` to resolve a later `X = <alias>`
+                # RHS against.
+                orig_name = _as_str(alias[0])
+                _alias_local = _as_str(alias[1]) if len(alias) > 1 else ''
+                local_name = _alias_local if _alias_local else orig_name
                 for check_name in (orig_name, local_name):
                     if check_name in _dispatch_dict_names and check_name not in _declared_globals:
                         global_decls.append(f"MojoDict * {check_name};")
