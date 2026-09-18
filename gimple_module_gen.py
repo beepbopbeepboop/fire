@@ -2325,8 +2325,12 @@ def gen_module_impl(self, stmts):
             '_mojo_module_cache': 'MojoDict *',
             '_func_specs': 'MojoDict *',
             '_raised_mojo_value': 'int64_t',
-            '_INT_TYPE_NAMES': 'MojoSet *',
-            '_FLOAT_TYPE_NAMES': 'MojoSet *',
+            # NOT `_INT_TYPE_NAMES` / `_FLOAT_TYPE_NAMES`: both are CLASS-level
+            # constants (`Interpreter._INT_TYPE_NAMES = {...}`,
+            # myinterpreter.py), read as `self._INT_TYPE_NAMES`. Listing them
+            # here made those reads hit a never-initialized struct field
+            # instead of their `_classattr_Interpreter__*` globals — the same
+            # `Parser._CONV_KWS` bug fixed alongside this.
             '_gen_tls': 'void *',
         }
         # Interpreter is DEFINED in myinterpreter.py — same reasoning
