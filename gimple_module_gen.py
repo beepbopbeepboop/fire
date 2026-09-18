@@ -6631,12 +6631,19 @@ def gen_module_impl(self, stmts):
     for _egi in range(len(_early_gvt_items)):
         _gn = _as_str(_early_gvt_items[_egi][0])
         _gt = _early_gvt_items[_egi][1]
-        if _gn in self._global_c_decl_types:
-            continue
+        # Dispatch-table check BEFORE the `already in _global_c_decl_types`
+        # skip: the Phase-1.7 scan (above) writes the generic scalar
+        # `int64_t` placeholder for any global whose RHS it cannot resolve
+        # (`_BIN_OPS = _GD_BIN_OPS`, an imported alias), so testing
+        # membership first would skip exactly the names this loop exists to
+        # preserve. `_own_overlay_global_ctype`'s documented rule 1 is that
+        # these container entries WIN over a scalar own-conclusion.
         if _gn in _EARLY_DISPATCH_DICTS:
             self._global_c_decl_types[_gn] = 'MojoDict *'
         elif _gn in _EARLY_DISPATCH_SETS:
             self._global_c_decl_types[_gn] = 'MojoSet *'
+        elif _gn in self._global_c_decl_types:
+            continue
         elif _gt in ('MojoDict *', 'MojoList *', 'MojoSet *'):
             self._global_c_decl_types[_gn] = 'int64_t'  # boxed by default
         else:
@@ -7696,21 +7703,39 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[gname] = 'int64_t'
                 self._global_c_decl_types[gname] = 'int64_t'
         else:
-            qt = self._quick_type(value) or 'int64_t'
-            if qt.endswith(' *') or qt == 'char *':
-                global_decls.append(f"{qt} {gname};")
-                self._global_var_types[gname] = qt
-                self._global_c_decl_types[gname] = (
-                    'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                    else qt)
-            elif qt == '_Bool':
-                global_decls.append(f"int {gname};")
-                self._global_var_types[gname] = 'int'
-                self._global_c_decl_types[gname] = 'int'
+            # A hardcoded dispatch-table global assigned from a non-literal
+            # RHS (`_BIN_OPS = _GD_BIN_OPS`, where `_GD_*` are `from
+            # generated_dispatch import ... as ...` aliases) must KEEP its
+            # real container ctype, exactly like the DictExpr/ListExpr/
+            # SetExpr branches above do via `_is_dispatch_name`. Without
+            # this the generic `_quick_type` fallback rewrote
+            # `_global_c_decl_types[gname]` to the boxed `int64_t` — after
+            # this function's own earlier reconcile loop had correctly
+            # seeded `MojoDict *` — so `_own_overlay_global_ctype`'s
+            # container rule could not return it and the struct field came
+            # out `int64_t _BIN_OPS` where the shim emits `MojoDict *`.
+            if _is_dispatch_name(gname):
+                _dt = ('MojoSet *' if _as_str(gname) == '_CMP_OPS'
+                       else 'MojoDict *')
+                global_decls.append(f"{_dt} {gname};")
+                self._global_var_types[gname] = _dt
+                self._global_c_decl_types[gname] = _dt
             else:
-                global_decls.append(f"int64_t {gname};")
-                self._global_var_types[gname] = 'int64_t'
-                self._global_c_decl_types[gname] = 'int64_t'
+                qt = self._quick_type(value) or 'int64_t'
+                if qt.endswith(' *') or qt == 'char *':
+                    global_decls.append(f"{qt} {gname};")
+                    self._global_var_types[gname] = qt
+                    self._global_c_decl_types[gname] = (
+                        'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                        else qt)
+                elif qt == '_Bool':
+                    global_decls.append(f"int {gname};")
+                    self._global_var_types[gname] = 'int'
+                    self._global_c_decl_types[gname] = 'int'
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+                    self._global_c_decl_types[gname] = 'int64_t'
 
     # `{gname: init_code}` captured at declaration time — the later
     # field-order loop's re-scan for the matching AssignStmt
