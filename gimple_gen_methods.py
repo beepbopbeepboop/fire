@@ -25,7 +25,7 @@ from fire_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _sms_key,
+    _sms_key, _as_str,
 )
 import regex_compile
 import mlir
@@ -100,18 +100,37 @@ def _resolve_class_attr_write_target(gen, target):
     if (isinstance(obj, gimple_ctypes.MemberExpr)
             and isinstance(obj.obj, gimple_ctypes.IdentExpr)
             and _is_selfhost_sibling_alias(gen, obj.obj.name)):
-        obj = obj.member if isinstance(obj.member, str) else None
-        obj = gimple_ctypes.IdentExpr(name=obj, line=getattr(target, 'line', 0)) \
-            if obj is not None else None
+        # `_as_str`, not `isinstance(obj.member, str)`: `obj.member` is a
+        # boxed AST field read, and the isinstance test is unreliable
+        # self-hosted — it evaluated False, so `obj` became None and this
+        # function returned None for exactly the case its own docstring
+        # cites. The write then fell through to the generic MemberExpr
+        # path, lowering the class ref `gimple_codegen.GimpleGen` as a
+        # value (0, "class-as-value not modeled") and emitting
+        # `_mojo_dispatch_setattr((void *)0, "_cpp_kwfwd_counter", old+1)`
+        # — the counter never incremented (uid stayed 0) plus the real
+        # "cast to pointer from integer of different size" warning at
+        # `gimple_cpp_core.py:422` in a downstream GCC build.
+        _cls_member = _as_str(obj.member)
+        obj = gimple_ctypes.IdentExpr(name=_cls_member, line=getattr(target, 'line', 0)) \
+            if _cls_member else None
     if not isinstance(obj, gimple_ctypes.IdentExpr):
         return None
-    class_name = obj.name
+    class_name = _as_str(obj.name)
     if class_name not in gen.struct_field_types or class_name in gen.var_types:
         return None
     cattrs = gen._class_attrs.get(class_name)
-    if not cattrs or target.member not in cattrs:
+    # `_as_str(target.member)` for the KEY: `target.member` is a boxed AST
+    # field read, and a boxed pointer used as a dict key misses the
+    # `_class_attrs` entry whose key is a real string — so this returned None
+    # for a genuine class-attr write and the `+=` fell through to the generic
+    # path (`_mojo_dispatch_setattr` on `target.obj`'s value — the counter's
+    # int cast to `void *`, the "cast to pointer from integer of different
+    # size" warning in a downstream GCC build).
+    _member_s = _as_str(target.member)
+    if not cattrs or _member_s not in cattrs:
         return None
-    gname = cattrs[target.member]
+    gname = cattrs[_member_s]
     gtype = gen._global_var_types.get(gname, 'int64_t')
     return gtype, gname
 

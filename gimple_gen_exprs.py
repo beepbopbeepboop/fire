@@ -788,10 +788,18 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if (isinstance(node.obj, gimple_ctypes.MemberExpr)
             and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)
             and gmp._is_selfhost_sibling_alias(gen, node.obj.obj.name)):
+        # `_as_str` on BOTH member reads: they are boxed AST field reads, and
+        # passing the boxed values straight into the re-dispatched
+        # `IdentExpr(member=...)` / `MemberExpr(member=...)` made the later
+        # `module_name in gen.struct_field_types` / `node.member in
+        # _cattrs` lookups miss (a boxed pointer as a dict key), so
+        # `gimple_codegen.GimpleGen._cpp_kwfwd_counter` printed as
+        # `0 /* class value ... not modeled */` instead of the
+        # `_classattr_GimpleGen___cpp_kwfwd_counter` global.
         return gen.lower_expr(gimple_ctypes.MemberExpr(
-            obj=gimple_ctypes.IdentExpr(name=node.obj.member,
+            obj=gimple_ctypes.IdentExpr(name=_as_str(node.obj.member),
                                         line=getattr(node, 'line', 0)),
-            member=node.member))
+            member=_as_str(node.member)))
     # `dict.fromkeys` read as a VALUE (real: zipfile/_path/__init__.py's
     # `_dedupe = dict.fromkeys`, later called as `_dedupe(iterable)`) —
     # `dict` itself already resolves to a real function-pointer VALUE
