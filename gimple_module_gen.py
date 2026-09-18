@@ -3012,15 +3012,41 @@ def gen_module_impl(self, stmts):
         if isinstance(_s, StructDef):
             _init = None
             for _m in _s.methods:
-                if _m.name == '__init__':
+                # `_as_str(_m.name) == '__init__'`: `_m.name` is a boxed AST
+                # field read and the bare compare missed self-hosted, leaving
+                # `_ctor_init_params` empty and skipping the whole
+                # constructor-literal-evidence pass below.
+                if _as_str(_m.name) == '__init__':
                     _init = _m
                     break
-            if _init:
-                _ctor_init_params[_s.name] = [pn for pn, _ in (_init.params or [])
+            if _init is not None:
+                # `_as_str` on the KEY: two reads of the same struct name are
+                # different boxed pointers, so the later
+                # `_ctor_init_params.get(<call's own boxed name>)` missed for
+                # every struct — no constructor literal-evidence type was ever
+                # recorded (`Lit.value` stayed `int64_t` where the shim
+                # inferred `char *` from `Lit('environ')` call sites; the
+                # whole-program --dump-full's first divergence at offset
+                # 21577).
+                _cs_key = _as_str(_s.name)
+                _ctor_init_params[_cs_key] = [pn for pn, _ in (_init.params or [])
                                               if pn != 'self' and not pn.startswith('*')]
-                _ctor_init_methods[_s.name] = _init
+                _ctor_init_methods[_cs_key] = _init
     if _ctor_init_params:
-        _ctor_lit_obs: dict[str, dict[str, set]] = {}
+        # FLAT dicts keyed by "<struct>::<param>", NOT a nested
+        # `dict[str, dict[str, set]]`. The previous
+        # `_ctor_lit_obs.setdefault(a, {}).setdefault(b, set()).add(...)`
+        # chain was lowered self-hosted with `mojo_dict_setdefault_int` for
+        # the nested NEW-dict value (a dict-of-dicts whose values are
+        # created by `{}` is not modeled), so `_ctor_lit_obs` stayed empty,
+        # no constructor literal-evidence type was ever recorded, and an
+        # unannotated `self.value = value` field stayed `int64_t` where the
+        # shim inferred `char *` from `Lit('environ')` call sites (`Lit.value`
+        # — the whole-program --dump-full's first divergence at offset
+        # 21577). Every accumulator below is a plain `dict[str, str]` /
+        # `dict[str, bool]`, the shape this codebase compiles reliably.
+        _obs_kind: dict = {}
+        _obs_conflict: dict = {}
         _ctor_calls: list = []
         self._calls_in_stmts(stmts, _ctor_calls)
         if self.do_imports or self.link_imports:
@@ -3028,30 +3054,50 @@ def gen_module_impl(self, stmts):
         for _call in _ctor_calls:
             if not isinstance(_call.func, IdentExpr):
                 continue
-            _pnames = _ctor_init_params.get(_call.func.name)
+            _cs_cname = _as_str(_call.func.name)
+            _pnames = _ctor_init_params.get(_cs_cname)
             if not _pnames:
                 continue
             for _i, _a in enumerate(_call.args):
                 if _i >= len(_pnames):
                     break
+                _lit_ct = ''
                 if isinstance(_a, StringLiteral):
-                    _ctor_lit_obs.setdefault(_call.func.name, {}).setdefault(
-                        _pnames[_i], set()).add('char *')
+                    _lit_ct = 'char *'
                 elif isinstance(_a, FloatLiteral):
-                    _ctor_lit_obs.setdefault(_call.func.name, {}).setdefault(
-                        _pnames[_i], set()).add('double')
-        for _struct_name, _pmap in _ctor_lit_obs.items():
-            _init = _ctor_init_methods.get(_struct_name)
+                    _lit_ct = 'double'
+                if not _lit_ct:
+                    continue
+                _okey = _cs_cname + '::' + _pnames[_i]
+                _prev = _obs_kind.get(_okey, '')
+                if not _prev:
+                    _obs_kind[_okey] = _lit_ct
+                elif _prev != _lit_ct:
+                    _obs_conflict[_okey] = True
+        for _cs_name2 in _ctor_init_params:
+            _init = _ctor_init_methods.get(_cs_name2)
             if not _init:
                 continue
-            _ann = {pn: pt for pn, pt in (_init.params or [])}
-            for _pname, _types in _pmap.items():
-                if _types not in ({'double'}, {'char *'}):
-                    continue                    # not unanimous double / char *
+            _ann = {}
+            for _ap in (_init.params or []):
+                _ann[_as_str(_ap[0])] = _ap[1]
+            for _pname in _ctor_init_params[_cs_name2]:
+                _okey2 = _cs_name2 + '::' + _pname
+                _kind = _obs_kind.get(_okey2, '')
+                if _kind != 'char *' and _kind != 'double':
+                    continue                    # none, or not unanimous
+                if _obs_conflict.get(_okey2):
+                    continue                    # mixed char*/double evidence
                 if _ann.get(_pname) is not None:
                     continue                    # respect explicit annotation
-                self._ctor_lit_param_types.setdefault(_struct_name, {})[_pname] = (
-                    'double' if _types == {'double'} else 'char *')
+                # FLAT composite key "<struct>::<param>": a nested
+                # `dict[str, dict[str, str]]` is unreliable here because
+                # `dict.get(...)` on it returns an untyped int self-hosted, so
+                # the outer `.get(name)` result can't be used for an inner
+                # membership test at all (see the consumer in the field-write
+                # pass). Same composite-string-key convention this codebase
+                # already uses elsewhere.
+                self._ctor_lit_param_types[_cs_name2 + '::' + _pname] = _kind
 
     # The synthetic `class GimpleGen` StructDef registered above (shared into
     # every nested temp_gen) must yield ownership to the REAL node whenever it
@@ -3327,7 +3373,16 @@ def gen_module_impl(self, stmts):
             for method in s.methods:
                 pm = {}
                 _defaults = getattr(method, 'param_defaults', {}) or {}
-                for pname, ptype in method.params:
+                for _mpj in (method.params or []):
+                    # Indexed loop + `_as_str`, NOT `for pname, ptype in
+                    # method.params:` — a 2-tuple unpack over a boxed element
+                    # list miscompiles self-hosted (the pname/ptype slots box
+                    # to int64_t; see _free_func_param_ctypes' docstring), so
+                    # the `pname in self._ctor_lit_param_types...` lookup
+                    # missed on the boxed key and every unannotated
+                    # `self.value = value` field fell back to `int64_t`.
+                    pname = _as_str(_mpj[0])
+                    ptype = _mpj[1]
                     if pname != 'self':
                         if ptype:
                             pm[pname] = self._resolve_type(ptype)
@@ -3339,9 +3394,9 @@ def gen_module_impl(self, stmts):
                                 pm[pname] = '_Bool'
                             else:
                                 pm[pname] = 'int64_t'
-                        elif (method.name == '__init__'
-                              and pname in self._ctor_lit_param_types.get(s.name, {})):
-                            pm[pname] = self._ctor_lit_param_types[s.name][pname]
+                        elif (_as_str(method.name) == '__init__'
+                              and (_as_str(s.name) + '::' + pname) in self._ctor_lit_param_types):
+                            pm[pname] = self._ctor_lit_param_types[_as_str(s.name) + '::' + pname]
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
@@ -4814,14 +4869,15 @@ def gen_module_impl(self, stmts):
             else:
                 self.func_param_types[s.name] = _free_func_param_ctypes(self, s)
 
-    _ctor_scalar_obs: dict[str, dict[str, set]] = {}   # struct -> {pname -> {types}}
+    _ctor_scalar_obs: dict = {}          # "<struct>::<pname>" -> scalar type
+    _ctor_scalar_conflict: dict = {}     # "<struct>::<pname>" -> True (mixed)
     for caller_name, body in _caller_bodies:
         calls = []
         self._calls_in_stmts(body, calls)
         for call in calls:
             if not isinstance(call.func, IdentExpr):
                 continue
-            struct_name = call.func.name
+            struct_name = _as_str(call.func.name)
             pnames = _ctor_init_params.get(struct_name)
             if not pnames:
                 continue
@@ -4829,25 +4885,41 @@ def gen_module_impl(self, stmts):
                 if i >= len(pnames):
                     break
                 st = _arg_scalar_type(caller_name, a)
-                if st:
-                    _ctor_scalar_obs.setdefault(struct_name, {}).setdefault(
-                        pnames[i], set()).add(st)
+                if not st:
+                    continue
+                _skey = struct_name + '::' + _as_str(pnames[i])
+                _sprev = _ctor_scalar_obs.get(_skey, '')
+                if not _sprev:
+                    _ctor_scalar_obs[_skey] = st
+                elif _sprev != st:
+                    _ctor_scalar_conflict[_skey] = True
 
-    for struct_name, pmap in _ctor_scalar_obs.items():
-        _init = _ctor_init_methods.get(struct_name)
+    for _csn in _ctor_init_params:
+        _init = _ctor_init_methods.get(_csn)
         if not _init:
             continue
-        _ann = {pn: pt for pn, pt in (_init.params or [])}
+        _ann = {}
+        for _ap2 in (_init.params or []):
+            _ann[_as_str(_ap2[0])] = _ap2[1]
         _init_defaults = getattr(_init, 'param_defaults', {}) or {}
-        for pname, types in pmap.items():
-            if types not in ({'double'}, {'char *'}):
-                continue                        # not unanimous double / char *
+        for pname in _ctor_init_params[_csn]:
+            _skey2 = _csn + '::' + pname
+            _st2 = _ctor_scalar_obs.get(_skey2, '')
+            # FLAT dicts + string comparison, NOT `types not in ({'double'},
+            # {'char *'})` over a nested `dict[str, dict[str, set]]`: the
+            # set-of-sets membership test is unreliable self-hosted, and a
+            # nested dict's `.get` returns an untyped int, so neither the
+            # inner membership nor the set comparison worked.
+            if _st2 != 'double' and _st2 != 'char *':
+                continue                        # none, or not unanimous
+            if _ctor_scalar_conflict.get(_skey2):
+                continue                        # mixed scalar evidence
             if _ann.get(pname) is not None:
                 continue                        # respect explicit annotation
             if pname in _init_defaults:
                 continue                        # respect default-value inference
-            resolved_type = 'double' if types == {'double'} else 'char *'
-            self._ctor_lit_param_types.setdefault(struct_name, {})[pname] = resolved_type
+            _resolved_type = _st2
+            self._ctor_lit_param_types[_csn + '::' + pname] = _resolved_type
             for node in _walk_ast(_init.body):
                 if not isinstance(node, AssignStmt):
                     continue
@@ -4857,9 +4929,9 @@ def gen_module_impl(self, stmts):
                     continue
                 v = node.value
                 if isinstance(v, IdentExpr) and v.name == pname:
-                    _fld_types = self.struct_field_types.setdefault(struct_name, {})
+                    _fld_types = self.struct_field_types.setdefault(_csn, {})
                     if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
-                        _fld_types[tgt.member] = resolved_type
+                        _fld_types[tgt.member] = _resolved_type
 
     for _gm_stmt in stmts:
         if isinstance(_gm_stmt, AssignStmt) and isinstance(_gm_stmt.target, IdentExpr):
