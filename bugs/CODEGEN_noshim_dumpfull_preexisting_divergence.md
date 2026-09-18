@@ -1,5 +1,33 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
 
+## Status (2026-09-17, fourth entry — `make bootstrap` NOW PASSES)
+
+`make bootstrap` went green: "PASSED: all 168 output files match across 3
+stages" / "✓ Bootstrap complete — all stages verified". It had been failing on
+four stage1-vs-stage2 `.ast` mismatches (`fire_compiler.ast`, `fire.ast`,
+`module_loader.ast`, `myinterpreter.ast`), all with the same shape: a
+`Generator` node's `iterable` printed as a raw boxed pointer
+(`Generator(target='c', iterable=47038764864, ...)`) in the self-hosted build
+instead of the nested node repr the shim prints
+(`iterable=IdentExpr(name='prefix', ...)`).
+
+Root cause: `.ast` is `repr(ast)`, and the generated per-struct
+`_mojo_repr_<Struct>` (gimple_module_gen.py's reflect section) recurses for a
+boxed `object`-typed field only when that struct/field is listed in the
+hardcoded `struct_boxed_fields` table — it routes through
+`_mojo_generic_elem_repr` (runtime type-tag dispatch) instead of
+`mojo_repr_int`. `Comprehension` has `{'element', 'key'}` in that table;
+`Generator` — added to `struct_field_types` earlier today (commit `5e5d05e`,
+which stopped a 5-module silent drop) — did not, so its `iterable` fell to the
+`mojo_repr_int` branch. Added `struct_boxed_fields['Generator'] = {'iterable'}`.
+
+Verified: a comprehension file's `.ast` is now byte-identical shim↔self-host,
+and `make bootstrap`'s 3-stage byte-identity check passes for all 168 files.
+Full gate still green (all `make check-*`, stdlib dylib 0 skips,
+`compile_stdlib.py` 664/664 0 unexpected). The per-file `--dump` sweep buckets
+are unchanged, because the four bootstrap files are classified by their `.ci`
+(which still differs) before `.ast` is compared.
+
 ## Status (2026-09-17, third entry — the 38-file self-hosted-parser class FIXED)
 
 The largest single `.mojo` class (38 files whose self-hosted `--dump` produced

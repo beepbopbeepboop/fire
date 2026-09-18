@@ -2678,6 +2678,17 @@ def gen_module_impl(self, stmts):
     self.struct_boxed_fields['LambdaExpr'] = {'body'}
     self.struct_boxed_fields['SliceExpr'] = {'obj', 'start', 'stop', 'step'}
     self.struct_boxed_fields['Comprehension'] = {'element', 'key'}
+    # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
+    # node. Its `iterable` is `object` (any AST node), so it must be marked
+    # boxed like Comprehension's `element`/`key`: the generated
+    # `_mojo_repr_<Struct>` then routes it through `_mojo_generic_elem_repr`
+    # (runtime type-tag dispatch) instead of `mojo_repr_int`. Without this,
+    # `repr(ast)` printed the raw boxed pointer as a decimal — the exact
+    # stage1-vs-stage2 `fire_compiler.ast` / `fire.ast` / `module_loader.ast`
+    # / `myinterpreter.ast` mismatches `make bootstrap`'s verify step reports
+    # (`Generator(target='c', iterable=47038764864, ...)` instead of the
+    # nested `IdentExpr(...)` repr).
+    self.struct_boxed_fields['Generator'] = {'iterable'}
     self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
 
     # ELEMENT types for the homogeneous list fields of the AST tables above.
