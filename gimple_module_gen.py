@@ -6618,7 +6618,19 @@ def gen_module_impl(self, stmts):
     _EARLY_DISPATCH_DICTS = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
                              '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
     _EARLY_DISPATCH_SETS = {'_CMP_OPS'}
-    for _gn, _gt in list(self._global_var_types.items()):
+    # Indexed iteration + `_as_str`, NOT `for _gn, _gt in ....items()`: the
+    # self-hosted 2-tuple unpack boxes BOTH slots to int64_t, so `_gn in
+    # self._global_c_decl_types` (plain-str keys) missed, `_gn in
+    # _EARLY_DISPATCH_DICTS` missed, and the final `else` wrote a
+    # decimal-address key with an erased value — `_BIN_OPS`/`_CMP_OPS`
+    # never got the `MojoDict *`/`MojoSet *` cdecl entry this loop exists
+    # to seed, so `_own_overlay_global_ctype`'s container rule could not
+    # return it and the module struct field came out `int64_t _BIN_OPS`
+    # where the shim emits `MojoDict *`.
+    _early_gvt_items = list(self._global_var_types.items())
+    for _egi in range(len(_early_gvt_items)):
+        _gn = _as_str(_early_gvt_items[_egi][0])
+        _gt = _early_gvt_items[_egi][1]
         if _gn in self._global_c_decl_types:
             continue
         if _gn in _EARLY_DISPATCH_DICTS:
