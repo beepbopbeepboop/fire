@@ -667,7 +667,11 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
     for stmt in stmts:
         if not isinstance(stmt, gimple_ctypes.FromImportStmt):
             continue
-        mod = stmt.module
+        # `_as_str`: a bare `.module` FIELD read used unguarded below in
+        # string concatenation (`mod + '.py'`) and as a resolver
+        # argument — the established self-hosted trap (working `==` but
+        # corrupted downstream string ops) for AST struct-field reads.
+        mod = _as_str(stmt.module)
         # A bare `from <name> import ...` naming a compiler `.py` sibling
         # (build_config, ...): `load_module` raises "Only stdlib and test
         # imports supported" and the compiled backend's `except Exception`
