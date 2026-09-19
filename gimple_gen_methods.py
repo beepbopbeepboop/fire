@@ -3692,6 +3692,28 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
     if method == 'rfind' and arg_vals:
         sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
         return 'int64_t', gen._call_expr('int64_t', 'mojo_str_rfind', [('char *', cstr_ov), (sep_type, arg_vals[0])])
+    if method == 'rindex' and arg_vals:
+        # str.rindex(sub) — like rfind but real Python raises ValueError on
+        # a miss instead of returning -1; this codebase's `index`/`rindex`
+        # callers never actually rely on that exception (they've already
+        # checked `sub in s` or a bracket-match count first), so mapping to
+        # the same mojo_str_rfind runtime helper as rfind (rather than
+        # inventing a raising variant) is safe here, exactly like `index`
+        # just below reuses mojo_str_find/mojo_str_find_from. Had NO
+        # lowering case at all before this fix — confirmed via a full grep
+        # for "rindex" across every gimple_gen_*.py — so it silently fell
+        # through to the generic unknown-method stub, returning a bare
+        # `int 0` regardless of the real string/substring. Found via
+        # module_loader.py's own export-signature scanner: `paren_end =
+        # sig.rindex(')')` read back 0 self-hosted (instead of the real
+        # closing-paren index), truncating `params_str` to '' and silently
+        # dropping every parameter from every scanned function's exported
+        # C signature whose Mojo source used generic bracket parameters
+        # (e.g. `def listdir[PathLike: stdPathLike](path: PathLike)`,
+        # which has a second, later ')' the plain .index('(')-paired
+        # .rindex(')') pattern needs to actually find).
+        sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_str_rfind', [('char *', cstr_ov), (sep_type, arg_vals[0])])
     if method == 'index' and arg_vals:
         sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
         if len(arg_vals) >= 2:
