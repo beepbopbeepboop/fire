@@ -1611,15 +1611,19 @@ def _gmi_scan_cpp_nested_imports(self, stmt_list):
     for _gi in stmt_list:
         if isinstance(_gi, (ImportStmt, FromImportStmt)):
             if isinstance(_gi, ImportStmt):
-                for _it_pair in _import_targets(_gi):
-                    _tm, _ta = _it_pair[0], _it_pair[1]
+                # Plain unpack, NOT `for _it_pair in ...: _it_pair[0]` —
+                # subscripting a freshly-iterated tuple is the same
+                # self-hosted trap fixed throughout this file's
+                # FromImportStmt.names handling.
+                for _tm, _ta in _import_targets(_gi):
                     self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
             else:
-                # Same tuple-unpack fix as the top-level scan above
-                # (see that branch's comment) -- this is the nested
-                # (try/if-guarded import) sibling scan.
-                for _nm in getattr(_gi, 'names', []) or []:
-                    _in, _ia = _nm if isinstance(_nm, tuple) else (_nm, None)
+                # `name_alias_strs` + `_fi_name`/`_fi_alias`, NOT the raw
+                # `.names` tuple field — see this file's other
+                # FromImportStmt.names fixes for why.
+                for _nm in (getattr(_gi, 'name_alias_strs', None) or []):
+                    _in = gimple_ctypes._fi_name(_nm)
+                    _ia = gimple_ctypes._fi_alias(_nm)
                     self._cpp_early_global_names.add(_ia if _ia else _in)
         elif isinstance(_gi, AssignStmt) and isinstance(_gi.target, IdentExpr):
             self._cpp_early_global_names.add(_gi.target.name)
@@ -5925,15 +5929,31 @@ def gen_module_impl(self, stmts):
                         inner_assign_targets.add(tgt)
                     elif hasattr(tgt, 'name'):
                         inner_assign_targets.add(tgt.name)
-            # `{_p[0] for _p in inner.params}` not `{pn for pn, _ in ...}`
-            # — tuple-unpack-in-set-comprehension boxing bug: a boxed `pn`
-            # fails to subtract a real param name from `free` below, so
-            # the param leaks in as a spurious capture and the closure's
-            # env struct allocation flips (`_alloc_X_env()` vs `(X *)0`)
-            # run to run — a dominant --dump-full fire.py nondeterminism.
+            # A PLAIN for-loop unpack (`for _pn, _pt in inner.params:`),
+            # NOT a comprehension (`{pn for pn, _ in ...}` — tuple-unpack-
+            # in-a-comprehension boxes `pn` to int64_t self-hosted) and
+            # NOT `for _p in inner.params: _p[0]` either — subscripting a
+            # value obtained by single-var for-loop iteration over a real
+            # AST list field is a SEPARATE, also-confirmed-broken self-
+            # hosted trap (working `==` but corrupted `len()`/hashing on
+            # the subscripted slot; see this file's `FromImportStmt.names`
+            # fixes and the general writeup in bugs/CODEGEN_selfhost_
+            # actual_types_identifier_field_key.md). A plain multi-target
+            # unpack directly in the for-statement (not a comprehension,
+            # not a subscript) is the one shape confirmed safe for
+            # `list[tuple[str, str]]` dataclass fields throughout this
+            # session's fixes (e.g. `gen_func`'s own param-seeding loop).
+            # Previously this WAS `_p[0]`-subscripted (with an `_as_str`
+            # guard) as a fix for the comprehension version — itself the
+            # "dominant --dump-full fire.py nondeterminism" per the
+            # original comment here — but that fix just swapped one
+            # broken shape for the other; confirmed still nondeterministic
+            # this session via `mojoc fire.py --dump-full` run twice in a
+            # row disagreeing with ITSELF at a closure call's argument
+            # count (module_loader.py's `_scan_source` closure).
             _ipn: set = set()
-            for _p in inner.params:
-                _ipn.add(_as_str(_p[0]))
+            for _pn, _pt in inner.params:
+                _ipn.add(_pn)
             inner_declared: set = set()
             for _idv in (_ipn
                          | _declared_vars_body(inner.body)
