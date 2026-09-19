@@ -1,6 +1,90 @@
 # CODEGEN: self-hosted `.name`-field string used as a dict key loses hash identity
 
-## Status: two confirmed chokepoints fixed; general pattern likely recurs elsewhere
+## Status (2026-09-19 update): ~25 real bugs fixed across many commits; root
+## cause of the LAST remaining class crystallized as whole-program
+## compile-order nondeterminism, not yet fixed
+
+This doc started from one narrow finding (below) and grew, over one long
+session, into the tracking doc for `make check-noshim-dumpfull`'s entire
+remaining gap. Summary of what happened, newest first:
+
+- **Whole-program compile-order dependent symbol resolution (OPEN, not
+  fixed)**: after fixing every concrete bug found below, `mojoc fire.py
+  --dump-full` run twice in a row *still* disagrees with itself, now at a
+  `_MOJO_STUB_add`/`_MOJO_STUB_get` vs `gimple_codegen`'s own module-struct
+  section ordering (gimple_gen_calls.py's auto-stub path, gated on
+  `fname_raw not in gen.func_return_types` — true or false depending on
+  whether the DEFINING module has already been compiled by the time this
+  CALLING module's call site is lowered). This is the same shape as every
+  other divergence chased in this doc: `_module_candidate_paths`'s
+  relative-vs-absolute race (fixed), `_MOJO_STUB_GimpleGen_*` count
+  differing by ~378 (documented, not fixed), `_build_config_toplev`
+  appearing in a different position relative to `_shutil_toplev` (fixed
+  differently each time a different upstream nondeterminism source got
+  fixed first), and a closure's registered argument count flipping
+  (fixed). All of them reduce to: **the ~59-module transitive closure
+  gets recursively discovered and compiled in an order that is not
+  guaranteed identical between the python3 shim and the self-hosted
+  binary**, so "is this symbol's real signature/struct/definition already
+  known, or do we need a placeholder/stub/extern-only guess" answers
+  differently depending on that order. A one-at-a-time fix at each
+  manifestation site (this session's whole approach) demonstrably makes
+  real, measurable progress — the self-host-vs-self-host first-
+  disagreement byte offset was pushed from a hard CRASH, through byte
+  99872, 254836, 689905, 4613182, and 6013115 (each a genuine, separately
+  fixed bug) — but each fix only moves WHERE the next disagreement
+  surfaces, because the underlying "order isn't guaranteed identical" fact
+  is still true. **Do not expect the NEXT one-off fix to be the last
+  one** — budget for this as an open-ended architectural property, not a
+  bug count to exhaust. The two real fix strategies, in order of
+  preference:
+  1. **(Recommended, bigger)** Make the recursive module-discovery/compile
+     order itself deterministic and independent of shim-vs-self-host
+     execution — e.g. a two-pass design: pass 1 walks the whole
+     transitive closure collecting every module/symbol's info with NO
+     code emission at all (so its own traversal order literally cannot
+     affect output), pass 2 emits everything in one final pass ordered by
+     `sorted()` over the complete, order-independent knowledge pass 1
+     built. This eliminates the entire class at once instead of chasing
+     individual call sites forever.
+  2. **(What this session did)** Keep bisecting `mojoc fire.py --dump-full`
+     run-twice-in-a-row diffs one manifestation at a time (see "How to
+     continue" below) — real, valid, but open-ended.
+
+- **~25 concrete self-hosted correctness/nondeterminism bugs, FIXED**,
+  across these commits (search the repo log for the exact diffs):
+  "Fix self-hosted comprehension compile-failures and identifier-key hash
+  loss", "Fix self-hosted crash: FromImportStmt.names tuple corruption in
+  gen_module_impl", "Fix FromImportStmt.names tuple-subscript corruption
+  across 19 call sites", "Fix ASLR-dependent %-format literal corruption",
+  "Fix two more single-var-iterate-then-subscript nondeterminism sources",
+  "Fix LayoutSolver/EscapeAnalyzer param-name subscript nondeterminism",
+  "Fix more comprehension/subscript-unpack nondeterminism, plus a real
+  path-boxing bug", "Fix genexpr/comprehension-join string corruption, and
+  module path resolution race". Each commit message has the specific
+  before/after repro and byte-offset evidence. The two dominant *shapes*
+  of bug, useful as a checklist for anyone auditing more call sites:
+  - `for x in some_list: ... x[0]` (or `x[1]`, etc.) — subscripting a
+    value obtained by single-variable for-loop iteration, whether
+    `some_list` is a real AST field (`stmt.names`, `.extra`) or a freshly
+    built list (`_fromimport_names(...)`, `_parse_fstring_parts(...)`,
+    `parts` built by `.append((...))`) — BROKEN (working `==` but
+    corrupted `len()`/hashing on the subscripted slot). Fix: a plain
+    `for a, b in some_list:` unpack directly in the for-statement (NOT a
+    comprehension, NOT a subscript) is the one shape confirmed safe
+    throughout this session for `list[tuple[str, str]]`-shaped data.
+  - `''.join(<comprehension or genexpr>)` — joining a list of computed
+    string PIECES via a comprehension/genexpr, tuple-unpack target or not
+    — BROKEN (produces an erased `_slit` string pool reference, i.e. a
+    raw heap address baked into the generated C as a decimal literal,
+    different every run under ASLR). Fix: an explicit accumulation loop
+    (`out = ''; for x in things: out += f(x)`).
+  Neither `_as_str()` alone (a compile-time type-hint, not a runtime
+  conversion) nor keeping the loop-then-subscript/comprehension SHAPE and
+  merely guarding the extracted value reliably fixes either pattern —
+  both require actually changing the SHAPE to a plain for-loop.
+
+## Original finding (kept for the specific repro), status: two confirmed chokepoints fixed; general pattern likely recurs elsewhere
 
 ## Problem
 
