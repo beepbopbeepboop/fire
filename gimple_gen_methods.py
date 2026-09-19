@@ -1818,12 +1818,35 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # `gimple_codegen.compile_to_gimple(...)` call sites (in
                 # `build_executable` / the `--dump` handler) — silently
                 # truncating those functions from the output.
-                if os.environ.get('MOJO_NO_SHIM'):
-                    # Native path: call compiled compile_to_gimple directly
-                    t = gen._new_val('char *', f"compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
-                else:
-                    # Subprocess path: call C runtime shim
-                    t = gen._new_val('char *', f"gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
+                # Always emit a call to the C runtime wrapper, never the
+                # native `compile_to_gimple` symbol directly: runtime/
+                # fire_runtime.c's `gimple_codegen_compile_to_gimple`
+                # ALREADY does its own `getenv("MOJO_NO_SHIM")` check and
+                # dispatches to the native in-binary `compile_to_gimple`
+                # itself when set, falling back to the subprocess shim
+                # otherwise — the exact same choice this codegen used to
+                # make a SECOND TIME, redundantly, at COMPILE time (of
+                # whichever process happened to be GENERATING this C code
+                # — the python3 shim or a self-hosted `mojoc` compiling
+                # itself — rather than at RUN time of the resulting
+                # program). Checking `os.environ.get('MOJO_NO_SHIM')`
+                # here meant the python3 shim and a self-hosted `mojoc`
+                # compiling the IDENTICAL source (fire.py's own `--dump`/
+                # `--dump-full` handler, which calls THIS exact method)
+                # picked a DIFFERENT call-site text purely because of
+                # which process happened to generate the C — a real,
+                # confirmed source of whole-program `--dump-full`
+                # shim-vs-self-host byte divergence (first observed
+                # divergence after fixing the toplev-struct-duplication
+                # bug: literally this one call, `gimple_codegen_compile_
+                # to_gimple(...)` in the shim's own output vs
+                # `compile_to_gimple(...)` in the self-hosted binary's,
+                # for the exact same source line). Collapsing to always
+                # emit the wrapper call is purely a codegen simplification
+                # with ZERO runtime behavior change: the wrapper's own
+                # `getenv` check already produces the identical dispatch
+                # this branch used to hardcode at the wrong time.
+                t = gen._new_val('char *', f"gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
                 return 'char *', t
 
         # Calls to this module's own compiled sibling modules'

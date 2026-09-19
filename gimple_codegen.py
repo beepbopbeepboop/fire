@@ -4087,6 +4087,78 @@ def _check_ownership(stmts, filename: str) -> None:
     )
 
 
+_TOPLEV_STRUCT_BLOCK_RE = re.compile(
+    r'#ifndef _MOJO_TOPLEV_GUARD_(\w+)\n'
+    r'#define _MOJO_TOPLEV_GUARD_\1\n'
+    r'typedef struct _\1_toplev \{\n'
+    r'(?:.*\n)*?'
+    r'\} _\1_toplev;\n'
+    r'#endif\n'
+)
+
+
+def _dedup_module_toplev_structs(code: str) -> str:
+    """Strip every REPEAT full `typedef struct _<mod>_toplev {...}` block
+    for the same module, keeping only its first (textually earliest)
+    occurrence.
+
+    A `do_imports=True`/link-mode whole-program compile inlines many
+    independently-generated per-module code fragments (gen_module_impl's
+    own "sorted(all_modules_to_declare)" preamble loop AND its "this is
+    MY module" block both independently emit this SAME struct any time a
+    fragment references a sibling module whose globals happen to already
+    be known at that fragment's OWN generation time) — with no
+    cross-fragment coordination, a module reachable from many importers
+    (a common small utility like `build_config`) gets its full struct
+    definition emitted once per REFERENCING fragment, not once per
+    program. Every occurrence is individually valid C (each one's own
+    `#ifndef _MOJO_TOPLEV_GUARD_<mod>` guard makes every occurrence after
+    the first a compile-time no-op) — this is wasteful, not broken, for
+    an ordinary build. But WHICH of a module's several nested,
+    independently-recursing importers happens to be the one whose own
+    per-module compile runs (in PYTHON CALL-STACK / EXECUTION order, not
+    the deterministic textual splice order the outer `sorted(modules_to_
+    compile)` loop uses to assemble the final file) at a point where the
+    referenced module's globals are already known is itself compile-
+    order-dependent, and not guaranteed identical between the python3
+    shim and the self-hosted binary — a real, confirmed source of whole-
+    program `--dump-full` shim-vs-self-host byte divergence (first
+    diverging byte consistently at an offset where the shim and self-
+    host differ only in WHICH already-duplicated struct-definition text
+    appears at that position, never in whether the struct is eventually
+    defined correctly somewhere).
+
+    Deliberately a POST-PROCESSING pass over the FINAL, fully-assembled
+    code string (called exactly once, only at the true top-level
+    `_run_pipeline` entry point — never on an individual nested
+    fragment) rather than a dedup guard threaded through the recursive
+    per-module compiles themselves: an earlier attempt at the latter
+    (tracking "already emitted" during generation, shared across nested
+    temp_gen instances) broke `make mojoc`'s own build with "invalid use
+    of undefined type" errors, because that in-flight tracking follows
+    PYTHON EXECUTION order, which can genuinely differ from the file's
+    own final TEXTUAL order (a module compiled early, in Python call-
+    stack terms, because an EARLIER-executing importer happens to depend
+    on it, can still end up spliced LATER in the final file if the outer
+    sorted-by-module-name loop places it there) — a module needing an
+    EARLIER textual position's full definition could end up with only
+    the later one, an actual "incomplete type" compile error. Operating
+    on the finished text sidesteps that mismatch entirely: every
+    occurrence found here is already in genuine final file order, so
+    keeping strictly the first and discarding the rest can never move a
+    definition to a later position than any of its own real uses."""
+    seen: set[str] = set()
+
+    def _repl(m: re.Match) -> str:
+        name = m.group(1)
+        if name in seen:
+            return ''
+        seen.add(name)
+        return m.group(0)
+
+    return _TOPLEV_STRUCT_BLOCK_RE.sub(_repl, code)
+
+
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False):
     """Shared driver behind every public compile_* entry point.
@@ -4216,7 +4288,10 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     if do_imports or link_mode:
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
-    return gen.gen_module(stmts), gen
+    code = gen.gen_module(stmts)
+    if do_imports or link_mode:
+        code = _dedup_module_toplev_structs(code)
+    return code, gen
 
 
 def compile_to_c(mojo_src: str) -> str:
