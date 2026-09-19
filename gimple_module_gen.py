@@ -7517,28 +7517,56 @@ def gen_module_impl(self, stmts):
             _seed.add(_as_str(_e[0]) + '\x00' + _as_str(_e[1])
                       + '\x00' + _as_str(_e[2]))
         self._module_global_names[current_mod_name] = _seed
-    _dispatch_dict_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                            '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
-    _dispatch_set_names = {'_CMP_OPS'}
     _declared_globals = {}  # dict not set: self-hosted `sorted(<set>)` at the field-order loop below sorts boxed str slots by ADDRESS (nondeterministic _<mod>_toplev field order in --dump-full); dict keys sort by content via mojo_dict_sorted_keys
     all_scan = stmts
     for stmt in all_scan:
         if isinstance(stmt, FromImportStmt):
-            for alias in stmt.names:
-                # `_as_str` on both tuple slots: `alias[0]`/`alias[1]` come
-                # back boxed self-hosted, so `check_name in
-                # _dispatch_dict_names` (a set of plain strs) missed and a
-                # `from generated_dispatch import _EXPR_DISPATCH` /
-                # `_FLOAT` / `_STMT_DISPATCH` / `_BIN_OPS` alias never got
-                # its `MojoDict *` field in the importing module's
-                # `_<mod>_toplev` struct (the shim emitted it), nor did the
-                # alias name land in `_global_var_types` for
-                # `_phase17_value_type` to resolve a later `X = <alias>`
-                # RHS against.
-                orig_name = _as_str(alias[0])
-                _alias_local = _as_str(alias[1]) if len(alias) > 1 else ''
+            # Rebuilt fresh on every iteration of this loop, NOT hoisted
+            # above it, and as plain LISTS with a manual membership loop,
+            # NOT `set` literals checked with `in`: a `set`/`dict` literal
+            # here (whether hoisted above this whole `for stmt in
+            # all_scan:` loop or rebuilt fresh per-FromImportStmt — both
+            # tried) intermittently (not every run — heap-layout/ASLR-
+            # dependent, ~3 times out of 4) came back invalid by the time
+            # it was READ, always while compiling module_loader.py
+            # (reached partway through fire.py's `--dump-full` transitive
+            # closure, i.e. after at least one prior recursive
+            # `_compile_imported_module` call — this loop's OTHER branch,
+            # `elif isinstance(stmt, ImportStmt)` below, re-enters this
+            # very function for a nested import — had already returned).
+            # Real memory corruption (`mojo_set_contains_str`/`_str_hash`
+            # segfault reading the MojoSet's own bucket array), not a
+            # value-correctness issue, and neither hoisting location fixed
+            # it — plain lists + `==` sidestep the MojoSet/MojoDict
+            # runtime entirely for this specific (tiny, cold) check.
+            _dispatch_dict_names = ['_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
+                                    '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT']
+            _dispatch_set_names = ['_CMP_OPS']
+            # `stmt.name_alias_strs` + `_fi_name`/`_fi_alias`, NOT
+            # `stmt.names`/`alias[0]`/`alias[1]` — `FromImportStmt.names`
+            # is `list[(str, str|None)]`, and its OWN dataclass docstring
+            # (fire_compiler.py) already documents that these tuples "box
+            # their str slots to int64_t self-hosted"; `name_alias_strs`
+            # (a flat `list[str]` of `"name"`/`"name|alias"` composites,
+            # with `_fi_name`/`_fi_alias` as the established accessors —
+            # see `_register_sym`'s call above in this same file) is the
+            # existing, already-correct workaround. Confirmed via `mojoc
+            # fire.py --dump-full`: the OLD `alias[0]`/`alias[1]` pattern
+            # (even after `_as_str`-guarding both slots, and after trying
+            # both a tuple-literal loop AND a plain list loop over the
+            # extracted names) produced a garbage `char *` about 3 times
+            # out of 4 runs — `len(alias)` itself came back 5 for a plain
+            # `from pathlib import Path` (should be a 2-tuple) — a real
+            # self-hosted tuple-representation bug in `stmt.names` itself,
+            # not fixable by guarding what's read FROM it.
+            for _fip in (getattr(stmt, 'name_alias_strs', None) or []):
+                orig_name = gimple_ctypes._fi_name(_fip)
+                _alias_local = gimple_ctypes._fi_alias(_fip)
                 local_name = _alias_local if _alias_local else orig_name
-                for check_name in (orig_name, local_name):
+                _check_names = [orig_name]
+                if local_name != orig_name:
+                    _check_names.append(local_name)
+                for check_name in _check_names:
                     if check_name in _dispatch_dict_names and check_name not in _declared_globals:
                         global_decls.append(f"MojoDict * {check_name};")
                         _declared_globals[check_name] = True
