@@ -299,3 +299,59 @@ rebuild `mojoc` fresh (`rm -f mojoc && make mojoc`) before trusting any
 aside/bside sweep number**, since `make mojoc`'s Makefile rule only lists
 `fire.py` + runtime files as prerequisites (not its full transitive
 closure), so `make mojoc` alone frequently no-ops on a stale binary.
+
+## Update 2026-09-19: shift to per-file `--dump` sweep; a THIRD open bug found
+
+Per-file `tools/ab_compare.py` sweep (`make -j8 aside bside`, 779 files)
+after all the above fixes: **clean=40, CI-DIFF=698, SELFHOST-CRASHED=22,
+AST/TOK-DIFF=14** — barely moved from the session's very first sweep
+(clean=40, CI-DIFF=696). This does NOT mean the fixes were wasted — most
+of them measurably shrank individual files' divergence or fixed crashes
+without flipping the file to fully "clean" (e.g. `unescape_c.py`'s
+function body went from diverging at byte 29388 to matching byte-for-byte,
+but its `__main__`/toplevel block still differs from an unrelated cause) —
+but it does mean full per-file byte-identity is still far off and the
+right next unit of work is "pick ONE small file, drive it to genuinely
+zero diff" rather than continuing to survey.
+
+Picked `gimple_exprtypes.py --dump` (small, `do_imports=False` so no
+whole-program recursion, first-diff at byte 11225) and traced it past two
+real, now-fixed bugs (`gen._link_import_decl_list` — see the `stmt.module`
+`_as_str` guard and `os.path.join`→`+` fixes, both committed) to a THIRD,
+NOT YET FOUND bug: `exports.get(name)` in `_emit_imported_global_accessors`
+(gimple_gen_infra.py) misses for a stable 2-of-6 subset of
+`gimple_ctypes.py`'s real `global_var` exports, every self-hosted run,
+even after both `name` (verified byte-correct via `len()`) and the lookup
+path (`_cand`) are confirmed clean. Two direct fix attempts (rewriting
+`_fi_name`/`_fi_alias` to avoid slicing; fixing `os.path.join`) each
+independently verified to make ZERO difference to which 2 entries are
+missing — meaning the corruption is upstream of this function entirely,
+most likely inside `module_loader.py`'s own regex-based export-text-scan
+or its `ModuleLoader._path_cache` dict (`if path in self._path_cache:
+return self._path_cache[path]` — itself a dict keyed by a string that's
+been through the same corruption-prone construction chain). **Not
+investigated inside module_loader.py itself this session** — that file
+was never opened/edited. This is the concrete next step: instrument
+`module_loader.py`'s own export scan the same MOJO_DEBUG-gated way (see
+`_debug_note` — already removed from the current commit, re-add fresh) to
+find which of the 2 missing exports' names are actually present in
+`ModuleLoader`'s internal parse result vs silently dropped/mis-keyed.
+
+**How to continue efficiently**: this exact investigation (one small
+`--dump`, single-file, `do_imports=False`) took roughly a dozen
+print-debug-rebuild-test cycles at ~2-3 minutes each to get this far,
+each narrowing the search by eliminating one hypothesis. The pattern
+that worked: add 2-3 `gimple_ctypes._debug_note(tag, value)` calls
+bracketing a suspected function boundary, gated `if mod == 'gimple_ctypes'`
+(or similarly scoped to the ONE reproducing case) so the debug output
+stays small; run shim first (`MOJO_DEBUG=1 python3 fire.py --dump
+gimple_exprtypes.py`, no rebuild needed, instant); THEN `rm -f mojoc &&
+make mojoc` (the slow step, ~2 min) and re-run self-hosted
+(`MOJO_DEBUG=1 MOJO_NO_SHIM=1 MOJO_HOME=$PWD ./mojoc
+$PWD/gimple_exprtypes.py --dump`); compare the two debug traces by eye
+(they're short). Move the debug points one function deeper into whichever
+side looks suspicious, repeat. This is the exact iota+hash technique from
+HOW-TO-DEBUG.html §8b at a coarser grain (values instead of a rolling
+hash) — reach for the real rolling-hash+lldb version once a single
+function's own internals need bisecting rather than a handful of call
+sites across a short chain.
