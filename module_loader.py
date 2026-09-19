@@ -551,7 +551,42 @@ class ModuleLoader:
             # (they weren't the crash and their undeclared->0 fallback, while
             # imprecise, is not a hard failure).
             _selfhost_dir = os.path.dirname(os.path.abspath(__file__))
-            if path.endswith('.py') and os.path.dirname(os.path.abspath(path)) == _selfhost_dir:
+            # STILL OPEN (see bugs/CODEGEN_selfhost_actual_types_identifier_
+            # field_key.md's "module_loader.py" section for the full trail):
+            # the original `os.path.dirname(os.path.abspath(path)) ==
+            # _selfhost_dir` string compare is FALSE self-hosted even though
+            # both operands are, by construction, "the directory containing
+            # this compiler's own .py files" computed the identical way
+            # (`dirname(abspath(__file__))`) from two different modules
+            # (gimple_codegen.py's module-level `_SELFHOST_DIR` vs this
+            # function's own local `_selfhost_dir`). Ruled out empirically,
+            # in order: (1) string-hash corruption in the `==` itself --
+            # `os.path.dirname`/`os.path.abspath`'s return values came back
+            # with a working `os.path.isfile()` but a corrupted `len()`
+            # (same failure class as `os.path.join`'s return value, fixed
+            # elsewhere in this session), so switched the comparison to
+            # `os.path.samefile()` (a stat()-based directory-IDENTITY check,
+            # not a string compare) to sidestep it entirely -- but (2)
+            # `samefile()` ALSO reports the two directories as different,
+            # meaning this isn't just a string-representation artifact: the
+            # two independently-computed "self-host source directory"
+            # values are ACTUALLY resolving to different real filesystem
+            # locations self-hosted, for a reason not yet found (candidates:
+            # `__file__`'s compiled-in placeholder value differs per module
+            # rather than being the uniform "<bootstrap>" this session
+            # otherwise assumed everywhere; or CWD itself somehow differs
+            # between when gimple_codegen.py's module-level constant gets
+            # evaluated vs when this function runs). `samefile()` is kept
+            # regardless -- it is strictly more correct than the string
+            # compare it replaced and correctly returns False here rather
+            # than papering over a still-real mismatch with a coincidental
+            # string comparison that used to sometimes match by luck.
+            try:
+                _selfhost_gate = os.path.samefile(
+                    os.path.dirname(os.path.abspath(path)), _selfhost_dir)
+            except OSError:
+                _selfhost_gate = False
+            if path.endswith('.py') and _selfhost_gate:
                 import re as _re_py
                 _pydir = os.path.dirname(path)
                 # `NAME = frozenset(...)` / `set(...)` -> boxed int64_t accessor
