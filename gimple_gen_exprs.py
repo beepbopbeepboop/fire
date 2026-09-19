@@ -2718,7 +2718,13 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 # string literal whose content starts/ends with a quote
                 # (found chasing make bootstrap's verify byte-identity
                 # failures back to their real, non-cosmetic root cause).
-                actual = gen._actual_types.get(var)
+                # `_as_str(var)` — see `_track_pointer_actual_type`'s
+                # identical guard on the WRITE side for why: `var` here
+                # is an identifier's `.name` field (from `lv`/`rv` via
+                # `_lower_IdentExpr`), and looking it up in
+                # `gen._actual_types` without this normalization missed
+                # entries inserted under the byte-identical string.
+                actual = gen._actual_types.get(_as_str(var))
                 is_tracked_char = (actual == 'char')
                 if typ == 'char' or is_tracked_char or (
                         not is_other_str_lit and typ in ('int', 'int64_t')

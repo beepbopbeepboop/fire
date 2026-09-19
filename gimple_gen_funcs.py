@@ -2580,6 +2580,22 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # _quick_type can resolve param names during the pre-pass. Unannotated
     # params use the inferred type (incl. cross-call scalar contract, e.g. a
     # double param), not the int64_t default, so return inference is right.
+    #
+    # Plain `for pname, ptype in node.params:` — NOT indexed access
+    # (`node.params[_pi][0]`). That double-subscript form was tried here
+    # and is itself broken on the self-hosted path: it comes back with a
+    # working `==`/`.startswith()` but a BROKEN `len()` (reported 0 for a
+    # real 1-char string) and every `in`/`.get()` dict lookup against it
+    # misses, even though a plain for-loop unpack over the exact same
+    # `list[tuple[str, str]]` hashes correctly. Confirmed via
+    # unescape_c.py's `s` parameter: with indexed access, `_infer_param_
+    # types`'s correctly-computed `{'s': 'char *'}` entry existed in
+    # `gen._inferred_param_types['unescape_c']` but `.get(pname)` here
+    # still missed it and fell through to the int64_t default; switching
+    # this loop back to a plain unpack fixed it. Do not "index-ify" this
+    # loop, or any other `for name, type in <FunctionDef>.params:` loop —
+    # only tuple-of-tuples built ad hoc at runtime (e.g.
+    # analyze_param_usage's `==`/`+` operand scans) need the indexed fix.
     for pname, ptype in node.params:
         bare = pname.lstrip('*')
         if pname.startswith('*'):
@@ -2727,8 +2743,19 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._struct_layout = solver.solve(node.params, node.body)
 
     param_strs = []
-    has_varargs = any(pname.startswith('*') for pname, _ in (node.params or []))
+    has_varargs = gimple_ctypes._params_have_vararg(node.params)
     seen_varargs = False
+    # Plain `for pname, ptype in node.params:` — NOT indexed. Unlike a
+    # tuple-of-tuples built ad hoc at runtime (see analyze_param_usage's
+    # `==`/`+` operand scans), a for-loop unpack over `node.params`
+    # itself (a real, statically-typed `list[tuple[str, str]]` dataclass
+    # field) lowers correctly on the self-hosted path — CONFIRMED by
+    # direct comparison: `node.params[_pi][0]` (double subscript) came
+    # back with a working `==`/`.startswith()` but a BROKEN `len()`
+    # (reported 0 for a real 1-char string) and dict-membership lookups
+    # against it always missed, while the plain unpack's `pname` had a
+    # correct `len()` and dict lookups worked. Do not "fix" this shape
+    # to indexed access — that conversion is what's actually broken here.
     for pname, ptype in node.params:
         bare = pname.lstrip('*')
         if pname.startswith('**'):
@@ -4335,7 +4362,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._struct_layout = solver.solve(node.params, node.body)
 
     method_full_name = f"{struct_name}_{node.name}"
-    has_varargs = any(pn.startswith('*') for pn, _ in (node.params or []))
+    has_varargs = gimple_ctypes._params_have_vararg(node.params)
     param_strs = []
     if has_varargs:
         # Keep self + any fixed params before *args, then pack the rest; e.g.

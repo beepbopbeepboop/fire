@@ -1790,7 +1790,20 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 scan_expr(expr.obj)
             elif isinstance(expr, gimple_ctypes.BinaryOp):
                 if expr.op == '==':
-                    for a, b in ((expr.left, expr.right), (expr.right, expr.left)):
+                    # Indexed, NOT `for a, b in (...)` — a multi-target
+                    # unpack over a tuple of AST-node pairs boxes both
+                    # slots to int64_t on the self-hosted path (the same
+                    # trap already fixed for the dispatch-cdecl reconcile
+                    # loop and the module-global scan; see those commits),
+                    # after which `isinstance(a, ...)` is always False and
+                    # `is_char_compared` never gets set. Confirmed via
+                    # unescape_c.py's `next_char == '\\'`-style char
+                    # compares flipping the enclosing param's inferred type
+                    # between `char *` (shim) and `MojoList *` (self-host).
+                    _eq_pairs = ((expr.left, expr.right), (expr.right, expr.left))
+                    for _pi in range(2):
+                        a = _eq_pairs[_pi][0]
+                        b = _eq_pairs[_pi][1]
                         is_direct = (isinstance(a, gimple_ctypes.SubscriptExpr)
                                      and not isinstance(a.index, gimple_ctypes.SliceExpr)
                                      and isinstance(a.obj, gimple_ctypes.IdentExpr)
@@ -1812,7 +1825,12 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # str-only method call, no subscript) and defaulted
                     # to int64_t, so the coroutine body's co_yield hit
                     # "invalid conversion from 'int64_t' to 'char*'".
-                    for _a, _b in ((expr.left, expr.right), (expr.right, expr.left)):
+                    # Indexed, NOT `for _a, _b in (...)` — same self-hosted
+                    # boxed-2-tuple-unpack trap as the `==` case just above.
+                    _add_pairs = ((expr.left, expr.right), (expr.right, expr.left))
+                    for _pi in range(2):
+                        _a = _add_pairs[_pi][0]
+                        _b = _add_pairs[_pi][1]
                         if not _is_param_ident(_a):
                             continue
                         if _expr_is_stringish(_b):

@@ -76,6 +76,28 @@ def _debug_note(where: str, detail: object = '') -> None:
     if os.environ.get('MOJO_DEBUG'):
         print(f"[gimple_codegen] {where}: {detail}", flush=True)
 
+
+def _params_have_vararg(params: list) -> bool:
+    """True if any `(name, type)` pair in `params` is a `*args`/`**kwargs`
+    slot (name starts with `*`).
+
+    Indexed, NOT `any(pn.startswith('*') for pn, _ in params)` — a
+    generator-expression target unpack over a `list[tuple[str, str]]`'s
+    elements boxes both slots to int64_t on the self-hosted path, which
+    GCC then rejects outright as undeclared C identifiers (`'pn'
+    undeclared`) — a hard compile failure, not just a silently-wrong
+    value, first exposed when an unrelated edit forced this file's
+    CAS-cached object to be retranspiled from scratch. This single
+    helper replaces ~8 duplicated copies of the same broken idiom across
+    gimple_module_gen.py.
+    """
+    if not params:
+        return False
+    for i in range(len(params)):
+        if params[i][0].startswith('*'):
+            return True
+    return False
+
 # ---------------------------------------------------------------------------
 # TypeLattice — C11 usual arithmetic conversions + container helpers
 # ---------------------------------------------------------------------------

@@ -3890,7 +3890,7 @@ def gen_module_impl(self, stmts):
             self.func_return_types[s.name] = self._resolve_type(s.return_type)
         _s_pts = None
         if isinstance(s, FunctionDef) and s.params:
-            if any(pn.startswith('*') for pn, _ in s.params):
+            if gimple_ctypes._params_have_vararg(s.params):
                 _s_pts = self._signature_ctypes(s.params, s)
                 self.func_param_types[s.name] = _s_pts
                 self._note_vararg_trailing_param_types(s)
@@ -4582,9 +4582,21 @@ def gen_module_impl(self, stmts):
                 # raw `cls->_attr` field store on a non-struct ("request
                 # for member ... in something not a structure or union").
                 _meth_is_cls = 'classmethod' in (getattr(meth, 'decorators', None) or [])
-                pnames = [pn for pn, _ in (meth.params or [])
-                          if pn != 'self' and not (_meth_is_cls and pn == 'cls')
-                          and not pn.startswith('*')]
+                # `[pn for pn, _ in (meth.params or [])...]` doesn't
+                # compile self-hosted (comprehension target unpack), but
+                # the fix is a plain for-loop unpack, NOT indexed access
+                # (`meth.params[_pi][0]`) — that double-subscript form is
+                # itself broken (working `==` but broken `len()`/dict-key
+                # hashing; see `ann`'s identical fix above). `pnames[i]`
+                # ends up used as an `obs` DICT KEY below, and later
+                # matched by `.get(pname)` against `ann` (now a properly-
+                # hashed dict), so a corrupted-hash key here would break
+                # that match even though `ann` itself is fixed.
+                pnames = []
+                for _pn, _pt in (meth.params or []):
+                    if (_pn != 'self' and not (_meth_is_cls and _pn == 'cls')
+                            and not _pn.startswith('*')):
+                        pnames.append(_pn)
                 for i, a in enumerate(call.args):
                     if i >= len(pnames):
                         break
@@ -4602,7 +4614,20 @@ def gen_module_impl(self, stmts):
             if meth is None:
                 continue
             key = f"{rstruct}_{mname}"
-            ann = {pn: pt for pn, pt in (meth.params or [])}
+            # `{pn: pt for pn, pt in (meth.params or [])}` doesn't even
+            # COMPILE self-hosted (a comprehension's target unpack over a
+            # `list[tuple[str, str]]` boxes both slots to int64_t, which
+            # GCC then rejects as undeclared C identifiers) — but the fix
+            # is a plain multi-line for-loop unpack, NOT indexed access
+            # (`meth.params[_ai][0]`): that double-subscript form is
+            # itself broken (confirmed via unescape_c.py's `s` parameter —
+            # a working `==`/`.startswith()` but a broken `len()` and
+            # broken dict-key hashing), and `ann` here is looked up by
+            # `.get(pname)` below using a properly-typed string, which
+            # would miss every entry inserted under a corrupted-hash key.
+            ann = {}
+            for _ap, _at in (meth.params or []):
+                ann[_ap] = _at
             defaults = getattr(meth, 'param_defaults', {}) or {}
             for pname, types in pmap.items():
                 if types not in ({'double'}, {'char *'}):
@@ -4673,7 +4698,7 @@ def gen_module_impl(self, stmts):
         if _is_foreign_main(s):
             continue
         if isinstance(s, FunctionDef):
-            if s.params and any(pn.startswith('*') for pn, _ in s.params):
+            if gimple_ctypes._params_have_vararg(s.params):
                 self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 self._note_vararg_trailing_param_types(s)
             else:
@@ -4686,7 +4711,7 @@ def gen_module_impl(self, stmts):
                 method_full_name = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 if method_full_name in self._selfhost_locked_param_types:
                     continue
-                if m.params and any(pn.startswith('*') for pn, _ in m.params):
+                if gimple_ctypes._params_have_vararg(m.params):
                     self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, s.name)
                 else:
                     param_ctypes = []
@@ -4736,7 +4761,7 @@ def gen_module_impl(self, stmts):
                 # methods are skipped — their flat positional model doesn't
                 # apply (same exclusion `_signature_ctypes`' branch above
                 # already makes).
-                if not (m.params and any(pn.startswith('*') for pn, _ in m.params)):
+                if not (gimple_ctypes._params_have_vararg(m.params)):
                     _m_dflts = getattr(m, 'param_defaults', None) or {}
                     if _m_dflts:
                         self._func_param_defaults.setdefault(method_full_name,
@@ -4922,7 +4947,7 @@ def gen_module_impl(self, stmts):
         if _is_foreign_main(s):
             continue
         if isinstance(s, FunctionDef):
-            if s.params and any(pn.startswith('*') for pn, _ in s.params):
+            if gimple_ctypes._params_have_vararg(s.params):
                 self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 self._note_vararg_trailing_param_types(s)
             else:
@@ -5057,7 +5082,13 @@ def gen_module_impl(self, stmts):
         self.func_param_types[f"{base}_start"] = param_ctypes
         _gen_dflts = getattr(s, 'param_defaults', None) or {}
         if _gen_dflts:
-            _dflt_list = [(pn, dv) for pn, dv in _gen_dflts.items()]
+            # Indexed key lookup, NOT `[(pn, dv) for pn, dv in
+            # _gen_dflts.items()]` — same self-hosted boxed-tuple-unpack
+            # trap: a comprehension target unpack over `.items()`'s
+            # (key, value) pairs boxes both slots to int64_t.
+            _dflt_list = []
+            for _dk in _gen_dflts:
+                _dflt_list.append((_dk, _gen_dflts[_dk]))
             self._func_param_defaults[f"{base}_start"] = _dflt_list
             # Cross-module call sites register from this snapshot (their own
             # _func_param_defaults never saw the defining module's pass).
@@ -5740,7 +5771,7 @@ def gen_module_impl(self, stmts):
         if _is_foreign_main(s):
             continue
         if isinstance(s, FunctionDef):
-            if s.params and any(pn.startswith('*') for pn, _ in s.params):
+            if gimple_ctypes._params_have_vararg(s.params):
                 self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 self._note_vararg_trailing_param_types(s)
             else:
@@ -6820,7 +6851,7 @@ def gen_module_impl(self, stmts):
                     continue
                 _seen_vtable_members.add(safe_mname)
                 ret    = self._resolve_type(m.return_type)
-                if m.params and any(pn.startswith('*') for pn, _ in m.params):
+                if gimple_ctypes._params_have_vararg(m.params):
                     ptypes = 'MojoList *'
                 else:
                     ptypes = (', '.join(self._resolve_type(pt) for _, pt in m.params)
@@ -6861,7 +6892,20 @@ def gen_module_impl(self, stmts):
     for fdef in func_defs:
         if fdef.name == 'main':
             continue
-        if fdef.params and any(pn.startswith('*') for pn, _ in fdef.params):
+        # `gimple_ctypes._params_have_vararg` — NOT `for pn, _ in
+        # fdef.params`: a genexpr/comprehension target unpack over a
+        # tuple-of-tuples built ad hoc boxes both slots to int64_t on the
+        # self-hosted path (see analyze_param_usage's `==`/`+` operand
+        # scans). But the actual `pn in inferred_params` / `pn, pt in
+        # fdef.params` loop just below is left as a PLAIN unpack, not
+        # converted to `fdef.params[_pi][0]` indexing: that double-
+        # subscript form was tried and is itself broken here — confirmed
+        # via unescape_c.py's `s` parameter, where `fdef.params[_pi][0]`
+        # came back with a working `==` but a broken `len()` (reported 0
+        # for a real 1-char string) and every `in inferred_params` dict-
+        # membership check against it missed, whereas the plain unpack's
+        # `pn` hashes correctly. Do not "index-ify" this loop.
+        if gimple_ctypes._params_have_vararg(fdef.params):
             self.func_param_types[fdef.name] = self._signature_ctypes(fdef.params, fdef)
             self._note_vararg_trailing_param_types(fdef)
         else:
@@ -8697,8 +8741,19 @@ def gen_module_impl(self, stmts):
         if fdef.name in self._unsupported_generator_names:
             continue
         ret    = self.func_return_types.get(fdef.name, 'int64_t')
-        has_varargs = any(pn.startswith('*') for pn, _ in (fdef.params or []))
-        if has_varargs:
+        # This SECOND, later computation of `param_ctypes`/
+        # `func_param_types` OVERWRITES the earlier forward-declaration
+        # pass's result, so leaving it on a broken pattern silently
+        # discards a fix made up there. `gimple_ctypes._params_have_
+        # vararg` is safe (see its own docstring); the `pn, pt in
+        # fdef.params` loop below is left as a PLAIN unpack, NOT indexed
+        # (`fdef.params[_pi][0]`) — that double-subscript form was tried
+        # here and is itself broken: confirmed via unescape_c.py's `s`
+        # parameter, where `fdef.params[_pi][0]` had a working `==` but a
+        # broken `len()` (reported 0 for a real 1-char string), so every
+        # `in inferred_params` / `.get(_bare_pn)` dict lookup against it
+        # missed even though the plain unpack's `pn` hashes correctly.
+        if gimple_ctypes._params_have_vararg(fdef.params):
             param_ctypes = self._signature_ctypes(fdef.params, fdef, sentinel='MojoList *')
             self.func_param_types[fdef.name] = self._signature_ctypes(fdef.params, fdef)
             self._note_vararg_trailing_param_types(fdef)
@@ -8753,7 +8808,7 @@ def gen_module_impl(self, stmts):
             per_overload_params = self.func_param_types.get(mangled_name)
             if per_overload_params is not None:
                 param_ctypes = per_overload_params
-            elif any(pn.startswith('*') for pn, _ in (m.params or [])):
+            elif gimple_ctypes._params_have_vararg(m.params):
                 param_ctypes = self._signature_ctypes(m.params, m, sd.name, sentinel='MojoList *')
                 self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, sd.name)
             else:

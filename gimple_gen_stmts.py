@@ -660,7 +660,27 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
     `rest` with no actual-type record at all: found via
     fire_compiler.py's own _strip_string_prefix_and_quotes, where
     `len(rest)`/`rest[0]` on the tuple-unpacked `rest` misread it as a
-    MojoList* and segfaulted deep in mojo_list_get_int."""
+    MojoList* and segfaulted deep in mojo_list_get_int.
+
+    `_as_str(tname)` — a CHOKEPOINT guard (the same pattern `_new_temp`
+    uses for `ctype`). `tname` here is an IdentExpr's `.name` FIELD read
+    (`tgt.name` at the call site), not a local variable — and a struct
+    field of static type `str` apparently still round-trips through this
+    self-hosted backend's generic int64_t erasure in a way plain string
+    locals/params don't: `==`/`.startswith()` against it worked (byte
+    contents intact) but `len()` on it returned 0 and every dict lookup
+    keyed by it missed, even immediately after inserting a `char` entry
+    UNDER that exact key in this exact call (confirmed with
+    `/tmp/mojo_repro/t1.py`'s `c = s[0]; if c == 'x': ...` — the minimal
+    repro: `gen._actual_types['c'] = 'char'` here, followed one
+    statement later by `gen._actual_types.get('c')` at the comparison
+    site, returned None on self-host despite an identical-content key).
+    This is very likely the SAME root cause behind the ~696/779-file
+    CI-DIFF the aside/bside sweep found across the whole stdlib, since
+    `_actual_types`-by-identifier-name tracking is used pervasively for
+    char/string dispatch. See bugs/CODEGEN_selfhost_actual_types_
+    identifier_field_key.md for the still-open general form of this."""
+    tname = _as_str(tname)
     if dst != 'int64_t':
         if v in gen._struct_field_owners:
             gen._struct_field_owners[tname] = list(gen._struct_field_owners[v])
