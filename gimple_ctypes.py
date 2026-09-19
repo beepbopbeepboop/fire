@@ -1332,21 +1332,45 @@ def _import_local_names(node: ImportStmt) -> list:
 
 
 def _fi_name(entry) -> str:
-    """Name half of a `name|alias` composite (FromImportStmt.name_alias_strs)."""
+    """Name half of a `name|alias` composite (FromImportStmt.name_alias_strs).
+
+    Built by explicit character concatenation, NOT `_s[:_i]` slicing:
+    `_as_str()` on the slice result does NOT fix this (tried and
+    confirmed still broken) -- `_as_str` is a compile-time type-hint
+    with CPython identity semantics, not a runtime re-box, so it cannot
+    repair a value whose underlying representation is genuinely
+    different from an ordinarily-constructed string. A sliced string
+    came back with a working `==`/correct `len()` but a corrupted dict-
+    key hash self-hosted (confirmed via a per-file aside/bside sweep on
+    gimple_exprtypes.py --dump: `exports.get(name)` missed for every
+    ALIASED import name -- the ones needing this slice -- while plain,
+    unsliced names looked up fine). Concatenating one character at a
+    time is the established safe construction shape elsewhere this
+    session (see gimple_gen_exprs.py's `_lower_StringLiteral`/`_lit_
+    bytes` fixes)."""
     _s = _as_str(entry)
     _i = _s.find('|')
-    return _s[:_i] if _i >= 0 else _s
+    if _i < 0:
+        return _s
+    _out = ''
+    for _ci in range(_i):
+        _out += _s[_ci]
+    return _out
 
 
 def _fi_alias(entry) -> str:
-    """Alias half of a `name|alias` composite, or None when unaliased."""
+    """Alias half of a `name|alias` composite, or None when unaliased.
+    Built by explicit character concatenation -- see `_fi_name`'s
+    docstring for why, not `_s[_i+1:]` slicing."""
     _s = _as_str(entry)
     _i = _s.find('|')
     if _i < 0:
         return None
-    _a = _s[_i + 1:]
-    if _a:
-        return _a
+    _out = ''
+    for _ci in range(_i + 1, len(_s)):
+        _out += _s[_ci]
+    if _out:
+        return _out
     return None
 
 

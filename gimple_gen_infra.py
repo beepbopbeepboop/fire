@@ -718,12 +718,34 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
             # compiler `.py` lives in one directory) and is already the
             # value the rest of the self-host machinery keys off.
             _sd = gimple_codegen._SELFHOST_DIR
-            _cand = gimple_ctypes.os.path.join(_sd, mod.split('.')[-1] + '.py')
+            # Plain `+` concatenation, NOT `os.path.join(_sd, ...)`: the
+            # os.path.join RETURN VALUE itself came back with a working
+            # `os.path.isfile()`/`open()` (content intact) but a
+            # corrupted `len()` self-hosted — a real, independently
+            # confirmed bug (fixed here), though NOT the cause of the
+            # `exports.get(name)` misses documented just below: that
+            # symptom is UNCHANGED with this fix applied, so its root
+            # cause is deeper still (see the tracking doc).
+            _cand = _sd + '/' + mod.split('.')[-1] + '.py'
             if gimple_ctypes.os.path.isfile(_cand):
                 exports = _mlmod2._module_loader.load_module_from_path(_cand)
                 qual = _mlmod2.module_name_for_path(_cand)
         if not exports or not qual:
             continue
+        # `exports.get(name)` misses for a stable, reproducible SUBSET
+        # of gimple_ctypes.py's real `global_var` exports self-hosted
+        # (confirmed via aside/bside on gimple_exprtypes.py --dump: 2 of
+        # 6 imported names always miss, the same 2 every run) even
+        # though: `name` is byte-correct (`_fi_name` verified via
+        # `len()`), rewriting `_fi_name` to build the string via
+        # character-by-character concatenation instead of slicing made
+        # no difference, and fixing the `os.path.join` corruption above
+        # made no difference either. Root cause NOT YET FOUND — likely
+        # inside `module_loader.py`'s own regex-based export scan or its
+        # `_path_cache` dict, not in this function. See bugs/CODEGEN_
+        # selfhost_actual_types_identifier_field_key.md for the full
+        # investigation trail and how to continue it (the aside/bside +
+        # MOJO_DEBUG-gated `_debug_note` technique used to find this).
         for _fip10 in (getattr(stmt, 'name_alias_strs', None) or []):
             name = gimple_ctypes._fi_name(_fip10)
             alias = gimple_ctypes._fi_alias(_fip10)
