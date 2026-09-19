@@ -2628,7 +2628,12 @@ def emit_c(meta_entry: dict) -> str:
             return (f', ({{ int64_t __t{i}; double __s{i} = __a{i}; '
                     f'__builtin_memcpy(&__t{i}, &__s{i}, sizeof __t{i}); __t{i}; }})')
         return f', (int64_t)__a{i}'
-    arg_fwd = ''.join(_fwd(i) for i in range(nslots))
+    # Explicit accumulation loop, NOT `''.join(_fwd(i) for i in
+    # range(nslots))` — a list of string pieces joined via a genexpr is
+    # the established self-hosted trap.
+    arg_fwd = ''
+    for _fi in range(nslots):
+        arg_fwd += _fwd(_fi)
     new_params = ', '.join(['int64_t'] + ['int64_t'] * nslots)
     new_fn = (f'__mojo_gen_new_m{nslots - 1}' if is_method
               else f'__mojo_gen_new_{nslots}')

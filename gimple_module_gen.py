@@ -533,6 +533,16 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list, _depth: int
             _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
 
 
+def _fieldnames_append_lines(name_lits: list) -> str:
+    """`"".join(f'  mojo_list_append_str(_r, {nl});\\n' for nl in
+    name_lits)` as an explicit accumulation loop — a list of string
+    pieces joined via a genexpr is the established self-hosted trap."""
+    out = ''
+    for nl in name_lits:
+        out += f'  mojo_list_append_str(_r, {nl});\n'
+    return out
+
+
 def _emit_reflection_dispatch(self, parts):
     """Emit the generic reflection dispatch (getattr/setattr/repr/
     dataclasses.fields/asdict). Extracted from gen_module_impl so its
@@ -640,7 +650,7 @@ def _emit_reflection_dispatch(self, parts):
             f"\n  mojo_setattr((void *)obj, attr, val);\n}}\n"
             f"static MojoList * _mojo_fieldnames_{sn} (void) {{\n"
             f"  MojoList *_r = mojo_list_new();\n"
-            + "".join(f'  mojo_list_append_str(_r, {nl});\n' for nl in name_lits) +
+            + _fieldnames_append_lines(name_lits) +
             f"  return _r;\n}}\n"
             + asdict_part
         )
@@ -6920,8 +6930,15 @@ def gen_module_impl(self, stmts):
                 if gimple_ctypes._params_have_vararg(m.params):
                     ptypes = 'MojoList *'
                 else:
-                    ptypes = (', '.join(self._resolve_type(pt) for _, pt in m.params)
-                              if m.params else 'void')
+                    if m.params:
+                        # Plain unpack loop, NOT a genexpr with a
+                        # tuple-unpack target joined into a string.
+                        _vt_parts = []
+                        for _vtpn, _vtpt in m.params:
+                            _vt_parts.append(self._resolve_type(_vtpt))
+                        ptypes = ', '.join(_vt_parts)
+                    else:
+                        ptypes = 'void'
                 lines.append(f"  {ret} (*{safe_mname}) ({ptypes});")
             lines.append(f"}} {stmt.name}_vtable;")
             func_parts.extend(lines)
@@ -7485,7 +7502,15 @@ def gen_module_impl(self, stmts):
         # tuple re-boxes the slot to int64_t on the self-hosted path -> the
         # decl emitted `extern <decimal-address> chdir (...)`, address-ordered
         # and different every run. `_as_str` re-tags the intact char* bits.
-        _argstr = ', '.join([_as_str(_ea) for _ea in _eargs]) if _eargs else 'void'
+        if _eargs:
+            # Plain unpack loop, NOT a list comprehension — see this
+            # file's other genexpr/comprehension-join fixes for why.
+            _ea_parts = []
+            for _ea in _eargs:
+                _ea_parts.append(_as_str(_ea))
+            _argstr = ', '.join(_ea_parts)
+        else:
+            _argstr = 'void'
         parts.append(f'extern {_as_str(_eret)} {_ecname} ({_argstr});')
 
     _module_globals_insert_idx = len(parts)
@@ -8734,7 +8759,12 @@ def gen_module_impl(self, stmts):
         # `dict[str, str]` reparameterization wouldn't fit every field).
         for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
             _base, _vct = _as_str(_api['base']), _as_str(_api['value_ctype'])
-            _gptypes = ', '.join(_as_str(_p) for _p in (_api.get('params') or [])) or 'void'
+            # Plain unpack loop, NOT a genexpr — a list of string pieces
+            # joined via a genexpr is the established self-hosted trap.
+            _gp_parts = []
+            for _gp in (_api.get('params') or []):
+                _gp_parts.append(_as_str(_gp))
+            _gptypes = ', '.join(_gp_parts) or 'void'
             parts.append(f"extern MojoGenerator *{_base}_start ({_gptypes});")
             parts.append(f"extern _Bool {_base}_resume (MojoGenerator *);")
             parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")

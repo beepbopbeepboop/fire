@@ -495,16 +495,27 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                                      emit_entry_points=False, module_name=module_name,
                                      relaxed_imports=True)
                 # `_as_str(path)`: `path` is the raw `for path in
-                # mojo_paths:` loop variable (a real self-hosted boxing
-                # risk per this function's own `_ap_key` comment above,
-                # which already guards a DIFFERENT downstream use of the
-                # same loop var) — stored as-is here, `#line 1 "{...}"`
-                # (gimple_module_gen.py) interpolated it inconsistently
-                # run to run (observed: `#line 1 "./module_loader.py"` on
-                # one self-hosted run vs the real absolute path on the
-                # next, for the identical `mojoc fire.py --dump-full`
-                # invocation).
-                temp_gen._current_filename = _as_str(path)  # Set filename for #line directives
+                # mojo_paths:` loop variable — but more fundamentally,
+                # NOT the raw `path` at all, even `_as_str`-guarded:
+                # `mojo_paths` (`_module_candidate_paths`) can list BOTH a
+                # CWD-relative candidate (`search_dirs` includes a bare
+                # `'.'`) and an absolute one for the SAME real file, and
+                # WHICH ONE actually matches first (hence which literal
+                # string `path` holds) depends on the enclosing gen's own
+                # `_current_filename`/`importer_dir` state at resolution
+                # time — itself dependent on which of several importers'
+                # recursive compiles reaches this module first in the
+                # whole-program closure, an order this session found is
+                # not guaranteed identical between the shim and self-host
+                # (see bugs/CODEGEN_selfhost_actual_types_identifier_
+                # field_key.md). `_abspath` (already computed just above
+                # for `_ap_key`) is canonical regardless of which
+                # candidate matched, so `#line 1 "{...}"`
+                # (gimple_module_gen.py) is stable either way. Observed
+                # before this fix: `#line 1 "./module_loader.py"` on one
+                # self-hosted `mojoc fire.py --dump-full` run vs the real
+                # absolute path on the next, for the identical invocation.
+                temp_gen._current_filename = _abspath  # Set filename for #line directives
                 temp_gen._compiled_modules = gen._compiled_modules
                 temp_gen._inline_module_qualifiers = gen._inline_module_qualifiers
                 temp_gen._compiling_file_paths = gen._compiling_file_paths  # share: path-identity self-import guard (see its own declaration)

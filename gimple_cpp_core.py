@@ -636,8 +636,18 @@ def _cpp_string_literal_expr(gen, val: str) -> str:
         # pieces below.
         return f'"{gimple_ctypes._c_escape(text)}"'
     parts = gen._parse_fstring_parts(text)
-    if not parts or all(k == 'lit' for k, _v, _s, _c in parts):
-        plain = ''.join(v for k, v, _s, _c in parts)
+    # Plain unpack loops, NOT `all(...)`/`''.join(...)` genexprs with a
+    # 4-way tuple-unpack target — see gimple_gen_exprs.py's
+    # `_lower_StringLiteral` for the established fix.
+    _all_lit = True
+    for _pk, _pv, _ps, _pc in parts:
+        if _pk != 'lit':
+            _all_lit = False
+            break
+    if not parts or _all_lit:
+        plain = ''
+        for _pk2, _pv2, _ps2, _pc2 in parts:
+            plain += _pv2
         return f'"{gimple_ctypes._c_escape(plain)}"'
     self_fields = getattr(gen, '_cpp_gen_self_fields', None)
     fn_ret = _cpp_trusted_fn_return_types(gen)
@@ -1200,7 +1210,12 @@ def _cpp_list_literal_arg_expr(gen, lit):
                  'int': 'mojo_list_append_int',
                  'flt': 'mojo_list_append_double'}[kind]
     tmp = gen._cpp_fresh_name("_mg_lit")
-    body = ''.join(f" {append_fn}({tmp}, {v});" for _, v in kinds)
+    # Plain unpack loop, NOT `''.join(f"..." for _, v in kinds)` — a
+    # genexpr's tuple-unpack target joined into a string is the
+    # established self-hosted trap.
+    body = ''
+    for _kk, _kv in kinds:
+        body += f" {append_fn}({tmp}, {_kv});"
     return (f"[&]() -> MojoList * {{ MojoList *{tmp} = mojo_list_new ();"
             f"{body} return {tmp}; }}()")
 

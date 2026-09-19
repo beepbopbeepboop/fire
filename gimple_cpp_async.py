@@ -827,9 +827,16 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # (see that attribute's own docstring for why it must happen
     # there and not here) — just consult it for this signature text.
     _sig_pn = lambda pn: gen._cpp_kw_param_renames.get(pn, pn)
-    cpp_sig = (', '.join(f"{gimple_exprtypes._c_to_cpp_scalar_type(ct)} {_sig_pn(pn)}"
-                          for pn, ct in param_ctypes)) or 'void'
-    call_args = ', '.join(_sig_pn(pn) for pn, _ in param_ctypes)
+    # Plain unpack loops, NOT genexprs with a tuple-unpack target joined
+    # into a string — the established self-hosted trap.
+    _sig_parts = []
+    for _spn, _sct in param_ctypes:
+        _sig_parts.append(f"{gimple_exprtypes._c_to_cpp_scalar_type(_sct)} {_sig_pn(_spn)}")
+    cpp_sig = ', '.join(_sig_parts) or 'void'
+    _call_arg_parts = []
+    for _cpn, _cpt in param_ctypes:
+        _call_arg_parts.append(_sig_pn(_cpn))
+    call_args = ', '.join(_call_arg_parts)
     lines = [
         f"struct {promise};",
         f"using {handle_t} = std::coroutine_handle<{promise}>;",
@@ -957,7 +964,12 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    if (h) h.destroy();",
         f"}}",
     ]
-    return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
+    # Plain unpack loop, NOT `[ct for _, ct in param_ctypes]` — a
+    # comprehension's tuple-unpack target boxes to int64_t self-hosted.
+    _ret_cts = []
+    for _rpn, _rct in param_ctypes:
+        _ret_cts.append(_rct)
+    return '\n'.join(lines), value_ctype, base, _ret_cts
 
 
 _HELPER_SCALAR_CTYPES = frozenset({
@@ -1837,9 +1849,16 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     # (see that attribute's own docstring for why it must happen
     # there and not here) — just consult it for this signature text.
     _sig_pn = lambda pn: gen._cpp_kw_param_renames.get(pn, pn)
-    cpp_sig = (', '.join(f"{gimple_exprtypes._c_to_cpp_scalar_type(ct)} {_sig_pn(pn)}"
-                          for pn, ct in param_ctypes)) or 'void'
-    call_args = ', '.join(_sig_pn(pn) for pn, _ in param_ctypes)
+    # Plain unpack loops, NOT genexprs with a tuple-unpack target joined
+    # into a string — the established self-hosted trap.
+    _sig_parts = []
+    for _spn, _sct in param_ctypes:
+        _sig_parts.append(f"{gimple_exprtypes._c_to_cpp_scalar_type(_sct)} {_sig_pn(_spn)}")
+    cpp_sig = ', '.join(_sig_parts) or 'void'
+    _call_arg_parts = []
+    for _cpn, _cpt in param_ctypes:
+        _call_arg_parts.append(_sig_pn(_cpn))
+    call_args = ', '.join(_call_arg_parts)
     lines = [
         f"struct {promise};",
         f"using {handle_t} = std::coroutine_handle<{promise}>;",
@@ -2840,6 +2859,13 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
     wake_awaiter, anext_awaiter = f"{base}_WakeAwaiter", f"{base}_AnextAwaiter"
     cpp_value_ctype = gimple_exprtypes._c_to_cpp_scalar_type(value_ctype)
+    # Plain unpack loop, NOT `', '.join(f'...' for pn, ct in
+    # param_ctypes)` — a genexpr's tuple-unpack target joined into a
+    # string is the established self-hosted trap.
+    _gen_sig_parts = []
+    for _gspn, _gsct in param_ctypes:
+        _gen_sig_parts.append(f'{gimple_exprtypes._c_to_cpp_scalar_type(_gsct)} {_gspn}')
+    _gen_sig_params_str = ', '.join(_gen_sig_parts) or 'void'
     lines = [
         f"struct {promise};",
         f"using {handle_t} = std::coroutine_handle<{promise}>;",
@@ -2883,7 +2909,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         f"    if (cont) mojo_async_schedule_ready(cont.address());",
         f"    return std::noop_coroutine();",
         f"}}",
-        f"static {task} {impl} ({', '.join(f'{gimple_exprtypes._c_to_cpp_scalar_type(ct)} {pn}' for pn, ct in param_ctypes) or 'void'}) {{",
+        f"static {task} {impl} ({_gen_sig_params_str}) {{",
         *body_lines,
         f"    co_return;",
         f"}}",

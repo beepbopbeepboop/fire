@@ -162,7 +162,16 @@ def _lower_StringLiteral(gen, node):
         # fixed 3-digit octal escape (`\NNN`) so embedded NUL / high bytes
         # are exact and can never run on into a following digit, then build
         # the MojoBytes value at the literal site.
-        body = ''.join('\\%03o' % (ord(c) & 0xFF) for c in val)
+        # Explicit accumulation loop, NOT `''.join(<genexpr> for c in val)`
+        # — a list of single-char/short-string pieces joined via a
+        # comprehension/genexpr is the established self-hosted trap
+        # (documented at `_lower_percent_format`'s own `esc_buf`/`parts`
+        # comments): each piece boxes to int64_t, and `''.join(...)`
+        # over them produced an erased `_slit` reference (a raw heap
+        # address) that changes every run under ASLR.
+        body = ''
+        for c in val:
+            body += '\\%03o' % (ord(c) & 0xFF)
         sname = gen._intern_string(body)
         # GIMPLE strict mode rejects passing a module-level global (the
         # `_slit_` char[] pool entry) directly as a call argument -- it
@@ -190,8 +199,21 @@ def _lower_StringLiteral(gen, node):
     # F-string: for now, just extract literal parts and return as plain string
     # Full f-string formatting with snprintf requires static buffers, which aren't allowed in __GIMPLE
     parts = gen._parse_fstring_parts(val)
-    if not parts or all(k == 'lit' for k, _v, _s, _c in parts):
-        plain = ''.join(v for k, v, _s, _c in parts)
+    # Explicit loops, NOT `all(... for k, _v, _s, _c in parts)` /
+    # `''.join(v for k, v, _s, _c in parts)` — a genexpr's 4-way tuple-
+    # unpack target boxes every slot to int64_t self-hosted, and joining
+    # the (corrupted) pieces produced an erased `_slit` reference (a raw
+    # heap address, different every run under ASLR) — the same
+    # established trap as `_lower_percent_format`'s `parts`/`esc_buf`.
+    _all_lit = True
+    for _pk, _pv, _ps, _pc in parts:
+        if _pk != 'lit':
+            _all_lit = False
+            break
+    if not parts or _all_lit:
+        plain = ''
+        for _pk2, _pv2, _ps2, _pc2 in parts:
+            plain += _pv2
         escaped = gimple_ctypes._c_escape(plain)
         temp = gen._new_val('char *', f'{gen._intern_string(escaped)}')
         return 'char *', temp
@@ -266,7 +288,11 @@ def _lower_TstringLiteral(gen, node) -> tuple[str, str]:
     val = node.value
     val, _ = gen._decode_str_literal_text(val)
     parts = gen._parse_fstring_parts(val)
-    plain = ''.join(v for k, v, _s, _c in parts)
+    # Plain unpack loop, NOT `''.join(v for k, v, _s, _c in parts)` — see
+    # `_lower_StringLiteral`'s identical fix above for why.
+    plain = ''
+    for _pk, _pv, _ps, _pc in parts:
+        plain += _pv
     escaped = gimple_ctypes._c_escape(plain)
     temp = gen._new_val('char *', f'{gen._intern_string(escaped)}')
     return 'char *', temp
@@ -3209,7 +3235,11 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
             n_specs += 1
 
     def _lit_bytes(text):
-        body = ''.join('\\%03o' % (ord(ch) & 0xFF) for ch in text)
+        # Explicit accumulation loop, NOT `''.join(<genexpr>)` — see
+        # `_lower_StringLiteral`'s identical fix above for why.
+        body = ''
+        for ch in text:
+            body += '\\%03o' % (ord(ch) & 0xFF)
         sname = gen._intern_string(body)
         # load the `_slit_` global into a local first (GIMPLE strict mode
         # -- see _lower_StringLiteral's bytes branch for the same fix)
@@ -3741,7 +3771,15 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         t = gen._new_temp('int')
         gen._emit(f"  {t} = 0;  /* external_call with non-literal name */")
         return 'int', t
-    cname = ''.join('_' if not c.isalnum() and c != '_' else c for c in cname)
+    # Explicit accumulation loop, NOT `''.join(<genexpr> for c in cname)` —
+    # a list of single-char pieces joined via a comprehension/genexpr is
+    # the established self-hosted trap (see gimple_gen_methods.py's own
+    # note on this exact call site, and `_lower_StringLiteral`'s
+    # identical fix in this file).
+    _sanitized = ''
+    for c in cname:
+        _sanitized += ('_' if not c.isalnum() and c != '_' else c)
+    cname = _sanitized
 
     ret_ct = 'void'
     if len(elems) >= 2:
