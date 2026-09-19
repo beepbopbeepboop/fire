@@ -120,20 +120,98 @@ low-token alternative to lldb for this class of bug, since the divergence
 is almost always a boolean/string flag silently taking the wrong branch,
 not a crash.
 
-## Separate, unrelated finding from this session (pre-existing, NOT a regression)
+## check-noshim-dumpfull: crash FIXED, real content divergence remains (update, same session continued)
 
-`make check-noshim-dumpfull` currently fails: `MOJO_NO_SHIM=1 ./mojoc
-fire.py --dump-full` segfaults with **no** `fire.ci` written at all, which
-`test_noshim_dumpfull.py` reports as "worse than the known original SIGBUS"
-(which used to at least write the file before crashing). Verified via a
-stash/rebuild A-B test that this reproduces identically on `master` HEAD
-**without** any of this doc's fixes applied — it is not caused by the
-`_as_str` changes above. Also: `tools/ab_compare.py`'s `SELFHOST-CRASHED`
-bucket jumped from an initial 23 to 104 when `mojoc` was rebuilt from a
-stale (pre-session) binary to current `HEAD` — also confirmed
-pre-existing/unrelated via the same stash/rebuild A-B method. Both are
-likely the same underlying self-host regression from recent work (the
-"Ownership model Phase 4/6" / stack-allocation commits in the recent log)
-and warrant their own investigation, ideally starting from `mojoc fire.py
---dump-full` under lldb (`tools/gdbtool`) since it's a hard crash, not a
-silent divergence.
+`make check-noshim-dumpfull` originally failed with `MOJO_NO_SHIM=1 ./mojoc
+fire.py --dump-full` segfaulting with **no** `fire.ci` written at all
+(confirmed pre-existing via stash/rebuild A-B testing, not caused by this
+doc's `_as_str` fixes above). Root-caused and fixed in two follow-up
+commits:
+
+- `gen_module_impl`'s `FromImportStmt` handling read alias names via
+  `for alias in stmt.names: alias[0]/alias[1]`. `FromImportStmt.names` is
+  `list[(str, str|None)]`, and its own dataclass docstring already
+  documented that these tuples box to int64_t self-hosted, providing the
+  actual fix: `stmt.name_alias_strs` (a flat `list[str]` of
+  `"name"`/`"name|alias"` composites) + `gimple_ctypes._fi_name`/`_fi_alias`
+  accessors, already used correctly elsewhere in the same file but not
+  here. Switched to it; the crash reproduced ~100% before, 0% after across
+  10+ runs. The same broken `_fromimport_names(stmt)` + `_fip[0]`/`_fip[1]`
+  subscript shape existed at **19 separate call sites** across
+  `gimple_gen_funcs.py`/`gimple_gen_infra.py`/`gimple_gen_resolve.py`/
+  `gimple_module_gen.py` — all fixed the same way.
+- `_lower_percent_format` and its `MojoBytes` sibling (`gimple_gen_exprs.py`)
+  built a `parts` list of tuples, then iterated `for part in parts:` and
+  subscripted `part[0]`/`part[1]`/`part[2]` — the identical trap, but here
+  even an `_as_str()` guard on the extracted values was NOT sufficient;
+  the corrupted text still flowed into `_intern_string`, baking a raw heap
+  ADDRESS into the generated C as a decimal literal
+  (`mojo_str_cat (<address>, ...)`) — different every process run under
+  ASLR. Confirmed via running `mojoc fire.py --dump-full` **twice in a
+  row** and diffing the two self-hosted outputs against each other (not
+  against the shim) — proof of genuine non-determinism, not just a
+  shim-vs-self-host difference. Fixed by normalizing `parts` to uniform
+  3-tuples and switching to a plain `for kind, text, conv in parts:`
+  unpack, avoiding the subscript entirely.
+
+**Net effect of both fixes**: the self-host-vs-self-host first-disagreement
+offset moved from byte 6012936 to byte 254836 (earlier — expected, since
+fixing the *first* nondeterminism source exposes whichever one used to be
+masked behind it) rather than eliminating disagreement entirely. There is
+at least one more nondeterminism source, not yet fixed:
+
+## Open: closure call argument-COUNT nondeterminism (not yet fixed)
+
+Two back-to-back self-hosted `--dump-full` runs of the identical `fire.py`
+disagree at `module_loader.py:535`'s `_scan_source(content)` closure call
+— compiled sometimes as `ModuleLoader_load_module_from_path__scan_source
+(_env, _t162)` (2 args, correct: `_scan_source` is declared
+`def _scan_source(src_content):`, one param) and sometimes as `(..., _t162,
+0)` (a bogus 3rd arg). Traced to `gimple_gen_calls.py`'s closure-call
+lowering (~line 2630-2656): `user_param_count = len(expected_params) - ...`
+computed from `expected_params` (the closure's registered signature) is
+sometimes wrong (too high by one), triggering the "pad missing trailing
+args with a default, or `('int', '0')` if no default is known" fallback
+that exists for genuinely-optional trailing parameters — `_scan_source` has
+none, so this fallback should never fire for it. This is very likely THE
+SAME underlying root cause as the `_build_config_toplev`-position /
+`_MOJO_STUB_GimpleGen_*`-count divergences documented separately in this
+session's commits: a closure/function's real signature becomes "known" at
+a different POINT in the whole-program compile depending on which order
+the ~59-module (recursive, `sorted()`-at-every-level but not necessarily
+globally-consistent) transitive closure gets discovered and compiled in —
+not yet proven to be literally the same code path, but the shape (a
+just-registered-vs-not-yet-registered signature flipping behavior) matches
+exactly. NOT YET FIXED. Whether a call with too many/few arguments could
+ever produce a hard GCC error (rather than silently compiling, which is
+what's been observed so far — `mojoc` built with exit 0 every time) has not
+been checked; if the extern prototype for the affected closure also
+fluctuates in lock-step with the call site (plausible, since it's likely
+computed from the same `expected_params` source), that would explain why
+GCC never complained despite the arg-count mismatch, and this bug would
+still be a real, if currently silent, correctness risk.
+
+**How to continue**: this needs the root compile-order-determinism issue
+solved, not another individual call-site patch — the pattern of "signature
+becomes known at a different point depending on discovery order" will keep
+resurfacing at new call sites (stub declarations, closure calls, module
+struct positions, ...) until the underlying transitive-closure recursion
+order is made to not matter (either by making it truly identical between
+shim and self-host, or — architecturally cleaner per this project's own
+"pick the production-quality approach" convention — by making anything
+order-SENSITIVE (stub emission, closure-arg-padding, struct-position)
+insensitive to order instead, e.g. a two-pass design: pass 1 discovers
+every module and every signature with no code emission at all, pass 2
+emits everything in one final deterministic (alphabetically `sorted()`)
+order using pass 1's complete, order-independent knowledge. That is a
+substantially larger refactor than any single fix landed this session.
+
+Also confirmed pre-existing/unrelated via stash/rebuild A-B testing at the
+start of this investigation (not fixed, not caused by anything in this
+doc): `tools/ab_compare.py`'s `SELFHOST-CRASHED` bucket jumped from an
+initial 23 to 104 when `mojoc` was rebuilt from a stale (pre-session)
+binary to current `HEAD` at the very start of this session — i.e. **always
+rebuild `mojoc` fresh (`rm -f mojoc && make mojoc`) before trusting any
+aside/bside sweep number**, since `make mojoc`'s Makefile rule only lists
+`fire.py` + runtime files as prerequisites (not its full transitive
+closure), so `make mojoc` alone frequently no-ops on a stale binary.
