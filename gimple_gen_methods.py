@@ -4147,7 +4147,37 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     _method_candidates = gen._struct_method_signatures.get(_sms_key(struct_name, method))
     _method_overload_suffix = ''
     _chosen_method = None
-    if _method_candidates and len(_method_candidates) > 1:
+    # `len > 1` alone (the original gate) skipped overload resolution
+    # entirely for a NON-overloaded method (the overwhelmingly common
+    # case: exactly 1 registered candidate) -- fine for a positional-only
+    # call site (the `else` branch below, `[gen.lower_expr(a) for a in
+    # node.args]`, already handles that correctly), but a call site using
+    # KEYWORD arguments against that single candidate fell through to the
+    # SAME plain-positional `else` branch, which reads only `node.args`
+    # and completely ignores `node.kwargs` -- every keyword argument was
+    # silently dropped, later padded with the callee's own DEFAULT value
+    # by the "pad missing trailing args" step below, regardless of what
+    # was actually passed. `_resolve_overload` already handles a
+    # single-entry candidate list correctly (returns it outright once
+    # arity/kwarg-name checks pass), so also engaging it here for the
+    # `node.kwargs` case reuses the same, already-correct,
+    # kwargs-by-name-to-positional-slot binding
+    # (`_build_call_args_for_candidate`) the genuinely-overloaded case
+    # already relies on. Root-caused via `self._parse_funcdef(decs,
+    # is_async=is_async)` in this compiler's own fire_compiler.py:
+    # self-hosted, EVERY call site passing `is_async=True`/`is_async=
+    # is_async` compiled to a hardcoded `(int64_t)0` regardless of the
+    # real value, because `_parse_funcdef` has exactly one definition (no
+    # overloads) -- confirmed by inspecting the generated GIMPLE C
+    # directly (`_t60 = (int64_t)0;` at every one of the 5 real call
+    # sites, even the literal `is_async=True` one). Downstream effect:
+    # `FunctionDef.is_async` read back False for every genuinely-async
+    # function parsed by the self-hosted compiler, corrupting the A3
+    # stack-switch coroutine-detection prepass for any FILE COMPILED BY
+    # THE SELF-HOSTED BINARY (gimple_gen_coro.py's `lower()`), a
+    # plausible major contributor to the aside/bside sweep's CI-DIFF
+    # backlog for any async-using file.
+    if _method_candidates and (len(_method_candidates) > 1 or node.kwargs):
         _chosen_method = gen._resolve_overload(_method_candidates, node.args, node.kwargs)
         if _chosen_method is not None:
             _method_overload_suffix = _chosen_method['overload_id']
