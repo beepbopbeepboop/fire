@@ -489,8 +489,19 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list, _depth: int
     for stmt in node_list:
         if isinstance(stmt, FromImportStmt):
             modules_to_compile[_as_str(stmt.module)] = True
-            for _fip14 in gimple_ctypes._fromimport_names(stmt):
-                _fn = _as_str(_fip14[0])
+            # `stmt.name_alias_strs` + `_fi_name`, NOT
+            # `gimple_ctypes._fromimport_names(stmt)` + `_fip14[0]` — the
+            # latter subscripts a freshly-built 2-tuple (each entry
+            # `_fromimport_names` itself just constructed via
+            # `.append((_as_str(...), _as_str(...)))`), and that exact
+            # "subscript a freshly-built tuple" shape is the same one
+            # confirmed broken self-hosted in gen_module_impl's own
+            # FromImportStmt scan (see that fix's comment — `len()`/dict-
+            # key hashing on the extracted value silently misbehaved even
+            # though `==` still worked). `name_alias_strs` sidesteps
+            # tuples entirely.
+            for _fip14 in (getattr(stmt, 'name_alias_strs', None) or []):
+                _fn = gimple_ctypes._fi_name(_fip14)
                 # _join_import_member, not a blind f"{module}.{name}": for a
                 # bare-relative module (`from . import strutil`, module == '.')
                 # the separator dot would double-count the depth. The joined
@@ -1674,9 +1685,9 @@ def gen_module_impl(self, stmts):
             continue
         if not _imp_stmts:
             continue
-        for _fip12 in gimple_ctypes._fromimport_names(_fis):
-            _iname = _as_str(_fip12[0])
-            _ialias = _as_str(_fip12[1])
+        for _fip12 in (getattr(_fis, 'name_alias_strs', None) or []):
+            _iname = gimple_ctypes._fi_name(_fip12)
+            _ialias = gimple_ctypes._fi_alias(_fip12)
             _isym = _ialias if _ialias else _iname
             if _isym in self._comptime_vals:
                 continue   # a same-named local binding always wins
@@ -1755,9 +1766,9 @@ def gen_module_impl(self, stmts):
         _names = set()
         for _tb_s in (_tb_body or []):
             if isinstance(_tb_s, FromImportStmt):
-                for _fip13 in gimple_ctypes._fromimport_names(_tb_s):
-                    _tb_nm = _as_str(_fip13[0])
-                    _tb_alias = _as_str(_fip13[1])
+                for _fip13 in (getattr(_tb_s, 'name_alias_strs', None) or []):
+                    _tb_nm = gimple_ctypes._fi_name(_fip13)
+                    _tb_alias = gimple_ctypes._fi_alias(_fip13)
                     _names.add(_tb_alias if _tb_alias else _tb_nm)
             elif isinstance(_tb_s, ImportStmt):
                 for _tb_mod0, _tb_alias0 in _import_targets(_tb_s):
@@ -2029,9 +2040,9 @@ def gen_module_impl(self, stmts):
             _xg_module_binding: dict = {}
             for _xg_n in _walk_ast(stmts):
                 if isinstance(_xg_n, FromImportStmt) and not getattr(_xg_n, 'wildcard', False):
-                    for _fip15 in gimple_ctypes._fromimport_names(_xg_n):
-                        _xg_name = _as_str(_fip15[0])
-                        _xg_alias = _as_str(_fip15[1])
+                    for _fip15 in (getattr(_xg_n, 'name_alias_strs', None) or []):
+                        _xg_name = gimple_ctypes._fi_name(_fip15)
+                        _xg_alias = gimple_ctypes._fi_alias(_fip15)
                         _xg_bound = _xg_alias if _xg_alias else _xg_name
                         _xg_pm = _xg_alias_mod.get(_xg_bound)
                         if _xg_pm is None:
@@ -3304,9 +3315,9 @@ def gen_module_impl(self, stmts):
                                     if not (isinstance(_ist, FromImportStmt)
                                             and not getattr(_ist, 'wildcard', False)):
                                         continue
-                                    for _fip16 in gimple_ctypes._fromimport_names(_ist):
-                                        _inm = _as_str(_fip16[0])
-                                        _ialias = _as_str(_fip16[1])
+                                    for _fip16 in (getattr(_ist, 'name_alias_strs', None) or []):
+                                        _inm = gimple_ctypes._fi_name(_fip16)
+                                        _ialias = gimple_ctypes._fi_alias(_fip16)
                                         if (_ialias or _inm) != _fann_s:
                                             continue
                                         if self._materialize_imported_struct(
@@ -3840,9 +3851,9 @@ def gen_module_impl(self, stmts):
             else:
                 _debug_note('module load failed while registering imports')
                 if not s.wildcard:
-                    for _fip18 in gimple_ctypes._fromimport_names(s):
-                        _fb_name = _as_str(_fip18[0])
-                        _fb_alias = _as_str(_fip18[1])
+                    for _fip18 in (getattr(s, 'name_alias_strs', None) or []):
+                        _fb_name = gimple_ctypes._fi_name(_fip18)
+                        _fb_alias = gimple_ctypes._fi_alias(_fip18)
                         _fb_sym = _fb_alias if _fb_alias else _fb_name
                         # Same generator-binding rule as the resolved-exports
                         # branch above: exports can fail to load while the
@@ -7379,12 +7390,11 @@ def gen_module_impl(self, stmts):
         parts.append("  return \"<type>\";")
         parts.append("}")
         parts.append('')
-
     for mod_name in sorted(all_modules_to_declare):
         mod_s = '' + mod_name
         if mod_s == our_mod:
             continue
-        mod_str = mod_s if mod_s else "root"
+        mod_str = _as_str(mod_s if mod_s else "root")
         safe_mod = _c_field_name(mod_str) if mod_str else "root"
         struct_name = f"_{safe_mod}_toplev"
         global_var = f"_{safe_mod}_globals"

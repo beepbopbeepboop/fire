@@ -221,9 +221,9 @@ def _from_import_name_is_submodule(gen, module: str, name: str) -> bool:
             # explicit later rebinding always wins, exactly like the
             # def/class/assignment cases above.
             if (isinstance(s, gimple_ctypes.FromImportStmt) and not getattr(s, 'wildcard', False)):
-                for _fip0 in gimple_ctypes._fromimport_names(s):
-                    _rn = _as_str(_fip0[0])
-                    _ra = _as_str(_fip0[1])
+                for _fip0 in (getattr(s, 'name_alias_strs', None) or []):
+                    _rn = gimple_ctypes._fi_name(_fip0)
+                    _ra = gimple_ctypes._fi_alias(_fip0)
                     if (_ra if _ra else _rn) == name:
                         return False
     return gen._submodule_source_path(
@@ -269,8 +269,8 @@ def _resolve_reexported_closure_func(gen, module: str, name: str, _depth: int = 
     for _s in _stmts:
         if not isinstance(_s, gimple_ctypes.FromImportStmt) or getattr(_s, 'wildcard', False):
             continue
-        for _fp in gimple_ctypes._fromimport_names(_s):
-            _rn = _as_str(_fp[0]); _ra = _as_str(_fp[1])
+        for _fp in (getattr(_s, 'name_alias_strs', None) or []):
+            _rn = gimple_ctypes._fi_name(_fp); _ra = gimple_ctypes._fi_alias(_fp)
             if (_ra if _ra else _rn) == name:
                 _fn, _home = _resolve_reexported_closure_func(
                     gen, _s.module, _rn, _depth + 1)
@@ -293,13 +293,13 @@ def _gen_stmt_FromImportStmt(gen, node):
         _scope_qual = gen._resolve_import_module_qualifier(node.module)
         if _scope_qual:
             _scope = gen._import_scope_stack[-1]
-            for _fip1 in gimple_ctypes._fromimport_names(node):
-                name = _as_str(_fip1[0])
-                alias = _as_str(_fip1[1])
+            for _fip1 in (getattr(node, 'name_alias_strs', None) or []):
+                name = gimple_ctypes._fi_name(_fip1)
+                alias = gimple_ctypes._fi_alias(_fip1)
                 _scope[alias if alias else name] = _scope_qual
-    for _fip2 in gimple_ctypes._fromimport_names(node):
-        name = _as_str(_fip2[0])
-        alias = _as_str(_fip2[1])
+    for _fip2 in (getattr(node, 'name_alias_strs', None) or []):
+        name = gimple_ctypes._fi_name(_fip2)
+        alias = gimple_ctypes._fi_alias(_fip2)
         # `_as_str` on the ternary result: without it the self-hosted
         # backend erased `symbol_name` to int64_t (whole-function
         # unification off the `(_fi_home, symbol_name)` tuple key that used
@@ -2179,9 +2179,9 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict) -> None:
             q = gen._resolve_import_module_qualifier(stmt.module)
             if not q:
                 continue
-            for _fip3 in gimple_ctypes._fromimport_names(stmt):
-                nm = _as_str(_fip3[0])
-                alias = _as_str(_fip3[1])
+            for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
+                nm = gimple_ctypes._fi_name(_fip3)
+                alias = gimple_ctypes._fi_alias(_fip3)
                 scope[alias if alias else nm] = q
         elif isinstance(stmt, gimple_ctypes.IfStmt):
             gen._collect_body_import_bindings(stmt.then_body, scope)
@@ -3499,9 +3499,9 @@ def _register_imported_structs(gen, stmts) -> None:
     _imported_name_to_module: dict = {}
     for _ist in stmts:
         if isinstance(_ist, gimple_ctypes.FromImportStmt) and not getattr(_ist, 'wildcard', False):
-            for _fip4 in gimple_ctypes._fromimport_names(_ist):
-                _inm = _as_str(_fip4[0])
-                _ialias = _as_str(_fip4[1])
+            for _fip4 in (getattr(_ist, 'name_alias_strs', None) or []):
+                _inm = gimple_ctypes._fi_name(_fip4)
+                _ialias = gimple_ctypes._fi_alias(_fip4)
                 _imported_name_to_module.setdefault(_ialias or _inm, _ist.module)
 
     def _imported_func_return_struct(fname):
@@ -3555,9 +3555,9 @@ def _register_imported_structs(gen, stmts) -> None:
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
-        for _fip5 in gimple_ctypes._fromimport_names(st):
-            nm = _as_str(_fip5[0])
-            alias = _as_str(_fip5[1])
+        for _fip5 in (getattr(st, 'name_alias_strs', None) or []):
+            nm = gimple_ctypes._fi_name(_fip5)
+            alias = gimple_ctypes._fi_alias(_fip5)
             local = alias or nm
             if (nm.startswith('_') or local in gen.struct_field_types
                     or local in gen._imported_generic_structs
@@ -3632,9 +3632,9 @@ def _find_struct_home_module(gen, module: str, name: str, depth: int = 0) -> str
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
-        for _fip6 in gimple_ctypes._fromimport_names(st):
-            nm = _as_str(_fip6[0])
-            alias = _as_str(_fip6[1])
+        for _fip6 in (getattr(st, 'name_alias_strs', None) or []):
+            nm = gimple_ctypes._fi_name(_fip6)
+            alias = gimple_ctypes._fi_alias(_fip6)
             if (alias or nm) != name:
                 continue
             sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
@@ -3885,9 +3885,9 @@ def _register_imported_generics(gen, stmts) -> None:
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
-        for _fip7 in gimple_ctypes._fromimport_names(st):
-            nm = _as_str(_fip7[0])
-            alias = _as_str(_fip7[1])
+        for _fip7 in (getattr(st, 'name_alias_strs', None) or []):
+            nm = gimple_ctypes._fi_name(_fip7)
+            alias = gimple_ctypes._fi_alias(_fip7)
             local = alias or nm
             if (local in gen._imported_generics or local in gen.struct_field_types
                     or nm != local):   # aliased: elaborator looks up the source name
@@ -3921,9 +3921,9 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
-        for _fip8 in gimple_ctypes._fromimport_names(st):
-            nm = _as_str(_fip8[0])
-            alias = _as_str(_fip8[1])
+        for _fip8 in (getattr(st, 'name_alias_strs', None) or []):
+            nm = gimple_ctypes._fi_name(_fip8)
+            alias = gimple_ctypes._fi_alias(_fip8)
             local = alias or nm
             if (local in gen._imported_generic_structs or local in gen.struct_field_types
                     or nm != local):
