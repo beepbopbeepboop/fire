@@ -3188,7 +3188,7 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
             buf.append('%'); i += 2
             continue
         if buf:
-            parts.append(('lit', ''.join(buf))); buf = []
+            parts.append(('lit', ''.join(buf), '')); buf = []
         spec_start = i
         i += 1
         while i < n and fmt_bytes[i] in '-+0 #.123456789':
@@ -3198,9 +3198,15 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
             i += 1
         parts.append(('spec', fmt_bytes[spec_start:i], conv))
     if buf:
-        parts.append(('lit', ''.join(buf)))
+        parts.append(('lit', ''.join(buf), ''))
 
-    n_specs = sum(1 for p in parts if p[0] == 'spec')
+    # Indexed, NOT `sum(1 for p in parts if p[0] == 'spec')` — a genexpr
+    # subscripting a freshly-iterated tuple is the same self-hosted trap
+    # fixed throughout this function; see the loop below's own comment.
+    n_specs = 0
+    for _pi in range(len(parts)):
+        if parts[_pi][0] == 'spec':
+            n_specs += 1
 
     def _lit_bytes(text):
         body = ''.join('\\%03o' % (ord(ch) & 0xFF) for ch in text)
@@ -3217,13 +3223,27 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
 
     arg_i = 0
     acc_val = None
-    for part in parts:
-        if part[0] == 'lit':
-            if not part[1]:
+    # Plain 3-way unpack, NOT `for part in parts: ... part[0]/part[1]` —
+    # `parts` is a freshly-built `list[tuple]` (each entry appended via
+    # `parts.append((...))` just above), and subscripting a value obtained
+    # by single-var for-loop iteration over such a list is the established
+    # self-hosted trap (working `==` but corrupted `len()`/content on the
+    # subscripted slot) — confirmed via `mojoc fire.py --dump-full`
+    # producing a different `mojo_str_cat (<heap address>, ...)` literal
+    # every run for `_lower_percent_format`'s identical-shaped loop
+    # (gimple_gen_exprs.py:~3334), which already carried this exact
+    # diagnosis in its own comment; this sibling (bytes) version had the
+    # same shape and presumably the same live bug, just not yet caught by
+    # a byte-identity check exercising it. All `parts` entries are now
+    # normalized to 3-tuples (`'lit'` entries carry a dummy `''' conv
+    # slot) so one uniform unpack shape covers both kinds.
+    for kind, text_or_spec, conv in parts:
+        if kind == 'lit':
+            if not text_or_spec:
                 continue
-            part_val = _lit_bytes(part[1])
+            part_val = _lit_bytes(text_or_spec)
         else:
-            _, full_spec, conv = part
+            full_spec = text_or_spec
             et, ev = gen.lower_expr(rhs_exprs[arg_i])
             arg_i += 1
             if conv in ('s', 'r') and et == 'MojoBytes *':
@@ -3300,7 +3320,7 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
             continue
         _lit = esc_buf + _run
         if _lit:
-            parts.append(('lit', _lit))
+            parts.append(('lit', _lit, ''))
         esc_buf = ''
         spec_start = i
         i += 1
@@ -3316,9 +3336,14 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
         lit_start = i
     _tail = esc_buf + fmt_text[lit_start:n]
     if _tail:
-        parts.append(('lit', _tail))
+        parts.append(('lit', _tail, ''))
 
-    n_specs = sum(1 for p in parts if p[0] == 'spec')
+    # Indexed, NOT `sum(1 for p in parts if p[0] == 'spec')` — same
+    # self-hosted trap as the bytes sibling function above.
+    n_specs = 0
+    for _pi in range(len(parts)):
+        if parts[_pi][0] == 'spec':
+            n_specs += 1
     if n_specs != len(rhs_exprs):
         # Can't safely map operands to specs (mismatched-arity source,
         # or a '%' that wasn't really meant as a format template).
@@ -3331,24 +3356,30 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
 
     arg_i = 0
     acc_val = None
-    for part in parts:
-        if part[0] == 'lit':
-            # `_as_str`: `part` is a 2-tuple stored in a list; reading
-            # `part[1]` back re-boxes the text to int64_t on the self-
-            # hosted path, and `_intern_string(_c_escape(<boxed>))` then
-            # produced an erased `_slit` reference (a decimal address) —
-            # `mojo_str_cat (<address>, ...)` in the emitted C, different
-            # every --dump-full fire.py run.
-            text = _as_str(part[1])
+    # Plain 3-way unpack, NOT `for part in parts: ... part[1]`/`part[2]` —
+    # `_as_str(part[1])` alone was NOT sufficient: `part` here comes from
+    # single-var for-loop iteration over a freshly-built `list[tuple]`,
+    # and SUBSCRIPTING that iterated value is itself the self-hosted trap
+    # (working `==` but corrupted `len()`/hashing on the subscripted
+    # slot — the same class of bug as `node.params[i][0]`, confirmed
+    # while fixing the check-noshim-dumpfull crash), not something a
+    # post-hoc `_as_str()` on the extracted value can repair. Confirmed
+    # live: `mojoc fire.py --dump-full` produced a different
+    # `mojo_str_cat (<heap address>, ...)` literal every run for this
+    # exact loop despite the `_as_str` guards already here. All `parts`
+    # entries are normalized to 3-tuples (`'lit'` entries carry a dummy
+    # `''` conv slot) so one uniform unpack shape covers both kinds.
+    for kind, text_or_spec, conv in parts:
+        if kind == 'lit':
+            text = text_or_spec
             if not text:
                 continue
-            part_val = _as_str(gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text))))
+            part_val = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text)))
         else:
-            full_spec = _as_str(part[1])
-            conv = _as_str(part[2])
+            full_spec = text_or_spec
             et, ev = gen.lower_expr(rhs_exprs[arg_i])
             arg_i += 1
-            part_val = _as_str(gen._format_percent_spec(full_spec, conv, et, ev))
+            part_val = gen._format_percent_spec(full_spec, conv, et, ev)
         acc_val = part_val if acc_val is None else gen._new_val(
             'char *', f'mojo_str_cat ({acc_val}, {part_val})')
     if acc_val is None:
