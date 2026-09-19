@@ -262,7 +262,12 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         init = next((m for m in getattr(struct_def, 'methods', [])
                      if isinstance(m, N.FunctionDef) and m.name == '__init__'), None)
         if init is not None:
-            pann_by_name = {p: a for p, a in init.params}
+            # Plain unpack loop, NOT `{p: a for p, a in init.params}` —
+            # same comprehension-target-unpack trap as elsewhere in this
+            # file.
+            pann_by_name = {}
+            for _pn, _pa in init.params:
+                pann_by_name[_pn] = _pa
             for n in _walk(init):
                 if (isinstance(n, N.AssignStmt)
                         and isinstance(n.target, N.MemberExpr)
@@ -1819,7 +1824,12 @@ def lower(stmts: list) -> tuple[list, list]:
     for s in stmts:
         if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
                                              or getattr(s, 'is_async', False)):
-            _PARAM_NAMES[s.name] = [p for p, _a in s.params]
+            # Plain unpack loop, NOT `[p for p, _a in s.params]` — same
+            # comprehension-target-unpack trap as elsewhere in this file.
+            _pn_list = []
+            for _pn, _pa in s.params:
+                _pn_list.append(_pn)
+            _PARAM_NAMES[s.name] = _pn_list
         if isinstance(s, N.StructDef):
             for m in s.methods:
                 if not (isinstance(m, N.FunctionDef) and getattr(m, 'is_async', False)):
@@ -1829,7 +1839,13 @@ def lower(stmts: list) -> tuple[list, list]:
                         else _eligible_async(m, is_method=True)[0])
                 if _mok:
                     _ASYNC_METHOD_NAMES.add(m.name)
-                    _PARAM_NAMES.setdefault(m.name, [p for p, _a in m.params[1:]])
+                    # Plain unpack loop, NOT `[p for p, _a in
+                    # m.params[1:]]` — same comprehension-target-unpack
+                    # trap as elsewhere in this file.
+                    _mpn_list = []
+                    for _pn, _pa in m.params[1:]:
+                        _mpn_list.append(_pn)
+                    _PARAM_NAMES.setdefault(m.name, _mpn_list)
     out = []
     meta = []
     method_bodies = []
@@ -2019,7 +2035,10 @@ def _outer_all_locals(outer: N.FunctionDef) -> set:
     assigned name, any type) -- used only to detect whether a nested
     async def captures ANYTHING from its enclosing scope at all, before
     checking whether v0 can actually support that specific capture."""
-    return ({p for p, _a in outer.params}
+    _outer_pnames = set()
+    for _pn, _pa in outer.params:
+        _outer_pnames.add(_pn)
+    return (_outer_pnames
             | gimple_ctypes._declared_vars_body(outer.body))
 
 
@@ -2062,7 +2081,15 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
     used = set()
     for b in _capture_scan_body(inner.body):
         used |= gimple_ctypes._used_idents_node(b)
-    inner_declared = ({p for p, _a in inner.params}
+    # Plain unpack loop, NOT `{p for p, _a in inner.params}` — a
+    # comprehension's target unpack over a `list[tuple[str, str]]` boxes
+    # both slots to int64_t self-hosted (this codebase's original,
+    # longest-documented instance of this trap class). See
+    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+    _inner_pnames = set()
+    for _pn, _pa in inner.params:
+        _inner_pnames.add(_pn)
+    inner_declared = (_inner_pnames
                        | gimple_ctypes._declared_vars_body(inner.body))
     captured_names = (used - inner_declared) & all_outer
     if not captured_names:
@@ -2071,7 +2098,9 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
         return None            # unthreadable call site -- refuse (cpp path)
     boxable = _outer_boxable_locals(outer)
     penv = _static_env(outer)          # param annotation kinds + callsite contract
-    outer_param_names = {p for p, _a in outer.params}
+    outer_param_names = set()
+    for _pn, _pa in outer.params:
+        outer_param_names.add(_pn)
     plan: dict = {}
     for n in captured_names:
         if n in boxable:
@@ -2201,7 +2230,10 @@ def _fn_refs_captures(fn: N.FunctionDef, cap_names: set) -> bool:
     used = set()
     for b in _capture_scan_body(fn.body):
         used |= gimple_ctypes._used_idents_node(b)
-    declared = ({p for p, _a in fn.params}
+    _fn_pnames = set()
+    for _pn, _pa in fn.params:
+        _fn_pnames.add(_pn)
+    declared = (_fn_pnames
                 | gimple_ctypes._declared_vars_body(fn.body))
     return bool((used - declared) & cap_names)
 

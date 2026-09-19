@@ -2683,7 +2683,12 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     syn_body = [gimple_ctypes.ReturnStmt(value=node.body)]
     # Lambda params are (pname, default_value) not (pname, type_ann).
     # Strip defaults so _gen_lifted_closure doesn't try to resolve them as types.
-    syn_params = [(p, None) for p, _ in node.params]
+    # Plain unpack loop, NOT `[(p, None) for p, _ in node.params]` — a
+    # comprehension's target unpack over a `list[tuple[str, str]]` boxes
+    # both slots to int64_t self-hosted.
+    syn_params = []
+    for _pn, _pt in node.params:
+        syn_params.append((_pn, None))
     syn_def  = gimple_ctypes.FunctionDef(
         name=lifted_name,
         params=syn_params,

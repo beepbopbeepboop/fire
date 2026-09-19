@@ -98,6 +98,19 @@ def _params_have_vararg(params: list) -> bool:
             return True
     return False
 
+
+def _param_names_stripped(params: list) -> list:
+    """`[pn.lstrip('*') for pn, _ in (params or [])]` — as a plain unpack
+    LOOP, not a comprehension: a comprehension's target unpack over a
+    `list[tuple[str, str]]` boxes both slots to int64_t self-hosted (see
+    `_params_have_vararg`'s sibling note and
+    bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md). Shared
+    here instead of re-deriving the loop at each call site."""
+    out = []
+    for pn, _pt in (params or []):
+        out.append(pn.lstrip('*'))
+    return out
+
 # ---------------------------------------------------------------------------
 # TypeLattice — C11 usual arithmetic conversions + container helpers
 # ---------------------------------------------------------------------------

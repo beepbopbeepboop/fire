@@ -2152,7 +2152,7 @@ def gen_module_impl(self, stmts):
                     _xg_callee = _xg_local_fns.get(_xg_n2.func.name)
                     if _xg_callee is None:
                         continue
-                    _xg_cparams = [pn.lstrip('*') for pn, _pt in (_xg_callee.params or [])]
+                    _xg_cparams = gimple_ctypes._param_names_stripped(_xg_callee.params)
                     for _xi2, _xa2 in enumerate(_xg_n2.args):
                         if _xi2 >= len(_xg_cparams):
                             break
@@ -2215,7 +2215,7 @@ def gen_module_impl(self, stmts):
                     # docstring for why not a real tuple).
                     _xg_key = (_xg_mod_joined.replace('.', '_').replace('-', '_')
                                + '::' + _xg_call.func.member)
-                    _xg_pnames = [pn.lstrip('*') for pn, _pt in (_xg_fn.params or [])]
+                    _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
                     _xg_enc_map = (_xg_local_param_elems.get(_xg_enclosing.name, {})
                                    if _xg_enclosing is not None else {})
                     for _xi, _xa in enumerate(_xg_call.args):
@@ -2237,7 +2237,7 @@ def gen_module_impl(self, stmts):
                 # (gimple_codegen.py) for why a real tuple key breaks this
                 # dict's self-hosted compilation.
                 _xg_key = _xg_mod.replace('.', '_').replace('-', '_') + '::' + _xg_orig
-                _xg_pnames = [pn.lstrip('*') for pn, _pt in (_xg_fn.params or [])]
+                _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
                 # The ENCLOSING function's own param-elem contracts (from the
                 # literal-list call sites recorded above), for identifier
                 # arguments forwarded straight through to the generator.
@@ -3069,7 +3069,11 @@ def gen_module_impl(self, stmts):
                 break
         _bsc_idx = 0
         if _bsc_new is not None:
-            _bsc_pnames = [_as_str(pn) for pn, _pt in (_bsc_new.params or [])]
+            # Plain unpack loop, NOT a comprehension — see
+            # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+            _bsc_pnames = []
+            for _bpn, _bpt in (_bsc_new.params or []):
+                _bsc_pnames.append(_as_str(_bpn))
             # drop the leading cls/self
             _bsc_body_pnames = _bsc_pnames[1:] if _bsc_pnames else []
             _bsc_fwd = _bytes_subclass_new_payload_name(_bsc_new)
@@ -3103,8 +3107,13 @@ def gen_module_impl(self, stmts):
                 # whole-program --dump-full's first divergence at offset
                 # 21577).
                 _cs_key = _as_str(_s.name)
-                _ctor_init_params[_cs_key] = [pn for pn, _ in (_init.params or [])
-                                              if pn != 'self' and not pn.startswith('*')]
+                # Plain unpack loop, NOT a comprehension — see
+                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                _cip_list = []
+                for _cipn, _cipt in (_init.params or []):
+                    if _cipn != 'self' and not _cipn.startswith('*'):
+                        _cip_list.append(_cipn)
+                _ctor_init_params[_cs_key] = _cip_list
                 _ctor_init_methods[_cs_key] = _init
     if _ctor_init_params:
         # FLAT dicts keyed by "<struct>::<param>", NOT a nested
@@ -4150,11 +4159,19 @@ def gen_module_impl(self, stmts):
                         self._struct_property_names.setdefault(s.name, set()).add(m.name)
                     if m.name == '__init__':
                         self._struct_has_init.add(s.name)
-                        self._struct_init_params[s.name] = [
-                            pn for pn, _pt in m.params if pn != 'self']
+                        # Plain unpack loops, NOT comprehensions — see
+                        # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                        _sip_list = []
+                        for _sipn, _sipt in m.params:
+                            if _sipn != 'self':
+                                _sip_list.append(_sipn)
+                        self._struct_init_params[s.name] = _sip_list
                         _init_defaults = getattr(m, 'param_defaults', {}) or {}
-                        self._struct_init_defaults[s.name] = {
-                            pn: dv for pn, dv in _init_defaults.items() if pn != 'self'}
+                        _sid_dict = {}
+                        for _sidn in _init_defaults:
+                            if _sidn != 'self':
+                                _sid_dict[_sidn] = _init_defaults[_sidn]
+                        self._struct_init_defaults[s.name] = _sid_dict
                     if m.return_type is None:
                         _mangled_key = f"{s.name}_{m.name}"
                         for i, (pname, ptype) in enumerate(m.params):
@@ -4259,18 +4276,32 @@ def gen_module_impl(self, stmts):
                 # self-hosted (`_star_idx is not None` -> `0 != 0` -> False),
                 # silently giving a varargs method max_arity 0. -1 is
                 # unambiguous for an index under both evaluators.
-                _star_idx = next((i for i, (pn, _pt) in enumerate(_params_no_self)
-                                   if pn.startswith('*') and not pn.startswith('**')), -1)
-                real_params = [(pn, pt) for pn, pt in _params_no_self
-                               if not (pn.startswith('*') and not pn.startswith('**'))]
+                # Plain loops throughout this block, NOT comprehensions/
+                # genexprs with tuple-unpack targets — see
+                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                _star_idx = -1
+                for _psi in range(len(_params_no_self)):
+                    _psn = _params_no_self[_psi][0]
+                    if _psn.startswith('*') and not _psn.startswith('**'):
+                        _star_idx = _psi
+                        break
+                real_params = []
+                for _rpn, _rpt in _params_no_self:
+                    if not (_rpn.startswith('*') and not _rpn.startswith('**')):
+                        real_params.append((_rpn, _rpt))
                 _defaults = m.param_has_default or {}
                 if _star_idx >= 0:
                     _pre_star = _params_no_self[:_star_idx]
-                    min_arity = sum(1 for pn, _pt in _pre_star if pn not in _defaults)
+                    min_arity = 0
+                    for _psn2, _pst2 in _pre_star:
+                        if _psn2 not in _defaults:
+                            min_arity += 1
                     max_arity = float('inf')
                 else:
-                    min_arity = sum(1 for pn, _pt in real_params
-                                     if pn not in _defaults and not pn.startswith('**'))
+                    min_arity = 0
+                    for _rpn2, _rpt2 in real_params:
+                        if _rpn2 not in _defaults and not _rpn2.startswith('**'):
+                            min_arity += 1
                     max_arity = len(real_params)
                 _all_ctypes = self._signature_ctypes(m.params, m, s.name)
                 param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
@@ -4316,9 +4347,13 @@ def gen_module_impl(self, stmts):
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
                     max_arity = len(param_ctypes)
                 key = _sms_key(s.name, m.name)
+                # Plain unpack loop, NOT a comprehension.
+                _rp_names = []
+                for _rpn3, _rpt3 in real_params:
+                    _rp_names.append(_rpn3)
                 self._struct_method_signatures.setdefault(key, []).append({
                     'overload_id': _oid,
-                    'param_names': [pn for pn, _pt in real_params],
+                    'param_names': _rp_names,
                     'param_ctypes': param_ctypes,
                     'min_arity': min_arity,
                     'max_arity': max_arity,

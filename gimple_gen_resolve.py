@@ -494,7 +494,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen = gimple_codegen.GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=False,
                                      emit_entry_points=False, module_name=module_name,
                                      relaxed_imports=True)
-                temp_gen._current_filename = path  # Set filename for #line directives
+                # `_as_str(path)`: `path` is the raw `for path in
+                # mojo_paths:` loop variable (a real self-hosted boxing
+                # risk per this function's own `_ap_key` comment above,
+                # which already guards a DIFFERENT downstream use of the
+                # same loop var) — stored as-is here, `#line 1 "{...}"`
+                # (gimple_module_gen.py) interpolated it inconsistently
+                # run to run (observed: `#line 1 "./module_loader.py"` on
+                # one self-hosted run vs the real absolute path on the
+                # next, for the identical `mojoc fire.py --dump-full`
+                # invocation).
+                temp_gen._current_filename = _as_str(path)  # Set filename for #line directives
                 temp_gen._compiled_modules = gen._compiled_modules
                 temp_gen._inline_module_qualifiers = gen._inline_module_qualifiers
                 temp_gen._compiling_file_paths = gen._compiling_file_paths  # share: path-identity self-import guard (see its own declaration)
