@@ -93,7 +93,17 @@ def _scan_for_escaping(stmts: list, escaped: set, in_scope: set):
 def _find_escaping(params: list, body: list, struct_types: set) -> set:
     """Return the set of local variable names that escape `body`."""
     escaped: set[str] = set()
-    in_scope: set[str] = {p[0] for p in params}
+    # Plain unpack, NOT `{p[0] for p in params}` — subscripting a value
+    # obtained by comprehension-iterating a real list[tuple[str, str]]
+    # AST field is the established self-hosted trap (working `==` but
+    # corrupted `len()`/hashing on the subscripted slot; see
+    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md), and
+    # this feeds the LayoutSolver's stack-vs-heap escape analysis — a
+    # wrong `in_scope` here risks stack-allocating something that
+    # actually escapes.
+    in_scope: set[str] = set()
+    for _pn, _pt in params:
+        in_scope.add(_pn)
     _scan_for_escaping(body, escaped, in_scope)
     return escaped
 
@@ -113,7 +123,11 @@ class EscapeAnalyzer:
     def find_escaping(self, params: list, body: list) -> set:
         """Return the set of local variable names that escape `body`."""
         escaped: set[str] = set()
-        in_scope: set[str] = {p[0] for p in params}
+        # Plain unpack, NOT `{p[0] for p in params}` — see _find_escaping's
+        # identical fix above for why.
+        in_scope: set[str] = set()
+        for _pn, _pt in params:
+            in_scope.add(_pn)
         self._scan(body, escaped, in_scope)
         return escaped
 
