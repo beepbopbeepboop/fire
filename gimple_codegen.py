@@ -2400,6 +2400,7 @@ class GimpleGen:
         'int_join':              ('int64_t',   ['int64_t', 'int64_t', 'int64_t']),
         'int_join_list':         ('int64_t',   ['int64_t', 'int64_t']),
         'int_exists':            ('int',       ['int64_t', 'int64_t']),
+        'int_getcwd':            ('int64_t',   ['int64_t']),
         'mojo_set_intersection': ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_update':       ('void',      ['MojoSet *', 'MojoSet *']),
         'mojo_dict_copy':        ('MojoDict *', ['MojoDict *']),

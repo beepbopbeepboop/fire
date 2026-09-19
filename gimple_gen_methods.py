@@ -1390,13 +1390,36 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 t = gen._call_expr('char *', 'int64_t_expanduser', [(arg_type, arg_val)])
                 return 'char *', t
             elif outer_member == 'abspath' and len(node.args) == 1:
+                # int_abspath's real runtime.c signature is genuinely
+                # `int64_t int_abspath(int64_t, int64_t)` (a boxed char*,
+                # like int_dirname below) — but gimple_exprtypes.py's own
+                # local-variable-type inference (`fn_return_types`-style
+                # scan, ~line 840) has always declared os.path.abspath()
+                # results 'char *' for every CONSUMER of this call (matches
+                # the real semantic: it's a path string). Returning the raw
+                # 'int64_t' call result here left that declared-vs-actual
+                # mismatch for the assignment/declaration lowering to
+                # silently paper over, invisible until a caller's C
+                # declared type and this call's C return type collided in
+                # a single statement with no implicit int64_t->char*
+                # conversion allowed. Cast explicitly here (same pattern
+                # 'expanduser' a few lines up already uses, just via a
+                # runtime function whose C signature already says char*
+                # instead of needing this local cast) so this call's own
+                # returned (type, value) pair matches what every caller
+                # already assumes. Found via module_loader.py's
+                # `cwd = os.path.abspath(os.getcwd())`.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 t = gen._call_expr('int64_t', 'int_abspath', [('int64_t', '0'), (arg_type, arg_val)])
-                return 'int64_t', t
+                cast = gen._new_val('char *', f'(char *){t}')
+                return 'char *', cast
             elif outer_member == 'dirname' and len(node.args) == 1:
+                # Same boxed-int64_t-vs-declared-char* mismatch as abspath
+                # just above; identical fix.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 t = gen._call_expr('int64_t', 'int_dirname', [('int64_t', '0'), (arg_type, arg_val)])
-                return 'int64_t', t
+                cast = gen._new_val('char *', f'(char *){t}')
+                return 'char *', cast
             elif outer_member == 'join':
                 t = gen._new_temp('int64_t')
                 if len(node.args) == 0:
@@ -1655,6 +1678,49 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             arg_val = gen._materialize_as_list(arg_type, arg_val)
             t = gen._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
             return 'char *', t
+
+        # os.getcwd() -> char* (runtime helper int_getcwd, a real getcwd(3)
+        # call). This call shape had NO lowering case anywhere in this file
+        # (or gimple_gen_exprs.py/gimple_gen_calls.py — confirmed via a full
+        # grep for "getcwd" across every gimple_gen_*.py before adding this),
+        # despite int_getcwd already existing and being correctly implemented
+        # in runtime/fire_runtime.c and even documented as "looks correct" in
+        # an earlier round of this investigation. With no case here, `os.
+        # getcwd()` fell all the way through to the generic opaque-module-
+        # call fallback, which stubs an UNRECOGNIZED module method call to a
+        # bare `int64_t 0` — not a boxing/type-inference bug at all: the
+        # runtime function was simply never called. That explains this
+        # session's `len(os.getcwd())` reading back as exactly 0 self-hosted
+        # (len() on a NULL char* returns 0) while every OTHER os.getcwd()
+        # call site in the SAME compile (e.g. gimple_codegen.py's module-
+        # level `_SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))`
+        # constant) got the right answer only because the python3 SHIM
+        # evaluates those call sites directly in real CPython — this bug is
+        # compiled-path-only and was invisible to every shim-only check.
+        # Found via module_loader.py's `load_module_from_path`'s self-host
+        # directory gate (`_selfhost_dir = os.path.dirname(os.path.
+        # abspath(__file__))` compared against a candidate path derived
+        # ultimately from `os.getcwd()`).
+        if module_name == 'os' and method_name == 'getcwd' and not node.args:
+            # int_getcwd's real runtime.c signature (and its gimple_codegen.py
+            # _KNOWN_SIGS table entry) is genuinely `int64_t int_getcwd(int64_t)`
+            # (a boxed char*, same convention as int_abspath/int_dirname just
+            # above) -- declaring the call's OWN C return type 'char *' here
+            # directly (this case's first version) left the emitted temp
+            # declared char* while _emit_call still emits a bare
+            # `_t = int_getcwd(0);` (int64_t-returning call assigned straight
+            # into a char*-declared temp) -- a hard `-fgimple`
+            # "makes pointer from integer without a cast" error, invisible to
+            # every one of this session's earlier isolated repros because
+            # THIS exact call only gets compiled via fire.py build's
+            # generator-aware `compile_to_gimple_with_cpp` path (taken
+            # because fire.py's own source mentions `yield`/`async def`),
+            # never through the plainer `compile_to_gimple_cached` path this
+            # session's manual repros all happened to exercise. Same explicit
+            # int64_t-call-then-cast fix as abspath/dirname.
+            t = gen._call_expr('int64_t', 'int_getcwd', [('int64_t', '0')])
+            cast = gen._new_val('char *', f'(char *){t}')
+            return 'char *', cast
 
         # os.listdir(path) -> real list[str] of directory entries (runtime
         # helper mojo_listdir, opendir/readdir, "."/".." excluded). This call

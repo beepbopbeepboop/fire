@@ -581,6 +581,39 @@ class ModuleLoader:
             # compare it replaced and correctly returns False here rather
             # than papering over a still-real mismatch with a coincidental
             # string comparison that used to sometimes match by luck.
+            #
+            # ROOT CAUSE FOUND AND FIXED: `__file__` IS the uniform
+            # `"<bootstrap>"` placeholder in every module self-hosted
+            # (confirmed directly: `len(__file__) == 11`, `__file__ ==
+            # '<bootstrap>'` is True) -- that part of this session's working
+            # model was correct. The actual culprit was `os.getcwd()`
+            # itself: `len(os.getcwd())` read back as **0** self-hosted,
+            # right here in this function, even though nothing about the
+            # CWD had changed. Root cause: `os.getcwd()` (as a CALL, e.g.
+            # `os.getcwd()`, distinct from the `os.path`/`os.sep`-style
+            # attribute accesses) had NO lowering case anywhere in
+            # gimple_gen_methods.py/gimple_gen_exprs.py/gimple_gen_calls.py
+            # at all -- confirmed via a full grep for "getcwd" across every
+            # gimple_gen_*.py before the fix. It fell all the way through
+            # to the generic opaque-module-call fallback for an
+            # unrecognized module method, which stubs the result to a bare
+            # `int64_t 0` -- not a boxing/return-type-inference bug: the
+            # real runtime function (`int_getcwd` in runtime/
+            # fire_runtime.c`, itself correct all along -- a plain `malloc`
+            # + real `getcwd()` libc call) was simply never being called.
+            # `len()` on a NULL char* legitimately returns 0, matching the
+            # symptom exactly. Other `os.getcwd()` call sites in the SAME
+            # compile (e.g. gimple_codegen.py's module-level `_SELFHOST_DIR
+            # = os.path.dirname(os.path.abspath(__file__))` constant) only
+            # ever "worked" because the python3 SHIM evaluates them
+            # directly in real CPython -- this was a compiled-path-only
+            # bug, invisible to every shim-only check. Fixed by adding a
+            # real `module_name == 'os' and method_name == 'getcwd'` case
+            # in gimple_gen_methods.py (mirroring the existing `os.
+            # listdir()` case just below it) that calls `int_getcwd`, plus
+            # registering `int_getcwd` in gimple_codegen.py's call-signature
+            # table so link-mode's own separate-TU codegen resolves its
+            # return type correctly too.
             try:
                 _selfhost_gate = os.path.samefile(
                     os.path.dirname(os.path.abspath(path)), _selfhost_dir)
