@@ -287,6 +287,105 @@ Two force-multipliers here:
       the copy, so the repo stays clean and you can hack freely.</li>
 </ul>
 
+<h2>8b. Iota + rolling hash: bisecting a divergence to an exact instruction, without a debugger loop</h2>
+<p>
+Complementary to §8's "instrument the compiler" trick, for the specific case
+of two runs (shim vs self-host, or self-host vs itself across two invocations)
+that disagree somewhere deep in a huge, mostly-identical trace — a
+36 MB <code>--dump-full</code> or a hot loop executed millions of times. Printing
+every intermediate value is too slow and too much text to diff by eye; a
+single before/after value comparison (§8) only works once you already know
+*where* to look. This gets you there first, cheaply, then hands you off to
+lldb already standing at the exact first divergence.
+</p>
+<h3>The technique</h3>
+<ol>
+  <li><span class="step">Pick a hot chokepoint</span> — one function/line executed
+      on every iteration of the suspect loop (temp allocation, statement
+      emission, whatever is "close enough" to the bug that it will see the
+      first wrong value).</li>
+  <li><span class="step">Maintain two running counters there</span>, both
+      cheap and O(1) per call:
+      <ul>
+        <li>an <strong>iota</strong>: a plain monotonic sequence number,
+            <code>i = 0; i += 1</code> each call — this is your coordinate
+            into the trace, and it is what you break on later.</li>
+        <li>a <strong>rolling xorshift64 hash</strong> that mixes in 64 bits
+            of whatever "entropy" is available at that point (a temp's
+            address low bits, a string's hash, an enum tag, a small int
+            value) — <em>not</em> for cryptographic properties, just so two
+            traces that are about to diverge produce visibly different
+            numbers as soon as the underlying VALUES differ, even before you
+            know which value matters:
+<pre><code>h ^= (uint64_t)entropy_bits;
+h ^= h &lt;&lt; 13; h ^= h &gt;&gt; 7; h ^= h &lt;&lt; 17;   // xorshift64</code></pre>
+        </li>
+      </ul>
+  </li>
+  <li><span class="step">Print <code>i</code> and <code>h</code> to a plain log file</span> —
+      one line per call, nothing else on the line. Two runs of the same
+      chokepoint produce two logs of the same shape.</li>
+  <li><span class="step"><code>diff</code> (or <code>cmp</code>) the two logs</span>. The
+      first differing line's <code>i</code> is the exact iota of the first
+      divergence — you now have a coordinate, not just "somewhere in 36 MB
+      of output."</li>
+  <li><span class="step">Attach lldb (gdbtool) and stop a few iotas EARLY</span>,
+      not at the divergence itself — you want to watch it happen, not
+      discover it after the fact:
+<pre><code>gdbtool "b the_chokepoint_function"
+gdbtool "breakpoint modify -c 'i == (N-3)'"   # N = the divergent iota
+gdbtool run
+gdbtool continue   # now single-step/watch from here through iota N</code></pre>
+      If <code>i</code> itself is not directly readable as a debugger
+      condition (e.g. it lives in a self-hosted <code>GimpleGen</code>
+      instance field, not a plain C global), condition on a hit count
+      instead: run once uninstrumented to learn the call count at iota
+      <code>N-3</code>, then <code>breakpoint modify -i &lt;count-1&gt;</code>
+      to skip straight there.</li>
+  <li><span class="step">Step forward from <code>N-3</code> to <code>N</code></span>
+      watching whichever value feeds the hash — this is where the divergence
+      is finally visible in real time, in the actual failing process, instead
+      of inferred from two static log files.</li>
+  <li><span class="step">Once you know the mechanism, add finer-grained hash
+      points</span> — inside the one function/loop now implicated, at each
+      sub-step — and repeat steps 3–6 at that finer resolution. Each round
+      narrows the search by roughly the ratio of (sub-steps per call) : 1,
+      so a handful of rounds gets from "somewhere in a whole-program compile"
+      to "this exact statement."</li>
+</ol>
+<div class="card">
+Why this beats printing full values directly: the hash is <em>tiny</em>
+(one line, two integers) regardless of how large or complex the underlying
+data is, so it scales to traces with tens of millions of events without
+blowing up log size or diff time — the only per-run cost is O(n) integer
+math and O(n) tiny print lines, and disk use stays bounded as long as you
+do not add hash points to something called on every nanosecond-scale inner
+loop without limit. It is also <em>safe</em> where printing the real value is
+not: on the self-hosted path, a corrupted value is often exactly what you are
+hunting for (a raw pointer masquerading as a string — see §5's worked
+example), and printing it AS a string can itself crash or produce
+nondeterministic-looking output for reasons unrelated to your actual bug.
+Hashing a pointer's bits is safe and deterministic even when dereferencing
+or stringifying it would not be.
+</div>
+<p class="muted">
+This project's aside/bside harness (<code>tools/ab_run_one.py</code>,
+<code>tools/ab_filelist.py</code>, <code>tools/gen_ab_makefile.py</code>,
+<code>tools/ab_compare.py</code> — <code>make -j20 aside bside &amp;&amp; make
+compare-a-b</code>) is the coarse-grained first step this technique refines:
+it finds <em>which file</em> diverges between the shim and the self-hosted
+binary (or, run twice, whether a single file's self-hosted output is even
+stable run-to-run) far faster than a whole-program
+<code>--dump-full</code> — compiling one file via <code>python3
+fire.py --dump X.py</code> / <code>MOJO_NO_SHIM=1 ./mojoc X.py --dump</code>
+takes well under a second, versus minutes for the whole transitive closure,
+and a single-file <code>.ci</code> is small enough to diff and read directly
+without needing the iota/hash technique at all. Reach for aside/bside FIRST
+to localize to one file; reach for iota+hash only once you are already
+looking at one file (or one hot function) and still need to find the exact
+statement inside it.
+</p>
+
 <h2>9. Worked example — the full chain</h2>
 <p class="muted">
 <span class="tag">SIGBUS</span><span class="tag">200/200</span><span class="tag">type confusion</span>
