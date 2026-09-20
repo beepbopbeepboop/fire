@@ -1,4 +1,194 @@
-# CODEGEN_noshim_dumpfull_preexisting_divergence: check-noshim-dumpfull fails on b00955c itself
+# CODEGEN_noshim_dumpfull_preexisting_divergence: check-native-dumpfull fails on b00955c itself
+
+## Status (2026-09-20, seventh entry — huge backlog of self-hosted-only bugs found and fixed; `make bootstrap`'s per-file divergences now ALL fixed; one whole-program crash remains)
+
+Picking up directly from the sixth entry: with the subprocess fallback
+gone and native codegen genuinely running end to end, `make bootstrap`
+went from crashing almost immediately to reporting **14 files** with real
+`stage1` (python3) vs `stage2` (native) `.ci` content divergences
+(`t_list.mojo`, `class_jit.mojo`, `test_struct.mojo`,
+`bootstrap_test_classes.mojo`, `example_imports.mojo`,
+`bootstrap-validate.mojo`, `fire_compiler.py`, `fire_main.py`, `fire.py`,
+`module_loader.py`, `mojo.py`, `myinterpreter.py`, `stdlib_core.py`,
+`test_simple.mojo`). All 14 are now fixed for the per-file-dump case
+(`stage1`/`stage2` byte-identical for every one). Root causes, in the
+order found:
+
+1. **`zip()` had no lowering for a nested-tuple loop target**
+   (`for (a, b), c in zip(...)`) — `gimple_gen_loops.py`'s `_gen_for_zip`
+   raised outright for this shape, falling through to the generic
+   iterator path, which also couldn't handle it and silently ran the
+   loop body zero times (`mojo_unsupported_iter`). Fixed by adding real
+   nested-tuple-slot support to `_zip_bind_slot`/`_declare_zip_slot`.
+2. **`zip()` also had no lowering for a non-statically-typed sequence
+   argument** (e.g. `zip(d.get('parameters') or [], d['c_parameters'])`
+   — a dict-derived value, not a bare `MojoList *`) — fixed by routing
+   through `_materialize_as_list` (the same DESIGN.html R1/R5 chokepoint
+   `all()`/`any()`/`enumerate()`/`*.join()` already share) instead of
+   rejecting anything not already a literal list.
+3. **`ownership_destruct` was missing from `gimple_gen_methods.py`'s
+   `_SELFHOST_SIBLING_MODULE_PREFIXES` whitelist** — a real,
+   module-qualified free-function call
+   (`ownership_destruct.analyze_function(...)`) was silently
+   auto-stubbed into a no-op under self-hosting because the module
+   wasn't recognized as a legitimate self-host sibling. This alone made
+   Phase 3's ownership-free-candidate analysis return EMPTY, always,
+   under self-hosting — for as long as that's been true, `make bootstrap`
+   has never genuinely exercised this analysis' real logic.
+4. **Once (3) was fixed and the analysis started finding REAL
+   candidates for the first time, a long chain of untyped-parameter/
+   return-value element-type-propagation gaps in `ownership_destruct.py`
+   and its `gimple_gen_infra.py` consumer surfaced as segfaults**, not
+   silent wrong output — found and fixed one hop at a time (see
+   `ownership_destruct.py`'s own extensive docstrings on `_FuncFacts`,
+   `_intersect_all`, `analyze_function`, and `_as_str`, and `gimple_gen_
+   infra.py`'s `begin_function`/`emit_fallthrough_frees` for the full
+   mechanism and every specific crash each one fixed). The general
+   pattern, confirmed repeatedly: this self-hosted compiler tracks a
+   container's ELEMENT type (str vs int64_t) per COMPILE-TIME VARIABLE
+   NAME within one function scope (via `.append()`/`.add()` at the
+   point of construction) — but has NO mechanism to carry that
+   information across a plain function-call boundary (neither into a
+   callee's parameter, nor out through a return value, unless BOTH ends
+   are explicit `str`/`set`/`list` type ANNOTATIONS, which only fixes
+   the OUTER container type, not always its elements) or across a
+   struct-field write (`self.field = <call result>`, fixed for one
+   specific field via a manual `_field_elem_types` write in `begin_
+   function`) or through a *dynamically dispatched* attribute read
+   passed directly into a *builtin* method call like `set.add(x)`
+   (fixed via the `_as_str()` explicit-coercion-boundary trick — a
+   builtin has no annotatable parameter of its own to force the
+   coercion, so route the value through one of our OWN annotated
+   functions first).
+5. **A struct field-name list generator (`_mojo_fieldnames_*` in
+   `gimple_module_gen.py`) hit the exact same function-call-boundary
+   element-type-loss gap** (item 4's general pattern) for an unrelated
+   reason (real field names, not ownership candidates) — fixed by
+   inlining the single-call-site helper `_fieldnames_append_lines` back
+   into its caller's scope, so the list's element type (tracked via
+   `.append()`) never has to cross a boundary at all.
+6. **A large (`> INT64_MAX`) integer literal's Python-level VALUE
+   itself doesn't survive self-hosting** (`gimple_gen_exprs.py`'s
+   `_lower_IntLiteral`): `node.value` for a literal like
+   `0xFFFFFFFFFFFFFFFF` (2**64-1) is a real, unbounded Python int under
+   CPython, but under self-hosted execution `node.value` is itself
+   stored as an int64_t and has ALREADY WRAPPED to -1 by the time this
+   function runs — the existing `node.value > 0x7FFFFFFFFFFFFFFF` check
+   (correct under CPython) is then silently FALSE, skipping the
+   `uint64_t` cast+mask widening this literal needs entirely (a real,
+   reproducible divergence: a 64-bit hash-mixing idiom,
+   `x * <const> & 0xFFFFFFFFFFFFFFFF`, lost its whole masking step
+   under native). Fixed by also checking `node.value < 0` (unambiguous
+   evidence of this exact wraparound — a real `IntLiteral` node is never
+   itself negative under CPython either, since unary minus is a
+   separate AST node) and, for that branch, emitting a bit-reinterpret
+   C cast (`(uint64_t)(<value>LL)`) instead of trying to recover the
+   true unsigned decimal text with Python-level arithmetic (which would
+   itself need a literal >= 2**64 in THIS source file — circular).
+
+**Remaining, NOT yet fixed**: `make bootstrap`'s own internal
+whole-program `--dump-full ../fire.py` self-check (run once inside the
+`stage2` target and again inside `stage3`, comparing the self-hosted
+binary against itself on a much larger, real multi-module closure than
+any single bootstrap file) crashes intermittently — confirmed via lldb
+across several runs, always the same shape: `EXC_BAD_ACCESS` inside
+`mojo_set_update`/`mojo_set_add_str`/`_str_hash`, called from
+`ownership_destruct._dfa_stmt`, with the faulting address decoding as
+the raw bytes of an unrelated string constant (e.g. `"_SCALAR_..."`) —
+i.e. item 4's general class of bug, but not yet isolated to a specific,
+reproducible minimal shape: it has succeeded cleanly at least once (a
+full `make bootstrap` run completed stage1 AND all of stage2, including
+this exact `--dump-full` line, with zero per-file divergences) and
+failed on immediate re-run of the identical command against the
+identical binary and input, which points to a hash-seed/ASLR-dependent
+set/dict iteration order interacting with some remaining, real
+type-tracking gap on a control-flow shape (the crash trace runs through
+a real `TryStmt`) not yet reduced to a minimal repro — the run that
+crashed was compiling `module_loader.py`, which also hits (separately,
+non-fatally, printed as an `# ERROR: ...` comment in the generated C
+rather than crashing) a legitimate "two sibling modules both define
+`_mojo_type`" ambiguous-import case; whether that's connected to the
+crash is unconfirmed. Next step for whoever picks this up: reproduce
+under gdbtool with a breakpoint on `ownership_destruct__dfa_stmt_*`
+that conditionally prints `stmt`'s kind and the state of `assigned`
+each time a `TryStmt`/`MatchStmt` branch is taken while compiling
+`module_loader.py` specifically, to catch the exact iteration that
+produces the bad value — item 4's fixes were each found by exactly this
+kind of targeted instrumentation, just not yet pointed at this specific
+input.
+
+## Status (2026-09-19, sixth entry — earlier "FIXED" state this session was a FALSE POSITIVE; real divergence still open, now genuinely exercised for the first time)
+
+**Important correction**: this doc was `git rm`'d earlier today after `check-noshim-
+dumpfull` (renamed `check-native-dumpfull`) appeared to pass byte-identical. That
+was wrong — restored. What actually happened:
+
+1. Fixed three real, independent bugs this session (missing `os.getcwd()`/
+   `str.rindex()` codegen lowering, and a systemic keyword-arguments-dropped-
+   on-non-overloaded-method-calls bug) — all genuine, all still correct.
+2. Found the LONG-STANDING duplicate-`typedef struct _<mod>_toplev` emission
+   (Finding 5 below, "struct EMISSION ORDER divergence") is real and fixed
+   it with a regex-based post-processing pass (`gimple_codegen._dedup_
+   module_toplev_structs`), plus found and fixed a second, unrelated
+   cosmetic divergence (`gimple_codegen_compile_to_gimple(...)` vs
+   `compile_to_gimple(...)` call-site text, itself a MOJO_NO_SHIM-at-
+   codegen-time artifact, now removed).
+3. **After these, `check-noshim-dumpfull` reported byte-identical.** This
+   was accepted as "the divergence is fixed" and led to removing the
+   `gimple_codegen_compile_to_gimple` C runtime wrapper's python3-subprocess
+   fallback entirely (per an explicit user request to stop shelling out to
+   python3 at runtime).
+4. **That removal immediately broke `check-native-dumpfull`**: native
+   `compile_to_gimple` started returning NULL (a 264-byte fallback stub
+   instead of ~36MB of real output). Root cause: step 2's dedup fix used a
+   **regex with backreferences and a non-greedy quantifier**
+   (`#ifndef _MOJO_TOPLEV_GUARD_(\w+)\n...\1...(?:.*\n)*?...`) — both
+   outside POSIX ERE, which this codebase's self-hosted regex engine
+   implements (not Python's real `re`). Since this dedup pass runs inside
+   `_run_pipeline` (part of the self-hosted `compile_to_gimple` closure
+   itself), the self-hosted binary's OWN regex engine choked on it —
+   **silently**, because the still-present subprocess fallback caught the
+   resulting native failure and quietly re-did the whole compile via a
+   real `python3` subprocess (with real `re`), which of course produced
+   correct output. **The "byte-identical" result in step 3 was achieved
+   entirely via the subprocess fallback, not via working native codegen.**
+   Native `compile_to_gimple` was completely broken the whole time; nothing
+   in this session's earlier testing could see that, because the one gate
+   built specifically to see it (`check-native-dumpfull`, run with
+   `MOJO_NO_SHIM=1`/native-preferred) still had the fallback available as
+   an escape hatch.
+5. Fixed the regex bug for real: rewrote `_dedup_module_toplev_structs` as
+   plain `.find()`/slicing string scanning (no `re` at all) — verified via
+   a standalone unit test AND via the shim producing identical deduped
+   output. Rebuilt `mojoc`; native `compile_to_gimple` now genuinely runs
+   to completion self-hosted (native=35355174 bytes, not a 264-byte stub).
+6. **With native codegen actually running for the first time, the TRUE
+   remaining divergence is back**: `./mojoc fire.py --dump-full` vs
+   `python3 fire.py --dump-full fire.py`, first differing byte now at
+   offset ~87475 (was ~87862 before any of this session's fixes — i.e.
+   genuinely unchanged from where this whole investigation started).
+   Content: `struct _build_config_toplev _build_config_globals = {...};`
+   (the ONE-TIME instance-definition-with-initializers block — confirmed
+   via `grep -c` to appear EXACTLY ONCE in both outputs, so this is pure
+   **ordering**, not duplication) is spliced at line 3388 in native vs
+   line 4840 in the shim. This is a DIFFERENT text block than Finding 5's
+   original `typedef` duplication (which the dedup pass genuinely did fix
+   — the typedef itself is now at the identical line 2135 in both) but
+   the SAME underlying class of bug: `build_config` is a transitive
+   dependency reached from more than one importer (`fire.py` directly,
+   and `build_stdlib_dylib.py` — itself one of fire.py's own
+   dependencies), and `_compiled_modules`'s shared, first-come-first-
+   served dedup means WHICHEVER recursive path's Python-execution-order
+   reaches it first is the one whose own `gen_module_impl` call actually
+   emits this one-time instance-definition block, embedded inside THAT
+   caller's own fragment at THAT fragment's own splice position — not
+   necessarily `build_config`'s own alphabetical slot in the root's
+   `modules_to_compile` (confirmed separately, via instrumentation, to be
+   IDENTICAL between shim and self-host at the ROOT level only). This is
+   the SAME open architectural question Finding 5 below already
+   identified and left unsolved ("the ORDER FILES GET COMPILED differs
+   self-hosted vs shim... could stem from import-graph traversal order").
+   **Not yet fixed. Continuing.**
 
 ## Status (2026-09-17, fourth entry — `make bootstrap` NOW PASSES)
 

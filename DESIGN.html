@@ -267,7 +267,7 @@ blind spot into 34 GB of wild pointer arithmetic.
 
   <li><strong>Add a gate step that runs the self-hosted binary on real work and checks the
       artifact (R6).</strong> Not exit code — artifact size and content.
-      <code>MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full</code> producing a 0-byte
+      <code>./mojoc fire.py --dump-full</code> producing a 0-byte
       <code>mojo.ci</code> must fail loudly. This one check would have caught the regression
       the moment it appeared.</li>
 </ol>
@@ -409,14 +409,17 @@ pre-existing bugs the same search technique surfaced, not the larger pre-existin
 <code>check-runner</code>, <code>check-modcache</code>, <code>check-selfhost</code>,
 <code>check-runtimediff</code>, <code>check-linkmode</code>, <code>check-no-new-casts</code> (28
 casts, baseline unchanged), <code>compile_stdlib.py</code> (664/664, 0 failures), and a from-
-scratch stdlib dylib rebuild (0 skips) all pass. <code>check-noshim-dumpfull</code> fails — the
+scratch stdlib dylib rebuild (0 skips) all pass. <code>check-native-dumpfull</code> fails — the
 same pre-existing self-host module-drop divergence (byte offset 2390, `gimple_gen_coro` missing
 from the self-hosted build) confirmed via <code>git stash</code> bisection to exist on the
 untouched <code>b00955c</code> tree, unrelated to this session's R1/R3/R5 work — see
-<code>bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md</code>, tracked separately.</p>
+<code>bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md</code>, tracked separately
+(still open as of 2026-09-19; an apparent fix that session turned out to be a false
+positive masked by a since-removed subprocess fallback — see that doc's own sixth
+entry).</p>
 </div>
 
-<h2>Status update — 2026-09-13, check-noshim-dumpfull root-cause via lldb</h2>
+<h2>Status update — 2026-09-13, check-native-dumpfull root-cause via lldb</h2>
 <div class="card">
 <p>Used <code>tools/gdbtool</code> (lldb) directly on the self-hosted <code>mojoc</code> binary
 to root-cause the pre-existing divergence above, per the "when the writer is in the compiler,

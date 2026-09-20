@@ -39,7 +39,7 @@ import gimple_exprtypes
 from gimple_exprtypes import _walk_ast
 import gimple_codegen
 import gimple_gen_funcs as _ggf_dup
-from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _emitted_unresolved_stub_syms, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
+from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 
 def _is_selfhost_source_dir(_dir: str) -> bool:
@@ -533,16 +533,6 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list, _depth: int
             _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
 
 
-def _fieldnames_append_lines(name_lits: list) -> str:
-    """`"".join(f'  mojo_list_append_str(_r, {nl});\\n' for nl in
-    name_lits)` as an explicit accumulation loop — a list of string
-    pieces joined via a genexpr is the established self-hosted trap."""
-    out = ''
-    for nl in name_lits:
-        out += f'  mojo_list_append_str(_r, {nl});\n'
-    return out
-
-
 def _emit_reflection_dispatch(self, parts):
     """Emit the generic reflection dispatch (getattr/setattr/repr/
     dataclasses.fields/asdict). Extracted from gen_module_impl so its
@@ -582,7 +572,7 @@ def _emit_reflection_dispatch(self, parts):
     # raw int64_t ADDRESSES and handed back pointer-ints; the reflection
     # emit loop's `self.struct_field_types.get(sn)` then missed on every one
     # and silently skipped ALL the `_mojo_repr_*`/`_mojo_getattr_*` helpers
-    # (regressed struct_def/class_methods in test_ab_shim).
+    # (regressed struct_def/class_methods in test_ab_native).
     #
     # Ordering here is load-bearing: it drives the struct walk order, hence
     # the `_str_pool` intern order, hence every `_slit_N` in the output.
@@ -635,6 +625,22 @@ def _emit_reflection_dispatch(self, parts):
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
             name_lits.append(f'"{fname}"')
+        # Inlined `_fieldnames_append_lines` (was a separate function
+        # taking `name_lits: list`, called once, at the single call site
+        # below) — self-hosted codegen has no mechanism that carries a
+        # list's ELEMENT type across a plain function-call parameter
+        # boundary (confirmed repeatedly this session: `.append()`'s own
+        # elem-type tracking only reaches consumers in the SAME function
+        # scope the list was built in). Across that boundary, `nl` in
+        # the old `for nl in name_lits: out += f'...{nl});\n'` defaulted
+        # to `int64_t`, and the f-string printed the raw pointer decimal
+        # instead of the quoted field-name string literal (`mojo_list_
+        # append_str(_r, 46390516016);` instead of `mojo_list_append_
+        # str(_r, "x");` — a real, reproducible `make bootstrap`
+        # stage1-vs-stage2 divergence on any struct with real fields).
+        fieldnames_lines = ''
+        for nl in name_lits:
+            fieldnames_lines += f'  mojo_list_append_str(_r, {nl});\n'
         asdict_part = (
             f"static MojoDict * _mojo_asdict_{sn} ({sn} *obj) {{\n"
             f"  MojoDict *_r = mojo_dict_new();\n"
@@ -650,7 +656,7 @@ def _emit_reflection_dispatch(self, parts):
             f"\n  mojo_setattr((void *)obj, attr, val);\n}}\n"
             f"static MojoList * _mojo_fieldnames_{sn} (void) {{\n"
             f"  MojoList *_r = mojo_list_new();\n"
-            + _fieldnames_append_lines(name_lits) +
+            + fieldnames_lines +
             f"  return _r;\n}}\n"
             + asdict_part
         )
@@ -3526,7 +3532,7 @@ def gen_module_impl(self, stmts):
                     # `int64_t STACK;` here grew the shim's C struct by two
                     # extra members (`int64_t HEAP; int64_t STACK;`) the
                     # self-hosted build correctly omitted, the first
-                    # byte-level divergence of check-noshim-dumpfull (offset
+                    # byte-level divergence of check-native-dumpfull (offset
                     # 21086). The class-body-attribute pass above has already
                     # populated `_class_attrs[s.name]`, so this lookup makes
                     # the outcome independent of pass ordering.
@@ -8629,13 +8635,6 @@ def gen_module_impl(self, stmts):
         inline_defined = set()
 
     _stub_only_modules = {'jit.arm64', 'jit'}
-    # LOCAL dedup set (shadows the `from gimple_codegen import
-    # _emitted_unresolved_stub_syms` above) — that module-level `set()`
-    # global doesn't resolve cross-module on the self-hosted path, so it
-    # was NULL and `_emitted_unresolved_stub_syms.add(...)` segfaulted in
-    # `mojo_set_add_str(NULL, ...)` the moment a `jit`/`jit.arm64` import
-    # actually reached this branch.
-    _emitted_unresolved_stub_syms = set()
     _imp_syms = _as_dict(self.imported_symbols)
     for sym_name in sorted(_imp_syms):
         # `_sn` — a FRESH `_as_str` view (the sorted() loop var is int64_t;
@@ -8662,9 +8661,9 @@ def gen_module_impl(self, stmts):
         module = _as_str(sym_info.get('module', ''))
         if module in _stub_only_modules:
             cname = _safe_name(_as_str(sym_name))
-            if cname in _emitted_unresolved_stub_syms:
+            if cname in self._emitted_unresolved_stub_syms:
                 continue
-            _emitted_unresolved_stub_syms.add(cname)
+            self._emitted_unresolved_stub_syms.add(cname)
             ret_type = sym_info.get('return_type', 'int64_t')
             ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
             if ret_type == 'void':
@@ -8703,9 +8702,9 @@ def gen_module_impl(self, stmts):
             ret_type = _as_str(sym_info.get('return_type', 'int64_t'))
             ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
             if self.do_imports or self.link_imports:
-                if safe in _emitted_unresolved_stub_syms:
+                if safe in self._emitted_unresolved_stub_syms:
                     continue
-                _emitted_unresolved_stub_syms.add(safe)
+                self._emitted_unresolved_stub_syms.add(safe)
                 if ret_type == 'void':
                     body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); }}'
                 else:

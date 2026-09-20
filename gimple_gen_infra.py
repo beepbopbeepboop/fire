@@ -41,7 +41,7 @@ import ownership_destruct
 # (used throughout this codebase — e.g. gimple_codegen.py's `from
 # module_loader import load_module, get_symbol_type`), but `from X import
 # Y as Z` (a RENAMED single-name import) does not: found for real via
-# `make check-noshim-dumpfull` reporting "_owned_block_terminates:
+# `make check-native-dumpfull` reporting "_owned_block_terminates:
 # unavailable in compiled mode (imported from an unresolved external/
 # relative module)" — grep confirms this file was the only place in the
 # entire tree using that aliased form. No other local module import uses
@@ -4260,7 +4260,41 @@ _OWNED_PUSH_RUNTIME_FN = {
 }
 
 
-def maybe_push_owned_local(gen, name) -> None:
+def _owned_free_runtime_fn(ctype) -> str:
+    """`_OWNED_FREE_RUNTIME_FN.get(ctype)`, but as an explicit if/elif
+    chain rather than a dict `.get()` — self-hosted codegen has no
+    mechanism that tracks a MODULE-LEVEL dict LITERAL's VALUE type
+    (`_global_dict_val_types` exists but is never populated anywhere;
+    confirmed by grep), so `.get()` on one of these small string->string
+    tables returned its result mislabeled as a generic `int64_t`, and
+    interpolating that into an f-string (`f"  {runtime_fn} ({name});"`)
+    printed the raw pointer decimal instead of the function name
+    (`4346281880 (items);` instead of `mojo_list_free (items);` — a
+    real, reproducible `make bootstrap` divergence). An explicit
+    if/elif's each branch returns a STRING LITERAL directly, which is
+    always correctly typed."""
+    if ctype == 'MojoDict *':
+        return 'mojo_dict_free'
+    if ctype == 'MojoList *':
+        return 'mojo_list_free'
+    if ctype == 'MojoSet *':
+        return 'mojo_set_free'
+    return ''
+
+
+def _owned_push_runtime_fn(ctype) -> str:
+    """`_OWNED_PUSH_RUNTIME_FN.get(ctype)` — see `_owned_free_runtime_fn`
+    for why this can't be a dict `.get()` call under self-hosting."""
+    if ctype == 'MojoDict *':
+        return 'mojo_cleanup_push_dict'
+    if ctype == 'MojoList *':
+        return 'mojo_cleanup_push_list'
+    if ctype == 'MojoSet *':
+        return 'mojo_cleanup_push_set'
+    return ''
+
+
+def maybe_push_owned_local(gen, name: str) -> None:
     """Call once, right after lowering ANY statement whose sole target is
     the plain identifier `name` (a `VarDecl` or a single-target
     `AssignStmt`) — see the two call sites in gimple_gen_stmts.py's
@@ -4273,13 +4307,22 @@ def maybe_push_owned_local(gen, name) -> None:
     relaxation of that analysis fails closed (skips the push, today's
     pre-existing exception-path leak) rather than double-pushing the same
     pointer onto the cleanup stack."""
-    candidates = getattr(gen, '_owned_free_candidates', None)
+    # Direct attribute access (not `getattr(gen, ..., default)`): the
+    # field is unconditionally declared in `GimpleGen.__init__` now, and
+    # `getattr()` on a self-hosted struct goes through the GENERIC
+    # dynamic-dispatch path (`_mojo_dispatch_getattr`), which returns an
+    # opaque value with no element-type metadata — the plain attribute
+    # read below is what lets `_field_elem_types` (set once, in
+    # `begin_function`) actually reach this set's elements as `char *`
+    # instead of defaulting them to `int64_t` (see `begin_function`'s
+    # own docstring for the full story and the segfault this caused).
+    candidates = gen._owned_free_candidates
     if not candidates or name not in candidates:
         return
     pushed = gen._owned_free_pushed
     if name in pushed:
         return
-    push_fn = _OWNED_PUSH_RUNTIME_FN.get(gen.var_types.get(name))
+    push_fn = _owned_push_runtime_fn(gen.var_types.get(name))
     if push_fn:
         gen._emit(f"  {push_fn} ({name});")
         pushed.add(name)
@@ -4310,16 +4353,21 @@ def _emit_owned_local_frees(gen):
     # of bug `make bootstrap`'s byte-identity check exists to catch, and
     # it did: stage1-vs-stage2 `fire.ci` differed with this bug present.
     # A fixed, deterministic order is required output, not a style choice.
-    stack_allocated = getattr(gen, '_owned_stack_allocated', ())
+    # Direct attribute access — see `maybe_push_owned_local`'s identical
+    # note just above for why `getattr(gen, ..., default)` must not be
+    # used here.
+    stack_allocated = gen._owned_stack_allocated
     freed = 0
-    for name in sorted(getattr(gen, '_owned_free_candidates', ())):
+    for name in sorted(gen._owned_free_candidates):
         ctype = gen.var_types.get(name)
         # A stack-allocated candidate (Phase 6) must be torn down via
         # `_destroy` (buffer-only), never `_free` — the struct itself
         # lives in this function's own stack frame, not on the heap; see
         # this file's "Phase 6" section.
-        table = _OWNED_DESTROY_RUNTIME_FN if name in stack_allocated else _OWNED_FREE_RUNTIME_FN
-        runtime_fn = table.get(ctype)
+        if name in stack_allocated:
+            runtime_fn = _owned_destroy_runtime_fn(ctype)
+        else:
+            runtime_fn = _owned_free_runtime_fn(ctype)
         if runtime_fn:
             gen._emit(f"  {runtime_fn} ({name});")
             freed += 1
@@ -4389,6 +4437,19 @@ _OWNED_DESTROY_RUNTIME_FN = {
     'MojoSet *':  'mojo_set_destroy',
 }
 
+
+def _owned_destroy_runtime_fn(ctype) -> str:
+    """`_OWNED_DESTROY_RUNTIME_FN.get(ctype)` — see `_owned_free_
+    runtime_fn`'s docstring for why this can't be a dict `.get()` call
+    under self-hosting."""
+    if ctype == 'MojoDict *':
+        return 'mojo_dict_destroy'
+    if ctype == 'MojoList *':
+        return 'mojo_list_destroy'
+    if ctype == 'MojoSet *':
+        return 'mojo_set_destroy'
+    return ''
+
 _OWNED_STACK_PUSH_RUNTIME_FN = {
     'MojoDict *': 'mojo_cleanup_push_dict_stack',
     'MojoList *': 'mojo_cleanup_push_list_stack',
@@ -4413,7 +4474,7 @@ def _empty_ctor_ctype(node) -> str | None:
     return None
 
 
-def maybe_stack_alloc_owned_ctor(gen, name, value) -> bool:
+def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     """Call from gimple_gen_stmts.py's central `gen_stmt` dispatcher
     BEFORE lowering a `VarDecl`/single-target `AssignStmt` normally (a
     plain identifier `name` bound to `value`) — returns True if it fully
@@ -4422,7 +4483,8 @@ def maybe_stack_alloc_owned_ctor(gen, name, value) -> bool:
     False means "not applicable, lower it normally" (not a candidate, not
     an empty-constructor shape, or — belt-and-suspenders — already
     handled, which single static assignment should make impossible)."""
-    candidates = getattr(gen, '_owned_free_candidates', None)
+    # Direct attribute access — see `maybe_push_owned_local`'s note.
+    candidates = gen._owned_free_candidates
     if not candidates or name not in candidates:
         return False
     pushed = gen._owned_free_pushed
@@ -4463,8 +4525,35 @@ def begin_function(gen, fn) -> None:
     """Call once, in gimple_gen_funcs.py's `gen_func`, before lowering
     `fn`'s body. Must run before any statement is lowered, since
     `emit_return_frees` below needs the result available at every
-    `return` encountered DURING that lowering, not just after it."""
+    `return` encountered DURING that lowering, not just after it.
+
+    The `_field_elem_types` line below is LOAD-BEARING, not stylistic.
+    `_owned_free_candidates` is assigned here from a value returned by a
+    long call chain (`ownership_destruct.py`'s `_FuncFacts.candidates()`
+    -> `analyze_function()` -> `_definitely_assigned()` ->
+    `_compute_owned_free_candidates()`), and every hop in that chain now
+    has its OUTER return type correctly annotated `-> set` — but this
+    self-hosted compiler has no general mechanism that carries a
+    container's ELEMENT type across a `self.field = <call result>`
+    assignment (`_field_elem_types`, the mechanism that WOULD carry it,
+    is only ever populated by `.append()`/`.add()` call sites that
+    already know they're writing through a tracked struct field — see
+    gimple_gen_methods.py — never by a plain assignment). Left unset,
+    every later read of this field (`_emit_owned_local_frees`'s
+    `sorted(gen._owned_free_candidates)` loop) defaulted its elements to
+    the generic `int64_t` fallback and segfaulted downstream (`gen.
+    var_types.get(name)` handed a raw boxed pointer mislabeled as an
+    int to a string-keyed dict lookup — confirmed via lldb: `strcmp`
+    with a NULL operand inside `mojo_dict_get_int`). `_owned_free_
+    candidates`'s elements are ALWAYS local-variable-name strings, an
+    invariant of `ownership_destruct.py`'s own algorithm (never anything
+    else), so hardcoding this one field's element type here — the exact
+    established pattern `.append()`'s own propagation already uses,
+    just triggered manually instead of automatically at the one
+    assignment site automatic propagation can't reach — is correct
+    permanently, not a one-off workaround for today's specific bug."""
     gen._owned_free_candidates = _compute_owned_free_candidates(fn)
+    gen._field_elem_types.setdefault('GimpleGen', {})['_owned_free_candidates'] = 'char *'
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
 
@@ -4499,7 +4588,8 @@ def emit_return_frees(gen) -> None:
     before anything else in that function runs (see that call site for
     why it's safe to run unconditionally before evaluating the returned
     expression)."""
-    if getattr(gen, '_owned_free_candidates', None):
+    # Direct attribute access — see `maybe_push_owned_local`'s note.
+    if gen._owned_free_candidates:
         _emit_owned_local_frees(gen)
 
 
@@ -4511,5 +4601,18 @@ def emit_fallthrough_frees(gen, fn) -> None:
     end (see `_function_has_reachable_fallthrough` — a function whose
     every path already returns has nothing left for this to do; whatever
     follows in `gen.body_lines` would be unreachable C)."""
-    if gen._owned_free_candidates and _function_has_reachable_fallthrough(fn):
-        _emit_owned_local_frees(gen)
+    # Split into two plain `if`s rather than one `and` expression —
+    # self-hosted codegen for a boolean `and` combining a SET truthiness
+    # check (LHS) with a plain int/bool result (RHS,
+    # `_function_has_reachable_fallthrough`) was found to miscompile:
+    # `mojo_set_len` ended up called with the RHS's own 0/1 result
+    # instead of the LHS set pointer (confirmed via lldb: `mojo_set_len`
+    # crashed with x0=1, i.e. it was handed the boolean `True`, not a
+    # real MojoSet*). Two nested `if`s side-step whatever code path
+    # combines mixed-type `and` operands.
+    # Direct attribute access — see `maybe_push_owned_local`'s note.
+    if not gen._owned_free_candidates:
+        return
+    if not _function_has_reachable_fallthrough(fn):
+        return
+    _emit_owned_local_frees(gen)

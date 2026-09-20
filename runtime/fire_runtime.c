@@ -4456,9 +4456,22 @@ void mojo_unsupported_iter(const char *type_name) {
 
 
 /* Weak fallback: overridden by the compiled gimple_codegen closure's own
- * strong `compile_to_gimple` in a self-hosted `mojoc`; NULL everywhere else
- * so the MOJO_NO_SHIM branch below degrades to the subprocess shim without a
- * link error. */
+ * strong `compile_to_gimple` in a self-hosted `mojoc`. Every compiled Mojo
+ * program links `fire_runtime.c`, and `gimple_codegen_compile_to_gimple`
+ * below unconditionally references `compile_to_gimple` — this weak stub is
+ * the ONLY thing that keeps a standalone link of just this runtime (no
+ * compiled gimple_codegen closure at all, e.g. test_module_cache.py's
+ * stage1 extern-boundary check, test_runner.py, build_stdlib_dylib.py's
+ * dylib builds) from failing with an undefined-symbol link error. None of
+ * those actually CALL gimple_codegen_compile_to_gimple at runtime (only
+ * fire.py's own --dump/--dump-full/build_executable driver code, and the
+ * compiler's own bootstrap sources mojo.mojo/scripts/stage2_mojo_
+ * interpreter.mojo, ever contain a literal `gimple_codegen.compile_to_
+ * gimple(...)` call), so this weak stub returning NULL is never actually
+ * exercised as "the real answer" by anything that ships — only as a link-
+ * time placeholder. Keep this even though the python3 subprocess fallback
+ * that used to sit below it is gone (see gimple_codegen_compile_to_gimple's
+ * own comment). */
 __attribute__((weak)) char *compile_to_gimple(char *src, int do_imports, char *filename) {
     (void)src; (void)do_imports; (void)filename;
     return (char *)0;
@@ -4466,90 +4479,28 @@ __attribute__((weak)) char *compile_to_gimple(char *src, int do_imports, char *f
 
 char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename) {
     /*
-     * MOJO_NO_SHIM=1: call the compiled `compile_to_gimple` in the SAME
-     * binary (from the inlined gimple_codegen closure of a self-hosted
-     * `mojoc`) instead of spawning a python3 subprocess. The weak fallback
-     * definition above returns NULL, so a standalone link of only this
-     * runtime (e.g. test_module_cache.py's stage1 extern-boundary check)
-     * links cleanly and falls through to the subprocess shim; a real
-     * self-hosted build's strong definition overrides it.
-     *
-     * Otherwise: call Python's gimple_codegen.compile_to_gimple() via
-     * subprocess. Write src to a temp file, run
-     *   python3 -c "import gimple_codegen; print(gimple_codegen.compile_to_gimple(open('TMP').read(), do_imports, filename))"
-     * and capture the output. Falls back to a valid-but-empty stub only on
-     * hard failures (popen/write errors).
+     * Always call the compiled `compile_to_gimple` closure directly — no
+     * subprocess, ever, under any circumstance. This used to fall back to
+     * spawning `python3 -c "import gimple_codegen; ..."` (gated by
+     * MOJO_NO_SHIM, or when this binary had no compiled closure at all);
+     * that subprocess path is deleted entirely now that check-native-
+     * dumpfull (formerly check-noshim-dumpfull) has proven the self-hosted
+     * binary's own native compile_to_gimple produces byte-identical output
+     * to the python3-interpreted reference for fire.py's whole transitive
+     * closure. The weak stub above returns NULL when this binary has no
+     * compiled gimple_codegen closure at all (see its own comment) — in
+     * that case, return a valid-but-minimal stub .ci instead of ever
+     * touching python3.
      */
-    if (getenv("MOJO_NO_SHIM")) {
-        char *native = compile_to_gimple(src, do_imports, filename);
-        if (native) return native;
-    }
+    char *native = compile_to_gimple(src, do_imports, filename);
+    if (native) return native;
+
     static char *result_buf = NULL;
     static size_t result_cap = 0;
-    char tmppath[128];
-    snprintf(tmppath, sizeof(tmppath), "/tmp/_mojo_src_%d.mojo", (int)getpid());
-
-    /* Write source to temp file */
-    FILE *tmp = fopen(tmppath, "w");
-    if (!tmp) goto fallback;
-    fputs(src, tmp);
-    fclose(tmp);
-
-    /* Locate the project root: prefer MOJO_HOME env, else executable-relative */
-    char *mojo_home = getenv("MOJO_HOME");
-    char pythonpath[512];
-    if (mojo_home) {
-        snprintf(pythonpath, sizeof(pythonpath), "%s", mojo_home);
-    } else {
-        /* Default: current working directory (works when run from project root) */
-        snprintf(pythonpath, sizeof(pythonpath), ".");
-    }
-
-    /* Build the Python one-liner command */
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd),
-        "PYTHONPATH='%s' python3 -c \""
-        "import sys; import gimple_codegen; "
-        "src = open('%s').read(); "
-        "print(gimple_codegen.compile_to_gimple(src, %d, '%s'), end='')\" 2>/dev/null",
-        pythonpath, tmppath, do_imports, filename ? filename : "");
-
-    FILE *fp = popen(cmd, "r");
-    if (!fp) { unlink(tmppath); goto fallback; }
-
-    /* Read the WHOLE subprocess output, growing the buffer as needed. A fixed
-     * 4 MiB cap here used to silently truncate any transitive-closure dump
-     * once the self-hosted compiler's own generated C exceeded that size
-     * (mojo.py's own full closure is 5+ MiB): fread stopped short of EOF,
-     * pclose() then closed the read end while the child still had more to
-     * write, the child got SIGPIPE/EPIPE and exited non-zero, and THAT non-zero
-     * rc silently triggered the "Python call failed" fallback stub below —
-     * every --dump of mojo.py itself losing its whole transitive closure. */
-    if (!result_buf) { result_cap = 1 << 20; result_buf = malloc(result_cap); }
-    size_t n = 0;
-    for (;;) {
-        if (n + 65536 >= result_cap) {
-            result_cap *= 2;
-            result_buf = realloc(result_buf, result_cap);
-        }
-        size_t got = fread(result_buf + n, 1, result_cap - n - 1, fp);
-        n += got;
-        if (got == 0) break;  /* EOF or error */
-    }
-    int rc = pclose(fp);
-    unlink(tmppath);
-
-    if (n > 64 && rc == 0) {
-        result_buf[n] = '\0';
-        return result_buf;
-    }
-
-fallback:
-    /* Should never be reached in a working installation — emit a valid-but-
-       minimal stub that at least compiles without errors. */
     if (!result_buf) { result_cap = 1 << 12; result_buf = malloc(result_cap); }
     snprintf(result_buf, result_cap,
-        "/* gimple_codegen_compile_to_gimple: Python call failed */\n"
+        "/* gimple_codegen_compile_to_gimple: no compiled compile_to_gimple "
+        "in this binary (not a self-hosted build) */\n"
         "#include \"fire_runtime.h\"\n"
         "int _gimple_main(void) { return 0; }\n"
         "int main(int argc, char **argv) {\n"

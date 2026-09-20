@@ -2835,10 +2835,25 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen.gen_stmt(stmt)
     ginf.emit_fallthrough_frees(gen, node)
 
-    # Add implicit return 0 for main if it returns int but has no explicit return
-    if node.name == 'main' and ret_type in ('int', 'int64_t') and not gen.body_lines[-1:] == ['  return 0;']:
-        # Check if last statement is a return
-        if not (gen.body_lines and gen.body_lines[-1].strip().startswith('return')):
+    # Add implicit return 0 for main if it returns int but has no explicit
+    # return. Deliberately NOT `gen.body_lines[-1:]`/`gen.body_lines[-1]`
+    # (negative slicing/indexing) — the established self-hosted trap for a
+    # real accumulated MojoList (see this file's own `for pname, ptype in
+    # node.params:` comment a few dozen lines up for the sibling
+    # subscript-vs-plain-iteration version of the same trap): confirmed by
+    # hand via lldb, `mojo_list_len(NULL)` crashed here for the minimal
+    # repro `def main(): return 3` (this exact line's own `gen.body_lines
+    # and gen.body_lines[-1]` truthiness/negative-index pair), reproduced
+    # in isolation and bisected to this line specifically (a sibling
+    # top-level function named anything other than `main`, or `main`
+    # itself with no explicit `return`, both compiled fine — only a
+    # `main` with a single explicit `return <value>` statement, so
+    # `body_lines` has exactly one real entry, hit the crash). Length +
+    # a plain, positive-index lookup is the established-safe replacement.
+    if node.name == 'main' and ret_type in ('int', 'int64_t'):
+        _n_body_lines = len(gen.body_lines)
+        _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
+        if not _last_body_line.strip().startswith('return'):
             gen._emit('  return 0;')
 
     # For main function in root module, rename to _gimple_main and create wrapper

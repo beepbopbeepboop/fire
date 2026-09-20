@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Per-translation-unit shimless grind harness.
+"""Per-translation-unit native-codegen grind harness.
 
 For each source file (smallest first), compare
 
-    MOJO_NO_SHIM=1 stage2/mojo --dump <file>     (compiled codegen)
+    stage2/mojo --dump <file>                    (compiled/native codegen)
     python3 fire.py --dump <file>                (reference codegen)
 
 and classify the outcome:
@@ -15,7 +15,7 @@ and classify the outcome:
     OK      byte-identical
 
 Both sides run from the repo root (the self-host reflection injection is
-CWD-gated — see test_ab_shim's harness note), writing their .ci into
+CWD-gated — see test_ab_native's harness note), writing their .ci into
 separate scratch dirs so neither clobbers the other.
 
 Usage:
@@ -62,8 +62,7 @@ def classify(src, timeout=180):
     # Native. `--dump` writes <basename>.ci into CWD, so give it its own dir
     # but keep MOJO_HOME/PYTHONPATH pointed at the repo so imports resolve.
     rc, out, err = _run([STAGE2, '--dump', abs_src], cwd=nat_dir, timeout=timeout,
-                        env={'MOJO_NO_SHIM': '1', 'MOJO_HOME': HERE,
-                             'PYTHONPATH': HERE})
+                        env={'MOJO_HOME': HERE, 'PYTHONPATH': HERE})
     if rc < 0 or rc >= 128 or rc not in (0,):
         return 'CRASH', 'rc=%d %s' % (rc, err.decode('utf8', 'replace')[-300:])
     if not os.path.exists(nat_ci) or os.path.getsize(nat_ci) == 0:

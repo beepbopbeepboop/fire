@@ -619,6 +619,63 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._sub_toplevels = gen._sub_toplevels  # share the ordered list of sub-toplevels
                 temp_gen._module_globals = gen._module_globals  # share module globals tracking
                 temp_gen._module_global_inits = gen._module_global_inits  # share global inits
+                # share: "is this bare name a recognized imported MODULE"
+                # (gimple_codegen.py __init__) -- an ALREADY real instance
+                # attribute (not a bare local) that was never added to this
+                # sharing block, same bug class as `_auto_stubbed` above. A
+                # nested temp_gen with its own fresh, empty copy forgets
+                # that e.g. `ownership_destruct` was imported as a module
+                # in the enclosing context, so `ownership_destruct.analyze_
+                # function(...)` (a real, correctly-resolved module-
+                # qualified call everywhere else) gets misread as a method
+                # call on an unknown local (inferred int64_t) and silently
+                # auto-stubbed instead -- confirmed directly: self-hosted
+                # `--dump t_list.mojo` then finds 0 ownership-free
+                # candidates where python3 finds 1, a real stage1-vs-
+                # stage2 `make bootstrap` divergence (missing `mojo_
+                # cleanup_push_list`/`mojo_list_free`/`mojo_cleanup_
+                # cancel_n` in t_list.ci).
+                temp_gen._module_alias_names = gen._module_alias_names
+                # share: the "unresolved import" stub-declaration dedup set
+                # (see its own declaration in gimple_codegen.py __init__)
+                # -- must be shared like _module_globals/_module_global_
+                # inits just above, or each of a heavily-referenced
+                # symbol's many importing fragments re-emits its own copy.
+                temp_gen._emitted_unresolved_stub_syms = gen._emitted_unresolved_stub_syms
+                # share: the "auto-stub a not-yet-resolved struct method"
+                # dedup set (gimple_gen_methods.py's `_lower_struct_
+                # method_call`) -- ALREADY a real instance attribute (not
+                # a bare local), but never added to this sharing block,
+                # so every nested temp_gen got its own fresh, empty copy
+                # instead of sharing the root's. Confirmed as the actual
+                # cause of a heavily-referenced class (e.g. GimpleGen
+                # itself, ~363 methods) getting its auto-stub declarations
+                # re-emitted once per importing fragment (~56x, 20328
+                # total occurrences for 363 unique names in a real
+                # `fire.py --dump-full`) -- each fragment's own empty set
+                # independently concluded "I haven't stubbed this yet".
+                temp_gen._auto_stubbed = gen._auto_stubbed
+                # NOTE: `_elaborated_externs` (gimple_codegen.py __init__)
+                # is deliberately NOT shared here, despite looking like an
+                # obvious candidate (it's where GimpleGen's own ~363
+                # method stub declarations get recorded as "already
+                # emitted", and unshared it's the actual cause of those
+                # stubs being re-emitted once per importing fragment --
+                # confirmed directly). Sharing it makes things WORSE, not
+                # better: gen_module_impl's own emission of this list
+                # (`for _decl in self._elaborated_externs: parts.append(
+                # _decl)`) runs ONCE PER FRAGMENT and dumps the list's
+                # ENTIRE CURRENT CONTENTS every time, not just entries
+                # added since that fragment's own last check -- sharing
+                # the list so it keeps growing across fragments means
+                # EACH LATER fragment's own emission re-dumps everything
+                # every EARLIER fragment already emitted too, compounding
+                # the duplication instead of fixing it (confirmed: total
+                # occurrences went UP, 20328 -> 26136, when this sharing
+                # line was tried). The actual fix is a POST-PROCESSING
+                # dedup of the final assembled text (see gimple_codegen.
+                # _dedup_guarded_blocks), the same technique already used
+                # for the toplev-struct duplication -- not a sharing fix.
                 if hasattr(gen, '_global_to_module'):
                     temp_gen._global_to_module = gen._global_to_module  # share global -> module mapping
                 # share: async/generator API tables across modules so

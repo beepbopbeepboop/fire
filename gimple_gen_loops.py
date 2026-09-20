@@ -957,7 +957,21 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
     choice, same box/unbox and `_actual_types` recovery conventions) — the
     only difference is that a zip slot reads element `idx_t` of its OWN
     per-slot LIST, where a tuple-unpack slot reads element `i` of one
-    shared tuple."""
+    shared tuple.
+
+    `vn` may itself be a nested tuple target (`(_p_name, _p_raw_type)`)
+    when this slot's own sequence is a list of tuples — the element at
+    `idx_t` is then an opaque boxed tuple handle (int64_t on the wire,
+    same as any tuple-literal-list element), unpacked the same way
+    `_gen_for_list`'s `_emit_target_assign` unpacks a nested slot, just
+    reading a fixed sub-index instead of a shared loop index."""
+    if vn.startswith('(') and vn.endswith(')'):
+        raw = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
+        nested_ptr = gen._coerce_to_type('int64_t', 'MojoList *', raw)
+        nested_elem = gen._nested_elem_types.get(list_ptr, 'int64_t')
+        for j, nn in enumerate(gen._split_top_level_comma(vn[1:-1].strip())):
+            _zip_bind_slot(gen, nn, nested_ptr, nested_elem, j)
+        return
     cvn = gen._cname(vn)
     vt = gen.var_types.get(vn, elem)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -1016,9 +1030,12 @@ def _gen_for_zip(gen, node):
 
     Any shape this handler can't prove supported (keyword arguments, fewer
     than two sequences, a non-tuple loop target, a target/sequence arity
-    mismatch, a nested tuple slot, a non-list sequence) raises; the caller
-    (`_gen_stmt_ForStmt`) rolls back partial output transactionally and
-    falls through to the pre-existing generic path unchanged."""
+    mismatch) raises; the caller (`_gen_stmt_ForStmt`) rolls back partial
+    output transactionally and falls through to the pre-existing generic
+    path unchanged. A nested tuple slot (one sequence a list of tuples) IS
+    supported — see `_zip_bind_slot` — and so is a non-statically-typed
+    sequence argument (dict/set/opaque boxed value), via
+    `_materialize_as_list`."""
     it = node.iterable
     if it.kwargs:
         raise ValueError("zip() takes no keyword arguments")
@@ -1031,30 +1048,46 @@ def _gen_for_zip(gen, node):
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != len(args):
         raise ValueError("zip() target arity does not match its sequence count")
-    for _tn in tgt_names:
-        if _tn.startswith('(') and _tn.endswith(')'):
-            raise ValueError("nested tuple target in zip() is unsupported here")
-
     seq_ptrs = []
     seq_elems = []
     for _ai in range(len(args)):
         st, sv = gen.lower_expr(args[_ai])
         st = gen._get_actual_type(st, sv)
-        if st != 'MojoList *':
-            raise ValueError(f"zip() over {st} is unsupported here")
-        ptr = sv
-        if ptr in gen.var_types and gen.var_types[ptr] == 'int64_t':
-            ptr = gen._coerce_to_type('int64_t', 'MojoList *', sv)
+        # A zip() argument need not be a statically-known MojoList* — a
+        # dict-subscript/`.get()` result (e.g. `zip(d.get('parameters') or
+        # [], d['c_parameters'])`, the exact shape self-hosting this
+        # compiler hit in gimple_module_gen.py) types as an opaque boxed
+        # value. `_materialize_as_list` is the shared DESIGN.html R1/R5
+        # chokepoint for "give me a MojoList* view of any iterable" used
+        # by all()/any()/enumerate()/*.join()/the generic for-loop path —
+        # use it here too instead of rejecting anything not already a
+        # bare MojoList*.
+        ptr = gen._materialize_as_list(st, sv)
         seq_ptrs.append(ptr)
-        _e = gen._elem_of(sv)
+        _e = gen._elem_of(ptr)
         seq_elems.append(_e if _e else 'int64_t')
 
     # Declare each target by its OWN slot's element type BEFORE the loop
     # (mirrors _gen_for_zip_longest / _gen_for_enumerate ordering).
     # `_declare_var` is first-decl-wins, so a later loop reusing the same
     # name inherits these real types instead of an int64_t lock-in.
+    #
+    # A slot's target can itself be a nested tuple (e.g. self-hosting this
+    # very compiler hit `for (_p_name, _p_raw_type), _c_param in zip(...)`
+    # in gimple_module_gen.py — a real, legal shape: one sequence is a
+    # list of tuples). Declare the nested names with that sequence's OWN
+    # nested element type (same `_nested_elem_types` lookup `_gen_for_list`
+    # uses for its `pair_elem`), recursing for arbitrarily deep nesting.
+    def _declare_zip_slot(vn: str, seq_ptr: str, elem: str) -> None:
+        if vn.startswith('(') and vn.endswith(')'):
+            nested_elem = gen._nested_elem_types.get(seq_ptr, 'int64_t')
+            for nn in gen._split_top_level_comma(vn[1:-1].strip()):
+                _declare_zip_slot(nn, seq_ptr, nested_elem)
+            return
+        gen._declare_var(vn, elem)
+
     for _di in range(len(tgt_names)):
-        gen._declare_var(tgt_names[_di], seq_elems[_di])
+        _declare_zip_slot(tgt_names[_di], seq_ptrs[_di], seq_elems[_di])
 
     # Trip count is min(len(seq_i)) — real zip stops at the SHORTEST
     # sequence (that is the whole semantic difference from zip_longest,

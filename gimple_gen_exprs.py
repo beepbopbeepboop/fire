@@ -121,10 +121,35 @@ def _lower_IntLiteral(gen, node) -> tuple[str, str]:
     # the bare decimal as unsigned but still warns ("integer constant is
     # so large that it is unsigned"). An explicit ULL suffix says what we
     # mean and silences the warning without changing the value.
-    if node.value > 0x7FFFFFFFFFFFFFFF:
+    #
+    # `node.value < 0` is ALSO checked, not just `> 0x7FFFFFFFFFFFFFFF`:
+    # under self-hosted compilation, `node.value` itself is stored as a
+    # real int64_t (this compiler's own runtime has no arbitrary-
+    # precision integer type), so a literal like `0xFFFFFFFFFFFFFFFF`
+    # (2**64-1) has ALREADY WRAPPED to -1 by the time this function
+    # runs — `node.value > 0x7FFFFFFFFFFFFFFF` then compares -1 against
+    # a huge positive constant and is FALSE, silently skipping the
+    # uint64_t widening entirely (a real, reproducible `make bootstrap`
+    # divergence: `x * 0x2545F4914F6CDD1D & 0xFFFFFFFFFFFFFFFF`, a
+    # 64-bit hash-mixing idiom, dropped its whole `(uint64_t)`-cast-and-
+    # mask sequence under native compilation). A literal `IntLiteral`
+    # node from the parser is never itself negative (unary minus is a
+    # separate AST node), so `node.value < 0` is unambiguous evidence of
+    # this wraparound and never true for a real small/negative literal
+    # under plain CPython either.
+    if node.value > 0x7FFFFFFFFFFFFFFF or node.value < 0:
         # Also widen the type tag to uint64_t: a plain 'int' temp holding
         # this literal would itself overflow (e.g. UInt64.MAX truncating
         # to -1) before any later cast gets a chance to widen it.
+        if node.value < 0:
+            # Recovering the true unsigned decimal text with Python-level
+            # arithmetic (`node.value + 2**64`) would itself need a
+            # literal >= 2**64 in THIS source file, which self-hosted
+            # would wrap the exact same way — circular. Instead, let GCC
+            # do the reinterpretation at ITS compile time: `(uint64_t)
+            # (-1LL)` is a portable, exact bit-reinterpret cast that
+            # needs no value bigger than int64_t's own range on our end.
+            return 'uint64_t', f'(uint64_t)({node.value}LL)'
         return 'uint64_t', f'{node.value}ULL'
     return 'int', str(node.value)
 
@@ -3392,7 +3417,7 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     # and SUBSCRIPTING that iterated value is itself the self-hosted trap
     # (working `==` but corrupted `len()`/hashing on the subscripted
     # slot — the same class of bug as `node.params[i][0]`, confirmed
-    # while fixing the check-noshim-dumpfull crash), not something a
+    # while fixing the check-native-dumpfull crash), not something a
     # post-hoc `_as_str()` on the extracted value can repair. Confirmed
     # live: `mojoc fire.py --dump-full` produced a different
     # `mojo_str_cat (<heap address>, ...)` literal every run for this
@@ -4104,6 +4129,20 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
     t = gen._new_val('MojoSet *', "mojo_set_new ()")
+    # Record the element type the same way `_lower_list_literal`/
+    # `_lower_tuple_literal` do — this was the ONE container-literal
+    # lowering missing it. Without it, a set literal's own elem type
+    # defaults to the generic `_elem_of` fallback (`int64_t`) for every
+    # later consumer that needs to know it (`sorted(a_str_set)`'s
+    # for-loop target, `for x in a_str_set:`, etc): a real, reproducible
+    # `make bootstrap` divergence traced here — `sorted(gen._owned_free_
+    # candidates)`'s loop var read/printed each name as its raw pointer
+    # decimal, and `gen.var_types.get(name)` (name treated as int64_t,
+    # not char *) crashed downstream in `mojo_dict_get_int`/`strcmp`.
+    if node.elements:
+        elem = gen._infer_list_elem_type(node.elements)
+        if elem != 'int64_t':
+            gen._elem_types[t] = elem
     for el in node.elements:
         et, ev = gen.lower_expr(el)
         if et == 'char *':

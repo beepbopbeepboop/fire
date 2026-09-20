@@ -42,17 +42,6 @@ from generated_dispatch import (
     _STMT_DISPATCH, _EXPR_DISPATCH,
 
 )
-# Module-level (not per-GimpleGen-instance) because a fresh GimpleGen is
-# constructed once per file during whole-program/transitive-closure
-# flattening (--dump-full, fire.py build), so an instance attribute would
-# reset for every file and never actually dedup anything. Tracks which
-# unresolved-import stub/definition C symbol names have already been
-# emitted into the CURRENT flattened output, so importing the same
-# never-defined name from multiple files (e.g. `from module_loader import
-# STDLIB_PATH` in imports.py/version.py/regex_compile.py) only emits ONE
-# definition instead of one per importing file - the latter is a hard
-# "redefinition of X" GCC error since it's all one translation unit.
-_emitted_unresolved_stub_syms: set[str] = set()
 # Dedup for the `_mojo_type_name` tag→name table (`static char *
 # _mojo_type_name`, must appear exactly once in the flattened closure's
 # single TU) now lives in `GimpleGen._emitted_singletons` under the
@@ -1765,6 +1754,31 @@ class GimpleGen:
         self._has_toplevel_code: bool = False  # set per-module; whether root has top-level statements
         self._module_globals: dict[str, list[tuple[str, str, str]]] = {}  # module_name -> [(name, c_type, mojo_type), ...] (shared)
         self._module_global_inits: dict[str, dict[str, str]] = {}  # module_name -> {name -> init_code} (shared)
+        # Which "unresolved import" stub symbols (e.g. GimpleGen's own
+        # methods, referenced-but-not-yet-compiled from a nested fragment)
+        # have already had their `#ifndef GUARD ... #endif`-guarded stub
+        # declaration emitted, ACROSS THE WHOLE do_imports=True compile —
+        # shared across every nested temp_gen the same way `_module_
+        # globals`/`_module_global_inits` above are. gen_module_impl used
+        # to shadow this with a bare LOCAL `set()`, reset to empty on
+        # EVERY per-module call instead of shared: each of a heavily-
+        # referenced class's (e.g. GimpleGen, ~363 methods) many
+        # importing fragments independently decided "I haven't emitted
+        # this one yet" and re-emitted its own copy — confirmed directly,
+        # 20328 total stub-guard occurrences for only 363 unique names in
+        # a real `fire.py --dump-full` (~56x duplication). Every copy was
+        # individually harmless C (the `#ifndef` guard makes every
+        # occurrence after the first a no-op), but the sheer bulk made
+        # the whole-program output significantly more sensitive to
+        # exactly which of a symbol's many importing fragments happens to
+        # run first — a real, unnecessary source of whole-program
+        # `--dump-full` shim-vs-self-host byte divergence. A shared
+        # dict/set instance ATTRIBUTE (not the historical module-level
+        # `gimple_codegen._emitted_unresolved_stub_syms` global this
+        # replaces, which a past session found unreliable to read
+        # cross-module self-hosted) is the same proven-safe sharing
+        # pattern `_module_globals` etc. already use successfully.
+        self._emitted_unresolved_stub_syms: set = set()
         self._global_to_module: dict[str, str] = {}  # global_name -> module_name (shared)
         self._current_module_ctx: str = ""  # current module name for global field access
         self._current_struct_name: str = ""  # struct whose method body is being lowered (for Self() ctor); declared here so self-host keeps it `char *` — a `getattr` read erases it to int64_t and the `Name___new` stub decl came out as `<addr>___new`, nondeterministic
@@ -1800,6 +1814,25 @@ class GimpleGen:
         # reference at all).
         self._emitted_funcptr_builtins: set[str] = set()
         self._auto_stubbed: set[str] = set()               # function names auto-stubbed in _emit_call
+        # doc/OWNERSHIP_MODEL.md Phase 3's per-function state (gimple_gen_
+        # infra.py's begin_function/reset_no_candidates/emit_return_frees/
+        # emit_fallthrough_frees). Previously only ever assigned dynamically
+        # OUTSIDE __init__ (inside begin_function, called from gen_func) —
+        # never declared here, so it was never part of GimpleGen's own
+        # self-hosted STRUCT LAYOUT. That was invisible for a long time
+        # because `_owned_free_candidates` was ALWAYS an empty set at
+        # runtime under self-hosting (the separate `ownership_destruct.
+        # analyze_function` self-host bugs its own docstring documents),
+        # so `if gen._owned_free_candidates:` was always false and nothing
+        # ever read the (uninitialized/undeclared) field. Fixing those
+        # bugs made this one real for the first time: `begin_function`'s
+        # write went to a field GimpleGen's own struct never allocated,
+        # and the next read (`emit_fallthrough_frees`) crashed on garbage/
+        # near-null memory (confirmed via lldb: EXC_BAD_ACCESS in
+        # `mojo_set_len`, called via `gen._owned_free_candidates`).
+        self._owned_free_candidates: set = set()
+        self._owned_free_pushed: set = set()
+        self._owned_stack_allocated: set = set()
         self._current_filename: str = ""  # filename for #line directives
         self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
@@ -4087,76 +4120,270 @@ def _check_ownership(stmts, filename: str) -> None:
     )
 
 
-_TOPLEV_STRUCT_BLOCK_RE = re.compile(
-    r'#ifndef _MOJO_TOPLEV_GUARD_(\w+)\n'
-    r'#define _MOJO_TOPLEV_GUARD_\1\n'
-    r'typedef struct _\1_toplev \{\n'
-    r'(?:.*\n)*?'
-    r'\} _\1_toplev;\n'
-    r'#endif\n'
-)
-
-
-def _dedup_module_toplev_structs(code: str) -> str:
-    """Strip every REPEAT full `typedef struct _<mod>_toplev {...}` block
-    for the same module, keeping only its first (textually earliest)
-    occurrence.
+def _dedup_guarded_blocks(code: str) -> str:
+    """Strip every REPEAT `#ifndef <GUARD>\\n#define <GUARD>\\n...#endif`
+    block sharing the same GUARD name, keeping only the first (textually
+    earliest) occurrence — for ANY guard, not just one specific prefix.
 
     A `do_imports=True`/link-mode whole-program compile inlines many
-    independently-generated per-module code fragments (gen_module_impl's
-    own "sorted(all_modules_to_declare)" preamble loop AND its "this is
-    MY module" block both independently emit this SAME struct any time a
-    fragment references a sibling module whose globals happen to already
-    be known at that fragment's OWN generation time) — with no
-    cross-fragment coordination, a module reachable from many importers
-    (a common small utility like `build_config`) gets its full struct
-    definition emitted once per REFERENCING fragment, not once per
-    program. Every occurrence is individually valid C (each one's own
-    `#ifndef _MOJO_TOPLEV_GUARD_<mod>` guard makes every occurrence after
-    the first a compile-time no-op) — this is wasteful, not broken, for
-    an ordinary build. But WHICH of a module's several nested,
-    independently-recursing importers happens to be the one whose own
-    per-module compile runs (in PYTHON CALL-STACK / EXECUTION order, not
-    the deterministic textual splice order the outer `sorted(modules_to_
-    compile)` loop uses to assemble the final file) at a point where the
-    referenced module's globals are already known is itself compile-
-    order-dependent, and not guaranteed identical between the python3
-    shim and the self-hosted binary — a real, confirmed source of whole-
-    program `--dump-full` shim-vs-self-host byte divergence (first
-    diverging byte consistently at an offset where the shim and self-
-    host differ only in WHICH already-duplicated struct-definition text
-    appears at that position, never in whether the struct is eventually
-    defined correctly somewhere).
+    independently-generated per-module code fragments, and this
+    codebase's OWN generated-C conventions (`_stub_guard_name`'s own
+    docstring: "share ONE guard namespace so a real definition always
+    wins over a later auto-generated stub of that SAME symbol") already
+    make every one of these blocks INTENTIONALLY safe to collapse to
+    "keep whichever occurs first" — that's exactly what the C
+    preprocessor itself would do at compile time anyway (a later
+    `#ifndef X`/`#define X` is a no-op once `X` is already defined); this
+    just does it as a text-level pass ahead of time, for determinism.
+    Two real, independent duplication sources this fixes:
+
+    1. A module's full `typedef struct _<mod>_toplev {...}` (gen_module_
+       impl's "sorted(all_modules_to_declare)" preamble loop AND its "this
+       is MY module" block both independently emit this SAME struct any
+       time a fragment references a sibling module whose globals happen
+       to already be known at that fragment's own generation time) — a
+       module reachable from many importers (e.g. `build_config`) gets
+       its full struct definition emitted once per REFERENCING fragment,
+       not once per program.
+    2. A heavily-referenced struct's own auto-stub method declarations
+       (gimple_module_gen.py's `self._elaborated_externs` list — NOT
+       shared across nested temp_gen instances, and can't safely be: its
+       own consumption pattern re-dumps the WHOLE list's current contents
+       once per fragment, so sharing it just makes duplication WORSE, not
+       better — confirmed directly, tried and reverted). GimpleGen itself
+       (~363 methods) showed 20328 total stub-guard occurrences for only
+       363 unique names in a real `fire.py --dump-full` (~56x
+       duplication) before this fix.
+
+    Both are individually valid C in every occurrence (the `#ifndef`
+    guard makes every occurrence after the first a compile-time no-op) —
+    wasteful, not broken, for an ordinary build. But WHICH of a symbol's
+    several nested, independently-recursing referencing fragments happens
+    to be the one whose own compile runs (in PYTHON CALL-STACK / EXECUTION
+    order, not the deterministic textual splice order the outer
+    `sorted(modules_to_compile)` loop uses to assemble the final file) at
+    a point where the symbol is already known is itself compile-order-
+    dependent, and not guaranteed identical between the python3 shim and
+    the self-hosted binary — a real, confirmed source of whole-program
+    `--dump-full` shim-vs-self-host byte divergence.
 
     Deliberately a POST-PROCESSING pass over the FINAL, fully-assembled
     code string (called exactly once, only at the true top-level
-    `_run_pipeline` entry point — never on an individual nested
-    fragment) rather than a dedup guard threaded through the recursive
-    per-module compiles themselves: an earlier attempt at the latter
-    (tracking "already emitted" during generation, shared across nested
-    temp_gen instances) broke `make mojoc`'s own build with "invalid use
-    of undefined type" errors, because that in-flight tracking follows
+    `_run_pipeline` entry point — never on an individual nested fragment)
+    rather than a dedup guard threaded through the recursive per-module
+    compiles themselves: an earlier attempt at exactly that (tracking
+    "already emitted" during generation, shared across nested temp_gen
+    instances) broke `make mojoc`'s own build with "invalid use of
+    undefined type" errors, because that in-flight tracking follows
     PYTHON EXECUTION order, which can genuinely differ from the file's
     own final TEXTUAL order (a module compiled early, in Python call-
     stack terms, because an EARLIER-executing importer happens to depend
-    on it, can still end up spliced LATER in the final file if the outer
-    sorted-by-module-name loop places it there) — a module needing an
-    EARLIER textual position's full definition could end up with only
-    the later one, an actual "incomplete type" compile error. Operating
-    on the finished text sidesteps that mismatch entirely: every
-    occurrence found here is already in genuine final file order, so
-    keeping strictly the first and discarding the rest can never move a
-    definition to a later position than any of its own real uses."""
-    seen: set[str] = set()
+    on it, can still end up spliced LATER in the final file, since the
+    outer splice order is `sorted(modules_to_compile)` by NAME, not by
+    execution order) — a module needing an EARLIER textual position's
+    full definition could end up with only a later one, an actual
+    "incomplete type" compile error. Operating on the finished text
+    sidesteps that mismatch entirely: every occurrence found here is
+    already in genuine final file order, so keeping strictly the first
+    of several occurrences that are ALL already in real, final file order
+    can never move a definition to a position later than any of its own
+    real uses.
 
-    def _repl(m: re.Match) -> str:
-        name = m.group(1)
-        if name in seen:
-            return ''
-        seen.add(name)
-        return m.group(0)
+    Deliberately PLAIN STRING SCANNING (line-based), NOT `re` — an
+    earlier version used a backreferenced, non-greedy regex, which this
+    codebase's self-hosted regex engine (a POSIX-regex-based
+    reimplementation, not Python's real `re`) does not support:
+    backreferences and non-greedy quantifiers are both outside POSIX
+    ERE. This function is compiled into the self-hosted binary as part
+    of `_run_pipeline`'s own closure (it runs on every do_imports=True
+    compile, including the self-hosted compiler's own `--dump-full` of
+    itself), so the regex version silently made the NATIVE
+    `compile_to_gimple` raise/fail self-hosted every time — invisible
+    while `gimple_codegen_compile_to_gimple`'s python3-subprocess
+    fallback still existed (a native failure just silently fell back to
+    the subprocess, which used real Python's `re` and worked fine), but
+    a hard failure (native returns NULL, no fallback left) the moment
+    that subprocess path was removed.
 
-    return _TOPLEV_STRUCT_BLOCK_RE.sub(_repl, code)
+    NESTING-AWARE: a guarded block can legitimately contain ANOTHER
+    nested `#ifndef .../#endif` pair (confirmed real: `_guarded_ctor`'s
+    own `#ifndef {stub_guard}\\n#ifndef {guard}\\n#define {guard}\\n...
+    #endif\\n#endif` wrapping) — a naive "first #endif found = end of
+    block" scan would cut such a block short. This tracks nesting depth
+    so only the OUTER `#ifndef`'s own matching `#endif` closes the
+    block."""
+    lines = code.split('\n')
+    n = len(lines)
+    seen: set = set()
+    out_lines: list = []
+    i = 0
+    while i < n:
+        line = lines[i]
+        if line.startswith('#ifndef ') and i + 1 < n:
+            guard = line[len('#ifndef '):]
+            if lines[i + 1] == f'#define {guard}':
+                depth = 1
+                j = i + 1
+                closed = False
+                while j + 1 < n:
+                    j += 1
+                    if lines[j].startswith('#ifndef ') or lines[j].startswith('#if '):
+                        depth += 1
+                    elif lines[j] == '#endif':
+                        depth -= 1
+                        if depth == 0:
+                            closed = True
+                            break
+                if closed:
+                    if guard in seen:
+                        i = j + 1
+                        continue
+                    seen.add(guard)
+                    out_lines.extend(lines[i:j + 1])
+                    i = j + 1
+                    continue
+        out_lines.append(line)
+        i += 1
+    return '\n'.join(out_lines)
+
+
+def _relocate_module_instance_defs(code: str) -> str:
+    """After `_dedup_guarded_blocks` canonicalizes each module's
+    `typedef` to a single, deterministic position, ALSO relocate that
+    module's one-time `struct _<mod>_toplev _<mod>_globals = {...};`
+    instance-definition-WITH-INITIALIZERS block (emitted exactly once
+    overall, by whichever nested temp_gen's own gen_module_impl call
+    happens to process that module "as itself" — see gimple_module_gen.py's
+    per-module globals-struct block) to immediately follow that same
+    module's now-canonical `extern struct _<mod>_toplev _<mod>_globals;`
+    declaration line.
+
+    Unlike the typedef (deduped above because it is genuinely emitted more
+    than once), this instance-definition block is emitted EXACTLY ONCE —
+    confirmed via `grep -c` on a real `--dump-full` — so the divergence
+    here is pure ORDERING, not duplication: WHICH nested temp_gen's own
+    fragment happens to embed it (hence where in the final spliced file it
+    lands) is compile-order-dependent in the same way the typedef's
+    emission was, and not guaranteed identical between the python3 shim
+    and the self-hosted binary (confirmed directly: `struct _build_config_
+    toplev _build_config_globals = {...}` at line 3388 self-hosted vs line
+    4840 in the shim, for the byte-identical typedef at line 2135 in both).
+    Anchoring its position on the already-canonical typedef/extern-decl
+    (governed by textual order, already made deterministic above) instead
+    of leaving it wherever Python-execution order happened to splice it
+    makes this deterministic too.
+
+    Plain line-based string scanning, no `re` (see
+    `_dedup_guarded_blocks`'s docstring for why regex is unsafe in
+    a function that runs inside the self-hosted compiler's own compiled
+    closure)."""
+    lines = code.split('\n')
+    n = len(lines)
+
+    # Pass 1: find every module name that has a REAL (non-"incomplete")
+    # typedef elsewhere in the file — i.e. an "extern struct _<name>_
+    # toplev _<name>_globals;" line immediately preceded by that typedef's
+    # closing `#endif`. A module's OWN "gen_module_impl processing itself"
+    # block (root, or any module never referenced by ANOTHER module's own
+    # "sorted(all_modules_to_declare)" loop before its own compile — e.g.
+    # `root`/fire.py itself, since that loop explicitly skips `our_mod`)
+    # has NO such separate extern line anywhere: its typedef+instance-
+    # with-initializers pair is emitted together, once, with nothing else
+    # to anchor a relocation on. Only relocate names that DO have this
+    # anchor; leave everything else exactly where it already is — moving
+    # an unanchored block would just delete it (nothing left to insert it
+    # after) or, worse, anchor on the WRONG thing (a module can ALSO have
+    # an `__attribute__((incomplete))` forward-declaration variant, whose
+    # own "extern struct X Y;" line is NOT preceded by `#endif` — splicing
+    # real initializers onto that incomplete type is a hard GCC error,
+    # confirmed by hand: "'struct _root_toplev' has no member named ..."
+    # for every field, before this anchor-detection pass was added).
+    anchor_names: set = set()
+    for i in range(1, n):
+        if (lines[i - 1] == '#endif' and lines[i].startswith('extern struct _')
+                and lines[i].endswith('_globals;')):
+            after = lines[i][len('extern struct _'):]
+            toplev_idx = after.find('_toplev _')
+            if toplev_idx >= 0:
+                anchor_names.add(after[:toplev_idx])
+
+    if not anchor_names:
+        return code
+
+    # Pass 2: extract each ANCHORED module's instance-with-initializers
+    # block from wherever it currently sits — PLUS its immediately-
+    # following per-global accessor functions (gimple_module_gen.py emits
+    # `{ctype} {mod}__mojo_global_get_{field} (void) { return ...; }` for
+    # each global, right after the instance def, as part of the SAME
+    # one-time "this is MY module" unit — these must move together with
+    # the instance def or they're left orphaned at the old, non-
+    # deterministic position (confirmed by hand: `build_config__mojo_
+    # global_get___all__` etc. still at the old splice point after only
+    # the instance-def half was relocated).
+    instance_blocks: dict = {}
+    kept_lines: list = []
+    i = 0
+    while i < n:
+        line = lines[i]
+        if line.startswith('struct _') and line.endswith(' = {'):
+            after_struct = line[len('struct _'):]
+            toplev_idx = after_struct.find('_toplev _')
+            if toplev_idx >= 0:
+                name = after_struct[:toplev_idx]
+                if name in anchor_names:
+                    block_lines = [line]
+                    j = i + 1
+                    while j < n and lines[j] != '};':
+                        block_lines.append(lines[j])
+                        j += 1
+                    if j < n:
+                        block_lines.append(lines[j])
+                        j += 1
+                        # Consume the accessor functions immediately
+                        # following (a blank line, then one line per
+                        # global whose name contains this module's own
+                        # `__mojo_global_get_` accessor prefix, then the
+                        # trailing blank line the emitter always appends).
+                        accessor_prefix = f'{name}__mojo_global_get_'
+                        if j < n and lines[j] == '':
+                            k = j + 1
+                            acc_lines = []
+                            while k < n and accessor_prefix in lines[k]:
+                                acc_lines.append(lines[k])
+                                k += 1
+                            if acc_lines:
+                                block_lines.append('')
+                                block_lines.extend(acc_lines)
+                                j = k
+                                if j < n and lines[j] == '':
+                                    j += 1
+                        instance_blocks[name] = '\n'.join(block_lines)
+                        i = j
+                        continue
+        kept_lines.append(line)
+        i += 1
+
+    if not instance_blocks:
+        return code
+
+    # Pass 3: re-insert each block immediately after its own anchor line.
+    final_lines: list = []
+    inserted: set = set()
+    prev_line = ''
+    for line in kept_lines:
+        final_lines.append(line)
+        if (prev_line == '#endif' and line.startswith('extern struct _')
+                and line.endswith('_globals;')):
+            after = line[len('extern struct _'):]
+            toplev_idx = after.find('_toplev _')
+            if toplev_idx >= 0:
+                name = after[:toplev_idx]
+                if name in instance_blocks and name not in inserted:
+                    inserted.add(name)
+                    final_lines.append('')
+                    final_lines.append(instance_blocks[name])
+        prev_line = line
+    return '\n'.join(final_lines)
 
 
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
@@ -4173,13 +4400,14 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     """
     # One call here = one independent output artifact (this project's own
     # transitive-closure dumps included - the whole multi-file closure is one
-    # call). Reset cross-file dedup state so it can't leak stale "already
-    # emitted" markers between unrelated compiles that happen to share this
-    # process (e.g. compile_stdlib.py compiling many independent modules),
-    # while still deduping correctly *within* one call across every nested
-    # GimpleGen instance recursive import-inlining creates. Now applied in
-    # ALL modes — link mode historically skipped this (REF.html B1).
-    _emitted_unresolved_stub_syms.clear()
+    # call). Cross-file dedup state (e.g. `_emitted_unresolved_stub_syms`)
+    # now lives on the `GimpleGen` instance itself, fresh per instantiation,
+    # so it can't leak stale "already emitted" markers between unrelated
+    # compiles that happen to share this process (e.g. compile_stdlib.py
+    # compiling many independent modules) with no explicit reset needed
+    # here, while still deduping correctly *within* one call across every
+    # nested GimpleGen instance recursive import-inlining creates (shared
+    # by reference — see `_compile_imported_module`'s sharing block).
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
@@ -4290,7 +4518,8 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
     code = gen.gen_module(stmts)
     if do_imports or link_mode:
-        code = _dedup_module_toplev_structs(code)
+        code = _dedup_guarded_blocks(code)
+        code = _relocate_module_instance_defs(code)
     return code, gen
 
 

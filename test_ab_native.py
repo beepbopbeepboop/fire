@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """A/B test: compare .ci output from Python path vs compiled native backend.
 
+(Formerly test_ab_shim.py — renamed once the self-hosted binary's
+python3-subprocess fallback was removed entirely; MOJO_NO_SHIM no longer
+does anything, so this test no longer sets it.)
+
 Usage:
-    python3 test_ab_shim.py [file.mojo ...]
+    python3 test_ab_native.py [file.mojo ...]
 
 If no files given, tests a built-in set of small Mojo programs.
 """
@@ -40,10 +44,14 @@ def run_python_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
 
 
 def run_native_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
-    """Run MOJO_NO_SHIM=1 mojoc <flag> on src_path, return path to .ci file."""
+    """Run mojoc <flag> on src_path, return path to .ci file.
+
+    No MOJO_NO_SHIM needed: the self-hosted binary always uses its own
+    compiled compile_to_gimple directly now (the subprocess fallback was
+    removed entirely from gimple_codegen_compile_to_gimple in
+    runtime/fire_runtime.c)."""
     src_path = os.path.abspath(src_path)
     env = os.environ.copy()
-    env['MOJO_NO_SHIM'] = '1'
     # The compiled binary's `__file__` is "<bootstrap>", so its self-host
     # detection (`_SELFHOST_DIR = dirname(abspath(__file__))`) resolves to the
     # process CWD. The self-host struct registration (AST nodes, interpreter
@@ -511,7 +519,7 @@ BUILTIN_TESTS = {
 
 def main():
     if not os.path.exists(MOJOC):
-        print(f"ERROR: {MOJOC} not found. Build with: MOJO_NO_SHIM=1 python3 fire.py build fire.py -o mojoc", file=sys.stderr)
+        print(f"ERROR: {MOJOC} not found. Build with: python3 fire.py build fire.py -o mojoc", file=sys.stderr)
         sys.exit(1)
 
     passed = 0
@@ -519,7 +527,7 @@ def main():
 
     # Test inline sources
     print("=" * 60)
-    print("A/B SHIM TEST — Python vs compiled native backend")
+    print("A/B TEST — Python vs compiled native backend")
     print("=" * 60)
     print()
 

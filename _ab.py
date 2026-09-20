@@ -1,16 +1,16 @@
 import os, subprocess, sys
-import test_ab_shim as T
+import test_ab_native as T
 root = os.getcwd(); only = sys.argv[1:]
 ident=diff=crash=0
 for name, src in sorted(T.BUILTIN_TESTS.items()):
     if only and name not in only: continue
     f = os.path.join(root, "_abt_"+name+".mojo"); open(f,"w").write(src); ci = f[:-5]+".ci"
-    def dump(env):
+    def dump(native, env):
         e = dict(os.environ); e.update(env)
         if os.path.exists(ci): os.remove(ci)
-        subprocess.run((["./mojoc","--dump",f] if env.get("MOJO_NO_SHIM") else ["python3","fire.py","--dump",f]), cwd=root, env=e, capture_output=True)
+        subprocess.run((["./mojoc","--dump",f] if native else ["python3","fire.py","--dump",f]), cwd=root, env=e, capture_output=True)
         return open(ci,"rb").read() if os.path.exists(ci) else None
-    py = dump({}); nc = dump({"MOJO_NO_SHIM":"1","MOJO_HOME":root})
+    py = dump(False, {}); nc = dump(True, {"MOJO_HOME":root})
     if os.path.exists(ci): os.remove(ci)
     os.remove(f)
     if nc is None: crash+=1; print("CRASH",name)

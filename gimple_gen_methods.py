@@ -41,8 +41,21 @@ import gimple_gen_calls as ggc
 # sibling *implementation* module whose top-level functions are the former
 # GimpleGen methods (see _selfhost_sibling_module_call). Any `import X as Y`
 # in a `gimple*.py` file where X starts with one of these is in scope.
+#
+# `ownership_destruct` added after it was found missing here: without it,
+# `gimple_gen_infra.py`'s `ownership_destruct.analyze_function(fn, {}, {})`
+# call (a plain module-qualified free-function call) wasn't recognized as
+# a self-host sibling call at all, so it fell through to the generic
+# "call an unknown method on an unresolved-type receiver" path and got
+# silently auto-stubbed (`int64_t.analyze_function() stubbed`) — a real,
+# reproducible `make bootstrap` stage1-vs-stage2 divergence for every file
+# with a local list/dict/set binding this analysis would otherwise flag as
+# a destroy candidate (confirmed on t_list.mojo: stage1 emits `mojo_
+# cleanup_push_list`/`mojo_list_free`/`mojo_cleanup_cancel_n`, stage2
+# emits nothing, because the stubbed call always returns an empty set).
 _SELFHOST_SIBLING_MODULE_PREFIXES = ('gimple_', 'ast_rewriter', 'mlir',
-                                     'regex_compile', 'module_loader')
+                                     'regex_compile', 'module_loader',
+                                     'ownership_destruct')
 
 
 def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
@@ -1767,12 +1780,11 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (module_name == 'gimple_codegen' and method_name in (
                 'compile_to_gimple', 'compile_to_gimple_cached')):
             # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
-            # compile_to_gimple_cached lowers to the SAME shim: caching is a
-            # Python-process concern; the self-hosted binary's subprocess
-            # fallback just compiles (same output, uncached).
-            #
-            # MOJO_NO_SHIM=1: call the compiled compile_to_gimple directly
-            # (native backend) instead of the C runtime shim (subprocess).
+            # compile_to_gimple_cached lowers to the SAME C runtime wrapper
+            # (gimple_codegen_compile_to_gimple, runtime/fire_runtime.c):
+            # caching is a Python-process concern; the compiled wrapper just
+            # calls the in-binary native compile_to_gimple directly (same
+            # output, uncached, no subprocess involved at all).
             if len(node.args) >= 1:
                 src_type, src_val = gen.lower_expr(node.args[0])
                 # Cast to char* if needed (legacy int-cast strings)
@@ -1818,34 +1830,25 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # `gimple_codegen.compile_to_gimple(...)` call sites (in
                 # `build_executable` / the `--dump` handler) — silently
                 # truncating those functions from the output.
-                # Always emit a call to the C runtime wrapper, never the
-                # native `compile_to_gimple` symbol directly: runtime/
-                # fire_runtime.c's `gimple_codegen_compile_to_gimple`
-                # ALREADY does its own `getenv("MOJO_NO_SHIM")` check and
-                # dispatches to the native in-binary `compile_to_gimple`
-                # itself when set, falling back to the subprocess shim
-                # otherwise — the exact same choice this codegen used to
-                # make a SECOND TIME, redundantly, at COMPILE time (of
-                # whichever process happened to be GENERATING this C code
-                # — the python3 shim or a self-hosted `mojoc` compiling
-                # itself — rather than at RUN time of the resulting
-                # program). Checking `os.environ.get('MOJO_NO_SHIM')`
-                # here meant the python3 shim and a self-hosted `mojoc`
-                # compiling the IDENTICAL source (fire.py's own `--dump`/
-                # `--dump-full` handler, which calls THIS exact method)
-                # picked a DIFFERENT call-site text purely because of
-                # which process happened to generate the C — a real,
-                # confirmed source of whole-program `--dump-full`
-                # shim-vs-self-host byte divergence (first observed
-                # divergence after fixing the toplev-struct-duplication
-                # bug: literally this one call, `gimple_codegen_compile_
-                # to_gimple(...)` in the shim's own output vs
-                # `compile_to_gimple(...)` in the self-hosted binary's,
-                # for the exact same source line). Collapsing to always
-                # emit the wrapper call is purely a codegen simplification
-                # with ZERO runtime behavior change: the wrapper's own
-                # `getenv` check already produces the identical dispatch
-                # this branch used to hardcode at the wrong time.
+                # Always emit a call to the C runtime wrapper
+                # (gimple_codegen_compile_to_gimple), never the native
+                # `compile_to_gimple` symbol directly: the wrapper calls the
+                # native in-binary `compile_to_gimple` itself unconditionally
+                # now (its own former python3-subprocess fallback was
+                # deleted once check-native-dumpfull, formerly check-noshim-
+                # dumpfull, proved the native path byte-identical to the
+                # python3-interpreted reference for fire.py's whole
+                # transitive closure). This codegen used to pick between
+                # emitting a call to the native symbol directly vs the
+                # wrapper based on `os.environ.get('MOJO_NO_SHIM')` at
+                # COMPILE time (of whichever process was generating this C —
+                # the python3 reference interpreter or a self-hosted `mojoc`
+                # compiling itself) — a real, confirmed source of whole-
+                # program `--dump-full` divergence between the two, since
+                # they'd pick different call-site text for the identical
+                # source line. Always emitting the wrapper call sidesteps
+                # that entirely: there is now only one dispatch decision,
+                # made once, inside the wrapper itself.
                 t = gen._new_val('char *', f"gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
                 return 'char *', t
 
@@ -3527,6 +3530,19 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         return 'int', gen._new_val('int', '0')
     if method == 'add' and args:
         at, av = gen.lower_expr(args[0])
+        # Record the set's element type on the RECEIVER the same way a
+        # `{...}` literal does (`_lower_set_literal`) — `s = set()` then
+        # `s.add(x)` in a loop never went through that literal path, so
+        # `sorted(s)`/`for v in s:` later defaulted `s`'s element type to
+        # `int64_t` unconditionally, silently misreading real string
+        # elements as boxed addresses (a real, reproducible `make
+        # bootstrap` crash chain: `ownership_destruct.py`'s `_FuncFacts.
+        # candidates()` builds exactly this `out = set(); ...
+        # out.add(name)` shape, and the caller's `sorted(candidates)`
+        # loop var then fed a mis-typed `name` into a dict lookup that
+        # segfaulted in `strcmp`).
+        if at == 'char *' and ov not in gen._elem_types:
+            gen._elem_types[ov] = 'char *'
         if at == 'char *':
             return gen._void_call('mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
         av64 = gen._to_int64(at, av)

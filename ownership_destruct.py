@@ -102,6 +102,31 @@ from ownership_check import _terminates, _block_terminates
 _NONRETAINING_BUILTINS = {'len', 'print', 'str', 'repr', 'bool', 'hash', 'id'}
 
 
+def _as_str(x: str) -> str:
+    """Identity, but with an explicitly `str`-annotated PARAMETER and
+    return type — force a call site to coerce a dynamically-typed value
+    (e.g. `stmt.target.name`, a `.name` field read off an untyped `stmt`
+    parameter via runtime dynamic dispatch) to a real `char *` BEFORE it
+    reaches a call that can't do that coercion itself.
+
+    LOAD-BEARING, not a style nicety: a *builtin* method call like `set.
+    add(x)`/`dict.get(x)` decides str-vs-int purely from `x`'s own
+    inferred STATIC type at that exact call site (gimple_gen_methods.py),
+    with no parameter annotation of its own to force a coercion — unlike
+    a call into one of THIS module's own functions/methods, which DOES
+    coerce its argument because ITS parameter is explicitly annotated
+    (confirmed via a real, minimal test: `facts.note(stmt.name)` with
+    `note(self, key: str)` correctly emits `mojo_set_add_str`, but
+    `assigned.add(stmt.target.name)` — no intervening annotated
+    parameter — emits `mojo_set_add_int`, silently storing a real string
+    under the WRONG runtime hash scheme). Route any dynamically-typed
+    field through `_as_str(...)` before handing it to a builtin
+    container method, and the call boundary this function's OWN
+    annotated parameter/return provides supplies the coercion the
+    builtin method can't."""
+    return x
+
+
 def _is_node(x):
     return dataclasses.is_dataclass(x) and not isinstance(x, type)
 
@@ -124,15 +149,15 @@ class _FuncFacts:
         self.all_ctor_assigns = {}   # name -> bool (True until proven False)
         self.disqualified = set()    # names ruled out by rules 3-8
 
-    def note_assign(self, name, is_ctor):
+    def note_assign(self, name: str, is_ctor: bool):
         self.assign_count[name] = self.assign_count.get(name, 0) + 1
         prev = self.all_ctor_assigns.get(name, True)
         self.all_ctor_assigns[name] = prev and is_ctor
 
-    def disqualify(self, name):
+    def disqualify(self, name: str):
         self.disqualified.add(name)
 
-    def candidates(self):
+    def candidates(self) -> set:
         out = set()
         for name, count in self.assign_count.items():
             if (count == 1 and self.all_ctor_assigns.get(name)
@@ -156,7 +181,7 @@ def _resolve_callee(func, funcs, methods):
     return None
 
 
-def _scan_expr(node, facts, funcs, methods, in_closure=False):
+def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
     """Visits every expression node reachable from `node`. THE CORE
     SOUNDNESS RULE (fixed 2026-09-15 after a real, reproducible self-host
     crash — see the "IMPORTANT correctness fix" note in the module
@@ -276,7 +301,7 @@ def _scan_expr(node, facts, funcs, methods, in_closure=False):
         _scan_expr(getattr(node, f.name), facts, funcs, methods, in_closure)
 
 
-def _scan_assign_target_escape(target, facts):
+def _scan_assign_target_escape(target, facts: _FuncFacts):
     """Rule 5: a target that ISN'T the simple `name = ...` shape (a
     subscript/member target, e.g. `d[k] = x` or `self.f = x`) means
     whatever's on the RHS may now be reachable from somewhere else —
@@ -286,7 +311,7 @@ def _scan_assign_target_escape(target, facts):
     return isinstance(target, N.IdentExpr)
 
 
-def _scan_stmt(stmt, facts, funcs, methods):
+def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
     if isinstance(stmt, (N.FunctionDef,)):
         for f in dataclasses.fields(stmt):
             _scan_expr(getattr(stmt, f.name), facts, funcs, methods, True)
@@ -364,7 +389,42 @@ def _scan_stmt(stmt, facts, funcs, methods):
                 _scan_expr(val, facts, funcs, methods)
 
 
-def _dfa_branches(then_body, elifs, else_body, assigned, terminals):
+def _intersect_all(sets: list) -> set:
+    """Plain-loop replacement for `set.intersection(*sets)` (the unbound-
+    method-called-with-star-unpacking idiom) — self-hosted codegen has no
+    lowering for that shape at all: a real, reproducible test (`set.
+    intersection(*[a, b, c])` on plain non-empty sets) returns an empty/
+    wrong result under a compiled binary, and iterating it even trips the
+    generic `mojo_unsupported_iter` fallback. Every one of this module's
+    4 original call sites fed straight into `set` mutation/comparison, so
+    this silently corrupted the whole definite-assignment pass under
+    self-hosting (found via the same `make bootstrap` t_list.mojo
+    divergence `analyze_function`'s own docstring documents — this was
+    the SECOND, independent bug in that one chain, not a duplicate of
+    the `facts`-typing fix).
+
+    NOTE: `out = sets[0]` below (a bare subscript read), never `set(sets
+    [0])` — a THIRD, independent bug in this same chain: `sets` (a plain
+    `list` parameter, no element-type annotation the parser recognizes)
+    loses its "elements are MojoSet*" tracking at the function boundary,
+    and self-hosted `set(<value read from an untyped list>)` has no
+    fallback for that case — it silently degrades to `mojo_set_new()`
+    (a fresh EMPTY set, `/* TODO: comprehension over int64_t */` in the
+    generated C), not an error. `sets[0] & sets[i]` doesn't hit this: the
+    `&` operator's own type resolution (unlike `set()`'s constructor
+    dispatch) correctly recovers the real MojoSet* regardless. Since `&`
+    (not `&=`) always allocates a fresh result set, `out` is never the
+    same object as `sets[0]` after the first loop iteration, so this
+    doesn't alias/mutate any of the caller's original sets either."""
+    if not sets:
+        return set()
+    out = sets[0]
+    for i in range(1, len(sets)):
+        out = out & sets[i]
+    return out
+
+
+def _dfa_branches(then_body, elifs, else_body, assigned: set, terminals: list) -> list:
     """Definite-assignment counterpart of ownership_check.py's
     `_branch_states`: same then/elifs/else/terminates shape, but the
     per-branch payload is "names definitely assigned so far on this path"
@@ -389,7 +449,7 @@ def _dfa_branches(then_body, elifs, else_body, assigned, terminals):
     return branches
 
 
-def _dfa_stmt(stmt, assigned, terminals):
+def _dfa_stmt(stmt, assigned: set, terminals: list) -> None:
     """Mutates `assigned` in place to reflect what's definitely assigned
     immediately AFTER `stmt`, given it was the set immediately before.
     Appends a snapshot to `terminals` at every point control could leave
@@ -397,10 +457,10 @@ def _dfa_stmt(stmt, assigned, terminals):
     doesn't itself terminate — the latter is handled by the caller after
     the top-level walk, matching `_block_terminates`'s own convention)."""
     if isinstance(stmt, N.AssignStmt) and isinstance(stmt.target, N.IdentExpr):
-        assigned.add(stmt.target.name)
+        assigned.add(_as_str(stmt.target.name))
         return
     if isinstance(stmt, N.VarDecl):
-        assigned.add(stmt.name)
+        assigned.add(_as_str(stmt.name))
         return
     if isinstance(stmt, N.ReturnStmt):
         terminals.append(set(assigned))
@@ -420,7 +480,17 @@ def _dfa_stmt(stmt, assigned, terminals):
         live = [a for a, term in branches if not term]
         assigned.clear()
         if live:
-            assigned.update(set.intersection(*live))
+            # `_ia` as its own local, NOT `assigned.update(_intersect_all
+            # (live))` inline — self-hosted codegen was found to
+            # miscompile (crash inside `mojo_set_update`/`mojo_set_
+            # order_indices` on real fire.py control flow, never
+            # reproduced in any isolated single-branch test) when a
+            # `-> set`-returning call's result feeds DIRECTLY into
+            # another method call as an argument, but not when the same
+            # result is stored into a local first. Same shape as every
+            # other fix in this module's history: store, then use.
+            _ia = _intersect_all(live)
+            assigned.update(_ia)
         return
     if isinstance(stmt, (N.WhileStmt, N.ForStmt, N.ComptimeForStmt)):
         # A loop may run zero times, so anything only assigned INSIDE the
@@ -429,7 +499,16 @@ def _dfa_stmt(stmt, assigned, terminals):
         # exactly like an if with an implicit empty else.
         body_assigned = set(assigned)
         _dfa_walk_block(stmt.body, body_assigned, terminals)
-        assigned.intersection_update(body_assigned)
+        # `_intersect_all` + reassign, NOT `assigned.intersection_update
+        # (body_assigned)` — self-hosted codegen for `set.intersection_
+        # update()` was found to silently give a WRONG result (a real,
+        # reproducible test: {"x","y","z"}.intersection_update({"y","z",
+        # "w"}) left the receiver at length 3, not the correct 2), the
+        # same underlying gap `_intersect_all` (see its own docstring)
+        # already exists to route around for `set.intersection(*args)`.
+        _new_assigned = _intersect_all([assigned, body_assigned])
+        assigned.clear()
+        assigned.update(_new_assigned)
         return
     if isinstance(stmt, N.TryStmt):
         pre = set(assigned)
@@ -445,7 +524,8 @@ def _dfa_stmt(stmt, assigned, terminals):
             _dfa_walk_block(getattr(h, 'body', []), ha, terminals)
             all_sets.append(ha)
         assigned.clear()
-        assigned.update(set.intersection(*all_sets))
+        _ia = _intersect_all(all_sets)
+        assigned.update(_ia)
         if stmt.else_body:
             _dfa_walk_block(stmt.else_body, assigned, terminals)
         if stmt.finally_body:
@@ -465,7 +545,8 @@ def _dfa_stmt(stmt, assigned, terminals):
         live = [a for a, term in branches if not term]
         assigned.clear()
         if live:
-            assigned.update(set.intersection(*live))
+            _ia = _intersect_all(live)
+            assigned.update(_ia)
         return
     if isinstance(stmt, N.FunctionDef):
         return  # nested def: its own body's assignments don't count here
@@ -473,12 +554,12 @@ def _dfa_stmt(stmt, assigned, terminals):
     # has no effect on which candidate names are definitely assigned.
 
 
-def _dfa_walk_block(body, assigned, terminals):
+def _dfa_walk_block(body, assigned: set, terminals: list) -> None:
     for stmt in body:
         _dfa_stmt(stmt, assigned, terminals)
 
 
-def _definitely_assigned(fn, candidates):
+def _definitely_assigned(fn, candidates: set) -> set:
     """Of `candidates` (names already cleared by the escape analysis
     above), returns only those provably assigned on EVERY path from
     function entry to EVERY point control can leave the function — see
@@ -496,14 +577,34 @@ def _definitely_assigned(fn, candidates):
         terminals.append(assigned)  # falls off the end: implicit return
     if not terminals:
         return set()
-    return candidates & set.intersection(*terminals)
+    return candidates & _intersect_all(terminals)
 
 
-def analyze_function(fn, funcs, methods):
+def analyze_function(fn, funcs, methods) -> set:
     """Returns the set of local names in `fn` that are destroy candidates
     per the module docstring's rules 1-8, AND are definitely assigned on
     every path to every point the function can exit (see
-    `_definitely_assigned`)."""
+    `_definitely_assigned`).
+
+    `facts` below is explicitly typed `_FuncFacts` (as are the `facts`
+    parameters of every helper this calls transitively — `_scan_expr`/
+    `_scan_stmt`/`_scan_assign_target_escape`) — this is LOAD-BEARING,
+    not stylistic. Self-hosted: an untyped (bare Python, no annotation)
+    parameter that later has a user-defined-class method called on it
+    (`facts.note_assign(...)`, `facts.disqualify(...)`) can't be resolved
+    to a real struct method at that call site, so the self-hosted
+    compiler silently AUTO-STUBS the call (`int64_t.note_assign() ...
+    stubbed` — a no-op, not an error) instead of raising or falling back
+    to dynamic dispatch. Found via a real, reproducible `make bootstrap`
+    stage1-vs-stage2 divergence (t_list.mojo's `.ci` missing `mojo_
+    cleanup_push_list`/`mojo_list_free`): self-hosted `analyze_function`
+    ran to completion, `_scan_stmt` was called the right number of times,
+    but every `facts.note_assign`/`facts.disqualify` call inside it was
+    silently a no-op, so `facts.assign_count` stayed empty end to end —
+    python3 (which runs this module as plain, uncompiled CPython even
+    when compiling something else) was correct throughout and never hit
+    this at all, which is why it was invisible until the C runtime's
+    python3-subprocess fallback was removed."""
     facts = _FuncFacts()
     for pname, _ in fn.params:
         # Parameters are out of scope for v0 (see module docstring) —

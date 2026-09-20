@@ -128,27 +128,62 @@ is optional or "extra":
 4. `make bootstrap` (3-stage self-compilation byte-identity check) if the
    change touches `mojo_compiler.py`, `gimple_codegen.py`, `module_loader.py`,
    or any `gimple_*.py` — the fullest-coverage check available; `make
-   check-selfhost` alone is a faster subset, not a substitute.
-5. `make check-noshim-dumpfull` (or `python3 test_noshim_dumpfull.py`) —
-   diffs `MOJO_NO_SHIM=1 ./mojoc fire.py --dump-full`'s actual output
-   BYTE-FOR-BYTE against the shim's own `--dump-full`, not just exit code.
-   Steps 0-4 all drive codegen through the python3 SHIM; only this one
-   exercises the self-hosted `mojoc` BINARY's own compiled codegen running
-   on real work. A self-host-only bug can produce a wrong-but-exit-0
-   artifact every other step is structurally blind to — this happened for
-   real 2026-08-13→09-13: a fix that silenced a known SIGBUS in that path
+   check-selfhost` alone is a faster subset, not a substitute. `stage2`/
+   `stage3` exercise the self-hosted binary's own native codegen for every
+   file they dump (the C runtime's python3-subprocess fallback was removed
+   2026-09-19 — see step 5's note — so there is no other path left for
+   them to take; this makes `stage2`/`stage3` meaningfully STRONGER than
+   before that removal, since they previously silently delegated the real
+   codegen work to the same subprocess and only verified argument-parsing/
+   orchestration determinism).
+5. `make check-native-dumpfull` (or `python3 test_native_dumpfull.py`) —
+   diffs `./mojoc fire.py --dump-full`'s actual output BYTE-FOR-BYTE
+   against the python3-interpreted reference's own `--dump-full`, not just
+   exit code. Steps 0-3 all drive codegen through the python3-interpreted
+   reference implementation; this one exercises the self-hosted `mojoc`
+   BINARY's own compiled (native) codegen running on real work. A
+   native-codegen-only bug can produce a wrong-but-exit-0 artifact every
+   other step is structurally blind to — this happened for real
+   2026-08-13→09-13: a fix that silenced a known SIGBUS in that path
    turned out to silently drop two compiled sibling modules instead
    (1.4M-line diff from correct), and every other check-* target stayed
    green throughout, including `make check-selfhost` and `make bootstrap`.
    Added 2026-09-13 (see the `design-container-typing-audit`/
    `selfhost-dump-full-module-drop` project memories) specifically because
-   steps 0-4 all missed that regression.
+   steps 0-3 all missed that regression. (Renamed 2026-09-19 from
+   `check-noshim-dumpfull`/`test_noshim_dumpfull.py` when the C runtime's
+   python3-subprocess fallback was removed entirely — see
+   `gimple_codegen_compile_to_gimple`'s own comment in runtime/
+   fire_runtime.c — so there is no more "shim vs no-shim" distinction,
+   only "python-interpreted reference vs self-hosted native".)
+
+**Status as of 2026-09-20**: removing the subprocess fallback (so `stage2`/
+`stage3` and native `--dump-full` genuinely exercise the self-hosted
+binary's own codegen for the first time) surfaced a real, substantial
+backlog of self-hosted-only bugs, most now fixed — see
+`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md` for the full
+history. `make bootstrap`'s stage1-vs-stage2 `.ci` divergence count went
+14 → 0 for individual per-file dumps; the ROOT CAUSES found (all in code
+this compiler self-hosts, not user-facing bugs) were a recurring pattern:
+an untyped function parameter/return value whose element type (str vs
+int64_t, for a `list`/`set`/`dict`) can't be tracked across a function-call
+boundary the way a locally-scoped literal's element type can — see
+`ownership_destruct.py`'s own extensive docstrings (`_as_str`,
+`_intersect_all`, `begin_function`) for the full mechanism and its
+limits. `make bootstrap`'s own internal whole-program `--dump-full
+fire.py` self-check (inside the `stage2`/`stage3` targets) still crashes
+intermittently on real, large, multi-module input (confirmed via lldb:
+`ownership_destruct._dfa_stmt`'s `assigned.update(...)` call, on a
+`TryStmt`/ambiguous-import-fallback code shape not yet isolated to a
+minimal repro) — this is the one known remaining gap, not yet root-
+caused to a specific fix the way every other divergence in this backlog
+was. Do not assume `make bootstrap`/`make check-native-dumpfull` are
+fully green without re-checking this doc's latest status entry.
 
 A change passing `test_gimple.py`/`test_module_cache.py`/`make check-selfhost`
 alone is NOT sufficient evidence the compiled path is unaffected — only
 `compile_stdlib.py` and the stdlib dylib build actually exercise the huge
-breadth of real Mojo source this compiler needs to keep working, only
-`make bootstrap` verifies the compiler's own self-hosted output is stable
-under repeated self-compilation, and only `make check-noshim-dumpfull`
-verifies the self-hosted BINARY's own codegen (not the python3 shim's)
+breadth of real Mojo source this compiler needs to keep working, and only
+`make bootstrap`/`make check-native-dumpfull` verify the self-hosted
+BINARY's own native codegen (not just the python3-interpreted reference's)
 produces correct output, not just a clean exit code.

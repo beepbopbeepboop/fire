@@ -76,7 +76,7 @@ exact shape:**
    `compile_stdlib.py` 664/664, `make bootstrap` 180/180) and against
    every earlier repro in this doc, now re-checked under `MallocScribble`/
    `dangerouslyDisableSandbox` (all pass with exit 0, not just "printed a
-   plausible-looking number"). `check-noshim-dumpfull` re-confirmed as
+   plausible-looking number"). `check-native-dumpfull` re-confirmed as
    the same pre-existing divergence via a proper same-worktree `--no-
    cache` A/B (see that bug doc's newest entry — the naive "compare to a
    number written down earlier" methodology used for the previous three
@@ -127,7 +127,7 @@ exact shape:**
      `make check-linkmode` (3/3), stdlib dylib build, `compile_stdlib.py`
      (both confirmed green independently), `make check-selfhost` (1/1),
      and `make bootstrap` (180/180 byte-identical across 3 stages) all
-     PASS. `make check-noshim-dumpfull` FAILS — but confirmed, via a
+     PASS. `make check-native-dumpfull` FAILS — but confirmed, via a
      from-scratch `git worktree` build of unmodified HEAD, to ALREADY
      fail identically before any of this session's changes (see
      `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s
@@ -137,7 +137,7 @@ exact shape:**
      meant to: (1) `make bootstrap` caught non-deterministic free-call
      ordering — `_owned_free_candidates` is a Python `set`, iterated
      directly; fixed by sorting at the point of emission. (2)
-     `check-noshim-dumpfull` caught a self-host-only crash: a real,
+     `check-native-dumpfull` caught a self-host-only crash: a real,
      serious escape-analysis soundness gap in `ownership_destruct.py`
      where a bare identifier read outside a closure was a silent no-op
      by default (only specific shapes like a bare/tuple `return` were
@@ -253,7 +253,7 @@ exact shape:**
      `make check-selfhost` 1/1, from-scratch stdlib dylib rebuild (0
      skips), `compile_stdlib.py` 664/664 (0 unexpected, up from 663/664),
      `make bootstrap` 180/180 byte-identical across 3 stages.
-     `make check-noshim-dumpfull` FAILS but re-confirmed as the SAME
+     `make check-native-dumpfull` FAILS but re-confirmed as the SAME
      pre-existing, already-tracked divergence (see
      `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s new
      2026-09-15 "later same day" entry) — same ~20800-21100 first-byte
@@ -277,7 +277,7 @@ exact shape:**
      `test_ownership_check.py` 24/24, `test_ownership_destruct.py`
      20/20, `make check-linkmode` 3/3, `make check-selfhost` 1/1,
      stdlib dylib rebuild 0 skips, `compile_stdlib.py` 664/664 0
-     unexpected, `make bootstrap` 180/180); `check-noshim-dumpfull`
+     unexpected, `make bootstrap` 180/180); `check-native-dumpfull`
      re-confirmed as the SAME pre-existing divergence a third time (see
      that bug doc's newest entry — same first-differing-byte offset
      21086, ~530KB gap unchanged, only a ~3KB shift on each side from
@@ -706,7 +706,7 @@ instead of "everything's an aliasable pointer":
   ownership fixture suites, `check-linkmode`, `check-selfhost` — the
   compiler's own self-compile hits zero false positives — stdlib dylib
   rebuild 0 skips, `compile_stdlib.py` 664/664 matching the standalone
-  sweep exactly, `make bootstrap` 180/180); `check-noshim-dumpfull`
+  sweep exactly, `make bootstrap` 180/180); `check-native-dumpfull`
   verification handed off mid-session to another agent already doing
   that specific A/B work — not independently re-confirmed here for this
   change.
@@ -780,7 +780,7 @@ anyway. With real ownership known statically:
   case from item 3's own fix (still correct with Phase 6 active). Full
   gate re-run clean (test suites, check-linkmode, check-selfhost, stdlib
   dylib rebuild 0 skips, `compile_stdlib.py` 664/664, `make bootstrap`
-  180/180); `check-noshim-dumpfull` re-confirmed as the same pre-existing
+  180/180); `check-native-dumpfull` re-confirmed as the same pre-existing
   divergence via the same-worktree `--no-cache` A/B methodology (see
   that bug doc's newest entry — identical first-differing-byte offset,
   gap changed by only ~5KB, consistent with the new code itself).
@@ -1011,7 +1011,7 @@ commit/PR, gated by this project's full quality gate (CLAUDE.md's
 "Quality gate for gimple/codegen-affecting changes" — every phase past 0
 touches `mojo_compiler.py` and/or `gimple_gen_*.py`, so all of it applies:
 `make check-linkmode`, `make check-selfhost`, a from-scratch stdlib dylib
-build, `compile_stdlib.py`, `make bootstrap`, `make check-noshim-dumpfull`).
+build, `compile_stdlib.py`, `make bootstrap`, `make check-native-dumpfull`).
 Phases 1-2 are the safest to start with: pure diagnostics, zero risk of
 silently miscompiling anything that compiles today, and they build the
 exact data structure (per-binding move/lifetime info) every later phase

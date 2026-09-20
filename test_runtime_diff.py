@@ -135,7 +135,7 @@ def diff_program(fpath: str) -> tuple:
 
 
 # ── Built-in corpus ────────────────────────────────────────────────────────
-# Derived from test_ab_shim.BUILTIN_TESTS (same program names/shapes) but
+# Derived from test_ab_native.BUILTIN_TESTS (same program names/shapes) but
 # adapted to emit stdout: each program prints its result instead of (or in
 # addition to) returning it, so the runtime-diff comparison has non-empty
 # stdout in both engines.
@@ -349,7 +349,7 @@ BUILTIN_PROGRAMS = {
 
 
 def report(status: str, name: str, detail: str) -> None:
-    """Print one program's result line, mirroring test_ab_shim's style."""
+    """Print one program's result line, mirroring test_ab_native's style."""
     if status == 'PASS':
         print(f"  PASS  {name}")
     else:

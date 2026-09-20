@@ -209,7 +209,7 @@ literals.
 
 ### Symptom
 
-The A/B harness (`test_ab_shim.py`) now RUNS all 28 builtin cases and the
+The A/B harness (`test_ab_native.py`) now RUNS all 28 builtin cases and the
 native `.ci` files are valid C (many compile cleanly with `gcc -fgimple`),
 but all 28 FAIL on byte-identity diffs that are **ordering/cosmetic**, not
 corruption. Two specific divergences:
@@ -260,7 +260,7 @@ python3 test_selfhost.py
 
 # A/B harness (28 builtin cases; native .ci must be valid C and ideally
 # byte-identical to Python):
-python3 test_ab_shim.py
+python3 test_ab_native.py
 
 # stdlib dylib (baseline is 0 skips; the dispatch patch regresses counter/
 # interval/_unicode/string_slice until section 1's residual is fixed):

@@ -5,7 +5,7 @@
 ## compile-order nondeterminism, not yet fixed
 
 This doc started from one narrow finding (below) and grew, over one long
-session, into the tracking doc for `make check-noshim-dumpfull`'s entire
+session, into the tracking doc for `make check-native-dumpfull`'s entire
 remaining gap. Summary of what happened, newest first:
 
 - **Whole-program compile-order dependent symbol resolution (OPEN, not
@@ -204,9 +204,9 @@ low-token alternative to lldb for this class of bug, since the divergence
 is almost always a boolean/string flag silently taking the wrong branch,
 not a crash.
 
-## check-noshim-dumpfull: crash FIXED, real content divergence remains (update, same session continued)
+## check-native-dumpfull: crash FIXED, real content divergence remains (update, same session continued)
 
-`make check-noshim-dumpfull` originally failed with `MOJO_NO_SHIM=1 ./mojoc
+`make check-native-dumpfull` originally failed with `MOJO_NO_SHIM=1 ./mojoc
 fire.py --dump-full` segfaulting with **no** `fire.ci` written at all
 (confirmed pre-existing via stash/rebuild A-B testing, not caused by this
 doc's `_as_str` fixes above). Root-caused and fixed in two follow-up

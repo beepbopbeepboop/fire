@@ -1,5 +1,5 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
-        check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-abshim \
+        check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-ab-native \
         check-coro \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
@@ -63,9 +63,9 @@ demo:
 # aspirational target — `make bootstrap` — because stage 2 has a known
 # pre-existing codegen segfault (see IMPL.md); it is not gated into `check`
 # so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost check-runtimediff check-linkmode check-noshim-dumpfull check-no-new-casts
+check: check-gimple check-runner check-modcache check-selfhost check-runtimediff check-linkmode check-native-dumpfull check-no-new-casts
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff + link-mode + no-shim dump-full + no-new-casts)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff + link-mode + native dump-full + no-new-casts)"
 
 # Every check-* target is wrapped in checked_run.py: a check's outcome is a
 # pure function of the compiler sources + toolchain + whatever extra files it
@@ -249,14 +249,13 @@ mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
 # self-hosted metadata-dict/AST-field type inference, tracked separately
 # — see bugs list / selfhost-shimless-progress memory). Without this
 # flag GCC leaves such a read as classic uninitialized-stack garbage,
-# which under MOJO_NO_SHIM=1 (this binary's OWN compiled codegen
-# running, not the python3 shim) was a flaky SIGSEGV in
+# which — since stage2/mojo's OWN compiled codegen always runs now (the
+# python3-subprocess fallback was removed entirely from gimple_codegen_
+# compile_to_gimple, runtime/fire_runtime.c) — was a flaky SIGSEGV in
 # `_declare_var`'s `mojo_str_cat` (strlen on a garbage pointer). Zero-
 # init makes the read well-defined (NULL), which the codegen's own
 # `_ptr_slot_in_range` guard already treats as "no known type" and
-# falls back on safely. Inert for the STOCK (shimmed) bootstrap path —
-# stage2/mojo's own compiled functions never run there at all, only
-# under MOJO_NO_SHIM=1.
+# falls back on safely.
 stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/fire.ci ==="
@@ -385,39 +384,40 @@ bootstrap: verify validate-all
 	@echo ""
 	@echo "✓ Bootstrap complete — all stages verified"
 
-# ── check-abshim: compiled compile_to_gimple vs Python, byte-for-byte ─────────
-# `test_ab_shim.py` diffs `python3 mojo.py --dump X` against
-# `MOJO_NO_SHIM=1 ./mojoc --dump X` for a 27-case corpus of small programs,
-# both run from the repo root, compared byte-for-byte. All 27 are now
-# byte-identical — this is the regression guard for that parity, and the
-# green light for eventually removing the `python3 -c` subprocess shim
-# from a self-hosted `firec` (runtime/fire_runtime.c). The full `fire.py`
-# self-compile is not yet shimless (AttributeError: __file__), so
-# `make bootstrap` itself still uses the shim.
-check-abshim: mojoc $(GIMPLE_SOURCES) test_ab_shim.py
-	python3 checked_run.py check-abshim --extra test_ab_shim.py -- python3 test_ab_shim.py
+# ── check-ab-native: compiled compile_to_gimple vs Python, byte-for-byte ─────
+# `test_ab_native.py` diffs `python3 fire.py --dump X` against
+# `./mojoc --dump X` for a 27-case corpus of small programs, both run from
+# the repo root, compared byte-for-byte. All 27 are byte-identical — this
+# is the regression guard for that parity. The self-hosted binary never
+# spawns a python3 subprocess at all now (gimple_codegen_compile_to_gimple,
+# runtime/fire_runtime.c, always calls its own compiled compile_to_gimple
+# directly), so this test simply compares two independent implementations
+# (python3-interpreted vs self-hosted-compiled) of the same compiler.
+check-ab-native: mojoc $(GIMPLE_SOURCES) test_ab_native.py
+	python3 checked_run.py check-ab-native --extra test_ab_native.py -- python3 test_ab_native.py
 
-# ── check-noshim-dumpfull: self-hosted --dump-full ARTIFACT check (DESIGN.html R6) ──
-# Every OTHER check-* target drives codegen through the python3 shim; only
-# this one runs the self-hosted mojoc BINARY's own compiled codegen on real
-# work and diffs the actual output byte-for-byte against the shim's, not
-# just the exit code. See test_noshim_dumpfull.py's own docstring for why:
-# a self-host-only codegen bug can produce a wrong-but-exit-0 .ci that every
-# other gate step is structurally blind to (this happened for real
-# 2026-09-13 - a fix that silenced a known SIGBUS turned out to silently
-# drop two compiled modules instead, and every check-* target stayed green).
-check-noshim-dumpfull: mojoc $(GIMPLE_SOURCES) test_noshim_dumpfull.py
-	python3 checked_run.py check-noshim-dumpfull --extra test_noshim_dumpfull.py -- python3 test_noshim_dumpfull.py
+# ── check-native-dumpfull: self-hosted --dump-full ARTIFACT check (DESIGN.html R6) ──
+# Every OTHER check-* target drives codegen through the python3-interpreted
+# reference; only this one runs the self-hosted mojoc BINARY's own compiled
+# (native) codegen on real work and diffs the actual output byte-for-byte
+# against the reference's, not just the exit code. See test_native_
+# dumpfull.py's own docstring for why: a native-codegen-only bug can
+# produce a wrong-but-exit-0 .ci that every other gate step is structurally
+# blind to (this happened for real 2026-09-13 - a fix that silenced a known
+# SIGBUS turned out to silently drop two compiled modules instead, and
+# every check-* target stayed green).
+check-native-dumpfull: mojoc $(GIMPLE_SOURCES) test_native_dumpfull.py
+	python3 checked_run.py check-native-dumpfull --extra test_native_dumpfull.py -- python3 test_native_dumpfull.py
 
 # ── aside/bside/compare-a-b: per-file self-host A/B sweep at scale ───────────
-# check-noshim-dumpfull's whole-transitive-closure self-compile is both the
+# check-native-dumpfull's whole-transitive-closure self-compile is both the
 # only test of the self-hosted BINARY's own codegen and, per
 # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md's 2026-09-15 retry,
 # capable of spiking past 230GB RSS on the full mojo.py self-compile — a
 # single all-or-nothing process that's both dangerous to run repeatedly and
 # uninformative when it fails (one diff offset for the WHOLE program).
 #
-# This decomposes the same shim-vs-self-hosted question into one `--dump`
+# This decomposes the same python-vs-native question into one `--dump`
 # (do_imports=False, no transitive-closure accumulation — see mojo.py's own
 # dump_full-vs-dump branch) per file, for every .py file in this repo's own
 # root plus every .mojo file across the stdlib's tracked subtrees (same file
