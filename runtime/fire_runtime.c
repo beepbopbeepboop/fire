@@ -10,6 +10,17 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <dirent.h>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#define MOJO_MALLOC_USABLE_SIZE(p) malloc_size(p)
+#define MOJO_HAVE_MALLOC_USABLE_SIZE 1
+#elif defined(__linux__)
+#include <malloc.h>
+#define MOJO_MALLOC_USABLE_SIZE(p) malloc_usable_size(p)
+#define MOJO_HAVE_MALLOC_USABLE_SIZE 1
+#else
+#define MOJO_HAVE_MALLOC_USABLE_SIZE 0
+#endif
 
 #define USE_PYTHON 0
 
@@ -3543,6 +3554,24 @@ static int _mojo_tagged_addr_ok(int64_t addr)
     if (u < 0x80000000ULL) return 0;
     if (u >= 0x0000800000000000ULL) return 0;
     if (u & 7ULL) return 0;
+#if MOJO_HAVE_MALLOC_USABLE_SIZE
+    /* The range/alignment checks above only rule out small-int/None/
+     * struct-type-tag values — they do NOT guarantee `addr` points at an
+     * allocation big enough to hold the 8-byte tag read below. A real,
+     * ASan-confirmed heap-buffer-overflow: a generic dataclass-field
+     * walker (e.g. fire_compiler.py's `_scan_yield_bearing`, called with
+     * an unannotated/erased `node` parameter) recurses into every field
+     * of an AST node, including plain `str`/`int` scalar fields, not
+     * just child nodes — a short `char *` string (as little as 1 byte,
+     * heap-allocated via `mojo_regex_substr`/`strdup`) is a perfectly
+     * valid, 8-byte-aligned heap pointer that PASSES the checks above,
+     * so `isinstance(<that string>, SomeStruct)` read 3+ bytes past its
+     * allocation. `malloc_size`/`malloc_usable_size` answers "how big is
+     * the allocation actually holding this pointer" in O(1) (no scan),
+     * so reject anything too small for a genuine tagged-struct header
+     * instead of trusting range/alignment alone. */
+    if (MOJO_MALLOC_USABLE_SIZE((void *)(intptr_t)u) < sizeof(int64_t)) return 0;
+#endif
     return 1;
 }
 

@@ -53,9 +53,21 @@ import gimple_gen_calls as ggc
 # a destroy candidate (confirmed on t_list.mojo: stage1 emits `mojo_
 # cleanup_push_list`/`mojo_list_free`/`mojo_cleanup_cancel_n`, stage2
 # emits nothing, because the stubbed call always returns an empty set).
+#
+# `fire_compiler` added after the same gap hit `gimple_gen_coro.py`'s
+# `import fire_compiler as N; N._as_str(...)` calls: not being a recognized
+# sibling, they fell through to the same generic unresolved-receiver stub
+# path, which mints a PER-CALL-SITE hash suffix from each call's locally
+# inferred argument type instead of resolving to fire_compiler.py's one
+# real `_as_str` definition. Two call sites inferring different argument
+# types therefore emitted two DIFFERENT undeclared C symbols
+# (`fire_compiler__as_str_d719e0` vs `..._9f63a2`, matching neither the
+# real definition) — an implicit-int-declaration mismatch, then a
+# pointer-from-int assignment, i.e. exactly the fake "overload" scheme
+# hashing garbage where a plain sibling free-function call was needed.
 _SELFHOST_SIBLING_MODULE_PREFIXES = ('gimple_', 'ast_rewriter', 'mlir',
                                      'regex_compile', 'module_loader',
-                                     'ownership_destruct')
+                                     'ownership_destruct', 'fire_compiler')
 
 
 def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:

@@ -157,28 +157,24 @@ is optional or "extra":
    fire_runtime.c — so there is no more "shim vs no-shim" distinction,
    only "python-interpreted reference vs self-hosted native".)
 
-**Status as of 2026-09-20**: removing the subprocess fallback (so `stage2`/
-`stage3` and native `--dump-full` genuinely exercise the self-hosted
-binary's own codegen for the first time) surfaced a real, substantial
-backlog of self-hosted-only bugs, most now fixed — see
-`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md` for the full
-history. `make bootstrap`'s stage1-vs-stage2 `.ci` divergence count went
-14 → 0 for individual per-file dumps; the ROOT CAUSES found (all in code
-this compiler self-hosts, not user-facing bugs) were a recurring pattern:
-an untyped function parameter/return value whose element type (str vs
-int64_t, for a `list`/`set`/`dict`) can't be tracked across a function-call
-boundary the way a locally-scoped literal's element type can — see
-`ownership_destruct.py`'s own extensive docstrings (`_as_str`,
-`_intersect_all`, `begin_function`) for the full mechanism and its
-limits. `make bootstrap`'s own internal whole-program `--dump-full
-fire.py` self-check (inside the `stage2`/`stage3` targets) still crashes
-intermittently on real, large, multi-module input (confirmed via lldb:
-`ownership_destruct._dfa_stmt`'s `assigned.update(...)` call, on a
-`TryStmt`/ambiguous-import-fallback code shape not yet isolated to a
-minimal repro) — this is the one known remaining gap, not yet root-
-caused to a specific fix the way every other divergence in this backlog
-was. Do not assume `make bootstrap`/`make check-native-dumpfull` are
-fully green without re-checking this doc's latest status entry.
+**Status as of 2026-09-20 (updated, eighth entry)**: the intermittent
+whole-program `--dump-full fire.py` crash mentioned in the previous
+paragraph (`EXC_BAD_ACCESS` in `mojo_set_update`) is now ROOT-CAUSED AND
+FIXED — 8 real self-hosted-only bugs, found and verified via
+AddressSanitizer (not just lldb; see the bugs doc's eighth entry for how
+ASan was made to work despite MacPorts GCC having no ASan runtime).
+`make bootstrap` now runs its `stage2`/`stage3` whole-program self-checks
+to completion for the first time this project has ever gotten that far.
+**However, `make bootstrap`'s own `verify` step then fails** on 14 files
+— this is a SEPARATE, previously-unreachable pre-existing bug (confirmed
+NOT caused by this session's fixes: reproduces identically on the
+unmodified pre-session `ownership_destruct.py`), including a genuine,
+confirmed `PYTHONHASHSEED`-dependent non-determinism in the python3-
+interpreted reference path itself. Full details, evidence, and next
+steps in `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s
+eighth entry. Do not assume `make bootstrap`/`make check-native-dumpfull`
+are fully green — they are not, though for a different reason than
+before.
 
 A change passing `test_gimple.py`/`test_module_cache.py`/`make check-selfhost`
 alone is NOT sufficient evidence the compiled path is unaffected — only

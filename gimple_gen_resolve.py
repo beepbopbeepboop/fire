@@ -883,6 +883,26 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
+                # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
+                # (gimple_gen_infra.py's begin_function/_owned_free_
+                # candidates) is NOT tied to modules_before/etc like the
+                # sets above, but a failed nested-module compile attempt
+                # can still have called begin_function for some function
+                # inside the module that just failed, leaving `gen.
+                # _owned_free_candidates`/`_owned_free_pushed`/`_owned_
+                # stack_allocated` pointing at sets built during (and
+                # scoped to) that now-abandoned compile attempt. Whatever
+                # code runs next (this module's own outer function, or
+                # the next sibling) must not see that stale state — reset
+                # exactly like `reset_no_candidates` does for a
+                # struct-method/toplevel body this analysis doesn't
+                # cover. Found via a real, reproducible `make bootstrap`
+                # crash: `mojo_set_update` dereferencing a `MojoSet *`
+                # whose bytes were garbage, immediately downstream of a
+                # "cannot compile module: ... is ambiguous" rollback.
+                gen._owned_free_candidates = set()
+                gen._owned_free_pushed = set()
+                gen._owned_stack_allocated = set()
                 # Note: _module_globals / _module_global_inits are intentionally NOT
                 # rolled back. Partial data from a failed compilation (e.g. build_stdlib_dylib
                 # failing but having populated its globals) is still needed so that the

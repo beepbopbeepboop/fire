@@ -1,5 +1,228 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-native-dumpfull fails on b00955c itself
 
+## Status (2026-09-20, eighth entry — the whole-program crash from entry 7 is FOUND AND FIXED (8 real bugs, AddressSanitizer-verified); `make bootstrap` now runs to completion for the FIRST TIME EVER; its own `verify` step then exposed a separate, previously-unreachable pre-existing bug)
+
+Continuing directly from entry 7's "one whole-program crash remains"
+(intermittent `EXC_BAD_ACCESS` in `mojo_set_update`, ~1-in-3 failure rate
+on raw `./mojoc fire.py --dump-full`, never root-caused despite three
+fix attempts). This session finally root-caused and fixed it, then
+discovered `make bootstrap`'s own `verify` step — never reached before,
+since the crash always killed the process first — fails for a different,
+unrelated reason. Both are documented below in full, since both are real
+and neither is resolved end-to-end yet.
+
+### Part A: the crash — ROOT-CAUSED AND FIXED
+
+AddressSanitizer (not lldb/MallocScribble alone) was required to pin this
+down. **How ASan was made to work despite MacPorts GCC having no ASan
+runtime installed**: compile `runtime/fire_runtime.c` alone with
+`clang -fsanitize=address` (a scratch copy with `mojo_type(...)` changed
+to `mojo_type()` — `(...)` with zero named params before it is a real
+ISO C error under clang, unlike GCC, and the function is a `return 0`
+stub that never reads its args, so this is behavior-preserving), then
+link that object against the GCC-built `fire.o`/`fire.ci` object with
+`clang -fsanitize=address`. Both toolchains target the same arm64
+Mach-O ABI, so mixing them for a diagnostic build works fine even though
+neither would be used for the shipped binary.
+
+Eight real bugs found and fixed, all in code this compiler self-hosts
+(none are user-facing Mojo bugs):
+
+1. **`gimple_gen_methods.py`'s `_SELFHOST_SIBLING_MODULE_PREFIXES`** was
+   missing `'fire_compiler'` — `gimple_gen_coro.py`'s
+   `import fire_compiler as N; N._as_str(...)` calls weren't recognized
+   as self-host sibling calls, fell through to the generic unresolved-
+   receiver stub path, which mints a PER-CALL-SITE hash suffix from each
+   call site's locally inferred argument type instead of resolving to
+   the one real `_as_str` definition — two call sites inferring
+   different types emitted two different undeclared C symbols
+   (`fire_compiler__as_str_d719e0` vs `..._9f63a2`), an implicit-int
+   declaration, then a pointer-from-int assignment.
+2. **Two `getattr(node, 'field', default)` reads on always-present
+   fields** in `ownership_destruct.py`'s `_dfa_stmt` (now `_dfa_try`/
+   `_dfa_match`, see below): `ExceptHandler.body` and `MatchCase.body`
+   are plain, never-optional `list` fields on their dataclasses (per
+   `fire_compiler.py`), but a `getattr(..., default)` read on a self-
+   hosted struct goes through the generic dynamic-dispatch path, which
+   returns an opaque value with NO element-type metadata even when the
+   field is guaranteed to exist. Fixed by direct attribute access.
+3. **`isinstance(x, SomeStructType)`/`x.__class__`** blindly called
+   `mojo_read_type_tag`/read the tag on ANY value whose static C type
+   ended in `' *'` — including `char *`/`MojoList *`/`MojoSet *`/
+   `MojoDict *`, none of which carry a tagged-struct header. A real,
+   ASan-confirmed heap-buffer-overflow: an 8-byte read past a 5-byte
+   `char *` string allocation (`mojo_regex_substr`'s tokenizer output),
+   reached via `isinstance(<AST leaf>, SomeNodeType)` inside
+   `fire_compiler._scan_yield_bearing`'s generic recursive field walk
+   (which recurses into every dataclass field, not just child AST
+   nodes — a plain `str`/`int` scalar field reaches the SAME isinstance
+   check as a real child node). Fixed with static-false guards in
+   `gimple_gen_calls.py`'s `_isinstance_one_type` and
+   `gimple_gen_exprs.py`'s `__class__` handling.
+4. **General safety net for (3)'s whole class**, not just the one call
+   site: `fire_runtime.c`'s `_mojo_tagged_addr_ok` now also checks
+   `malloc_size`/`malloc_usable_size` (`MOJO_HAVE_MALLOC_USABLE_SIZE`,
+   `__APPLE__`/`__linux__`) and rejects any address whose underlying
+   allocation is smaller than the 8-byte tag read needs, on top of the
+   existing range/alignment checks.
+5. **`_intersect_all`'s single-element degenerate case**: `out =
+   sets[0]` (a bare subscript read, no `&` ever applied when
+   `len(sets) == 1`) doesn't reliably recover the real `MojoSet*`
+   element type from an untyped `list` parameter — confirmed via ASan
+   that `out` could come back typed as the ENCLOSING LIST's own pointer
+   instead of one of its elements. Fixed: `out = sets[0] & sets[0]`
+   (self-intersection), forcing the same `&`-operator type resolution
+   already relied on for the `len > 1` loop case.
+6. **`_dfa_stmt`'s IfStmt/TryStmt/MatchStmt branches extracted into
+   their own top-level functions** (`_dfa_if`/`_dfa_try`/`_dfa_match`).
+   This project's own documented fix pattern for self-hosted-codegen
+   corruption tied to one enormous function (see
+   `gimple_module_gen.py`'s `_emit_reflection_dispatch` history) — the
+   monolithic `_dfa_stmt` (~820 locals once self-hosted) was still
+   producing the ASan-confirmed `mojo_set_update` corruption even after
+   fix 5, with `_ia_if` aliasing `branch_sets_if`'s own `MojoList*`
+   despite every individual line of generated GIMPLE reading correctly.
+   The exact GCC-level mechanism was never fully pinned down (suspected
+   `-fgimple -O0` stack-slot/register allocation pathology specific to
+   a function this large), but extraction reliably moved the crash to a
+   much smaller, precisely diagnosable function (fix 7), which is
+   itself strong evidence the function-size theory was right.
+7. **`analyze_function`/`_definitely_assigned`** were each passing a
+   `-> set`-returning call's result directly into another call as an
+   argument (`_definitely_assigned(fn, facts.candidates())`; `candidates
+   & _intersect_all(terminals)`) instead of storing it in a named local
+   first — the exact rule this same module documents repeatedly
+   elsewhere (`_ia_if`/`_ia_try`/`_ia_match`). Fixed with `_candidates`/
+   `_ia_term` locals.
+8. **The actual final root cause**: `_FuncFacts.candidates()`'s `for
+   name, count in self.assign_count.items():` used `.items()`'s result
+   directly as a for-loop's iterable, never stored in a local — the
+   SAME rule as (7), but for a loop iterable rather than a call
+   argument, and the corruption happens INSIDE `candidates()` itself,
+   before it ever returns — which is why fix 7 alone (fixing the
+   *callers* of `candidates()`) still hit the identical crash, at the
+   identical address, with the identical allocation site
+   (`mojo_dict_items` inside `candidates()`), twice in a row. Fixed
+   with an `_items` local.
+
+Verified via `AddressSanitizer` (built as described above): the exact
+crash class (`heap-buffer-overflow`/`mojo_set_update` reading past a
+`mojo_list_new`/`mojo_dict_items`-produced allocation) was reproduced and
+fixed incrementally, each fix confirmed by rebuilding and rerunning ASan
+against `mojoc fire.py --dump-full` until multiple consecutive runs
+(12+ minutes each, well past every prior crash's ~2-7 minute failure
+point) completed with no ASan report. The real (non-ASan) rebuilt
+`mojoc` was also confirmed to run `fire.py --dump-full` to completion
+without crashing.
+
+### Part B: `make bootstrap` now runs to completion — a first — but its `verify` step fails on 14 files for an UNRELATED, pre-existing reason
+
+With Part A's crash fixed, `make bootstrap` was run end to end for the
+first time this project has ever gotten that far (every previous attempt
+died mid-way through stage2/stage3 on the crash). Stage 1, compiling
+`stage2/mojo`, Stage 2, compiling `stage3/mojo` (or the stage2-repeat,
+per this Makefile's actual stage numbering), and both stages' own
+whole-program `--dump-full fire.py` self-checks all completed —
+peak RSS during the whole-program self-check oscillated in the
+20-30GB range on a 128GB machine (bursty, not runaway; a much smaller
+and clearly bounded pattern than an unrelated isolated worst-case
+test described below). `make: *** [verify] Error 1` then failed with:
+
+```
+FAIL stage1 vs stage2: bootstrap-validate.ci
+FAIL stage1 vs stage2: example_imports.ci
+FAIL stage1 vs stage2: fire_compiler.ci
+FAIL stage1 vs stage2: fire_main.ci
+FAIL stage1 vs stage2: fire.ci
+FAIL stage1 vs stage2: module_loader.ci
+FAIL stage1 vs stage2: mojo.ci
+FAIL stage1 vs stage2: myinterpreter.ci
+FAIL stage1 vs stage2: stdlib_core.ci
+FAIL stage1 vs stage2: t_argv.ci
+FAIL stage1 vs stage2: t_list.ci
+FAIL stage1 vs stage2: t1.ci
+FAIL stage1 vs stage2: test_relaxed_imports.ci
+FAIL stage1 vs stage2: test_simple.ci
+```
+
+This is almost certainly **NOT caused by any of Part A's fixes** — it is
+a previously-UNREACHABLE pre-existing bug, only observable now that
+`verify` is reached at all. Two distinct causes identified in the diffs
+(not one root cause):
+
+- **A `_sys_toplev`/`_sys_globals` extern-struct-declaration mismatch**
+  (present in `bootstrap-validate.ci`, `fire_compiler.ci`, `fire_main.ci`,
+  `fire.ci` — 66 diff lines for `fire.ci` alone —, `mojo.ci`,
+  `myinterpreter.ci`): stage1 (python3-interpreted) sometimes emits an
+  extra forward-declared `sys` module-globals struct that stage2
+  (self-hosted) does not, or vice versa. Not yet root-caused; looks like
+  a module-registration-order or a "was `sys` imported at all"
+  detection difference between the two paths.
+- **A genuine, CONFIRMED PYTHONHASHSEED-dependent non-determinism in the
+  python3-interpreted reference path itself**, isolated on `t_list.mojo`
+  (`items = [1,2,3]; items.append(4); print(len(items)); print(items[2])`
+  — the exact same minimal repro cited throughout this doc's entry 7 for
+  the owned-free-candidate mechanism). Confirmed empirically:
+  `PYTHONHASHSEED=0 python3 fire.py t_list.mojo --dump` and
+  `PYTHONHASHSEED=0` run from `stage1/` via the Makefile's own invocation
+  pattern (`cd stage1 && python3 ../fire.py --dump ../t_list.mojo`) now
+  agree (both omit `mojo_cleanup_push_list`/`mojo_list_free`/
+  `mojo_cleanup_cancel_n`), whereas the SAME two invocations WITHOUT a
+  fixed hash seed disagreed (the actual `make bootstrap` run's
+  `stage1/t_list.ci` had the cleanup calls; a fresh un-seeded rerun from
+  the repo root did not). This means `_FuncFacts`/`ownership_destruct`'s
+  candidate computation — or something it depends on — is sensitive to
+  Python's string-hash randomization, i.e. some SET (not dict — dicts
+  are insertion-ordered and confirmed not to vary) gets ITERATED
+  somewhere in a way that changes the computed RESULT, not just internal
+  bookkeeping order. NOT yet root-caused to the exact line: a scan of
+  `ownership_destruct.py` for `for x in <a plain set>:` patterns (as
+  opposed to `for x in <a list>:`, all of which are confirmed
+  insertion-order-safe) found none directly in this module, so the
+  sensitivity likely lives in a caller (`gimple_gen_infra.py`'s
+  `begin_function`/`_emit_owned_local_frees`/type-inference machinery)
+  or another file in the call chain, not yet isolated. **NOT a self-
+  hosted-only bug** — the self-hosted (`stage2/mojo`) side is
+  deterministic (its own hashing has no seed); only the python3
+  reference side is non-deterministic, which is exactly why `verify`
+  (which always compares against the python3-derived `stage1` output)
+  can never be made reliably green without fixing this, no matter how
+  correct `stage2`'s output is.
+
+**Not attempted this session**: root-causing either of Part B's two
+divergence classes to an exact line, or fixing either. This is
+explicitly new, previously-unreachable scope surfaced by Part A's fix,
+not a continuation of Part A's own crash — recommend a fresh, focused
+investigation (the `PYTHONHASHSEED`-sensitivity angle is the more
+promising lead: bisect which specific SET gets iterated non-
+deterministically, likely via a targeted `PYTHONHASHSEED=N` sweep across
+small N to find a minimal pair of seeds that disagree, then binary-search
+the call chain with print-debugging at each hop).
+
+### A separate memory-usage observation, investigated and found NOT to block the real path
+
+Isolated tests run while chasing Part A's crash found that compiling
+`ownership_destruct.py` (or `gimple_gen_infra.py`) directly AS THE ROOT
+`--dump-full` input file (not as a sibling import inside `fire.py`'s own
+closure, which is what `make bootstrap`/`check-native-dumpfull` actually
+do) causes catastrophic RSS growth (~1-1.5GB/sec, confirmed to 70GB+
+before being killed) in the self-hosted `mojoc` binary. Critically, this
+reproduces IDENTICALLY on the UNMODIFIED, pre-session `ownership_destruct.py`
+(via `git show HEAD:ownership_destruct.py`) — so it is not caused by any
+fix in this entry, and is not new. It is most likely the SAME already-
+documented "today's pre-existing leak, unchanged" this codebase's own
+`_compute_owned_free_candidates` docstring already calls out (Phase 3's
+free-insertion is explicitly a best-effort memory optimization, not a
+correctness requirement — a function it can't analyze just leaks, as
+before). The real target path (`fire.py` as root, exercised by the
+`make bootstrap` run in Part B above) does NOT exhibit this catastrophically
+— peak RSS there was bursty but bounded (20-30GB, not 70GB+) and the
+process completed on its own. Root-causing why `ownership_destruct.py`/
+`gimple_gen_infra.py`-as-root specifically triggers the worst case (root-
+module-specific codegen flags — `emit_entry_points`/`emit_str_pool`
+differ for root vs sibling compiles — are the leading suspect) is also
+new, not-yet-attempted scope.
+
 ## Status (2026-09-20, seventh entry — huge backlog of self-hosted-only bugs found and fixed; `make bootstrap`'s per-file divergences now ALL fixed; one whole-program crash remains)
 
 Picking up directly from the sixth entry: with the subprocess fallback

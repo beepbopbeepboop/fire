@@ -1907,6 +1907,22 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         # recognizing an import statement nested in a function/if/try
         # block once self-hosted.
         target_id = gimple_exprtypes._struct_type_id(type_name)
+        # A value statically typed as a container/string runtime type
+        # (`char *`/`MojoList *`/`MojoSet *`/`MojoDict *`) can never be an
+        # instance of a user-defined struct/dataclass under this runtime's
+        # object model — none of these carry the tagged-struct header
+        # `mojo_read_type_tag` expects as its first 8 bytes. Falling
+        # through to the `obj_type.endswith(' *')` branch below (true for
+        # ALL FOUR, since they're pointer types too) cast the string/
+        # container pointer straight into `mojo_read_type_tag` as if it
+        # WERE a struct address — a real, ASan-confirmed heap-buffer-
+        # overflow (8-byte read on e.g. a 5-byte `char *` token substring
+        # from `mojo_regex_substr`, reached via `isinstance(<AST leaf>,
+        # SomeNodeType)` during `fire_compiler._scan_yield_bearing`'s
+        # generic recursive walk) as well as a semantically wrong result
+        # even when it happened not to fault. Statically false, no read.
+        if obj_type in ('char *', 'MojoList *', 'MojoSet *', 'MojoDict *'):
+            return gen._new_val('_Bool', '0')
         if obj_type.endswith(' *'):
             ov_local = gen._ensure_local(obj_type, obj_val)
             vp = gen._new_val('void *', f'(void *){ov_local}')

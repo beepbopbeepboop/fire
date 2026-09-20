@@ -1664,6 +1664,17 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # code that stores/compares `__class__` values (not just `is`
     # against a literal class name) keeps working.
     if node.member == '__class__':
+        # A container/string runtime value (`char *`/`MojoList *`/
+        # `MojoSet *`/`MojoDict *`) has no tagged-struct header —
+        # `mojo_read_type_tag` blindly reading 8 bytes at its address is
+        # the same ASan-confirmed heap-buffer-overflow class as
+        # `_isinstance_one_type`'s identical guard (gimple_gen_calls.py) —
+        # a short `char *` string is a real, reproducible instance
+        # (`mojo_regex_substr`'s 5-byte allocation). `0` is a safe,
+        # never-collides-with-a-real-struct-tag sentinel here (every real
+        # struct tag comes from `_struct_type_id`, a nonzero hash).
+        if ot in ('char *', 'MojoList *', 'MojoSet *', 'MojoDict *'):
+            return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
         if ot == 'int64_t':
             addr = ov
         else:

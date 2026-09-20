@@ -159,7 +159,20 @@ class _FuncFacts:
 
     def candidates(self) -> set:
         out = set()
-        for name, count in self.assign_count.items():
+        # `_items` as its own local, NOT `for name, count in self.
+        # assign_count.items():` inline — the SAME "store a container-
+        # returning call's result in a local before using it" rule this
+        # module documents repeatedly elsewhere (`_ia_if`/`_ia_try`/
+        # `_ia_match`/`analyze_function`'s `_candidates`), but for a
+        # FOR-LOOP'S ITERABLE rather than a call argument: found via
+        # AddressSanitizer 2026-09-20 (heap-buffer-overflow in
+        # `mojo_set_update`, `src` aliasing the internal `data` buffer of
+        # THIS `.items()` list) — the two earlier fixes (storing
+        # `_definitely_assigned`'s arguments in locals) didn't touch this
+        # one at all, since the corruption already happens INSIDE this
+        # method, before it ever returns.
+        _items = self.assign_count.items()
+        for name, count in _items:
             if (count == 1 and self.all_ctor_assigns.get(name)
                     and name not in self.disqualified):
                 out.add(name)
@@ -403,50 +416,157 @@ def _intersect_all(sets: list) -> set:
     the SECOND, independent bug in that one chain, not a duplicate of
     the `facts`-typing fix).
 
-    NOTE: `out = sets[0]` below (a bare subscript read), never `set(sets
-    [0])` — a THIRD, independent bug in this same chain: `sets` (a plain
-    `list` parameter, no element-type annotation the parser recognizes)
-    loses its "elements are MojoSet*" tracking at the function boundary,
-    and self-hosted `set(<value read from an untyped list>)` has no
-    fallback for that case — it silently degrades to `mojo_set_new()`
-    (a fresh EMPTY set, `/* TODO: comprehension over int64_t */` in the
-    generated C), not an error. `sets[0] & sets[i]` doesn't hit this: the
-    `&` operator's own type resolution (unlike `set()`'s constructor
-    dispatch) correctly recovers the real MojoSet* regardless. Since `&`
-    (not `&=`) always allocates a fresh result set, `out` is never the
-    same object as `sets[0]` after the first loop iteration, so this
-    doesn't alias/mutate any of the caller's original sets either."""
+    NOTE: `out = sets[0] & sets[0]` below (an `&` self-intersection), never
+    a bare `out = sets[0]` subscript read and never `set(sets[0])` — a
+    FOURTH, independent bug in this same chain, found 2026-09-20 via ASan
+    (heap-buffer-overflow, `mojo_set_update` reading 8 bytes past the
+    24-byte `MojoList *` `branch_sets_if`/`branch_sets_match`/`all_sets_try`
+    itself — `_ia_if`/`_ia_match`/`_ia_try` held the enclosing LIST's own
+    pointer, not one of its `MojoSet *` elements, whenever `live_if`/
+    `live_match`/`all_sets_try` had exactly ONE surviving element, i.e. no
+    loop iteration of `out = out & sets[i]` ever ran to invoke `&`'s type
+    resolution). A bare `out = sets[0]` is a bare subscript read with no
+    further operation forcing element-type recovery at all, and — per the
+    THIRD bug this docstring already documents just below — `sets` (a
+    plain `list` parameter with no element-type annotation the parser
+    recognizes) loses its "elements are MojoSet*" tracking at the function
+    boundary, so a bare `sets[0]` can come back typed as the LIST itself
+    rather than the set at index 0. `set(sets[0])` has its own separate
+    failure mode (documented below): self-hosted `set(<value read from an
+    untyped list>)` silently degrades to `mojo_set_new()` (a fresh EMPTY
+    set, `/* TODO: comprehension over int64_t */` in the generated C), not
+    an error. `sets[0] & sets[i]` (a genuine `&`, even self-intersection)
+    doesn't hit either failure: the `&` operator's own type resolution
+    (unlike a bare subscript read OR `set()`'s constructor dispatch)
+    correctly recovers the real MojoSet* regardless. Since `&` (not `&=`)
+    always allocates a fresh result set, `out` is never the same object as
+    `sets[0]`, so this doesn't alias/mutate any of the caller's original
+    sets either — true for the self-intersection base case too."""
     if not sets:
         return set()
-    out = sets[0]
+    out = sets[0] & sets[0]
     for i in range(1, len(sets)):
         out = out & sets[i]
     return out
 
 
-def _dfa_branches(then_body, elifs, else_body, assigned: set, terminals: list) -> list:
-    """Definite-assignment counterpart of ownership_check.py's
-    `_branch_states`: same then/elifs/else/terminates shape, but the
-    per-branch payload is "names definitely assigned so far on this path"
-    (a plain set) rather than a move-state dict, and the eventual merge is
-    set INTERSECTION (true only if true on every live branch), not a
-    3-way lattice join — definite assignment has no "maybe" state, only
-    "yes on every path" or "not proven"."""
-    branches = []
-    a1 = set(assigned)
-    _dfa_walk_block(then_body, a1, terminals)
-    branches.append((a1, _block_terminates(then_body)))
-    for cond, body in (elifs or []):
-        a = set(assigned)
-        _dfa_walk_block(body, a, terminals)
-        branches.append((a, _block_terminates(body)))
-    if else_body is not None:
-        a = set(assigned)
-        _dfa_walk_block(else_body, a, terminals)
-        branches.append((a, _block_terminates(else_body)))
+def _dfa_if(stmt, assigned: set, terminals: list) -> None:
+    """The `_dfa_stmt` IfStmt/ComptimeIfStmt case, extracted into its own
+    function (2026-09-20). Was inlined directly in `_dfa_stmt`'s own body
+    alongside the TryStmt/MatchStmt cases — even after two independent
+    fixes (flat lists instead of `(set, bool)` tuples; every local given
+    a branch-unique `_if`/`_try`/`_match` suffix), `make bootstrap`/native
+    `--dump-full fire.py` still crashed `mojo_set_update` intermittently
+    (confirmed via AddressSanitizer, not just lldb: `_ia_if`'s VALUE
+    equaled `branch_sets_if`'s own `MojoList *` pointer — the wrong
+    OBJECT entirely, not merely a wrong TYPE tag — even though every
+    individual step of the generated GIMPLE, read line by line, was
+    verified structurally correct). Root cause never fully pinned down
+    at the instruction level (GCC's `-fgimple -O0` register/stack-slot
+    allocation for `_dfa_stmt` as ONE ~820-local function was the leading
+    suspect, not a logic bug in this module), but extracting each branch
+    into its OWN function — this project's own documented fix pattern
+    for this exact bug class, see `gimple_module_gen.py`'s
+    `_emit_reflection_dispatch` history — shrinks each branch to a small,
+    independent stack frame and is the standard remedy here. If this
+    ever regresses again, suspect this function specifically rather than
+    re-inlining it."""
+    branch_sets_if: list = []
+    branch_terms_if: list = []
+    a1_if = set(assigned)
+    _dfa_walk_block(stmt.then_body, a1_if, terminals)
+    branch_sets_if.append(a1_if)
+    branch_terms_if.append(_block_terminates(stmt.then_body))
+    for cond_if, body_if in (stmt.elifs or []):
+        a_if = set(assigned)
+        _dfa_walk_block(body_if, a_if, terminals)
+        branch_sets_if.append(a_if)
+        branch_terms_if.append(_block_terminates(body_if))
+    if stmt.else_body is not None:
+        a_if = set(assigned)
+        _dfa_walk_block(stmt.else_body, a_if, terminals)
+        branch_sets_if.append(a_if)
+        branch_terms_if.append(_block_terminates(stmt.else_body))
     else:
-        branches.append((set(assigned), False))
-    return branches
+        branch_sets_if.append(set(assigned))
+        branch_terms_if.append(False)
+    live_if: list = []
+    for i_if in range(len(branch_sets_if)):
+        if not branch_terms_if[i_if]:
+            live_if.append(branch_sets_if[i_if])
+    assigned.clear()
+    if live_if:
+        # `_ia_if` as its own local, NOT `assigned.update(
+        # _intersect_all(live_if))` inline — see this same note
+        # elsewhere in this module: a `-> set`-returning call's
+        # result must be stored into a local before being handed to
+        # another method call as an argument, not passed through
+        # directly.
+        _ia_if = _intersect_all(live_if)
+        assigned.update(_ia_if)
+
+
+def _dfa_try(stmt, assigned: set, terminals: list) -> None:
+    """The `_dfa_stmt` TryStmt case, extracted into its own function —
+    see `_dfa_if`'s docstring for why."""
+    pre_try = set(assigned)
+    try_assigned_try = set(assigned)
+    _dfa_walk_block(stmt.body, try_assigned_try, terminals)
+    all_sets_try = [try_assigned_try]
+    for h_try in (stmt.handlers or []):
+        # Same reasoning as ownership_check.py's TryStmt case: a
+        # handler can run after an exception struck at ANY point in
+        # the try body, so it must not be credited with anything the
+        # try body itself assigned — start from the PRE-try state.
+        ha_try = set(pre_try)
+        # Direct attribute access, NOT `getattr(h_try, 'body', [])`:
+        # `ExceptHandler.body` is a plain always-present `list` field
+        # (fire_compiler.py's ExceptHandler dataclass), but a
+        # `getattr(..., default)` read on a self-hosted struct goes
+        # through the generic dynamic-dispatch path, which returns an
+        # opaque value with NO element-type metadata even when the
+        # field is guaranteed to exist — corrupting every set this
+        # value's elements later flow into. Root-caused 2026-09-20
+        # while chasing the whole-program `--dump-full` mojo_set_update
+        # EXC_BAD_ACCESS crash.
+        _htb = h_try.body
+        _dfa_walk_block(_htb if _htb else [], ha_try, terminals)
+        all_sets_try.append(ha_try)
+    assigned.clear()
+    _ia_try = _intersect_all(all_sets_try)
+    assigned.update(_ia_try)
+    if stmt.else_body:
+        _dfa_walk_block(stmt.else_body, assigned, terminals)
+    if stmt.finally_body:
+        _dfa_walk_block(stmt.finally_body, assigned, terminals)
+
+
+def _dfa_match(stmt, assigned: set, terminals: list) -> None:
+    """The `_dfa_stmt` MatchStmt case, extracted into its own function —
+    see `_dfa_if`'s docstring for why."""
+    branch_sets_match: list = []
+    branch_terms_match: list = []
+    for case_match in (stmt.cases or []):
+        a_match = set(assigned)
+        # Direct attribute access, NOT `getattr(case_match, 'body', [])`
+        # — see the TryStmt handler-body note above for why: `MatchCase.
+        # body` is a plain always-present `list` field, but `getattr`
+        # with a default goes through the generic dynamic-dispatch path
+        # and loses element-type metadata even so.
+        body_match = case_match.body
+        _dfa_walk_block(body_match if body_match else [], a_match, terminals)
+        branch_sets_match.append(a_match)
+        branch_terms_match.append(_block_terminates(body_match))
+    branch_sets_match.append(set(assigned))  # no wildcard case: may fall through
+    branch_terms_match.append(False)
+    live_match: list = []
+    for i_match in range(len(branch_sets_match)):
+        if not branch_terms_match[i_match]:
+            live_match.append(branch_sets_match[i_match])
+    assigned.clear()
+    if live_match:
+        _ia_match = _intersect_all(live_match)
+        assigned.update(_ia_match)
 
 
 def _dfa_stmt(stmt, assigned: set, terminals: list) -> None:
@@ -455,7 +575,14 @@ def _dfa_stmt(stmt, assigned: set, terminals: list) -> None:
     Appends a snapshot to `terminals` at every point control could leave
     the function (a `return`, or falling off the end of a block that
     doesn't itself terminate — the latter is handled by the caller after
-    the top-level walk, matching `_block_terminates`'s own convention)."""
+    the top-level walk, matching `_block_terminates`'s own convention).
+
+    The IfStmt/TryStmt/MatchStmt cases are each their own top-level
+    function (`_dfa_if`/`_dfa_try`/`_dfa_match`) rather than inlined
+    here — see `_dfa_if`'s docstring for why (a real, AddressSanitizer-
+    confirmed `mojo_set_update` memory-corruption bug tied to this
+    dispatch being one enormous function, not fixed by giving every
+    branch's locals unique names alone)."""
     if isinstance(stmt, N.AssignStmt) and isinstance(stmt.target, N.IdentExpr):
         assigned.add(_as_str(stmt.target.name))
         return
@@ -475,22 +602,7 @@ def _dfa_stmt(stmt, assigned: set, terminals: list) -> None:
         # treating `raise` as a normal exit point).
         return
     if isinstance(stmt, (N.IfStmt, N.ComptimeIfStmt)):
-        branches = _dfa_branches(stmt.then_body, stmt.elifs, stmt.else_body,
-                                  assigned, terminals)
-        live = [a for a, term in branches if not term]
-        assigned.clear()
-        if live:
-            # `_ia` as its own local, NOT `assigned.update(_intersect_all
-            # (live))` inline — self-hosted codegen was found to
-            # miscompile (crash inside `mojo_set_update`/`mojo_set_
-            # order_indices` on real fire.py control flow, never
-            # reproduced in any isolated single-branch test) when a
-            # `-> set`-returning call's result feeds DIRECTLY into
-            # another method call as an argument, but not when the same
-            # result is stored into a local first. Same shape as every
-            # other fix in this module's history: store, then use.
-            _ia = _intersect_all(live)
-            assigned.update(_ia)
+        _dfa_if(stmt, assigned, terminals)
         return
     if isinstance(stmt, (N.WhileStmt, N.ForStmt, N.ComptimeForStmt)):
         # A loop may run zero times, so anything only assigned INSIDE the
@@ -511,42 +623,13 @@ def _dfa_stmt(stmt, assigned: set, terminals: list) -> None:
         assigned.update(_new_assigned)
         return
     if isinstance(stmt, N.TryStmt):
-        pre = set(assigned)
-        try_assigned = set(assigned)
-        _dfa_walk_block(stmt.body, try_assigned, terminals)
-        all_sets = [try_assigned]
-        for h in (stmt.handlers or []):
-            # Same reasoning as ownership_check.py's TryStmt case: a
-            # handler can run after an exception struck at ANY point in
-            # the try body, so it must not be credited with anything the
-            # try body itself assigned — start from the PRE-try state.
-            ha = set(pre)
-            _dfa_walk_block(getattr(h, 'body', []), ha, terminals)
-            all_sets.append(ha)
-        assigned.clear()
-        _ia = _intersect_all(all_sets)
-        assigned.update(_ia)
-        if stmt.else_body:
-            _dfa_walk_block(stmt.else_body, assigned, terminals)
-        if stmt.finally_body:
-            _dfa_walk_block(stmt.finally_body, assigned, terminals)
+        _dfa_try(stmt, assigned, terminals)
         return
     if isinstance(stmt, N.WithStmt):
         _dfa_walk_block(stmt.body, assigned, terminals)
         return
     if isinstance(stmt, N.MatchStmt):
-        branches = []
-        for case in (stmt.cases or []):
-            a = set(assigned)
-            body = getattr(case, 'body', [])
-            _dfa_walk_block(body, a, terminals)
-            branches.append((a, _block_terminates(body)))
-        branches.append((set(assigned), False))  # no wildcard case: may fall through
-        live = [a for a, term in branches if not term]
-        assigned.clear()
-        if live:
-            _ia = _intersect_all(live)
-            assigned.update(_ia)
+        _dfa_match(stmt, assigned, terminals)
         return
     if isinstance(stmt, N.FunctionDef):
         return  # nested def: its own body's assignments don't count here
@@ -577,7 +660,13 @@ def _definitely_assigned(fn, candidates: set) -> set:
         terminals.append(assigned)  # falls off the end: implicit return
     if not terminals:
         return set()
-    return candidates & _intersect_all(terminals)
+    # `_ia_term` as its own local — same rule as `_ia_if`/`_ia_try`/
+    # `_ia_match`/`analyze_function`'s `_candidates` elsewhere in this
+    # module: store a `-> set`-returning call's result before using it,
+    # rather than folding it directly into another expression that's
+    # itself immediately returned.
+    _ia_term = _intersect_all(terminals)
+    return candidates & _ia_term
 
 
 def analyze_function(fn, funcs, methods) -> set:
@@ -613,7 +702,19 @@ def analyze_function(fn, funcs, methods) -> set:
         facts.disqualify(pname.lstrip('*'))
     for stmt in fn.body:
         _scan_stmt(stmt, facts, funcs, methods)
-    return _definitely_assigned(fn, facts.candidates())
+    # `_candidates` as its own local, NOT `_definitely_assigned(fn, facts.
+    # candidates())` inline — this file's own repeatedly-documented rule
+    # (see `_ia_if`/`_ia_try`/`_ia_match`'s identical notes): a `-> set`-
+    # returning call's result must be stored into a local before being
+    # handed to another call as an argument, never passed through
+    # directly. This exact line was the one place in the whole module
+    # that still broke that rule — found via AddressSanitizer 2026-09-20
+    # (heap-buffer-overflow in `mojo_set_update`, `src` aliasing a
+    # `MojoList *` built by `mojo_dict_items` inside `_FuncFacts.
+    # candidates()` itself, i.e. `_definitely_assigned`'s second
+    # parameter wasn't reliably typed `MojoSet *` at this call site).
+    _candidates = facts.candidates()
+    return _definitely_assigned(fn, _candidates)
 
 
 def analyze_module(stmts):
