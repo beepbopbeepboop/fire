@@ -15,8 +15,8 @@ import re
 import hashlib
 from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, VarDecl
 from gimple_codegen import _mojo_type, _safe_name, GimpleGen
-from gimple_gen_funcs import dup_def_signature_key
-from gimple_ctypes import _c_field_name
+from mojo.backend_gimple.emit_funcs import dup_def_signature_key
+from mojo.middle.types import _c_field_name
 
 # Free functions whose C symbol the codegen does NOT overload-mangle (must match
 # GimpleGen._NO_OVERLOAD_MANGLE).

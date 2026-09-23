@@ -8,6 +8,10 @@ Modes:
 - mojo <file.mojo>                 Interpret and execute file
 - mojo build <file.mojo>           Compile to executable (output name = file basename)
 - mojo build -o <output> <file>    Compile to executable with specified output name
+- mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple)
+- mojo formalbuild <file.mojo>     Build with the formal arm64 codegen (Mach-O)
+- mojo formalbuild -o <out> <file> Same, with specified output path
+- mojo formalbuild --prove <file>  Same, also emit <stem>_proof.lean (Lean 4)
 - mojo --jit <file.mojo>           JIT compile and execute (ARM64)
 - mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
 - mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
@@ -51,6 +55,72 @@ def _extract_codegen_flags(args: list):
         else:
             remaining.append(a)
     return opt_flag, debug_flag, remaining
+
+
+def _extract_backend(args: list):
+    """Pull --backend=<name> (or --backend <name>) out of an argument list.
+
+    Returns (backend, remaining_args). 'gimple' is the default; 'arm64'
+    (aliases: 'formal', 'arm64-formal', 'macho') selects the formal arm64
+    codegen path and must never import gimple_codegen / driver.
+    Last occurrence wins."""
+    backend = 'gimple'
+    remaining = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--backend' and i + 1 < len(args):
+            backend = args[i + 1]
+            i += 2
+            continue
+        if a.startswith('--backend='):
+            backend = a.split('=', 1)[1]
+            i += 1
+            continue
+        remaining.append(a)
+        i += 1
+    if backend in ('formal', 'arm64-formal', 'macho'):
+        backend = 'arm64'
+    if backend not in ('gimple', 'arm64'):
+        print(f"error: unknown backend '{backend}' (expected gimple|arm64)",
+              file=sys.stderr)
+        sys.exit(2)
+    return backend, remaining
+
+
+def _load_formal_build():
+    """Resolve formal.build WITHOUT a static `from formal.build import ...`.
+
+    gen_module's find_imports AST-walk (`_collect_import_modules`) collects
+    every ImportStmt/FromImportStmt at ANY nesting depth into the do_imports
+    transitive closure — function-local ones included — so a static import of
+    formal.build drags formal/arm64_proof_gen.py and formal/build.py into
+    fire.py's self-host compile (test_selfhost compiles fire.py itself with
+    do_imports=True). That closure does not build: gcc rejects
+    formal/build.py's call to generate_arm64_proof with -Wint-conversion (a
+    wrong C signature left behind after formal.arm64_proof_gen's own compile
+    raises `cannot coerce MojoDict * to MojoSet *`), failing test_selfhost
+    (regression found 2026-09-23; HEAD fire.py had no formal imports and
+    self-hosted clean).
+
+    `importlib.import_module` is invisible to that AST walk — the module
+    name is a string argument, not an import node — while resolving
+    identically under python3: the same escape hatch emit_infra uses to
+    keep elaborate.py/comptime.py (never GIMPLE-clean) out of the
+    self-host closure (see its comptime-evaluation comment). Under the
+    compiled self-hosted binary the formal path is never exercised by
+    test_selfhost (the binary is deliberately not run), so importlib's
+    inlined runtime resolving 'formal.build' at call time is untested
+    there — same status as before this fix, when the path did not
+    link at all."""
+    import importlib as _importlib
+    return _importlib.import_module('formal.build')
+
+
+def _parse_arm64_module(src: str, filename: str) -> list:
+    """Parse source with fire_compiler for the arm64 backend path."""
+    from fire_compiler import py_tokenize, Parser
+    return Parser(py_tokenize(src)).with_filename(filename).parse_module()
 
 
 def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
@@ -533,8 +603,11 @@ def build_executable(input_file: str, src: str, output: str = None,
         return False
 
 def main():
-    # Pull -O*/-g* codegen flags out of argv first so they may appear anywhere.
+    # Pull -O*/-g* codegen flags and --backend out of argv first so they
+    # may appear anywhere. backend selects the codegen path: 'gimple'
+    # (default) vs 'arm64' (formal arm64 codegen + Mach-O, no gimple).
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
+    backend, rest = _extract_backend(rest)
     sys.argv = [sys.argv[0]] + rest
 
     # No arguments: run REPL
@@ -562,8 +635,14 @@ def main():
   mojo --jit <file.mojo>           JIT compile and execute (ARM64)
   mojo build <file.mojo>           Compile to executable (same name as file, no extension)
   mojo build -o <output> <file>    Compile to executable with specified output name
+  mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple)
+  mojo --backend=gimple ...        Select the gimple backend (default)
   mojo dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
   mojo dylib -o <out> <file> [...] Same, with specified output path
+  mojo formalbuild <file.mojo>     Build with the formal arm64 codegen (Mach-O .aout)
+  mojo formalbuild -o <out> <file> Same, with specified output path
+  mojo formalbuild -n <int> <file> Same, with X0 test input for the entry call (default 10)
+  mojo formalbuild --prove <file>  Same, also emit <stem>_proof.lean (Lean 4)
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
   mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
   mojo -v, --version               Show the compiler version (git SHA / release)
@@ -571,7 +650,10 @@ def main():
 
 Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
   -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
-  -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)""")
+  -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)
+
+Backend selector (may appear anywhere; selects the codegen path):
+  --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)""")
         return
 
     # Check for repl command
@@ -647,6 +729,60 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         rc = driver.compile_dylib(dylib_inputs, output=dylib_output, opt_flag=opt_flag)
         sys.exit(rc)
 
+    # Check for formalbuild command: the formal arm64 codegen path
+    # (formal/arm64_codegen.py + formal/macho.py + formal/arm64_proof_gen.py,
+    # ported from the toy proof-carrying compiler and re-targeted onto
+    # fire_compiler's AST). Emits a Mach-O executable directly — no gcc,
+    # no GIMPLE, no CAS. With --prove, also emits <stem>_proof.lean.
+    if sys.argv[1] == 'formalbuild':
+        sys.argv.pop(1)
+        backend = 'arm64'  # formalbuild is shorthand for --backend=arm64
+        formal_output = None
+        formal_test_input = 10
+        formal_prove = False
+        if '--prove' in sys.argv:
+            formal_prove = True
+            sys.argv.remove('--prove')
+        if '--no-proof' in sys.argv:
+            formal_prove = False
+            sys.argv.remove('--no-proof')
+        if '-o' in sys.argv:
+            idx = sys.argv.index('-o')
+            if idx + 1 < len(sys.argv):
+                formal_output = sys.argv[idx + 1]
+                sys.argv.pop(idx)   # remove -o
+                sys.argv.pop(idx)   # remove output filename
+        if '-n' in sys.argv:
+            idx = sys.argv.index('-n')
+            if idx + 1 < len(sys.argv):
+                formal_test_input = int(sys.argv[idx + 1])
+                sys.argv.pop(idx)   # remove -n
+                sys.argv.pop(idx)   # remove value
+        formal_inputs = sys.argv[1:]
+        if len(formal_inputs) != 1:
+            print("mojo formalbuild: exactly one .mojo file is required",
+                  file=sys.stderr)
+            sys.exit(1)
+        _fb = _load_formal_build()
+        compile_formal = _fb.compile_formal
+        FormalBuildError = _fb.FormalBuildError
+        try:
+            result = compile_formal(formal_inputs[0], output=formal_output,
+                                    test_input=formal_test_input,
+                                    prove=formal_prove)
+        except FormalBuildError as e:
+            print(f"formalbuild: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"formalbuild: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            sys.exit(1)
+        print(f"Built: {result['path']}")
+        if result.get("proof_path"):
+            print(f"Proof: {result['proof_path']}")
+        sys.exit(0)
+
     dump_full = '--dump-full' in sys.argv
     dump = '--dump' in sys.argv
     # Strip flags from sys.argv so input_file = sys.argv[1] works.
@@ -697,10 +833,26 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag, program_args)
         sys.exit(0 if ok else 1)
 
-    # If build requested, compile to executable through the module-cache system
-    # (link mode + per-import dylibs + CAS + reflection); fall back to the inline
-    # builder if that path can't produce a binary.
+    # If build requested, compile to executable. backend='arm64' routes through
+    # formal.build (no driver, no gimple); 'gimple' uses the module-cache system
+    # (link mode + per-import dylibs + CAS + reflection) with inline fallback.
     if build:
+        if backend == 'arm64':
+            _fb = _load_formal_build()
+            compile_formal = _fb.compile_formal
+            FormalBuildError = _fb.FormalBuildError
+            try:
+                result = compile_formal(input_file, output=build_output)
+            except FormalBuildError as e:
+                print(f"build: {e}", file=sys.stderr)
+                sys.exit(1)
+            except Exception as e:
+                print(f"build: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                sys.exit(1)
+            print(f"Built: {result['path']}")
+            sys.exit(0)
         try:
             import driver
             rc = driver.compile_program(input_file, src, output=build_output,
@@ -713,9 +865,26 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             rc = 0 if success else 1
         sys.exit(rc)
 
-    # If --dump-full requested, generate single .ci with transitive closure (for bootstrap)
+    # If --dump-full requested, generate single .ci with transitive closure (for bootstrap).
+    # arm64 backend has no gimple .ci — skip gimple entirely (no import).
     if dump_full:
         basename = os.path.splitext(os.path.basename(input_file))[0]
+        if backend == 'arm64':
+            # arm64 formal backend: no gimple .ci artifact. Emit a small
+            # listing so callers still get a backend-specific .ci-shaped file.
+            try:
+                stmts = _parse_arm64_module(src, input_file)
+                funcs = [s.name for s in stmts if type(s).__name__ == 'FunctionDef']
+                with open(f"{basename}.ci", "w") as f:
+                    f.write(f"# arm64 backend dump-full\n")
+                    f.write(f"# functions: {', '.join(funcs) if funcs else '(none)'}\n")
+                print(f"✓ Generated {basename}.ci (arm64 backend listing)",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"Error generating --dump-full (arm64): {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+            return
         try:
             import gimple_codegen
             c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
@@ -740,7 +909,11 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         # and fail at the end, rather than stopping after the first file.
         any_failed = False
         try:
-            import gimple_codegen
+            # gimple_codegen is only imported for the gimple backend; arm64
+            # never touches it (and never imports driver either).
+            gimple_codegen = None
+            if backend != 'arm64':
+                import gimple_codegen
 
             # Tokenize ONCE and reuse for both .tok and .ast: these used to
             # call py_tokenize(src) independently, each re-running the full
@@ -788,15 +961,29 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             # NOTE: call compile_to_gimple directly — compile_to_gimple_cached
             # imports cas.py which depends on CPython stdlib (hashlib, subprocess)
             # that the compiled binary can't run.
-            try:
-                c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
-            except Exception as e:
-                print(f"compile_to_gimple failed: {e}", file=sys.stderr)
-                import traceback; traceback.print_exc(file=sys.stderr)
-                c_code = ''
-                any_failed = True
-            with open(f"{basename}.ci", "w") as f:
-                f.write(c_code)
+            # arm64 backend: skip gimple .ci entirely (no gimple_codegen import).
+            if backend != 'arm64':
+                try:
+                    c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
+                except Exception as e:
+                    print(f"compile_to_gimple failed: {e}", file=sys.stderr)
+                    import traceback; traceback.print_exc(file=sys.stderr)
+                    c_code = ''
+                    any_failed = True
+                with open(f"{basename}.ci", "w") as f:
+                    f.write(c_code)
+            else:
+                # arm64 formal backend: .ci is a small function listing, not C.
+                try:
+                    stmts = _parse_arm64_module(src, input_file)
+                    funcs = [s.name for s in stmts if type(s).__name__ == 'FunctionDef']
+                    with open(f"{basename}.ci", "w") as f:
+                        f.write(f"# arm64 backend dump\n")
+                        f.write(f"# functions: {', '.join(funcs) if funcs else '(none)'}\n")
+                except Exception as e:
+                    print(f"arm64 .ci generation failed: {e}", file=sys.stderr)
+                    import traceback; traceback.print_exc(file=sys.stderr)
+                    any_failed = True
 
             # Generate Python interface stub
             with open(f"{basename}.pyi", "w") as f:
@@ -818,8 +1005,26 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
 
     # Default for a .mojo program: compile and run it through the module-cache
     # system (link mode + per-import dylibs + CAS + reflection). Fall back to the
-    # interpreter if it can't produce a binary.
+    # interpreter if it can't produce a binary. arm64 backend: build via
+    # formal.build only — never import driver/gimple (codesign may still
+    # block execution; that is deferred).
     if input_file.endswith('.mojo'):
+        if backend == 'arm64':
+            _fb = _load_formal_build()
+            compile_formal = _fb.compile_formal
+            FormalBuildError = _fb.FormalBuildError
+            try:
+                result = compile_formal(input_file)
+            except FormalBuildError as e:
+                print(f"build: {e}", file=sys.stderr)
+                sys.exit(1)
+            except Exception as e:
+                print(f"build: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                sys.exit(1)
+            print(f"Built: {result['path']}")
+            sys.exit(0)
         try:
             import driver
             rc = driver.compile_program(input_file, src, run=True,

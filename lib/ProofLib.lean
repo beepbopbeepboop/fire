@@ -1,0 +1,4321 @@
+import Lean
+
+/-!
+# ProofLib: Shared infrastructure for Mojo proof-carrying compiler
+
+This library contains the x86-64 machine model, memory operations,
+instruction semantics, execution engine, AST types, and evaluation
+functions.  It is compiled once (to .olean) and imported by all
+per-program proof files.
+-/
+
+/-- x86-64 machine state: 16 GPRs, flags, rip, and byte-addressable memory -/
+structure X86State where
+  rax : UInt64
+  rbx : UInt64
+  rcx : UInt64
+  rdx : UInt64
+  rsp : UInt64
+  rbp : UInt64
+  rsi : UInt64
+  rdi : UInt64
+  r8 : UInt64
+  r9 : UInt64
+  r10 : UInt64
+  r11 : UInt64
+  r12 : UInt64
+  r13 : UInt64
+  r14 : UInt64
+  r15 : UInt64
+  rip : Nat
+  zf : Bool
+  sf : Bool
+  cf : Bool
+  of_ : Bool
+  mem : Nat → UInt8
+  deriving Inhabited
+
+def X86State.init (input : UInt64) (entry : Nat) : X86State :=
+  { rax := 0, rbx := 0, rcx := 0, rdx := 0
+    rsp := 0xfffffffffffffff0, rbp := 0, rsi := 0, rdi := input
+    r8 := 0, r9 := 0, r10 := 0, r11 := 0
+    r12 := 0, r13 := 0, r14 := 0, r15 := 0
+    rip := entry, zf := false, sf := false, cf := false, of_ := false
+    mem := fun _ => 0 }
+
+/-- Memory read: load 8 bytes little-endian from address -/
+def mem_read_u64 (mem : Nat → UInt8) (addr : Nat) : UInt64 :=
+  (mem addr).toUInt64 |||
+  ((mem (addr + 1)).toUInt64 <<< 8) |||
+  ((mem (addr + 2)).toUInt64 <<< 16) |||
+  ((mem (addr + 3)).toUInt64 <<< 24) |||
+  ((mem (addr + 4)).toUInt64 <<< 32) |||
+  ((mem (addr + 5)).toUInt64 <<< 40) |||
+  ((mem (addr + 6)).toUInt64 <<< 48) |||
+  ((mem (addr + 7)).toUInt64 <<< 56)
+
+/-- Memory write: store 8 bytes little-endian to address -/
+def mem_write_u64 (mem : Nat → UInt8) (addr : Nat) (val : UInt64) : Nat → UInt8 :=
+  fun i =>
+    if i = addr then UInt8.ofNat (val.toNat % 256)
+    else if i = addr + 1 then UInt8.ofNat ((val.toNat >>> 8) % 256)
+    else if i = addr + 2 then UInt8.ofNat ((val.toNat >>> 16) % 256)
+    else if i = addr + 3 then UInt8.ofNat ((val.toNat >>> 24) % 256)
+    else if i = addr + 4 then UInt8.ofNat ((val.toNat >>> 32) % 256)
+    else if i = addr + 5 then UInt8.ofNat ((val.toNat >>> 40) % 256)
+    else if i = addr + 6 then UInt8.ofNat ((val.toNat >>> 48) % 256)
+    else if i = addr + 7 then UInt8.ofNat ((val.toNat >>> 56) % 256)
+    else mem i
+
+/-- Read 4 bytes signed little-endian (sign-extended to UInt64) -/
+def read_i32_le (code : Nat → UInt8) (addr : Nat) : Int :=
+  let b0 := (code addr).toNat
+  let b1 := (code (addr + 1)).toNat * 256
+  let b2 := (code (addr + 2)).toNat * 65536
+  let b3 := (code (addr + 3)).toNat * 16777216
+  let unsigned := b0 + b1 + b2 + b3
+  if unsigned ≥ 2147483648 then Int.ofNat unsigned - 4294967296
+  else Int.ofNat unsigned
+
+/-- Read signed byte (rel8 offset) -/
+def read_i8 (b : UInt8) : Int :=
+  let n := b.toNat
+  if n ≥ 128 then Int.ofNat n - 256
+  else Int.ofNat n
+
+theorem nat64 : (18446744073709551616 : Nat) = 2 ^ 64 := by decide
+theorem n8 : (256 : Nat) = 2 ^ 8 := rfl
+
+theorem sub_add (m n : Nat) (h : n ≤ m) : n + (m - n) = m := by omega
+
+/-- Collapse a pushed byte-window term to a single compound window decide. -/
+theorem winfix (v i k : Nat) :
+    ((decide (i < 64) && (decide (i ≥ k) && (decide (i - k < 8) && v.testBit (k + (i - k))))))
+      = (decide (i < 64) && (decide (k ≤ i ∧ i < k + 8) && v.testBit i)) := by
+  by_cases hc : k ≤ i ∧ i < k + 8
+  · have t1 : decide (i ≥ k) = true := decide_eq_true hc.1
+    have t2 : decide (i - k < 8) = true := decide_eq_true (by omega)
+    have t3 : decide (k ≤ i ∧ i < k + 8) = true := decide_eq_true hc
+    rw [t1, t2, t3, sub_add i k hc.1]
+    try simp
+  · rcases Nat.lt_or_ge i k with hl | hg
+    · have e1 : decide (i ≥ k) = false := decide_eq_false (by omega)
+      have e3 : decide (k ≤ i ∧ i < k + 8) = false := decide_eq_false (by omega)
+      rw [e1, e3]
+      try simp
+    · have t1 : decide (i ≥ k) = true := decide_eq_true hg
+      have e2 : decide (i - k < 8) = false := decide_eq_false (by omega)
+      have e3 : decide (k ≤ i ∧ i < k + 8) = false := decide_eq_false hc
+      rw [t1, e2, e3]
+      try simp
+
+/-- Memory read-after-write: reading from the address just written returns the value.
+    Proved: little-endian byte recombination, per-bit via `Nat.eq_of_testBit_eq`. -/
+@[simp] theorem mem_read_after_write_u64 (mem : Nat → UInt8) (addr : Nat) (val : UInt64) :
+  mem_read_u64 (mem_write_u64 mem addr val) addr = val := by
+  apply UInt64.toNat.inj
+  simp [mem_read_u64, mem_write_u64]
+  apply Nat.eq_of_testBit_eq
+  intro i
+  have hb : val.toNat < 2 ^ 64 := UInt64.toNat_lt val
+  simp only [Nat.testBit_or, UInt8.toNat_ofNat, nat64, n8,
+             Nat.testBit_mod_two_pow, Nat.testBit_shiftLeft, Nat.testBit_shiftRight]
+  simp only [winfix]
+  by_cases h64 : i < 64
+  · -- i in some window [8j, 8j+8)
+    rcases Nat.lt_or_ge i 8 with r0 | g0
+    · -- window 0
+      rw [show decide (i < 8) = true from decide_eq_true r0,
+          show decide (i < 64) = true from decide_eq_true h64,
+          show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+          show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+          show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+          show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+          show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+          show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega),
+          show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega)]
+      simp
+    · rcases Nat.lt_or_ge i 16 with r1 | g1
+      · -- window 1
+        rw [show decide (8 ≤ i ∧ i < 8 + 8) = true from decide_eq_true ⟨g0, by omega⟩,
+            show decide (i < 64) = true from decide_eq_true h64,
+            show decide (i < 8) = false from decide_eq_false (by omega),
+            show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+            show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+            show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+            show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+            show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega),
+            show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega)]
+        simp
+      · rcases Nat.lt_or_ge i 24 with r2 | g2
+        · -- window 2
+          rw [show decide (16 ≤ i ∧ i < 16 + 8) = true from decide_eq_true ⟨g1, by omega⟩,
+              show decide (i < 64) = true from decide_eq_true h64,
+              show decide (i < 8) = false from decide_eq_false (by omega),
+              show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+              show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+              show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+              show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+              show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega),
+              show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega)]
+          simp
+        · rcases Nat.lt_or_ge i 32 with r3 | g3
+          · -- window 3
+            rw [show decide (24 ≤ i ∧ i < 24 + 8) = true from decide_eq_true ⟨g2, by omega⟩,
+                show decide (i < 64) = true from decide_eq_true h64,
+                show decide (i < 8) = false from decide_eq_false (by omega),
+                show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+                show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+                show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+                show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+                show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega),
+                show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega)]
+            simp
+          · rcases Nat.lt_or_ge i 40 with r4 | g4
+            · -- window 4
+              rw [show decide (32 ≤ i ∧ i < 32 + 8) = true from decide_eq_true ⟨g3, by omega⟩,
+                  show decide (i < 64) = true from decide_eq_true h64,
+                  show decide (i < 8) = false from decide_eq_false (by omega),
+                  show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+                  show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+                  show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+                  show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+                  show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega),
+                  show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega)]
+              simp
+            · rcases Nat.lt_or_ge i 48 with r5 | g5
+              · -- window 5
+                rw [show decide (40 ≤ i ∧ i < 40 + 8) = true from decide_eq_true ⟨g4, by omega⟩,
+                    show decide (i < 64) = true from decide_eq_true h64,
+                    show decide (i < 8) = false from decide_eq_false (by omega),
+                    show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+                    show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+                    show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+                    show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+                    show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega),
+                    show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega)]
+                simp
+              · rcases Nat.lt_or_ge i 56 with r6 | g6
+                · -- window 6
+                  rw [show decide (48 ≤ i ∧ i < 48 + 8) = true from decide_eq_true ⟨g5, by omega⟩,
+                      show decide (i < 64) = true from decide_eq_true h64,
+                      show decide (i < 8) = false from decide_eq_false (by omega),
+                      show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+                      show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+                      show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+                      show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+                      show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+                      show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega)]
+                  simp
+                · -- window 7: i ≥ 56, i < 64
+                  rw [show decide (56 ≤ i ∧ i < 56 + 8) = true from decide_eq_true ⟨g6, by omega⟩,
+                      show decide (i < 64) = true from decide_eq_true h64,
+                      show decide (i < 8) = false from decide_eq_false (by omega),
+                      show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+                      show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+                      show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+                      show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+                      show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+                      show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega)]
+                  simp
+  · -- i ≥ 64
+    have hn : ¬ (i < 64) := by omega
+    have hB : val.toNat.testBit i = false := by
+      apply Nat.testBit_lt_two_pow
+      have hp : (2 : Nat) ^ 64 ≤ 2 ^ i :=
+        Nat.pow_le_pow_right (by omega) (by omega)
+      omega
+    rw [show decide (i < 64) = false from decide_eq_false hn,
+        show decide (i < 8) = false from decide_eq_false (by omega),
+        show decide (8 ≤ i ∧ i < 8 + 8) = false from decide_eq_false (by omega),
+        show decide (16 ≤ i ∧ i < 16 + 8) = false from decide_eq_false (by omega),
+        show decide (24 ≤ i ∧ i < 24 + 8) = false from decide_eq_false (by omega),
+        show decide (32 ≤ i ∧ i < 32 + 8) = false from decide_eq_false (by omega),
+        show decide (40 ≤ i ∧ i < 40 + 8) = false from decide_eq_false (by omega),
+        show decide (48 ≤ i ∧ i < 48 + 8) = false from decide_eq_false (by omega),
+        show decide (56 ≤ i ∧ i < 56 + 8) = false from decide_eq_false (by omega),
+        show val.toNat.testBit i = false from hB]
+    simp
+
+/-- Memory read-after-write at non-overlapping address.
+    Proved: `mem_write_u64` only touches addresses [addr1, addr1+7]. -/
+@[simp] theorem memw_untouched (mem : Nat → UInt8) (a i : Nat) (val : UInt64)
+    (hd : i < a ∨ a + 8 ≤ i) :
+    mem_write_u64 mem a val i = mem i := by
+  simp only [mem_write_u64]
+  repeat' split
+  all_goals first
+    | rfl
+    | (exfalso; rcases hd with h | h <;> omega)
+
+@[simp] theorem mem_read_after_write_u64_ne (mem : Nat → UInt8) (addr1 addr2 : Nat) (val : UInt64)
+    (h : addr2 + 8 ≤ addr1 ∨ addr1 + 8 ≤ addr2) :
+    mem_read_u64 (mem_write_u64 mem addr1 val) addr2 = mem_read_u64 mem addr2 := by
+  rcases h with h | h
+  · unfold mem_read_u64
+    rw [show mem_write_u64 mem addr1 val addr2 = mem addr2 from memw_untouched _ _ _ _ (Or.inl (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 1) = mem (addr2 + 1) from memw_untouched _ _ _ _ (Or.inl (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 2) = mem (addr2 + 2) from memw_untouched _ _ _ _ (Or.inl (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 3) = mem (addr2 + 3) from memw_untouched _ _ _ _ (Or.inl (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 4) = mem (addr2 + 4) from memw_untouched _ _ _ _ (Or.inl (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 5) = mem (addr2 + 5) from memw_untouched _ _ _ _ (Or.inl (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 6) = mem (addr2 + 6) from memw_untouched _ _ _ _ (Or.inl (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 7) = mem (addr2 + 7) from memw_untouched _ _ _ _ (Or.inl (by omega))]
+  · unfold mem_read_u64
+    rw [show mem_write_u64 mem addr1 val addr2 = mem addr2 from memw_untouched _ _ _ _ (Or.inr (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 1) = mem (addr2 + 1) from memw_untouched _ _ _ _ (Or.inr (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 2) = mem (addr2 + 2) from memw_untouched _ _ _ _ (Or.inr (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 3) = mem (addr2 + 3) from memw_untouched _ _ _ _ (Or.inr (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 4) = mem (addr2 + 4) from memw_untouched _ _ _ _ (Or.inr (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 5) = mem (addr2 + 5) from memw_untouched _ _ _ _ (Or.inr (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 6) = mem (addr2 + 6) from memw_untouched _ _ _ _ (Or.inr (by omega)),
+        show mem_write_u64 mem addr1 val (addr2 + 7) = mem (addr2 + 7) from memw_untouched _ _ _ _ (Or.inr (by omega))]
+
+/-- Reading slot 1 of an STP-style double write returns slot 1's value,
+    provided the two slots do not overlap. -/
+theorem mem_read_two_writes_same (mem : Nat → UInt8) (a b : Nat) (v w : UInt64)
+    (h : a + 8 ≤ b ∨ b + 8 ≤ a) :
+    mem_read_u64 (mem_write_u64 (mem_write_u64 mem a v) b w) a = v := by
+  have h1 : mem_read_u64 (mem_write_u64 (mem_write_u64 mem a v) b w) a
+      = mem_read_u64 (mem_write_u64 mem a v) a :=
+    mem_read_after_write_u64_ne (mem_write_u64 mem a v) b a w h
+  rw [h1]
+  exact mem_read_after_write_u64 mem a v
+
+/-- Adjacent-slot variant: the second STP slot sits at (first + 8), which
+    the %2^64-normalized LDP address reproduces syntactically. -/
+theorem mem_read_two_writes_adjacent (mem : Nat → UInt8) (a : Nat) (v w : UInt64)
+    (hb : a + 8 < 18446744073709551616) :
+    mem_read_u64 (mem_write_u64 (mem_write_u64 mem a v)
+        ((a + 8) % 18446744073709551616) w) a = v := by
+  rw [show (a + 8) % 18446744073709551616 = a + 8 from Nat.mod_eq_of_lt hb]
+  exact mem_read_two_writes_same mem a (a + 8) v w (Or.inl (by omega))
+
+
+/-- Generic two-write reload with the second address given by an equation. -/
+theorem mem_read_two_writes (mem : Nat → UInt8) (a b : Nat) (v w : UInt64)
+    (h : b = a + 8) :
+    mem_read_u64 (mem_write_u64 (mem_write_u64 mem a v) b w) a = v := by
+  subst h
+  exact mem_read_two_writes_same mem a (a + 8) v w (Or.inl (by omega))
+
+/-- **Push/pop low-slot read.**  A pair `(v, w)` is pushed at the slots
+    `sp - 16` and `(sp - 16) + 8` (the `stp` frame save).  Reading the low slot
+    `sp - 16` back returns `v`; the `stp` address is in the `UInt64`-added
+    form `(sp - 16) + 8`, so only the `toNat`-of-`+` normalization is needed
+    (no no-wrap hypothesis: the `%2^64` case is handled by the adjacent-slot
+    lemma below).  This is the general pattern behind every body block's
+    `x0 := push; …; pop` value flow, so it lives here rather than in the
+    generator. -/
+theorem mem_read_two_writes_adjacent' (mem : Nat → UInt8) (a : Nat) (ha : a < 18446744073709551616)
+    (v w : UInt64) :
+    mem_read_u64 (mem_write_u64 (mem_write_u64 mem a v)
+        ((a + 8) % 18446744073709551616) w) a = v := by
+  by_cases h : a + 8 < 18446744073709551616
+  · rw [Nat.mod_eq_of_lt h]
+    exact mem_read_two_writes_same mem a (a + 8) v w (Or.inl (by omega))
+  · have hm : (a + 8) % 18446744073709551616 = a + 8 - 18446744073709551616 := by
+      rw [Nat.mod_eq_sub_mod (by omega)]
+      exact Nat.mod_eq_of_lt (by omega)
+    rw [hm]
+    exact mem_read_two_writes_same mem a (a + 8 - 18446744073709551616) v w (Or.inr (by omega))
+
+theorem mem_read_push_low (mem : Nat → UInt8) (sp : UInt64) (v w : UInt64) :
+    mem_read_u64
+      (mem_write_u64 (mem_write_u64 mem (sp - UInt64.ofNat 16).toNat v)
+        ((sp - UInt64.ofNat 16) + 8).toNat w) (sp - UInt64.ofNat 16).toNat = v := by
+  rw [UInt64.toNat_add]
+  have h8 : (8 : UInt64).toNat = 8 := by decide
+  rw [h8]
+  exact mem_read_two_writes_adjacent' mem (sp - UInt64.ofNat 16).toNat (UInt64.toNat_lt _) v w
+
+/-- Reading the second (high) slot of an STP-like double write survives any
+    number of later writes whose addresses are 8-byte-disjoint from it.
+    This is the per-instruction frame combinator: the generator peels the
+    unrelated writes (one call per instruction) and finishes with the matching
+    write.  Each `h` is exactly the disjointness side condition of
+    `mem_read_after_write_u64_ne`. -/
+theorem mem_read_slot1_through4 (mem : Nat → UInt8) (a b c : UInt64)
+    (v29 v30 w19 w20 u0 u2 : UInt64)
+    (h1 : (a + 8).toNat + 8 ≤ b.toNat ∨ b.toNat + 8 ≤ (a + 8).toNat)
+    (h2 : (a + 8).toNat + 8 ≤ (b + 8).toNat ∨ (b + 8).toNat + 8 ≤ (a + 8).toNat)
+    (h3 : (a + 8).toNat + 8 ≤ c.toNat ∨ c.toNat + 8 ≤ (a + 8).toNat)
+    (h4 : (a + 8).toNat + 8 ≤ (c + 8).toNat ∨ (c + 8).toNat + 8 ≤ (a + 8).toNat) :
+    mem_read_u64
+      (mem_write_u64 (mem_write_u64 (mem_write_u64 (mem_write_u64
+        (mem_write_u64 (mem_write_u64 mem a.toNat v29) (a + 8).toNat v30)
+        b.toNat w19) (b + 8).toNat w20) c.toNat u0) (c + 8).toNat u2)
+      (a + 8).toNat = v30 := by
+  rw [mem_read_after_write_u64_ne _ _ _ _ h4,
+      mem_read_after_write_u64_ne _ _ _ _ h3,
+      mem_read_after_write_u64_ne _ _ _ _ h2,
+      mem_read_after_write_u64_ne _ _ _ _ h1,
+      mem_read_after_write_u64]
+
+/-- Frame combinator with the slot addresses given directly (no `+ 8`), so the
+    generator can pass the canonical `sp - UInt64.ofNat K` forms that the
+    block effects normalise to.  `A0/A1` are the two slots of the first STP
+    (the read slot is `A1`, holding the restored `x30`), `B0/B1` and `C0/C1`
+    the two later double-writes.  Each `h*` is the disjointness side condition
+    of `mem_read_after_write_u64_ne`; the generator discharges them with
+    `u64_slot_disjoint`. -/
+theorem mem_read_frame6 (mem : Nat → UInt8)
+    (A0 A1 B0 B1 C0 C1 : UInt64)
+    (v29 v30 w19 w20 u0 u2 : UInt64)
+    (hC1 : A1.toNat + 8 ≤ C1.toNat ∨ C1.toNat + 8 ≤ A1.toNat)
+    (hC0 : A1.toNat + 8 ≤ C0.toNat ∨ C0.toNat + 8 ≤ A1.toNat)
+    (hB1 : A1.toNat + 8 ≤ B1.toNat ∨ B1.toNat + 8 ≤ A1.toNat)
+    (hB0 : A1.toNat + 8 ≤ B0.toNat ∨ B0.toNat + 8 ≤ A1.toNat) :
+    mem_read_u64
+      (mem_write_u64 (mem_write_u64 (mem_write_u64 (mem_write_u64
+        (mem_write_u64 (mem_write_u64 mem A0.toNat v29) A1.toNat v30)
+        B0.toNat w19) B1.toNat w20) C0.toNat u0) C1.toNat u2)
+      A1.toNat = v30 := by
+  rw [mem_read_after_write_u64_ne _ _ _ _ hC1,
+      mem_read_after_write_u64_ne _ _ _ _ hC0,
+      mem_read_after_write_u64_ne _ _ _ _ hB1,
+      mem_read_after_write_u64_ne _ _ _ _ hB0,
+      mem_read_after_write_u64]
+
+/-! ## Per-instruction frame address arithmetic
+
+The frame slots of a prologue/epilogue are the `UInt64` addresses
+`sp - d` for small literal offsets `d` (multiples of 8).  These lemmas give the
+`.toNat` of such an address as a function of `sp.toNat`, splitting on whether
+the subtraction wraps.  They are the one-instruction arithmetic facts the
+generator needs to discharge the `mem_read_after_write_u64_ne` side conditions
+of the frame combinator above, without ever unfolding a composed block. -/
+
+/-- No wrap: `(sp - d).toNat = sp.toNat - d` when `d ≤ sp.toNat`. -/
+theorem u64_slot_nowrap (sp : UInt64) {d : Nat} (hd : d < 2^64) (h : d ≤ sp.toNat) :
+    (sp - UInt64.ofNat d).toNat = sp.toNat - d := by
+  rw [UInt64.toNat_sub_of_le sp (UInt64.ofNat d) (by
+    rw [UInt64.le_iff_toNat_le, UInt64.toNat_ofNat', Nat.mod_eq_of_lt hd]; exact h)]
+  rw [UInt64.toNat_ofNat', Nat.mod_eq_of_lt hd]
+
+/-- Wrap: `(sp - d).toNat = 2^64 - d + sp.toNat` when `sp.toNat < d`. -/
+theorem u64_slot_wrap (sp : UInt64) {d : Nat} (hd : d < 2^64) (h : sp.toNat < d) :
+    (sp - UInt64.ofNat d).toNat = 2^64 - d + sp.toNat := by
+  rw [UInt64.toNat_sub, UInt64.toNat_ofNat', Nat.mod_eq_of_lt hd]
+  apply Nat.mod_eq_of_lt
+  have hs := UInt64.toNat_lt sp; omega
+
+/-- Two distinct frame slots `sp - k` and `sp - j` (`j + 8 ≤ k`) occupy
+    8-byte-disjoint address ranges.  The `hsum` bound rules out the degenerate
+    huge-offset wrap; for the literal offsets the codegen emits it is decided by
+    `decide`. -/
+theorem u64_slot_disjoint (sp : UInt64) {j k : Nat}
+    (hj : j < 2^64) (hk : k < 2^64) (hsum : k + j + 8 ≤ 2^64) (h : j + 8 ≤ k) :
+    ((sp - UInt64.ofNat k).toNat) + 8 ≤ (sp - UInt64.ofNat j).toNat ∨
+    (sp - UInt64.ofNat j).toNat + 8 ≤ (sp - UInt64.ofNat k).toNat := by
+  have hs := UInt64.toNat_lt sp
+  rcases Nat.lt_or_ge sp.toNat k with hlt | hge
+  · have hk' : (sp - UInt64.ofNat k).toNat = 2^64 - k + sp.toNat := u64_slot_wrap sp hk hlt
+    rw [hk']
+    rcases Nat.lt_or_ge sp.toNat j with hlt2 | hge2
+    · have hj' : (sp - UInt64.ofNat j).toNat = 2^64 - j + sp.toNat := u64_slot_wrap sp hj hlt2
+      rw [hj']; left; omega
+    · have hj' : (sp - UInt64.ofNat j).toNat = sp.toNat - j := u64_slot_nowrap sp hj hge2
+      rw [hj']; right; omega
+  · have hk' : (sp - UInt64.ofNat k).toNat = sp.toNat - k := u64_slot_nowrap sp hk hge
+    have hge2 : j ≤ sp.toNat := by omega
+    have hj' : (sp - UInt64.ofNat j).toNat = sp.toNat - j := u64_slot_nowrap sp hj hge2
+    rw [hk', hj']; left; omega
+
+/-- **Frame slot read-through, in `simp`-ready shape.**  Reading the slot
+    `sp - UInt64.ofNat k` from a memory whose topmost write is to a disjoint
+    slot `sp - UInt64.ofNat j` (`j + 8 ≤ k`) is the read from the older memory.
+    This is the single library lemma the generator's value-flow `simp` uses to
+    peel unrelated stores; the address arithmetic is discharged by `decide`.
+    (The frame-restore proofs use the curried `mem_read_after_write_u64_ne`
+    directly with hand-built disjointness facts.) -/
+theorem mem_read_after_write_u64_slot (mem : Nat → UInt8) (sp : UInt64) {j k : Nat}
+    (hj : j < 2^64) (hk : k < 2^64) (hsum : k + j + 8 ≤ 2^64) (h : j + 8 ≤ k)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat j).toNat val)
+        (sp - UInt64.ofNat k).toNat
+      = mem_read_u64 mem (sp - UInt64.ofNat k).toNat :=
+  mem_read_after_write_u64_ne mem (sp - UInt64.ofNat j).toNat
+    (sp - UInt64.ofNat k).toNat val
+    ((u64_slot_disjoint sp hj hk hsum h).elim Or.inl Or.inr)
+
+/-- Mirror orientation of `mem_read_after_write_u64_slot`: the write slot sits
+    *below* the read slot (`k + 8 ≤ j`). -/
+theorem mem_read_after_write_u64_slot' (mem : Nat → UInt8) (sp : UInt64) {j k : Nat}
+    (hj : j < 2^64) (hk : k < 2^64) (hsum : k + j + 8 ≤ 2^64) (h : k + 8 ≤ j)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat j).toNat val)
+        (sp - UInt64.ofNat k).toNat
+      = mem_read_u64 mem (sp - UInt64.ofNat k).toNat :=
+  mem_read_after_write_u64_ne mem (sp - UInt64.ofNat j).toNat
+    (sp - UInt64.ofNat k).toNat val
+    ((u64_slot_disjoint sp (j := k) (k := j) hk hj (by omega) h).elim Or.inr Or.inl)
+
+/-! ### Frame store vs. a slot at/above `sp`
+
+`FrameOk`'s memory clause is agreement on the caller's slots `sp + j`
+(`j < FRAME`), above the callee's frame.  The store addresses are
+`sp - UInt64.ofNat K` (`K ≥ 8`); `K + j + 8 ≤ 2^64` rules out the degenerate
+wrap, so the two ranges are 8-byte disjoint for **every** `sp` (no stack-bound
+hypothesis needed). -/
+
+/-- A frame store at `sp - K` (`K ≥ 8`) is disjoint from a caller slot at
+    `sp + j` (`j` small), for all `sp`. -/
+theorem u64_write_read_disjoint (sp : UInt64) {K j : Nat}
+    (hK : 8 ≤ K) (hK64 : K < 2^64) (hj : j < 2^63) (hsum : K + j + 8 ≤ 2^64) :
+    (sp - UInt64.ofNat K).toNat + 8 ≤ (sp + UInt64.ofNat j).toNat ∨
+    (sp + UInt64.ofNat j).toNat + 8 ≤ (sp - UInt64.ofNat K).toNat := by
+  have hs := UInt64.toNat_lt sp
+  have hj64 : j < 2^64 := by omega
+  have hread : (sp + UInt64.ofNat j).toNat = (sp.toNat + j) % 2^64 := by
+    rw [UInt64.toNat_add, UInt64.toNat_ofNat', Nat.mod_eq_of_lt hj64]
+  rcases Nat.lt_or_ge sp.toNat K with hlt | hge
+  · have hw : (sp - UInt64.ofNat K).toNat = 2^64 - K + sp.toNat := u64_slot_wrap sp hK64 hlt
+    rw [hw, hread]
+    have hlt2 : sp.toNat + j < 2^64 := by omega
+    rw [Nat.mod_eq_of_lt hlt2]
+    right; omega
+  · have hw : (sp - UInt64.ofNat K).toNat = sp.toNat - K := u64_slot_nowrap sp hK64 hge
+    rw [hw, hread]
+    rcases Nat.lt_or_ge (sp.toNat + j) (2^64) with hlt2 | hge2
+    · rw [Nat.mod_eq_of_lt hlt2]; left; omega
+    · have hm : (sp.toNat + j) % 2^64 = sp.toNat + j - 2^64 := by
+        rw [Nat.mod_eq_sub_mod hge2]
+        exact Nat.mod_eq_of_lt (by omega)
+      rw [hm]; right; omega
+
+/-- `simp`-ready single-byte consequence: a frame store below `sp` leaves every
+    caller slot above `sp` untouched. -/
+theorem mem_write_u64_high (mem : Nat → UInt8) (sp : UInt64) {K j : Nat}
+    (hK : 8 ≤ K) (hK64 : K < 2^64) (hj : j < 2^63) (hsum : K + j + 8 ≤ 2^64)
+    (val : UInt64) :
+    mem_write_u64 mem (sp - UInt64.ofNat K).toNat val ((sp + UInt64.ofNat j).toNat)
+      = mem ((sp + UInt64.ofNat j).toNat) := by
+  apply memw_untouched
+  rcases u64_write_read_disjoint sp hK hK64 hj hsum with h | h
+  · exact Or.inr h
+  · exact Or.inl (by omega)
+
+/-- `simp`-ready read-through for a store below `sp` against a caller slot
+    above `sp`. -/
+theorem mem_read_after_write_u64_high (mem : Nat → UInt8) (sp : UInt64) {K j : Nat}
+    (hK : 8 ≤ K) (hK64 : K < 2^64) (hj : j < 2^63) (hsum : K + j + 8 ≤ 2^64)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
+  mem_read_after_write_u64_ne mem (sp - UInt64.ofNat K).toNat
+    ((sp + UInt64.ofNat j).toNat) val
+    ((u64_write_read_disjoint sp hK hK64 hj hsum).elim Or.inr Or.inl)
+
+/-- **No-wrap frame store vs. a slot at/above `sp`.**  When both the store slot
+    `sp - K` (`K ≤ sp.toNat`) and the read address `sp + j` (`sp.toNat + j < 2^64`)
+    are in the non-wrapping regime, the store is *unconditionally* below the read
+    — the disjointness needs no auxiliary bound.  This is the form the
+    no-wrap-guarded `FrameOk.mem` uses. -/
+theorem mem_read_after_write_u64_high_nw (mem : Nat → UInt8) (sp : UInt64) {K j : Nat}
+    (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (hjnw : sp.toNat + j < 2^64) (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) := by
+  apply mem_read_after_write_u64_ne
+  right
+  have hj64 : j < 2^64 := by omega
+  have hread : (sp + UInt64.ofNat j).toNat = sp.toNat + j := by
+    simp only [UInt64.toNat_add, UInt64.toNat_ofNat']
+    rw [Nat.mod_eq_of_lt hj64, Nat.mod_eq_of_lt hjnw]
+  rw [u64_slot_nowrap sp (by omega) hKnw, hread]
+  omega
+
+
+/-! ## Canonicalising frame addresses
+
+The composed block effects emit `sp` as a nest of `+`/`-` literals
+(`(sp - 16) - 16`, `(sp - 16) + 8`, ...).  These four lemmas flatten such a nest
+into the canonical single-subtraction form `sp - UInt64.ofNat K`, which is what
+`u64_slot_disjoint` and the frame combinators expect.  They are deliberately not
+`@[simp]` (to avoid perturbing existing proofs); the generator lists them
+explicitly in the frame simp set. -/
+
+/-- `(sp - a) - b = sp - (a + b)` (bitvector sub is associative). -/
+theorem u64_sub_sub (sp a b : UInt64) : (sp - a) - b = sp - (a + b) := by grind
+
+/-- `(sp - a) + b = sp - (a - b)` (moving an addition back under the sub). -/
+theorem u64_sub_add (sp a b : UInt64) : (sp - a) + b = sp - (a - b) := by grind
+
+/-- Literal offset addition: `ofNat a + ofNat b = ofNat (a + b)`. -/
+theorem u64_ofNat_add (a b : Nat) : UInt64.ofNat a + UInt64.ofNat b = UInt64.ofNat (a + b) := by
+  apply UInt64.toNat.inj
+  rw [UInt64.toNat_add, UInt64.toNat_ofNat', UInt64.toNat_ofNat', UInt64.toNat_ofNat']
+  exact (Nat.add_mod a b (2^64)).symm
+
+/-- Literal offset subtraction (for `b ≤ a < 2^64`):
+    `ofNat a - ofNat b = ofNat (a - b)`. -/
+theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
+    UInt64.ofNat a - UInt64.ofNat b = UInt64.ofNat (a - b) := by
+  have hb : b < 2^64 := by omega
+  have hab : a - b < 2^64 := by omega
+  apply UInt64.toNat.inj
+  rw [UInt64.toNat_sub, UInt64.toNat_ofNat', UInt64.toNat_ofNat', UInt64.toNat_ofNat',
+      Nat.mod_eq_of_lt hM, Nat.mod_eq_of_lt hb, Nat.mod_eq_of_lt hab]
+  have : (2^64 - b + a) % 2^64 = a - b := by
+    rw [show 2^64 - b + a = 2^64 + (a - b) by omega, Nat.add_mod, Nat.mod_self, Nat.zero_add,
+        Nat.mod_mod]
+    exact Nat.mod_eq_of_lt hab
+  exact this
+
+/-- **Frame-window re-index.**  `sp - K = (sp - P) + (P - K)` for `K ≤ P`
+    (all `UInt64`, no wrap).  This is the arithmetic that converts an
+    entry-relative address `sp - K` into a call-time-relative one
+    `call_state.sp + (P - K)` when re-reading FrameOk's window. -/
+theorem u64_sub_reindex (sp : UInt64) {P K : Nat} (hK : K ≤ P) (hP : P < 2^64) :
+    sp - UInt64.ofNat K = (sp - UInt64.ofNat P) + UInt64.ofNat (P - K) := by
+  rw [u64_sub_add,
+      show UInt64.ofNat P - UInt64.ofNat (P - K) = UInt64.ofNat (P - (P - K))
+        from u64_ofNat_sub P (P - K) (by omega) hP,
+      show P - (P - K) = K from by omega]
+
+/-- **Frame-window re-index (upward).**  `(sp - P) + (P + j) = sp + j`.  Used to
+    re-read FrameOk's window at an address above the call-time `sp`. -/
+theorem u64_add_reindex (sp : UInt64) (P j : Nat) :
+    (sp - UInt64.ofNat P) + UInt64.ofNat (P + j) = sp + UInt64.ofNat j := by
+  calc (sp - UInt64.ofNat P) + UInt64.ofNat (P + j)
+      = (sp - UInt64.ofNat P) + (UInt64.ofNat P + UInt64.ofNat j) := by rw [u64_ofNat_add]
+    _ = ((sp - UInt64.ofNat P) + UInt64.ofNat P) + UInt64.ofNat j :=
+          (UInt64.add_assoc _ _ _).symm
+    _ = sp + UInt64.ofNat j := by
+          rw [u64_sub_add,
+              show UInt64.ofNat P - UInt64.ofNat P = (0 : UInt64) from by simp]
+          simp
+
+/-! # UInt64 arithmetic helpers used by the loop/recursion emitters -/
+
+/-- Stable wrapper for toNat_add with literal modulus — avoids repeated
+    2^64-vs-literal defeq checks that blow the native stack in
+    context-heavy proofs. -/
+theorem u64_toNat_add_lit (a b : UInt64) :
+    (a + b).toNat = (a.toNat + b.toNat) % 18446744073709551616 :=
+  UInt64.toNat_add a b
+
+
+theorem u64_ofNat_zero : UInt64.ofNat 0 = 0 := rfl
+
+/-- `¬(0 < n)` on a `UInt64` means `n` is zero, hence `n.toNat = 0`. -/
+theorem u64_not_lt_zero_toNat (n : UInt64) (h : ¬(0 < n)) : n.toNat = 0 := by
+  have h1 : ¬(0 < n.toNat) := by
+    intro hlt
+    exact h (UInt64.lt_iff_toNat_lt.mpr hlt)
+  omega
+
+theorem u64_add_zero_r (v : UInt64) : v + (0:UInt64) = v := by
+  apply UInt64.toNat.inj
+  show (v.toNat + (0:UInt64).toNat) % 18446744073709551616 = v.toNat
+  simp
+
+theorem u64_add_ofNat_zero_r (v : UInt64) : v + UInt64.ofNat 0 = v := by
+  rw [u64_ofNat_zero]
+  exact u64_add_zero_r v
+
+theorem u64_sub_zero (v : UInt64) : v - (0:UInt64) = v := by
+  simp
+
+theorem u64_ofNat_sub_one (k : Nat) (hk : 1 ≤ k) (hb : k < 18446744073709551616) :
+    UInt64.ofNat k - UInt64.ofNat 1 = UInt64.ofNat (k - 1) := by
+  apply UInt64.toNat.inj
+  simp only [UInt64.toNat_sub]
+  have h1 : (UInt64.ofNat 1).toNat = 1 := rfl
+  have hk' : (UInt64.ofNat k).toNat = k := by simp; omega
+  have hk1 : (UInt64.ofNat (k - 1)).toNat = k - 1 := by simp; omega
+  rw [h1, hk', hk1]
+  have h64 : (2:Nat) ^ 64 = 18446744073709551616 := rfl
+  omega
+
+/-- Shared: read the `reg` field of a ModRM byte (source operand). -/
+def read_reg (s : X86State) (modrm : UInt8) : UInt64 :=
+  match modrm.toNat >>> 3 &&& 7 with
+  | 0 => s.rax | 1 => s.rcx | 2 => s.rdx | 3 => s.rbx
+  | 4 => s.rsp | 5 => s.rbp | 6 => s.rsi | 7 => s.rdi | _ => 0
+
+/-- Shared: read the `rm` field of a ModRM byte (destination operand). -/
+def read_rm (s : X86State) (modrm : UInt8) : UInt64 :=
+  match modrm.toNat &&& 7 with
+  | 0 => s.rax | 1 => s.rcx | 2 => s.rdx | 3 => s.rbx
+  | 4 => s.rsp | 5 => s.rbp | 6 => s.rsi | 7 => s.rdi | _ => 0
+
+/-- Shared: write to the register selected by the `reg` field of ModRM. -/
+def set_reg (s : X86State) (modrm : UInt8) (val : UInt64) : X86State :=
+  match modrm.toNat >>> 3 &&& 7 with
+  | 0 => {s with rax := val} | 1 => {s with rcx := val} | 2 => {s with rdx := val}
+  | 3 => {s with rbx := val} | 4 => {s with rsp := val} | 5 => {s with rbp := val}
+  | 6 => {s with rsi := val} | 7 => {s with rdi := val} | _ => s
+
+/-- Shared: write to the register selected by the `rm` field of ModRM. -/
+def set_rm (s : X86State) (modrm : UInt8) (val : UInt64) : X86State :=
+  match modrm.toNat &&& 7 with
+  | 0 => {s with rax := val} | 1 => {s with rcx := val} | 2 => {s with rdx := val}
+  | 3 => {s with rbx := val} | 4 => {s with rsp := val} | 5 => {s with rbp := val}
+  | 6 => {s with rsi := val} | 7 => {s with rdi := val} | _ => s
+
+/-- x86-64 instruction step function.
+    Fully specified machine model with 16 GPRs, memory, and flags.
+    Each instruction is decoded and its semantics fully defined. -/
+def x86_step (s : X86State) (code : Nat → UInt8) : Option X86State :=
+  match code s.rip with
+  | 0xc3 => some {s with rip := (mem_read_u64 s.mem s.rsp.toNat).toNat, rsp := s.rsp + 8}
+  | 0x53 => some {s with rsp := s.rsp - 8, rip := s.rip + 1, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.rbx}
+  | 0x50 => some {s with rsp := s.rsp - 8, rip := s.rip + 1, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.rax}
+  | 0x5b => some {s with rbx := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 1}
+  | 0x58 => some {s with rax := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 1}
+  | 0x90 => some {s with rip := s.rip + 1}
+  | 0x75 => let off := read_i8 (code (s.rip + 1)); some {s with rip := if s.zf then s.rip + 2 else (Int.ofNat s.rip + 2 + off).toNat}
+  | 0x74 => let off := read_i8 (code (s.rip + 1)); some {s with rip := if s.zf then (Int.ofNat s.rip + 2 + off).toNat else s.rip + 2}
+  | 0x7e => let off := read_i8 (code (s.rip + 1)); some {s with rip := if s.zf ∨ s.sf then (Int.ofNat s.rip + 2 + off).toNat else s.rip + 2}
+  | 0x7f => let off := read_i8 (code (s.rip + 1)); some {s with rip := if ¬s.zf ∧ ¬s.sf then (Int.ofNat s.rip + 2 + off).toNat else s.rip + 2}
+  | 0x7c => let off := read_i8 (code (s.rip + 1)); some {s with rip := if s.sf then (Int.ofNat s.rip + 2 + off).toNat else s.rip + 2}
+  | 0x7d => let off := read_i8 (code (s.rip + 1)); some {s with rip := if ¬s.sf then (Int.ofNat s.rip + 2 + off).toNat else s.rip + 2}
+  | 0xeb => let off := read_i8 (code (s.rip + 1)); some {s with rip := (Int.ofNat s.rip + 2 + off).toNat}
+  | 0xe8 => let off := read_i32_le code (s.rip + 1); some {s with rip := (Int.ofNat s.rip + 5 + off).toNat}
+  -- REX.W (0x48): 64-bit operations
+  | 0x48 =>
+    let b1 := code (s.rip + 1); let b2 := code (s.rip + 2)
+    let modrm := b2; let mod := (modrm >>> 6).toNat
+    match b1 with
+    | 0x89 => if mod = 3 then
+        let s' := set_rm s modrm (read_reg s modrm)
+        some {s' with rip := s.rip + 3}
+      else none
+    | 0x01 => if mod = 3 then
+        let src := read_reg s modrm; let dst := read_rm s modrm
+        let res := dst + src; let zf := res = 0; let sf := res ≥ 0x8000000000000000
+        let s' := set_rm s modrm res
+        some {s' with rip := s.rip + 3, zf := zf, sf := sf}
+      else none
+    | 0x29 => if mod = 3 then
+        let src := read_reg s modrm; let dst := read_rm s modrm
+        let res := dst - src; let zf := res = 0; let sf := res ≥ 0x8000000000000000; let cf := dst < src
+        let of_ := (dst ≥ 0x8000000000000000 ∧ src < 0x8000000000000000 ∧ res < 0x8000000000000000) ∨ (dst < 0x8000000000000000 ∧ src ≥ 0x8000000000000000 ∧ res ≥ 0x8000000000000000)
+        let s' := set_rm s modrm res
+        some {s' with rip := s.rip + 3, zf := zf, sf := sf, cf := cf, of_ := of_}
+      else none
+    | 0x39 => if mod = 3 then
+        let src := read_reg s modrm; let dst := read_rm s modrm
+        let res := dst - src; let zf := res = 0; let sf := res ≥ 0x8000000000000000; let cf := dst < src
+        some {s with rip := s.rip + 3, zf := zf, sf := sf, cf := cf, of_ := false}
+      else none
+    | 0x31 => if mod = 3 then
+        let src := read_reg s modrm; let dst := read_rm s modrm
+        let res := dst ^^^ src; let zf := res = 0
+        let s' := set_rm s modrm res
+        some {s' with rip := s.rip + 3, zf := zf}
+      else none
+    | 0x83 => if mod = 3 then
+        let reg_field := ((modrm >>> 3) &&& 7).toNat
+        let imm := UInt64.ofInt (read_i8 (code (s.rip + 3)))
+        let dst := read_rm s modrm; let res := dst - imm
+        let zf := res = 0; let sf := res ≥ 0x8000000000000000
+        if reg_field = 5 then
+          let s' := set_rm s modrm res
+          some {s' with rip := s.rip + 4, zf := zf, sf := sf}
+        else if reg_field = 7 then
+          some {s with rip := s.rip + 4, zf := zf, sf := sf}
+        else none
+      else none
+    | 0x0f =>
+      let b1_0f := code (s.rip + 2); let modrm_0f := code (s.rip + 3)
+      if b1_0f = 0xb6 then
+        if (modrm_0f >>> 6).toNat = 3 then
+          let s' := set_reg s modrm_0f (read_rm s modrm_0f)
+          some {s' with rip := s.rip + 4}
+        else none
+      else none
+    | _ => none
+  -- REX.WB (0x49)
+  | 0x49 =>
+    let b1 := code (s.rip + 1); let b2 := code (s.rip + 2)
+    let modrm := b2; let mod := (modrm >>> 6).toNat; let reg := ((modrm >>> 3) &&& 7).toNat; let rm := (modrm &&& 7).toNat
+    match b1 with
+    | 0x89 => if mod = 3 then let src := (match reg with | 0 => s.rax | 1 => s.rcx | 2 => s.rdx | 3 => s.rbx | 4 => s.rsp | 5 => s.rbp | 6 => s.rsi | 7 => s.rdi | _ => 0 : UInt64)
+      match rm with | 2 => some {s with r10 := src, rip := s.rip + 3} | 3 => some {s with r11 := src, rip := s.rip + 3} | _ => none else none
+    | 0x5a => some {s with r10 := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 2}
+    | 0x39 => if mod = 3 then let src := (match reg with | 0 => s.rax | 1 => s.rcx | 2 => s.rdx | 3 => s.rbx | 4 => s.rsp | 5 => s.rbp | 6 => s.rsi | 7 => s.rdi | _ => 0 : UInt64)
+      let dst := (match rm with | 2 => s.r10 | 3 => s.r11 | _ => 0 : UInt64)
+      let res := dst - src; let zf := res = 0; let sf := res ≥ 0x8000000000000000
+      some {s with rip := s.rip + 3, zf := zf, sf := sf}
+      else none
+    | _ => none
+  -- SETcc via 0x0f prefix
+  | 0x0f =>
+    let b1 := code (s.rip + 1); let modrm := code (s.rip + 2)
+    if (modrm >>> 6).toNat = 3 then
+      let v_setle := if s.sf ∨ s.zf then (1 : UInt64) else 0
+      let v_sete := if s.zf then (1 : UInt64) else 0
+      let v_setne := if ¬s.zf then (1 : UInt64) else 0
+      let v_setg := if ¬s.zf ∧ ¬s.sf then (1 : UInt64) else 0
+      let v_setge := if ¬s.sf then (1 : UInt64) else 0
+      let v_setl := if s.sf then (1 : UInt64) else 0
+      match b1 with
+      | 0x9e => let s' := set_rm s modrm v_setle; some {s' with rip := s.rip + 3}
+      | 0x94 => let s' := set_rm s modrm v_sete; some {s' with rip := s.rip + 3}
+      | 0x95 => let s' := set_rm s modrm v_setne; some {s' with rip := s.rip + 3}
+      | 0x9f => let s' := set_rm s modrm v_setg; some {s' with rip := s.rip + 3}
+      | 0x9d => let s' := set_rm s modrm v_setge; some {s' with rip := s.rip + 3}
+      | 0x9c => let s' := set_rm s modrm v_setl; some {s' with rip := s.rip + 3}
+      | _ => none
+    else none
+  -- mov r/m32, imm32 (0xc7) -- zero-extends to 64 bits
+  | 0xc7 => let modrm := code (s.rip + 1)
+    if (modrm >>> 6).toNat = 3 then
+      let imm := (code (s.rip + 2)).toUInt64 ||| ((code (s.rip + 3)).toUInt64 <<< 8) ||| ((code (s.rip + 4)).toUInt64 <<< 16) ||| ((code (s.rip + 5)).toUInt64 <<< 24)
+      let s' := set_rm s modrm imm
+      some {s' with rip := s.rip + 6}
+    else none
+  -- REX.B (0x41)
+  | 0x41 => match code (s.rip + 1) with
+    | 0x50 => some {s with rsp := s.rsp - 8, rip := s.rip + 2, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.r8}
+    | 0x51 => some {s with rsp := s.rsp - 8, rip := s.rip + 2, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.r9}
+    | 0x52 => some {s with rsp := s.rsp - 8, rip := s.rip + 2, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.r10}
+    | 0x53 => some {s with rsp := s.rsp - 8, rip := s.rip + 2, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.r11}
+    | 0x58 => some {s with r8 := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 2}
+    | 0x59 => some {s with r9 := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 2}
+    | 0x5a => some {s with r10 := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 2}
+    | 0x5b => some {s with r11 := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 2}
+    | _ => none
+  -- REX.WRB (0x4d): reg and rm in r8-r15
+  | 0x4d =>
+    let b1 := code (s.rip + 1); let b2 := code (s.rip + 2)
+    let modrm := b2; let mod_field := (modrm >>> 6).toNat; let reg := ((modrm >>> 3) &&& 7).toNat; let rm := (modrm &&& 7).toNat
+    match b1 with
+    | 0x39 => if mod_field = 3 then let src := (match reg with | 0 => s.r8 | 1 => s.r9 | 2 => s.r10 | 3 => s.r11 | 4 => s.r12 | 5 => s.r13 | 6 => s.r14 | 7 => s.r15 | _ => 0 : UInt64)
+      let dst := (match rm with | 2 => s.r10 | 3 => s.r11 | _ => 0 : UInt64)
+      let res := dst - src; let zf := res = 0; let sf := res ≥ 0x8000000000000000
+      some {s with rip := s.rip + 3, zf := zf, sf := sf}
+      else none
+    | _ => none
+  | _ => none
+
+/-- Step function for x86 execution with explicit fuel parameter.
+    Extracted from x86_exec to enable composition proofs. -/
+@[irreducible] def x86_exec_go (st : X86State) (fuel : Nat) (code : Nat → UInt8) : Option X86State :=
+  match fuel with
+  | 0 => none
+  | n + 1 =>
+    match x86_step st code with
+    | none => none
+    | some st' =>
+      if code st'.rip = 0xc3 then some st'
+      else x86_exec_go st' n code
+
+/-- Execute steps until ret (0xc3) is the next instruction, or fuel runs out -/
+@[irreducible] def x86_exec (s : X86State) (code : Nat → UInt8) : Option X86State :=
+  x86_exec_go s 1000 code
+
+/-- Unfold x86_exec into x86_exec_go with fuel 1000 -/
+theorem x86_exec_eq_go (s : X86State) (code : Nat → UInt8) :
+  x86_exec s code = x86_exec_go s 1000 code := by
+  unfold x86_exec; rfl
+
+/-- If a step succeeds and the next instruction is not ret, continue execution -/
+@[simp] theorem x86_exec_go_step_continue {st : X86State} {fuel : Nat} {code : Nat → UInt8} {st' : X86State}
+    (h_step : x86_step st code = some st') (h_not_ret : code st'.rip ≠ 0xc3) (h_fuel : fuel > 0) :
+    x86_exec_go st fuel code = x86_exec_go st' (fuel - 1) code := by
+  cases fuel with
+  | zero => contradiction
+  | succ n => simp [x86_exec_go, h_step, h_not_ret]
+
+/-- If a step succeeds and the next instruction is ret, return that state -/
+@[simp] theorem x86_exec_go_step_ret {st : X86State} {fuel : Nat} {code : Nat → UInt8} {st' : X86State}
+    (h_step : x86_step st code = some st') (h_ret : code st'.rip = 0xc3) (h_fuel : fuel > 0) :
+    x86_exec_go st fuel code = some st' := by
+  cases fuel with
+  | zero => contradiction
+  | succ n => simp [x86_exec_go, h_step, h_ret]
+
+/-- Variant of step_continue that takes the concrete rip address,
+    avoiding complex state expressions in not_ret obligation. -/
+@[simp] theorem x86_exec_go_step_continue_addr {st : X86State} {fuel : Nat} {code : Nat → UInt8} {st' : X86State}
+    (addr : Nat) (h_step : x86_step st code = some st') (h_rip : st'.rip = addr)
+    (h_not_ret : code addr ≠ 0xc3) (h_fuel : fuel > 0) :
+    x86_exec_go st fuel code = x86_exec_go st' (fuel - 1) code := by
+  cases fuel with
+  | zero => contradiction
+  | succ n => simp [x86_exec_go, h_step, h_rip, h_not_ret]
+
+/-- Variant of step_ret that takes the concrete rip address -/
+@[simp] theorem x86_exec_go_step_ret_addr {st : X86State} {fuel : Nat} {code : Nat → UInt8} {st' : X86State}
+    (addr : Nat) (h_step : x86_step st code = some st') (h_rip : st'.rip = addr)
+    (h_ret : code addr = 0xc3) (h_fuel : fuel > 0) :
+    x86_exec_go st fuel code = some st' := by
+  cases fuel with
+  | zero => contradiction
+  | succ n => simp [x86_exec_go, h_step, h_rip, h_ret]
+
+/-- Get byte from list at index -/
+def getByte (bytes : List UInt8) (i : Nat) : UInt8 :=
+  match bytes with
+  | [] => 0
+  | b :: bs => if i = 0 then b else getByte bs (i - 1)
+
+/-- AST types (source language) -/
+inductive MojoExpr where
+  | int (v : UInt64)
+  | bool (v : Bool)
+  | var (name : String)
+  | unop (op : String) (operand : MojoExpr)
+  | binop (op : String) (left : MojoExpr) (right : MojoExpr)
+  | call (name : String) (arg : MojoExpr)
+
+inductive MojoStmt where
+  | return (expr : MojoExpr)
+  | ifstmt (cond : MojoExpr) (then_body : List MojoStmt) (else_body : List MojoStmt)
+  | while (cond : MojoExpr) (body : List MojoStmt)
+  | assign (name : String) (expr : MojoExpr)
+  | exprstmt (expr : MojoExpr)
+  | pass
+
+inductive MojoFunc where
+  | mk (name : String) (param : String) (body : List MojoStmt) : MojoFunc
+
+/-- Source semantics: evaluate expressions with a call handler for recursion -/
+def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) : UInt64 :=
+  match e with
+  | MojoExpr.int v => v
+  | MojoExpr.bool v => if v then 1 else 0
+  | MojoExpr.var name => env name
+  | MojoExpr.unop "neg" operand => (0 : UInt64) - evalExpr callFunc operand env
+  | MojoExpr.unop "not" operand => if evalExpr callFunc operand env = 0 then 1 else 0
+  | MojoExpr.unop _ operand => evalExpr callFunc operand env
+  | MojoExpr.binop "+" l r => evalExpr callFunc l env + evalExpr callFunc r env
+  | MojoExpr.binop "-" l r => evalExpr callFunc l env - evalExpr callFunc r env
+  | MojoExpr.binop "*" l r => evalExpr callFunc l env * evalExpr callFunc r env
+  | MojoExpr.binop "<=" l r => if evalExpr callFunc l env ≤ evalExpr callFunc r env then 1 else 0
+  | MojoExpr.binop "<" l r => if evalExpr callFunc l env < evalExpr callFunc r env then 1 else 0
+  | MojoExpr.binop ">" l r => if evalExpr callFunc l env > evalExpr callFunc r env then 1 else 0
+  | MojoExpr.binop ">=" l r => if evalExpr callFunc l env ≥ evalExpr callFunc r env then 1 else 0
+  | MojoExpr.binop "=" l r => if evalExpr callFunc l env = evalExpr callFunc r env then 1 else 0
+  | MojoExpr.binop "!=" l r => if evalExpr callFunc l env ≠ evalExpr callFunc r env then 1 else 0
+  | MojoExpr.binop "and" l r => if (evalExpr callFunc l env ≠ 0 ∧ evalExpr callFunc r env ≠ 0) then 1 else 0
+  | MojoExpr.binop "or" l r => if (evalExpr callFunc l env ≠ 0 ∨ evalExpr callFunc r env ≠ 0) then 1 else 0
+  | MojoExpr.binop _ l r => evalExpr callFunc l env
+  | MojoExpr.call name arg => callFunc name (evalExpr callFunc arg env)
+
+/-- Environment-threading evaluator.  Returns the optional result together with
+    the final environment, so an `if` branch that assigns a local and then falls
+    through carries its updated environment into the trailing statements (the
+    previous `Option UInt64`-only evaluator dropped it). -/
+def evalBodyEnv (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) :
+    Option UInt64 × (String → UInt64) :=
+  match stmts with
+  | [] => (none, env)
+  | MojoStmt.return e :: _ => (some (evalExpr callFunc e env), env)
+  | MojoStmt.ifstmt cond tb eb :: rest =>
+    let condVal := evalExpr callFunc cond env
+    if condVal ≠ 0 then
+      let r := evalBodyEnv callFunc tb env
+      match r.1 with
+      | some v => (some v, r.2)
+      | none => evalBodyEnv callFunc rest r.2
+    else
+      let r := evalBodyEnv callFunc eb env
+      match r.1 with
+      | some v => (some v, r.2)
+      | none => evalBodyEnv callFunc rest r.2
+  | MojoStmt.while _ _ :: rest => evalBodyEnv callFunc rest env
+  | MojoStmt.assign name e :: rest =>
+    let val := evalExpr callFunc e env
+    evalBodyEnv callFunc rest (fun n => if n == name then val else env n)
+  | MojoStmt.exprstmt _ :: rest => evalBodyEnv callFunc rest env
+  | MojoStmt.pass :: rest => evalBodyEnv callFunc rest env
+
+def evalBody (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) : Option UInt64 :=
+  (evalBodyEnv callFunc stmts env).1
+
+/-- Evaluate a function by setting up the environment and evaluating its body -/
+def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64) (arg : UInt64) : UInt64 :=
+  match f with
+  | MojoFunc.mk _ param body =>
+    let env := fun name => if name == param then arg else (0 : UInt64)
+    match evalBody callFunc body env with
+    | some v => v
+    | none => 0
+
+/-!
+# AST evaluation lemmas (incremental)
+
+Each AST node constructor gets a corresponding lemma.  The main dispatch lemma
+`evalFunc_eq_mojo_all` pattern-matches on the function AST and calls per-node
+lemmas.  All per-node lemmas currently admit; each will be incrementally
+replaced with a real proof. -/
+
+/-- Evaluate a variable reference. -/
+theorem evalExpr_var (callFunc : String → UInt64 → UInt64) (name : String) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.var name) env = env name := by
+  rfl
+
+/-- Evaluate an integer constant. -/
+theorem evalExpr_int (callFunc : String → UInt64 → UInt64) (v : UInt64) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.int v) env = v := by
+  rfl
+
+/-- Evaluate a boolean constant. -/
+theorem evalExpr_bool (callFunc : String → UInt64 → UInt64) (v : Bool) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.bool v) env = (if v then 1 else 0) := by
+  rfl
+
+/-- Evaluate a unary operator expression.  Proved by case analysis on the operator. -/
+theorem evalExpr_unop (callFunc : String → UInt64 → UInt64) (op : String) (operand : MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.unop op operand) env =
+  match op with
+  | "neg" => (0 : UInt64) - evalExpr callFunc operand env
+  | "not" => if evalExpr callFunc operand env = 0 then 1 else 0
+  | _ => evalExpr callFunc operand env := by
+  by_cases h : op = "neg"; · subst h; rfl
+  · by_cases h' : op = "not"; · subst h'; rfl
+    · simp [evalExpr, h, h']
+
+/-- Evaluate a binary operator expression.  Proved by case analysis on the operator. -/
+theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (l r : MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.binop op l r) env =
+  match op with
+  | "+" => evalExpr callFunc l env + evalExpr callFunc r env
+  | "-" => evalExpr callFunc l env - evalExpr callFunc r env
+  | "*" => evalExpr callFunc l env * evalExpr callFunc r env
+  | "<=" => if evalExpr callFunc l env ≤ evalExpr callFunc r env then 1 else 0
+  | "<" => if evalExpr callFunc l env < evalExpr callFunc r env then 1 else 0
+  | ">" => if evalExpr callFunc l env > evalExpr callFunc r env then 1 else 0
+  | ">=" => if evalExpr callFunc l env ≥ evalExpr callFunc r env then 1 else 0
+  | "=" => if evalExpr callFunc l env = evalExpr callFunc r env then 1 else 0
+  | "!=" => if evalExpr callFunc l env ≠ evalExpr callFunc r env then 1 else 0
+  | "and" => if (evalExpr callFunc l env ≠ 0 ∧ evalExpr callFunc r env ≠ 0) then 1 else 0
+  | "or" => if (evalExpr callFunc l env ≠ 0 ∨ evalExpr callFunc r env ≠ 0) then 1 else 0
+  | _ => evalExpr callFunc l env := by
+  by_cases h : op = "+"; · subst h; rfl
+  · by_cases h' : op = "-"; · subst h'; rfl
+    · by_cases h'' : op = "*"; · subst h''; rfl
+      · by_cases h3 : op = "<="; · subst h3; rfl
+        · by_cases h4 : op = "<"; · subst h4; rfl
+          · by_cases h5 : op = ">"; · subst h5; rfl
+            · by_cases h6 : op = ">="; · subst h6; rfl
+              · by_cases h7 : op = "="; · subst h7; rfl
+                · by_cases h8 : op = "!="; · subst h8; rfl
+                  · by_cases h9 : op = "and"; · subst h9; rfl
+                    · by_cases h10 : op = "or"; · subst h10; rfl
+                      · simp [evalExpr, h, h', h'', h3, h4, h5, h6, h7, h8, h9, h10]
+
+/-- Evaluate a function call expression. -/
+theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (name : String) (arg : MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.call name arg) env = callFunc name (evalExpr callFunc arg env) := by
+  rfl
+
+/-- Evaluate a return statement. -/
+theorem evalBody_return (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.return e] env = some (evalExpr callFunc e env) := by
+  simp [evalBody, evalBodyEnv]
+
+/-- single-stmt if-then-else. -/
+theorem evalBody_ifstmt (callFunc : String → UInt64 → UInt64) (cond : MojoExpr) (t e : List MojoStmt) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.ifstmt cond t e] env =
+  let condVal := evalExpr callFunc cond env
+  if condVal ≠ 0 then
+    match evalBody callFunc t env with
+    | some v => some v
+    | none => none
+  else
+    match evalBody callFunc e env with
+    | some v => some v
+    | none => none := by
+  simp only [evalBody, evalBodyEnv]
+  by_cases h : evalExpr callFunc cond env = 0
+  · simp only [h, ne_eq, not_true_eq_false, if_false]
+    cases evalBodyEnv callFunc e env with
+    | mk r env' => cases r <;> rfl
+  · simp only [h, ne_eq, not_false_eq_true, if_true]
+    cases evalBodyEnv callFunc t env with
+    | mk r env' => cases r <;> rfl
+
+/-- single-stmt while (body skipped). -/
+theorem evalBody_while (callFunc : String → UInt64 → UInt64) (cond : MojoExpr) (body : List MojoStmt) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.while cond body] env = none := by
+  simp [evalBody, evalBodyEnv]
+
+/-- single-stmt assign. -/
+theorem evalBody_assign (callFunc : String → UInt64 → UInt64) (name : String) (e : MojoExpr) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.assign name e] env = none := by
+  simp [evalBody, evalBodyEnv]
+
+/-- single-stmt exprstmt. -/
+theorem evalBody_exprstmt (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.exprstmt e] env = none := by
+  simp [evalBody, evalBodyEnv]
+
+/-- single-stmt pass. -/
+theorem evalBody_pass (callFunc : String → UInt64 → UInt64) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.pass] env = none := by
+  simp [evalBody, evalBodyEnv]
+
+/-- UInt64 order bridges for the AST-eval obligations: with the (normalised)
+    negation of a comparison in scope, `simp` can discharge the corresponding
+    positive comparison to `False`. -/
+theorem u64_lt_iff_false_of_le {a b : UInt64} (h : b ≤ a) : (a < b) ↔ False :=
+  ⟨fun hab => (UInt64.not_lt.mpr h) hab, False.elim⟩
+
+theorem u64_le_iff_false_of_lt {a b : UInt64} (h : b < a) : (a ≤ b) ↔ False :=
+  ⟨fun hab => (UInt64.not_le.mpr h) hab, False.elim⟩
+
+/-- Main AST evaluation lemma.
+    Takes a function-specific hypothesis `h_result` (supplied by the per-program
+    proof) and uses it to close the equality.
+-/
+theorem evalFunc_eq_mojo_all (f : MojoFunc) (handler : String → UInt64 → UInt64) (mojo_fn : UInt64 → UInt64) (arg : UInt64)
+  (h_result : match f with
+    | MojoFunc.mk _ param body =>
+      let env := fun name : String => if name == param then arg else 0
+      match evalBody handler body env with
+      | some v => v = mojo_fn arg
+      | none => 0 = mojo_fn arg) : evalFunc f handler arg = mojo_fn arg := by
+  unfold evalFunc
+  cases f
+  rename_i name param body
+  dsimp at h_result
+  dsimp
+  cases h_eq : evalBody handler body (fun name : String => if name == param then arg else 0) with
+  | some v =>
+    rw [h_eq] at h_result
+    exact h_result
+  | none =>
+    rw [h_eq] at h_result
+    exact h_result
+
+/-- Instruction lemmas: parameterized by code and address (m). No absolute addresses. -/
+
+theorem x86_step_push_rbx (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x53 →
+  x86_step s code = some {s with rsp := s.rsp - 8, rip := s.rip + 1, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.rbx} := by
+  intro h_rip h_byte; simp only [x86_step, h_rip, h_byte]
+
+theorem x86_step_push_rax (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x50 →
+  x86_step s code = some {s with rsp := s.rsp - 8, rip := s.rip + 1, mem := mem_write_u64 s.mem (s.rsp.toNat - 8) s.rax} := by
+  intro h_rip h_byte; simp only [x86_step, h_rip, h_byte]
+
+theorem x86_step_pop_rbx (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x5b →
+  x86_step s code = some {s with rbx := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 1} := by
+  intro h_rip h_byte; simp only [x86_step, h_rip, h_byte]
+
+theorem x86_step_pop_rax (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x58 →
+  x86_step s code = some {s with rax := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 1} := by
+  intro h_rip h_byte; simp only [x86_step, h_rip, h_byte]
+
+theorem x86_step_ret (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0xc3 →
+  x86_step s code = some {s with rip := (mem_read_u64 s.mem s.rsp.toNat).toNat, rsp := s.rsp + 8} := by
+  intro h_rip h_byte; simp only [x86_step, h_rip, h_byte]
+
+theorem x86_step_nop (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x90 →
+  x86_step s code = some {s with rip := s.rip + 1} := by
+  intro h_rip h_byte; simp only [x86_step, h_rip, h_byte]
+
+-- pop r10 (0x41 0x5a): REX.B + pop r10
+theorem x86_step_pop_r10 (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x41 → code (m + 1) = 0x5a →
+  x86_step s code = some {s with r10 := mem_read_u64 s.mem s.rsp.toNat, rsp := s.rsp + 8, rip := s.rip + 2} := by
+  intro h_rip h_b0 h_b1; simp [x86_step, h_rip, h_b0, h_b1]
+
+-- cmp r10, r11 (0x4d 0x39 0xda): REX.WRB cmp r/m64, r64, reg=r11(3), rm=r10(2)
+theorem x86_step_cmp_r10_r11 (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x4d → code (m + 1) = 0x39 → code (m + 2) = 0xda →
+  x86_step s code = some {s with rip := s.rip + 3, zf := s.r10 - s.r11 = 0, sf := (s.r10 - s.r11) ≥ 0x8000000000000000} := by
+  intro h_rip h_b0 h_b1 h_b2
+  have h_mod : ((0xda : UInt8) >>> 6).toNat = 3 := by native_decide
+  have h_reg : (((0xda : UInt8) >>> 3) &&& 7).toNat = 3 := by native_decide
+  have h_rm : ((0xda : UInt8) &&& 7).toNat = 2 := by native_decide
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod, h_reg, h_rm]
+
+/-- Result state for REX.W add r/m64, r64 (0x48 0x01 ModRM) with mod=3 (register-to-register). -/
+def x86_add_result (s : X86State) (modrm : UInt8) : Option X86State :=
+  let src := read_reg s modrm; let dst := read_rm s modrm
+  let res := dst + src; let zf := res = 0; let sf := res ≥ 0x8000000000000000
+  let s' := set_rm s modrm res
+  some {s' with rip := s.rip + 3, zf := zf, sf := sf}
+
+theorem x86_step_rex_w_add_modrm (s : X86State) (code : Nat → UInt8) (m : Nat) (modrm : UInt8)
+    (h_mod_val : (modrm >>> 6).toNat = 3)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x01) (h_b2 : code (m + 2) = modrm) :
+    x86_step s code = x86_add_result s modrm := by
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod_val, x86_add_result]
+
+/-- Result state for REX.W sub r/m64, r64 (0x48 0x29 ModRM) with mod=3 (register-to-register). -/
+def x86_sub_result (s : X86State) (modrm : UInt8) : Option X86State :=
+  let src := read_reg s modrm; let dst := read_rm s modrm
+  let res := dst - src; let zf := res = 0; let sf := res ≥ 0x8000000000000000; let cf := dst < src
+  let of_ := (dst ≥ 0x8000000000000000 ∧ src < 0x8000000000000000 ∧ res < 0x8000000000000000) ∨ (dst < 0x8000000000000000 ∧ src ≥ 0x8000000000000000 ∧ res ≥ 0x8000000000000000)
+  let s' := set_rm s modrm res
+  some {s' with rip := s.rip + 3, zf := zf, sf := sf, cf := cf, of_ := of_}
+
+theorem x86_step_rex_w_sub_modrm (s : X86State) (code : Nat → UInt8) (m : Nat) (modrm : UInt8)
+    (h_mod_val : (modrm >>> 6).toNat = 3)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x29) (h_b2 : code (m + 2) = modrm) :
+    x86_step s code = x86_sub_result s modrm := by
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod_val, x86_sub_result]
+
+/-- Result state for REX.W cmp r/m64, r64 (0x48 0x39 ModRM) with mod=3 (register-to-register). -/
+def x86_cmp_result (s : X86State) (modrm : UInt8) : Option X86State :=
+  let src := read_reg s modrm; let dst := read_rm s modrm
+  let res := dst - src; let zf := res = 0; let sf := res ≥ 0x8000000000000000; let cf := dst < src
+  some {s with rip := s.rip + 3, zf := zf, sf := sf, cf := cf, of_ := false}
+
+theorem x86_step_rex_w_cmp_modrm (s : X86State) (code : Nat → UInt8) (m : Nat) (modrm : UInt8)
+    (h_mod_val : (modrm >>> 6).toNat = 3)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x39) (h_b2 : code (m + 2) = modrm) :
+    x86_step s code = x86_cmp_result s modrm := by
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod_val, x86_cmp_result]
+
+/-- Result state for REX.W xor r/m64, r64 (0x48 0x31 ModRM) with mod=3 (register-to-register). -/
+def x86_xor_result (s : X86State) (modrm : UInt8) : Option X86State :=
+  let src := read_reg s modrm; let dst := read_rm s modrm
+  let res := dst ^^^ src; let zf := res = 0
+  let s' := set_rm s modrm res
+  some {s' with rip := s.rip + 3, zf := zf}
+
+theorem x86_step_rex_w_xor_modrm (s : X86State) (code : Nat → UInt8) (m : Nat) (modrm : UInt8)
+    (h_mod_val : (modrm >>> 6).toNat = 3)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x31) (h_b2 : code (m + 2) = modrm) :
+    x86_step s code = x86_xor_result s modrm := by
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod_val, x86_xor_result]
+
+/-- c7 /0 (mov rax, imm32): specific lemma for mov eax, imm32 (ModRM = 0xc0, rm=rax). -/
+theorem x86_step_c7_rax (s : X86State) (code : Nat → UInt8) (m : Nat) (imm : UInt64) :
+  s.rip = m →
+  code m = 0xc7 → code (m + 1) = 0xc0 →
+  imm = (code (m + 2)).toUInt64 ||| ((code (m + 3)).toUInt64 <<< 8) ||| ((code (m + 4)).toUInt64 <<< 16) ||| ((code (m + 5)).toUInt64 <<< 24) →
+  x86_step s code = some {s with rax := imm, rip := s.rip + 6} := by
+  intro h_rip h_b0 h_b1 h_imm
+  rw [h_imm]
+  have h_mod : ((0xc0 : UInt8) >>> 6).toNat = 3 := by native_decide
+  have h_bit : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
+  simp [x86_step, h_rip, h_b0, h_b1, h_mod, set_rm, h_bit]
+
+/-- sete rax (0f 94 c0): SETcc with zf flag. -/
+theorem x86_step_sete_rax (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x0f → code (m + 1) = 0x94 → code (m + 2) = 0xc0 →
+  x86_step s code = some {s with rax := if s.zf then 1 else 0, rip := s.rip + 3} := by
+  intro h_rip h_b0 h_b1 h_b2
+  have h_mod : ((0xc0 : UInt8) >>> 6).toNat = 3 := by native_decide
+  have h_bit : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod, set_rm, h_bit]
+
+/-- setle rax (0f 9e c0): SETcc with sf | zf flag. -/
+theorem x86_step_setle_rax (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x0f → code (m + 1) = 0x9e → code (m + 2) = 0xc0 →
+  x86_step s code = some {s with rax := if s.sf ∨ s.zf then 1 else 0, rip := s.rip + 3} := by
+  intro h_rip h_b0 h_b1 h_b2
+  have h_mod : ((0xc0 : UInt8) >>> 6).toNat = 3 := by native_decide
+  have h_bit : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod, set_rm, h_bit]
+
+/-- setg rax (0f 9f c0): SETcc with ¬zf ∧ ¬sf. -/
+theorem x86_step_setg_rax (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x0f → code (m + 1) = 0x9f → code (m + 2) = 0xc0 →
+  x86_step s code = some {s with rax := if ¬s.zf ∧ ¬s.sf then 1 else 0, rip := s.rip + 3} := by
+  intro h_rip h_b0 h_b1 h_b2
+  have h_mod : ((0xc0 : UInt8) >>> 6).toNat = 3 := by native_decide
+  have h_bit : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod, set_rm, h_bit]
+
+/-- movzx rax, rax (48 0f b6 c0): REX.W movzx r64, r8. -/
+theorem x86_step_movzx_rax_rax (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x48 → code (m + 1) = 0x0f → code (m + 2) = 0xb6 → code (m + 3) = 0xc0 →
+  x86_step s code = some {s with rax := s.rax, rip := s.rip + 4} := by
+  intro h_rip h_b0 h_b1 h_b2 h_b3
+  have h_mod : ((0xc0 : UInt8) >>> 6).toNat = 3 := by native_decide
+  have h_bit_reg : (0xc0 : UInt8).toNat >>> 3 &&& 7 = 0 := by native_decide
+  have h_bit_rm : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_b3, h_mod, set_reg, read_rm, h_bit_reg, h_bit_rm]
+
+/-- cmp rax, 1 (48 83 f8 01): REX.W cmp r/m64, imm8 with reg=7(cmp), rm=0(rax), imm=1. -/
+theorem x86_step_cmp_rax_1 (s : X86State) (code : Nat → UInt8) (m : Nat) :
+  s.rip = m → code m = 0x48 → code (m + 1) = 0x83 → code (m + 2) = 0xf8 → code (m + 3) = 0x01 →
+  x86_step s code = some {s with rip := s.rip + 4, zf := s.rax - 1 = 0, sf := (s.rax - 1) ≥ 0x8000000000000000} := by
+  intro h_rip h_b0 h_b1 h_b2 h_b3
+  have h_mod : ((0xf8 : UInt8) >>> 6).toNat = 3 := by native_decide
+  have h_reg : (((0xf8 : UInt8) >>> 3) &&& 7).toNat = 7 := by native_decide
+  have h_rm_bit : (0xf8 : UInt8).toNat &&& 7 = 0 := by native_decide
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_b3, h_mod, h_reg, read_rm, h_rm_bit, read_i8, UInt64.ofInt]
+
+/-- Arithmetic bridging lemmas for Nat.toUInt64 -/
+theorem Nat.toUInt64_add (a b : Nat) : (a + b).toUInt64 = a.toUInt64 + b.toUInt64 := by
+  simp [Nat.toUInt64, UInt64.ofNat, BitVec.ofNat_add]
+
+theorem Nat.toUInt64_add_one (n : Nat) : (n+1).toUInt64 = n.toUInt64 + (1 : UInt64) := by
+  simp [Nat.toUInt64, UInt64.ofNat, BitVec.ofNat_add]
+
+theorem Nat.toUInt64_mul (a b : Nat) : (a * b).toUInt64 = a.toUInt64 * b.toUInt64 := by
+  simp [Nat.toUInt64, UInt64.ofNat, BitVec.ofNat_mul]
+
+/-- Result state for REX.W mov r/m64, r64 with mod=3 (register-to-register). -/
+def x86_mov_result_rex_w (s : X86State) (modrm : UInt8) : Option X86State :=
+  let s' := set_rm s modrm (read_reg s modrm)
+  some {s' with rip := s.rip + 3}
+
+/-! Result state for REX.WB mov r/m64, r64 with mod=3 (register-to-register).
+    REX.B shifts the rm-to-register mapping so rm=2→r10, rm=3→r11.
+    This matches the current x86_step implementation which only handles rm=2 and rm=3. -/
+def x86_mov_result_rex_wb (s : X86State) (modrm : UInt8) : Option X86State :=
+  match modrm.toNat &&& 7 with
+  | 2 => some {s with r10 := (match modrm.toNat >>> 3 &&& 7 with | 0 => s.rax | 1 => s.rcx | 2 => s.rdx | 3 => s.rbx | 4 => s.rsp | 5 => s.rbp | 6 => s.rsi | 7 => s.rdi | _ => 0), rip := s.rip + 3}
+  | 3 => some {s with r11 := (match modrm.toNat >>> 3 &&& 7 with | 0 => s.rax | 1 => s.rcx | 2 => s.rdx | 3 => s.rbx | 4 => s.rsp | 5 => s.rbp | 6 => s.rsi | 7 => s.rdi | _ => 0), rip := s.rip + 3}
+  | _ => none
+
+/-- Generic lemma for REX.W mov r/m64, r64 (0x48 0x89 ModRM) with register-to-register addressing. -/
+theorem x86_step_rex_w_mov_modrm (s : X86State) (code : Nat → UInt8) (m : Nat) (modrm : UInt8)
+    (h_mod_val : (modrm >>> 6).toNat = 3)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x89) (h_b2 : code (m + 2) = modrm) :
+    x86_step s code = x86_mov_result_rex_w s modrm := by
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod_val, x86_mov_result_rex_w]
+
+/-- Generic lemma for REX.WB mov r/m64, r64 (0x49 0x89 ModRM) with register-to-register addressing. -/
+theorem x86_step_rex_wb_mov_modrm (s : X86State) (code : Nat → UInt8) (m : Nat) (modrm : UInt8)
+    (h_mod_val : (modrm >>> 6).toNat = 3)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x49) (h_b1 : code (m + 1) = 0x89) (h_b2 : code (m + 2) = modrm) :
+    x86_step s code = x86_mov_result_rex_wb s modrm := by
+  simp [x86_step, h_rip, h_b0, h_b1, h_b2, h_mod_val, x86_mov_result_rex_wb]
+
+/-- UInt64 equality via toNat equality. -/
+theorem eq_of_toNat_eq {a b : UInt64} (h : a.toNat = b.toNat) : a = b := by
+  calc
+    a = UInt64.ofNat a.toNat := by symm; exact UInt64.ofNat_toNat
+    _ = UInt64.ofNat b.toNat := by rw [h]
+    _ = b := UInt64.ofNat_toNat
+
+/-- Adding 8 never fixes a UInt64: x ≠ x + 8 (8 is not 0 mod 2^64). -/
+theorem u64_ne_add8 (x : UInt64) : x ≠ x + UInt64.ofNat 8 := by
+  intro h
+  have hto := congrArg UInt64.toNat h
+  rw [u64_toNat_add_lit] at hto
+  simp at hto
+  by_cases hlt : x.toNat + 8 < 18446744073709551616
+  · have hmod : (x.toNat + 8) % 18446744073709551616 = x.toNat + 8 := by omega
+    rw [hmod] at hto
+    omega
+  · have hge : 18446744073709551616 ≤ x.toNat + 8 := by omega
+    have hmod : (x.toNat + 8) % 18446744073709551616
+        = x.toNat + 8 - 18446744073709551616 := by omega
+    rw [hmod] at hto
+    omega
+
+/-- When n ≠ 0, (n-1).toNat = n.toNat - 1. -/
+theorem toNat_sub_one (n : UInt64) (h : n ≠ 0) : (n - 1).toNat = n.toNat - 1 := by
+  rw [UInt64.toNat_sub]
+  have hpos : 1 ≤ n.toNat := by
+    have hzero : n.toNat ≠ 0 := by
+      intro hz
+      apply h
+      calc
+        n = UInt64.ofNat n.toNat := by symm; exact UInt64.ofNat_toNat
+        _ = UInt64.ofNat 0 := by rw [hz]
+        _ = 0 := rfl
+    omega
+  have hbound : n.toNat < 2^64 := UInt64.toNat_lt n
+  have h2 : n.toNat - 1 < 2^64 := by omega
+  calc
+    (2^64 - (1 : UInt64).toNat + n.toNat) % 2^64 = (2^64 - 1 + n.toNat) % 2^64 := by
+      have h1 : (1 : UInt64).toNat = 1 := by native_decide
+      rw [h1]
+    _ = (2^64 + (n.toNat - 1)) % 2^64 := by omega
+    _ = ((2^64 % 2^64) + ((n.toNat - 1) % 2^64)) % 2^64 := by rw [Nat.add_mod]
+    _ = (0 + ((n.toNat - 1) % 2^64)) % 2^64 := by simp
+    _ = (n.toNat - 1) % 2^64 := by simp
+    _ = n.toNat - 1 := Nat.mod_eq_of_lt h2
+
+/-- Successor form of `toNat_sub_one`, phrased so it is usable as a rewrite
+    when the recursion step hypothesis is `arg.toNat = k + 1`: it turns the
+    recursive argument `arg - 1` back into `k`.  This is the one-instruction
+    fact behind the linear-recursion terminal (`{name}_go (arg-1).toNat =
+    {name}_go arg.toNat`). -/
+theorem uint64_sub_one_toNat_of_succ (arg : UInt64) {k : Nat} (hk : arg.toNat = k + 1) :
+    (arg - 1).toNat = k := by
+  have hne : arg ≠ 0 := by intro h; rw [h] at hk; simp at hk
+  rw [toNat_sub_one arg hne]; omega
+
+/-- When n ≠ 0,1, (n-2).toNat = n.toNat - 2. -/
+theorem toNat_sub_two (n : UInt64) (h0 : n ≠ 0) (h1 : n ≠ 1) : (n - 2).toNat = n.toNat - 2 := by
+  rw [UInt64.toNat_sub]
+  have hpos : 2 ≤ n.toNat := by
+    have hzero' : n.toNat ≠ 0 := by intro hz; apply h0; apply eq_of_toNat_eq hz
+    have hone' : n.toNat ≠ 1 := by intro hz; apply h1; apply eq_of_toNat_eq hz
+    omega
+  have hbound : n.toNat < 2^64 := UInt64.toNat_lt n
+  have h2 : n.toNat - 2 < 2^64 := by omega
+  calc
+    (2^64 - (2 : UInt64).toNat + n.toNat) % 2^64 = (2^64 - 2 + n.toNat) % 2^64 := by
+      have h2nat : (2 : UInt64).toNat = 2 := by native_decide
+      rw [h2nat]
+    _ = (2^64 + (n.toNat - 2)) % 2^64 := by omega
+    _ = ((2^64 % 2^64) + ((n.toNat - 2) % 2^64)) % 2^64 := by rw [Nat.add_mod]
+    _ = (0 + ((n.toNat - 2) % 2^64)) % 2^64 := by simp
+    _ = (n.toNat - 2) % 2^64 := by simp
+    _ = n.toNat - 2 := Nat.mod_eq_of_lt h2
+
+/-- Helper: derive False from n.toNat = 0 and n.toNat ≥ 2. -/
+theorem uint64_toNat_ge_two_ne_zero {n : UInt64} (h0 : n.toNat = 0) (h_ge : n.toNat ≥ 2) : False := by
+  omega
+
+/-- A `UInt64` is its `toNat` cast back (`ofNat` is injective on the range). -/
+theorem u64_ofNat_of_toNat {a : UInt64} {k : Nat} (h : a.toNat = k) (hk : k < 2^64) :
+    a = UInt64.ofNat k := by
+  apply UInt64.toNat.inj
+  rw [h, UInt64.toNat_ofNat', Nat.mod_eq_of_lt hk]
+
+/-! ### Exponential fuel arithmetic (tree recursion) -/
+
+theorem one_le_two_pow (k : Nat) : 1 ≤ 2 ^ k := Nat.one_le_pow k 2 (by decide)
+
+theorem mul_two_pow_succ (c k : Nat) : c * 2 ^ (k + 1) = (c * 2) * 2 ^ k := by
+  rw [Nat.pow_succ]
+  simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+
+theorem mul_two_pow_add_two (c k : Nat) : c * 2 ^ (k + 2) = (c * 4) * 2 ^ k := by
+  rw [show 2 ^ (k + 2) = 2 ^ k * 4 from by
+        rw [show k + 2 = k + 2 from rfl, Nat.pow_add]]
+  simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+
+/-- Helper: derive False from n.toNat = 1 and n.toNat ≥ 2. -/
+theorem uint64_toNat_ge_two_ne_one {n : UInt64} (h1 : n.toNat = 1) (h_ge : n.toNat ≥ 2) : False := by
+  rw [h1] at h_ge
+  omega
+
+/-!
+# ARM64 Machine Model
+
+Minimal ARM64 (AArch64) machine model for proof-carrying compilation.
+32 general-purpose registers (X0-X30), SP, PC, NZCV flags, and memory.
+-/
+
+/-- ARM64 machine state: 32 GPRs, SP, PC, NZCV flags, memory -/
+structure Arm64State where
+  x0 : UInt64
+  x1 : UInt64
+  x2 : UInt64
+  x3 : UInt64
+  x4 : UInt64
+  x5 : UInt64
+  x6 : UInt64
+  x7 : UInt64
+  x8 : UInt64
+  x9 : UInt64
+  x10 : UInt64
+  x11 : UInt64
+  x12 : UInt64
+  x13 : UInt64
+  x14 : UInt64
+  x15 : UInt64
+  x16 : UInt64
+  x17 : UInt64
+  x18 : UInt64
+  x19 : UInt64
+  x20 : UInt64
+  x21 : UInt64
+  x22 : UInt64
+  x23 : UInt64
+  x24 : UInt64
+  x25 : UInt64
+  x26 : UInt64
+  x27 : UInt64
+  x28 : UInt64
+  x29 : UInt64
+  x30 : UInt64
+  sp : UInt64
+  pc : Nat
+  nzcv : UInt8
+  mem : Nat → UInt8
+  deriving Inhabited
+
+def Arm64State.init (input : UInt64) (entry : Nat) : Arm64State :=
+  { x0 := input, x1 := 0, x2 := 0, x3 := 0, x4 := 0, x5 := 0, x6 := 0, x7 := 0,
+    x8 := 0, x9 := 0, x10 := 0, x11 := 0, x12 := 0, x13 := 0, x14 := 0, x15 := 0,
+    x16 := 0, x17 := 0, x18 := 0, x19 := 0, x20 := 0, x21 := 0, x22 := 0, x23 := 0,
+    x24 := 0, x25 := 0, x26 := 0, x27 := 0, x28 := 0, x29 := 0, x30 := 0,
+    sp := 0xfffffffffffffff0, pc := entry, nzcv := 0, mem := fun _ => 0 }
+
+/-- Helper function to get register by index. -/
+def arm64_reg (i : Nat) (s : Arm64State) : UInt64 :=
+  match i with
+  | 0 => s.x0 | 1 => s.x1 | 2 => s.x2 | 3 => s.x3 | 4 => s.x4
+  | 5 => s.x5 | 6 => s.x6 | 7 => s.x7 | 8 => s.x8 | 9 => s.x9
+  | 10 => s.x10 | 11 => s.x11 | 12 => s.x12 | 13 => s.x13 | 14 => s.x14
+  | 15 => s.x15 | 16 => s.x16 | 17 => s.x17 | 18 => s.x18 | 19 => s.x19
+  | 20 => s.x20 | 21 => s.x21 | 22 => s.x22 | 23 => s.x23 | 24 => s.x24
+  | 25 => s.x25 | 26 => s.x26 | 27 => s.x27 | 28 => s.x28 | 29 => s.x29
+  | 30 => s.x30 | _ => 0
+
+/-- Helper function to set register by index. -/
+def arm64_set_reg (i : Nat) (s : Arm64State) (val : UInt64) : Arm64State :=
+  match i with
+  | 0 => { s with x0 := val } | 1 => { s with x1 := val } | 2 => { s with x2 := val }
+  | 3 => { s with x3 := val } | 4 => { s with x4 := val } | 5 => { s with x5 := val }
+  | 6 => { s with x6 := val } | 7 => { s with x7 := val } | 8 => { s with x8 := val }
+  | 9 => { s with x9 := val } | 10 => { s with x10 := val } | 11 => { s with x11 := val }
+  | 12 => { s with x12 := val } | 13 => { s with x13 := val } | 14 => { s with x14 := val }
+  | 15 => { s with x15 := val } | 16 => { s with x16 := val } | 17 => { s with x17 := val }
+  | 18 => { s with x18 := val } | 19 => { s with x19 := val } | 20 => { s with x20 := val }
+  | 21 => { s with x21 := val } | 22 => { s with x22 := val } | 23 => { s with x23 := val }
+  | 24 => { s with x24 := val } | 25 => { s with x25 := val } | 26 => { s with x26 := val }
+  | 27 => { s with x27 := val } | 28 => { s with x28 := val } | 29 => { s with x29 := val }
+  | 30 => { s with x30 := val } | _ => s
+
+/-- Register projection is unaffected by non-register field updates. -/
+@[simp] theorem arm64_reg_pc (j : Nat) (s : Arm64State) (p : Nat) :
+    arm64_reg j { s with pc := p } = arm64_reg j s := by
+  cases j <;> rfl
+
+@[simp] theorem arm64_reg_sp (j : Nat) (s : Arm64State) (v : UInt64) :
+    arm64_reg j { s with sp := v } = arm64_reg j s := by
+  cases j <;> rfl
+
+@[simp] theorem arm64_reg_mem (j : Nat) (s : Arm64State) (m : Nat → UInt8) :
+    arm64_reg j { s with mem := m } = arm64_reg j s := by
+  cases j <;> rfl
+
+@[simp] theorem arm64_reg_nzcv (j : Nat) (s : Arm64State) (c : UInt8) :
+    arm64_reg j { s with nzcv := c } = arm64_reg j s := by
+  cases j <;> rfl
+
+/-- Setting register i, reading register j: same index reads the new value. -/
+@[simp] theorem arm64_set_reg_reg_eq (i : Nat) (s : Arm64State) (v : UInt64)
+    (hi : i < 31) : arm64_reg i (arm64_set_reg i s v) = v := by
+  have h : i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨ i = 6 ∨ i = 7 ∨
+      i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨ i = 13 ∨ i = 14 ∨ i = 15 ∨
+      i = 16 ∨ i = 17 ∨ i = 18 ∨ i = 19 ∨ i = 20 ∨ i = 21 ∨ i = 22 ∨ i = 23 ∨
+      i = 24 ∨ i = 25 ∨ i = 26 ∨ i = 27 ∨ i = 28 ∨ i = 29 ∨ i = 30 := by omega
+  rcases h with h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h |
+      h | h | h | h | h | h | h | h | h | h | h | h | h | h | h
+  all_goals subst i <;> rfl
+
+/-- Setting a register leaves `sp` unchanged (no record expansion). -/
+@[simp] theorem arm64_set_reg_sp (i : Nat) (s : Arm64State) (v : UInt64) :
+    (arm64_set_reg i s v).sp = s.sp := by
+  unfold arm64_set_reg
+  split <;> rfl
+
+/-- Setting register i, reading the same register i yields the new value.
+    (i in 0..30; proved by finite case split.) -/
+theorem arm64_set_reg_reg_same (i : Nat) (s : Arm64State) (v : UInt64)
+    (hi : i < 31) : arm64_reg i (arm64_set_reg i s v) = v := by
+  have : i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨ i = 6 ∨ i = 7 ∨
+      i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨ i = 13 ∨ i = 14 ∨ i = 15 ∨
+      i = 16 ∨ i = 17 ∨ i = 18 ∨ i = 19 ∨ i = 20 ∨ i = 21 ∨ i = 22 ∨ i = 23 ∨
+      i = 24 ∨ i = 25 ∨ i = 26 ∨ i = 27 ∨ i = 28 ∨ i = 29 ∨ i = 30 := by omega
+  rcases this with hi0 | hi1 | hi2 | hi3 | hi4 | hi5 | hi6 | hi7 |
+      hi8 | hi9 | hi10 | hi11 | hi12 | hi13 | hi14 | hi15 |
+      hi16 | hi17 | hi18 | hi19 | hi20 | hi21 | hi22 | hi23 |
+      hi24 | hi25 | hi26 | hi27 | hi28 | hi29 | hi30
+  all_goals subst i <;> rfl
+
+/- Specific cases of register preservation after set_reg. -/
+@[simp] theorem arm64_reg_1_arm64_set_reg_0 (s : Arm64State) (v : UInt64) :
+    arm64_reg 1 (arm64_set_reg 0 s v) = arm64_reg 1 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_2_arm64_set_reg_0 (s : Arm64State) (v : UInt64) :
+    arm64_reg 2 (arm64_set_reg 0 s v) = arm64_reg 2 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_19_arm64_set_reg_0 (s : Arm64State) (v : UInt64) :
+    arm64_reg 19 (arm64_set_reg 0 s v) = arm64_reg 19 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_0_arm64_set_reg_1 (s : Arm64State) (v : UInt64) :
+    arm64_reg 0 (arm64_set_reg 1 s v) = arm64_reg 0 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_2_arm64_set_reg_1 (s : Arm64State) (v : UInt64) :
+    arm64_reg 2 (arm64_set_reg 1 s v) = arm64_reg 2 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_19_arm64_set_reg_1 (s : Arm64State) (v : UInt64) :
+    arm64_reg 19 (arm64_set_reg 1 s v) = arm64_reg 19 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_0_arm64_set_reg_2 (s : Arm64State) (v : UInt64) :
+    arm64_reg 0 (arm64_set_reg 2 s v) = arm64_reg 0 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_1_arm64_set_reg_2 (s : Arm64State) (v : UInt64) :
+    arm64_reg 1 (arm64_set_reg 2 s v) = arm64_reg 1 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_19_arm64_set_reg_2 (s : Arm64State) (v : UInt64) :
+    arm64_reg 19 (arm64_set_reg 2 s v) = arm64_reg 19 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_0_arm64_set_reg_19 (s : Arm64State) (v : UInt64) :
+    arm64_reg 0 (arm64_set_reg 19 s v) = arm64_reg 0 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_1_arm64_set_reg_19 (s : Arm64State) (v : UInt64) :
+    arm64_reg 1 (arm64_set_reg 19 s v) = arm64_reg 1 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+@[simp] theorem arm64_reg_2_arm64_set_reg_19 (s : Arm64State) (v : UInt64) :
+    arm64_reg 2 (arm64_set_reg 19 s v) = arm64_reg 2 s := by
+  unfold arm64_reg arm64_set_reg
+  rfl
+
+
+/-- Read a 32-bit instruction from code memory (little-endian). -/
+def arm64_read_insn (code : Nat → UInt8) (pc : Nat) : UInt32 :=
+  ((code pc).toUInt32) |||
+  ((code (pc + 1)).toUInt32 <<< 8) |||
+  ((code (pc + 2)).toUInt32 <<< 16) |||
+  ((code (pc + 3)).toUInt32 <<< 24)
+
+/-- Check if condition code matches NZCV flags. -/
+def arm64_matches_condition (cond : Nat) (nzcv : UInt8) : Bool :=
+  let n := (nzcv >>> 0) &&& 0x1
+  let z := (nzcv >>> 1) &&& 0x1
+  let c := (nzcv >>> 2) &&& 0x1
+  let v := (nzcv >>> 3) &&& 0x1
+  if cond = 0 then z = 1
+  else if cond = 1 then z = 0
+  else if cond = 2 then c = 1
+  else if cond = 3 then c = 0
+  else if cond = 4 then n = 1
+  else if cond = 5 then n = 0
+  else if cond = 6 then v = 1
+  else if cond = 7 then v = 0
+  else if cond = 8 then c = 1 ∧ z = 0
+  else if cond = 9 then c = 0 ∨ z = 1
+  else if cond = 10 then n = v
+  else if cond = 11 then n ≠ v
+  else if cond = 12 then z = 0 ∧ n = v
+  else if cond = 13 then z = 1 ∨ n ≠ v
+  else false
+
+/-- NZCV flags produced by a subtraction `a - b`: N (result sign), Z (result
+    zero), C (no borrow, i.e. `a ≥ b` unsigned) and V (signed overflow). -/
+def arm64_subs_flags (a b : UInt64) : UInt8 :=
+  let diff := a - b
+  let v := ((a ^^^ b) &&& (a ^^^ diff)) >>> 63
+  (if diff = 0 then 0x2 else if (diff >>> 63) = 1 then 0x1 else 0)
+    ||| (if a ≥ b then 0x4 else 0)
+    ||| (if v = 1 then 0x8 else 0)
+
+/-- Zero-extend (mask) the low 8/16/32 bits of a 64-bit value. -/
+def t8u (x : UInt64) : UInt64 := x &&& 0xff
+def t16u (x : UInt64) : UInt64 := x &&& 0xffff
+def t32u (x : UInt64) : UInt64 := x &&& 0xffffffff
+/-- Sign-extend the low 8/16/32 bits of a 64-bit value to 64 bits.  These are
+    the single source of truth shared by the ARM64 step function (SXTB/SXTH/
+    SXTW) and the typed semantic model. -/
+def t8s (x : UInt64) : UInt64 :=
+  let b := x &&& 0xff
+  if (b >>> 7) = 1 then b ||| (0xffffffffffffff00 : UInt64) else b
+def t16s (x : UInt64) : UInt64 :=
+  let b := x &&& 0xffff
+  if (b >>> 15) = 1 then b ||| (0xffffffffffff0000 : UInt64) else b
+def t32s (x : UInt64) : UInt64 :=
+  let b := x &&& 0xffffffff
+  if (b >>> 31) = 1 then b ||| (0xffffffff00000000 : UInt64) else b
+/-- SXTW after SXTB/SXTH is a no-op: the narrower sign-extension already
+    yields a fully sign-extended 64-bit value. -/
+theorem t32s_t8s (x : UInt64) : t32s (t8s x) = t8s x := by
+  unfold t32s t8s
+  bv_decide
+theorem t32s_t16s (x : UInt64) : t32s (t16s x) = t16s x := by
+  unfold t32s t16s
+  bv_decide
+
+/-- ARM64 step function: decode and execute one instruction. -/
+def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
+  let insn := arm64_read_insn code s.pc
+  -- RET (BR X30): 0xd65f03c0
+  if insn = 0xd65f03c0 then
+    some { s with pc := s.x30.toNat }
+  -- MOV (ORR Xd, XZR, Xn): 0x2A00FA00
+  else if (insn &&& 0xffe00000) = 0x2A00FA00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let val := arm64_reg rn s
+    some (arm64_set_reg rd s val)
+  -- ADD Xd, Xn, Xm (register): 0x8b000000
+  else if (insn &&& 0xffe00000) = 0x8b000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let xm := ((insn >>> 16) &&& 0x1f).toNat
+    let result := (arm64_reg rn s + arm64_reg xm s)
+    some (arm64_set_reg rd s result)
+  -- SUB Xd, Xn, Xm (register): 0xcb000000
+  else if (insn &&& 0xffe00000) = 0xcb000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let xm := ((insn >>> 16) &&& 0x1f).toNat
+    let result := (arm64_reg rn s - arm64_reg xm s)
+    some (arm64_set_reg rd s result)
+  -- MUL Xd, Xn, Xm: 0x9b007c00
+  else if (insn &&& 0xffe07c00) = 0x9b007c00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let xm := ((insn >>> 16) &&& 0x1f).toNat
+    let result := (arm64_reg rn s * arm64_reg xm s)
+    some (arm64_set_reg rd s result)
+  -- NEG Xd, Xn: 0xcb0003e0
+  else if (insn &&& 0xfffffc1f) = 0xcb0003e0 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 16) &&& 0x1f).toNat
+    let val := arm64_reg rn s
+    let result := -val
+    some (arm64_set_reg rd s result)
+  -- CMP Xn, Xm (register): 0xeb000000
+  else if (insn &&& 0xffe00000) = 0xeb000000 then
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let xm := ((insn >>> 16) &&& 0x1f).toNat
+    some { s with nzcv := arm64_subs_flags (arm64_reg rn s) (arm64_reg xm s) }
+  -- AND Xd, Xn, Xm: 0x8a000000
+  else if (insn &&& 0xffe00000) = 0x8a000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let xm := ((insn >>> 16) &&& 0x1f).toNat
+    let result := (arm64_reg rn s &&& arm64_reg xm s)
+    some (arm64_set_reg rd s result)
+  -- EOR Xd, Xn, Xm: 0xca000000
+  else if (insn &&& 0xffe00000) = 0xca000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let xm := ((insn >>> 16) &&& 0x1f).toNat
+    let val1 := arm64_reg rn s
+    let val2 := arm64_reg xm s
+    let result := UInt64.ofNat ((val1.toNat ^ val2.toNat) % (2^64))
+    some (arm64_set_reg rd s result)
+  -- ADD Xd, Xn, #imm12: 0x11000000 (32-bit) / 0x91000000 (64-bit)
+  else if (insn &&& 0xff800000) = 0x11000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let result := (arm64_reg rn s + UInt64.ofNat imm12)
+    some (arm64_set_reg rd s result)
+  else if (insn &&& 0xff800000) = 0x91000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    if rd = 31 then
+      let result := (if rn = 31 then s.sp else arm64_reg rn s) + UInt64.ofNat imm12
+      some { s with sp := result }
+    else
+      let base := if rn = 31 then s.sp else arm64_reg rn s
+      some (arm64_set_reg rd s (base + UInt64.ofNat imm12))
+  -- SUB Xd, Xn, #imm12: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
+  else if (insn &&& 0xff800000) = 0x51000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let result := (arm64_reg rn s - UInt64.ofNat imm12)
+    some (arm64_set_reg rd s result)
+  else if (insn &&& 0xff800000) = 0xd1000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    if rd = 31 then
+      let result := (if rn = 31 then s.sp else arm64_reg rn s) - UInt64.ofNat imm12
+      some { s with sp := result }
+    else
+      let base := if rn = 31 then s.sp else arm64_reg rn s
+      some (arm64_set_reg rd s (base - UInt64.ofNat imm12))
+  -- CMP Xn, #imm12: 0xf1000000 (64-bit subs xzr, Xn, #imm)
+  else if (insn &&& 0xff800000) = 0xf1000000 then
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    some { s with nzcv := arm64_subs_flags (arm64_reg rn s) (UInt64.ofNat imm12) }
+  -- B #offset: 0x14000000 (sign-extended 26-bit, x4)
+  else if (insn &&& 0xfc000000) = 0x14000000 then
+    let imm := (insn &&& 0x03ffffff)
+    let off64 : UInt64 := if (imm &&& 0x02000000) ≠ 0 then (UInt64.ofNat imm.toNat) - (UInt64.ofNat (2^26)) else UInt64.ofNat imm.toNat
+    some { s with pc := (UInt64.ofNat s.pc + off64 * 4).toNat }
+  -- BL #offset: 0x94000000 (sign-extended 26-bit, x4)
+  else if (insn &&& 0xfc000000) = 0x94000000 then
+    let imm := (insn &&& 0x03ffffff)
+    let off64 : UInt64 := if (imm &&& 0x02000000) ≠ 0 then (UInt64.ofNat imm.toNat) - (UInt64.ofNat (2^26)) else UInt64.ofNat imm.toNat
+    some { s with x30 := UInt64.ofNat (s.pc + 4), pc := (UInt64.ofNat s.pc + off64 * 4).toNat }
+  -- CBZ Xn, #offset: 0xb4000000 (sign-extended 19-bit, x4)
+  else if (insn &&& 0xff000000) = 0xb4000000 then
+    let rn := (insn &&& 0x1f).toNat
+    let imm19 := (insn >>> 5) &&& 0x7ffff
+    let off64 : UInt64 := if (imm19 &&& 0x40000) ≠ 0 then (UInt64.ofNat imm19.toNat) - (UInt64.ofNat (2^19)) else UInt64.ofNat imm19.toNat
+    if arm64_reg rn s = 0 then
+      some { s with pc := (UInt64.ofNat s.pc + off64 * 4).toNat }
+    else
+      some { s with pc := s.pc + 4 }
+  -- CBNZ Xn, #offset: 0xb5000000 (sign-extended 19-bit, x4)
+  else if (insn &&& 0xff000000) = 0xb5000000 then
+    let rn := (insn &&& 0x1f).toNat
+    let imm19 := (insn >>> 5) &&& 0x7ffff
+    let off64 : UInt64 := if (imm19 &&& 0x40000) ≠ 0 then (UInt64.ofNat imm19.toNat) - (UInt64.ofNat (2^19)) else UInt64.ofNat imm19.toNat
+    if arm64_reg rn s ≠ 0 then
+      some { s with pc := (UInt64.ofNat s.pc + off64 * 4).toNat }
+    else
+      some { s with pc := s.pc + 4 }
+  -- STR Xt, [SP, #-imm]!: 0xF9400000
+  else if (insn &&& 0xffe00000) = 0xF9400000 then
+    let rt := (insn &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let addr := s.sp - UInt64.ofNat (imm12 * 8)
+    let new_mem := fun i => if i = addr.toNat then (arm64_reg rt s).toUInt8 else s.mem i
+    some { s with sp := addr, mem := new_mem }
+  -- LDR Xt, [SP], #imm: 0xB9000000
+  else if (insn &&& 0xffe00000) = 0xB9000000 then
+    let rt := (insn &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let addr := s.sp.toNat
+    let val := mem_read_u64 s.mem addr
+    let s' := arm64_set_reg rt s val
+    some { s' with sp := s.sp + UInt64.ofNat (imm12 * 8) }
+  -- ADRP Xd, #page: 0x90000000 (Xd = page(PC) + sign_extend(imm21) << 12)
+  else if (insn &&& 0x9f000000) = 0x90000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let immlo := ((insn >>> 29) &&& 0x3).toNat
+    let immhi := ((insn >>> 5) &&& 0x7ffff).toNat
+    let imm21 := immhi * 4 + immlo
+    let off : UInt64 := if imm21 ≥ 2^20 then (UInt64.ofNat imm21) - (UInt64.ofNat (2^21)) else UInt64.ofNat imm21
+    let pcpage := (UInt64.ofNat s.pc) - ((UInt64.ofNat s.pc) % 4096)
+    let val := pcpage + off * 4096
+    some (arm64_set_reg rd s val)
+  -- STP Xt1, Xt2, [Xn|SP, #imm7*8]! (pre-index): 0xA9800000
+  else if (insn &&& 0xffc00000) = 0xA9800000 then
+    let rt1 := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let rt2 := ((insn >>> 10) &&& 0x1f).toNat
+    let imm7 := ((insn >>> 15) &&& 0x7f).toNat
+    let addr := if imm7 ≥ 64 then
+                  (if rn = 31 then s.sp else arm64_reg rn s) - UInt64.ofNat ((128 - imm7) * 8)
+                else
+                  (if rn = 31 then s.sp else arm64_reg rn s) + UInt64.ofNat (imm7 * 8)
+    let mem1 := mem_write_u64 s.mem addr.toNat (arm64_reg rt1 s)
+    let mem2 := mem_write_u64 mem1 (addr + 8).toNat (arm64_reg rt2 s)
+    some { s with sp := addr, mem := mem2 }
+  -- LDP Xt1, Xt2, [Xn|SP], #imm7*8 (post-index): 0xA8C00000
+  else if (insn &&& 0xffc00000) = 0xA8C00000 then
+    let rt1 := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let rt2 := ((insn >>> 10) &&& 0x1f).toNat
+    let imm7 := ((insn >>> 15) &&& 0x7f).toNat
+    let addr := if rn = 31 then s.sp else arm64_reg rn s
+    let val1 := mem_read_u64 s.mem addr.toNat
+    let val2 := mem_read_u64 s.mem (addr + 8).toNat
+    let s' := arm64_set_reg rt1 s val1
+    let s'' := arm64_set_reg rt2 s' val2
+    some { s'' with sp := addr + UInt64.ofNat (imm7 * 8) }
+  -- MOVZ Xd, #imm16: 0x52800000 (32-bit) / 0xd2800000 (64-bit)
+  else if (insn &&& 0xffe00000) = 0x52800000 then
+    let rd := (insn &&& 0x1f).toNat
+    let imm16 := ((insn >>> 5) &&& 0xffff).toNat
+    let val := UInt64.ofNat imm16
+    some (arm64_set_reg rd s val)
+  else if (insn &&& 0xffe00000) = 0xd2800000 then
+    let rd := (insn &&& 0x1f).toNat
+    let imm16 := ((insn >>> 5) &&& 0xffff).toNat
+    let val := UInt64.ofNat imm16
+    some (arm64_set_reg rd s val)
+  -- ORR Xd, Xn, Xm (register): 0xaa000000
+  else if (insn &&& 0xffe00000) = 0xaa000000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let rm := ((insn >>> 16) &&& 0x1f).toNat
+    some (arm64_set_reg rd s (arm64_reg rn s ||| arm64_reg rm s))
+  -- MOVK Xd, #imm16, LSL #(hw*16): 0x72800000 (32-bit) / 0xf2800000 (64-bit)
+  else if (insn &&& 0xff800000) = 0xf2800000 then
+    let rd := (insn &&& 0x1f).toNat
+    let imm16 := ((insn >>> 5) &&& 0xffff).toNat
+    let hw := ((insn >>> 21) &&& 0x3).toNat
+    some (arm64_set_reg rd s (arm64_reg rd s ||| (UInt64.ofNat imm16 <<< UInt64.ofNat (hw * 16))))
+  else if (insn &&& 0xff800000) = 0x72800000 then
+    let rd := (insn &&& 0x1f).toNat
+    let imm16 := ((insn >>> 5) &&& 0xffff).toNat
+    let hw := ((insn >>> 21) &&& 0x3).toNat
+    some (arm64_set_reg rd s (arm64_reg rd s ||| (UInt64.ofNat imm16 <<< UInt64.ofNat (hw * 16))))
+  -- MOVN Xd, #imm16: 0x12800000 (32-bit) / 0x92800000 (64-bit)
+  else if (insn &&& 0xffe00000) = 0x12800000 then
+    let rd := (insn &&& 0x1f).toNat
+    let imm16 := ((insn >>> 5) &&& 0xffff).toNat
+    let val := UInt64.ofNat (0xffff_ffff - imm16)
+    some (arm64_set_reg rd s val)
+  else if (insn &&& 0xffe00000) = 0x92800000 then
+    let rd := (insn &&& 0x1f).toNat
+    let imm16 := ((insn >>> 5) &&& 0xffff).toNat
+    let val := UInt64.ofNat (0xffff_ffff_ffff_ffff - imm16)
+    some (arm64_set_reg rd s val)
+  -- CSET Xd, cond = CSINC Xd, XZR, XZR, invert(cond): 0x9a9f07e0
+  else if (insn &&& 0xffff0fe0) = 0x9a9f07e0 then
+    let rd := (insn &&& 0x1f).toNat
+    let field := (insn >>> 12) &&& 0xf
+    let cond := if field &&& 0x1 = 0 then (field + 1).toNat else (field - 1).toNat
+    let result := if arm64_matches_condition cond s.nzcv then (1 : UInt64) else (0 : UInt64)
+    some (arm64_set_reg rd s result)
+  -- STR Xt, [SP, #imm]: 0xF9000000 (unsigned offset store, no writeback)
+  else if (insn &&& 0xffe00000) = 0xF9000000 then
+    let rt := (insn &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let addr := s.sp + UInt64.ofNat (imm12 * 8)
+    some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
+  -- LDP Xt, Xn, [SP, #imm]: 0xA9400000 (offset load pair, no writeback)
+  else if (insn &&& 0xffc00000) = 0xA9400000 then
+    let d1 := ((insn >>> 5) &&& 0x1f).toNat
+    let d2 := (insn &&& 0x1f).toNat
+    let imm12 := ((insn >>> 10) &&& 0xfff).toNat
+    let addr := s.sp + UInt64.ofNat (imm12 * 8)
+    let val1 := mem_read_u64 s.mem addr.toNat
+    let val2 := mem_read_u64 s.mem (addr + 8).toNat
+    let s' := arm64_set_reg d1 s val1
+    let s'' := arm64_set_reg d2 s' val2
+    some s''
+  -- ORN Xd, Xn, Xm: 0x0A200000
+  else if (insn &&& 0xffe00000) = 0x0A200000 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 10) &&& 0x1f).toNat
+    let rm := ((insn >>> 16) &&& 0x1f).toNat
+    some (arm64_set_reg rd s ((arm64_reg rn s) ^^^ (0xffffffffffffffff : UInt64) ||| arm64_reg rm s))
+  -- BR Xn: 0xD61F0000
+  else if (insn &&& 0xfffffc1f) = 0xD61F0000 then
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    some { s with pc := (arm64_reg rn s).toNat }
+  -- SVC #imm: 0xD4000001 (trap; modelled as a no-op step)
+  else if (insn &&& 0xffe0001f) = 0xD4000001 then
+    some s
+  -- SXTB Wd, Wn: 0x13001c00 (sign-extend byte 0 to 32 bits, zero-extended to 64)
+  else if (insn &&& 0xffe0fc00) = 0x13001c00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    some (arm64_set_reg rd s (t8s (arm64_reg rn s)))
+  -- SXTH Wd, Wn: 0x13003c00 (sign-extend halfword 0 to 32 bits, zero-extended to 64)
+  else if (insn &&& 0xffe0fc00) = 0x13003c00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    some (arm64_set_reg rd s (t16s (arm64_reg rn s)))
+  -- SXTW Xd, Wn: 0x93407c00 (sign-extend 32 bits to 64 bits)
+  else if (insn &&& 0xffe0fc00) = 0x93407c00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    some (arm64_set_reg rd s (t32s (arm64_reg rn s)))
+  -- AND Xd, Xn, #0xff: 0x92401c00 (zero-truncate to 8 bits)
+  else if (insn &&& 0xffc0fc00) = 0x92401c00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    some (arm64_set_reg rd s (t8u (arm64_reg rn s)))
+  -- AND Xd, Xn, #0xffff: 0x92403c00 (zero-truncate to 16 bits)
+  else if (insn &&& 0xffc0fc00) = 0x92403c00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    some (arm64_set_reg rd s (t16u (arm64_reg rn s)))
+  -- AND Xd, Xn, #0xffffffff: 0x92407c00 (zero-truncate to 32 bits)
+  else if (insn &&& 0xffc0fc00) = 0x92407c00 then
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    some (arm64_set_reg rd s (t32u (arm64_reg rn s)))
+  else
+    none
+
+/-- Execute ARM64 instructions until the program terminates or fuel runs out.
+
+Sequential instructions in `arm64_step` do not modify `pc`; the loop
+advances `pc` by 4 whenever a step leaves it unchanged (branches, calls
+and `ret` set `pc` explicitly). Every instruction, including `ret`, is
+*executed*: a `ret` branches to `x30`, exactly as on real hardware, so
+nested/recursive calls return to their callers correctly. Execution
+stops when the machine reaches a fixed point — an instruction word of
+`ret` whose branch target `x30` equals its own address `pc` (the RET
+sentinel the compiler appends after the program, with the initial link
+register pointing at it) — because stepping there would leave the state
+unchanged forever. Top-level structural recursion on fuel so it can be
+unfolded in proofs. -/
+def arm64_go (st : Arm64State) (code : Nat → UInt8) (fuel : Nat) : Option Arm64State :=
+  if fuel = 0 then none
+  else if code st.pc = 0xd65f03c0 ∧ st.pc = st.x30.toNat then some st
+  else
+    match arm64_step st code with
+    | none => none
+    | some st' =>
+        let st'' := if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st'
+        arm64_go st'' code (fuel - 1)
+
+def arm64_exec (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
+  arm64_go s code 1000
+
+/-- Execute ARM64 with explicit fuel limit. -/
+def arm64_exec_go (s : Arm64State) (code : Nat → UInt8) (fuel : Nat) : Option Arm64State :=
+  arm64_go s code fuel
+
+/-- Execute ARM64 with explicit fuel limit, stopping at a designated exit address.
+
+Unlike `arm64_exec_go`, execution does NOT terminate at the first `ret`
+(which would break recursion); instead it runs until `st.pc = exit`.
+The exit address should point at a `ret` that the initial link register
+(value of `x30`) returns to after the top-level function call returns. -/
+def arm64_go_exit (st : Arm64State) (code : Nat → UInt8) (exit : Nat) (fuel : Nat) : Option Arm64State :=
+  if fuel = 0 then none
+  else if st.pc = exit then some st
+  else
+    match arm64_step st code with
+    | none => none
+    | some st' =>
+        let st'' := if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st'
+        arm64_go_exit st'' code exit (fuel - 1)
+
+def arm64_exec_go_exit (s : Arm64State) (code : Nat → UInt8) (exit : Nat) (fuel : Nat) : Option Arm64State :=
+  arm64_go_exit s code exit fuel
+
+/-- Library step lemma: ADD Xd, Xn, Xm.  Hypotheses constrain the full
+assembled instruction word (`arm64_read_insn`), not just the low byte. -/
+theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
+    (h_opc : arm64_read_insn code s.pc &&& 0xffe00000 = 0x8b000000)
+    (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
+    (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
+    (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s + arm64_reg xm s)) := by
+  have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
+    intro he; rw [he] at h_opc
+    exact absurd h_opc (by native_decide)
+  have hne_mov : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x2a00fa00) := by
+    intro t; rw [h_opc] at t
+    exact absurd t (by native_decide)
+  unfold arm64_step
+  rw [if_neg hne_ret, if_neg hne_mov, if_pos h_opc, h_rd, h_rn, h_xm]
+
+/-- Library step lemma: SUB Xd, Xn, Xm. -/
+theorem arm64_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
+    (h_opc : arm64_read_insn code s.pc &&& 0xffe00000 = 0xcb000000)
+    (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
+    (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
+    (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s - arm64_reg xm s)) := by
+  have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
+    intro he; rw [he] at h_opc
+    exact absurd h_opc (by native_decide)
+  have hne_mov : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x2a00fa00) := by
+    intro t; rw [h_opc] at t
+    exact absurd t (by native_decide)
+  have hne_add : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x8b000000) := by
+    intro t; rw [h_opc] at t
+    exact absurd t (by native_decide)
+  unfold arm64_step
+  rw [if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_pos h_opc, h_rd, h_rn, h_xm]
+
+/-- Library step lemma: MUL Xd, Xn, Xm. -/
+theorem arm64_step_mul (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
+    (h_opc : arm64_read_insn code s.pc &&& 0xffe07c00 = 0x9b007c00)
+    (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
+    (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
+    (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s * arm64_reg xm s)) := by
+  have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
+    intro he; rw [he] at h_opc
+    exact absurd h_opc (by native_decide)
+  have hM : (0xffe07c00 : UInt32) &&& 0xffe00000 = 0xffe00000 := by native_decide
+  have hsub : arm64_read_insn code s.pc &&& 0xffe00000 = 0x9b000000 := by
+    have := congrArg (fun x => x &&& (0xffe00000 : UInt32)) h_opc
+    rwa [UInt32.and_assoc, hM] at this
+  have hne_mov : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x2a00fa00) := by
+    intro t; rw [hsub] at t
+    exact absurd t (by native_decide)
+  have hne_add : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0x8b000000) := by
+    intro t; rw [hsub] at t
+    exact absurd t (by native_decide)
+  have hne_sub : ¬ (arm64_read_insn code s.pc &&& 0xffe00000 = 0xcb000000) := by
+    intro t; rw [hsub] at t
+    exact absurd t (by native_decide)
+  unfold arm64_step
+  rw [if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub, if_pos h_opc,
+      h_rd, h_rn, h_xm]
+
+/-- Distribute an Option match over an if (used to close eval_eq_mojo). -/
+@[simp] theorem match_if_distrib {α β : Type} (C : Prop) [Decidable C]
+    (f : α → β) (d : β) (a b : Option α) :
+  (match (if C then a else b) with
+   | some v => f v
+   | none => d) =
+    (if C then (match a with | some v => f v | none => d)
+     else (match b with | some v => f v | none => d)) := by
+  by_cases h : C <;> simp [h]
+
+/-- UInt64 values ≤ 1 are 0 or 1. -/
+theorem uint64_le_one (n : UInt64) (h : n ≤ 1) : n = 0 ∨ n = 1 := by
+  have h' : n.toNat ≤ 1 := UInt64.le_iff_toNat_le.mp h
+  have hc : n.toNat = 0 ∨ n.toNat = 1 := by omega
+  rcases hc with h0 | h1
+  · left; exact (UInt64.toNat_inj.mp (by simpa using h0))
+  · right; exact (UInt64.toNat_inj.mp (by simpa using h1))
+
+/-- UInt64 values not ≤ 1 are ≥ 2. -/
+theorem uint64_not_le_one_ge_two (n : UInt64) (h : ¬ n ≤ 1) : 2 ≤ n := by
+  rw [UInt64.le_iff_toNat_le]
+  have h' : ¬ n.toNat ≤ 1 := by simpa [UInt64.le_iff_toNat_le] using h
+  simp
+  omega
+
+/-! # Fuel-bounded full interpreter (executes while loops)
+
+`evalBody` above skips while loops entirely, so `evalFunc` does not match
+the source semantics of loop programs.  `runF` below is a complete
+statement interpreter: it threads environments through loops and returns
+either a final environment (`done`) or an early return value (`ret`).
+Fuel is consumed on every statement pass, giving structural recursion.
+-/
+
+inductive RunRes where
+  | done (env : String → UInt64)
+  | ret (v : UInt64)
+
+def runF (fuel : Nat) (cf : String → UInt64 → UInt64)
+    (stmts : List MojoStmt) (env : String → UInt64) : Option RunRes :=
+  match fuel with
+  | 0 => none
+  | f + 1 =>
+    match stmts with
+    | [] => some (.done env)
+    | MojoStmt.return e :: _ => some (.ret (evalExpr cf e env))
+    | MojoStmt.ifstmt c tb eb :: rest =>
+        if evalExpr cf c env ≠ 0 then
+          match runF f cf tb env with
+          | some (.ret v) => some (.ret v)
+          | some (.done env') => runF f cf rest env'
+          | none => none
+        else
+          match runF f cf eb env with
+          | some (.ret v) => some (.ret v)
+          | some (.done env') => runF f cf rest env'
+          | none => none
+    | MojoStmt.while c body :: rest =>
+        if evalExpr cf c env ≠ 0 then
+          match runF f cf body env with
+          | some (.ret v) => some (.ret v)
+          | some (.done env') => runF f cf (MojoStmt.while c body :: rest) env'
+          | none => none
+        else
+          runF f cf rest env
+    | MojoStmt.assign name e :: rest =>
+        let v := evalExpr cf e env
+        runF f cf rest (fun n => if n == name then v else env n)
+    | MojoStmt.exprstmt _ :: rest => runF f cf rest env
+    | MojoStmt.pass :: rest => runF f cf rest env
+
+/-- Fuel-bounded function evaluation: source-level semantics including
+while loops.  Agrees with `evalFunc` on programs without whiles. -/
+def evalFuncF (fuel : Nat) (f : MojoFunc) (cf : String → UInt64 → UInt64)
+    (arg : UInt64) : UInt64 :=
+  match f with
+  | MojoFunc.mk _ param body =>
+    let env := fun name => if name == param then arg else (0 : UInt64)
+    match runF fuel cf body env with
+    | some (.ret v) => v
+    | _ => 0
+
+/-- Convenience lemma: a `return` head evaluates directly. -/
+theorem runF_return (fuel : Nat) (cf : String → UInt64 → UInt64)
+    (e : MojoExpr) (env : String → UInt64) :
+    runF (fuel + 1) cf [MojoStmt.return e] env = some (.ret (evalExpr cf e env)) := by
+  unfold runF; simp
+
+/-! ### runF equation lemmas
+
+One lemma per statement shape at successor fuel, so proofs can be pure
+`rw`-chains without casing on fuel. -/
+
+theorem runF_nil (f : Nat) (cf : String → UInt64 → UInt64) (env : String → UInt64) :
+    runF (f + 1) cf [] env = some (.done env) := rfl
+
+theorem runF_return_eq (f : Nat) (cf : String → UInt64 → UInt64)
+    (e : MojoExpr) (env : String → UInt64) :
+    runF (f + 1) cf [MojoStmt.return e] env = some (.ret (evalExpr cf e env)) := rfl
+
+theorem runF_assign (f : Nat) (cf : String → UInt64 → UInt64)
+    (name : String) (e : MojoExpr) (rest : List MojoStmt) (env : String → UInt64) :
+    runF (f + 1) cf (MojoStmt.assign name e :: rest) env =
+      runF f cf rest (fun n => if n == name then evalExpr cf e env else env n) := rfl
+
+theorem runF_exprstmt (f : Nat) (cf : String → UInt64 → UInt64)
+    (e : MojoExpr) (rest : List MojoStmt) (env : String → UInt64) :
+    runF (f + 1) cf (MojoStmt.exprstmt e :: rest) env = runF f cf rest env := rfl
+
+theorem runF_pass (f : Nat) (cf : String → UInt64 → UInt64)
+    (rest : List MojoStmt) (env : String → UInt64) :
+    runF (f + 1) cf (MojoStmt.pass :: rest) env = runF f cf rest env := rfl
+
+theorem runF_while_done (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (body : List MojoStmt) (rest : List MojoStmt)
+    (env env' : String → UInt64)
+    (hcond : evalExpr cf c env ≠ 0)
+    (hbody : runF f cf body env = some (.done env')) :
+    runF (f + 1) cf (MojoStmt.while c body :: rest) env =
+      runF f cf (MojoStmt.while c body :: rest) env' := by
+  simp only [runF]
+  rw [if_pos hcond, hbody]
+
+theorem runF_while_ret (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (body : List MojoStmt) (rest : List MojoStmt)
+    (env : String → UInt64) (v : UInt64)
+    (hcond : evalExpr cf c env ≠ 0)
+    (hbody : runF f cf body env = some (.ret v)) :
+    runF (f + 1) cf (MojoStmt.while c body :: rest) env = some (.ret v) := by
+  simp only [runF]
+  rw [if_pos hcond, hbody]
+
+theorem runF_while_stuck (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (body : List MojoStmt) (rest : List MojoStmt)
+    (env : String → UInt64)
+    (hcond : evalExpr cf c env ≠ 0)
+    (hbody : runF f cf body env = none) :
+    runF (f + 1) cf (MojoStmt.while c body :: rest) env = none := by
+  simp only [runF]
+  rw [if_pos hcond, hbody]
+
+theorem runF_while_false (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (body : List MojoStmt) (rest : List MojoStmt)
+    (env : String → UInt64)
+    (hcond : evalExpr cf c env = 0) :
+    runF (f + 1) cf (MojoStmt.while c body :: rest) env = runF f cf rest env := by
+  simp only [runF]
+  have hc : ¬ (evalExpr cf c env ≠ 0) := by rw [hcond]; simp
+  rw [if_neg hc]
+
+/-- If-condition variants: then-branch returns a value. -/
+theorem runF_if_ret_then (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (tb eb rest : List MojoStmt) (env : String → UInt64) (v : UInt64)
+    (hcond : evalExpr cf c env ≠ 0)
+    (htb : runF f cf tb env = some (.ret v)) :
+    runF (f + 1) cf (MojoStmt.ifstmt c tb eb :: rest) env = some (.ret v) := by
+  simp only [runF]
+  rw [if_pos hcond, htb]
+
+theorem runF_if_done_then (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (tb eb rest : List MojoStmt) (env env' : String → UInt64)
+    (hcond : evalExpr cf c env ≠ 0)
+    (htb : runF f cf tb env = some (.done env')) :
+    runF (f + 1) cf (MojoStmt.ifstmt c tb eb :: rest) env = runF f cf rest env' := by
+  simp only [runF]
+  rw [if_pos hcond, htb]
+
+theorem runF_if_ret_else (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (tb eb rest : List MojoStmt) (env : String → UInt64) (v : UInt64)
+    (hcond : evalExpr cf c env = 0)
+    (heb : runF f cf eb env = some (.ret v)) :
+    runF (f + 1) cf (MojoStmt.ifstmt c tb eb :: rest) env = some (.ret v) := by
+  simp only [runF]
+  have hc : ¬ (evalExpr cf c env ≠ 0) := by rw [hcond]; simp
+  simp only [if_neg hc, heb]
+
+theorem runF_if_done_else (f : Nat) (cf : String → UInt64 → UInt64)
+    (c : MojoExpr) (tb eb rest : List MojoStmt) (env env' : String → UInt64)
+    (hcond : evalExpr cf c env = 0)
+    (heb : runF f cf eb env = some (.done env')) :
+    runF (f + 1) cf (MojoStmt.ifstmt c tb eb :: rest) env = runF f cf rest env' := by
+  simp only [runF]
+  have hc : ¬ (evalExpr cf c env ≠ 0) := by rw [hcond]; simp
+  simp only [if_neg hc, heb]
+
+theorem runF_nil_pos (f : Nat) (hf : 0 < f) (cf : String → UInt64 → UInt64)
+    (env : String → UInt64) :
+    runF f cf [] env = some (.done env) := by
+  cases f with
+  | zero => omega
+  | succ g => exact runF_nil g cf env
+
+/-! ### arm64_go chaining lemmas -/
+
+/-- Sequential instruction: step succeeds leaving pc unchanged; the loop
+bumps pc by 4 and consumes one fuel unit. -/
+theorem arm64_go_step_seq {st st' : Arm64State} {code : Nat → UInt8} {f : Nat}
+    (hstep : arm64_step st code = some st')
+    (hseq : st'.pc = st.pc)
+    (hstop : ¬ (code st.pc = 0xd65f03c0 ∧ st.pc = st.x30.toNat)) :
+    arm64_go st code (f + 1) = arm64_go { st' with pc := st.pc + 4 } code f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go, if_neg hfnz, if_neg hstop, hstep]
+  simp only
+  rw [if_pos hseq]
+  simp [Nat.add_sub_cancel]
+
+/-- Control-transfer instruction: step succeeds setting a new pc; no bump. -/
+theorem arm64_go_step_jump {st st' : Arm64State} {code : Nat → UInt8} {f : Nat}
+    (hstep : arm64_step st code = some st')
+    (hjump : st'.pc ≠ st.pc)
+    (hstop : ¬ (code st.pc = 0xd65f03c0 ∧ st.pc = st.x30.toNat)) :
+    arm64_go st code (f + 1) = arm64_go st' code f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go, if_neg hfnz, if_neg hstop, hstep]
+  simp only
+  rw [if_neg hjump]
+  simp [Nat.add_sub_cancel]
+
+/-- Halt at the RET-sentinel fixed point for any positive fuel. -/
+theorem arm64_go_halt {s : Arm64State} {code : Nat → UInt8} {f : Nat}
+    (hf : f > 0)
+    (hret : code s.pc = 0xd65f03c0)
+    (hx : s.pc = s.x30.toNat) :
+    arm64_go s code f = some s := by
+  cases f with
+  | zero => omega
+  | succ g =>
+    have hfnz : ¬ (g + 1 = 0) := by omega
+    rw [arm64_go, if_neg hfnz, if_pos ⟨hret, hx⟩]
+
+/-- Sequential step at a literal address (call-site friendly). -/
+theorem arm64_go_step_seq_at (st st' : Arm64State) (code : Nat → UInt8) (f : Nat)
+    (a x : Nat)
+    (hstep : arm64_step st code = some st')
+    (hseq : st'.pc = st.pc)
+    (hpc : st.pc = a)
+    (hx30 : st.x30.toNat = x)
+    (hne : ¬ (code a = 0xd65f03c0 ∧ a = x)) :
+    arm64_go st code (f + 1) = arm64_go { st' with pc := st.pc + 4 } code f := by
+  apply arm64_go_step_seq hstep hseq
+  intro hc
+  rw [hpc] at hc
+  rw [hx30] at hc
+  exact hne hc
+
+/-- Control-transfer step at a literal address. -/
+theorem arm64_go_step_jump_at (st st' : Arm64State) (code : Nat → UInt8) (f : Nat)
+    (a x : Nat)
+    (hstep : arm64_step st code = some st')
+    (hjump : st'.pc ≠ st.pc)
+    (hpc : st.pc = a)
+    (hx30 : st.x30.toNat = x)
+    (hne : ¬ (code a = 0xd65f03c0 ∧ a = x)) :
+    arm64_go st code (f + 1) = arm64_go st' code f := by
+  apply arm64_go_step_jump hstep hjump
+  intro hc
+  rw [hpc] at hc
+  rw [hx30] at hc
+  exact hne hc
+
+/-- Exit-mode sequential step: only requires the current pc to differ
+from the designated exit address (both usually literals). -/
+theorem arm64_go_exit_step_seq (st st' : Arm64State) (code : Nat → UInt8)
+    (exit f : Nat)
+    (hstep : arm64_step st code = some st')
+    (hseq : st'.pc = st.pc)
+    (hpc : st.pc ≠ exit) :
+    arm64_go_exit st code exit (f + 1)
+      = arm64_go_exit { x0 := st'.x0, x1 := st'.x1, x2 := st'.x2, x3 := st'.x3, x4 := st'.x4, x5 := st'.x5, x6 := st'.x6, x7 := st'.x7, x8 := st'.x8, x9 := st'.x9, x10 := st'.x10, x11 := st'.x11, x12 := st'.x12, x13 := st'.x13, x14 := st'.x14, x15 := st'.x15, x16 := st'.x16, x17 := st'.x17, x18 := st'.x18, x19 := st'.x19, x20 := st'.x20, x21 := st'.x21, x22 := st'.x22, x23 := st'.x23, x24 := st'.x24, x25 := st'.x25, x26 := st'.x26, x27 := st'.x27, x28 := st'.x28, x29 := st'.x29, x30 := st'.x30, sp := st'.sp, pc := st.pc + 4, nzcv := st'.nzcv, mem := st'.mem } code exit f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go_exit, if_neg hfnz, if_neg hpc, hstep]
+  simp only
+  rw [if_pos hseq]
+  simp only [Nat.add_sub_cancel]
+
+/-- Exit-mode control-transfer step. -/
+theorem arm64_go_exit_step_jump (st st' : Arm64State) (code : Nat → UInt8)
+    (exit f : Nat)
+    (hstep : arm64_step st code = some st')
+    (hjump : st'.pc ≠ st.pc)
+    (hpc : st.pc ≠ exit) :
+    arm64_go_exit st code exit (f + 1)
+      = arm64_go_exit { x0 := st'.x0, x1 := st'.x1, x2 := st'.x2, x3 := st'.x3, x4 := st'.x4, x5 := st'.x5, x6 := st'.x6, x7 := st'.x7, x8 := st'.x8, x9 := st'.x9, x10 := st'.x10, x11 := st'.x11, x12 := st'.x12, x13 := st'.x13, x14 := st'.x14, x15 := st'.x15, x16 := st'.x16, x17 := st'.x17, x18 := st'.x18, x19 := st'.x19, x20 := st'.x20, x21 := st'.x21, x22 := st'.x22, x23 := st'.x23, x24 := st'.x24, x25 := st'.x25, x26 := st'.x26, x27 := st'.x27, x28 := st'.x28, x29 := st'.x29, x30 := st'.x30, sp := st'.sp, pc := st'.pc, nzcv := st'.nzcv, mem := st'.mem } code exit f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go_exit, if_neg hfnz, if_neg hpc, hstep]
+  simp only
+  rw [if_neg hjump]
+  simp [Nat.add_sub_cancel]
+
+/-- Terminal: reaching the exit address yields the state, any positive fuel. -/
+theorem arm64_go_exit_hit (st : Arm64State) (code : Nat → UInt8)
+    (exit f : Nat)
+    (hf : f > 0)
+    (hpc : st.pc = exit) :
+    arm64_go_exit st code exit f = some st := by
+  cases f with
+  | zero => omega
+  | succ g =>
+    rw [arm64_go_exit]
+    exact if_pos hpc
+
+/-- Exit-mode sequential step, call-site friendly: address + sentinel-x30
+explicit, side conditions on closed literals. -/
+theorem arm64_go_exit_step_seq_at (st st' : Arm64State) (code : Nat → UInt8)
+    (exit f a : Nat)
+    (hstep : arm64_step st code = some st')
+    (hseq : st'.pc = st.pc)
+    (hpc : st.pc = a)
+    (hna : a ≠ exit) :
+    arm64_go_exit st code exit (f + 1) =
+      arm64_go_exit { st' with pc := st.pc + 4 } code exit f := by
+  apply arm64_go_exit_step_seq st st' code exit f hstep hseq
+  intro hc
+  rw [hpc] at hc
+  exact hna hc
+
+/-- Exit-mode control-transfer step, call-site friendly. -/
+theorem arm64_go_exit_step_jump_at (st st' : Arm64State) (code : Nat → UInt8)
+    (exit f a : Nat)
+    (hstep : arm64_step st code = some st')
+    (hjump : st'.pc ≠ st.pc)
+    (hpc : st.pc = a)
+    (hna : a ≠ exit) :
+    arm64_go_exit st code exit (f + 1) = arm64_go_exit st' code exit f := by
+  apply arm64_go_exit_step_jump st st' code exit f hstep hjump
+  intro hc
+  rw [hpc] at hc
+  exact hna hc
+
+/-- Bridge: toNat of a UInt64-sum of ofNats is the wrapped Nat-sum. -/
+theorem toNat_uadd (a b : Nat) :
+    (UInt64.ofNat a + UInt64.ofNat b).toNat = (a + b) % 18446744073709551616 := by
+  rw [UInt64.toNat_add]
+  have h1 : (UInt64.ofNat a).toNat = a % 18446744073709551616 := by simp
+  have h2 : (UInt64.ofNat b).toNat = b % 18446744073709551616 := by simp
+  have h64 : (2 ^ 64 : Nat) = 18446744073709551616 := by decide
+  rw [h64]
+  exact (Nat.add_mod a b 18446744073709551616).symm
+
+/-- Bridge: toNat of a UInt64-product of ofNats is the wrapped Nat-product. -/
+theorem toNat_umul (a b : Nat) :
+    (UInt64.ofNat a * UInt64.ofNat b).toNat = (a * b) % 18446744073709551616 := by
+  rw [UInt64.toNat_mul]
+  have h1 : (UInt64.ofNat a).toNat = a % 18446744073709551616 := by simp
+  have h2 : (UInt64.ofNat b).toNat = b % 18446744073709551616 := by simp
+  have h64 : (2 ^ 64 : Nat) = 18446744073709551616 := by decide
+  rw [h64]
+  exact (Nat.mul_mod a b 18446744073709551616).symm
+
+/-- Bridge for BL-shaped pc-updates with K=3, M=4 (most common case).
+    General form: toNat(ofNat x + ofNat K * ofNat M) = (x + K*M) % 2^64. -/
+theorem toNat_uadd_umul_lit (x : Nat) :
+    (UInt64.ofNat x + UInt64.ofNat 3 * UInt64.ofNat 4).toNat =
+      (x + 12) % 18446744073709551616 := by
+  rw [UInt64.toNat_add]
+  rw [UInt64.toNat_mul]
+  have h1 : (UInt64.ofNat x).toNat = x % 18446744073709551616 := rfl
+  have h2 : (UInt64.ofNat 3).toNat = 3 % 18446744073709551616 := rfl
+  have h3 : (UInt64.ofNat 4).toNat = 4 % 18446744073709551616 := rfl
+  rw [h1, h2, h3]
+  have h64 : (2 ^ 64 : Nat) = 18446744073709551616 := by decide
+  rw [h64]
+  omega
+/-! # Finite step-run iterator and exit-gluing for recursive programs
+
+`arm64_runs code f st` executes exactly `f` steps of the machine (failing only
+when the model cannot step). Unlike `arm64_go_exit` it has no halt address,
+so one call-frame of a recursive function can be certified as a finite prefix
+and then converted into an equation about the fuel-bounded exit run for any
+exit address that frame's execution never touches. -/
+
+
+
+
+def arm64_runs (code : Nat → UInt8) : Nat → Arm64State → Option Arm64State
+  | 0, st => some st
+  | f + 1, st =>
+      match arm64_step st code with
+      | none => none
+      | some st' =>
+          arm64_runs code f (if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st')
+
+theorem runs_zero (code : Nat → UInt8) (st : Arm64State) :
+    arm64_runs code 0 st = some st := rfl
+
+theorem runs_cons_seq (st st' : Arm64State) (code : Nat → UInt8) (f : Nat)
+    (hstep : arm64_step st code = some st')
+    (hseq : st'.pc = st.pc) :
+    arm64_runs code (f + 1) st = arm64_runs code f { st' with pc := st.pc + 4 } := by
+  simp only [arm64_runs, hstep]
+  rw [if_pos hseq]
+
+theorem runs_cons_jump (st st' : Arm64State) (code : Nat → UInt8) (f : Nat)
+    (hstep : arm64_step st code = some st')
+    (hjump : st'.pc ≠ st.pc) :
+    arm64_runs code (f + 1) st = arm64_runs code f st' := by
+  simp only [arm64_runs, hstep]
+  rw [if_neg hjump]
+
+theorem runs_step_none (st : Arm64State) (code : Nat → UInt8) (f : Nat)
+    (hstep : arm64_step st code = none) :
+    arm64_runs code (f + 1) st = none := by
+  simp only [arm64_runs, hstep]
+
+theorem runs_append (code : Nat → UInt8) (p u : Nat) (st : Arm64State) :
+    arm64_runs code (p + u) st =
+      match arm64_runs code p st with
+      | some mid => arm64_runs code u mid
+      | none => none := by
+  induction p generalizing st with
+  | zero => simp only [Nat.zero_add, arm64_runs]
+  | succ q ih =>
+    cases hstep : arm64_step st code with
+    | none =>
+      rw [show q + 1 + u = (q + u) + 1 from by omega,
+          runs_step_none st code (q + u) hstep,
+          runs_step_none st code q hstep]
+    | some st' =>
+      by_cases hp : st'.pc = st.pc
+      · have h1 : arm64_runs code (q + 1 + u) st =
+            arm64_runs code (q + u) { st' with pc := st.pc + 4 } := by
+          rw [show q + 1 + u = (q + u) + 1 from by omega]
+          exact runs_cons_seq st st' code (q + u) hstep hp
+        have h2 : arm64_runs code (q + 1) st =
+            arm64_runs code q { st' with pc := st.pc + 4 } :=
+          runs_cons_seq st st' code q hstep hp
+        rw [h1, ih, h2]
+      · have h1 : arm64_runs code (q + 1 + u) st = arm64_runs code (q + u) st' := by
+          rw [show q + 1 + u = (q + u) + 1 from by omega]
+          exact runs_cons_jump st st' code (q + u) hstep hp
+        have h2 : arm64_runs code (q + 1) st = arm64_runs code q st' :=
+          runs_cons_jump st st' code q hstep hp
+        rw [h1, ih, h2]
+
+/-- Composition of two `arm64_runs` segments when the first is known to succeed:
+    `arm64_runs code (p+u) st = arm64_runs code u mid`. -/
+theorem runs_append_some (code : Nat → UInt8) (p u : Nat) (st mid : Arm64State)
+    (h : arm64_runs code p st = some mid) :
+    arm64_runs code (p + u) st = arm64_runs code u mid := by
+  rw [runs_append, h]
+
+/-- **Avoidance composes across a prefix run.**  If no intermediate state of the
+    `p`-step prefix from `st` has `pc = ρ`, and no intermediate state of the
+    `u`-step continuation from `mid` has `pc = ρ`, then no intermediate state of
+    the combined `p + u`-step run from `st` has `pc = ρ`.  This is the `hmid`
+    composition `go_exit_glue`/`arm64_go_exit_switch` consume. -/
+theorem runs_avoid_one (code : Nat → UInt8) (st : Arm64State) (exit : Nat)
+    (hpc : st.pc ≠ exit) :
+    ∀ u, u < 1 → ∀ s, arm64_runs code u st = some s → s.pc ≠ exit := by
+  intro u hu s hs
+  have hz : u = 0 := by omega
+  subst u
+  simp only [runs_zero, Option.some.injEq] at hs
+  subst s
+  exact hpc
+
+theorem runs_avoid_stuck (code : Nat → UInt8) (k exit : Nat) (st finish : Arm64State)
+    (hrun : arm64_runs code k st = some finish)
+    (hstuck : ∀ s : Arm64State, s.pc = exit → arm64_step s code = none) :
+    ∀ u, u < k → ∀ s, arm64_runs code u st = some s → s.pc ≠ exit := by
+  intro u hu s hs hp
+  have hsplit := runs_append_some code u (k - u) st s hs
+  rw [Nat.add_sub_of_le (by omega)] at hsplit
+  have hrest : arm64_runs code (k - u) s = some finish := hsplit.symm.trans hrun
+  have hpos : k - u = (k - u - 1) + 1 := by omega
+  rw [hpos, runs_step_none s code (k - u - 1) (hstuck s hp)] at hrest
+  cases hrest
+
+theorem runs_avoid_append (code : Nat → UInt8) (p u ρ : Nat) (st mid : Arm64State)
+    (h : arm64_runs code p st = some mid)
+    (h1 : ∀ v, v < p → ∀ sv, arm64_runs code v st = some sv → sv.pc ≠ ρ)
+    (h2 : ∀ v, v < u → ∀ sv, arm64_runs code v mid = some sv → sv.pc ≠ ρ) :
+    ∀ v, v < p + u → ∀ sv, arm64_runs code v st = some sv → sv.pc ≠ ρ := by
+  intro v hv sv hsv
+  rcases Nat.lt_or_ge v p with hlt | hge
+  · exact h1 v hlt sv hsv
+  · have hsplit : arm64_runs code v st = arm64_runs code (v - p) mid := by
+      have h' := runs_append_some code p (v - p) st mid h
+      rw [show p + (v - p) = v from by omega] at h'
+      exact h'
+    rw [hsplit] at hsv
+    exact h2 (v - p) (by omega) sv hsv
+
+/-- A run preserves register `r` when every step of the run does.  The generator
+    discharges `hstep` per instruction (via the `work_step_*` lemmas), so the
+    deep per-block unfolding lives here rather than in the generated proof. -/
+theorem arm64_runs_reg_eq (code : Nat → UInt8) (m : Nat) (st mid : Arm64State) (r : Nat)
+    (h : arm64_runs code m st = some mid)
+    (hstep : ∀ u, u < m → ∀ s, arm64_runs code u st = some s →
+      ∀ s', arm64_step s code = some s' → arm64_reg r s' = arm64_reg r s) :
+    arm64_reg r mid = arm64_reg r st := by
+  induction m generalizing st with
+  | zero =>
+    rw [runs_zero] at h
+    injection h with heq
+    subst heq
+    rfl
+  | succ q ih =>
+    cases hstep0 : arm64_step st code with
+    | none =>
+      rw [runs_step_none st code q hstep0] at h
+      simp at h
+    | some st' =>
+      have h0 : arm64_reg r st' = arm64_reg r st :=
+        hstep 0 (by omega) st (by simp only [runs_zero]) st' hstep0
+      by_cases hp : st'.pc = st.pc
+      · rw [runs_cons_seq st st' code q hstep0 hp] at h
+        have hsub : arm64_reg r mid = arm64_reg r { st' with pc := st.pc + 4 } :=
+          ih { st' with pc := st.pc + 4 } h (by
+            intro u hu s hs s' hs'
+            refine hstep (u + 1) (by omega) s ?_ s' hs'
+            rw [runs_cons_seq st st' code u hstep0 hp]
+            exact hs)
+        rw [hsub]
+        rw [show arm64_reg r { st' with pc := st.pc + 4 } = arm64_reg r st' from rfl, h0]
+      · rw [runs_cons_jump st st' code q hstep0 hp] at h
+        have hsub : arm64_reg r mid = arm64_reg r st' :=
+          ih st' h (by
+            intro u hu s hs s' hs'
+            refine hstep (u + 1) (by omega) s ?_ s' hs'
+            rw [runs_cons_jump st st' code u hstep0 hp]
+            exact hs)
+        rw [hsub, h0]
+
+@[simp] theorem Arm64State.mem_pc (s : Arm64State) (pc : Nat) :
+    ({ s with pc := pc }).mem = s.mem := rfl
+
+/-- A run preserves the `mem_read_u64` at a fixed address when every step does.
+    Companion to `arm64_runs_reg_eq`, used for the frame-slot value flow. -/
+theorem arm64_runs_mem_eq (code : Nat → UInt8) (m : Nat) (st mid : Arm64State) (S : Nat)
+    (h : arm64_runs code m st = some mid)
+    (hstep : ∀ u, u < m → ∀ s, arm64_runs code u st = some s →
+      ∀ s', arm64_step s code = some s' → mem_read_u64 s'.mem S = mem_read_u64 s.mem S) :
+    mem_read_u64 mid.mem S = mem_read_u64 st.mem S := by
+  induction m generalizing st with
+  | zero =>
+    rw [runs_zero] at h
+    injection h with heq
+    subst heq
+    rfl
+  | succ q ih =>
+    cases hstep0 : arm64_step st code with
+    | none =>
+      rw [runs_step_none st code q hstep0] at h
+      simp at h
+    | some st' =>
+      have h0 : mem_read_u64 st'.mem S = mem_read_u64 st.mem S :=
+        hstep 0 (by omega) st (by simp only [runs_zero]) st' hstep0
+      by_cases hp : st'.pc = st.pc
+      · rw [runs_cons_seq st st' code q hstep0 hp] at h
+        have hsub : mem_read_u64 mid.mem S = mem_read_u64 { st' with pc := st.pc + 4 }.mem S :=
+          ih { st' with pc := st.pc + 4 } h (by
+            intro u hu s hs s' hs'
+            refine hstep (u + 1) (by omega) s ?_ s' hs'
+            rw [runs_cons_seq st st' code u hstep0 hp]
+            exact hs)
+        rw [hsub]
+        rw [Arm64State.mem_pc]
+        exact h0
+      · rw [runs_cons_jump st st' code q hstep0 hp] at h
+        have hsub : mem_read_u64 mid.mem S = mem_read_u64 st'.mem S :=
+          ih st' h (by
+            intro u hu s hs s' hs'
+            refine hstep (u + 1) (by omega) s ?_ s' hs'
+            rw [runs_cons_jump st st' code u hstep0 hp]
+            exact hs)
+        rw [hsub, h0]
+
+/-- Prefix-gluing: a finite certified run whose intermediate states avoid `ρ`
+    converts into an equation between exit-runs: executing the certified prefix
+    first and then `g` more steps equals running `m + g` fuel directly. -/
+theorem go_exit_glue (code : Nat → UInt8) (ρ m g : Nat) (st tc : Arm64State)
+    (hrun : arm64_runs code m st = some tc)
+    (hmid : ∀ u, u < m → ∀ su, arm64_runs code u st = some su → su.pc ≠ ρ)
+    (htc : tc.pc ≠ ρ) :
+    arm64_go_exit st code ρ (m + g) = arm64_go_exit tc code ρ g := by
+  induction m generalizing st with
+  | zero =>
+    rw [runs_zero] at hrun
+    injection hrun with heq
+    subst heq
+    exact congrArg (arm64_go_exit st code ρ) (Nat.zero_add g)
+  | succ q ih =>
+    have h0ne : st.pc ≠ ρ := fun hc =>
+      hmid 0 (by omega) st (by simp only [runs_zero]) hc
+    cases hstep : arm64_step st code with
+    | none =>
+      exfalso
+      rw [runs_step_none st code q hstep] at hrun
+      simp at hrun
+    | some st' =>
+      by_cases hp : st'.pc = st.pc
+      · -- sequential step: pc advances by 4
+        have hmid' : ∀ u, u < q → ∀ su,
+            arm64_runs code u { st' with pc := st.pc + 4 } = some su → su.pc ≠ ρ := by
+          intro u hu su hsu
+          refine hmid (u + 1) (by omega) su ?_
+          rw [runs_cons_seq st st' code u hstep hp]
+          exact hsu
+        rw [runs_cons_seq st st' code q hstep hp] at hrun
+        have hglue := ih _ hrun hmid'
+        rw [show (q + 1) + g = (q + g) + 1 from by omega]
+        rw [arm64_go_exit_step_seq st st' code ρ (q + g) hstep hp h0ne]
+        exact hglue
+      · -- control-transfer step
+        have hmid' : ∀ u, u < q → ∀ su,
+            arm64_runs code u st' = some su → su.pc ≠ ρ := by
+          intro u hu su hsu
+          refine hmid (u + 1) (by omega) su ?_
+          rw [runs_cons_jump st st' code u hstep hp]
+          exact hsu
+        rw [runs_cons_jump st st' code q hstep hp] at hrun
+        have hglue := ih _ hrun hmid'
+        rw [show (q + 1) + g = (q + g) + 1 from by omega]
+        rw [arm64_go_exit_step_jump st st' code ρ (q + g) hstep hp h0ne]
+        exact hglue
+
+/-- Exit-switching composition.  If a run of exactly `k` steps reaches `st'`
+    at exit `e1`, and every intermediate state avoids the second exit `e2`, then
+    running `st` to `e2` for `k + g` steps is the same as running `st'` to `e2`
+    for `g` steps.  This is the glue needed to compose a recursive call (which
+    halts at its return address `e1`) with the calling context (which continues
+    to the function exit `e2`). -/
+theorem arm64_go_exit_switch (st st' : Arm64State) (code : Nat → UInt8)
+    (e1 e2 k g : Nat)
+    (hrun : arm64_runs code k st = some st') (hpc : st'.pc = e1) (hne : e1 ≠ e2)
+    (hmid : ∀ u, u < k → ∀ su, arm64_runs code u st = some su → su.pc ≠ e2) :
+    arm64_go_exit st code e2 (k + g) = arm64_go_exit st' code e2 g :=
+  go_exit_glue code e2 k g st st' hrun hmid (by rw [hpc]; exact hne)
+
+/-- Conditional-branch composition in exit mode: given a step whose result is
+    `if C then sT else sF`, taking the true branch (C holds) consumes one fuel
+    and reaches `sT`.  Generic over any branch with the `if` result shape. -/
+theorem go_exit_cbz_taken (st : Arm64State) (code : Nat → UInt8) (exit f : Nat)
+    (C : Prop) [Decidable C] (sT sF : Arm64State)
+    (hstep : arm64_step st code = some (if C then sT else sF))
+    (h : C)
+    (hjump : sT.pc ≠ st.pc)
+    (hpc : st.pc ≠ exit) :
+    arm64_go_exit st code exit (f + 1) = arm64_go_exit sT code exit f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go_exit, if_neg hfnz, if_neg hpc, hstep, if_pos h]
+  simp only [if_neg hjump, Nat.add_sub_cancel]
+
+/-- Unconditional-branch composition in exit mode (B #tgt): consuming one
+    fuel reaches { st with pc := tgt }.  `hjump` and `hpc` are the literal
+    side conditions. -/
+theorem go_exit_b (st : Arm64State) (code : Nat → UInt8) (exit f : Nat) (tgt : Nat)
+    (hstep : arm64_step st code = some { st with pc := tgt })
+    (hjump : tgt ≠ st.pc) (hpc : st.pc ≠ exit) :
+    arm64_go_exit st code exit (f + 1) = arm64_go_exit { st with pc := tgt } code exit f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go_exit, if_neg hfnz, if_neg hpc, hstep]
+  simp only [if_neg hjump, Nat.add_sub_cancel]
+
+/-- Single-step composition in exit mode, with an abstract post-state `st'`:
+    consuming one fuel reaches `st'`.  Side conditions are given as a
+    post-state pc fact plus two *literal* inequalities, so generated proofs
+    never reduce `st.pc` through a deep run certificate. -/
+theorem go_exit_step (st st' : Arm64State) (code : Nat → UInt8) (exit f tgt b_pc : Nat)
+    (hstep : arm64_step st code = some st')
+    (hpc' : st'.pc = tgt) (hpcb : st.pc = b_pc)
+    (hne : tgt ≠ b_pc) (hpc : b_pc ≠ exit) :
+    arm64_go_exit st code exit (f + 1) = arm64_go_exit st' code exit f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go_exit, if_neg hfnz]
+  have hpc2 : st.pc ≠ exit := by rw [hpcb]; exact hpc
+  rw [if_neg hpc2, hstep]
+  have hjump : st'.pc ≠ st.pc := by rw [hpc', hpcb]; exact hne
+  simp only [if_neg hjump, Nat.add_sub_cancel]
+
+/-- Conditional-branch composition in exit mode: taking the false branch
+    (¬ C) reaches `sF`. -/
+theorem go_exit_cbz_fall (st : Arm64State) (code : Nat → UInt8) (exit f : Nat)
+    (C : Prop) [Decidable C] (sT sF : Arm64State)
+    (hstep : arm64_step st code = some (if C then sT else sF))
+    (h : ¬ C)
+    (hjump : sF.pc ≠ st.pc)
+    (hpc : st.pc ≠ exit) :
+    arm64_go_exit st code exit (f + 1) = arm64_go_exit sF code exit f := by
+  have hfnz : ¬ (f + 1 = 0) := by omega
+  rw [arm64_go_exit, if_neg hfnz, if_neg hpc, hstep, if_neg h]
+  simp only [if_neg hjump, Nat.add_sub_cancel]
+
+/-- Sequential-block advance in exit mode: executing `m` certified sequential
+    steps consumes `m` fuel.  `hrun` is the block's runs-certificate, `hmid`
+    the no-exit side condition on intermediate states, `htc` the exit's
+    non-reachability from the block exit.  This is the per-block composition
+    used by the CFG path proof. -/
+theorem go_exit_block (code : Nat → UInt8) (ρ m g : Nat) (st tc : Arm64State)
+    (hrun : arm64_runs code m st = some tc)
+    (hmid : ∀ u, u < m → ∀ su, arm64_runs code u st = some su → su.pc ≠ ρ)
+    (htc : tc.pc ≠ ρ) :
+    arm64_go_exit st code ρ (m + g) = arm64_go_exit tc code ρ g :=
+  go_exit_glue code ρ m g st tc hrun hmid htc
+
+/-- Generic prefix-glue WITHOUT the tc.pc ≠ ρ side condition:
+    exit-freeze semantics make the equation hold regardless. -/
+theorem rec1_glue_gen (code : Nat → UInt8) (ρ m g : Nat) (st tc : Arm64State)
+    (hrun : arm64_runs code m st = some tc)
+    (hmid : ∀ u, u < m → ∀ su, arm64_runs code u st = some su → su.pc ≠ ρ) :
+    arm64_go_exit st code ρ (m + g) = arm64_go_exit tc code ρ g := by
+  induction m generalizing st with
+  | zero =>
+    rw [runs_zero] at hrun
+    injection hrun with heq
+    subst heq
+    exact congrArg (arm64_go_exit st code ρ) (Nat.zero_add g)
+  | succ q ih =>
+    have h0ne : st.pc ≠ ρ := fun hc =>
+      hmid 0 (by omega) st (by simp only [runs_zero]) hc
+    cases hstep : arm64_step st code with
+    | none =>
+      exfalso
+      rw [runs_step_none st code q hstep] at hrun
+      simp at hrun
+    | some st' =>
+      by_cases hp : st'.pc = st.pc
+      · -- sequential step: pc advances by 4
+        have hmid' : ∀ u, u < q → ∀ su,
+            arm64_runs code u { st' with pc := st.pc + 4 } = some su → su.pc ≠ ρ := by
+          intro u hu su hsu
+          refine hmid (u + 1) (by omega) su ?_
+          rw [runs_cons_seq st st' code u hstep hp]
+          exact hsu
+        rw [runs_cons_seq st st' code q hstep hp] at hrun
+        have hglue := ih _ hrun hmid'
+        rw [show (q + 1) + g = (q + g) + 1 from by omega]
+        rw [arm64_go_exit_step_seq st st' code ρ (q + g) hstep hp h0ne]
+        exact hglue
+      · -- control-transfer step
+        have hmid' : ∀ u, u < q → ∀ su,
+            arm64_runs code u st' = some su → su.pc ≠ ρ := by
+          intro u hu su hsu
+          refine hmid (u + 1) (by omega) su ?_
+          rw [runs_cons_jump st st' code u hstep hp]
+          exact hsu
+        rw [runs_cons_jump st st' code q hstep hp] at hrun
+        have hglue := ih _ hrun hmid'
+        rw [show (q + 1) + g = (q + g) + 1 from by omega]
+        rw [arm64_go_exit_step_jump st st' code ρ (q + g) hstep hp h0ne]
+        exact hglue
+
+
+
+
+
+
+/-- `arm64_go_exit` is monotone in fuel: once it reaches the exit within `f`
+    steps, any larger fuel returns the same state. -/
+theorem arm64_go_exit_mono (st s : Arm64State) (code : Nat → UInt8) (exit f g : Nat)
+    (hle : f ≤ g) (h : arm64_go_exit st code exit f = some s) :
+    arm64_go_exit st code exit g = some s := by
+  have aux : ∀ f, (∀ g st s, f ≤ g →
+      arm64_go_exit st code exit f = some s →
+      arm64_go_exit st code exit g = some s) := by
+    intro f
+    induction f with
+    | zero =>
+        intro g st s hle h
+        unfold arm64_go_exit at h
+        simp at h
+    | succ f ih =>
+        intro g st s hle h
+        have hg : g ≠ 0 := by omega
+        unfold arm64_go_exit at h
+        rw [if_neg (by omega : ¬ (f + 1 = 0))] at h
+        split at h
+        · rename_i hpc
+          injection h with hs
+          subst hs
+          unfold arm64_go_exit
+          rw [if_neg hg, if_pos hpc]
+        · rename_i hpc
+          split at h
+          · simp at h
+          · rename_i st' hstep
+            unfold arm64_go_exit
+            rw [if_neg hg, if_neg hpc, hstep]
+            dsimp only at h
+            exact ih (g - 1) _ s (by omega) h
+  exact aux f g st s hle h
+
+/-- Reachability characterisation: if `arm64_go_exit` returns `some s`, then
+    some finite prefix run `arm64_runs` reaches `s`.  (Prerequisite for gluing
+    a recursive call's result onto the calling context.) -/
+theorem arm64_go_exit_runs (st s : Arm64State) (code : Nat → UInt8) (e f : Nat)
+    (h : arm64_go_exit st code e f = some s) :
+    ∃ k, k ≤ f ∧ arm64_runs code k st = some s := by
+  induction f generalizing st with
+  | zero =>
+      unfold arm64_go_exit at h
+      simp at h
+  | succ f ih =>
+      unfold arm64_go_exit at h
+      rw [if_neg (by omega : ¬ (f + 1 = 0))] at h
+      split at h
+      · injection h with hs
+        subst hs
+        exact ⟨0, by omega, by rw [runs_zero]⟩
+      · cases hstep : arm64_step st code with
+        | none => rw [hstep] at h; simp at h
+        | some st' =>
+          rw [hstep] at h
+          obtain ⟨k, hk, hruns⟩ :=
+            ih (if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st') h
+          refine ⟨k + 1, by omega, ?_⟩
+          by_cases hp : st'.pc = st.pc
+          · rw [runs_cons_seq st st' code k hstep hp]
+            rw [if_pos hp] at hruns
+            exact hruns
+          · rw [runs_cons_jump st st' code k hstep hp]
+            rw [if_neg hp] at hruns
+            exact hruns
+
+/-- General loop contraction by induction on the iteration count, as a full
+    state transfer: `F` enumerates the loop's check states (`F (k+1)` is one
+    iteration before `F k`), `hstep` glues one iteration (a full-state transfer
+    taking `PATH` committed steps), and `hbase` discharges the exit when the
+    counter has reached `F 0` (the exit state `s0` is fixed because each
+    iteration restores the frame).  No unrolling: the conclusion is stated
+    directly against `arm64_go_exit`. -/
+theorem go_exit_loop_exact (code : Nat → UInt8) (ρ : Nat) (F : Nat → Arm64State)
+    (PATH BASE : Nat) (s0 : Arm64State)
+    (hstep : ∀ k, arm64_go_exit (F (k+1)) code ρ (BASE + PATH*(k+1))
+        = arm64_go_exit (F k) code ρ (BASE + PATH*k))
+    (hbase : arm64_go_exit (F 0) code ρ BASE = some s0) :
+    ∀ N, arm64_go_exit (F N) code ρ (BASE + PATH*N) = some s0 := by
+  intro N
+  induction N with
+  | zero => exact hbase
+  | succ k ih => rw [hstep k]; exact ih
+
+/-- Fuel-agnostic form of `go_exit_loop_exact`: the same contraction with any
+    fuel at least `BASE + PATH*N` (via `arm64_go_exit_mono`). -/
+theorem go_exit_loop (code : Nat → UInt8) (ρ : Nat) (F : Nat → Arm64State)
+    (PATH BASE : Nat) (s0 : Arm64State)
+    (hstep : ∀ k, arm64_go_exit (F (k+1)) code ρ (BASE + PATH*(k+1))
+        = arm64_go_exit (F k) code ρ (BASE + PATH*k))
+    (hbase : arm64_go_exit (F 0) code ρ BASE = some s0) :
+    ∀ N f, BASE + PATH*N ≤ f → arm64_go_exit (F N) code ρ f = some s0 := by
+  intro N f hf
+  exact arm64_go_exit_mono (F N) s0 code ρ (BASE + PATH*N) f hf
+    (go_exit_loop_exact code ρ F PATH BASE s0 hstep hbase N)
+
+/-- Two adjacent 8-byte slots at `a` and `a + 8` have non-overlapping byte
+    ranges, even when the second address wraps modulo 2^64.  This supplies the
+    disjointness hypothesis of the frame read-after-write lemmas for a
+    symbolic stack pointer. -/
+theorem addr_adjacent_disj (a : Nat) (ha : a < 18446744073709551616) :
+    a + 8 ≤ (a + 8) % 18446744073709551616 ∨
+      (a + 8) % 18446744073709551616 + 8 ≤ a := by
+  by_cases h : a + 8 < 18446744073709551616
+  · left
+    have : (a + 8) % 18446744073709551616 = a + 8 := Nat.mod_eq_of_lt h
+    omega
+  · right
+    have hge : 18446744073709551616 ≤ a + 8 := by omega
+    have hlt : a + 8 - 18446744073709551616 < 18446744073709551616 := by omega
+    have hmod : (a + 8) % 18446744073709551616 = a + 8 - 18446744073709551616 := by
+      calc (a + 8) % 18446744073709551616
+          = ((a + 8 - 18446744073709551616) + 18446744073709551616) % 18446744073709551616 := by
+              rw [Nat.sub_add_cancel hge]
+        _ = (a + 8 - 18446744073709551616) % 18446744073709551616 := Nat.add_mod_right _ _
+        _ = a + 8 - 18446744073709551616 := Nat.mod_eq_of_lt hlt
+    rw [hmod]; omega
+
+/-- Side-condition-free adjacent-slot round-trip: reading slot `a` after a
+    pair of writes at `a` and `a+8 (mod 2^64)` returns the first value.  The
+    disjointness is supplied by `addr_adjacent_disj`; `ha` is discharged by
+    `UInt64.toNat_lt` for the actual `(sp - k).toNat` addresses. -/
+theorem mem_read_two_writes_adjacent_mod (mem : Nat → UInt8) (a : Nat)
+    (ha : a < 18446744073709551616) (v w : UInt64) :
+    mem_read_u64
+      (mem_write_u64 (mem_write_u64 mem a v) ((a + 8) % 18446744073709551616) w) a = v :=
+  mem_read_two_writes_same mem a ((a + 8) % 18446744073709551616) v w
+    (addr_adjacent_disj a ha)
+
+/-- Adjacent-slot round-trip in the address shape the code generator actually
+    emits: read slot `x.toNat` after writes at `x.toNat` and `(x+8).toNat`.
+    (`(x+8).toNat` is the `%2^64` form; this variant rewrites it and applies
+    `mem_read_two_writes_adjacent_mod`.) -/
+theorem mem_read_two_writes_adj_uint (mem : Nat → UInt8) (x : UInt64) (v w : UInt64) :
+    mem_read_u64
+      (mem_write_u64 (mem_write_u64 mem x.toNat v) (x + 8).toNat w) x.toNat = v := by
+  have h8 : ((8 : UInt64)).toNat = 8 := rfl
+  have hx : (x + 8).toNat = (x.toNat + 8) % 18446744073709551616 := by
+    rw [u64_toNat_add_lit, h8]
+  rw [hx]
+  exact mem_read_two_writes_adjacent_mod mem x.toNat (UInt64.toNat_lt x) v w
+
+/-- Peel a spill pair written at `x` from a read at a disjoint `y`.  Needed when
+    a block spills several operands (e.g. a compound condition): the read of an
+    earlier spill has later spills above it in the memory chain. -/
+theorem mem_read_two_writes_adj_uint_ne (mem : Nat → UInt8) (x y : UInt64) (v w : UInt64)
+    (h1 : y.toNat + 8 ≤ x.toNat ∨ x.toNat + 8 ≤ y.toNat)
+    (h2 : y.toNat + 8 ≤ (x + 8).toNat ∨ (x + 8).toNat + 8 ≤ y.toNat) :
+    mem_read_u64 (mem_write_u64 (mem_write_u64 mem x.toNat v) (x + 8).toNat w) y.toNat
+      = mem_read_u64 mem y.toNat := by
+  rw [mem_read_after_write_u64_ne _ (x + 8).toNat y.toNat w h2,
+      mem_read_after_write_u64_ne _ x.toNat y.toNat v h1]
+
+/-! ### Comparison-condition bridge
+
+The code generator materialises a source comparison `a ⋈ b` by `cmp`-ing the
+two operands and `cset`-ing the corresponding condition code.  These lemmas
+identify the resulting condition flag with the UInt64 comparison, generically
+over the operands (proved by `bv_decide`). -/
+
+theorem arm64_flag_eq (a b : UInt64) :
+    arm64_matches_condition 0 (arm64_subs_flags a b) = true ↔ a = b := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_ne (a b : UInt64) :
+    arm64_matches_condition 1 (arm64_subs_flags a b) = true ↔ a ≠ b := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_ge (a b : UInt64) :
+    arm64_matches_condition 2 (arm64_subs_flags a b) = true ↔ a ≥ b := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_lt (a b : UInt64) :
+    arm64_matches_condition 3 (arm64_subs_flags a b) = true ↔ a < b := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_gt (a b : UInt64) :
+    arm64_matches_condition 8 (arm64_subs_flags a b) = true ↔ a > b := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_le (a b : UInt64) :
+    arm64_matches_condition 9 (arm64_subs_flags a b) = true ↔ a ≤ b := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+/-- Signed-comparison flag lemmas.  A signed ≤/</≥/> on the two's-complement
+    values is an unsigned comparison after flipping the sign bit, so the
+    `gt`/`lt`/`ge`/`le` conditions (codes 12/11/10/13) identify with the
+    sign-flipped unsigned order.  Sign mask is `0x8000000000000000`. -/
+theorem arm64_flag_ge_s (a b : UInt64) :
+    arm64_matches_condition 10 (arm64_subs_flags a b) = true
+      ↔ (a ^^^ 0x8000000000000000) ≥ (b ^^^ 0x8000000000000000) := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_lt_s (a b : UInt64) :
+    arm64_matches_condition 11 (arm64_subs_flags a b) = true
+      ↔ (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_gt_s (a b : UInt64) :
+    arm64_matches_condition 12 (arm64_subs_flags a b) = true
+      ↔ (a ^^^ 0x8000000000000000) > (b ^^^ 0x8000000000000000) := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_flag_le_s (a b : UInt64) :
+    arm64_matches_condition 13 (arm64_subs_flags a b) = true
+      ↔ (a ^^^ 0x8000000000000000) ≤ (b ^^^ 0x8000000000000000) := by
+  simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+theorem arm64_cset_eq (a b : UInt64) :
+    (if arm64_matches_condition 0 (arm64_subs_flags a b) then (1 : UInt64) else 0)
+      = (if a = b then 1 else 0) := by
+  by_cases h : a = b
+  · rw [if_pos ((arm64_flag_eq a b).mpr h), if_pos h]
+  · rw [if_neg (fun hc => h ((arm64_flag_eq a b).mp hc)), if_neg h]
+
+theorem arm64_cset_ne (a b : UInt64) :
+    (if arm64_matches_condition 1 (arm64_subs_flags a b) then (1 : UInt64) else 0)
+      = (if a ≠ b then 1 else 0) := by
+  by_cases h : a ≠ b
+  · rw [if_pos ((arm64_flag_ne a b).mpr h), if_pos h]
+  · rw [if_neg (fun hc => h ((arm64_flag_ne a b).mp hc)), if_neg h]
+
+theorem arm64_cset_le (a b : UInt64) :
+    (if arm64_matches_condition 9 (arm64_subs_flags a b) then (1 : UInt64) else 0)
+      = (if a ≤ b then 1 else 0) := by
+  by_cases h : a ≤ b
+  · rw [if_pos ((arm64_flag_le a b).mpr h), if_pos h]
+  · rw [if_neg (fun hc => h ((arm64_flag_le a b).mp hc)), if_neg h]
+
+/-! # Generic countdown-style while-loop contract
+
+This is the generic induction behind every `while (x19 > 0) { x19 -= 1 }` loop
+the compiler emits.  The three straight-line block effect maps (`cond`, `body`,
+`ex`) and their machine facts are supplied as hypotheses; the induction on the
+counter, the fuel arithmetic, and the block composition are all proved here, so
+the generator only emits a thin instantiation. -/
+
+
+
+/-- **Generic countdown-style while-loop contract.**
+
+`checkPc` is the loop header; `cond` is the condition block (ending in a `cbz`
+on register `cr` at `cbzPc`) that falls to `bodyPc` and exits to `exitBpc`;
+`body` is the body block, which runs back to `checkPc`; `ex` is the exit block,
+which runs to `exit`.  The loop counter is `x19`; the `cbz` tests it against
+zero (`hcondFlag`).  With `x19 = arg` at the header, the exit-mode interpreter
+reaches `exit` with `x0 = done arg`, provided `done` is constant along the
+countdown (`hmojo`).
+
+`P` is the frame invariant the loop maintains (for the compiler.s loops it is
+the return-address slot read-back that the callee-saved epilogue consumes).  It
+is preserved by the condition and body blocks (`hP_cond`, `hP_body`), moved past
+`pc`-updates (`hP_pc`), and implies the epilogue.s return target (`hexPc`). -/
+theorem while_dec_exit_contract
+    (code : Nat → UInt8) (exit checkPc cbzPc bodyPc exitBpc : Nat) (cr : Nat)
+    (done : UInt64 → UInt64)
+    (cond body ex : Arm64State → Arm64State)
+    (mc mb me : Nat)
+    (P : Arm64State → Prop)
+    (hP_pc : ∀ (st : Arm64State) (pc : Nat), P st → P { st with pc := pc })
+    (hP_cond : ∀ st, st.pc = checkPc → P st → P (cond st))
+    (hP_body : ∀ st, st.pc = bodyPc → P st → P (body st))
+    (hstep : ∀ st, st.pc = cbzPc →
+      arm64_step st code = some (if arm64_reg cr st = 0 then
+        ({ st with pc := exitBpc } : Arm64State) else ({ st with pc := bodyPc } : Arm64State)))
+    (hcondRun : ∀ st, st.pc = checkPc → arm64_runs code mc st = some (cond st))
+    (hcondMid : ∀ st, st.pc = checkPc →
+      ∀ u, u < mc → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hcondPc : ∀ st, st.pc = checkPc → (cond st).pc = cbzPc)
+    (hcondFlag : ∀ st, st.pc = checkPc → (arm64_reg cr (cond st) = 0 ↔ st.x19 = 0))
+    (hcondX19 : ∀ st, st.pc = checkPc → (cond st).x19 = st.x19)
+    (hbodyRun : ∀ st, st.pc = bodyPc → arm64_runs code mb st = some (body st))
+    (hbodyMid : ∀ st, st.pc = bodyPc →
+      ∀ u, u < mb → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hbodyPc : ∀ st, st.pc = bodyPc → (body st).pc = checkPc)
+    (hbodyDec : ∀ st, st.pc = bodyPc → (body st).x19 = st.x19 - 1)
+    (hexRun : ∀ st, st.pc = exitBpc → P st → arm64_runs code me st = some (ex st))
+    (hexMid : ∀ st, st.pc = exitBpc →
+      ∀ u, u < me → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hexPc : ∀ st, st.pc = exitBpc → P st → (ex st).pc = exit)
+    (hexX0 : ∀ st, st.pc = exitBpc → st.x19 = 0 → (ex st).x0 = done st.x19)
+    (hmojo : ∀ (a : UInt64), a ≠ 0 → done (a - 1) = done a)
+    (hcbzExit : cbzPc ≠ exit) (hExitBpc : exitBpc ≠ cbzPc) (hBodyPc : bodyPc ≠ cbzPc) :
+    ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
+      (mc + mb + 2) * arg.toNat + (mc + me + 2) ≤ fuel →
+      st.pc = checkPc → st.x19 = arg → P st →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = done arg := by
+  have key : ∀ k, ∀ st : Arm64State, st.pc = checkPc → st.x19.toNat = k → P st →
+      ∀ fuel, (mc + mb + 2) * k + (mc + me + 2) ≤ fuel →
+        ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = done st.x19 := by
+    intro k
+    induction k with
+    | zero =>
+      intro st hpc hk hPst fuel hfuel
+      rw [Nat.mul_zero, Nat.zero_add] at hfuel
+      have hx19_0 : st.x19 = 0 := by
+        apply UInt64.toNat.inj
+        simpa using hk
+      have hglue1 := rec1_glue_gen code exit mc (fuel - mc) st (cond st)
+        (hcondRun st hpc) (hcondMid st hpc)
+      rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
+      rw [hglue1]
+      have hcp := hcondPc st hpc
+      have hflag : arm64_reg cr (cond st) = 0 := (hcondFlag st hpc).mpr hx19_0
+      have hjump : ({ cond st with pc := exitBpc } : Arm64State).pc ≠ (cond st).pc := by
+        rw [hcp]; exact hExitBpc
+      have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
+      have hcbz := go_exit_cbz_taken (cond st) code exit (fuel - mc - 1)
+        (arm64_reg cr (cond st) = 0)
+        ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
+        (hstep (cond st) hcp) hflag hjump hpcne
+      rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
+      rw [hcbz]
+      have hPe : P ({ cond st with pc := exitBpc } : Arm64State) :=
+        hP_pc (cond st) exitBpc (hP_cond st hpc hPst)
+      have hglue3 := rec1_glue_gen code exit me (fuel - mc - 1 - me)
+        ({ cond st with pc := exitBpc }) (ex { cond st with pc := exitBpc })
+        (hexRun _ (by rfl) hPe) (hexMid _ (by rfl))
+      rw [show me + (fuel - mc - 1 - me) = fuel - mc - 1 from by omega] at hglue3
+      rw [hglue3]
+      have hexpc : (ex { cond st with pc := exitBpc }).pc = exit := hexPc _ (by rfl) hPe
+      rw [arm64_go_exit_hit _ code exit (fuel - mc - 1 - me) (by omega) hexpc]
+      have hzero : ({ cond st with pc := exitBpc } : Arm64State).x19 = 0 := by
+        change (cond st).x19 = 0
+        rw [hcondX19 st hpc, hx19_0]
+      have hx0ex : (ex { cond st with pc := exitBpc }).x0 = done st.x19 := by
+        rw [hexX0 _ (by rfl) hzero]
+        rw [show ({ cond st with pc := exitBpc } : Arm64State).x19 = st.x19 from by
+          change (cond st).x19 = st.x19
+          exact hcondX19 st hpc]
+      exact ⟨ex { cond st with pc := exitBpc }, rfl, hx0ex⟩
+    | succ k ih =>
+      intro st hpc hk hPst fuel hfuel
+      rw [Nat.mul_succ] at hfuel
+      have hne : st.x19 ≠ 0 := by intro h; rw [h] at hk; simp at hk
+      have hglue1 := rec1_glue_gen code exit mc (fuel - mc) st (cond st)
+        (hcondRun st hpc) (hcondMid st hpc)
+      rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
+      rw [hglue1]
+      have hcp := hcondPc st hpc
+      have hflag : ¬ (arm64_reg cr (cond st) = 0) :=
+        fun h0 => hne ((hcondFlag st hpc).mp h0)
+      have hjump : ({ cond st with pc := bodyPc } : Arm64State).pc ≠ (cond st).pc := by
+        rw [hcp]; exact hBodyPc
+      have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
+      have hcbz := go_exit_cbz_fall (cond st) code exit (fuel - mc - 1)
+        (arm64_reg cr (cond st) = 0)
+        ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
+        (hstep (cond st) hcp) hflag hjump hpcne
+      rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
+      rw [hcbz]
+      have hglue2 := rec1_glue_gen code exit mb (fuel - mc - 1 - mb)
+        ({ cond st with pc := bodyPc }) (body { cond st with pc := bodyPc })
+        (hbodyRun _ (by rfl)) (hbodyMid _ (by rfl))
+      rw [show mb + (fuel - mc - 1 - mb) = fuel - mc - 1 from by omega] at hglue2
+      rw [hglue2]
+      have hbpc : (body { cond st with pc := bodyPc }).pc = checkPc := hbodyPc _ (by rfl)
+      have hcin : ({ cond st with pc := bodyPc } : Arm64State).x19 = st.x19 := by
+        change (cond st).x19 = st.x19
+        exact hcondX19 st hpc
+      have hbdec : (body { cond st with pc := bodyPc }).x19 = st.x19 - 1 := by
+        have h := hbodyDec ({ cond st with pc := bodyPc }) (by rfl)
+        rwa [hcin] at h
+      have hbtoNat : (body { cond st with pc := bodyPc }).x19.toNat = k := by
+        rw [hbdec, toNat_sub_one st.x19 hne, hk]; omega
+      have hPc' : P ({ cond st with pc := bodyPc } : Arm64State) :=
+        hP_pc (cond st) bodyPc (hP_cond st hpc hPst)
+      have hPb : P (body { cond st with pc := bodyPc }) := hP_body _ (by rfl) hPc'
+      have hfuel' : (mc + mb + 2) * k + (mc + me + 2) ≤ fuel - mc - 1 - mb := by omega
+      obtain ⟨s, hs, hx0⟩ := ih _ hbpc hbtoNat hPb _ hfuel'
+      refine ⟨s, hs, ?_⟩
+      rw [hx0, hbdec]
+      exact hmojo st.x19 hne
+  intro arg st fuel hfuel hpc hx19 hPst
+  simpa [hx19] using key arg.toNat st hpc (by rw [hx19]) hPst fuel (by simpa using hfuel)
+
+/-- Generic count-up loop contract: the `for i in range (start, end)` shape.
+
+    `checkPc` is the loop top (start of the condition-test block), `cbzPc` the
+    CBZ inside it, `bodyPc` the CBZ fall (loop body), `exitBpc` the CBZ taken
+    (exit path).  `cr` is the register the CBZ tests (the CSET result); `r` is
+    the counter register (loop variable); `b` the bound register.
+
+    Inducts on the remaining iterations `(b - r).toNat`:
+    - base (`b ≤ r`): condition false, exit path, `x0 = model st` (the
+      exit-path obligation folds the model to the exit expression);
+    - step (`r < b`): condition true, body increments the counter
+      (`hbodyR`) and the model advances by one step (`hbodyModel`).
+
+    `model : Arm64State → UInt64` is pc-insensitive (`hmodelPc`) and reads
+    only registers; its base case must equal the exit-path's x0.  This is the
+    counting generalisation of `while_dec_exit_contract` (which is the
+    `r = 0 → done` special case with a constant model). -/
+theorem while_lt_exit_contract
+    (code : Nat → UInt8) (exit checkPc cbzPc bodyPc exitBpc : Nat)
+    (cr r b : Nat)
+    (model : Arm64State → UInt64)
+    (cond body ex : Arm64State → Arm64State)
+    (mc mb me : Nat)
+    (P : Arm64State → Prop)
+    (hP_pc : ∀ (st : Arm64State) (pc : Nat), P st → P { st with pc := pc })
+    (hP_cond : ∀ st, st.pc = checkPc → P st → P (cond st))
+    (hP_body : ∀ st, st.pc = bodyPc → P st → P (body st))
+    (hstep : ∀ st, st.pc = cbzPc →
+      arm64_step st code = some (if arm64_reg cr st = 0 then
+        ({ st with pc := exitBpc } : Arm64State) else ({ st with pc := bodyPc } : Arm64State)))
+    (hcondRun : ∀ st, st.pc = checkPc → arm64_runs code mc st = some (cond st))
+    (hcondMid : ∀ st, st.pc = checkPc →
+      ∀ u, u < mc → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hcondPc : ∀ st, st.pc = checkPc → (cond st).pc = cbzPc)
+    (hcondFlag : ∀ st, st.pc = checkPc →
+      (arm64_reg cr (cond st) = 0 ↔ ¬ (arm64_reg r st < arm64_reg b st)))
+    (hcondRB : ∀ st, st.pc = checkPc →
+      arm64_reg r (cond st) = arm64_reg r st ∧ arm64_reg b (cond st) = arm64_reg b st)
+    (hcondModel : ∀ st, st.pc = checkPc → model (cond st) = model st)
+    (hbodyRun : ∀ st, st.pc = bodyPc → arm64_runs code mb st = some (body st))
+    (hbodyMid : ∀ st, st.pc = bodyPc →
+      ∀ u, u < mb → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hbodyPc : ∀ st, st.pc = bodyPc → (body st).pc = checkPc)
+    (hbodyR : ∀ st, st.pc = bodyPc → arm64_reg r (body st) = arm64_reg r st + 1)
+    (hbodyB : ∀ st, st.pc = bodyPc → arm64_reg b (body st) = arm64_reg b st)
+    (hbodyModel : ∀ st, st.pc = bodyPc →
+      (arm64_reg r st < arm64_reg b st) → model (body st) = model st)
+    (hexRun : ∀ st, st.pc = exitBpc → P st → arm64_runs code me st = some (ex st))
+    (hexMid : ∀ st, st.pc = exitBpc →
+      ∀ u, u < me → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hexPc : ∀ st, st.pc = exitBpc → P st → (ex st).pc = exit)
+    (hexX0 : ∀ st, st.pc = exitBpc →
+      ¬ (arm64_reg r st < arm64_reg b st) → (ex st).x0 = model st)
+    (hmodelPc : ∀ st pc, model { st with pc := pc } = model st)
+    (hcbzExit : cbzPc ≠ exit) (hExitBpc : exitBpc ≠ cbzPc) (hBodyPc : bodyPc ≠ cbzPc) :
+    ∀ (st : Arm64State) (fuel : Nat),
+      (mc + mb + 2) *
+        ((arm64_reg b st).toNat - (arm64_reg r st).toNat) + (mc + me + 2) ≤ fuel →
+      st.pc = checkPc → P st →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+  have u64_lt_toNat {a c : UInt64} (h : a < c) : a.toNat < c.toNat := by
+    rw [UInt64.lt_iff_toNat_lt] at h
+    exact h
+  have toNat_lt_u64 {a c : UInt64} (h : a.toNat < c.toNat) : a < c := by
+    rw [UInt64.lt_iff_toNat_lt]
+    exact h
+  have key : ∀ (k : Nat) (st : Arm64State), st.pc = checkPc →
+      (arm64_reg b st).toNat - (arm64_reg r st).toNat = k → P st →
+      ∀ fuel, (mc + mb + 2) * k + (mc + me + 2) ≤ fuel →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+    intro k
+    induction k with
+    | zero =>
+      intro st hpc hk hPst fuel hfuel
+      rw [Nat.mul_zero, Nat.zero_add] at hfuel
+      have hge : ¬ (arm64_reg r st < arm64_reg b st) := by
+        intro hlt_r
+        have hltNat : (arm64_reg r st).toNat < (arm64_reg b st).toNat := u64_lt_toNat hlt_r
+        have hle : (arm64_reg b st).toNat ≤ (arm64_reg r st).toNat :=
+          Nat.le_of_sub_eq_zero hk
+        exact (Nat.not_lt_of_le hle) hltNat
+      have hglue1 := rec1_glue_gen code exit mc (fuel - mc) st (cond st)
+        (hcondRun st hpc) (hcondMid st hpc)
+      rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
+      rw [hglue1]
+      have hcp := hcondPc st hpc
+      have hflag : arm64_reg cr (cond st) = 0 := (hcondFlag st hpc).mpr hge
+      have hjump : ({ cond st with pc := exitBpc } : Arm64State).pc ≠ (cond st).pc := by
+        rw [hcp]; exact hExitBpc
+      have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
+      have hcbz := go_exit_cbz_taken (cond st) code exit (fuel - mc - 1)
+        (arm64_reg cr (cond st) = 0)
+        ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
+        (hstep (cond st) hcp) hflag hjump hpcne
+      rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
+      rw [hcbz]
+      have hPe : P ({ cond st with pc := exitBpc } : Arm64State) :=
+        hP_pc (cond st) exitBpc (hP_cond st hpc hPst)
+      have hglue3 := rec1_glue_gen code exit me (fuel - mc - 1 - me)
+        ({ cond st with pc := exitBpc }) (ex { cond st with pc := exitBpc })
+        (hexRun _ (by rfl) hPe) (hexMid _ (by rfl))
+      rw [show me + (fuel - mc - 1 - me) = fuel - mc - 1 from by omega] at hglue3
+      rw [hglue3]
+      have hexpc : (ex { cond st with pc := exitBpc }).pc = exit :=
+        hexPc _ (by rfl) hPe
+      rw [arm64_go_exit_hit _ code exit (fuel - mc - 1 - me) (by omega) hexpc]
+      have hge2 : ¬ (arm64_reg r { cond st with pc := exitBpc } <
+                     arm64_reg b { cond st with pc := exitBpc }) := by
+        intro hlt_e
+        rw [arm64_reg_pc r (cond st) exitBpc, arm64_reg_pc b (cond st) exitBpc,
+            (hcondRB st hpc).1, (hcondRB st hpc).2] at hlt_e
+        exact hge hlt_e
+      have hx0ex : (ex { cond st with pc := exitBpc }).x0 = model st := by
+        have hex0 := hexX0 _ (by rfl) hge2
+        rw [hex0, hmodelPc (cond st) exitBpc, hcondModel st hpc]
+      exact ⟨ex { cond st with pc := exitBpc }, rfl, hx0ex⟩
+    | succ k ih =>
+      intro st hpc hk hPst fuel hfuel
+      rw [Nat.mul_succ] at hfuel
+      have hlt : arm64_reg r st < arm64_reg b st := by
+        have hpos : 0 < (arm64_reg b st).toNat - (arm64_reg r st).toNat := by
+          rw [hk]; omega
+        exact toNat_lt_u64 (Nat.lt_of_sub_pos hpos)
+      have hglue1 := rec1_glue_gen code exit mc (fuel - mc) st (cond st)
+        (hcondRun st hpc) (hcondMid st hpc)
+      rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
+      rw [hglue1]
+      have hcp := hcondPc st hpc
+      have hflag : ¬ (arm64_reg cr (cond st) = 0) := by
+        intro hcr
+        exact (hcondFlag st hpc).mp hcr hlt
+      have hjump : ({ cond st with pc := bodyPc } : Arm64State).pc ≠ (cond st).pc := by
+        rw [hcp]; exact hBodyPc
+      have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
+      have hcbz := go_exit_cbz_fall (cond st) code exit (fuel - mc - 1)
+        (arm64_reg cr (cond st) = 0)
+        ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
+        (hstep (cond st) hcp) hflag hjump hpcne
+      rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
+      rw [hcbz]
+      have hglue2 := rec1_glue_gen code exit mb (fuel - mc - 1 - mb)
+        { cond st with pc := bodyPc } (body { cond st with pc := bodyPc })
+        (hbodyRun _ (by rfl)) (hbodyMid _ (by rfl))
+      rw [show mb + (fuel - mc - 1 - mb) = fuel - mc - 1 from by omega] at hglue2
+      rw [hglue2]
+      have hbpc : (body { cond st with pc := bodyPc }).pc = checkPc :=
+        hbodyPc _ (by rfl)
+      have hlt2 : arm64_reg r { cond st with pc := bodyPc } <
+                  arm64_reg b { cond st with pc := bodyPc } := by
+        rw [arm64_reg_pc r (cond st) bodyPc, arm64_reg_pc b (cond st) bodyPc,
+            (hcondRB st hpc).1, (hcondRB st hpc).2]
+        exact hlt
+      have hrem : (arm64_reg b (body { cond st with pc := bodyPc })).toNat -
+          (arm64_reg r (body { cond st with pc := bodyPc })).toNat = k := by
+        have hrb : arm64_reg r (body { cond st with pc := bodyPc }) =
+            arm64_reg r { cond st with pc := bodyPc } + 1 := hbodyR _ (by rfl)
+        have hbb : arm64_reg b (body { cond st with pc := bodyPc }) =
+            arm64_reg b { cond st with pc := bodyPc } := hbodyB _ (by rfl)
+        have hadd : (arm64_reg r { cond st with pc := bodyPc } + 1).toNat =
+            (arm64_reg r { cond st with pc := bodyPc }).toNat + 1 := by
+          have hltNat : (arm64_reg r { cond st with pc := bodyPc }).toNat <
+              (arm64_reg b { cond st with pc := bodyPc }).toNat := u64_lt_toNat hlt2
+          have hb264 : (arm64_reg b { cond st with pc := bodyPc }).toNat < 2^64 :=
+            UInt64.toNat_lt (arm64_reg b { cond st with pc := bodyPc })
+          have hlt264 : (arm64_reg r { cond st with pc := bodyPc }).toNat + 1 < 2^64 := by
+            calc (arm64_reg r { cond st with pc := bodyPc }).toNat + 1
+                ≤ (arm64_reg b { cond st with pc := bodyPc }).toNat := Nat.succ_le_of_lt hltNat
+              _ < 2^64 := hb264
+          rw [UInt64.toNat_add, show (1 : UInt64).toNat = 1 from by rfl]
+          exact Nat.mod_eq_of_lt hlt264
+        have hrb2 : (arm64_reg r (body { cond st with pc := bodyPc })).toNat =
+            (arm64_reg r { cond st with pc := bodyPc }).toNat + 1 := by
+          rw [hrb, hadd]
+        have hb2 : (arm64_reg b { cond st with pc := bodyPc }).toNat =
+            (arm64_reg b st).toNat := by
+          rw [arm64_reg_pc, (hcondRB st hpc).2]
+        have hr2 : (arm64_reg r { cond st with pc := bodyPc }).toNat =
+            (arm64_reg r st).toNat := by
+          rw [arm64_reg_pc, (hcondRB st hpc).1]
+        rw [hbb, hrb2, hb2, hr2]
+        have hsub : (arm64_reg b st).toNat - ((arm64_reg r st).toNat + 1) = k := by
+          rw [← Nat.sub_sub, hk]
+          omega
+        simpa using hsub
+      have hfuel' : (mc + mb + 2) * k + (mc + me + 2) ≤ fuel - mc - 1 - mb := by omega
+      have hP2 : P { cond st with pc := bodyPc } :=
+        hP_pc (cond st) bodyPc (hP_cond st hpc hPst)
+      have hPb : P (body { cond st with pc := bodyPc }) :=
+        hP_body _ (by rfl) hP2
+      obtain ⟨s, hs, hx0⟩ := ih _ hbpc hrem hPb _ hfuel'
+      refine ⟨s, hs, ?_⟩
+      rw [hx0, hbodyModel _ (by rfl) hlt2, hmodelPc (cond st) bodyPc,
+          hcondModel st hpc]
+  intro st fuel hfuel hpc hPst
+  simpa using key ((arm64_reg b st).toNat - (arm64_reg r st).toNat) st hpc
+    (by rfl) hPst fuel hfuel
+
+/-- **A push pair does not disturb a slot above `sp`.**  Reading `sp + j`
+    (`j < 2^63`) after the two-store push at `sp - 16` and `(sp - 16) + 8`
+    returns the value from the old memory.  This is the frame-preservation
+    combinator every body block needs: the loop's pushes sit below the
+    caller's saved slots. -/
+theorem mem_read_push_frame (mem : Nat → UInt8) (sp : UInt64) {j : Nat} (hj : j < 2^63)
+    (v w : UInt64) :
+    mem_read_u64
+      (mem_write_u64 (mem_write_u64 mem (sp - UInt64.ofNat 16).toNat v)
+        ((sp - UInt64.ofNat 16) + 8).toNat w) ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) := by
+  have haddr : (((sp - UInt64.ofNat 16) + 8 : UInt64).toNat) = (sp - UInt64.ofNat 8).toNat := by
+    rw [u64_sub_add]
+    rfl
+  rw [haddr,
+      mem_read_after_write_u64_ne _ _ _ _
+        ((u64_write_read_disjoint sp (K := 8) (j := j) (by decide) (by decide)
+          (by omega) (by omega)).elim Or.inr Or.inl),
+      mem_read_after_write_u64_ne _ _ _ _
+        ((u64_write_read_disjoint sp (K := 16) (j := j) (by decide) (by decide)
+          hj (by omega)).elim Or.inr Or.inl)]
+
+
+/-- `(sp - d) + d = sp` (bitvector cancellation). -/
+theorem u64_sub_add_self (sp d : UInt64) : (sp - d) + d = sp := by grind
+
+
+/-! ## Routed per-instruction step lemmas and loop-contract helpers
+
+Promoted from the former `lib/work.lean` (now empty): these are proven,
+generic, and used by the generator's `{name}_sr_N` routing and the
+decrement-while loop contract.  See HARD §0.10/§0.10.1. -/
+
+/-- §8.4(1) body_run: body run + back-edge as one `arm64_runs` certificate. -/
+theorem work_body_run (code : Nat → UInt8) (m : Nat) (st mid : Arm64State) (tgt : Nat)
+    (h1 : arm64_runs code m st = some mid)
+    (h2 : arm64_step mid code = some { mid with pc := tgt })
+    (h3 : tgt ≠ mid.pc) :
+    arm64_runs code (m + 1) st = some { mid with pc := tgt } := by
+  rw [runs_append_some code m 1 st mid h1]
+  simp only [arm64_runs, h2]
+  rw [if_neg h3]
+
+/-- §8.4(2) body_mid: the composed body+branch avoids the exit pc. -/
+theorem work_body_mid (code : Nat → UInt8) (m : Nat) (st mid : Arm64State) (tgt exit : Nat)
+    (h1 : arm64_runs code m st = some mid)
+    (h2 : arm64_step mid code = some { mid with pc := tgt })
+    (h3 : ∀ u, u < m → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (h4 : tgt ≠ exit)
+    (h5 : mid.pc ≠ exit) :
+    ∀ u, u < m + 1 → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit := by
+  intro u hu su hsu
+  rcases Nat.lt_or_eq_of_le (Nat.le_of_lt_succ hu) with hlt | heq
+  · exact h3 u hlt su hsu
+  · subst u
+    have hmid : mid = su := by injection (h1.symm.trans hsu)
+    rw [← hmid]
+    exact h5
+
+/-- §8.4(3) fuel: the countdown loop fuel bound, in omega-ready form. -/
+theorem work_loop_fuel (mc mb me k fuel : Nat)
+    (h : (mc + mb + 2) * k + (mc + me + 2) ≤ fuel) :
+    (mc + mb + 2) * k + (mc + me + 2) ≤ fuel := by
+  exact h
+
+/-- §8.4(4) exit: package `while_dec_exit_contract`'s exit obligations. -/
+theorem work_exit_hyps (code : Nat → UInt8) (exitBpc exit : Nat) (ex : Arm64State → Arm64State)
+    (hpc : ∀ st, st.pc = exitBpc → (ex st).pc = exit)
+    (hrun : ∀ st, st.pc = exitBpc → arm64_runs code 5 st = some (ex st)) :
+    (∀ st, st.pc = exitBpc → (ex st).pc = exit) := by
+  exact hpc
+
+/-! Per-instruction step lemmas (routed from the generator)
+
+Each `work_step_*` states the `arm64_step` result for one decoded instruction
+kind in terms of the word's bit-fields; proved by unfolding `arm64_step` and
+reducing the decode chain.  The generator's `{name}_sr_N` is a call to one of
+these. -/
+
+/-- Per-instruction step: `work_step_ret`. -/
+theorem work_step_ret (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : w = (0xd65f03c0 : UInt32)) :
+    arm64_step s code = some { s with pc := s.x30.toNat } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  rw [if_pos h]
+
+/-- Per-instruction step: `work_step_mov`. -/
+theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0x2a00fa00) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  rw [if_neg hne_ret, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_add_reg`. -/
+theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0x8b000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_sub_reg`. -/
+theorem work_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xcb000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_mul`. -/
+theorem work_step_mul (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe07c00) = 0x9b007c00) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s * arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_neg`. -/
+theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xfffffc1f) = 0xcb0003e0) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (-(arm64_reg (((w >>> 16) &&& 0x1f).toNat) s))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_cmp_reg`. -/
+theorem work_step_cmp_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xeb000000) :
+    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_and`. -/
+theorem work_step_and (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0x8a000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_eor`. -/
+theorem work_step_eor (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xca000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat (((arm64_reg (((w >>> 5) &&& 0x1f).toNat) s).toNat ^ (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat) % (2^64)))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_add_imm32`. -/
+theorem work_step_add_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xff800000) = 0x11000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_add_imm64`. -/
+theorem work_step_add_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xff800000) = 0x91000000) :
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_sub_imm32`. -/
+theorem work_step_sub_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xff800000) = 0x51000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_sub_imm64`. -/
+theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xff800000) = 0xd1000000) :
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_cmp_imm`. -/
+theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xff800000) = 0xf1000000) :
+    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)) } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldr_pre`. -/
+theorem work_step_ldr_pre (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xf9400000) :
+    arm64_step s code = some { s with sp := (s.sp - UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)), mem := fun i => if i = (s.sp - UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat then (arm64_reg ((w &&& 0x1f).toNat) s).toUInt8 else s.mem i } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldr_post`. -/
+theorem work_step_ldr_post (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xb9000000) :
+    arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem s.sp.toNat)) with sp := s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8) } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_adrp`. -/
+theorem work_step_adrp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0x9f000000) = 0x90000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat pc - (UInt64.ofNat pc) % (4096 : UInt64) + (if ((((w >>> 5) &&& 0x7ffff).toNat) * 4 + ((w >>> 29) &&& 0x3).toNat) ≥ 2^20 then UInt64.ofNat ((((w >>> 5) &&& 0x7ffff).toNat) * 4 + ((w >>> 29) &&& 0x3).toNat) - UInt64.ofNat (2^21) else UInt64.ofNat ((((w >>> 5) &&& 0x7ffff).toNat) * 4 + ((w >>> 29) &&& 0x3).toNat)) * (4096 : UInt64))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_stp`. -/
+theorem work_step_stp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffc00000) = 0xa9800000) :
+    arm64_step s code = some { s with sp := (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)), mem := mem_write_u64 (mem_write_u64 s.mem (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)).toNat (arm64_reg ((w &&& 0x1f).toNat) s)) ((if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)) + 8).toNat (arm64_reg (((w >>> 10) &&& 0x1f).toNat) s) } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldp_post`. -/
+theorem work_step_ldp_post (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffc00000) = 0xa8c00000) :
+    arm64_step s code = some { (arm64_set_reg (((w >>> 10) &&& 0x1f).toNat) (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s).toNat)) (mem_read_u64 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + 8).toNat)) with sp := (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8) } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_movz`. -/
+theorem work_step_movz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0x52800000 ∨ (w &&& 0xffe00000) = 0xd2800000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat (((w >>> 5) &&& 0xffff).toNat))) := by
+  rcases h with h | h
+  ·
+    unfold arm64_step
+    rw [hpc, hread]
+    have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+      intro t; rw [t] at h; exact absurd h (by native_decide)
+    have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+    have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+    have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+    have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+    have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+    have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+    have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+    have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+    have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+    have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+    have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+    have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+    have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+    have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+    have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+    have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+    have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+    have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+    have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+    have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+    have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+    have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+    rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_pos h]; try dsimp; try rfl; try simp
+  ·
+    unfold arm64_step
+    rw [hpc, hread]
+    have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+      intro t; rw [t] at h; exact absurd h (by native_decide)
+    have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+    have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+    have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+    have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+    have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+    have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+    have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+    have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+    have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+    have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+    have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+    have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+    have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+    have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+    have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+    have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+    have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+    have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+    have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+    have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+    have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+    have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+    have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+    rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_orr`. -/
+theorem work_step_orr (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xaa000000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s ||| arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_movk`. -/
+theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xff800000) = 0xf2800000 ∨ (w &&& 0xff800000) = 0x72800000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg ((w &&& 0x1f).toNat) s ||| (UInt64.ofNat (((w >>> 5) &&& 0xffff).toNat) <<< UInt64.ofNat ((((w >>> 21) &&& 0x3).toNat) * 16)))) := by
+  rcases h with h | h
+  ·
+    unfold arm64_step
+    rw [hpc, hread]
+    have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+      intro t; rw [t] at h; exact absurd h (by native_decide)
+    have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+    have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+    have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+    have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+    have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+    have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+    have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+    have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+    have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+    have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+    have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+    have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+    have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+    have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+    have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+    have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+    have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+    have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+    have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+    have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+    have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+    have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+    have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+    have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+    have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+    rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_pos h]; try dsimp; try rfl; try simp
+  ·
+    unfold arm64_step
+    rw [hpc, hread]
+    have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+      intro t; rw [t] at h; exact absurd h (by native_decide)
+    have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+    have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+    have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+    have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+    have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+    have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+    have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+    have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+    have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+    have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+    have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+    have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+    have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+    have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+    have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+    have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+    have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+    have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+    have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+    have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+    have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+    have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+    have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+    have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+    have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+    have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+    rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_movn32`. -/
+theorem work_step_movn32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0x12800000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat (0xffff_ffff - (((w >>> 5) &&& 0xffff).toNat)))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_movn64`. -/
+theorem work_step_movn64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0x92800000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat (0xffff_ffff_ffff_ffff - (((w >>> 5) &&& 0xffff).toNat)))) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_cset`. -/
+theorem work_step_cset (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffff0fe0) = 0x9a9f07e0) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (if arm64_matches_condition (if ((w >>> 12) &&& 0xf) &&& 0x1 = 0 then (((w >>> 12) &&& 0xf) + 1).toNat else (((w >>> 12) &&& 0xf) - 1).toNat) s.nzcv then 1 else 0)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_str_off`. -/
+theorem work_step_str_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xf9000000) :
+    arm64_step s code = some { s with mem := mem_write_u64 s.mem (s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldp_off`. -/
+theorem work_step_ldp_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffc00000) = 0xa9400000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) (arm64_set_reg (((w >>> 5) &&& 0x1f).toNat) s (mem_read_u64 s.mem (s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) (mem_read_u64 s.mem ((s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)) + 8).toNat)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
+  have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_orn`. -/
+theorem work_step_orn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xa200000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg (((w >>> 10) &&& 0x1f).toNat) s) ^^^ (0xffffffffffffffff : UInt64) ||| arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
+  have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
+  have hne_33 : ¬ ((w &&& 0xffc00000) = 0xa9400000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_br`. -/
+theorem work_step_br (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xfffffc1f) = 0xd61f0000) :
+    arm64_step s code = some { s with pc := (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s).toNat } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
+  have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
+  have hne_33 : ¬ ((w &&& 0xffc00000) = 0xa9400000) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe00000) = 0x0a200000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_pos h]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_svc`. -/
+theorem work_step_svc (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe0001f) = 0xd4000001) :
+    arm64_step s code = some s := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xffe00000) = 0xb9000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffc00000) = 0xa9800000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0xffc00000) = 0xa8c00000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
+  have hne_32 : ¬ ((w &&& 0xffe00000) = 0xf9000000) := by intro t; bv_decide
+  have hne_33 : ¬ ((w &&& 0xffc00000) = 0xa9400000) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe00000) = 0x0a200000) := by intro t; bv_decide
+  have hne_35 : ¬ ((w &&& 0xfffffc1f) = 0xd61f0000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_pos h]; try dsimp; try rfl; try simp

@@ -34,7 +34,7 @@ from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import ownership_check
 import mlir
-import gimple_gen_coro
+import mojo.middle.coro as gimple_gen_coro
 import regex_compile
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
@@ -304,7 +304,7 @@ _STR_RETURNING_METHODS = {
 
 
 # ---- Wave-2 leaf extraction re-imports (verbatim moves; see REF.html §6) ----
-from gimple_ctypes import (
+from mojo.middle.types import (
     TypeLattice, _debug_note, _TYPE_MAP, _FLOAT_TYPES, _split_top_level_commas,
     _class_attr_ctype, _mojo_type, _result_type, _elem_type, _c_id, _c_var_decl,
     _printf_fmt, _strip_mojo_param_modifiers, _walk_type_expr, _param_sig_str,
@@ -317,12 +317,12 @@ from gimple_ctypes import (
     _CPP_CALLABLE_CTYPE_1ARG,
     _compute_exc_descendants, _unpack_target_leaf_names, _declared_vars_body,
 )
-from gimple_solvers import (
+from mojo.middle.solvers import (
     _find_idents, _scan_for_escaping, _find_escaping, EscapeAnalyzer,
     LayoutSolver, DispatchTable, DispatchPattern, DispatchSolver,
     FunctionCompilability, TypePromotionSolver, ClosureInfo,
 )
-from gimple_exprtypes import (
+from mojo.middle.exprtypes import (
     _walk_ast, _UnsupportedGeneratorShape, _UnsupportedAsyncShape,
     _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _async_quick_eligible,
     _generator_quick_eligible, _async_gen_quick_eligible, _await_call_ctype,
@@ -524,17 +524,17 @@ _RETURN = "  return;"
 # GimpleGen
 # ---------------------------------------------------------------------------
 
-import gimple_gen_methods as gmp
-import gimple_module_gen as gmg
-import gimple_gen_calls as ggc
-import gimple_gen_stmts as gst
-import gimple_gen_loops as glo
-import gimple_gen_funcs as gfn
-import gimple_cpp_async as gca
-import gimple_cpp_core as gcc_
-import gimple_gen_exprs as gex
-import gimple_gen_infra as ginf
-import gimple_gen_resolve as grsl
+import mojo.backend_gimple.emit_methods as gmp
+import mojo.backend_gimple.module_gen as gmg
+import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_stmts as gst
+import mojo.backend_gimple.emit_loops as glo
+import mojo.backend_gimple.emit_funcs as gfn
+import mojo.backend_gimple.cpp_async as gca
+import mojo.backend_gimple.cpp_core as gcc_
+import mojo.backend_gimple.emit_exprs as gex
+import mojo.backend_gimple.emit_infra as ginf
+import mojo.backend_gimple.emit_resolve as grsl
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
     BUILTIN_VALUE_MAP: dict[str, str] = {

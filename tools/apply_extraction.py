@@ -184,12 +184,12 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
-import gimple_ctypes
-import gimple_solvers
-import gimple_exprtypes
+import mojo.middle.types as gimple_ctypes
+import mojo.middle.solvers as gimple_solvers
+import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
-import gimple_gen_methods as gmp
-import gimple_gen_calls as ggc{extra}
+import mojo.backend_gimple.emit_methods as gmp
+import mojo.backend_gimple.emit_calls as ggc{extra}
 """
 
 

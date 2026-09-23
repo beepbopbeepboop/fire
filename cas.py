@@ -60,23 +60,48 @@ ABI_VERSION = "2"
 # means "the compiler changed" ⇒ new keys ⇒ recompile, with zero manual version
 # bumping, and (unlike the git SHA) it catches *uncommitted* edits during dev.
 # Keep this list complete: anything that changes generated C / objects belongs
-# here. The version (below) is the safety net if something is missing.
+# here. The version (below) is the safety net if something is missing — but it
+# only bumps on a *tracked* git change, so an untracked new source file is
+# invisible to it; auto-discovery below is what actually catches those.
 #
 # The gimple_* family is auto-discovered (glob) rather than enumerated: the
 # 2026-08 refactor split gimple_codegen.py into a dozen sibling modules, and
 # forgetting to add a new one here silently served stale cached output for
 # every edit to it (filed as BUG-2026-022 candidate by the box.3d/game AI).
 # Auto-discovery makes "new compiler source file" self-registering.
+#
+# The 2026-09 restructure then moved the real implementation OUT of those
+# gimple_*.py files into mojo/middle/ + mojo/backend_gimple/, leaving the
+# gimple_*.py names as thin re-export shims. Hashing only the shims meant an
+# edit to e.g. mojo/middle/resolve_shared.py left compiler_fingerprint()
+# *unchanged* (confirmed: append a line, fp identical) while editing the
+# empty shim changed it — every real codegen edit was invisible to the CAS
+# and served stale .ci/.o. The mojo/** glob below closes that hole the same
+# way the gimple_* glob closed the 2026-08 one.
 _COMPILER_SOURCES = [
     'mlir.py', 'module_loader.py', 'ast_rewriter.py',
     'generated_dispatch.py', 'fire_compiler.py',
     'elaborate.py', 'monomorphize.py', 'comptime.py',
     'imports.py', 'reflect.py', 'build_stdlib_dylib.py',
     'version.py', 'build_config.py',
+    # Root-level codegen-path deps (imported by gimple_codegen / mojo/* but
+    # living outside the gimple_*.py and mojo/ globs below). Omitting them
+    # had the same silent-stale-cache failure mode as the mojo/ gap:
+    # ownership_destruct decides which locals get destructors emitted,
+    # regex_compile drives pattern-recognition in the middle end, and
+    # ownership_check's diagnostics gate real emission paths.
+    'ownership_check.py', 'ownership_destruct.py', 'regex_compile.py',
 ]
 import glob as _glob
 for _p in sorted(_glob.glob(os.path.join(HERE, 'gimple_*.py'))):
     _COMPILER_SOURCES.append(os.path.basename(_p))
+# The actual compiler implementation (post-2026-09 package split). Paths are
+# repo-relative with forward slashes so the fingerprint is host-OS-stable.
+for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', '**', '*.py'),
+                            recursive=True)):
+    if '__pycache__' in _p.split(os.sep):
+        continue
+    _COMPILER_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
 
 # Runtime ABI: every cached object is compiled against this header (and links the
 # runtime). A change to either MUST invalidate the cache, or stale objects link

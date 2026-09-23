@@ -1,0 +1,1100 @@
+# Moved from gimple_ctypes.py - shared middle-end (mojo/middle).
+# Import rewrite performed via AST; original docstring/comments preserved below.
+"""Shared C-type utilities and leaf constants for the GIMPLE backend.
+
+Mechanically extracted from gimple_codegen.py (Wave-2 integration, M1).
+Leaf-most module: stdlib imports only; every other gimple_* module may
+import from here without cycles. Definitions are verbatim moves;
+gimple_codegen re-imports them so unqualified internal references and
+external `from gimple_codegen import X` keep working unchanged.
+"""
+from __future__ import annotations
+import hashlib
+import os
+import re
+import sys
+import zlib
+import dataclasses
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node
+from module_loader import load_module, get_symbol_type
+import ast_rewriter
+import mlir
+import regex_compile
+from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
+
+def _debug_note(where: str, detail: object='') -> None:
+    """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
+
+    Codegen degrades gracefully on some failures (module imports, type
+    inference, generic instantiation).  Those paths intentionally continue
+    with reduced information; this hook makes them diagnosable without
+    changing compiler behavior for normal runs.
+
+    `print(..., flush=True)` to plain stdout, NOT `file=sys.stderr`: the
+    self-hosted backend has no lowering for `sys.stderr`/`sys.stderr.write`
+    (see `_compile_imported_module`'s own identical fix in
+    gimple_gen_resolve.py) — it faults at the `sys.stderr` attribute access
+    itself. That fault is a real, catchable exception under this runtime's
+    setjmp-based exception protocol, so it doesn't crash outright; instead
+    it becomes a NEW exception raised from inside whatever `except:` block
+    had just called `_debug_note` to report the ORIGINAL failure. If that
+    surrounding `except` has nothing further to catch it, the new exception
+    propagates in its place -- but the global exception MESSAGE slot
+    (`mojo_exc_msg_set`) is never overwritten by the stderr fault itself, so
+    the propagated exception still carries the original failure's message
+    text, making the real cause (this line) invisible from the outside.
+    Concretely: `_gen_stmt_ForStmt`'s zip-loop fallback (gimple_gen_stmts.py)
+    calls this on a caught `ValueError`, and self-hosted `--dump-full fire.py`
+    would silently DROP an entire sibling module (gimple_gen_coro.py) whose
+    `for (a, b), c in zip(...)` shape hit that fallback, with only a
+    misleadingly-labeled "# ERROR: ...: zip() lowering needs a tuple loop
+    target" reaching the module-level catch-all in
+    `_compile_imported_module` -- the real point of failure was here, not
+    the original (correctly-handled) ValueError.
+    """
+    if os.environ.get('MOJO_DEBUG'):
+        print(f'[gimple_codegen] {where}: {detail}', flush=True)
+
+def _params_have_vararg(params: list) -> bool:
+    """True if any `(name, type)` pair in `params` is a `*args`/`**kwargs`
+    slot (name starts with `*`).
+
+    Indexed, NOT `any(pn.startswith('*') for pn, _ in params)` — a
+    generator-expression target unpack over a `list[tuple[str, str]]`'s
+    elements boxes both slots to int64_t on the self-hosted path, which
+    GCC then rejects outright as undeclared C identifiers (`'pn'
+    undeclared`) — a hard compile failure, not just a silently-wrong
+    value, first exposed when an unrelated edit forced this file's
+    CAS-cached object to be retranspiled from scratch. This single
+    helper replaces ~8 duplicated copies of the same broken idiom across
+    gimple_module_gen.py.
+    """
+    if not params:
+        return False
+    for i in range(len(params)):
+        if params[i][0].startswith('*'):
+            return True
+    return False
+
+def _param_names_stripped(params: list) -> list:
+    """`[pn.lstrip('*') for pn, _ in (params or [])]` — as a plain unpack
+    LOOP, not a comprehension: a comprehension's target unpack over a
+    `list[tuple[str, str]]` boxes both slots to int64_t self-hosted (see
+    `_params_have_vararg`'s sibling note and
+    bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md). Shared
+    here instead of re-deriving the loop at each call site."""
+    out = []
+    for pn, _pt in params or []:
+        out.append(pn.lstrip('*'))
+    return out
+
+class TypeLattice:
+    """Numeric type promotion lattice for Mojo → C lowering.
+
+    join(t1, t2) implements C11 usual-arithmetic-conversion rules:
+      - If either operand is float, float wins; wider float wins.
+      - If both are signed ints, wider wins.
+      - If both are unsigned ints, wider wins.
+      - If mixed signed/unsigned: if unsigned rank >= signed rank → unsigned; else signed.
+    """
+    _SIGNED = _GD_SIGNED
+    _UNSIGNED = _GD_UNSIGNED
+    _FLOAT = _GD_FLOAT
+
+    @classmethod
+    def is_float(cls, t: str) -> bool:
+        return t in _TYPE_FLOAT
+
+    @classmethod
+    def is_signed(cls, t: str) -> bool:
+        return t in _TYPE_SIGNED
+
+    @classmethod
+    def is_unsigned(cls, t: str) -> bool:
+        return t in _TYPE_UNSIGNED
+
+    @classmethod
+    def is_int(cls, t: str) -> bool:
+        return t in _TYPE_SIGNED or t in _TYPE_UNSIGNED
+
+    @classmethod
+    def is_numeric(cls, t: str) -> bool:
+        return cls.is_float(t) or cls.is_int(t)
+
+    @classmethod
+    def is_pointer(cls, t: str) -> bool:
+        return '*' in t
+
+    @classmethod
+    def is_bool(cls, t: str) -> bool:
+        return t == '_Bool'
+
+    @classmethod
+    def join(cls, t1: str, t2: str) -> str:
+        """LUB for binary arithmetic result type."""
+        if t1 == t2:
+            return t1
+        if t1 == '_Bool':
+            t1 = 'int'
+        if t2 == '_Bool':
+            t2 = 'int'
+        if t1 == t2:
+            return t1
+        if cls.is_pointer(t1) or cls.is_pointer(t2):
+            if cls.is_pointer(t1) and cls.is_pointer(t2):
+                if t1 == 'void *' or t2 == 'void *':
+                    return 'void *'
+                if t1 == 'char *' or t2 == 'char *':
+                    return 'char *'
+                return 'int64_t'
+            return t1 if cls.is_pointer(t1) else t2
+        if cls.is_float(t1) or cls.is_float(t2):
+            r1 = _TYPE_FLOAT.get(t1, 0)
+            r2 = _TYPE_FLOAT.get(t2, 0)
+            if r1 == 0:
+                return t2
+            if r2 == 0:
+                return t1
+            return t1 if r1 >= r2 else t2
+        rs1 = _TYPE_SIGNED.get(t1, 0)
+        rs2 = _TYPE_SIGNED.get(t2, 0)
+        ru1 = _TYPE_UNSIGNED.get(t1, 0)
+        ru2 = _TYPE_UNSIGNED.get(t2, 0)
+        if rs1 and rs2:
+            return t1 if rs1 >= rs2 else t2
+        if ru1 and ru2:
+            return t1 if ru1 >= ru2 else t2
+        if rs1 and ru2:
+            return t2 if ru2 >= rs1 else t1
+        if ru1 and rs2:
+            return t1 if ru1 >= rs2 else t2
+        return 'int64_t'
+
+    @classmethod
+    def join_all(cls, types: list) -> str:
+        """LUB of a list of types (e.g. for return type inference)."""
+        if not types:
+            return 'void'
+        result = types[0]
+        for t in types[1:]:
+            if result == 'void':
+                result = t
+            elif t != 'void':
+                result = cls.join(result, t)
+        return result
+
+    @classmethod
+    def coerce(cls, src: str, dst: str, val: str) -> str:
+        """Return `val` cast to `dst` if types differ.
+        NOTE: GIMPLE only allows single-level casts on simple variables.
+        This method must be called only when val is guaranteed to be a simple
+        variable name, not a function call or compound expression.
+        """
+        if src == dst:
+            return val
+        if src in ('int', 'int64_t', '_Bool') and dst in ('int', 'int64_t', '_Bool'):
+            if src == dst:
+                return val
+            return f'({dst}){val}'
+        if src == '_Bool':
+            if dst == 'int':
+                return f'(int){val}'
+            return f'({dst}){val}'
+        if dst == '_Bool':
+            return f'(_Bool){val}'
+        if src.endswith(' *') and dst == 'int64_t':
+            if src == 'void *':
+                return f'(int64_t){val}'
+            return f'(int64_t)(void *){val}'
+        if src == 'int64_t' and dst.endswith(' *'):
+            if dst == 'void *':
+                return f'(void *){val}'
+            raise TypeError(f'UNSAFE CAST: int64_t → {dst} requires type validation in _actual_types. Call must verify via _actual_types[{val}] before casting. Use (void *){val} as intermediate if truly generic.')
+        return f'({dst}){val}'
+
+    @classmethod
+    def list_suffix(cls, elem: str) -> str:
+        """Select 'int'/'double'/'str' API suffix based on element C type."""
+        if elem in _TYPE_FLOAT:
+            return 'double'
+        if elem == 'char *':
+            return 'str'
+        return 'int'
+
+    @classmethod
+    def printf_fmt(cls, ctype: str) -> str:
+        if ctype in ('double', 'float', '__fp16'):
+            return '%g'
+        if ctype == 'char *':
+            return '%s'
+        if ctype == 'char':
+            return '%c'
+        if ctype == 'int64_t':
+            return '%ld'
+        if ctype == 'uint64_t':
+            return '%lu'
+        if ctype in ('unsigned int', 'uint32_t', 'uint16_t', 'uint8_t'):
+            return '%u'
+        return '%d'
+_TYPE_MAP: dict[str | None, str] = {'Int': 'int64_t', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'uint64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'float': 'double', 'Bool': '_Bool', 'bool': 'int', 'String': 'char *', 'str': 'char *', 'List': 'MojoList *', 'list': 'MojoList *', 'Dict': 'MojoDict *', 'dict': 'MojoDict *', 'Set': 'MojoSet *', 'set': 'MojoSet *', 'Str': 'MojoStr *', 'bytes': 'MojoBytes *', 'bytearray': 'MojoBytes *', 'memoryview': 'MojoMemoryView *', 'None': 'void', 'object': 'int64_t'}
+_SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+_CONTAINER_KIND_TYPES = frozenset({'MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *'})
+_EMPTY_CONTAINER_CTOR = {'MojoDict *': 'mojo_dict_new ()', 'MojoList *': 'mojo_list_new ()', 'MojoSet *': 'mojo_set_new ()'}
+
+def container_kind(ctype: str) -> str | None:
+    """DESIGN.html R1's canonical predicate: 'dict'/'list'/'set'/'bytes' for
+    one of this codegen's container pointer ctypes, else None (not a
+    container, or an unrecognized/opaque type). This is step one of R1 (a
+    single place that answers "what kind of container is this") — most of
+    the ~300 sites that independently DECIDE a container's ctype from
+    scratch (AST shape, call signature, method name, ...) still do not
+    route through a shared decision function, because their inputs are too
+    varied to unify mechanically; that migration is a separate, much larger
+    follow-on. What IS centralized here and in `reify_empty_container_
+    literal` below is the narrower, already-identified recurring pattern:
+    treating an unprovable/mismatched EMPTY literal as if guessing one
+    concrete kind were safe."""
+    if ctype not in _CONTAINER_KIND_TYPES:
+        return None
+    return {'MojoDict *': 'dict', 'MojoList *': 'list', 'MojoSet *': 'set', 'MojoBytes *': 'bytes'}[ctype]
+
+def reify_empty_container_literal(gen, value_type: str, declared_type: str, value_node) -> str | None:
+    """If `value_node` is a syntactically-EMPTY container literal (`{}`,
+    `[]`, `set()`, `()`) whose default lowering (`value_type`) doesn't
+    match the REAL declared/needed container kind (`declared_type`),
+    return a freshly-constructed value of `declared_type` — the empty-
+    literal shape carries no real evidence for ANY particular kind (an
+    empty dict, list, and set are equally "nothing"), so building the
+    kind the destination actually needs is always safe, unlike coercing
+    (reinterpret-casting) the wrong one. Returns None when this doesn't
+    apply (caller falls through to its normal coercion/cast path).
+
+    Centralizes what were 3 independently-written copies of this same
+    check (`_gen_stmt_AssignStmt` x2 in gimple_gen_stmts.py for a var-decl
+    and a struct-field write, and `_lower_dict_method`'s `.get(k, default)`
+    in gimple_gen_methods.py) — see commit 634852c, DESIGN.html R1/R2/R4."""
+    if value_type == declared_type or declared_type not in _EMPTY_CONTAINER_CTOR:
+        return None
+    if not isinstance(value_node, (DictExpr, ListExpr, SetExpr, TupleExpr)):
+        return None
+    if getattr(value_node, 'elements', None) or getattr(value_node, 'pairs', None):
+        return None
+    return gen._new_val(declared_type, _EMPTY_CONTAINER_CTOR[declared_type])
+_RUNTIME_FUNCS: dict[str, str] = {'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_setdefault_int': 'int64_t', 'mojo_dict_setdefault_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_cstr_slice': 'char *', 'mojo_cstr_region_eq': 'int', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double', 'mojo_bytes_new_lit': 'MojoBytes *', 'mojo_bytes_empty': 'MojoBytes *', 'mojo_bytes_zeros': 'MojoBytes *', 'mojo_bytes_from_list': 'MojoBytes *', 'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *', 'mojo_bytes_len': 'int64_t', 'mojo_bytes_get': 'int64_t', 'mojo_bytes_eq': 'int', 'mojo_bytes_truthy': 'int', 'mojo_bytes_repr': 'char *', 'mojo_bytes_concat': 'MojoBytes *', 'mojo_bytes_repeat': 'MojoBytes *', 'mojo_bytes_slice': 'MojoBytes *', 'mojo_bytes_contains': 'int', 'mojo_bytes_find': 'int64_t', 'mojo_bytes_count': 'int64_t', 'mojo_bytes_startswith': 'int', 'mojo_bytes_endswith': 'int', 'mojo_bytes_decode': 'char *', 'mojo_bytes_hex': 'char *', 'mojo_bytes_replace': 'MojoBytes *', 'mojo_bytes_strip': 'MojoBytes *', 'mojo_bytes_upper': 'MojoBytes *', 'mojo_bytes_lower': 'MojoBytes *', 'mojo_bytes_split': 'MojoList *', 'mojo_bytes_rsplit': 'MojoList *', 'mojo_bytes_splitlines': 'MojoList *', 'mojo_bytes_join': 'MojoBytes *', 'mojo_bytes_copy': 'MojoBytes *', 'mojo_bytearray_new': 'MojoBytes *', 'mojo_bytearray_copy': 'MojoBytes *', 'mojo_bytearray_pop': 'int64_t', 'mojo_memoryview_new': 'MojoMemoryView *', 'mojo_memoryview_from_bytes': 'MojoMemoryView *', 'mojo_memoryview_len': 'int64_t', 'mojo_memoryview_get': 'int64_t', 'mojo_memoryview_slice': 'MojoMemoryView *', 'mojo_memoryview_tobytes': 'MojoBytes *', 'mojo_memoryview_eq': 'int', 'mojo_memoryview_hex': 'char *', 'mojo_memoryview_cast': 'MojoMemoryView *', 'mojo_memoryview_repr': 'char *', 'mojo_struct_compile': 'MojoStructFmt *', 'mojo_struct_new': 'MojoStructFmt *', 'mojo_struct_calcsize': 'int64_t', 'mojo_struct_size': 'int64_t', 'mojo_struct_format': 'char *', 'mojo_struct_pack_list': 'MojoBytes *', 'mojo_struct_pack_h': 'MojoBytes *', 'mojo_struct_unpack': 'MojoList *', 'mojo_struct_unpack_from': 'MojoList *', 'mojo_struct_unpack_h': 'MojoList *', 'mojo_struct_unpack_from_h': 'MojoList *', 'input': 'char *', 'string_lower': 'char *', 'string_strip': 'char *', 'string_upper': 'char *', 'compile_to_gimple': 'char *', 'py_tokenize': 'MojoList *', 'Parser': 'Parser *', 'Interpreter': 'Interpreter *'}
+_FLOAT_TYPES = {'double', 'float', '__fp16'}
+_SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
+_STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
+
+def _split_top_level_commas(s: str) -> list[str]:
+    """Split `s` on commas that are not nested inside ([{ }]). Used to pull
+    just the element-type segment out of a multi-arg bracket annotation like
+    `UnsafePointer[X, SomeOrigin]` without splitting inside a nested `X` that
+    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`)."""
+    parts, depth, buf = ([], 0, [])
+    for c in s:
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth = max(0, depth - 1)
+        if c == ',' and depth == 0:
+            parts.append(''.join(buf))
+            buf = []
+        else:
+            buf.append(c)
+    parts.append(''.join(buf))
+    return parts
+
+def _class_attr_ctype(v) -> str | None:
+    """C pointer type for a container-valued class-body attribute initializer
+    (`MojoSet *` / `MojoDict *` / `MojoList *`), or None if the initializer
+    isn't a container value. Handles both container LITERALS (set `{...}`,
+    dict `{...}`, list `[...]`, tuple `(...)`) and container CONSTRUCTOR calls
+    (`set(...)`, `frozenset(...)`, `dict(...)`, `list(...)`, and the runtime
+    helpers) — the class-body `_X = frozenset({...})` pattern used all over
+    this file for membership-test class attrs. Mirrors the container
+    classification in `_collect_self_assigns` (CallExpr branch) so every site
+    agrees on one answer."""
+    if isinstance(v, SetExpr):
+        return 'MojoSet *'
+    if isinstance(v, DictExpr):
+        return 'MojoDict *'
+    if isinstance(v, (ListExpr, TupleExpr)):
+        return 'MojoList *'
+    if isinstance(v, CallExpr) and isinstance(v.func, IdentExpr):
+        cn = v.func.name
+        if cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
+            return 'MojoSet *'
+        if cn in ('dict', 'Dict', 'mojo_dict_new'):
+            return 'MojoDict *'
+        if cn in ('list', 'DynamicVector', 'mojo_list_new'):
+            return 'MojoList *'
+    if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and isinstance(v.func.obj, IdentExpr) and (v.func.obj.name == 'struct') and (v.func.member == 'Struct'):
+        return 'MojoStructFmt *'
+    return None
+_FIXED_ARRAY_ANN_RE = re.compile('^\\[\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*([A-Za-z_0-9]+)\\s*\\]$')
+
+def _mojo_type(ann: str | type | None) -> str:
+    if not ann:
+        return 'int64_t'
+    if isinstance(ann, type):
+        ann = ann.__name__
+    if isinstance(ann, str) and ann.startswith('__mlir_type.'):
+        c = mlir.type_to_c(ann[len('__mlir_type.'):])
+        if c is not None:
+            return c
+    if ' | ' in ann:
+        parts = [p.strip() for p in ann.split(' | ')]
+        non_none = [p for p in parts if p != 'None']
+        if non_none:
+            return _mojo_type(non_none[0])
+        return 'int64_t'
+    if isinstance(ann, str) and ann.endswith('()') and ('[' not in ann):
+        base = ann[:-2].strip()
+        if base in ('list', 'List', 'DynamicVector'):
+            return 'MojoList *'
+        if base in ('dict', 'Dict'):
+            return 'MojoDict *'
+        if base in ('set', 'Set'):
+            return 'MojoSet *'
+    if isinstance(ann, str):
+        _m = _FIXED_ARRAY_ANN_RE.match(ann.strip())
+        if _m:
+            return 'MojoList *'
+    if '[' in ann:
+        base, rest = ann.split('[', 1)
+        inner = rest.rstrip(']').strip()
+        if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
+            elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
+            return f'{elem} *'
+        if base in ('List', 'list', 'InlineArray'):
+            return 'MojoList *'
+        if base in ('Dict', 'dict'):
+            return 'MojoDict *'
+        if base in ('Set', 'set'):
+            return 'MojoSet *'
+        if base in ('Span', 'StringSlice'):
+            return 'Span *'
+        if base == 'Optional':
+            return _mojo_type(_split_top_level_commas(inner)[0].strip())
+        ann = base
+    if isinstance(ann, str) and len(ann) > 1 and (ann[0] == '*') and (ann[1] != '*'):
+        inner = ann[1:].strip()
+        if inner in _TYPE_MAP:
+            return f'{_TYPE_MAP[inner]} *'
+    t = _TYPE_MAP.get(ann)
+    return t if t is not None else 'int64_t'
+
+def _result_type(t1: str, t2: str) -> str:
+    return TypeLattice.join(t1, t2)
+_PTR_OUT_PARAM_SCALAR_ELEMS = frozenset({'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t', 'int', 'unsigned', 'long', 'size_t', 'float', 'double', '_Bool'})
+
+def _elem_type(ptr_type: str) -> str:
+    """Strip one level of pointer to get element type."""
+    if ptr_type.endswith(' *'):
+        return ptr_type[:-2]
+    if '*' in ptr_type:
+        return ptr_type.replace('*', '').strip()
+    return 'int64_t'
+_STR_RETURNING_METHODS = {'replace', 'strip', 'lstrip', 'rstrip', 'lower', 'upper', 'format', 'zfill', 'capitalize', 'title', 'join', 'swapcase', 'expandtabs', 'casefold', 'center', 'ljust', 'rjust', 'removeprefix', 'removesuffix'}
+_LIST_RETURNING_METHODS = {'split', 'rsplit', 'splitlines'}
+_C_ID_MAP = {'char *': 'charptr', 'void *': 'voidptr', '_Bool': 'bool'}
+
+def _c_id(ctype: str) -> str:
+    """Convert a C type to a valid identifier suffix (for helper function names)."""
+    return _C_ID_MAP.get(ctype, ctype.replace(' ', '_').replace('*', 'ptr'))
+_FNPTR_CTYPE_RE = re.compile('^(.*)\\(\\*\\)\\((.*)\\)$')
+
+def _c_var_decl(ctype: str, name: str) -> str:
+    """A variable declaration for `ctype name` (no trailing `;`) — almost
+    always just `f"{ctype} {name}"`, EXCEPT a function-pointer ctype (e.g.
+    `'void (*)(int64_t)'`, this file's own spelling for the resume_fn/
+    destroy_fn parameters of runtime/fire_async_runtime.h's
+    AsyncRT_DeviceContext_enqueueHostFunction(Range) stubs — see
+    _LIBC_SIGS' entries for those two names), whose C declarator syntax
+    embeds the variable NAME INSIDE the parentheses (`void (*name)
+    (int64_t)`), not after the whole type spelling like every other C
+    type. Every declaration site in this file (_new_temp, the one central
+    spot every GIMPLE temp's declaration text is built) used to do the
+    naive `f"{ctype} {name}"` unconditionally, which is syntactically
+    invalid for a function-pointer ctype and corrupted GCC's parse of the
+    rest of the file (a real, hand-verified bug, not a hypothetical one —
+    found wiring up device_context.mojo's `_coro_resume_fn`/
+    `_coro_destroy_fn` values through to this exact call site)."""
+    m = _FNPTR_CTYPE_RE.match(ctype)
+    if m:
+        ret, params = (m.group(1).rstrip(), m.group(2))
+        return f'{ret} (*{name})({params})'
+    return f'{ctype} {name}'
+
+def _printf_fmt(ctype: str) -> str:
+    return TypeLattice.printf_fmt(ctype)
+
+def _strip_mojo_param_modifiers(pname: str) -> str:
+    """Strip Mojo parameter modifiers (inout, borrowed, owned, etc.) from parameter name.
+
+    These modifiers are not valid in C and must be removed for code generation.
+    Examples: 'inout self' → 'self', 'borrowed x' → 'x', 'owned data' → 'data'
+    """
+    modifiers = ('inout', 'borrowed', 'owned', 'borrow', 'out', 'mut', 'ref', 'read', 'copy')
+    for mod in modifiers:
+        if pname.startswith(mod + ' '):
+            return pname[len(mod) + 1:].strip()
+    return pname
+_type_walk_cache: dict[int, str] = {}
+
+def _walk_type_expr(node) -> str:
+    """Recursively serialize an AST type expression to a canonical string."""
+    if node is None:
+        return 'any'
+    if isinstance(node, str):
+        return node
+    nid = id(node)
+    cached = _type_walk_cache.get(nid)
+    if cached is not None:
+        return cached
+    if isinstance(node, IdentExpr):
+        result = node.name
+    elif isinstance(node, SubscriptExpr):
+        base = _walk_type_expr(node.obj)
+        idx = node.index
+        if isinstance(idx, TupleExpr):
+            inner = ','.join((_walk_type_expr(e) for e in idx.elements))
+        else:
+            inner = _walk_type_expr(idx)
+        result = f'{base}[{inner}]'
+    elif isinstance(node, MemberExpr):
+        result = f'{_walk_type_expr(node.obj)}.{node.member}'
+    elif isinstance(node, TupleExpr):
+        result = '(' + ','.join((_walk_type_expr(e) for e in node.elements)) + ')'
+    elif isinstance(node, (IntLiteral, FloatLiteral)):
+        result = str(node.value)
+    elif isinstance(node, StringLiteral):
+        result = f'"{node.value}"'
+    else:
+        result = type(node).__name__
+    _type_walk_cache[nid] = result
+    return result
+
+def _param_sig_str(params: tuple) -> str:
+    """Produce a canonical signature string from a (pname, ptype) tuple of params."""
+    parts = []
+    for pname, ptype in params:
+        bare = pname.lstrip('*') if pname else ''
+        type_str = _walk_type_expr(ptype)
+        parts.append(f'{bare}:{type_str}')
+    return ','.join(parts)
+_overload_hash_registry: dict[str, str] = {}
+
+def _method_overload_id(param_types: tuple, struct_name: str='', method_name: str='') -> str:
+    """Generate a short stable hash ID for a method overload from its param types.
+
+    Walks each param's type expression recursively, hashes the canonical
+    string, and returns the first 6 hex digits as the suffix.
+    Also registers the mapping in _overload_hash_registry for demangling.
+    """
+    sig = _param_sig_str(param_types)
+    h = hashlib.md5(sig.encode(), usedforsecurity=False).hexdigest()[:6]
+    full = f'{struct_name}.{method_name}({sig})' if struct_name else sig
+    _overload_hash_registry[h] = full
+    return f'_{h}'
+
+def demangle_overload(c_name: str) -> str:
+    """Demangle a C function name with an overload hash suffix back to Mojo form.
+
+    E.g. 'Bool___init___76baef' → 'Bool.__init__(self:any)'
+    Returns the original c_name unchanged if no match is found.
+    """
+    import re as _re
+    m = _re.search('___([0-9a-f]{6})$', c_name)
+    if not m:
+        return c_name
+    h = m.group(1)
+    sig = _overload_hash_registry.get(h)
+    if not sig:
+        return c_name
+    base = c_name[:-7]
+    return f'{base} ({sig})'
+_BIN_OPS = _GD_BIN_OPS
+_CMP_OPS = _GD_CMP_OPS
+_TYPE_SIGNED = _GD_SIGNED
+_TYPE_UNSIGNED = _GD_UNSIGNED
+_TYPE_FLOAT = _GD_FLOAT
+_COMMON_METHOD_NAMES = frozenset({'write_to', 'write_text', 'write', 'format', 'copy', 'fdopen', '__contains__', '__str__', '__repr__', '__len__', '__iter__', '__next__', '__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__', '__bool__', '__init__', '__copyinit__', '__moveinit__', '__del__', '__hash__', '__getitem__', '__setitem__', '__add__', '__sub__', '__mul__', '__call__'})
+_C_KEYWORDS = frozenset({'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while', '_Bool', '_Complex', '_Imaginary', '_Alignas', '_Alignof', '_Atomic', '_Generic', '_Noreturn', '_Static_assert', '_Thread_local', 'nullptr', 'constexpr', 'thread_local', 'static_assert', 'typeof_unqual'})
+_CPP_KEYWORD_FIELDS = frozenset({'operator', 'new', 'delete', 'class', 'template', 'typename', 'namespace', 'public', 'private', 'protected', 'virtual', 'this', 'try', 'catch', 'throw', 'const', 'true', 'false', 'and', 'or', 'not', 'xor', 'bool', 'compl', 'nullptr'})
+_C_PARAM_EXTRA_KEYWORDS = frozenset({'asm', '__asm__', 'typeof', '__typeof__'})
+_C_MACRO_NAMES = frozenset({'true', 'false', 'NULL', 'EOF', 'SEEK_SET', 'SEEK_CUR', 'SEEK_END', 'TMP_MAX', 'FILENAME_MAX', 'FOPEN_MAX', 'BUFSIZ', 'L_tmpnam', 'L_ctermid', 'stdin', 'stdout', 'stderr'})
+_PSEUDO_DUNDER_ATTRS = frozenset({'__class__', '__dict__', '__module__', '__name__', '__qualname__', '__doc__', '__bases__', '__base__', '__mro__', '__annotations__', '__slots__', '__weakref__', '__flags__', '__basicsize__', '__dictoffset__'})
+
+def _safe_field(name: str) -> str:
+    """Sanitize struct field and parameter names that are C keywords or
+    platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`
+    entries — a field named identically to a Darwin <stdio.h> object-like
+    macro gets silently text-substituted before GCC/G++ parses it, exactly
+    the same failure mode _c_field_name already guards for module globals
+    and gimple_gen_infra.py's local-variable declarator already guards for
+    locals; this is that same chokepoint for struct fields/parameters).
+    Also covers C++-ONLY keywords (_CPP_KEYWORD_FIELDS): a field named
+    `delete` (real: Lib/tempfile.py's `_TemporaryFileCloser.delete`) is a
+    valid C identifier, so the .ci side compiles clean, but the compiled-
+    generator .cpp preamble re-emits the same typedef and g++ rejects
+    `bool delete;` outright ("expected unqualified-id before 'delete'").
+    Every field emission AND every field access goes through this one
+    function on both sides, so the rename is applied uniformly."""
+    if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES or (name in _CPP_KEYWORD_FIELDS):
+        return f'_kw_{name}'
+    return name
+_C_RESERVED_FUNCS = frozenset({'exit', 'abort', 'write', 'read', 'close', 'malloc', 'calloc', 'realloc', 'free', 'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar', 'memcpy', 'memmove', 'memset', 'memcmp', 'memchr', 'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strchr', 'strrchr', 'strstr', 'strtok', 'strerror', 'atoi', 'atol', 'atoll', 'atof', 'strtol', 'strtoll', 'strtod', 'strtof', 'setvbuf', 'setbuf', 'remainderf', 'remainderl', 'posix_spawn', 'posix_spawnp', 'index', 'rindex', 'cos', 'cosf', 'sin', 'sinf', 'tan', 'tanf', 'acos', 'acosf', 'asin', 'asinf', 'atan', 'atanf', 'atan2', 'atan2f', 'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf', 'trunc', 'truncf', 'sqrt', 'sqrtf', 'cbrt', 'cbrtf', 'pow', 'powf', 'exp', 'expf', 'exp2', 'exp2f', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f', 'fabs', 'fabsf', 'fmod', 'fmodf', 'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma', 'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff', 'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf', 'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf', 'nextafter', 'nextafterf', 'copysign', 'copysignf', 'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder', 'expm1', 'expm1f', 'log1p', 'log1pf', 'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf', 'j0', 'j1', 'y0', 'y1', 'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath', 'open', 'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush', 'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr', 'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf', 'fdopen', 'popen', 'pclose', 'remove', 'rename', 'rand', 'srand', 'random', 'srandom', 'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork', 'execv', 'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'unlink', 'rmdir', 'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'dlopen', 'dlsym', 'dlclose', 'dlerror', 'access', 'stat', 'lstat', 'fstat', 'qsort', 'bsearch', 'abs', 'labs', 'llabs', 'fabsf', 'fmodf', 'sqrtf', 'powf', 'ceilf', 'floorf', 'roundf', 'truncf', 'isfinite', 'isinf', 'isnan', 'isnormal', 'signbit', 'fpclassify', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower', 'toupper', 'tolower', 'strdup', 'strndup', 'strtok_r', 'time', 'clock', 'difftime', 'mktime', 'strftime', 'gmtime', 'localtime', 'signal', 'raise', '_end'})
+_FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv', 'atol', 'frexp', 'abort'})
+_IDENT_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
+
+def _replace_first_ident(text: str, old: str, new: str) -> str:
+    """Replace the first STANDALONE occurrence of identifier `old` in `text`
+    with `new`, preserving every other byte — the compiled-backend-safe
+    replacement for `re.sub(r'\\b' + re.escape(old) + r'\\b', new, text,
+    count=1)`.
+
+    Under the self-hosted backend that regex silently replaced NOTHING:
+    `re.escape` had no lowering at all and returned 0, so the pattern lost
+    the identifier it was meant to anchor on, and the compiled `re.sub`
+    runs through POSIX `regcomp`, where `\\b` isn't a word boundary on
+    macOS (verified: `regexec` returns no-match for `\\bfoo\\b`, while the
+    BSD spelling `[[:<:]]foo[[:>:]]` matches). The visible symptom was a
+    bare `extern void assert_equal (...)` in the self-hosted output against
+    the defining module's real `std_testing___init___assert_equal` — the
+    largest single shim-vs-noshim `--dump` divergence class (see
+    bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md).
+
+    Plain `str.find`/slicing is identical on both sides, so callers no
+    longer depend on the regex engine at all."""
+    if not old:
+        return text
+    _l = len(old)
+    _i = text.find(old)
+    while _i >= 0:
+        _j = _i + _l
+        _ok_l = _i == 0 or _IDENT_CHARS.find(text[_i - 1:_i]) < 0
+        _ok_r = _j >= len(text) or _IDENT_CHARS.find(text[_j:_j + 1]) < 0
+        if _ok_l and _ok_r:
+            return text[:_i] + new + text[_j:]
+        _i = text.find(old, _j)
+    return text
+
+def _safe_name(name: str) -> str:
+    if name.startswith('`') and name.endswith('`') and (len(name) > 2):
+        name = name[1:-1]
+        if name and name[0].isdigit():
+            name = '_' + name
+        import re as _re
+        name = _re.sub('[^a-zA-Z0-9_]', '_', name)
+    if name in _C_KEYWORDS or name in _C_RESERVED_FUNCS:
+        return f'mojo_{name}'
+    return name
+
+def _stub_guard_name(name: str) -> str:
+    """Canonical `_MOJO_STUB_<name>` C-preprocessor guard macro used
+    throughout this file's auto-stub/extern-suppression scheme (weak
+    function stubs, forward-decl externs, ctor stubs, struct typedefs all
+    share ONE guard namespace so that a real definition/typedef for a
+    symbol always wins over a later auto-generated stub of that SAME
+    symbol — see every call site's own comment for the specific collision
+    it guards against).
+
+    Case-PRESERVING by design: `name` here is already a real, exact C
+    identifier (a mangled function symbol or a struct name), and every
+    call site's matching half compares against that same exact string —
+    the shared-guard scheme has never relied on case-insensitive matching.
+    Previously every call site independently upper-cased `name` before
+    building the guard purely for SCREAMING_SNAKE_CASE macro style; that
+    incidentally made the guard namespace case-INSENSITIVE, so two
+    genuinely different symbols that only differ in case (e.g. the struct
+    `Deque` — a local subclass — and the unrelated function `deque` — an
+    unresolved `from collections import deque`) collided: the struct's
+    `#define _MOJO_STUB_DEQUE` (emitted first) silently suppressed the
+    `deque` function's own `#ifndef _MOJO_STUB_DEQUE` weak-stub block
+    later in the same translation unit, leaving `deque` completely
+    undeclared and producing `implicit declaration of function 'deque'`
+    at every call site. See bugs/CODEGEN_generator_function_Lib_test_test_
+    deque.md. Preserving case here removes the false collision while
+    leaving every genuine (exact-name) dedup case unaffected."""
+    return f'_MOJO_STUB_{name}'
+
+def _c_field_name(name: str) -> str:
+    """Convert a Mojo variable/module name to a valid C struct field name.
+    Dots in module paths (e.g. 'std.sys') become underscores ('std__sys').
+
+    Also renames names that collide with C preprocessor macros (e.g. a Mojo
+    global named `SEEK_CUR`) or C keywords, mirroring the rename `_declare_var`
+    already does for local variables. Without this, the field name is emitted
+    verbatim into the generated struct (e.g. `int SEEK_CUR;` / `.SEEK_CUR = 1,`)
+    and the *textual* macro substitution from <stdio.h> (`SEEK_CUR` -> `1`)
+    turns it into invalid C (`int 1;`) before GCC ever parses it."""
+    safe = re.sub('[^a-zA-Z0-9_]', '_', name)
+    if safe in _C_PARAM_EXTRA_KEYWORDS or safe in _C_MACRO_NAMES:
+        return f'_kw_{safe}'
+    if safe in _C_KEYWORDS:
+        return f'_{safe}'
+    return safe
+_CPP_OPAQUE_PTR_STRUCTS = frozenset({'MojoList', 'MojoDict', 'MojoSet', 'MojoStr', 'MojoStrIter', 'MojoListIter', 'MojoDictIter', 'MojoSetIter', 'MojoGenerator', 'MojoAsync', 'MojoBoundMethod', 'PyObject', 'MojoCompletedProcess', 'MojoFileHandle'})
+_FIXED_RUNTIME_STRUCT_NAMES = frozenset({'MojoBoundMethod', 'MojoGenerator', 'MojoAsync'})
+
+def _import_targets(node) -> list:
+    """All `(module, alias)` targets of an ImportStmt: the primary
+    `node.module`/`node.alias` plus every extra comma-separated target from
+    `import a, b, c` (`node.extra`). Every ImportStmt consumer that binds/
+    declares a name must walk this full list, not just the primary target —
+    shared here instead of re-deriving `[(module, alias)] + extra` at each
+    call site."""
+    out = [(_as_str(node.module), _as_str(node.alias))]
+    for _pair in getattr(node, 'extra', None) or []:
+        out.append((_as_str(_pair[0]), _as_str(_pair[1])))
+    return out
+
+def _import_local_names(node: ImportStmt) -> list:
+    """The bound local name for each target of an ImportStmt — `alias or
+    module` — as a plain `list[str]`.
+
+    `node: ImportStmt` (NOT an unannotated param): on the self-hosted
+    compiled path an unannotated `node` is `int64_t`, so `node.alias` /
+    `node.module` below still lowered to a `_mojo_dispatch_getattr` whose
+    boxed result `_as_str` could not recover — every top-level `import X`
+    then registered a garbage local name (or none), so `_lower_IdentExpr`'s
+    bare-name global-read branch never saw `X` and a `X.attr` receiver read
+    fell to `(int64_t)0` (`import sys` in t1.mojo/t_argv.mojo/mojo_main.py,
+    stage1-vs-stage2 parity break under MOJO_NO_SHIM=1).
+
+    `_import_targets` returns `(module, alias)` tuples; a consumer that only
+    needs the local name and does `alias if alias else module` on the
+    UNPACKED tuple slots hits a self-hosted bug: the tuple's `None` alias
+    slot boxes to a stray non-NULL pointer, so the ternary picks it and the
+    "local name" becomes a decimal heap address. Reading `node.alias`
+    DIRECTLY (not through a tuple) keeps `None` `None`. Homogeneous
+    `list[str]` return preserves each entry as `char *`."""
+    _al = _as_str(node.alias)
+    out = [_al if _al else _as_str(node.module)]
+    for _pair in getattr(node, 'extra', None) or []:
+        _pa = _as_str(_pair[1])
+        out.append(_pa if _pa else _as_str(_pair[0]))
+    return out
+
+def _fi_name(entry) -> str:
+    """Name half of a `name|alias` composite (FromImportStmt.name_alias_strs).
+
+    Built by explicit character concatenation, NOT `_s[:_i]` slicing:
+    `_as_str()` on the slice result does NOT fix this (tried and
+    confirmed still broken) -- `_as_str` is a compile-time type-hint
+    with CPython identity semantics, not a runtime re-box, so it cannot
+    repair a value whose underlying representation is genuinely
+    different from an ordinarily-constructed string. A sliced string
+    came back with a working `==`/correct `len()` but a corrupted dict-
+    key hash self-hosted (confirmed via a per-file aside/bside sweep on
+    gimple_exprtypes.py --dump: `exports.get(name)` missed for every
+    ALIASED import name -- the ones needing this slice -- while plain,
+    unsliced names looked up fine). Concatenating one character at a
+    time is the established safe construction shape elsewhere this
+    session (see gimple_gen_exprs.py's `_lower_StringLiteral`/`_lit_
+    bytes` fixes)."""
+    _s = _as_str(entry)
+    _i = _s.find('|')
+    if _i < 0:
+        return _s
+    _out = ''
+    for _ci in range(_i):
+        _out += _s[_ci]
+    return _out
+
+def _fi_alias(entry) -> str:
+    """Alias half of a `name|alias` composite, or None when unaliased.
+    Built by explicit character concatenation -- see `_fi_name`'s
+    docstring for why, not `_s[_i+1:]` slicing."""
+    _s = _as_str(entry)
+    _i = _s.find('|')
+    if _i < 0:
+        return None
+    _out = ''
+    for _ci in range(_i + 1, len(_s)):
+        _out += _s[_ci]
+    if _out:
+        return _out
+    return None
+
+def _fromimport_names(node) -> list:
+    """`[(name, alias|None), ...]` for a FromImportStmt, every slot
+    `_as_str`-viewed — `FromImportStmt.names` is `list[(str, str|None)]` but
+    the alias slot erases to int64_t on the self-hosted backend, so a
+    consumer unpacking `for name, alias in stmt.names:` reads a boxed
+    pointer and feeds it to `_stub_guard_name(...)` / `imported_symbols[...]`
+    as a decimal-stringified address (non-deterministic garbage C
+    identifiers). Mirrors `_import_targets` for ImportStmt."""
+    out = []
+    for _pair in getattr(node, 'names', None) or []:
+        out.append((_as_str(_pair[0]), _as_str(_pair[1])))
+    return out
+
+def _join_import_member(mod: str, name: str) -> str:
+    """Canonical dotted string naming what `from mod import name` binds —
+    the exact string _module_candidate_paths/_compile_imported_module must
+    resolve (and the string _generator_home_api keys are built from), so a
+    binding site and a defining module's own compile always derive the SAME
+    module identity from one `from X import Y` statement.
+
+    For an ABSOLUTE `mod` this is plain `mod + '.' + name` (`pkg` +
+    `sub` -> `pkg.sub`) — unchanged from the historical f-string shape.
+
+    For a RELATIVE `mod` consisting ONLY of leading dots, appending another
+    separator dot would double-count the depth: `from . import sibling`
+    (mod='.') spelled '.' + '.' + 'sibling' as '..sibling' reads as a
+    level-2 name and resolves one directory TOO HIGH (or nowhere). Real
+    Python binds `sibling` in the level-1 package — so concatenate
+    directly: '.' + 'sibling' == '.sibling' (level 1) and '..' +
+    'sibling2' == '..sibling2' (level 2). A suffixed relative mod keeps
+    the separator: '.mod' + '.' + 'name' == '.mod.name' (level 1, suffix
+    'mod.name') — exactly how myinterpreter.py's own relative-import rule
+    splits dots-then-suffix."""
+    if mod and (not mod.replace('.', '')):
+        return mod + name
+    return f'{mod}.{name}'
+
+def _c_escape(s: str) -> str:
+    """Escape a Mojo string-literal's content for the body of a C string literal.
+
+    The source already uses C-style escapes (`\\n`, `\\t`, `\\\\`, ...), so those are
+    passed through unchanged rather than having their backslash doubled — the old
+    code did `replace('\\\\','\\\\\\\\')` first, turning `\\n` into a literal
+    backslash-n in the output. Lone backslashes, quotes, and raw control chars are
+    escaped. Non-ASCII bytes pass through untouched."""
+    known = set('ntr"\\\'0abfv')
+    out = []
+    i, n = (0, len(s))
+    while i < n:
+        ch = s[i]
+        if ch == '\\' and i + 1 < n and (s[i + 1] in known):
+            out.append(ch)
+            out.append(s[i + 1])
+            i += 2
+            continue
+        if ch == '\\' and i + 1 < n and (s[i + 1] == 'x'):
+            if i + 2 < n and s[i + 2] in '0123456789abcdefABCDEF':
+                out.append(ch)
+                out.append(s[i + 1])
+                i += 2
+                continue
+            else:
+                out.append('\\\\x')
+                i += 2
+                continue
+        if ch == '\\':
+            out.append('\\\\')
+            i += 1
+            continue
+        if ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ch == '?':
+            out.append('\\?')
+        else:
+            out.append(ch)
+        i += 1
+    return ''.join(out)
+
+def _str_literal_value_is_fstring(val: str) -> bool:
+    """Does a raw StringLiteral.value (as the parser leaves it -- an
+    f/t-string keeps its prefix+quotes, unlike a plain string, whose
+    quotes the parser already strips at tokenize time -- see
+    GimpleGen._decode_str_literal_text's own comment) look like an f- or
+    t-string? Pure prefix-sniffing, factored out as its own free
+    function (rather than inlined at its one call site) so any FUTURE
+    caller that only needs the yes/no answer (not the fully decoded
+    text GimpleGen._decode_str_literal_text also strips out) has
+    somewhere to reuse it instead of re-deriving the same prefix-walk.
+    Deliberately mirrors (but, for now, does not share code with)
+    _decode_str_literal_text's identical prefix-walk -- that method is
+    a hot, widely-used (4 call sites) instance method deep in the
+    f-string/`%`-formatting lowering path; refactoring it to delegate
+    here is out of scope for this fix (unrelated risk, see this
+    codebase's "one careful step at a time" convention for exactly this
+    kind of prescan/global-inference change)."""
+    prefix = ''
+    rest = val
+    while rest and rest[0] in 'fFrRbBuUtT':
+        prefix += rest[0]
+        rest = rest[1:]
+    return bool(rest) and rest[0] in ('"', "'") and any((c in 'fFtT' for c in prefix))
+
+def _extract_init_expr(stmt_value) -> str:
+    """Generate C initialization code for a module-level assignment RHS."""
+    if stmt_value is None:
+        return '0'
+    if isinstance(stmt_value, IntLiteral):
+        _il = _as_intlit_node(stmt_value)
+        _raw = _as_str(_il.raw)
+        if _raw:
+            return _raw
+        return str(_as_int(_il.value))
+    if isinstance(stmt_value, BoolLiteral):
+        return '1' if _as_boollit_node(stmt_value).value else '0'
+    if isinstance(stmt_value, DictExpr):
+        if not stmt_value.pairs:
+            return 'mojo_dict_new()'
+        return '0'
+    elif isinstance(stmt_value, ListExpr):
+        if not stmt_value.elements:
+            return 'mojo_list_new()'
+        return '0'
+    elif isinstance(stmt_value, SetExpr):
+        if not stmt_value.elements:
+            return 'mojo_set_new()'
+        return '0'
+    elif isinstance(stmt_value, StringLiteral):
+        if _str_literal_value_is_fstring(stmt_value.value):
+            return '0'
+        return f'"{_c_escape(stmt_value.value)}"'
+    elif isinstance(stmt_value, (CallExpr, IdentExpr)):
+        return '0'
+    else:
+        return '0'
+
+def _module_toplevel_name(module_name: str) -> str:
+    """Generate a unique C function name for a module's initializer."""
+    import re
+    safe = re.sub('[^A-Za-z0-9_]', '_', module_name)
+    if safe and safe[0].isdigit():
+        safe = '_' + safe
+    return f'_{safe}_toplevel'
+
+def _module_init_name(module_name: str) -> str:
+    """Public, documented C symbol name for a *library* module's module-scope
+    initializer (bugs/DYLIB_module_scope_never_executes.md, box.3d/game repo).
+
+    A `mojo dylib` build (emit_entry_points=False) never emits any `main()` —
+    there is nothing in the produced .dylib's ABI that calls the module's own
+    `_<module>_toplevel()` (see `_module_toplevel_name`), so every module-scope
+    `var x = f()` / bare statement silently never ran. Two independent fixes
+    ride on this same name: (1) it's exported so a C host has a documented,
+    callable "run this module's scope now" entry point, and (2) it's also
+    invoked automatically from a `__attribute__((constructor))` so a host that
+    does nothing special still gets correct behavior (matches how the
+    executable path already runs top-level code unconditionally at process
+    start — see gen_module's `int main` wrapper). Both routes funnel through
+    the SAME underlying `_<module>_toplevel()`, which is itself guarded by a
+    one-shot static flag (see `_gen_toplevel`) so calling both the ctor and
+    the exported name (or calling the exported name more than once) is safe,
+    not a double-init bug."""
+    import re
+    safe = re.sub('[^A-Za-z0-9_]', '_', module_name)
+    if safe and safe[0].isdigit():
+        safe = '_' + safe
+    return f'{safe}_init'
+
+def _used_idents_node(node) -> set[str]:
+    """All IdentExpr names referenced in node; does NOT cross FunctionDef boundaries."""
+    if node is None:
+        return set()
+    if isinstance(node, IdentExpr):
+        return {node.name}
+    if isinstance(node, FunctionDef):
+        return set()
+    if isinstance(node, BinaryOp):
+        return _used_idents_node(node.left) | _used_idents_node(node.right)
+    if isinstance(node, CompareChain):
+        r = set()
+        for o in node.operands:
+            r |= _used_idents_node(o)
+        return r
+    if isinstance(node, UnaryOp):
+        return _used_idents_node(node.operand)
+    if isinstance(node, CallExpr):
+        r = _used_idents_node(node.func)
+        for a in node.args:
+            r |= _used_idents_node(a)
+        return r
+    if isinstance(node, MemberExpr):
+        return _used_idents_node(node.obj)
+    if isinstance(node, SubscriptExpr):
+        return _used_idents_node(node.obj) | _used_idents_node(node.index)
+    if isinstance(node, SliceExpr):
+        r = _used_idents_node(node.obj)
+        if node.start:
+            r |= _used_idents_node(node.start)
+        if node.stop:
+            r |= _used_idents_node(node.stop)
+        return r
+    if isinstance(node, TernaryExpr):
+        return _used_idents_node(node.condition) | _used_idents_node(node.then_val) | _used_idents_node(node.else_val)
+    if isinstance(node, WalrusExpr):
+        return {node.name} | _used_idents_node(node.value)
+    if isinstance(node, (ListExpr, SetExpr, TupleExpr)):
+        r: set = set()
+        for e in node.elements:
+            r |= _used_idents_node(e)
+        return r
+    if isinstance(node, DictExpr):
+        r2: set = set()
+        for _kv in node.pairs:
+            r2 |= _used_idents_node(_kv[0]) | _used_idents_node(_kv[1])
+        return r2
+    if isinstance(node, Comprehension):
+        r3 = _used_idents_node(node.element)
+        if getattr(node, 'key', None) is not None:
+            r3 |= _used_idents_node(node.key)
+        gen_vars: set = set()
+        for g in node.generators:
+            r3 |= _used_idents_node(g.iterable)
+            tgt = g.target
+            if isinstance(tgt, str):
+                gen_vars.add(tgt)
+            elif isinstance(tgt, (list, tuple)):
+                for item in tgt:
+                    if isinstance(item, str):
+                        gen_vars.add(item)
+                    elif hasattr(item, 'name'):
+                        gen_vars.add(item.name)
+            elif hasattr(tgt, 'name'):
+                gen_vars.add(tgt.name)
+        r3 -= gen_vars
+        return r3
+    if isinstance(node, (PassStmt, BreakStmt, ContinueStmt)):
+        return set()
+    if isinstance(node, ReturnStmt):
+        return _used_idents_node(node.value) if node.value else set()
+    if isinstance(node, RaiseStmt):
+        return _used_idents_node(node.value) if node.value else set()
+    if isinstance(node, ExprStmt):
+        return _used_idents_node(node.value)
+    if isinstance(node, AssertStmt):
+        return _used_idents_node(node.value)
+    if isinstance(node, VarDecl):
+        return _used_idents_node(node.value) if node.value else set()
+    if isinstance(node, AssignStmt):
+        return _used_idents_node(node.target) | _used_idents_node(node.value)
+    if isinstance(node, AugAssignStmt):
+        return _used_idents_node(node.target) | _used_idents_node(node.value)
+    if isinstance(node, MultiAssignStmt):
+        r4 = _used_idents_node(node.value)
+        for t in node.targets:
+            r4 |= _used_idents_node(t)
+        return r4
+    if isinstance(node, IfStmt):
+        r5 = _used_idents_node(node.condition)
+        for s in node.then_body:
+            r5 |= _used_idents_node(s)
+        for _elif in node.elifs:
+            for s in _elif[1]:
+                r5 |= _used_idents_node(s)
+        if node.else_body:
+            for s in node.else_body:
+                r5 |= _used_idents_node(s)
+        return r5
+    if isinstance(node, WhileStmt):
+        r6 = _used_idents_node(node.condition)
+        for s in node.body:
+            r6 |= _used_idents_node(s)
+        return r6
+    if isinstance(node, ForStmt):
+        r7 = _used_idents_node(node.iterable)
+        for s in node.body:
+            r7 |= _used_idents_node(s)
+        return r7
+    if isinstance(node, TryStmt):
+        r8: set = set()
+        for s in node.body:
+            r8 |= _used_idents_node(s)
+        for h in node.handlers:
+            for s in h.body:
+                r8 |= _used_idents_node(s)
+        if node.else_body:
+            for s in node.else_body:
+                r8 |= _used_idents_node(s)
+        if node.finally_body:
+            for s in node.finally_body:
+                r8 |= _used_idents_node(s)
+        return r8
+    if isinstance(node, WithStmt):
+        r9: set = set()
+        for item in node.items:
+            r9 |= _used_idents_node(item.expr)
+        for s in node.body:
+            r9 |= _used_idents_node(s)
+        return r9
+    return set()
+
+def _compute_exc_descendants(all_struct_defs):
+    """For each struct name, the set of all struct names that transitively
+    inherit from it (including itself) — used so a compiled `except
+    BaseError:` handler matches any raised subclass of BaseError, not just
+    an exact type-tag match (see _gen_stmt_TryStmt's typed-dispatch loop).
+    The interpreter gets the equivalent behavior by walking a MojoClass's
+    `.bases` chain at catch time (myinterpreter.py's _matches_exc_type);
+    the compiled path has no such runtime walk available (dispatch is
+    static int comparisons against a fixed tag), so this precomputes the
+    same answer once, at compile time, instead."""
+    by_name = {s.name: s for s in all_struct_defs if isinstance(s, StructDef)}
+    descendants = {name: {name} for name in by_name}
+    for name, s in by_name.items():
+        stack = list(getattr(s, 'bases', None) or [])
+        seen = set()
+        while stack:
+            base_name = stack.pop()
+            if base_name in seen:
+                continue
+            seen.add(base_name)
+            if base_name in by_name:
+                descendants.setdefault(base_name, {base_name}).add(name)
+                stack.extend(getattr(by_name[base_name], 'bases', None) or [])
+    return descendants
+
+def _unpack_target_leaf_names(target: str) -> list:
+    """Flatten a tuple-unpack target string (`'(a, b)'`,
+    `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target
+    preserves) into its LEAF variable names. Bracket-aware at every
+    level: a naive `.split(',')` tore nested slots into paren-carrying
+    fragments that then leaked into declared-name sets (or worse, into
+    emitted C declarations verbatim)."""
+    t = target.strip()
+    if t.startswith('(') and t.endswith(')'):
+        names = []
+        for part in _split_top_level_commas(t[1:-1]):
+            names.extend(_unpack_target_leaf_names(part))
+        return names
+    return [t] if t else []
+
+def _declared_vars_body(stmts) -> set[str]:
+    """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
+    result: set = set()
+    for node in stmts:
+        if isinstance(node, VarDecl):
+            result.add(node.name)
+        elif isinstance(node, ForStmt):
+            tgt = node.target
+            name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
+            if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
+                result.update(_unpack_target_leaf_names(name))
+            elif name:
+                result.add(name)
+            result |= _declared_vars_body(node.body)
+        elif isinstance(node, IfStmt):
+            result |= _declared_vars_body(node.then_body)
+            for _elif in node.elifs:
+                result |= _declared_vars_body(_elif[1])
+            if node.else_body:
+                result |= _declared_vars_body(node.else_body)
+        elif isinstance(node, (WhileStmt, WithStmt)):
+            result |= _declared_vars_body(node.body)
+        elif isinstance(node, TryStmt):
+            result |= _declared_vars_body(node.body)
+            for h in node.handlers:
+                if h.name:
+                    result.add(h.name)
+                result |= _declared_vars_body(h.body)
+            if node.else_body:
+                result |= _declared_vars_body(node.else_body)
+            if node.finally_body:
+                result |= _declared_vars_body(node.finally_body)
+    return result
+_CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
+_CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'

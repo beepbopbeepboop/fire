@@ -1,6 +1,6 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-ab-native \
-        check-coro \
+        check-coro check-formal \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -79,6 +79,7 @@ check: check-gimple check-runner check-modcache check-selfhost check-runtimediff
 GIMPLE_SOURCES := gimple_codegen.py $(wildcard gimple_gen_*.py) \
                   $(wildcard gimple_cpp_*.py) gimple_ctypes.py \
                   gimple_solvers.py gimple_exprtypes.py \
+                  $(wildcard mojo/middle/*.py) $(wildcard mojo/backend_gimple/*.py) \
                   ownership_check.py ownership_destruct.py
 
 check-gimple: $(GIMPLE_SOURCES) test_gimple.py
@@ -162,6 +163,30 @@ check-stdlib-jit: fire_compiler.py
 
 check-gimple-runner:
 	python3 test_gimple_runner.py
+
+# ── check-formal: formal arm64 + Lean 4 proof typecheck ──────────────────────
+# Every formal/examples/*.mojo through formalbuild --prove, then pixi's lean
+# typechecks the generated proof statically (no binary execution). Parallel
+# by default (min(cpu_count, 20) workers — see test_formal.py). Not gated
+# into `check`: lean/pixi (pixi install + pixi run prooflib) is an extra
+# dependency beyond the rest of the testsuite. Serial single-stem path:
+# tools/proof.sh <stem>.
+FORMAL_SOURCES  := $(wildcard formal/*.py)
+FORMAL_EXAMPLES := $(wildcard formal/examples/*.mojo)
+
+check-formal: $(FORMAL_SOURCES) $(FORMAL_EXAMPLES) test_formal.py fire.py \
+              fire_compiler.py lib/ProofLib.olean
+	python3 checked_run.py check-formal \
+		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
+		$(foreach s,$(FORMAL_EXAMPLES),--extra $(s)) \
+		--extra test_formal.py --extra fire.py --extra fire_compiler.py \
+		--extra lib/ProofLib.olean \
+		-- python3 test_formal.py
+
+# ProofLib.olean is required by check-formal / tools/proof.sh; build it here
+# if missing so the Make prereq above can be satisfied from a fresh clone.
+lib/ProofLib.olean: lib/ProofLib.lean lib/work.lean lib/Refine.lean pixi.toml
+	pixi run prooflib
 
 # Parse and validate entire stdlib (all .mojo files)
 stdlib:
