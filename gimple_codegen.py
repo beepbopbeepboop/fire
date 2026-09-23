@@ -337,6 +337,35 @@ from mojo.middle.exprtypes import (
 
 _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _selfhost_impl_py_files(sd: str) -> list[str]:
+    """Compiler implementation sources under `sd`: root `gimple_*.py` plus
+    `mojo/middle/*.py` and `mojo/backend_gimple/*.py`.
+
+    Self-host field/global pre-seeds must see the real implementation, not
+    only the root entry (post-2026-09 package split). Uses `os.listdir`,
+    not `glob.glob`: glob silently returns 0 matches in the self-hosted
+    binary regardless of directory correctness (confirmed in
+    emit_funcs._selfhost_scan_gimplegen_extra_fields).
+    """
+    out: list[str] = []
+    try:
+        for n in sorted(os.listdir(sd)):
+            if n.startswith('gimple_') and n.endswith('.py'):
+                out.append(os.path.join(sd, n))
+    except OSError:
+        pass
+    for sub in ('middle', 'backend_gimple'):
+        d = os.path.join(sd, 'mojo', sub)
+        try:
+            for n in sorted(os.listdir(d)):
+                if n.endswith('.py'):
+                    out.append(os.path.join(d, n))
+        except OSError:
+            continue
+    return out
+
+
 # Function/method C symbols that the self-host forward-decl block
 # (gen_module's `_is_selfhost_file` gate) declares explicitly with concrete
 # signatures. The lazy auto-stub path (`_lower_named_call`'s `_is_unknown`

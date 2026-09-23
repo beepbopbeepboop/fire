@@ -999,13 +999,13 @@ def _scan_from_imports_flat(src: str) -> list:
 # --- dependency _selfhost_extracted_fn_index (from gimple_gen_funcs.py) ---
 def _selfhost_extracted_fn_index() -> dict:
     """`{fn_name: FunctionDef}` for every top-level `def fn(gen|self, ...)`
-    across the backend `gimple_*.py` modules — the extracted helper that a
+    across this compiler's implementation sources (root `gimple_*.py` +
+    `mojo/middle` + `mojo/backend_gimple`) — the extracted helper that a
     `class GimpleGen` delegate method `return <alias>.<fn>(self, ...)`
     forwards to. Cached with the field scanner's cache key."""
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('fnidx')
-    import glob as _glob
     _sd = gimple_codegen._SELFHOST_DIR
-    _files = sorted(_glob.glob(gimple_ctypes.os.path.join(_sd, 'gimple_*.py')))
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(_sd))
     _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
     if _hit is not None and _hit[0] == _key:
         return _hit[1]

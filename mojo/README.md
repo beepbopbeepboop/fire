@@ -39,9 +39,10 @@ formal/                        # independent ARM64 backend (unchanged)
 
 ## Compatibility
 
-Every old path (`gimple_*.py` at repo root) is a re-export shim so existing
-`import gimple_*` / `from gimple_* import X` keep working. New code should
-import `mojo.middle.*` (analysis) or `mojo.backend_gimple.*` (emission).
+The 16 root `gimple_*.py` re-export shims were removed after the restructure
+(settled 2026-09). Import `mojo.middle.*` (analysis) or
+`mojo.backend_gimple.*` (emission) directly; only `gimple_codegen.py` remains
+at the root as the public C-backend entry.
 
 ## Rules
 

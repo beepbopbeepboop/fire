@@ -36,6 +36,35 @@ def _selfhost_modglobal_is_pathcall(_v) -> bool:
         return True
     return False
 
+def _selfhost_module_name_for_path(sd: str, path: str) -> str:
+    """Compile-time module name for a compiler implementation source — the
+    SAME string `_compile_imported_module` receives as `module_name` for the
+    corresponding `import` (dotted package path under `mojo/`, bare basename
+    for a root-level `.py`). The scalar-globals pre-seed must use this, not
+    a naive basename: `_global_to_module` drives bare-name global reads to
+    `_{mod}_globals` / `struct _{mod}_toplev`, and those struct names are
+    built from `GimpleGen.module_name` / `current_mod_name`. Seeding
+    `types.py`'s globals under `'types'` while the compile registers them
+    under `'mojo.middle.types'` made every read reference the never-defined
+    `struct _types_toplev` (a real test_selfhost regression after the
+    package split when the pre-seed started covering `mojo/**`)."""
+    try:
+        rel = os.path.relpath(path, sd)
+    except Exception:
+        return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
+    if rel.startswith('..'):
+        return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
+    # '/', not os.sep: see module_loader.module_name_for_path's identical
+    # note — the self-hosted backend leaves os.sep opaque.
+    rel = rel.replace(os.sep, '/').replace('-', '_')
+    if rel.endswith('.py'):
+        rel = rel[:-3]
+    if rel.endswith('/__init__'):
+        rel = rel[: -len('/__init__')]
+    elif rel == '__init__':
+        return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
+    return rel.replace('/', '.')
+
 def _selfhost_module_scalar_globals(sd: str) -> dict:
     """`{global_name: (module_name, semantic_ctype, c_decl_ctype)}` for every
     top-level `NAME = <int|str|bool literal>` / `NAME = frozenset(...)` /
@@ -53,8 +82,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     seeded: those are exactly what `_gscan_declare_global` itself would
     conclude for the same assignment, so the pre-seed can never disagree
     with the eventual per-module scan."""
-    import glob as _glob
-    _files = sorted(_glob.glob(os.path.join(sd, 'gimple_*.py'))
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
                         'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',
@@ -73,7 +101,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
                       '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
     _out: dict = {}
     for _f in _files:
-        _mod = os.path.splitext(os.path.basename(_f))[0]
+        _mod = _selfhost_module_name_for_path(sd, _f)
         try:
             _stmts = ast_rewriter.rewrite(
                 Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
@@ -125,8 +153,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
     `_str_pool: dict[str, str]` value type was lost — `for k, v in
     self._str_pool.items()` then unpacked `v` as int64 and `str()`'d the
     pointer (garbage decimal `_slit_N` names in the emitted string pool)."""
-    import glob as _glob
-    _files = sorted(_glob.glob(os.path.join(sd, 'gimple_*.py'))
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('module_loader.py', 'fire_compiler.py')])
     _files = [f for f in _files if os.path.isfile(f)]
@@ -188,8 +215,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
     importing module — so `GimpleGen._decode_str_literal_text`'s
     `(char*, char*)` return was unpacked via `mojo_list_get_int` and every
     user `StringLiteral`'s text read back as 0 (empty string-pool entries)."""
-    import glob as _glob
-    _files = sorted(_glob.glob(os.path.join(sd, 'gimple_*.py'))
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in ('module_loader.py', 'fire_compiler.py')])
     _files = [f for f in _files if os.path.isfile(f)]
     _key = tuple((f, os.path.getmtime(f)) for f in _files)

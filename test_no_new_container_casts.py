@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """DESIGN.html R3 guard: no NEW ad-hoc container-kind casts outside the
-coercion chokepoint (gimple_gen_resolve.py).
+coercion chokepoint (mojo/backend_gimple/emit_resolve.py).
 
 `(MojoList *)`/`(MojoDict *)`/`(MojoSet *)`/`(MojoBytes *)` written directly
 at a call site, instead of going through `_safe_coerce_emit`'s chokepoint,
@@ -90,9 +90,14 @@ BASELINE_COUNT = 28
 
 def count_casts() -> int:
     total = 0
-    for path in sorted(glob.glob(os.path.join(REPO, "gimple_*.py"))):
-        if os.path.basename(path) == "gimple_gen_resolve.py":
-            continue  # the chokepoint itself is allowed to cast
+    paths = sorted(glob.glob(os.path.join(REPO, "gimple_*.py")))
+    paths += sorted(glob.glob(os.path.join(REPO, "mojo", "**", "*.py"),
+                              recursive=True))
+    for path in paths:
+        base = os.path.basename(path)
+        # the chokepoint itself is allowed to cast
+        if base in ("emit_resolve.py", "gimple_gen_resolve.py"):
+            continue
         with open(path) as f:
             total += len(CAST_RE.findall(f.read()))
     return total
@@ -102,7 +107,7 @@ def main() -> int:
     n = count_casts()
     if n > BASELINE_COUNT:
         print("Results: 0 passed, 1 failed")
-        print(f"✗ {n} container-kind casts outside gimple_gen_resolve.py "
+        print(f"✗ {n} container-kind casts outside emit_resolve.py "
               f"(baseline {BASELINE_COUNT}, +{n - BASELINE_COUNT} new) - "
               f"route new container-kind coercions through "
               f"gen._coerce_to_type instead of an ad-hoc (MojoX *) cast, "

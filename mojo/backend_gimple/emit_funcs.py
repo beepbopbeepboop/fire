@@ -865,40 +865,33 @@ def _selfhost_walk_stmts_for_assign_targets(stmts, p0, fields):
 def _selfhost_scan_gimplegen_extra_fields(_src_dir=None) -> dict[str, str]:
     """`{attr_name: ctype}` for every GimpleGen instance attribute first
     bound OUTSIDE `class GimpleGen`'s own body — i.e. `gen.<attr> = <literal>`
-    / `self.<attr> = <literal>` inside the ~344 extracted backend helper
-    functions (`gen.bb_counter = 2` in gimple_gen_infra.py, `gen._loop_depth
-    = ...` in gimple_gen_calls.py, ...). The `class GimpleGen` scan can't see
-    these, so they default to opaque `int` and a real pointer stored into
-    that field truncates → segfault.
+    / `self.<attr> = <literal>` inside the extracted backend helper functions
+    (`gen.bb_counter = 2` in emit_infra.py, `gen._loop_depth = ...` in
+    emit_calls.py, ...). The `class GimpleGen` scan can't see these, so they
+    default to opaque `int` and a real pointer stored into that field
+    truncates → segfault.
 
     Only literal RHS is trustworthy for a ctype; `gen.x = f()` gives nothing
     and is left to `_inferred_param_types` / the frozen table. Cached on the
-    mtime set of all `gimple_*.py` under the resolved source dir.
+    mtime set of implementation sources under the resolved source dir
+    (root `gimple_*.py` + `mojo/middle` + `mojo/backend_gimple`).
 
     `_src_dir` (`gen._selfhost_src_dir`, threaded through from
     `_selfhost_register_gimplegen`) is tried FIRST, same fallback order as
     `_selfhost_load_gimplegen_class` in gimple_codegen.py: in the COMPILED
     binary `_SELFHOST_DIR` is `dirname(abspath(__file__))`, and `__file__`
     there is `<bootstrap>`, so it can resolve to a directory with no
-    `gimple_*.py` siblings at all.
+    implementation siblings at all.
 
-    Uses `os.listdir()` + manual filename filtering, NOT `glob.glob()`:
-    confirmed by hand that `glob.glob(os.path.join(d, 'gimple_*.py'))`
-    silently returns 0 matches self-hosted regardless of directory
-    correctness, while `os.listdir(d)` + `startswith('gimple_')`/
-    `endswith('.py')` filtering finds the same 17 files the shim finds."""
+    File discovery goes through `gimple_codegen._selfhost_impl_py_files`
+    (os.listdir-based): confirmed by hand that `glob.glob` silently returns
+    0 matches self-hosted regardless of directory correctness."""
     _files: list = []
     for _cand_dir in (_src_dir, gimple_codegen._SELFHOST_DIR, '.', '..'):
         if _cand_dir is None:
             continue
-        try:
-            _cand_names = sorted(os.listdir(_cand_dir))
-        except OSError:
-            continue
-        _cand_files = []
-        for _cn in _cand_names:
-            if _cn.startswith('gimple_') and _cn.endswith('.py'):
-                _cand_files.append(gimple_ctypes.os.path.join(_cand_dir, _cn))
+        _cand_files = gimple_codegen._selfhost_impl_py_files(_cand_dir)
+        _cand_files = [f for f in _cand_files if gimple_ctypes.os.path.isfile(f)]
         if _cand_files:
             _files = _cand_files
             break

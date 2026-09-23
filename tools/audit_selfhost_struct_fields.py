@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Audit the self-host AST-struct field map against the real dataclasses.
 
-`gimple_module_gen.py` hardcodes `self.struct_field_types['<Node>'] = {...}`
+`mojo/backend_gimple/module_gen.py` hardcodes `self.struct_field_types['<Node>'] = {...}`
 for this compiler's OWN AST nodes (the "self-host" struct injection). A field
 present on the real dataclass in `fire_compiler.py` but MISSING from that map
 is silently dropped from the emitted C struct, its reflection
@@ -91,7 +91,8 @@ def main() -> int:
     args = ap.parse_args()
 
     dcs = dataclass_fields(os.path.join(HERE, 'fire_compiler.py'))
-    mp = struct_field_map(os.path.join(HERE, 'gimple_module_gen.py'))
+    mp = struct_field_map(os.path.join(HERE, 'mojo', 'backend_gimple',
+                                       'module_gen.py'))
 
     n_missing = 0
     for name in sorted(mp):

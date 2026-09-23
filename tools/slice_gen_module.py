@@ -23,11 +23,11 @@
            '    py_tokenize, Parser,\n'
            ')\n'
            'from module_loader import load_module, get_symbol_type\n'
-           'import ast_rewriter\n'
-           'import mlir\n'
-           'import regex_compile\n'
-           'import gimple_ctypes\n'
-           'import gimple_solvers\n'
-           'import gimple_exprtypes\n'
-           'from gimple_exprtypes import _walk_ast\n')
+            'import ast_rewriter\n'
+            'import mlir\n'
+            'import regex_compile\n'
+            'import mojo.middle.types as gimple_ctypes\n'
+            'import mojo.middle.solvers as gimple_solvers\n'
+            'import mojo.middle.exprtypes as gimple_exprtypes\n'
+            'from mojo.middle.exprtypes import _walk_ast\n')
     old_hdr_never_used = ('"""gen_module implementation.\n\n'"

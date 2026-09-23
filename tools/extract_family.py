@@ -20,7 +20,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import gimple_ctypes, gimple_solvers, gimple_exprtypes  # noqa: E402
+import mojo.middle.types as gimple_ctypes  # noqa: E402
+import mojo.middle.solvers as gimple_solvers  # noqa: E402
+import mojo.middle.exprtypes as gimple_exprtypes  # noqa: E402
 import fire_compiler  # noqa: E402
 
 CT = {n for n in dir(gimple_ctypes) if not n.startswith('__')}

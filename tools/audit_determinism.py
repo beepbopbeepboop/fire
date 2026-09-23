@@ -52,8 +52,13 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 
-DEFAULT = ([f for f in sorted(os.listdir(HERE))
-            if f.startswith('gimple') and f.endswith('.py')]
+DEFAULT = (['gimple_codegen.py']
+           + [os.path.join('mojo', 'middle', f)
+              for f in sorted(os.listdir(os.path.join(HERE, 'mojo', 'middle')))
+              if f.endswith('.py')]
+           + [os.path.join('mojo', 'backend_gimple', f)
+              for f in sorted(os.listdir(os.path.join(HERE, 'mojo', 'backend_gimple')))
+              if f.endswith('.py')]
            + ['fire_compiler.py', 'module_loader.py', 'ast_rewriter.py',
               'imports.py', 'regex_compile.py'])
 

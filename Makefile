@@ -74,11 +74,10 @@ check: check-gimple check-runner check-modcache check-selfhost check-runtimediff
 # of re-running the check - a hit is exact (same exit code, same stdout/
 # stderr), not an approximation. See checked_run.py's docstring.
 
-# All compiler source modules (post-refactor gimple_codegen split). Any edit
+# All compiler source modules (post-refactor gimple_codegen split; shims
+# removed — only root gimple_codegen.py remains alongside mojo/**). Any edit
 # to one of these must re-run the gates that compile the compiler.
-GIMPLE_SOURCES := gimple_codegen.py $(wildcard gimple_gen_*.py) \
-                  $(wildcard gimple_cpp_*.py) gimple_ctypes.py \
-                  gimple_solvers.py gimple_exprtypes.py \
+GIMPLE_SOURCES := gimple_codegen.py \
                   $(wildcard mojo/middle/*.py) $(wildcard mojo/backend_gimple/*.py) \
                   ownership_check.py ownership_destruct.py
 

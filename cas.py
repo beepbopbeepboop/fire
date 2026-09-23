@@ -72,7 +72,8 @@ ABI_VERSION = "2"
 #
 # The 2026-09 restructure then moved the real implementation OUT of those
 # gimple_*.py files into mojo/middle/ + mojo/backend_gimple/, leaving the
-# gimple_*.py names as thin re-export shims. Hashing only the shims meant an
+# gimple_*.py names as thin re-export shims (later deleted 2026-09-23; only
+# root gimple_codegen.py remains). Hashing only the shims meant an
 # edit to e.g. mojo/middle/resolve_shared.py left compiler_fingerprint()
 # *unchanged* (confirmed: append a line, fp identical) while editing the
 # empty shim changed it — every real codegen edit was invisible to the CAS

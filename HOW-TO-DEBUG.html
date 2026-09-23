@@ -266,7 +266,7 @@ The compile-time analogue of a watchpoint is a wrapper that traps the moment a
 value is decided, and prints a stack. Because the shim is plain CPython, this is
 exact, fast and fully deterministic:
 </p>
-<pre><code>import gimple_gen_infra as ginf
+<pre><code>import mojo.middle.infra_infer as ginf
 orig = ginf._infer_param_types
 def patched(gen, func, owner_struct=None):
     r = orig(gen, func, owner_struct)
