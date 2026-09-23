@@ -29,6 +29,7 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
+import gimple_gen_funcs as _ggf
 import gimple_ctypes
 import gimple_solvers
 import gimple_exprtypes
@@ -67,7 +68,56 @@ import gimple_gen_calls as ggc
 # hashing garbage where a plain sibling free-function call was needed.
 _SELFHOST_SIBLING_MODULE_PREFIXES = ('gimple_', 'ast_rewriter', 'mlir',
                                      'regex_compile', 'module_loader',
-                                     'ownership_destruct', 'fire_compiler')
+                                     'ownership_destruct', 'fire_compiler',
+                                     # gated determinism-trace facility
+                                     # (see determinism_trace.py): without
+                                     # this, `import determinism_trace as
+                                     # _dtrace` in gimple_gen_resolve.py
+                                     # resolved to a bare module-GLOBAL
+                                     # int64_t named `_dtrace` instead of the
+                                     # module, so `_dtrace.enabled()` was a
+                                     # scalar stub returning 0 and the trace
+                                     # never fired.
+                                     'determinism_trace')
+
+
+def _gmm_as_str(x) -> str:
+    """Same-module `str`-view identity helper (see gimple_gen_calls`
+    `_ggc_as_str`). A dict comprehension over `node.kwargs`
+    (`{k: v for k, v in node_kwargs}`) reads each kwarg NAME from a
+    2-tuple via `mojo_list_get_int`, so `k` erases to int64_t and the
+    key is stored as the pointer's decimal address unless re-viewed as
+    `str` — which made `'do_imports' in kwarg_map` miss and silently
+    default `gimple_codegen.compile_to_gimple(src, do_imports=True,
+    filename=input_file)` to `(src, 0, "")` on the self-hosted path."""
+    return x
+
+
+def _gmm_sms_key(struct_name, method) -> str:
+    """Same-module `str`-returning wrapper around the imported `_sms_key`
+    (the `_gmm_as_str` pattern — see its docstring). A module-level call to
+    the IMPORTED `fire_compiler._sms_key` has its `-> str` return type go
+    UNRESOLVED, so the codegen types the result int64_t and the following
+    `dict.get(...)` key-coercion (`_char_to_cstr`) rewrites it through
+    `mojo_str_from_int(<pointer>)` — the key becomes the pointer's DECIMAL
+    ADDRESS, never `"Struct_method"`, so `_struct_method_signatures` lookups
+    miss and return the miss sentinel. Concretely:
+    `_method_candidates = gen._struct_method_signatures.get(_sms_key(...))`
+    got back 1, and `len(_method_candidates)` SIGSEGV'd in
+    `mojo_list_len(0x1)`. A SAME-MODULE `-> str` function resolves, so the
+    caller sees `char *` and passes the real key."""
+    return _sms_key(struct_name, method)
+
+
+def _gmm_callexpr_node(x) -> CallExpr:
+    """Same-module `CallExpr`-view identity helper (the `_gmm_as_str`
+    pattern; an imported `_as_callexpr_node` from fire_compiler is emitted
+    as an `int64_t` weak stub and would return 0). Lets
+    `_lower_struct_method_call` read `.args`/`.kwargs` as DIRECT struct
+    fields instead of through `_mojo_dispatch_getattr`, whose per-type
+    table does not reliably carry a CallExpr case in every compiled module
+    (miss sentinel 1 -> `mojo_list_len(1)` SIGSEGV)."""
+    return x
 
 
 def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
@@ -157,7 +207,7 @@ def _resolve_class_attr_write_target(gen, target):
     class_name = _as_str(obj.name)
     if class_name not in gen.struct_field_types or class_name in gen.var_types:
         return None
-    cattrs = gen._class_attrs.get(class_name)
+    cattrs = gen._class_attrs.get(_gmm_as_str(class_name))
     # `_as_str(target.member)` for the KEY: `target.member` is a boxed AST
     # field read, and a boxed pointer used as a dict key misses the
     # `_class_attrs` entry whose key is a real string — so this returned None
@@ -169,7 +219,7 @@ def _resolve_class_attr_write_target(gen, target):
     if not cattrs or _member_s not in cattrs:
         return None
     gname = cattrs[_member_s]
-    gtype = gen._global_var_types.get(gname, 'int64_t')
+    gtype = gen._global_var_types.get(_gmm_as_str(gname), 'int64_t')
     return gtype, gname
 
 
@@ -252,13 +302,13 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
             "API, which a MojoBoundMethod* (single-call, scalar-"
             "return) value can't represent -- falling back to "
             "interpreting this module from source instead")
-    candidates = gen._struct_method_signatures.get(_sms_key(struct_name, method))
+    candidates = gen._struct_method_signatures.get(_gmm_sms_key(struct_name, method))
     overload_id = ''
     if candidates and len(candidates) == 1:
         overload_id = candidates[0].get('overload_id', '') or ''
-    mangled = gen._struct_method_csym(struct_name, method, overload_id)
+    mangled = _gmm_as_str(_ggf._struct_method_csym(gen, struct_name, method, overload_id))
     ret_type = gen.func_return_types.get(
-        mangled, gen.func_return_types.get(f"{struct_name}_{method}", 'int64_t'))
+        _gmm_as_str(mangled), gen.func_return_types.get(f"{struct_name}_{method}", 'int64_t'))
     gen._funcptr_builtins_needed.add(mangled)
     static_name = f'_funcptr_{mangled}'
     fn_ptr = gen._new_val('void *', static_name)
@@ -392,7 +442,7 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     (`return self[key]`) against UserDict's own `__getitem__`.
     """
     sn = gimple_exprtypes._struct_name_of(ot)
-    cands = gen._struct_method_signatures.get(_sms_key(sn, method)) if sn else None
+    cands = gen._struct_method_signatures.get(_gmm_sms_key(sn, method)) if sn else None
     if not (ot.endswith(' *') and sn in gen.struct_field_types and cands):
         return None
     chosen = None
@@ -407,9 +457,9 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
         if len(matching) == 1:
             chosen = matching[0]
     overload_id = (chosen or {}).get('overload_id', '') or ''
-    mangled = gen._struct_method_csym(sn, method, overload_id)
+    mangled = _gmm_as_str(_ggf._struct_method_csym(gen, sn, method, overload_id))
     ret_type = (chosen or {}).get('ret_type') or gen.func_return_types.get(
-        mangled, gen.func_return_types.get(f"{sn}_{method}", 'int64_t'))
+        _gmm_as_str(mangled), gen.func_return_types.get(f"{sn}_{method}", 'int64_t'))
     all_pairs = [(ot, ov)] + list(arg_pairs)
     if ret_type == 'void':
         gen._emit_call('void', '', mangled, all_pairs)
@@ -1096,8 +1146,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # rather than emitting an unresolvable symbol.
         def _base_defines_method(b):
             return (f"{b}_{gimple_ctypes._safe_name(method)}" in gen.func_return_types
-                    or _sms_key(b, method) in gen._struct_method_signatures)
-        for b in (gen._struct_bases.get(cur_struct) or []) if cur_struct else ():
+                    or _gmm_sms_key(b, method) in gen._struct_method_signatures)
+        for b in (gen._struct_bases.get(_gmm_as_str(cur_struct)) or []) if cur_struct else ():
             # Only a base with an actual known definition (fields/methods
             # registered in struct_field_types) has a real C function to
             # call into. A base we never resolved a StructDef for — e.g.
@@ -1447,9 +1497,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return 'char *', cast
             elif outer_member == 'join':
                 t = gen._new_temp('int64_t')
+                _join_has_spread = any(
+                    isinstance(_ja, UnaryOp) and _ja.op == '*'
+                    for _ja in node.args)
                 if len(node.args) == 0:
                     gen._emit(f'  {t} = (int64_t)0;')
-                elif len(node.args) == 1:
+                elif len(node.args) == 1 and not _join_has_spread:
                     # os.path.join(*list) — single arg is a MojoList*
                     arg_type, arg_val = gen.lower_expr(node.args[0])
                     if arg_type == 'MojoList *':
@@ -1457,6 +1510,38 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     else:
                         # Single non-list arg: just return it
                         gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), ('int64_t', '0')])
+                elif _join_has_spread or len(node.args) > 2:
+                    # `os.path.join(d, *parts, suffix)` (a `*` spread mixed
+                    # with fixed args, or 3+ args): the old 2-arg fast path
+                    # BELOW silently dropped every arg past the second, and
+                    # the spread pass-through handed the raw MojoList to
+                    # `int_join` as if it were one path part. Real divergence
+                    # found via `_resolve_test_relative_module`'s
+                    # `os.path.join(d, *rel_parts, '__init__.mojo')` under
+                    # stage2: the candidate path came out wrong, so a sibling
+                    # import from a `stage2` CWD never resolved and every
+                    # imported function became a weak stub. Build ONE
+                    # MojoList of all parts (expanding spreads) and join it.
+                    _jl = gen._new_temp('MojoList *')
+                    gen._emit(f'  {_jl} = mojo_list_new();')
+                    for _ja in node.args:
+                        if isinstance(_ja, UnaryOp) and _ja.op == '*':
+                            _jat, _jav = gen.lower_expr(_ja.operand)
+                            if _jat == 'MojoList *':
+                                _jcat = gen._call_expr(
+                                    'MojoList *', 'mojo_list_concat',
+                                    [('MojoList *', _jl), ('MojoList *', _jav)])
+                                gen._emit(f'  {_jl} = {_jcat};')
+                                continue
+                            _javs = _jav if _jat == 'char *' else gen._stringify_value(_jat, _jav)
+                            gen._emit_call('void', '', 'mojo_list_append_str',
+                                           [('MojoList *', _jl), ('char *', _javs)])
+                        else:
+                            _jat, _jav = gen.lower_expr(_ja)
+                            _javs = _jav if _jat == 'char *' else gen._stringify_value(_jat, _jav)
+                            gen._emit_call('void', '', 'mojo_list_append_str',
+                                           [('MojoList *', _jl), ('char *', _javs)])
+                    gen._emit_call('int64_t', t, 'int_join_list', [('int64_t', '0'), ('MojoList *', _jl)])
                 else:
                     # os.path.join(a, b) — two path args
                     arg_type, arg_val = gen.lower_expr(node.args[0])
@@ -1617,7 +1702,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 folded_pattern = gen._try_const_fold_str(node.args[0])
                 info = None
                 if folded_pattern is not None:
-                    info = gen._regex_progs.get(folded_pattern)
+                    info = gen._regex_progs.get(_gmm_as_str(folded_pattern))
                     if info is None:
                         try:
                             prog_id = f"re{len(gen._regex_progs)}"
@@ -1816,7 +1901,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # this subprocess-fallback for a do_imports=False single-file
                 # compile. Check node.kwargs too, positional args still win.
                 node_kwargs = getattr(node, 'kwargs', None) or []
-                kwarg_map = {k: v for k, v in node_kwargs}
+                kwarg_map = {_gmm_as_str(k): v for k, v in node_kwargs}
                 # Extract do_imports if provided, default to 0 (false)
                 do_imports_val = '0'
                 if len(node.args) >= 2:
@@ -2177,7 +2262,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                    if isinstance(ot, str) and ot.endswith(' *') else None)
         _fut_user_method = bool(
             _fut_sn and _fut_sn in gen.struct_field_types
-            and method in (gen.struct_field_types.get(_fut_sn) or ()))
+            and method in (gen.struct_field_types.get(_gmm_as_str(_fut_sn)) or ()))
         # A container receiver's `.set()` / `.clear()` is dict/set/list
         # mutation, never an Event op. `ot` is often just `int64_t` for a
         # boxed module global (e.g. gimple_gen_coro.py's own `_PARAM_NAMES:
@@ -2198,7 +2283,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                   and isinstance(_fut_recv_obj.obj, IdentExpr)
                   and _fut_recv_obj.obj.name == 'self'
                   and gen._current_struct_name):
-                _fut_recv_sem = (gen.struct_field_types.get(gen._current_struct_name, {})
+                _fut_recv_sem = (gen.struct_field_types.get(_gmm_as_str(gen._current_struct_name), {})
                                  .get(_fut_recv_obj.member) or _fut_recv_sem)
         _fut_container_recv = (isinstance(_fut_recv_sem, str)
                                and _fut_recv_sem in ('MojoDict *', 'MojoList *', 'MojoSet *'))
@@ -2452,7 +2537,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _gm_kwargs = getattr(node, 'kwargs', []) or []
         _gm_expected = gen.func_param_types.get(f"{_gm_api['base']}_start", [])
         if _gm_expected and len(all_args) < len(_gm_expected):
-            _gm_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gm_kwargs}
+            # Explicit loop, NOT `{kn: gen.lower_expr(ke) for kn, ke in
+            # _gm_kwargs}` — the comprehension's tuple-unpacked key `kn`
+            # erases to int64_t (the pointer-decimal key trap) and the
+            # comprehension itself is the documented self-host hazard.
+            _gm_kwarg_dict = {}
+            for _gm_kn, _gm_ke in _gm_kwargs:
+                _gm_kwarg_dict[_gmm_as_str(_gm_kn)] = gen.lower_expr(_gm_ke)
             _gm_kwarg_values = list(_gm_kwarg_dict.values())
             _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
             while len(all_args) < len(_gm_expected):
@@ -2472,7 +2563,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _dv = gimple_exprtypes._trailing_default_at(
                     _gm_dflts, len(_gm_expected) - 1, _pos)
                 if _dv is not None:
-                    all_args.append(gen._default_expr_to_pair(_dv))
+                    all_args.append(ggc._default_expr_to_pair(gen, _dv))
                 else:
                     all_args.append(('int', '0'))
         else:
@@ -2557,7 +2648,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # the membership check below must use that bare form even though
         # the actual emitted call target is qualified.
         bare_mangled = f"{struct_name}_{gimple_ctypes._safe_name(method)}"
-        mangled = gen._struct_method_csym(struct_name, method, '')
+        mangled = _gmm_as_str(_ggf._struct_method_csym(gen, struct_name, method, ''))
         ret_type = gen.func_return_types.get(f"{struct_name}_{method}", 'char *')
         actual_args = [gen.lower_expr(a) for a in node.args]
         # Keyword arguments (e.g. TestReport.skipped(name=...)) are real
@@ -2595,7 +2686,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # the full arity — P_call's C signature expects every param. Fill
         # the missing trailing args with None (0), mirroring how a missing
         # default is Python-`None` in the common self-host helper classes.
-        _ptypes = (gen.func_param_types.get(mangled)
+        _ptypes = (gen.func_param_types.get(_gmm_as_str(mangled))
                    or gen.func_param_types.get(f"{struct_name}_{method}"))
         if _ptypes and len(arg_pairs) < len(_ptypes):
             for _pad_i in range(len(arg_pairs), len(_ptypes)):
@@ -3118,7 +3209,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (_recv_struct is not None and _recv_struct in gen.struct_field_types
             and method in gen.struct_field_types[_recv_struct]
             and f'{_recv_struct}_{method}' not in gen.func_return_types
-            and _sms_key(_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
+            and _gmm_sms_key(_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
         _has_spread = any(isinstance(a, gimple_ctypes.UnaryOp) and a.op in ('*', '**')
                           for a in node.args)
         if _has_spread:
@@ -3322,7 +3413,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # `.append(...)` / `[...]` resolves against the real runtime type.
         if dt not in ('int64_t', 'int', '_Bool', 'double', ''):
             typed = gen._new_val(dt, f"({dt}){raw}")
-            gen._elem_types[typed] = gen._elem_types.get(dv, gen._elem_types.get(raw))
+            gen._elem_types[typed] = gen._elem_types.get(dv, gen._elem_types.get(_gmm_as_str(raw)))
             return dt, typed
         return 'int64_t', raw
     return 'int64_t', gen._new_val('int64_t', '0')
@@ -3423,7 +3514,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
                 at = 'int64_t'
             gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
             if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
-                actual_elem = gen._actual_types.get(av, at)
+                actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem
                 if actual_elem == 'MojoList *' and av in gen._elem_types:
                     gen._nested_elem_types[ov] = gen._elem_types[av]
@@ -3946,7 +4037,7 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
         # handle is now also runtime-guarded (mojo_is_registered_dict/_set)
         # there instead of blindly assuming list.
         it = gen._materialize_as_list(arg_pairs[0][0], arg_pairs[0][1])
-        _je = gen._elem_types.get(it) or gen._elem_types.get(arg_pairs[0][1])
+        _je = gen._elem_types.get(_gmm_as_str(it)) or gen._elem_types.get(arg_pairs[0][1])
         if _je and gen._bytes_subclass_of(_je):
             # Elements are `class X(bytes)` instances — `b''.join(...)`
             # operates on their `_data: MojoBytes *` payloads, not the
@@ -4086,7 +4177,14 @@ def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,
         mangled, gen._func_kwargs_slot.get(f"{struct_name}_{method}", -1))
     if kw_i < 0:
         return arg_pairs
-    has_spread = any(isinstance(a, gimple_ctypes.UnaryOp) and a.op in ('*', '**') for a in call_args)
+    # Explicit loop, NOT `any(<genexpr>)` — the genexpr/`any` shape is the
+    # established self-hosted trap (its materialized list came back garbage
+    # and `mojo_list_get_int` on it SIGSEGV'd).
+    has_spread = False
+    for _ca0 in call_args:
+        if isinstance(_ca0, gimple_ctypes.UnaryOp) and _ca0.op in ('*', '**'):
+            has_spread = True
+            break
     if not has_spread:
         return arg_pairs
     has_vararg = gen._func_kwargs_has_vararg.get(
@@ -4102,9 +4200,17 @@ def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,
     rest_args = call_args[n_fixed:]
     rest_pairs = arg_pairs[n_fixed:]
     dict_pair = None
+    # Indexed loops, NOT `zip(rest_args, rest_pairs)` with a nested
+    # `for a_node, (a_t, a_v)` tuple unpack — that shape is the same
+    # self-hosted tuple/zip boxing trap the rest of this codebase
+    # documents (`_gen_for_zip`, `_as_str` element views).
     if has_vararg:
         lst = gen._new_val('MojoList *', "mojo_list_new ()")
-        for a_node, (a_t, a_v) in zip(rest_args, rest_pairs):
+        for _pi0 in range(len(rest_pairs)):
+            a_node = rest_args[_pi0]
+            _ap0 = rest_pairs[_pi0]
+            a_t = _ap0[0]
+            a_v = _ap0[1]
             if isinstance(a_node, gimple_ctypes.UnaryOp) and a_node.op == '*':
                 gen._emit(f"  mojo_list_extend ({lst}, {a_v});")
             elif isinstance(a_node, gimple_ctypes.UnaryOp) and a_node.op == '**':
@@ -4114,11 +4220,15 @@ def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,
                 gen._emit(f"  mojo_list_append_int ({lst}, {av});")
         fixed_pairs.append(('MojoList *', lst))
     else:
-        for a_node, (a_t, a_v) in zip(rest_args, rest_pairs):
+        for _pi1 in range(len(rest_pairs)):
+            a_node = rest_args[_pi1]
+            _ap1 = rest_pairs[_pi1]
+            a_t = _ap1[0]
+            a_v = _ap1[1]
             if isinstance(a_node, gimple_ctypes.UnaryOp) and a_node.op == '**':
                 dict_pair = (a_t, a_v)
     if dict_pair is None:
-        dict_pair = ('MojoDict *', gen._pack_kwargs_dict({}))
+        dict_pair = ('MojoDict *', ggc._pack_kwargs_dict(gen, {}))
     fixed_pairs.append(dict_pair)
     return fixed_pairs
 
@@ -4195,7 +4305,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # known only via dylib reflection has no entry here and falls
     # through to the unsuffixed name unchanged (cross-module overload
     # resolution is a separate follow-on, elaborate.py extension).
-    _method_candidates = gen._struct_method_signatures.get(_sms_key(struct_name, method))
+    _method_candidates = gen._struct_method_signatures.get(_gmm_sms_key(struct_name, method))
     _method_overload_suffix = ''
     _chosen_method = None
     # `len > 1` alone (the original gate) skipped overload resolution
@@ -4228,11 +4338,27 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # THE SELF-HOSTED BINARY (gimple_gen_coro.py's `lower()`), a
     # plausible major contributor to the aside/bside sweep's CI-DIFF
     # backlog for any async-using file.
+    # `_as_callexpr_node`: read `node.args`/`node.kwargs` as DIRECT struct
+    # fields. A reflective `node.kwargs` read goes through
+    # `_mojo_dispatch_getattr`, whose per-type table does not reliably carry
+    # a CallExpr case (see bugs/CODEGEN_noshim_dumpfull_preexisting_
+    # divergence.md continuation 7) — the miss sentinel 1 then made
+    # `len(node.kwargs)` SIGSEGV in mojo_list_len(0x1). Same fix family as
+    # `_gmm_as_str`/`_as_ident_node`.
+    _cnode = _gmm_callexpr_node(node)
     if _method_candidates and (len(_method_candidates) > 1 or node.kwargs):
-        _chosen_method = gen._resolve_overload(_method_candidates, node.args, node.kwargs)
+        _chosen_method = ggc._resolve_overload(gen, _method_candidates, _cnode.args, node.kwargs)
         if _chosen_method is not None:
             _method_overload_suffix = _chosen_method['overload_id']
-    mangled = gen._struct_method_csym(struct_name, method, _method_overload_suffix)
+    # `_gmm_as_str`: `_struct_method_csym`'s `-> str` return type goes
+    # UNRESOLVED at this call site (an imported/GimpleGen method), so the
+    # codegen typed `mangled` int64_t and every following
+    # `dict.get(mangled)` key-coercion rewrote the key through
+    # `mojo_str_from_int(<pointer>)` — the pointer's DECIMAL ADDRESS, never
+    # the real "Struct_method" key. Every `_func_param_defaults` /
+    # `func_return_types` / `_KNOWN_SIGS` lookup by mangled name then
+    # missed. Re-tag as `str`.
+    mangled = _gmm_as_str(_ggf._struct_method_csym(gen, struct_name, method, _method_overload_suffix))
     # Prefer the candidate's own precomputed return type (Pass 2b-bis) over
     # func_return_types[suffixed_key], which is only populated once THAT
     # overload's own body is emitted (Phase 2a, declaration order) — a call
@@ -4278,19 +4404,29 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # `m.param_defaults` — same source `_lower_named_call` uses for free
     # functions). `[(pname, default_ast), ...]`, only params that HAVE a
     # default, starting at the first defaulted position.
-    _method_dflts = (gen._func_param_defaults.get(mangled)
+    _gpd1 = gen._func_param_defaults.get(mangled)
+    _method_dflts = (_gpd1
                      or gen._func_param_defaults.get(
                          f"{struct_name}_{method}{_method_overload_suffix}")
                      or gen._func_param_defaults.get(f"{struct_name}_{method}")
                      or [])
-    _method_dflt_map = {pn: dv for pn, dv in _method_dflts}
+    # Explicit loop, NOT `{pn: dv for pn, dv in _method_dflts}` (self-host
+    # comprehension trap; tuple-unpacked `pn` also erases to int64_t).
+    _method_dflt_map = {}
+    for _pn0, _dv0 in _method_dflts:
+        _method_dflt_map[_gmm_as_str(_pn0)] = _dv0
     if _chosen_method is not None:
-        arg_pairs = gen._build_call_args_for_candidate(
-            _chosen_method, node.args, node.kwargs, defaults=_method_dflt_map)
+        arg_pairs = ggc._build_call_args_for_candidate(
+            gen, _chosen_method, _cnode.args, node.kwargs, defaults=_method_dflt_map)
     else:
-        arg_pairs = [gen.lower_expr(a) for a in node.args]
-        arg_pairs = gen._repack_method_call_spread_args(
-            mangled, struct_name, method, node.args, arg_pairs)
+        # Explicit accumulation loop, NOT `[gen.lower_expr(a) for a in
+        # _cnode.args]` — a list comprehension is the established
+        # self-hosted trap (result erased to the garbage non-list 1).
+        arg_pairs = []
+        for _a2 in _cnode.args:
+            arg_pairs.append(gen.lower_expr(_a2))
+        arg_pairs = _repack_method_call_spread_args(
+            gen, mangled, struct_name, method, _cnode.args, arg_pairs)
     full_param_list = gen.func_param_types.get(mangled,
         gen.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", []))
     # The method-parameter registration passes key `func_param_types` by
@@ -4336,7 +4472,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             _pos = len(arg_pairs)
             _dv = (_method_dflts[_pos - _first_dflt][1]
                    if 0 <= _pos - _first_dflt < len(_method_dflts) else None)
-            arg_pairs.append(gen._default_expr_to_pair(_dv)
+            arg_pairs.append(ggc._default_expr_to_pair(gen, _dv)
                              if _dv is not None else ('int', '0'))
     # Auto-stub if the mangled method name has no known declaration. Check
     # both the suffixed key (this specific overload) and the bare key
@@ -4394,11 +4530,20 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # decide the callee's `cls` param is a `Struct *`.
     _recv_pair = ('int64_t', ov) if _is_cls_receiver else (ot, ov)
     _prepend_recv = (not is_class_ref) or _is_cls_receiver
+    # Explicit accumulation, NOT `([_recv_pair] + arg_pairs) if _prepend_recv
+    # else arg_pairs`: a list-literal `+` concat is the established
+    # self-hosted trap (element/element-type erasure; here it produced the
+    # garbage non-list 1, which `_call_expr` then iterated -> `mojo_list_len
+    # (0x1)` SIGSEGV compiling std/collections/dict.mojo).
+    all_arg_pairs = []
+    if _prepend_recv:
+        all_arg_pairs.append(_recv_pair)
+    for _ap0 in arg_pairs:
+        all_arg_pairs.append(_ap0)
     if ret_type == 'void':
-        all_arg_pairs = ([_recv_pair] + arg_pairs) if _prepend_recv else arg_pairs
         return gen._void_call(mangled, all_arg_pairs)
-    all_arg_pairs = ([_recv_pair] + arg_pairs) if _prepend_recv else arg_pairs
     t = gen._call_expr(ret_type, mangled, all_arg_pairs)
+
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]
         if ret_type in ('int', 'int64_t'):

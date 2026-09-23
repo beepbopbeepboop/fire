@@ -3126,7 +3126,7 @@ def _cpp_expr(gen, e) -> str:
                     _sym = gen._struct_method_csym(_next_struct, '__next__', '')
                     gen._cpp_struct_method_refs.add((_next_struct, '__next__'))
                     return f"{_sym}({args[0]})"
-            if (fname in ('list', 'set') and len(e.args) == 1 and not e.kwargs
+            if (fname in ('list', 'set') and len(e.args) == 1 and len(e.kwargs or []) == 0
                     and not gen._locally_binds_name(fname)):
                 # `list(<iterable-expr>)` / `set(<iterable-expr>)` where
                 # the iterable isn't already a plain declared list/dict/
@@ -3154,7 +3154,7 @@ def _cpp_expr(gen, e) -> str:
                 return gen._cpp_build_container_from_iterable(
                     fname, e.args[0], _ctor_var,
                     gimple_ctypes.IdentExpr(_ctor_var, e.line, e.col), [])
-            if (fname == 'map' and len(e.args) == 2 and not e.kwargs
+            if (fname == 'map' and len(e.args) == 2 and len(e.kwargs or []) == 0
                     and not gen._locally_binds_name('map')):
                 # `map(func, iterable)` — categorically unsupported before
                 # this (fell to the generic unresolved-callee refusal
@@ -3179,7 +3179,7 @@ def _cpp_expr(gen, e) -> str:
                     kwargs=[], line=e.line, col=e.col)
                 return gen._cpp_build_container_from_iterable(
                     'list', e.args[1], _ctor_var, _elem, [])
-            if (fname == 'filter' and len(e.args) == 2 and not e.kwargs
+            if (fname == 'filter' and len(e.args) == 2 and len(e.kwargs or []) == 0
                     and not gen._locally_binds_name('filter')):
                 # `filter(func, iterable)` — same eager-materialization
                 # treatment as `map()` just above (real: importlib/
@@ -3247,7 +3247,7 @@ def _cpp_expr(gen, e) -> str:
                         _cond = _call_truthy
                 return gen._cpp_build_container_from_iterable(
                     'list', e.args[1], _ctor_var, _elem, [_cond])
-            if (fname in ('min', 'max') and not e.kwargs
+            if (fname in ('min', 'max') and len(e.kwargs or []) == 0
                     and not gen._locally_binds_name(fname)):
                 # `min(iterable)` / `max(iterable)` reducing a single list
                 # argument, and the multi-arg `min(a, b, ...)` fold — neither
@@ -3492,7 +3492,7 @@ def _cpp_expr(gen, e) -> str:
             # for `self`/parameter struct pointers), so no analogous
             # linkage problem exists there.
             if fname in gen.struct_field_types and fname in gen._struct_has_init \
-                    and not e.kwargs:
+                    and len(e.kwargs or []) == 0:
                 gen._cpp_ctor_struct_names.add(fname)
                 init_sym = gen._struct_method_csym(fname, '__init__', '')
                 gen._cpp_struct_method_refs.add((fname, '__init__'))
@@ -5320,7 +5320,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     out-of-scope shape in this emitter, so an unsupported instance
     falls back to interpreting the whole module from source instead of
     miscompiling."""
-    if call.kwargs:
+    if len(call.kwargs or []) > 0:
         for kname, kexpr in call.kwargs:
             call.args.append(kexpr)
         call.kwargs = []
@@ -7066,7 +7066,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     # alongside its sibling `yield from repeat(...)` sites, all of
     # which must agree on one int64_t promise type.
     if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
-            and call.func.name == 'range' and not call.kwargs
+            and call.func.name == 'range' and len(call.kwargs or []) == 0
             and len(call.args) in (1, 2, 3)):
         rargs = [gen._cpp_expr(a) for a in call.args]
         if len(rargs) == 1:
@@ -7204,7 +7204,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
                 f"{indent}    co_yield {_yf_accessor}({result_var}, _i);",
                 f"{indent}}}"]
-    if call.kwargs:
+    if len(call.kwargs or []) > 0:
         # Append keyword arguments as positional args at the end.
         # This is a simplification (correct only when kwargs match the
         # LAST parameters in source order, which is the common case).

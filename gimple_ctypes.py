@@ -130,13 +130,13 @@ class TypeLattice:
     _FLOAT    = _GD_FLOAT
 
     @classmethod
-    def is_float(cls, t: str) -> bool:    return t in cls._FLOAT
+    def is_float(cls, t: str) -> bool:    return t in _TYPE_FLOAT
     @classmethod
-    def is_signed(cls, t: str) -> bool:   return t in cls._SIGNED
+    def is_signed(cls, t: str) -> bool:   return t in _TYPE_SIGNED
     @classmethod
-    def is_unsigned(cls, t: str) -> bool: return t in cls._UNSIGNED
+    def is_unsigned(cls, t: str) -> bool: return t in _TYPE_UNSIGNED
     @classmethod
-    def is_int(cls, t: str) -> bool:      return t in cls._SIGNED or t in cls._UNSIGNED
+    def is_int(cls, t: str) -> bool:      return t in _TYPE_SIGNED or t in _TYPE_UNSIGNED
     @classmethod
     def is_numeric(cls, t: str) -> bool:  return cls.is_float(t) or cls.is_int(t)
     @classmethod
@@ -167,16 +167,16 @@ class TypeLattice:
             return t1 if cls.is_pointer(t1) else t2
         # Float wins over int; wider float wins
         if cls.is_float(t1) or cls.is_float(t2):
-            r1 = cls._FLOAT.get(t1, 0)
-            r2 = cls._FLOAT.get(t2, 0)
+            r1 = _TYPE_FLOAT.get(t1, 0)
+            r2 = _TYPE_FLOAT.get(t2, 0)
             if r1 == 0: return t2   # t2 is the float
             if r2 == 0: return t1   # t1 is the float
             return t1 if r1 >= r2 else t2
         # Both integral
-        rs1 = cls._SIGNED.get(t1, 0)
-        rs2 = cls._SIGNED.get(t2, 0)
-        ru1 = cls._UNSIGNED.get(t1, 0)
-        ru2 = cls._UNSIGNED.get(t2, 0)
+        rs1 = _TYPE_SIGNED.get(t1, 0)
+        rs2 = _TYPE_SIGNED.get(t2, 0)
+        ru1 = _TYPE_UNSIGNED.get(t1, 0)
+        ru2 = _TYPE_UNSIGNED.get(t2, 0)
         if rs1 and rs2:  return t1 if rs1 >= rs2 else t2   # both signed
         if ru1 and ru2:  return t1 if ru1 >= ru2 else t2   # both unsigned
         if rs1 and ru2:  return t2 if ru2 >= rs1 else t1   # t1 signed, t2 unsigned
@@ -242,7 +242,7 @@ class TypeLattice:
     @classmethod
     def list_suffix(cls, elem: str) -> str:
         """Select 'int'/'double'/'str' API suffix based on element C type."""
-        if elem in cls._FLOAT: return 'double'
+        if elem in _TYPE_FLOAT: return 'double'
         if elem == 'char *':   return 'str'
         return 'int'
 
@@ -933,6 +933,22 @@ def demangle_overload(c_name: str) -> str:
 
 _BIN_OPS  = _GD_BIN_OPS   # Mojo op → C infix op; **, //, @ handled separately
 _CMP_OPS  = _GD_CMP_OPS   # operators whose result type is _Bool
+
+# TypeLattice's rank tables — module-level aliases of the imported
+# generated_dispatch globals, DELIBERATELY NOT class attributes. The
+# self-hosted `_mojo_classattr_init` emitter only materializes class-body
+# assignments whose RHS it can lower to a literal/`{}`/`[]`/`set()`; it
+# skips an alias to another global (`_SIGNED = _GD_SIGNED`), leaving
+# `_classattr_TypeLattice___SIGNED` declared but never assigned (0). A
+# module-level alias of the same imported global IS emitted correctly
+# (exactly like `_BIN_OPS`/`_CMP_OPS` above), so TypeLattice reads these
+# instead. Without this, every mixed-type join fell through to int64_t on
+# the self-hosted path — e.g. `1.5 + 2` lowered to int64 arithmetic
+# (native-vs-python3 `--dump` divergence), and the `0xFFFFFFFFFFFFFFFF`
+# uint64 mask idiom lost its unsigned promotion.
+_TYPE_SIGNED   = _GD_SIGNED
+_TYPE_UNSIGNED = _GD_UNSIGNED
+_TYPE_FLOAT    = _GD_FLOAT
 
 # ---------------------------------------------------------------------------
 

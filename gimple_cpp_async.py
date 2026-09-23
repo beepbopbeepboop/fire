@@ -1118,7 +1118,7 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             for x in gimple_exprtypes._walk_own_body(body):
                 if (isinstance(x, gimple_ctypes.CallExpr)
                         and isinstance(x.func, gimple_ctypes.IdentExpr)
-                        and x.func.name == d.name and not x.kwargs):
+                        and x.func.name == d.name and len(x.kwargs or []) == 0):
                     sites.append((x.args, kmap or {}))
         try:
             usage = gen._infer_param_types(d) or {}

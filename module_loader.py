@@ -136,10 +136,22 @@ def module_name_for_path(path: str) -> str:
     # identical on both sides. Fall back to relpath for a path that isn't
     # literally under STDLIB_PATH (the old behavior).
     _pfx = STDLIB_PATH.rstrip('/') + '/'
-    if path.startswith(_pfx):
-        rel = path[len(_pfx):]
-    else:
-        rel = os.path.relpath(path, STDLIB_PATH)
+    if not path.startswith(_pfx):
+        # Outside STDLIB_PATH: always the basename, decided by the
+        # startswith test ALONE. The old code fell back to
+        # `os.path.relpath(path, STDLIB_PATH)` and then tested
+        # `rel.startswith('..')` — but `os.path.relpath` is a self-host
+        # codegen STUB that returns its first argument unchanged, so on
+        # the compiled backend a RELATIVE path like `runtime/test_helper.mojo`
+        # came back verbatim (no leading `..`), took the dotted-relative
+        # branch, and produced the qualifier `runtime_test_helper` where
+        # CPython's real relpath produced `test_helper` — every imported
+        # symbol from such a module got a different C symbol prefix
+        # (`runtime_test_helper_mojo_double_9f63a2` vs
+        # `test_helper_mojo_double_9f63a2`), a real stage1-vs-stage2
+        # `make bootstrap` divergence (example_imports.mojo).
+        return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
+    rel = path[len(_pfx):]
     if rel.startswith('..'):
         return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
     # '/', not os.sep: the compiled backend leaves `os.sep` opaque (see

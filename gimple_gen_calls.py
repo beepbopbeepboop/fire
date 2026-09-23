@@ -281,6 +281,17 @@ def _lower_future_done_callback(gen, node: gimple_ctypes.CallExpr) -> tuple[str,
     return 'int64_t', gen._call_expr('int64_t', fname, args)
 
 
+def _ggc_as_str(x) -> str:
+    """Same-module `str`-view identity helper. The IMPORTED
+    `fire_compiler._as_str`'s `-> str` return type is not resolved at a
+    module-level call site in this file, so a key routed through it still
+    quick-typed as int64_t and `_emit_dict_pair_store` stringified the
+    pointer via `mojo_str_from_int` (see the `kwarg_dict` build in
+    `_lower_named_call`). A SAME-MODULE `-> str` function resolves, so the
+    key comes out `char *` and is stored by name."""
+    return x
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and node.func.name in ('__mojo_future_add_done_callback',
@@ -1739,7 +1750,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # proof a "real resolvable struct" exists here (like it does for actual
     # user-defined structs) is wrong for these two — see gimple_ctypes.py's
     # `_STR_WRAPPER_CTORS` docstring for the full failure this fixes.
-    if (gen.func_return_types.get(fname_raw, 'int64_t') == 'int64_t'
+    # `_ctor_rt == ''` too, NOT `not gen.func_return_types.get(...)`: a
+    # self-hosted `not <string>` is lowered as POINTER-NULLITY, so an
+    # EMPTY-STRING entry (this compiler's own `func_return_types
+    # ['StringRef'] == ''`) is non-null and `not` yields False, where the
+    # python3 reference's `not ''` is True (string truthiness). Comparing
+    # the value against both the default and the empty string avoids that.
+    _ctor_rt = gen.func_return_types.get(fname_raw, 'int64_t')
+    if ((_ctor_rt == 'int64_t' or _ctor_rt == '')
             and fname_raw[0:1].isupper()
             and fname_raw not in gen.func_param_types
             and (fname_raw not in gen.imported_symbols
@@ -2400,7 +2418,7 @@ def _lower_builtin_set(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    if not node.args and not node.kwargs:
+    if not node.args and len(node.kwargs or []) == 0:
         return 'MojoDict *', gen._new_val('MojoDict *', 'mojo_dict_new ()')
     # `dict(k=v, ...)` kwarg form — previously silently DROPPED (an
     # all-kwargs call hit the `not node.args` early return above and built
@@ -2411,7 +2429,7 @@ def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # KeyError('prog') because nothing ever stored the key. Pairs lower
     # through the SAME per-pair store helper the `{k: v}` literal uses, so
     # key coercion and per-type setter dispatch stay in one place.
-    if node.kwargs and not node.args:
+    if len(node.kwargs or []) > 0 and not node.args:
         t = gen._new_val('MojoDict *', "mojo_dict_new ()")
         for _kw_key, _kw_val in node.kwargs:
             # StringLiteral.value is the parser's already-quote-stripped
@@ -2540,7 +2558,13 @@ def _lower_opaque_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tup
     # -arg, zero-kwargs, char*-argument shape takes this path; every other
     # opaque construction keeps the original first-arg-as-int64_t behavior
     # below unchanged.
-    if (len(node.args) == 1 and not getattr(node, 'kwargs', None)
+    # `len(...) == 0`, NOT `not getattr(node, 'kwargs', None)`: an empty
+    # kwargs list is a NON-NULL MojoList* pointer, which is truthy under
+    # the self-hosted backend's pointer-nullity `not`, so the old gate was
+    # False for a call with NO keywords and the char*-argument fast path
+    # never ran (a real `StringRef("")` stage1-vs-stage2 divergence).
+    _ctor_kw = getattr(node, 'kwargs', None) or []
+    if (len(node.args) == 1 and len(_ctor_kw) == 0
             and gen._quick_type(node.args[0]) == 'char *'):
         at, av = gen.lower_expr(node.args[0])
         return at, av
@@ -3439,7 +3463,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
 
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     kwargs    = getattr(node, 'kwargs', []) or []
-    kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
+    # `_as_str(kname)`: the dict-comprehension's tuple-unpack reads
+    # `kwargs[i][0]` (the kwarg NAME, a str) via `mojo_list_get_int`, so
+    # `kname` erases to int64_t and the old bare `{kname: ...}` key used
+    # `mojo_dict_set_int(d, mojo_str_from_int(kname), v)` — the char*
+    # POINTER stringified as its DECIMAL ADDRESS, not the name. Every
+    # `'do_imports' in kwarg_dict` / `kwarg_dict['filename']` then missed
+    # and the real kwarg was replaced by the callee's default. Real
+    # stage1-vs-stage2 divergence: mojo.mojo's
+    # `gimple_codegen.compile_to_gimple(src, do_imports=True,
+    # filename=input_file)` compiled natively to `(src, 0, "")` instead of
+    # `(src, 1, input_file)`. The `-> str` re-view restores the real key.
+    kwarg_dict = {_ggc_as_str(kname): gen.lower_expr(kexpr) for kname, kexpr in kwargs}
 
     # Disambiguate a call to a `(*args, **kwargs)`-declared callee by
     # the CALL SITE's own shape, not the callee's signature alone (see
@@ -3936,16 +3971,41 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
         return None
     kwargs = kwargs or []
     call_arity = len(args) + len(kwargs)
-    kwarg_names = [kn for kn, _ke in kwargs]
-    survivors = [c for c in candidates
-                 if c['min_arity'] <= call_arity <= c['max_arity']
-                 and all(kn in c['param_names'] for kn in kwarg_names)]
+    # Explicit accumulation loops, NOT the original one-line comprehensions
+    # (`kwarg_names = [kn for kn, _ke in kwargs]` and
+    # `survivors = [c for c in candidates if c['min_arity'] <= call_arity
+    # <= c['max_arity'] and all(kn in c['param_names'] for kn in
+    # kwarg_names)]`). On the self-hosted compiled path those came back as
+    # the garbage non-list 1, so `len(survivors)`/`if not survivors`
+    # SIGSEGV'd in mojo_list_len(0x1) while compiling
+    # std/collections/dict.mojo (a kwargs method call reaching the
+    # 2-candidate overload set). Same comprehension trap family as
+    # `''.join(<genexpr>)` / fire_compiler.py's `CallExpr.kwargs` build.
+    kwarg_names = []
+    for _kn0, _ke0 in kwargs:
+        kwarg_names.append(_kn0)
+    survivors = []
+    for _c0 in candidates:
+        if not (_c0['min_arity'] <= call_arity and call_arity <= _c0['max_arity']):
+            continue
+        _allok = True
+        for _kn1 in kwarg_names:
+            if _kn1 not in _c0['param_names']:
+                _allok = False
+                break
+        if _allok:
+            survivors.append(_c0)
     if not survivors:
         return None
     if len(survivors) == 1:
         return survivors[0]
 
-    arg_types = [gen._quick_type(a) for a in args]
+    # Explicit accumulation loop, NOT `[gen._quick_type(a) for a in args]`
+    # — see the `survivors` note above: a list comprehension here can erase
+    # to the garbage non-list 1 on the self-hosted path.
+    arg_types = []
+    for _a1 in args:
+        arg_types.append(gen._quick_type(_a1))
     # Keyword args bind by name to whichever positional slot that name
     # occupies in a given candidate; scored per-candidate below since
     # candidates can disagree on where a name falls.
@@ -3973,7 +4033,17 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
                     score += 1
         return score
 
-    best = max(survivors, key=_score)
+    # Explicit max-by-score loop, NOT `max(survivors, key=_score)` — the
+    # builtin `max(..., key=...)` form is another self-host lowering
+    # hazard alongside the comprehensions above.
+    _best = None
+    _bestv = None
+    for _c3 in survivors:
+        _c3v = _score(_c3)
+        if _bestv is None or _c3v > _bestv:
+            _bestv = _c3v
+            _best = _c3
+    best = _best
     best_score = _score(best)
     # Same arity, but (when best_score == 0) no candidate's declared param
     # type matched any argument's type at all — our type erasure genuinely
@@ -3992,7 +4062,13 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
     # Picking a real, defined candidate deterministically — same
     # first-in-declaration-order rule already used for genuine ties below
     # — is strictly safer: a plausible overload beats a guaranteed crash.
-    ties = [c for c in survivors if _score(c) == best_score]
+    # Explicit accumulation loop, NOT `[c for c in survivors if
+    # _score(c) == best_score]` — same self-hosted comprehension-erasure
+    # trap as `survivors`/`arg_types` above.
+    ties = []
+    for _c2 in survivors:
+        if _score(_c2) == best_score:
+            ties.append(_c2)
     if len(ties) > 1:
         gimple_ctypes._debug_note('ambiguous or type-indistinguishable overload, picking first in declaration order',
                     f"candidates={[c['overload_id'] for c in ties]}")

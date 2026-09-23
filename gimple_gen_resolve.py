@@ -9,6 +9,15 @@ from __future__ import annotations
 import os
 import re
 
+# Gated determinism tracing hook (see determinism_trace.py's module docstring
+# and HOW-TO-DEBUG.html section 8b). `_DTRACE_ON` is read ONCE, here, so the
+# per-call check in `_new_val` (the temp-allocation chokepoint every emitted
+# statement flows through) is a single dead bool branch when tracing is off —
+# no I/O, no allocation, and no perturbation of the heap layout being
+# measured. Set `MOJO_TRACE=1` (and optionally `MOJO_TRACE_FILE=<path>`) to
+# switch the iota+xorshift64 stream on for a directed divergence hunt.
+import determinism_trace as _dtrace
+
 from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
@@ -594,13 +603,32 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # temp_gen routes the same StructDef through its own
                 # `_imported_typedef_structs` so `self`/`gen` params type
                 # consistently. See gimple_codegen._selfhost_register_gimplegen.
-                for _sh_attr in ('_selfhost_gimplegen_stmts',
-                                 '_selfhost_gimplegen_extra_fields',
-                                 '_selfhost_gimplegen_registered',
-                                 '_selfhost_gimplegen_sigs',
-                                 '_selfhost_gimplegen_dict_vts'):
-                    if hasattr(gen, _sh_attr):
-                        setattr(temp_gen, _sh_attr, getattr(gen, _sh_attr))
+                # EXPLICIT per-attribute copies, NOT the former
+                # `for _sh_attr in ('_selfhost_gimplegen_stmts', ...):
+                # hasattr(gen, _sh_attr) / setattr(temp_gen, _sh_attr, ...)`
+                # loop: iterating a tuple of STRING literals boxes `_sh_attr`
+                # to int64_t on the self-hosted path, so `hasattr(gen,
+                # <boxed>)` was False for every entry and NO nested temp_gen
+                # ever inherited `_selfhost_gimplegen_stmts`/`_sigs` — the
+                # frozen GimpleGen signature table (362 entries on the
+                # reference) was EMPTY in every nested temp_gen, so the
+                # `GimpleGen__*` method externs (gimple_module_gen.py's
+                # `_imported_typedef_structs` loop) were never emitted and
+                # `./mojoc fire.py --dump-full` diverged from the python3
+                # reference at the first `#ifndef _MOJO_STUB_GimpleGen_...`
+                # block. Verified by file-tracing: reference
+                # `stmts_none=0 nsigs=362` in all 36 gens, self-hosted
+                # `stmts_none=1 nsigs=0` in 34 of 35.
+                if hasattr(gen, '_selfhost_gimplegen_stmts'):
+                    temp_gen._selfhost_gimplegen_stmts = gen._selfhost_gimplegen_stmts
+                if hasattr(gen, '_selfhost_gimplegen_extra_fields'):
+                    temp_gen._selfhost_gimplegen_extra_fields = gen._selfhost_gimplegen_extra_fields
+                if hasattr(gen, '_selfhost_gimplegen_registered'):
+                    temp_gen._selfhost_gimplegen_registered = gen._selfhost_gimplegen_registered
+                if hasattr(gen, '_selfhost_gimplegen_sigs'):
+                    temp_gen._selfhost_gimplegen_sigs = gen._selfhost_gimplegen_sigs
+                if hasattr(gen, '_selfhost_gimplegen_dict_vts'):
+                    temp_gen._selfhost_gimplegen_dict_vts = gen._selfhost_gimplegen_dict_vts
                 # share: `self._compiled_modules`-based dedup (line above,
                 # `_compiled_modules`) means a module can be Pass1b-scanned
                 # exactly ONCE, in whichever temp_gen happens to compile it
@@ -1354,6 +1382,14 @@ def _new_temp(gen, ctype: str) -> str:
 
 def _new_val(gen, ctype: str, rhs: str) -> str:
     """Alloc a GIMPLE temp, emit `t = rhs`, return t."""
+    # Determinism-trace chokepoint: every emitted value flows through here,
+    # so a per-call iota+xorshift64 step sees the first divergent value with
+    # no other instrumentation. Entropy is CONTENT only (the ctype's and the
+    # rhs text's stable hashes) — never an address — so two runs that agree
+    # produce identical streams and diff lands on the first real divergence.
+    # Dead branch when MOJO_TRACE is unset (the default).
+    if _dtrace.enabled():
+        _dtrace.note(_dtrace.str_hash(_as_str(ctype)) ^ _dtrace.str_hash(rhs))
     t = gen._new_temp(ctype)
     # GIMPLE strict mode: a bare integer literal (e.g. `0`) is typed
     # plain 'int' by the C frontend; assigning it to a temp declared
@@ -2339,7 +2375,14 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     Scans all assignments to determine the variable's actual type needs.
     Returns dict mapping var_name → inferred_ctype.
     """
-    inferred = {}
+    # Annotated as a real dict: `inferred` is captured by the nested
+    # `collect_assigned_types` closure (passed through its lifted env
+    # struct), and an unannotated `{}` left that env field / the closure's
+    # writes typed int64_t on the self-hosted path, corrupting the dict so
+    # the later `for vname in inferred:` SIGSEGV'd in
+    # `mojo_dict_iter_key` (`it->dict->slots[it->order[...]]`) while
+    # compiling `./mojoc fire.py --dump-full`.
+    inferred: dict[str, list] = {}
 
     # This pre-pass runs before self.var_types is populated for this
     # function, so _quick_type(IdentExpr(param_name)) falls through to its
@@ -2517,7 +2560,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         gen.var_types = _saved_var_types
 
     # Join all types for each variable using TypeLattice
-    result = {}
+    result: dict[str, str] = {}
     for vname in inferred:
         types = inferred[vname]
         if types:

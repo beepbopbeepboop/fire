@@ -2056,6 +2056,18 @@ def _gen_stmt_ReturnStmt(gen, node):
 
 def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
     """Convert val to a GIMPLE-safe _Bool for use in if/while conditions."""
+    # A condition whose `lower_expr` returned an UNKNOWN type leaves
+    # `ctype` as the real Python `None` — which reaches the string-keyed
+    # `ctype in gen._CONTAINER_LEN_FN` membership test just below and, on
+    # the self-hosted path, SIGSEGVs in strcmp inside mojo_dict_contains
+    # with a NULL key (the identical failure mode the `_real_ctype is not
+    # None` guard further down already documents). Normalize to the empty
+    # string so every `in`/`==`/`.endswith` below is a safe string
+    # operation and the unknown type falls through to the generic
+    # nonzero-int truthiness path (CPython never sees None here — it would
+    # have raised on `None.endswith` — so this is compiled-path-only).
+    if ctype is None:
+        ctype = ''
     if ctype == '_Bool':
         return val
     # A module-level container global (`x: set = set()`) is deliberately
@@ -2468,8 +2480,21 @@ def _gen_stmt_MatchStmt(gen, node):
         has_more = i + 1 < len(node.cases)
         next_check_bb = gen._new_bb() if has_more else bb_merge
 
-        is_wildcard = any(
-            isinstance(p, gimple_ctypes.IdentExpr) and p.name == '_' for p in match_case.patterns)
+        # An explicit loop, NOT `any(isinstance(p, IdentExpr) and
+        # p.name == '_' for p in match_case.patterns)`: `pattern` elements
+        # are heterogeneous Expr nodes with no tracked element type, so the
+        # element binds as a bare int64_t — for which `isinstance` emits a
+        # REAL `mojo_read_type_tag` check (unlike the constant-false
+        # `isinstance(<char *>, ...)` static guard). The generator-
+        # comprehension form instead materialized an empty list plus
+        # `mojo_list_any` (`/* TODO: comprehension over int64_t */`), i.e.
+        # always False, which emitted `case _:` as `case 0:` on the
+        # self-hosted path (native vs python3 `--dump match_stmt.mojo`).
+        is_wildcard = False
+        for _wp in match_case.patterns:
+            if isinstance(_wp, gimple_ctypes.IdentExpr) and _wp.name == '_':
+                is_wildcard = True
+                break
         if is_wildcard:
             # A bare `_Bool x; x = 1;` is a "non-trivial conversion" under
             # -fgimple's strict mode (an int constant assigned straight
@@ -2867,8 +2892,28 @@ def _loop_break_bb(gen) -> str:
     return gen.loop_stack[-1][1]
 
 
+def _emit_try_loop_exit_exc_pops(gen) -> None:
+    """Emit one `mojo_exc_pop()` per open `try` protected region a
+    `break`/`continue` jumps out of. A `try` counts when its entry
+    `len(loop_stack)` is >= the current depth (the loop it jumps out of
+    was already open at try-entry; a loop opened INSIDE the try stays put
+    and needs no pop). Replaces the `gen._emit = intercepted_emit` nested
+    closure in `_gen_stmt_TryStmt`, which the self-hosted backend did not
+    run — `mojo.mojo`'s REPL loop silently lost the `mojo_exc_pop()`
+    before a `break`/`continue` inside a `try`."""
+    if not gen.loop_stack:
+        return
+    _npops = 0
+    for _d in gen._try_loop_protect:
+        if len(gen.loop_stack) <= _d:
+            _npops += 1
+    for _i in range(_npops):
+        gen._emit("  mojo_exc_pop ();")
+
+
 def _gen_stmt_BreakStmt(gen, node):
     if gen.loop_stack:
+        _emit_try_loop_exit_exc_pops(gen)
         gen._emit(f"  goto {gen._loop_break_bb()};")
     else:
         # Skip emitting comment to avoid GIMPLE global-passing issues
@@ -2877,6 +2922,7 @@ def _gen_stmt_BreakStmt(gen, node):
 
 def _gen_stmt_ContinueStmt(gen, node):
     if gen.loop_stack:
+        _emit_try_loop_exit_exc_pops(gen)
         gen._emit(f"  goto {gen._loop_continue_bb()};")
     else:
         # Skip emitting comment to avoid GIMPLE global-passing issues
@@ -3686,6 +3732,13 @@ def _gen_stmt_TryStmt(gen, node):
     _return_value = None
     _return_type = None
     _saw_return = [False]   # list so the nested intercepted_emit can set it
+    # Save/restore the protected-region list around this body rather than a
+    # bare append/pop: a nested function or nested try compiled from this
+    # body can leave the list in a different state (a stray pop) before
+    # this try returns, which made the bare `pop()` raise
+    # `IndexError: pop from empty list` and abort the whole module compile.
+    _saved_tlp = list(gen._try_loop_protect)
+    gen._try_loop_protect.append(_entry_loop_depth)
     for s in node.body:
         # Temporarily override _emit to intercept return statements
         original_emit = gen._emit
@@ -3720,21 +3773,12 @@ def _gen_stmt_TryStmt(gen, node):
                     original_emit(line)
                 gen._last_was_terminal = True
                 return
-            # break/continue lower to a bare `goto <loop label>;` (see
-            # _gen_stmt_BreakStmt/_gen_stmt_ContinueStmt). It leaves this
-            # try's protected region — and so needs a `mojo_exc_pop()` —
-            # ONLY when it targets a loop that was already open at
-            # try-entry (a loop OUTSIDE the try). `len(loop_stack) >
-            # _entry_loop_depth` means the innermost loop was opened
-            # inside the try body, and its `continue` stays put.
-            if (gen.loop_stack and len(gen.loop_stack) <= _entry_loop_depth
-                    and stripped in (
-                        f"goto {gen._loop_continue_bb()};",
-                        f"goto {gen._loop_break_bb()};",
-                    )):
-                original_emit("  mojo_exc_pop ();")
-                original_emit(line)
-                return
+            # break/continue jumping out of this try's protected region is
+            # handled in _gen_stmt_BreakStmt/_gen_stmt_ContinueStmt via
+            # `_emit_try_loop_exit_exc_pops` (which reads
+            # `gen._try_loop_protect`), NOT here — the former interception
+            # of the `goto <loop label>;` line was a nested-closure
+            # `gen._emit` override the self-hosted backend did not run.
             original_emit(line)
 
         gen._emit = intercepted_emit
@@ -3744,6 +3788,8 @@ def _gen_stmt_TryStmt(gen, node):
         if gen._last_was_terminal:
             _had_terminal = True
             break
+
+    gen._try_loop_protect = _saved_tlp
 
     # Normal fall-through out of the try body: no exception, no early
     # return. `finally` must run EXACTLY ONCE here, then control continues
@@ -3942,6 +3988,90 @@ def _gen_stmt_TryStmt(gen, node):
     gen._emit_label(bb_after)
 
 
+def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
+    """Emit every `with`-item's teardown (`__exit__` call, generator
+    resume/destroy, or a placeholder comment), in reverse-independent
+    index order.
+
+    HOISTED out of `_gen_stmt_WithStmt` (was a nested closure reading the
+    enclosing function's `_ctx_ts`/`_ctx_vs`/`_ctx_sns`/`_gctx_bases`/
+    `_gctx_vs` locals directly). As a nested closure it emitted NOTHING
+    after the self-hosted binary compiled the compiler: a real
+    stage1-vs-stage2 `make bootstrap` divergence (fire_main.py/mojo.mojo
+    emitted `/* with: __exit__ (int64_t) */` and the python3 reference
+    emitted it, the native side omitted it entirely), while the same
+    function's `__enter__`/alias-binding path — which runs in the
+    ENCLOSING scope, not a closure — emitted correctly. Threading the
+    lists as explicit parameters while leaving it nested did NOT fix it,
+    so the failure is the nested-closure lifting itself, not the capture
+    values; hoisting to module level (this project's standard remedy —
+    see `_gmi_scan_import_modules`, `_register_imported_structs`'s
+    `collect`) removes it.
+
+    Index walk over parallel lists, NOT
+    `for (ct, cv, sn), gctx in zip(contexts, gen_ctxs)` — the
+    nested-tuple `for` target has no self-hosted lowering (emits
+    mojo_unsupported_iter, the loop ran zero times so `with` blocks
+    never emitted their __exit__ / generator teardown in the compiled
+    compiler's own output)."""
+    # `_as_str` on every element read out of a plain (element-type-
+    # untracked) list parameter — otherwise the str slot erases to
+    # int64_t and `f"({sn})"` emitted the pointer's DECIMAL address
+    # (`/* with: __exit__ (4376542048) */`) instead of `int64_t`.
+    for _xi in range(len(_ex_ts)):
+        ct = _as_str(_ex_ts[_xi])
+        cv = _as_str(_ex_vs[_xi])
+        sn = _as_str(_ex_sns[_xi])
+        _gbase = _ex_gbases[_xi]
+        _gval = _ex_gvs[_xi]
+        if _gbase is not None:
+            _gbase = _as_str(_gbase)
+            _gval = _as_str(_gval)
+            # Generator context manager: the final resume() runs the
+            # body from its bare yield to co_return (= __exit__), then
+            # the coroutine frame is destroyed. resume()'s _Bool
+            # result (False == already done) is intentionally
+            # discarded — real Python's __exit__ return value only
+            # suppresses exceptions, and this normal-path emission
+            # runs after an unexceptional body.
+            done_t = gen._new_temp('_Bool')
+            gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
+            gen._emit_call('void', '', f"{_gbase}_destroy",
+                           [('MojoGenerator *', _gval)])
+            continue
+        exit_fn = gen._struct_method_csym(sn, '__exit__', '')
+        if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
+            # __exit__(self, exc_type, exc_val, exc_tb) — real
+            # Python's protocol always passes 3 exception-info
+            # args (None/None/None on the normal-exit path). This
+            # codegen doesn't thread real per-with-statement
+            # exception objects through to here on the exceptional
+            # path either (both paths pass 0/0/0) — always calling
+            # with the correct ARITY, matching whatever exception
+            # info happens to be available, was previously simply
+            # missing altogether ("too few arguments to function
+            # ...__exit__; expected 4, have 1", a hard compile
+            # failure, not just imprecise semantics).
+            #
+            # Real Mojo (unlike Python) does NOT require __exit__
+            # to accept the 3 exception-info params — plain
+            # resource-cleanup-only `def __exit__(self):` is a
+            # legitimate, common shape too (e.g. std/io/io.mojo's
+            # `_fdopen`). Padding unconditionally to 4 args broke
+            # that shape ("too many arguments... expected 1, have
+            # 4") — pad only up to however many params THIS
+            # exit_fn's own real signature actually declares.
+            _exit_params = gen.func_param_types.get(exit_fn)
+            if _exit_params is None:
+                _exit_params = gen.func_param_types.get(f"{sn}___exit__")
+            _n_extra = max(len(_exit_params) - 1, 0) if _exit_params is not None else 3
+            _extra_args = [('int64_t', '0')] * min(_n_extra, 3)
+            ret_t = gen.func_return_types.get(exit_fn, '_Bool')
+            gen._emit_call(ret_t, '', exit_fn, [(ct, cv)] + _extra_args)
+        else:
+            gen._emit(f"  /* with: __exit__ ({sn}) */")
+
+
 def _gen_stmt_WithStmt(gen, node):
     # `contexts` tracks the ORIGINAL context-manager value (`ctx_v`,
     # `ctx_t`) for each item, separately from the user-visible bound
@@ -4038,64 +4168,6 @@ def _gen_stmt_WithStmt(gen, node):
             _gctx_bases.append(None)   # keep index-parallel
             _gctx_vs.append(None)
 
-    def _emit_exits():
-        # Index walk over 3 parallel lists, NOT
-        # `for (ct, cv, sn), gctx in zip(contexts, gen_ctxs)` — the
-        # nested-tuple `for` target has no self-hosted lowering (emits
-        # mojo_unsupported_iter, the loop ran zero times so `with` blocks
-        # never emitted their __exit__ / generator teardown in the
-        # compiled compiler's own output).
-        for _xi in range(len(_ctx_ts)):
-            ct = _ctx_ts[_xi]
-            cv = _ctx_vs[_xi]
-            sn = _ctx_sns[_xi]
-            _gbase = _gctx_bases[_xi]
-            _gval = _gctx_vs[_xi]
-            if _gbase is not None:
-                # Generator context manager: the final resume() runs the
-                # body from its bare yield to co_return (= __exit__), then
-                # the coroutine frame is destroyed. resume()'s _Bool
-                # result (False == already done) is intentionally
-                # discarded — real Python's __exit__ return value only
-                # suppresses exceptions, and this normal-path emission
-                # runs after an unexceptional body.
-                done_t = gen._new_temp('_Bool')
-                gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-                gen._emit_call('void', '', f"{_gbase}_destroy",
-                               [('MojoGenerator *', _gval)])
-                continue
-            exit_fn = gen._struct_method_csym(sn, '__exit__', '')
-            if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
-                # __exit__(self, exc_type, exc_val, exc_tb) — real
-                # Python's protocol always passes 3 exception-info
-                # args (None/None/None on the normal-exit path). This
-                # codegen doesn't thread real per-with-statement
-                # exception objects through to here on the exceptional
-                # path either (both paths pass 0/0/0) — always calling
-                # with the correct ARITY, matching whatever exception
-                # info happens to be available, was previously simply
-                # missing altogether ("too few arguments to function
-                # ...__exit__; expected 4, have 1", a hard compile
-                # failure, not just imprecise semantics).
-                #
-                # Real Mojo (unlike Python) does NOT require __exit__
-                # to accept the 3 exception-info params — plain
-                # resource-cleanup-only `def __exit__(self):` is a
-                # legitimate, common shape too (e.g. std/io/io.mojo's
-                # `_fdopen`). Padding unconditionally to 4 args broke
-                # that shape ("too many arguments... expected 1, have
-                # 4") — pad only up to however many params THIS
-                # exit_fn's own real signature actually declares.
-                _exit_params = gen.func_param_types.get(exit_fn)
-                if _exit_params is None:
-                    _exit_params = gen.func_param_types.get(f"{sn}___exit__")
-                _n_extra = max(len(_exit_params) - 1, 0) if _exit_params is not None else 3
-                _extra_args = [('int64_t', '0')] * min(_n_extra, 3)
-                ret_t = gen.func_return_types.get(exit_fn, '_Bool')
-                gen._emit_call(ret_t, '', exit_fn, [(ct, cv)] + _extra_args)
-            else:
-                gen._emit(f"  /* with: __exit__ ({sn}) */")
-
     has_exit = False
     for _hxi in range(len(_ctx_sns)):
         _hsn = _ctx_sns[_hxi]
@@ -4160,15 +4232,15 @@ def _gen_stmt_WithStmt(gen, node):
         # codegen instead of `try`).
         if not gen._last_was_terminal:
             gen._emit("  mojo_exc_pop ();")
-            _emit_exits()
+            _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
             gen._emit(f"  goto {bb_after};")
         else:
             gen._emit("  mojo_exc_pop ();")
-            _emit_exits()
+            _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
 
         gen._emit_label(bb_exc)
         gen._emit("  mojo_exc_pop ();")
-        _emit_exits()
+        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
         gen._emit("  mojo_raise ();")
         # Only emit goto if the exception handler didn't end with a return
         if not gen._last_was_terminal:
@@ -4178,4 +4250,4 @@ def _gen_stmt_WithStmt(gen, node):
     else:
         for s in node.body:
             gen.gen_stmt(s)
-        _emit_exits()
+        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)

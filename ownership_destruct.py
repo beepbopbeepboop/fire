@@ -127,6 +127,21 @@ def _as_str(x: str) -> str:
     return x
 
 
+def _set_view(x: set) -> set:
+    """Set-typed twin of `_as_str`: identity in CPython, but an explicitly
+    `set`-annotated parameter/return so a value read out of an untyped
+    `list` (whose elements the self-hosted backend otherwise erases to
+    `int64_t`) is recovered as a real `MojoSet *` BEFORE an operator
+    inspects it. `_intersect_all` needs exactly this: `sets[0] & sets[i]`
+    on `int64_t` elements emits a BITWISE AND of the two pointers
+    (`_t9 & _t11` in the generated C — every set here is a heap pointer, so
+    that is silent garbage, not a flagged type error), which then reached
+    `mojo_set_update` as a bogus `MojoSet *` and heap-overflowed. Routing
+    each element through `_set_view` makes `&` lower to
+    `mojo_set_intersection` as intended."""
+    return x
+
+
 def _is_node(x):
     return dataclasses.is_dataclass(x) and not isinstance(x, type)
 
@@ -159,20 +174,26 @@ class _FuncFacts:
 
     def candidates(self) -> set:
         out = set()
-        # `_items` as its own local, NOT `for name, count in self.
-        # assign_count.items():` inline — the SAME "store a container-
-        # returning call's result in a local before using it" rule this
-        # module documents repeatedly elsewhere (`_ia_if`/`_ia_try`/
-        # `_ia_match`/`analyze_function`'s `_candidates`), but for a
-        # FOR-LOOP'S ITERABLE rather than a call argument: found via
-        # AddressSanitizer 2026-09-20 (heap-buffer-overflow in
-        # `mojo_set_update`, `src` aliasing the internal `data` buffer of
-        # THIS `.items()` list) — the two earlier fixes (storing
-        # `_definitely_assigned`'s arguments in locals) didn't touch this
-        # one at all, since the corruption already happens INSIDE this
-        # method, before it ever returns.
-        _items = self.assign_count.items()
-        for name, count in _items:
+        # Iterate KEYS ONLY (`for name in self.assign_count:`), never
+        # `for name, count in self.assign_count.items():` — even with
+        # `.items()`'s result stored in a named local first (`_items`,
+        # the fix this comment used to describe), self-hosted codegen's
+        # tuple-unpacking of a dict-`.items()`-derived pair silently
+        # produced a `name` that DID look up correctly by hand via lldb
+        # (`self.all_ctor_assigns.get("items")` external to the loop
+        # answered True, `"items" not in self.disqualified` answered
+        # True) but FAILED every single one of these same checks INSIDE
+        # the loop body, leaving `out` permanently empty — confirmed via
+        # gdbtool on `list_ops`/`t_list.mojo`-shaped input (`var items =
+        # [...]`, never reassigned) 2026-09-20, the NINTH bug in this
+        # chain and the reason `make bootstrap`'s per-file A/B sweep
+        # (`_ab.py`) still showed 6/27 built-in tests diverging even
+        # after the whole-program crash (bugs 1-8) was fully fixed.
+        # Looking each value up separately by the (correctly-typed,
+        # dict-key-derived) `name` sidesteps whatever `.items()`-pair
+        # unpacking loses.
+        for name in self.assign_count:
+            count = self.assign_count.get(name)
             if (count == 1 and self.all_ctor_assigns.get(name)
                     and name not in self.disqualified):
                 out.add(name)
@@ -444,9 +465,18 @@ def _intersect_all(sets: list) -> set:
     sets either — true for the self-intersection base case too."""
     if not sets:
         return set()
-    out = sets[0] & sets[0]
+    # `_set_view(...)` on every element, NOT a bare `sets[i]`: see `_set_view`'s
+    # own docstring — untyped-list elements erase to int64_t, so
+    # `sets[0] & sets[i]` was a bitwise AND of two heap pointers (the
+    # `&`-type-resolution claim this docstring used to make only held when
+    # the elements were already statically MojoSet*). A real ASan
+    # heap-buffer-overflow in `mojo_set_update` (called from `_dfa_stmt`'s
+    # loop-arm `assigned.update(_new_assigned)` with TWO elements) was this
+    # exact bug; the one-element case got lucky because `p & p == p`.
+    _first = _set_view(sets[0])
+    out = _first & _first
     for i in range(1, len(sets)):
-        out = out & sets[i]
+        out = out & _set_view(sets[i])
     return out
 
 

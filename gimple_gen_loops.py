@@ -1037,13 +1037,28 @@ def _gen_for_zip(gen, node):
     sequence argument (dict/set/opaque boxed value), via
     `_materialize_as_list`."""
     it = node.iterable
-    if it.kwargs:
+    # `len(...) > 0`, NOT a bare `if it.kwargs:` — an EMPTY kwargs list is a
+    # non-null MojoList* and therefore TRUTHY under the self-hosted backend's
+    # pointer-nullity `if`, so this rejected EVERY `zip(a, b)` with no
+    # keywords, fell back to the generic `mojo_unsupported_iter` path, and
+    # ran the loop ZERO times. Real, reproducible: fire_compiler.py's own
+    # `for op, operand in zip(node.ops, node.operands[1:]):` silently
+    # dropped the rest of `emit`'s strings from the native output.
+    if len(it.kwargs or []) > 0:
         raise ValueError("zip() takes no keyword arguments")
     args = list(it.args)
     if len(args) < 2:
         raise ValueError("only the multi-sequence zip() shape is lowered here")
-    target = node.target
-    if not (isinstance(target, str) and target.startswith('(') and target.endswith(')')):
+    # `_as_str(node.target)`, NOT `isinstance(target, str) and target.startswith(...)`:
+    # a tuple loop target (`for op, operand in ...`) is a `char *`-typed
+    # ForStmt field on the self-hosted path, and `isinstance(<char *>, str)`
+    # is the constant-FALSE static guard, so the condition was always true
+    # and `_gen_for_zip` rejected EVERY tuple-target zip — falling back to
+    # `mojo_unsupported_iter` and running the loop ZERO times (real:
+    # fire_compiler.py's own `for op, operand in zip(node.ops,
+    # node.operands[1:]):`, silently dropping the rest of `emit`).
+    target = _as_str(node.target)
+    if not (target.startswith('(') and target.endswith(')')):
         raise ValueError("zip() lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != len(args):
@@ -1480,8 +1495,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         def _emit_slot_read(ptr, i, slot_elem):
             suf_i = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
             if suf_i == 'str':
-                return 'char *', f"mojo_list_get_str ({ptr}, {i})"
-            return 'int64_t', f"mojo_list_get_int ({ptr}, {i})"
+                return 'char *', f"mojo_list_get_str ({_as_str(ptr)}, {i})"
+            return 'int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})"
 
         def _emit_target_assign(ptr, vn, i, slot_elem):
             """Assign slot `i` of the tuple at `ptr` to target name `vn` —
@@ -1503,7 +1518,15 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             suf = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
             vt = gen.var_types.get(vn, slot_elem)
             if suf == 'str':
-                ts = gen._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {i})")
+                # `ptr` (this function's own PARAMETER), NOT the enclosing
+                # `tuple_ptr` local: `_emit_target_assign` is a nested
+                # closure, and the self-hosted backend's capture of
+                # `tuple_ptr` came back NULL, so the slot read emitted
+                # `mojo_list_get_str (0, 0)` instead of the real tuple
+                # pointer — a real stage1-vs-stage2 `make bootstrap`
+                # divergence (`bootstrap-validate.mojo`'s
+                # `for path, base in sources:`).
+                ts = gen._new_val('char *', f"mojo_list_get_str ({_as_str(ptr)}, {i})")
                 if vt == 'char *':
                     gen._emit(f"  {cvn} = {ts};")
                 else:
@@ -1514,7 +1537,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     # into the int64_t loop var reads as %ld (decimal addr).
                     gen._actual_types[vn] = 'char *'
             else:
-                raw = gen._new_val('int64_t', f"mojo_list_get_int ({tuple_ptr}, {i})")
+                raw = gen._new_val('int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})")
                 if vt == 'int64_t':
                     gen._emit(f"  {cvn} = {raw};")
                 else:

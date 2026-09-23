@@ -1432,6 +1432,19 @@ def _as_vardecl_node(e: object) -> VarDecl:
     return e
 
 
+def _as_callexpr_node(e: object) -> CallExpr:
+    """See _as_ident_node: static CallExpr view of a boxed handle, so a
+    following `.func` / `.args` / `.kwargs` read compiles to a DIRECT struct
+    field load rather than a `_mojo_dispatch_getattr` on the boxed node.
+    Load-bearing for `.kwargs`: the per-type reflection dispatch
+    (`_mojo_dispatch_getattr`) does not reliably carry a `CallExpr` case in
+    every compiled module (see bugs/CODEGEN_noshim_dumpfull_preexisting_
+    divergence.md continuation 7), so a reflective `node.kwargs` read comes
+    back as the miss sentinel 1 and a later `len(node.kwargs)` SIGSEGVs in
+    `mojo_list_len(0x1)`. A direct field read is immune."""
+    return e
+
+
 def _as_multiassignstmt_node(e: object) -> MultiAssignStmt:
     """See _as_ident_node: static MultiAssignStmt view of a boxed handle."""
     return e
@@ -3798,8 +3811,15 @@ class Parser:
                         args.append(first)
                     if self._peek().kind == "COMMA": self._advance()
                 self._expect("RPAREN")
-                # Convert keywords dict to list of (name, expr) tuples for CallExpr.kwargs
-                kwargs_list = [(k, v) for k, v in keywords.items()]
+                # Convert keywords dict to list of (name, expr) tuples for
+                # CallExpr.kwargs. Explicit accumulation loop, NOT the
+                # `[(k, v) for k, v in keywords.items()]` comprehension — a
+                # list comprehension over dict items is the established
+                # self-hosted trap (same family as `''.join(<genexpr>)`):
+                # the compiled result erased to the garbage non-list 1.
+                kwargs_list = []
+                for _kw_name, _kw_val in keywords.items():
+                    kwargs_list.append((_kw_name, _kw_val))
                 expr = CallExpr(func=expr, args=args, kwargs=kwargs_list, line=line, col=col)
             elif t.kind == "OP" and t.value == "^":
                 # Check if ^ is postfix (ownership transfer) or binary (XOR)

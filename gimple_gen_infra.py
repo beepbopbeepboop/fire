@@ -130,6 +130,13 @@ def _reset_func(gen, body: list = None, params: list = None):
     gen._addressed_locals: set = set()
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
+    # Entry `len(loop_stack)` of each currently-open `try` body. A
+    # `break`/`continue` that targets a loop already open at try-entry
+    # must emit a `mojo_exc_pop()` first (see
+    # `_emit_try_loop_exit_exc_pops`); the former `gen._emit` nested-
+    # closure interception that used to do this was not run by the
+    # self-hosted backend.
+    gen._try_loop_protect: list = []
     # Set True by _gen_stmt_TryStmt / the with-__exit__ path in
     # _gen_stmt_WithStmt whenever THIS function's own body (not a
     # nested closure's — those get their own _reset_func/flag) emits a
@@ -642,9 +649,27 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
             # the same guard macro _MOJO_STUB_<NAME>) don't produce a second
             # conflicting declaration. If the extern is emitted here, the stub
             # will see the macro already defined and skip itself.
-            guard = gimple_ctypes._stub_guard_name(sym)
-            decl = f'#ifndef {guard}\n#define {guard}\nextern {sig};\n#endif'
-            gen._link_import_decl_list.append(decl)
+            #
+            # ONLY for genuine `std`/`std.*` modules, NOT a bare test-path
+            # sibling (`from test_helper import ...`). `can_resolve_module_path`
+            # accepts both (stdlib, or a module under TEST_PATH =
+            # `os.path.join(HERE, 'runtime')`), but `HERE` is
+            # `dirname(abspath(__file__))` — the SCRIPT's dir for the python3
+            # reference vs the process CWD for the self-hosted binary. So a
+            # `stage2`-CWD build has TEST_PATH=`stage2/runtime`, `can_resolve`
+            # is False for `test_helper`, and this block was skipped natively
+            # while the python3 reference (TEST_PATH=repo/runtime) emitted it —
+            # a real stage1-vs-stage2 `make bootstrap` divergence
+            # (example_imports.mojo). The block is REDUNDANT for such a
+            # sibling anyway: `_register_sym`'s own `/* from <mod> */` extern
+            # (emitted for every resolved FromImportStmt) already declares the
+            # same symbol. Restricting to `std` makes both paths agree; the
+            # `_own_imported_func_home`/`func_return_types` bookkeeping above
+            # still runs for every module.
+            if mod == 'std' or mod.startswith('std.'):
+                guard = gimple_ctypes._stub_guard_name(sym)
+                decl = f'#ifndef {guard}\n#define {guard}\nextern {sig};\n#endif'
+                gen._link_import_decl_list.append(decl)
             seen.add(sym)
 
 
@@ -4469,7 +4494,7 @@ def _empty_ctor_ctype(node) -> str | None:
     if isinstance(node, SetExpr):
         return 'MojoSet *' if not node.elements else None
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
-            and not node.args and not node.kwargs):
+            and not node.args and len(node.kwargs or []) == 0):
         return {'dict': 'MojoDict *', 'list': 'MojoList *', 'set': 'MojoSet *'}.get(node.func.name)
     return None
 

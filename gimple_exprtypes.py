@@ -734,7 +734,7 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # (A zero-arg `list()`/`set()` — no iterable — isn't handled by
         # that codegen case, so isn't claimed here either; falls through
         # to whatever this function already did for it.)
-        if e.func.name in ('list', 'set') and len(e.args) == 1 and not e.kwargs:
+        if e.func.name in ('list', 'set') and len(e.args) == 1 and len(e.kwargs or []) == 0:
             return 'MojoList *' if e.func.name == 'list' else 'MojoSet *'
         # `map(func, iterable)` — materialized eagerly as a real `MojoList
         # *` by this same mechanism (see `_cpp_expr`'s CallExpr/'map' case,
@@ -743,14 +743,14 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # (this runtime has no lazy-iterator representation, so `map()`
         # is only ever consumed as a fully-realized container). Without
         # this, `x = map(f, y)` fell through to the int64_t default below.
-        if e.func.name == 'map' and len(e.args) == 2 and not e.kwargs:
+        if e.func.name == 'map' and len(e.args) == 2 and len(e.kwargs or []) == 0:
             return 'MojoList *'
         # `filter(func, iterable)` — same eager-materialization simplification
         # as `map()` just above (see `_cpp_expr`'s CallExpr/'filter' case,
         # gimple_cpp_core.py). Without this, `lines = filter(f, y)`
         # (importlib/metadata/__init__.py's `Sectioned.read`) fell through
         # to the int64_t default below.
-        if e.func.name == 'filter' and len(e.args) == 2 and not e.kwargs:
+        if e.func.name == 'filter' and len(e.args) == 2 and len(e.kwargs or []) == 0:
             return 'MojoList *'
         # `next(x)` where `x` resolves to a known struct pointer (`self`,
         # or a bare local/param of a known struct type) that implements
@@ -767,7 +767,7 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # return_types` (== `self.func_return_types`), keyed
         # `f"{struct_name}___next__"` exactly like the ordinary GIMPLE
         # path's own `x.__next__()` call site already resolves it.
-        if (e.func.name == 'next' and len(e.args) == 1 and not e.kwargs
+        if (e.func.name == 'next' and len(e.args) == 1 and len(e.kwargs or []) == 0
                 and method_return_types is not None):
             _next_arg = e.args[0]
             if isinstance(_next_arg, IdentExpr) and _next_arg.name == 'self':
@@ -1108,7 +1108,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None,
     # raising _UnsupportedGeneratorShape first (via the undeclared-symbol
     # compile failure) before this mismatch was ever reached.
     if (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
-            and call.func.name == 'range' and not call.kwargs
+            and call.func.name == 'range' and len(call.kwargs or []) == 0
             and len(call.args) in (1, 2, 3)):
         return 'int64_t'
     # yield from sorted(<inner>, key=..., reverse=...): the emitted sort

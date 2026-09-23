@@ -651,9 +651,25 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
     dump = '--dump' in sys.argv
     # Strip flags from sys.argv so input_file = sys.argv[1] works.
     # sys.argv.remove() is broken in the compiled binary (list method
-    # dispatch fails), so rebuild the list instead.
+    # dispatch fails), so rebuild the list instead -- via an explicit
+    # imperative loop, NOT a list comprehension (`[a for a in sys.argv
+    # if a not in (...)]`): a real, ASan-couldn't-catch, lldb-couldn't-
+    # catch, lookslikeUB bug (2026-09-20) where the flag's POSITION in
+    # argv determined whether this crashed (`--dump file.mojo` crashed
+    # ~75% of runs; `file.mojo --dump` never did) -- reproducible only
+    # under a genuinely raw, uninstrumented run, never under lldb or
+    # AddressSanitizer (both changed memory layout enough to avoid
+    # whatever this reads). Never fully root-caused at the instruction
+    # level; rewriting the filter as a plain loop sidesteps it, matching
+    # this project's established fallback for comprehension-shaped
+    # self-hosted bugs elsewhere (see gimple_gen_infra.py's own history
+    # of comprehension/generator-narrowing gaps).
     if dump_full or dump:
-        sys.argv = [a for a in sys.argv if a not in ('--dump-full', '--dump')]
+        _filtered_argv = []
+        for a in sys.argv:
+            if a not in ('--dump-full', '--dump'):
+                _filtered_argv.append(a)
+        sys.argv = _filtered_argv
 
     if len(sys.argv) < 2:
         run_repl()

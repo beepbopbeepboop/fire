@@ -141,16 +141,35 @@ def _lower_IntLiteral(gen, node) -> tuple[str, str]:
         # Also widen the type tag to uint64_t: a plain 'int' temp holding
         # this literal would itself overflow (e.g. UInt64.MAX truncating
         # to -1) before any later cast gets a chance to widen it.
+        #
+        # Materialize into a temp with the SAME signed decimal + `ULL`
+        # suffix (`-1ULL` for 0xFFFFFFFFFFFFFFFF) on both paths:
+        #   * Under CPython `node.value` for 0xFFFFFFFFFFFFFFFF is the
+        #     positive 2**64-1, but the self-hosted compiler stores the
+        #     literal in an int64_t and sees the already-wrapped -1; only
+        #     by converting CPython's value to that same signed form here
+        #     (`- 0x10000000000000000`) do the two paths emit identical
+        #     text, which `make bootstrap`'s stage1-vs-stage2 `verify`
+        #     requires.
+        #   * gcc's `-fgimple` strict frontend REJECTS a large literal as a
+        #     direct BINARY operand in several spellings — `(uint64_t)
+        #     (-1LL)` ("expected expression before '(' token") and `x &
+        #     -1ULL` ("expected expression before '-' token") both fail,
+        #     while a plain `_t = -1ULL;` ASSIGNMENT is accepted. Assigning
+        #     to a temp first is therefore the one form that is both
+        #     GIMPLE-valid everywhere and byte-identical across paths. (The
+        #     entry-8 `(uint64_t)(...)` rewrite broke every stdlib module
+        #     with such a literal once the CPython path emitted it too.)
+        # The `>= 2**64` literal in the positive branch wraps to 0 under
+        # self-host, but that branch is dead there (node.value < 0 is
+        # taken instead), so it never runs.
         if node.value < 0:
-            # Recovering the true unsigned decimal text with Python-level
-            # arithmetic (`node.value + 2**64`) would itself need a
-            # literal >= 2**64 in THIS source file, which self-hosted
-            # would wrap the exact same way — circular. Instead, let GCC
-            # do the reinterpretation at ITS compile time: `(uint64_t)
-            # (-1LL)` is a portable, exact bit-reinterpret cast that
-            # needs no value bigger than int64_t's own range on our end.
-            return 'uint64_t', f'(uint64_t)({node.value}LL)'
-        return 'uint64_t', f'{node.value}ULL'
+            _signed = node.value
+        else:
+            _signed = node.value - 0x10000000000000000
+        _t = gen._new_temp('uint64_t')
+        gen._emit(f"  {_t} = {_signed}ULL;")
+        return 'uint64_t', _t
     return 'int', str(node.value)
 
 
