@@ -1244,18 +1244,18 @@ def _eval_const(gen, node):
     isn't foldable. A superset of _eval_const_int/_eval_const_bool used
     where the comptime value's own type (not just int/bool) matters,
     e.g. a comptime `if` testing a comptime string alias."""
-    if isinstance(node, gimple_ctypes.BoolLiteral): return node.value
-    if isinstance(node, gimple_ctypes.IntLiteral):  return node.value
-    if isinstance(node, gimple_ctypes.StringLiteral): return node.value
-    if isinstance(node, gimple_ctypes.IdentExpr):
+    if isinstance(node, BoolLiteral): return node.value
+    if isinstance(node, IntLiteral):  return node.value
+    if isinstance(node, StringLiteral): return node.value
+    if isinstance(node, IdentExpr):
         return gen._comptime_vals.get(node.name)
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-':
+    if isinstance(node, UnaryOp) and node.op == '-':
         v = gen._eval_const(node.operand)
         return -v if isinstance(v, (int, bool)) else None
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == 'not':
+    if isinstance(node, UnaryOp) and node.op == 'not':
         v = gen._eval_const(node.operand)
         return not v if isinstance(v, (bool, int)) else None
-    if isinstance(node, gimple_ctypes.BinaryOp):
+    if isinstance(node, BinaryOp):
         l = gen._eval_const(node.left)
         r = gen._eval_const(node.right)
         if l is None or r is None: return None
@@ -1272,7 +1272,7 @@ def _eval_const(gen, node):
         if op == '>=':  return l >= r
         if op == 'and': return l and r
         if op == 'or':  return l or r
-    if isinstance(node, gimple_ctypes.CompareChain):
+    if isinstance(node, CompareChain):
         left = gen._eval_const(node.operands[0])
         if left is None: return None
         for op, operand in zip(node.ops, node.operands[1:]):
@@ -1298,7 +1298,7 @@ def _eval_const(gen, node):
     # body even when compiling on macOS/Linux — found via Lib/
     # importlib/_bootstrap_external.py's `if _MS_WINDOWS: def
     # _path_join(...): ... else: def _path_join(...): ...`.
-    if (isinstance(node, gimple_ctypes.MemberExpr) and isinstance(node.obj, gimple_ctypes.IdentExpr)
+    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name == 'sys' and node.member == 'platform'):
         return gimple_ctypes.sys.platform
     return None

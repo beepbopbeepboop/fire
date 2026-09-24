@@ -922,10 +922,14 @@ def _addressable_to_target(gen, ctype: str, aval: str) -> bool:
         return False
     if ctype == 'int64_t' and aval in gen._actual_types:
         return False
-    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', aval) is None:
-        return False
-    if re.fullmatch(r'_t\d+', aval) is not None:
-        return False
+    # The former `re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', aval)` /
+    # `re.fullmatch(r'_t\d+', aval)` guards are GONE: `re.fullmatch` is
+    # unreliable on the self-hosted path (it returned None for a plain
+    # identifier), so EVERY addressable scalar target was rejected and
+    # `UnsafePointer(to=value)` emitted a null pointer. They were also
+    # redundant — the final `aval in gen.var_types` membership already
+    # restricts `aval` to a genuine declared local/parameter name (never a
+    # `_tN` temp, which is not stored in `var_types`).
     return aval in gen.var_types
 
 

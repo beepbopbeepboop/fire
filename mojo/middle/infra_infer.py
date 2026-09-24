@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node
 import regex_compile
 import mlir
 import ownership_destruct
@@ -1099,13 +1099,38 @@ def _seed_addressed_locals(gen, body: list):
     boxing, which must declare a concrete pointee ctype up front):
     `_lower_IdentExpr` already computes each name's ctype itself, at
     the point it materializes a read of it."""
-    for node in gimple_exprtypes._walk_ast(body):
-        if not (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
-                and node.func.name in _POINTER_CTOR_NAMES and not node.args):
+    _nodes = gimple_exprtypes._walk_ast(body)
+    for node in _nodes:
+        if not isinstance(node, CallExpr):
             continue
-        for k, v in (getattr(node, 'kwargs', None) or []):
-            if k == 'to' and isinstance(v, IdentExpr):
-                gen._addressed_locals.add(v.name)
+        # `_as_callexpr_node(node).args` / `len(...) == 0`, NOT `not
+        # node.args`: an empty args MojoList is a NON-NULL pointer, so
+        # `not node.args` is FALSE self-hosted and this skipped every
+        # no-positional-arg pointer ctor — see the `to=` note below.
+        _cn = _as_callexpr_node(node)
+        if not isinstance(_cn.func, IdentExpr):
+            continue
+        if len(_cn.args or []) != 0:
+            continue
+        # `_as_str(_as_ident_node(node.func).name)`: `node` is an untyped
+        # element of `_walk_ast`'s output, so `node.func.name` is a reflective
+        # read; without the tags the membership test below missed and the
+        # whole `to=` pre-registration silently no-op'd.
+        if _as_str(_as_ident_node(node.func).name) not in _POINTER_CTOR_NAMES:
+            continue
+        # Index-based, NOT `for k, v in node.kwargs:` — the 2-tuple unpack
+        # boxes both slots to int64_t self-hosted, so `k == 'to'` never
+        # matched and `value` was never added to `_addressed_locals`. Then
+        # `_lower_call`'s addressed-local fast path missed and
+        # `UnsafePointer(to=value)` emitted `(uint64_t *)0` (a null pointer)
+        # instead of `&value` (repro: std/test/memory/uninit_check/
+        # test_uninit_check_float64_poison). Same trap family as the
+        # `_to_expr` extraction in `_lower_call`.
+        _kw = getattr(node, 'kwargs', None) or []
+        for _ki in range(len(_kw)):
+            _kp = _kw[_ki]
+            if _as_str(_kp[0]) == 'to' and isinstance(_kp[1], IdentExpr):
+                gen._addressed_locals.add(_as_str(_as_ident_node(_kp[1]).name))
 
 def _closure_info_for_ident(gen, name: str):
     """Resolve a bare identifier reference to the ClosureInfo of the

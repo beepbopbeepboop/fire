@@ -195,6 +195,54 @@ unlowered, (e) `extern int chdir (char *)` losing its parameter type,
 targeted fix; the `score`-ranked sweep (`fewest differing lines first`) is
 the efficient way to keep working them.
 
+**Continuation 3 — ROOT-CAUSED AND FIXED: `_walk_ast_into` truncated the
+whole walk self-hosted. clean 147 -> 155; CI-DIFF 615 -> 607; crashes 0.**
+
+The "isinstance is constant-false" symptom above was a red herring. The real
+root is in `mojo/middle/exprtypes.py`'s `_walk_ast_into` (the generic AST
+walker behind EVERY struct-field scan, closure/async pre-pass, and
+`_seed_addressed_locals`): the scalar early-return
+`isinstance(node, str/int/float/bool)` is lowered for an int64_t-boxed value
+to a NON-NULL test (`_isinstance_one_type`'s static `_SCALAR_TYPE_MATCH`
+branch), and every AST node is a pointer boxed as int64_t — so an AST node
+was mistaken for an int and the walk returned WITHOUT descending into its
+fields. Measured directly: `_seed_addressed_locals`'s `_walk_ast(body)`
+returned **3 nodes where the reference returns 64**, so `UnsafePointer(
+to=value)` was never pre-registered. Fixed by walking dataclass fields FIRST
+(a genuine int/str/float is never a dataclass), then the scalar check.
+
+Once the walk was complete, the `UnsafePointer(to=value)` chain had three
+more self-hosted gaps, each fixed:
+- `_seed_addressed_locals` iterated `for k, v in (node.kwargs or [])` — the
+  same 2-tuple-unpack boxing trap; rewritten as an index loop with `_as_str`
+  on the key and `_as_ident_node` on the value.
+- `_lower_call`'s addressed-local test `_to_expr.name in gen._addressed_locals`
+  read `.name` reflectively (a POINTER); now `_as_str(_as_ident_node(_to_expr).name)`.
+- `_addressable_to_target` used `re.fullmatch(r'[A-Za-z_]...')` / `re.fullmatch(
+  r'_t\d+')`, and `re.fullmatch` is unreliable self-hosted (returned None for
+  a plain identifier), rejecting EVERY scalar target. Both guards dropped —
+  the final `aval in gen.var_types` membership already restricts to real
+  locals/params.
+Effect: all five `std/test/memory/uninit_check/*` files are clean (were
+`(uint64_t *)0` vs `&value`).
+
+The complete walk newly reaches async units the truncated walk missed. That
+exposed one latent artifact — `gen_cpp_async_unit`'s `body_lines` local was
+NULL at its trailing `body_lines.append("    co_return;")`
+(`mojo_list_append_str(0, ...)` SIGSEGV) for `test/runtime/test_locks` and
+`std/gpu/host/device_context` — fixed defensively (`if not body_lines:
+body_lines = []`; `not NULL` is true, `not <valid empty list>` false, so the
+same `co_return;` is emitted either way). Those files are now CI-DIFF, not
+crashes.
+
+STILL OPEN: the comptime-`_eval_const`-isinstance instance from the earlier
+write-up was NOT this bug and remains (a `comptime idx = 0` local still hits
+the placeholder); the `struct_field_types`-order hypothesis for it is not yet
+confirmed.
+
+**Final state after continuation 3: 765 files — clean=155, CI-DIFF=607,
+SELFHOST-CRASHED=0, AST/TOK-DIFF=0, SHIM-FAILED=2, BOTH-FAILED=1.**
+
 ## Status (2026-09-21, ninth entry — SIX more self-hosted-only bugs fixed; `check-ab-native` now 30/30 (was 25/30); `make bootstrap` verify failures 14 → 9; whole-program first-diff moved 52 KiB → 143 KiB; the remaining divergences are the documented architectural classes, not these bugs)
 
 Picked up the WIP `fire.py`/`ownership_destruct.py` changes and worked the

@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _as_str, _sms_key,
+    _as_str, _sms_key, _as_ident_node,
 )
 import regex_compile
 import mlir
@@ -780,9 +780,20 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # argument entirely and yielding a null/zero pointer with no diagnostic.
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and node.func.name in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer')
-            and not node.args):
+            and len(node.args or []) == 0):
         _to_kwargs = getattr(node, 'kwargs', None) or []
-        _to_expr = next((v for k, v in _to_kwargs if k == 'to'), None)
+        # Explicit index loop, NOT `next((v for k, v in _to_kwargs if k ==
+        # 'to'), None)`: the genexpr's 2-tuple unpack boxes both slots to
+        # int64_t self-hosted, so `k == 'to'` never matched and `_to_expr`
+        # stayed None — `UnsafePointer(to=value)` then fell through to the
+        # null-pointer branch (`_t2 = (uint64_t *)0;` instead of `&value`;
+        # repro: std/test/memory/uninit_check/test_uninit_check_float64_poison).
+        _to_expr = None
+        for _ki in range(len(_to_kwargs)):
+            _kp = _to_kwargs[_ki]
+            if _as_str(_kp[0]) == 'to':
+                _to_expr = _kp[1]
+                break
         if _to_expr is not None:
             # A bare-identifier `to=` target is ALWAYS already in
             # `_addressed_locals` by this point — `_seed_addressed_locals`
@@ -798,9 +809,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # value at some other read site — a real, hand-hit segfault
             # from a naive first version of this fix that only bypassed
             # materialization for a name's SECOND `to=` occurrence.
-            if isinstance(_to_expr, gimple_ctypes.IdentExpr) and _to_expr.name in gen._addressed_locals:
-                at = gen._type_of(_to_expr.name)
-                av = gen._c_names.get(_to_expr.name, _to_expr.name)
+            _is_ident = isinstance(_to_expr, gimple_ctypes.IdentExpr)
+            _tname = ''
+            if _is_ident:
+                _tname = _as_str(_as_ident_node(_to_expr).name)
+            if _is_ident and _tname in gen._addressed_locals:
+                at = gen._type_of(_tname)
+                av = gen._c_names.get(_tname, _tname)
             else:
                 at, av = gen.lower_expr(_to_expr)
             if at.endswith(' *'):

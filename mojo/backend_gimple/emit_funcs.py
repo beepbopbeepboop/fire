@@ -28,6 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node,
+    _as_comptimevar_node, _as_intlit_node, _as_boollit_node,
 )
 import ast_rewriter
 import regex_compile
@@ -609,11 +610,25 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
     # code, but a later comptime `if`/expression may reference this name
     # (e.g. `comptime FOO = 1` then `if FOO == 1:`) — record the folded
     # value so _eval_const's IdentExpr case can resolve it.
-    val = gen._eval_const(node.value)
+    # `_as_str(node.target)`: the target name read off the (boxed, untyped)
+    # ComptimeVarStmt node came back as its POINTER, so the dict was keyed by
+    # that pointer and every later `name in gen._comptime_vals` / `.get(name)`
+    # STRING lookup MISSED — a local `comptime idx = 0` then `t[idx]` fell to
+    # the `/* ct param or undeclared: idx */` placeholder where the reference
+    # folds it (repro: std/test/utils/test_static_tuple.mojo).
+    _ct_target = _as_str(node.target)
+    # `_as_comptimevar_node(node).value` for a DIRECT field read: reading
+    # `.value` off the boxed, untyped ComptimeVarStmt node went through
+    # reflective dispatch and came back as the miss sentinel, so `_eval_const`
+    # did not recognise the IntLiteral and returned None — `val is not None`
+    # was then False and the value was never recorded (a local
+    # `comptime idx = 0` then `t[idx]` hit the placeholder).
+    _ct_node = _as_comptimevar_node(node)
+    val = gen._eval_const(_ct_node.value)
     if val is not None:
-        gen._comptime_vals[node.target] = val
-    if isinstance(node.value, gimple_ctypes.ListExpr):
-        gen._comptime_list_asts[node.target] = node.value
+        gen._comptime_vals[_ct_target] = val
+    if isinstance(_ct_node.value, gimple_ctypes.ListExpr):
+        gen._comptime_list_asts[_ct_target] = _ct_node.value
     return
 
 

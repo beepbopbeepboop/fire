@@ -1758,6 +1758,15 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
             # An explicit trailing `co_return;` guarantees the marker
             # exists syntactically, regardless of what's already in
             # body_lines.
+            # Defensive re-materialize: after the full `_walk_ast` fix this
+            # branch is reached for async units the previously-truncated walk
+            # missed, and a latent artifact left `body_lines` NULL here
+            # (`mojo_list_append_str(0, ...)` SIGSEGV). `not NULL` is true
+            # self-hosted, `not <valid empty list>` is false, so this only
+            # kicks in for the broken case and still emits the same
+            # `co_return;`.
+            if not body_lines:
+                body_lines = []
             body_lines.append("    co_return;")
         else:
             raise gimple_exprtypes._UnsupportedAsyncShape(

@@ -46,23 +46,35 @@ def _walk_ast_into(node, out, _depth=0):
     out.append(node)
     if isinstance(node, type):
         return
+    # Dataclass AST nodes are walked FIRST, before the scalar early-return
+    # just below. That scalar test (`isinstance(node, str/int/float/bool)`)
+    # is lowered for an int64_t-boxed value to a NON-NULL test
+    # (`_isinstance_one_type`'s static `_SCALAR_TYPE_MATCH` branch), and
+    # every AST node is a pointer boxed as int64_t — so an AST node was
+    # mistaken for an int and the walk returned WITHOUT descending into its
+    # fields. Measured: `_seed_addressed_locals`'s `_walk_ast(body)` saw 3
+    # nodes where the reference sees 64, so `UnsafePointer(to=value)` was
+    # never pre-registered and emitted `(uint64_t *)0` (repro:
+    # std/test/memory/uninit_check/test_uninit_check_float64_poison). A
+    # genuine int/str/float is never a dataclass, so this ordering is safe.
+    if dataclasses.is_dataclass(node):
+        fnames = _WALK_FIELD_NAMES_CACHE.get(type(node))
+        if fnames is None:
+            _raw = dataclasses.fields(node)
+            _names = []
+            for _f in _raw:
+                _names.append(_f.name if hasattr(_f, 'type') else _f)
+            fnames = tuple(_names)
+            _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
+        for fname in fnames:
+            _child = getattr(node, fname, None)
+            if _child is node:
+                continue
+            _walk_ast_into(_child, out, _depth + 1)
+        return
     if isinstance(node, str) or isinstance(node, int) or isinstance(node, float) or isinstance(node, bool) or (node is None):
         return
-    if not dataclasses.is_dataclass(node):
-        return
-    fnames = _WALK_FIELD_NAMES_CACHE.get(type(node))
-    if fnames is None:
-        _raw = dataclasses.fields(node)
-        _names = []
-        for _f in _raw:
-            _names.append(_f.name if hasattr(_f, 'type') else _f)
-        fnames = tuple(_names)
-        _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
-    for fname in fnames:
-        _child = getattr(node, fname, None)
-        if _child is node:
-            continue
-        _walk_ast_into(_child, out, _depth + 1)
+    return
 
 def _walk_ast(node):
     """Recursively return a list of every AST node (statement or expression)
