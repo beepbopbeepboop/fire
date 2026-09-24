@@ -3847,7 +3847,17 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     idx = node.func.index
     elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
 
-    cname = elems[0].value if elems and isinstance(elems[0], gimple_ctypes.StringLiteral) else None
+    # Explicit if/else + `_as_str`, NOT a ternary `elems[0].value if ... else
+    # None`: the ternary unifies `elems[0].value` (read reflectively off an
+    # untyped list element -> int64_t) with `None` into an int64_t `cname`, so
+    # the sanitize loop below (`for c in cname:`) iterated an int64 and left
+    # `_sanitized == ''` — every external_call name became EMPTY
+    # (`extern void  (int64_t *);`; repro: std/sys/arg.mojo's
+    # `external_call["KGEN_CompilerRT_GetArgV", NoneType](...)`).
+    _e0 = elems[0] if elems else None
+    cname = ''
+    if isinstance(_e0, gimple_ctypes.StringLiteral):
+        cname = _as_str(_e0.value)
     if not cname:
         t = gen._new_temp('int')
         gen._emit(f"  {t} = 0;  /* external_call with non-literal name */")
