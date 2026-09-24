@@ -21,79 +21,10 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 
-def _lbn_target_names(t) -> list:
-    """Hoisted out of `_locally_bound_names` (module-level, not a nested
-    closure) — see `_lbn_walk`'s docstring for why."""
-    if isinstance(t, gimple_ctypes.IdentExpr):
-        return [t.name]
-    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        names = []
-        for e in t.elements:
-            names.extend(_lbn_target_names(e))
-        return names
-    return []
-
-def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
-    """Hoisted out of `_locally_bound_names` (module-level, not a nested,
-    RECURSIVE closure mutating two captured sets) — a real --dump-full
-    fire.py crash (SIGSEGV in mojo_set_update -> mojo_set_add_str ->
-    _set_slot_str -> _str_hash, address 0x1) traced here via lldb: the
-    lifted-closure env carrying `bound`/`global_declared` across this
-    closure's OWN recursive self-calls wasn't reliably allocated/valid at
-    every recursion depth. Threading both sets as explicit parameters
-    (mutated in place, same as any ordinary Python call) sidesteps the
-    lifted-closure machinery entirely."""
-    for node in nodes or []:
-        if isinstance(node, gimple_ctypes.GlobalStmt):
-            global_declared.update(node.names)
-        elif isinstance(node, gimple_ctypes.AssignStmt):
-            bound.update(_lbn_target_names(node.target))
-        elif isinstance(node, gimple_ctypes.MultiAssignStmt):
-            for t in node.targets:
-                bound.update(_lbn_target_names(t))
-        elif isinstance(node, gimple_ctypes.AugAssignStmt):
-            bound.update(_lbn_target_names(node.target))
-        elif isinstance(node, gimple_ctypes.VarDecl):
-            bound.add(node.name)
-        elif isinstance(node, gimple_ctypes.ForStmt):
-            bound.update(_lbn_target_names(node.target))
-            _lbn_walk(bound, global_declared, node.body)
-            if node.else_body:
-                _lbn_walk(bound, global_declared, node.else_body)
-        elif isinstance(node, gimple_ctypes.WhileStmt):
-            _lbn_walk(bound, global_declared, node.body)
-            if node.else_body:
-                _lbn_walk(bound, global_declared, node.else_body)
-        elif isinstance(node, gimple_ctypes.IfStmt):
-            _lbn_walk(bound, global_declared, node.then_body)
-            if node.else_body:
-                _lbn_walk(bound, global_declared, node.else_body)
-            for _, elif_body in (node.elifs or []):
-                _lbn_walk(bound, global_declared, elif_body)
-        elif isinstance(node, gimple_ctypes.TryStmt):
-            _lbn_walk(bound, global_declared, node.body)
-            for h in (node.handlers or []):
-                _lbn_walk(bound, global_declared, h.body)
-            if node.else_body:
-                _lbn_walk(bound, global_declared, node.else_body)
-            if node.finally_body:
-                _lbn_walk(bound, global_declared, node.finally_body)
-        elif isinstance(node, gimple_ctypes.WithStmt):
-            for item in (node.items or []):
-                _al = item.alias
-                if _al is not None:
-                    # `isinstance(_al, str)` is unreliable in the
-                    # self-hosted backend (WithItem.alias is typed
-                    # `object` -> int64_t -> the isinstance stub says
-                    # False for a real `char *`, then `_al.name` on the
-                    # bare string "f" raises AttributeError). Check for
-                    # the node case explicitly; everything else is the
-                    # string alias.
-                    if isinstance(_al, gimple_ctypes.IdentExpr):
-                        bound.add(_al.name)
-                    else:
-                        bound.add(_as_str(_al))
-            _lbn_walk(bound, global_declared, node.body)
+# Bound-name walk lives in the light mojo.middle.boundnames module (formal
+# imports that directly; this file re-exports so emit_resolve's
+# `from mojo.middle.resolve_shared import _lbn_walk` keeps working).
+from mojo.middle.boundnames import _lbn_target_names, _lbn_walk
 
 def _closure_value_locals(gen, body: list) -> dict:
     """Map local name → 'MojoBoundMethod *'/'void *' for the locals of a

@@ -20,15 +20,10 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 
-def _with_item_alias_name(alias) -> str:
-    """Bare name a `with ... as <alias>` binds. `WithItem.alias` is typed
-    `object`, so the self-hosted backend erases it to int64_t and
-    `isinstance(alias, str)` (the stub) reports False for a real `char *` —
-    `alias.name` on the bare string then raises AttributeError and silently
-    truncates the enclosing function. Check the node case explicitly."""
-    if isinstance(alias, IdentExpr):
-        return alias.name
-    return _as_str(alias)
+# With-alias naming lives in the light mojo.middle.boundnames module
+# (formal imports that directly; this file re-exports so emit_stmts'
+# `from mojo.middle.stmts_shared import _with_item_alias_name` keeps working).
+from mojo.middle.boundnames import _with_item_alias_name
 
 def _annotation_dict_val_type(gen, ann) -> str | None:
     """`dict[K, V]` / `Dict[K, V]` annotation → the dict's VALUE C type,

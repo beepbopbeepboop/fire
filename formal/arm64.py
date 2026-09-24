@@ -48,6 +48,32 @@ def encode_ldr_xt_xn_imm(xt: int, xn: int, imm: int) -> bytes:
     return struct.pack('<I', insn)
 
 
+def encode_ldrb_wd_wn(wd: int, wn: int, imm: int = 0) -> bytes:
+    """LDRB Wd, [Xn, #imm]. Byte load, zero-extends into Xd.
+
+    Encoding: 0011100101 imm12 Rn Rt (0x39400000 base); imm is a byte
+    offset (not scaled). Verified against `as`: ldrb w0,[x9] = 20014039.
+    """
+    assert 0 <= wd <= 30
+    assert 0 <= wn <= 31
+    assert 0 <= imm < 0x1000
+    insn = 0x39400000 | (imm << 10) | (wn << 5) | wd
+    return struct.pack('<I', insn)
+
+
+def encode_strb_wd_wn(wd: int, wn: int, imm: int = 0) -> bytes:
+    """STRB Wd, [Xn, #imm]. Byte store from Wd.
+
+    Encoding: 0011100100 imm12 Rn Rt (0x39000000 base); imm is a byte
+    offset. Verified against `as`: strb w0,[x9] = 20010039.
+    """
+    assert 0 <= wd <= 30
+    assert 0 <= wn <= 31
+    assert 0 <= imm < 0x1000
+    insn = 0x39000000 | (imm << 10) | (wn << 5) | wd
+    return struct.pack('<I', insn)
+
+
 def encode_br_xn(xn: int) -> bytes:
     """BR Xn. Unconditional branch to register.
     Encoding: 11010110000 11111 000000 00000 Rn
@@ -144,6 +170,28 @@ def encode_add_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
     assert 0 <= xn <= 31
     assert 0 <= xm <= 30
     insn = 0x8b000000 | (xm << 16) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_add_xd_xn_xm_lsl3(xd: int, xn: int, xm: int) -> bytes:
+    """ADD Xd, Xn, Xm, LSL #3. Xd = Xn + (Xm << 3).
+    Element-address step for int64 list blobs. Verified against `as`:
+    add x0, x1, x2, lsl #3 = 8b020c20."""
+    assert 0 <= xd <= 30
+    assert 0 <= xn <= 31
+    assert 0 <= xm <= 30
+    insn = 0x8b000000 | (xm << 16) | (3 << 10) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_add_xd_xn_xm_lsl4(xd: int, xn: int, xm: int) -> bytes:
+    """ADD Xd, Xn, Xm, LSL #4. Xd = Xn + (Xm << 4).
+    Element-address step for dict pair blobs ([count][k][v]…, 16 bytes
+    per pair). Verified against `as`: add x4, x9, x3, lsl #4 = 8b031124."""
+    assert 0 <= xd <= 30
+    assert 0 <= xn <= 31
+    assert 0 <= xm <= 30
+    insn = 0x8b000000 | (xm << 16) | (4 << 10) | (xn << 5) | xd
     return struct.pack('<I', insn)
 
 
@@ -273,6 +321,20 @@ def encode_ldp_sp_post(rt1: int, rt2: int, b: int = 16) -> bytes:
     assert b > 0 and b % 8 == 0
     imm7 = (b // 8) & 0x7F
     insn = (0x2A3 << 22) | (imm7 << 15) | (rt2 << 10) | (0x1F << 5) | rt1
+    return struct.pack('<I', insn)
+
+
+def encode_str_xt_xn_imm(xt: int, xn: int, imm: int) -> bytes:
+    """STR Xt, [Xn, #imm]. Unsigned immediate offset store, 64-bit, no writeback.
+
+    imm is the byte offset (multiple of 8); encoding field is imm/8.
+    Matches encode_ldr_xt_xn_imm's parameter convention.
+    """
+    assert 0 <= xt <= 30 and 0 <= xn <= 31
+    assert imm % 8 == 0
+    imm12 = imm // 8
+    assert 0 <= imm12 < 0x1000
+    insn = 0xF9000000 | (imm12 << 10) | (xn << 5) | xt
     return struct.pack('<I', insn)
 
 
@@ -512,11 +574,15 @@ class Assembler:
                 # BL instruction
                 insn = (insn & 0xff000000) | (offset & 0x03ffffff)
             elif (insn & 0x7e000000) == 0x34000000:
-                # CBZ instruction
-                insn = (insn & 0xff800000) | ((offset << 5) & 0x007ffff0)
+                # CBZ (W or X). imm19 occupies bits 5..23; Rt is bits 0..4
+                # and MUST be preserved — the old mask 0xff800000 cleared
+                # Rt, turning `cbz x3` into `cbz x0` (and same for CBNZ),
+                # so every bounds-check that branched on a non-X0 cset
+                # result was silently wrong after resolve().
+                insn = (insn & 0xff00001f) | ((offset & 0x7ffff) << 5)
             elif (insn & 0x7e000000) == 0x35000000:
-                # CBNZ instruction
-                insn = (insn & 0xff800000) | ((offset << 5) & 0x007ffff0)
+                # CBNZ (W or X) — same imm19/Rt layout as CBZ.
+                insn = (insn & 0xff00001f) | ((offset & 0x7ffff) << 5)
 
             struct.pack_into('<I', self.sections["text"], idx, insn)
         self.relocs.clear()

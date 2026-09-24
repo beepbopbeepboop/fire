@@ -12,6 +12,7 @@ zero-extended. The unannotated `int` is UInt64.
 from dataclasses import dataclass
 
 import fire_compiler as F
+from mojo.middle.boundnames import _with_item_alias_name, _lbn_target_names
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,10 @@ def function_var_types(fn: F.FunctionDef, call_types: dict = None) -> dict:
                 if isinstance(s.target, F.IdentExpr) and s.target.name not in vtypes:
                     vtypes[s.target.name] = resolve(
                         infer_expr(s.value, vtypes, call_types))
+            elif isinstance(s, F.MultiAssignStmt):
+                for t in s.targets:
+                    if isinstance(t, F.IdentExpr):
+                        assign_type(t.name, None, s.value)
             elif isinstance(s, F.IfStmt):
                 walk(s.then_body)
                 for _c, body in (s.elifs or []):
@@ -148,14 +153,38 @@ def function_var_types(fn: F.FunctionDef, call_types: dict = None) -> dict:
                 walk(s.body)
                 walk(s.else_body)
             elif isinstance(s, F.ForStmt):
-                if isinstance(s.target, str) and s.target not in vtypes:
-                    rt = DEFAULT_INT_TYPE
-                    rargs = _range_args(s.iterable) or []
-                    for a in rargs:
-                        rt = common_type(rt, infer_expr(a, vtypes, call_types))
-                    vtypes[s.target] = resolve(rt)
+                # Target may be `"i"` or the tuple spelling `"(a, b)"` —
+                # split via the shared walk so each slot gets its own type
+                # (matches bound_names / register allocation). `for x in`
+                # list elements are int64 in formal's current surface.
+                for _tn in (_lbn_target_names(s.target)
+                            if isinstance(s.target, str) else []):
+                    if _tn not in vtypes:
+                        rargs = _range_args(s.iterable)
+                        if rargs:
+                            rt = DEFAULT_INT_TYPE
+                            for a in rargs:
+                                rt = common_type(
+                                    rt, infer_expr(a, vtypes, call_types))
+                            vtypes[_tn] = resolve(rt)
+                        else:
+                            vtypes[_tn] = resolve(DEFAULT_INT_TYPE)
                 walk(s.body)
                 walk(s.else_body)
+            elif isinstance(s, F.WithStmt):
+                for it in s.items or []:
+                    if it.alias is not None:
+                        name = _with_item_alias_name(it.alias)
+                        if name not in vtypes:
+                            vtypes[name] = resolve(
+                                infer_expr(it.expr, vtypes, call_types))
+                walk(s.body)
+            elif isinstance(s, F.TryStmt):
+                walk(s.body)
+                for h in (s.handlers or []):
+                    walk(h.body)
+                walk(s.else_body)
+                walk(s.finally_body)
 
     walk(fn.body)
     return vtypes
@@ -204,12 +233,19 @@ def used_narrow_types(fn: F.FunctionDef) -> set:
         elif isinstance(e, F.CallExpr):
             for a in e.args:
                 walk_expr(a)
+        elif isinstance(e, F.SubscriptExpr):
+            walk_expr(e.obj)
+            walk_expr(e.index)
+        elif isinstance(e, F.MemberExpr):
+            walk_expr(e.obj)
 
     def walk_stmts(stmts):
         for s in stmts or []:
             if isinstance(s, F.ReturnStmt):
                 walk_expr(s.value)
             elif isinstance(s, F.AssignStmt):
+                walk_expr(s.value)
+            elif isinstance(s, F.MultiAssignStmt):
                 walk_expr(s.value)
             elif isinstance(s, F.VarDecl):
                 walk_expr(s.value)

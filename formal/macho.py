@@ -71,11 +71,15 @@ def _build_segment_64(
     - flags (4 bytes)
     """
     # cmdsize = cmd + cmdsize + segname + vmaddr + vmsize + fileoff + filesize + maxprot + initprot + nsects + flags
-    # Plus nsects * 68 bytes for section data
-    section_data_size = nsects * 68
+    # Plus nsects * 80 bytes for section_64 records (each is exactly 80 bytes).
+    if nsects:
+        raise ValueError(
+            "section_64 records are not implemented here; "
+            "use formal.macho_linker (emits full section headers)")
+    section_data_size = nsects * 80
     cmdsize = 4 + 4 + 16 + 8 + 8 + 8 + 8 + 4 + 4 + 4 + 4 + section_data_size
     segname_bytes = segname.encode('ascii')[:16].ljust(16, b'\x00')
-    
+
     buf = bytearray()
     buf.extend(struct.pack('<I', LC_SEGMENT_64))  # cmd
     buf.extend(struct.pack('<I', cmdsize))  # cmdsize
@@ -88,7 +92,6 @@ def _build_segment_64(
     buf.extend(struct.pack('<I', initprot))  # initprot
     buf.extend(struct.pack('<I', nsects))  # nsects
     buf.extend(struct.pack('<I', flags))  # flags
-    # No section data when nsects=0
     return bytes(buf)
 
 

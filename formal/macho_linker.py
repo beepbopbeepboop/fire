@@ -15,7 +15,7 @@ SEGMENT_64_CMD = 0x19
 LOAD_DYLINKER_CMD = 0x0E
 LOAD_DYLIB_CMD = 0x0C
 UUID_CMD = 0x1B
-BUILD_VERSION_CMD = 0x1F
+BUILD_VERSION_CMD = 0x32
 MAIN_CMD = 0x80000028
 DYLD_INFO_ONLY_CMD = 0x80000022
 
@@ -382,5 +382,5 @@ def build_macho_executable_extern(
 if __name__ == "__main__":
     main_code = bytes([0x00, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6])
     with open("/tmp/a.out", "wb") as f:
-        f.write(build_macho_executable(main_code, 456))
+        f.write(build_macho_executable(main_code, 480))
     print("wrote /tmp/a.out")

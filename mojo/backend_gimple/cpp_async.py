@@ -1415,76 +1415,9 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
 
 
 def _mutated_free_names(gen, inner: gimple_ctypes.FunctionDef, candidate_names) -> frozenset:
-    """Of `candidate_names` (a captured-free-variable name set --
-    `_compute_nested_closure_captures`'s own return value, name-only),
-    which ones `inner`'s own body ever REASSIGNS (a plain `name = ...`
-    or `name += ...`/etc. with `name` as the direct target, anywhere in
-    the body, any nesting depth via `_walk_ast` -- `if`/`while`/`with`/
-    `try` bodies included) rather than only ever READING. Those need a
-    genuine by-REFERENCE capture (threaded through the coroutine frame
-    as a pointer parameter, dereferenced on every read/write inside the
-    body -- see `_gen_cpp_async_unit`'s `mut_capture_names` parameter
-    and `_cpp_expr`/`_cpp_stmt`'s own dereferencing) instead of the
-    existing by-VALUE capture (a plain scalar parameter copy) every
-    OTHER captured free variable still uses unchanged: real Mojo's own
-    `test_locks.mojo` idiom (`async def inc() {mut}: rawCounter += 1`)
-    needs the mutation to be visible to the CALLER across every one of
-    thousands of separate task invocations, which a by-value copy
-    cannot do. A name that's merely READ (e.g. `return x + 1`) is left
-    out of this set and keeps the existing, already-verified by-value
-    path -- unchanged, zero regression risk for every capture shape
-    this project already supports (device_context.mojo's closures,
-    `test_asyncrt_add`'s threaded comptime params, ...), none of which
-    ever reassign a captured name."""
-    # A plain `name = ...` assignment lexically INSIDE a deeper nested
-    # `def` is that def's OWN fresh local binding (Python — and this
-    # codegen's closure lifting — both scope it to the innermost def),
-    # NOT a write to the captured free variable, even when the two share
-    # a spelling: Lib/test/support/__init__.py's bigmemtest decorator
-    # family does `size = wrapper.size` / `memuse = wrapper.memuse`
-    # inside `wrapper` purely to read back function attributes that
-    # shadow the outer names, and counting those as mutations made the
-    # OUTER function's capture-store emit `{vtype} *` temps assigned
-    # from plain int64_t locals ("assignment to 'int64_t *' from
-    # 'int64_t' makes pointer from integer"). So plain assignments are
-    # only collected for statements in THIS def's own body (control-flow
-    # nesting included, nested defs excluded), while augmented
-    # assignments (`name += 1`, real Mojo's `{mut}` idiom) still count
-    # at every depth, preserving every previously-supported mutation
-    # shape unchanged.
-    mutated: set = set()
-    _stack = list(inner.body)
-    while _stack:
-        n = _stack.pop(0)
-        if isinstance(n, gimple_ctypes.FunctionDef):
-            continue
-        if isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
-            if n.target.name in candidate_names:
-                mutated.add(n.target.name)
-        elif isinstance(n, gimple_ctypes.AugAssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
-            if n.target.name in candidate_names:
-                mutated.add(n.target.name)
-        elif isinstance(n, gimple_ctypes.IfStmt):
-            _stack.extend(n.then_body)
-            for _, _eb in n.elifs:
-                _stack.extend(_eb)
-            if n.else_body:
-                _stack.extend(n.else_body)
-        elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-            _stack.extend(n.body)
-            if getattr(n, 'else_body', None):
-                _stack.extend(n.else_body)
-        elif isinstance(n, gimple_ctypes.WithStmt):
-            _stack.extend(n.body)
-        elif isinstance(n, gimple_ctypes.TryStmt):
-            _stack.extend(n.body)
-            for _h in (n.handlers or []):
-                _stack.extend(_h.body)
-            if n.else_body:
-                _stack.extend(n.else_body)
-            if n.finally_body:
-                _stack.extend(n.finally_body)
-    return frozenset(mutated)
+    """Delegate to the shared middle-end implementation (one copy)."""
+    from mojo.middle.closures import mutated_free_names
+    return mutated_free_names(inner, candidate_names)
 
 
 def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list | None = None,

@@ -18,6 +18,11 @@ import regex_compile
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
+# Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
+# share one copy; closures must not import this module — it pulls gimple_codegen).
+from mojo.middle.closures import (
+    _gmi_all_stmts_nonfunc, _selfhost_fn_reassigns_method,
+)
 import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
@@ -263,35 +268,6 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                         _out.setdefault(f"{_s.name}_{_m.name}", _e)
     _SELFHOST_MODGLOBAL_CACHE['httrf'] = (_key, _out)
     return _out
-
-def _selfhost_fn_reassigns_method(_fn, _pnames=('gen', 'self')) -> bool:
-    """True if `_fn`'s body monkey-patches a METHOD on the `gen`/`self` param
-    (`gen._emit = intercepted_emit` — the `_gen_stmt_TryStmt` emit-
-    interception idiom). Those functions must keep the param OPAQUE in the
-    closure pre-pass: typed as `GimpleGen *`, the nested closures capture a
-    real void method as a value and the reassignment / later calls don't
-    lower to valid C. try/except codegen already doesn't run natively, so
-    leaving it stubbed (as before) is no regression.
-
-    Only the METHOD-reassignment shape counts — the RHS is a nested `def`
-    name or a lambda. An ORDINARY `self.<datafield> = value` assignment
-    (which `gen_module_impl` and most GimpleGen methods do constantly) must
-    NOT trip this: it would wrongly force `self`/`gen` to `int64_t` in the
-    closure pre-pass, so `_scan_for_closures`'s capture of `self` typed
-    `int64_t` -> `self._mutated_free_names(...)` stubbed -> `mojo_set_union
-    (self, ...)` -> SEGV compiling any program with a nested `def`."""
-    _local_defs = {_d.name for _d in _walk_ast(getattr(_fn, 'body', []) or [])
-                   if isinstance(_d, FunctionDef)}
-    for _n in _walk_ast(getattr(_fn, 'body', []) or []):
-        if (isinstance(_n, AssignStmt) and isinstance(_n.target, MemberExpr)
-                and isinstance(_n.target.obj, IdentExpr)
-                and _n.target.obj.name in _pnames):
-            _rhs = _n.value
-            if isinstance(_rhs, LambdaExpr):
-                return True
-            if isinstance(_rhs, IdentExpr) and _rhs.name in _local_defs:
-                return True
-    return False
 
 def _collect_import_modules(modules_to_compile: dict, node_list):
     """Populate `modules_to_compile` with every module named by an import
@@ -806,42 +782,6 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
         elif isinstance(_nn, MatchStmt):
             for _ci in range(len(_nn.cases)):
                 _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found)
-
-def _gmi_all_stmts_nonfunc(stmts) -> list:
-    """Hoisted out of `gen_module_impl._scan_for_closures` (was a
-    2-level-deep nested closure) — see `_gmi_prefold_toplevel_comptime`'s
-    docstring. Recursive, pure. Returns a list of statements recursively
-    through control flow, NOT entering FunctionDef bodies. Explicit
-    per-node-type branches (not `getattr(s, <loop-var>)` + `isinstance`):
-    the self-hosted backend's `isinstance(<int64_t>, list)` stub is always
-    false, so a dynamic getattr keyed by a runtime attr name would make it
-    never recurse into any control flow."""
-    result = []
-    for s in stmts:
-        result.append(s)
-        if isinstance(s, FunctionDef):
-            continue
-        if isinstance(s, IfStmt):
-            result.extend(_gmi_all_stmts_nonfunc(s.then_body))
-            if s.else_body:
-                result.extend(_gmi_all_stmts_nonfunc(s.else_body))
-            for _cond, _eb in (s.elifs or []):
-                result.extend(_gmi_all_stmts_nonfunc(_eb))
-        elif isinstance(s, TryStmt):
-            result.extend(_gmi_all_stmts_nonfunc(s.body))
-            for _h in (s.handlers or []):
-                _hb = getattr(_h, 'body', None)
-                if _hb:
-                    result.extend(_gmi_all_stmts_nonfunc(_hb))
-            if s.else_body:
-                result.extend(_gmi_all_stmts_nonfunc(s.else_body))
-            if s.finally_body:
-                result.extend(_gmi_all_stmts_nonfunc(s.finally_body))
-        elif isinstance(s, (WhileStmt, ForStmt, WithStmt)):
-            result.extend(_gmi_all_stmts_nonfunc(s.body))
-            if isinstance(s, (WhileStmt, ForStmt)) and getattr(s, 'else_body', None):
-                result.extend(_gmi_all_stmts_nonfunc(s.else_body))
-    return result
 
 def _gmi_scan_import_modules(mod_stmts, all_modules: dict) -> None:
     """Record every module named by `import m` / `import m as a, m2` /
