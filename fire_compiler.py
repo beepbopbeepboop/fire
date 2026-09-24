@@ -109,19 +109,92 @@ class HostBuffer:
 
 
 # ── AST nodes ──────────────────────────────────────────────────────
+def _wrap_signed64(v: int) -> int:
+    """Reduce an arbitrary-precision Python int to its signed 64-bit value,
+    using ONLY self-host-safe operations.
+
+    The compiled/self-hosted backend turns any integer literal wider than
+    `int` into `-1` (same rule `determinism_trace._MASK63` documents), so the
+    former `v &= 0xFFFFFFFFFFFFFFFF` / `v >= 0x8000000000000000` were a
+    no-op / always-true there. Instead the in-range test is done on the
+    DECIMAL TEXT (all operands are small ints / short strings), and the wrap
+    branch — which needs `1 << 64` — is reachable ONLY under CPython (every
+    self-hosted value is already an int64 in `[-2**63, 2**63-1]`, <= 19
+    digits, so it always returns early)."""
+    _s = str(v)
+    _neg = _s.startswith('-')
+    _l = _s.lstrip('-')
+    _n = len(_l)
+    if _n < 19:
+        return v
+    if _n == 19:
+        if not _neg and _l <= '9223372036854775807':
+            return v
+        if _neg and _l <= '9223372036854775808':
+            return v
+    # CPython-only bignum: wrap modulo 2**64, then to signed.
+    v = v % (1 << 64)
+    if v >> 63:
+        v = v - (1 << 64)
+    return v
+
 def _signed_int64(value: int) -> int:
-    value &= 0xFFFFFFFFFFFFFFFF
-    if value >= 0x8000000000000000:
-        value -= 0x10000000000000000
-    return value
+    return _wrap_signed64(value)
 
 def _signed_int64_c_literal(value: int) -> str:
     value = _signed_int64(value)
-    if value == -0x8000000000000000:
-        return '(-0x7FFFFFFFFFFFFFFFLL - 1)'
     if -0x80000000 <= value <= 0x7FFFFFFF:
         return str(value)
+    # INT64_MIN via a STRING compare: a `-0x8000000000000000` int literal is
+    # itself >int32 and would be mangled self-hosted (see _wrap_signed64).
+    if str(value) == '-9223372036854775808':
+        return '(-0x7FFFFFFFFFFFFFFFLL - 1)'
     return f'{value}LL'
+
+def _parse_int_literal(text: str) -> int:
+    """Parse an INT token's source text (decimal / 0x / 0o / 0b, underscores
+    allowed) into its signed 64-bit value, WITHOUT `int(text, 0)`.
+
+    The compiled backend's `int(text, 0)` lowers to a C `strtoll`-style parse
+    that SATURATES on overflow (every out-of-int64 decimal literal became
+    INT64_MAX), so the true value was already lost before `_signed_int64`
+    could wrap it. Accumulating `v = v*base + digit` wraps naturally in the
+    self-hosted int64 (and is exact bignum under CPython, then wrapped by
+    `_wrap_signed64`), so both paths agree — e.g. `0xFFFFFFFFFFFFFFFF` -> -1
+    and `0x8000000000000000` -> -2**63."""
+    t = text.replace('_', '')
+    base = 10
+    body = t
+    if len(t) >= 2 and t[:1] == '0':
+        _p = t[1:2]
+        if _p == 'x' or _p == 'X':
+            base = 16; body = t[2:]
+        elif _p == 'o' or _p == 'O':
+            base = 8; body = t[2:]
+        elif _p == 'b' or _p == 'B':
+            base = 2; body = t[2:]
+    v = 0
+    i = 0
+    n = len(body)
+    while i < n:
+        # `ord(body[i:i+1])`, NOT `body[i]`: a compiled `str` subscript's
+        # value is ambiguous (byte-int vs 1-char str) and `isinstance(c,
+        # str)` is unreliable self-hosted, so `body[i]` left `c` a string
+        # and every `48 <= c <= 57` test failed -> EVERY digit parsed as 0
+        # (`_t7 = 0LL` for the literal `1`). A 1-char SLICE plus `ord` is an
+        # int on both paths.
+        c = ord(body[i:i + 1])
+        if 48 <= c <= 57:
+            d = c - 48
+        elif 97 <= c <= 102:
+            d = c - 87
+        elif 65 <= c <= 70:
+            d = c - 55
+        else:
+            d = 0
+        v = v * base + d
+        i = i + 1
+    return _wrap_signed64(v)
 
 @dataclass
 class IntLiteral:
@@ -4269,7 +4342,7 @@ class Parser:
             # parsed as `0x2000` (8192) where the reference gives
             # 536870912 (repro: std/test/builtin/test_print_long_string's
             # `print("*" * 0x2000_0000)`).
-            self._advance(); return IntLiteral(_signed_int64(int(t.value.replace('_', ''), 0)), line=line, col=col, raw=t.value)
+            self._advance(); return IntLiteral(_parse_int_literal(t.value), line=line, col=col, raw=t.value)
         if t.kind == "FLOAT":
             self._advance(); return FloatLiteral(float(t.value.replace('_', '')), line=line, col=col)
         if t.kind == "IMAG":

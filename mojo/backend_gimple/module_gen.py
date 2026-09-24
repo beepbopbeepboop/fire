@@ -396,12 +396,15 @@ def _emit_reflection_dispatch(self, parts):
                 continue
             safe_f = _safe_field(fname)
             fref = f'obj->{safe_f}'
-            if sn == 'IntLiteral' and fname == 'value' and 'raw' in fields:
-                raw_fref = f"obj->{_safe_field('raw')}"
-                val_expr = (f'(({raw_fref} && {raw_fref}[0]) '
-                            f'? mojo_int_literal_decimal({raw_fref}) '
-                            f': mojo_repr_int((int64_t){fref}))')
-            elif fname in bool_fields:
+            # IntLiteral.value used to be repr'd from `raw` via
+            # `mojo_int_literal_decimal` so it printed the exact
+            # arbitrary-precision decimal the reference's bignum `.value`
+            # showed. `_parse_int_literal` now SIGNED-WRAPS `.value` on BOTH
+            # sides (`0xFFFFFFFFFFFFFFFF` -> -1), so the reference prints the
+            # wrapped int and the raw-decimal path made them disagree
+            # (3 AST-DIFFs: value=-1 vs value=18446744073709551615). Fall
+            # through to the ordinary int repr.
+            if fname in bool_fields:
                 val_expr = f'({fref} ? "True" : "False")'
             elif fname in boxed and ftype in (
                     'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
