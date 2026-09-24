@@ -229,28 +229,66 @@ def _flatten_closures(functions, closures):
     lifted_defs = []  # (ci, parent_visible_keys_after_lift)
 
     def prepare(fn, visible_keys):
-        """Strip nested defs from fn; queue lifted children. visible_keys are
-        closure-map keys whose nested names are visible inside fn."""
+        """Strip nested defs from fn (any depth via control-flow bodies);
+        queue lifted children. visible_keys are closure-map keys whose
+        nested names are visible inside fn."""
         key_children = []
-        new_body = []
-        for stmt in fn.body or []:
-            if isinstance(stmt, F.FunctionDef):
-                # Find its ClosureInfo under any visible key
-                ci = None
-                for key in visible_keys:
-                    inner_map = closures.get(key) or {}
-                    if stmt.name in inner_map:
-                        ci = inner_map[stmt.name]
-                        break
-                if ci is None:
-                    # Nested def not registered (e.g. async skipped) — leave;
-                    # codegen will raise as before.
-                    new_body.append(stmt)
+        unregistered = []
+
+        def strip_body(body):
+            out = []
+            for stmt in body or []:
+                if isinstance(stmt, F.FunctionDef):
+                    ci = None
+                    for key in visible_keys:
+                        inner_map = closures.get(key) or {}
+                        if stmt.name in inner_map:
+                            ci = inner_map[stmt.name]
+                            break
+                    if ci is None:
+                        # Not registered (async nested, etc.) — still lift
+                        # so the parent body has no nested FunctionDef.
+                        unregistered.append(stmt)
+                        continue
+                    key_children.append(ci)
                     continue
-                key_children.append(ci)
-            else:
-                new_body.append(stmt)
-        fn.body = new_body
+                # Recurse into control-flow statement lists (nested defs
+                # inside if/for/while/try/with are registered the same way;
+                # the old direct-children-only walk left them in place).
+                for attr in ("body", "then_body", "else_body"):
+                    sub = getattr(stmt, attr, None)
+                    if isinstance(sub, list):
+                        setattr(stmt, attr, strip_body(sub))
+                elifs = getattr(stmt, "elifs", None)
+                if elifs:
+                    new_elifs = []
+                    for c in elifs:
+                        if (isinstance(c, tuple) and len(c) >= 2
+                                and isinstance(c[1], list)):
+                            new_elifs.append(
+                                (c[0], strip_body(c[1]), *c[2:]))
+                        else:
+                            new_elifs.append(c)
+                    stmt.elifs = new_elifs
+                handlers = getattr(stmt, "handlers", None)
+                if handlers:
+                    for h in handlers:
+                        hb = getattr(h, "body", None)
+                        if isinstance(hb, list):
+                            h.body = strip_body(hb)
+                finally_body = getattr(stmt, "finally_body", None)
+                if isinstance(finally_body, list):
+                    stmt.finally_body = strip_body(finally_body)
+                out.append(stmt)
+            return out
+
+        fn.body = strip_body(fn.body)
+        for inner in unregistered:
+            # Lift bare (no ClosureInfo): keep name; captures stay free
+            # names resolved as outer locals via X19 fallback / rewritten
+            # calls. Same shape GIMPLE uses for unregistered nested defs.
+            lifted_defs.append((inner, list(visible_keys)))
+            prepare(inner, list(visible_keys))
         for ci in key_children:
             inner = ci.inner_def
             # Rename to lifted symbol
@@ -278,6 +316,169 @@ def _flatten_closures(functions, closures):
     # Append lifted defs (prepare already recursed depth-first into lifted_defs via append order)
     # Order: originals first, then lifted in discovery order
     return functions + [inner for inner, _keys in lifted_defs]
+
+
+def _lift_lambdas(functions) -> list:
+    """Lift LambdaExprs into top-level FunctionDefs (compile-only).
+
+    - `name = lambda ...` → FunctionDef `name` (body becomes its Return),
+      AssignStmt dropped (the name is the function symbol).
+    - `(lambda ...)(args)` → IdentExpr of the lifted symbol as callee.
+    - Residual bare lambdas (args, ternaries, …) get `_lifted_name` set so
+      codegen can materialize the function address via ADRP.
+
+    Returns the original function list plus the lifted defs (appended).
+    """
+    lifted: list = []
+    used_names = {f.name for f in functions}
+    counter = [0]
+
+    def fresh_name(base: str) -> str:
+        name = base or "lambda"
+        if name not in used_names:
+            used_names.add(name)
+            return name
+        counter[0] += 1
+        while f"{name}_{counter[0]}" in used_names:
+            counter[0] += 1
+        name = f"{name}_{counter[0]}"
+        used_names.add(name)
+        return name
+
+    def make_fn(lam: F.LambdaExpr, base: str) -> str:
+        name = fresh_name(base)
+        params = []
+        param_has_default: dict = {}
+        param_defaults: dict = {}
+        for pname, pdefault in (lam.params or []):
+            ptype = "int"
+            if pdefault is not None:
+                param_has_default[pname] = True
+                param_defaults[pname] = pdefault
+            params.append((pname, ptype))
+        fdef = F.FunctionDef(
+            name=name,
+            params=params,
+            return_type="int",
+            body=[F.ReturnStmt(lam.body, line=lam.line, col=lam.col)],
+            param_has_default=param_has_default,
+            param_defaults=param_defaults,
+            line=lam.line,
+            col=lam.col,
+        )
+        lifted.append(fdef)
+        lam._lifted_name = name
+        return name
+
+    def walk_expr(expr, owner_name: str) -> None:
+        if expr is None or isinstance(expr, (str, int, float, bool)):
+            return
+        if isinstance(expr, F.LambdaExpr):
+            make_fn(expr, owner_name)
+            return
+        if isinstance(expr, F.CallExpr):
+            if isinstance(expr.func, F.LambdaExpr):
+                # Immediately-invoked: lift, then call the named symbol.
+                lam_name = make_fn(expr.func, owner_name)
+                expr.func = F.IdentExpr(lam_name, line=expr.func.line,
+                                        col=expr.func.col)
+            else:
+                walk_expr(expr.func, owner_name)
+            for a in list(expr.args or []):
+                walk_expr(a, owner_name)
+            for _k, kv in list(expr.kwargs or []):
+                walk_expr(kv, owner_name)
+            return
+        if isinstance(expr, F.AssignStmt):
+            walk_expr(expr.value, owner_name)
+            return
+        # Generic structural walk over known expr shapes.
+        for attr in ("left", "right", "operand", "value", "obj", "index",
+                     "condition", "then_val", "else_val", "body", "iterable",
+                     "test", "subject"):
+            sub = getattr(expr, attr, None)
+            if sub is not None and not isinstance(sub, (str, int, float, bool)):
+                if isinstance(sub, list):
+                    for x in sub:
+                        walk_expr(x, owner_name)
+                elif hasattr(sub, "__dict__"):
+                    walk_expr(sub, owner_name)
+        for attr in ("args", "elements", "operands", "values", "pairs",
+                     "generators", "keywords"):
+            sub = getattr(expr, attr, None)
+            if isinstance(sub, list):
+                for x in sub:
+                    if isinstance(x, tuple):
+                        for y in x:
+                            if hasattr(y, "__dict__"):
+                                walk_expr(y, owner_name)
+                    elif hasattr(x, "__dict__"):
+                        walk_expr(x, owner_name)
+        if isinstance(expr, F.DictExpr):
+            for k, v in expr.pairs or []:
+                walk_expr(k, owner_name)
+                walk_expr(v, owner_name)
+
+    def walk_body(body: list, owner_name: str) -> list:
+        """Return a new body with lambda-assigns replaced (def injected elsewhere)."""
+        out = []
+        for stmt in body or []:
+            # Recurse into nested control-flow bodies first.
+            for attr in ("body", "then_body", "else_body", "orelse",
+                         "finally_body"):
+                sub = getattr(stmt, attr, None)
+                if isinstance(sub, list):
+                    setattr(stmt, attr, walk_body(sub, owner_name))
+            elifs = getattr(stmt, "elifs", None)
+            if elifs:
+                new_elifs = []
+                for c in elifs:
+                    if (isinstance(c, tuple) and len(c) >= 2
+                            and isinstance(c[1], list)):
+                        new_elifs.append(
+                            (c[0], walk_body(c[1], owner_name), *c[2:]))
+                    else:
+                        new_elifs.append(c)
+                stmt.elifs = new_elifs
+            handlers = getattr(stmt, "handlers", None)
+            if handlers:
+                for h in handlers:
+                    hb = getattr(h, "body", None)
+                    if isinstance(hb, list):
+                        h.body = walk_body(hb, owner_name)
+            finally_body = getattr(stmt, "finally_body", None)
+            if isinstance(finally_body, list):
+                stmt.finally_body = walk_body(finally_body, owner_name)
+            cases = getattr(stmt, "cases", None)
+            if cases:
+                for c in cases:
+                    cb = getattr(c, "body", None)
+                    if isinstance(cb, list):
+                        c.body = walk_body(cb, owner_name)
+
+            if (isinstance(stmt, F.AssignStmt)
+                    and isinstance(stmt.value, F.LambdaExpr)
+                    and isinstance(stmt.target, F.IdentExpr)):
+                # `name = lambda ...` → top-level def; drop the assign.
+                make_fn(stmt.value, stmt.target.name)
+                continue
+
+            for attr in ("value", "iterable", "condition", "subject", "test"):
+                sub = getattr(stmt, attr, None)
+                if sub is not None and hasattr(sub, "__dict__"):
+                    walk_expr(sub, owner_name)
+            targets = getattr(stmt, "targets", None)
+            if isinstance(targets, list):
+                for t in targets:
+                    if hasattr(t, "__dict__"):
+                        walk_expr(t, owner_name)
+            out.append(stmt)
+        return out
+
+    for fn in functions:
+        fn.body = walk_body(fn.body, fn.name)
+        # Default values / param-level lambdas (rare): leave as-is.
+    return functions + lifted
 
 
 def _extract_functions(stmts: list) -> list:
@@ -333,6 +534,9 @@ def compile_formal(source_path: str, output: str = None,
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
+    # Lift LambdaExprs into top-level FunctionDefs so assigned/IIFE lambdas
+    # lower as BL targets (residual bare lambdas get `_lifted_name` for ADRP).
+    functions = _lift_lambdas(functions)
 
     # Rebuild a statement list with main-first ordering for the codegen.
     ordered = functions

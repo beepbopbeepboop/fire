@@ -93,6 +93,16 @@ def infer_expr(e, vtypes: dict, call_types: dict = None):
         # The chain's result is a boolean; operands share the common type
         # only insofar as each link needs it — report default.
         return DEFAULT_INT_TYPE
+    if isinstance(e, F.Comprehension):
+        # list/set/dict/genexpr result is a blob pointer (or set/dict blob).
+        return DEFAULT_INT_TYPE
+    if isinstance(e, F.SliceExpr):
+        return DEFAULT_INT_TYPE
+    if isinstance(e, F.SetExpr):
+        return DEFAULT_INT_TYPE
+    if isinstance(e, F.FloatLiteral):
+        # formal is int-only; floats truncate toward zero on emit.
+        return DEFAULT_INT_TYPE
     if isinstance(e, F.CallExpr):
         if isinstance(e.func, F.IdentExpr):
             return (call_types or {}).get(e.func.name) or DEFAULT_INT_TYPE
@@ -186,6 +196,44 @@ def function_var_types(fn: F.FunctionDef, call_types: dict = None) -> dict:
                 walk(s.else_body)
                 walk(s.finally_body)
 
+    def walk_compr(expr):
+        if expr is None:
+            return
+        if isinstance(expr, F.Comprehension):
+            for g in expr.generators or []:
+                for _tn in (_lbn_target_names(g.target)
+                            if isinstance(g.target, str) else []):
+                    if _tn not in vtypes:
+                        vtypes[_tn] = resolve(DEFAULT_INT_TYPE)
+                walk_compr(g.iterable)
+                for c in g.conditions or []:
+                    walk_compr(c)
+            walk_compr(expr.element)
+            if expr.key is not None:
+                walk_compr(expr.key)
+            return
+        if isinstance(expr, (str, int, float, bool)):
+            return
+        if hasattr(expr, "__dataclass_fields__"):
+            for fname in expr.__dataclass_fields__:
+                if fname in ("line", "col"):
+                    continue
+                val = getattr(expr, fname, None)
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, tuple):
+                            for x in item:
+                                walk_compr(x)
+                        else:
+                            walk_compr(item)
+                elif isinstance(val, tuple):
+                    for x in val:
+                        walk_compr(x)
+                else:
+                    walk_compr(val)
+
+    for st in fn.body or []:
+        walk_compr(st)
     walk(fn.body)
     return vtypes
 
@@ -238,6 +286,19 @@ def used_narrow_types(fn: F.FunctionDef) -> set:
             walk_expr(e.index)
         elif isinstance(e, F.MemberExpr):
             walk_expr(e.obj)
+        elif isinstance(e, F.Comprehension):
+            walk_expr(e.element)
+            if e.key is not None:
+                walk_expr(e.key)
+            for g in e.generators or []:
+                walk_expr(g.iterable)
+                for c in g.conditions or []:
+                    walk_expr(c)
+        elif isinstance(e, F.SliceExpr):
+            walk_expr(e.obj)
+            walk_expr(e.start)
+            walk_expr(e.stop)
+            walk_expr(e.step)
 
     def walk_stmts(stmts):
         for s in stmts or []:
@@ -262,6 +323,12 @@ def used_narrow_types(fn: F.FunctionDef) -> set:
                 walk_expr(s.condition)
                 walk_stmts(s.body)
                 walk_stmts(s.else_body)
+            elif isinstance(s, F.ForStmt):
+                walk_expr(s.iterable)
+                walk_stmts(s.body)
+                walk_stmts(s.else_body)
+            elif isinstance(s, F.ReturnStmt):
+                walk_expr(s.value)
 
     walk_stmts(fn.body)
     return used

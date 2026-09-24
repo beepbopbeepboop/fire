@@ -12,9 +12,9 @@ the C/GIMPLE emission stack — same constraint as `mojo.middle.closures`.
 from __future__ import annotations
 
 from fire_compiler import (
-    AssignStmt, AugAssignStmt, ForStmt, GlobalStmt, IdentExpr, IfStmt,
-    ListExpr, MultiAssignStmt, TryStmt, TupleExpr, VarDecl, WhileStmt,
-    WithStmt, _as_str,
+    AssignStmt, AugAssignStmt, Comprehension, ForStmt, GlobalStmt,
+    IdentExpr, IfStmt, ListExpr, MultiAssignStmt, TryStmt, TupleExpr,
+    VarDecl, WhileStmt, WithStmt, _as_str,
 )
 
 
@@ -109,6 +109,17 @@ def _lbn_target_names(t) -> list:
             for part in _lbn_split_commas(name[1:-1]):
                 names.extend(_lbn_target_names(part))
             return names
+        # Bare comma form: comprehension Generator.target is the parser's
+        # `"(a, b)"` spelling WITHOUT the surrounding parens (`"a, b"`).
+        if "," in name:
+            names = []
+            for part in _lbn_split_commas(name):
+                names.extend(_lbn_target_names(part))
+            if names:
+                return names
+        if name.startswith("*"):
+            # Starred leaf (`*_` / `*rest`): bind the name after `*`.
+            name = name[1:].strip()
         return [name] if name else []
     if isinstance(t, IdentExpr):
         return [t.name]
@@ -139,23 +150,32 @@ def _lbn_walk(bound, global_declared: set, nodes) -> None:
             global_declared.update(node.names)
         elif isinstance(node, AssignStmt):
             bound.update(_lbn_target_names(node.target))
+            _lbn_compr_targets(bound, node.value)
         elif isinstance(node, MultiAssignStmt):
             for t in node.targets:
                 bound.update(_lbn_target_names(t))
+            _lbn_compr_targets(bound, node.value)
         elif isinstance(node, AugAssignStmt):
             bound.update(_lbn_target_names(node.target))
+            _lbn_compr_targets(bound, node.value)
         elif isinstance(node, VarDecl):
             bound.add(node.name)
+            _lbn_compr_targets(bound, node.value)
         elif isinstance(node, ForStmt):
             bound.update(_lbn_target_names(node.target))
+            _lbn_compr_targets(bound, node.iterable)
             _lbn_walk(bound, global_declared, node.body)
             if node.else_body:
                 _lbn_walk(bound, global_declared, node.else_body)
         elif isinstance(node, WhileStmt):
+            _lbn_compr_targets(bound, node.condition)
             _lbn_walk(bound, global_declared, node.body)
             if node.else_body:
                 _lbn_walk(bound, global_declared, node.else_body)
         elif isinstance(node, IfStmt):
+            _lbn_compr_targets(bound, node.condition)
+            for _c, _b in (node.elifs or []):
+                _lbn_compr_targets(bound, _c)
             _lbn_walk(bound, global_declared, node.then_body)
             if node.else_body:
                 _lbn_walk(bound, global_declared, node.else_body)
@@ -187,6 +207,46 @@ def _lbn_walk(bound, global_declared: set, nodes) -> None:
             _lbn_walk(bound, global_declared, node.body)
 
 
+def _lbn_compr_targets(bound, expr) -> None:
+    """Bind Comprehension generator targets found anywhere in an expression.
+
+    Comprehension targets live in expression positions (AssignStmt value,
+    ReturnStmt, conditions, …), not as statement-level ForStmt nodes, so
+    `_lbn_walk` never sees them. Mirrors `eval_Comprehension`'s
+    current-scope leak: `x` in `[x for x in xs]` becomes a real local."""
+    if expr is None:
+        return
+    if isinstance(expr, Comprehension):
+        for g in expr.generators or []:
+            bound.update(_lbn_target_names(g.target))
+            _lbn_compr_targets(bound, g.iterable)
+            for c in g.conditions or []:
+                _lbn_compr_targets(bound, c)
+        _lbn_compr_targets(bound, expr.element)
+        if expr.key is not None:
+            _lbn_compr_targets(bound, expr.key)
+        return
+    if isinstance(expr, (str, int, float, bool)):
+        return
+    if hasattr(expr, "__dataclass_fields__"):
+        for fname in expr.__dataclass_fields__:
+            if fname in ("line", "col"):
+                continue
+            val = getattr(expr, fname, None)
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, tuple):
+                        for x in item:
+                            _lbn_compr_targets(bound, x)
+                    else:
+                        _lbn_compr_targets(bound, item)
+            elif isinstance(val, tuple):
+                for x in val:
+                    _lbn_compr_targets(bound, x)
+            else:
+                _lbn_compr_targets(bound, val)
+
+
 def bound_names_in_order(body, params=None) -> list:
     """Parameters first (verbatim names), then locals in first-assignment
     order. Used by formal register allocation; GIMPLE's set-based
@@ -195,4 +255,8 @@ def bound_names_in_order(body, params=None) -> list:
     for pname, _ptype in (params or []):
         bound.add(pname)
     _lbn_walk(bound, set(), body)
+    # Expression-position comprehensions (ReturnStmt/ExprStmt and any
+    # we missed in nested structures) — full recursive sweep.
+    for stmt in body or []:
+        _lbn_compr_targets(bound, stmt)
     return list(bound)

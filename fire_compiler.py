@@ -2094,7 +2094,21 @@ class Parser:
             if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
-            if t.value == "comptime": return self._parse_comptime()
+            if t.value == "comptime":
+                # Only commit to the comptime-statement parse when the next
+                # token could actually start one: `comptime if/for/assert`,
+                # `comptime NAME = ...`, or `comptime \`name\` = ...`.
+                # Anything else — `comptime.foo` (imported module named
+                # comptime), `comptime(...)`, `comptime = ...`, bare
+                # `comptime` — is an ordinary identifier use; fall through
+                # to expression/assignment parsing (same carve-out pattern
+                # as `enum` above; `_parse_primary` accepts KW as ident).
+                nxt = self._peek(1)
+                if ((nxt.kind == "KW" and nxt.value in ("if", "for", "assert"))
+                        or nxt.kind == "NAME"
+                        or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
+                    return self._parse_comptime()
+                # else: fall through to expression statement
             if t.value == 'pass': return self._parse_pass()
             if t.value == 'return': return self._parse_return()
             if t.value == 'raise': return self._parse_raise()
@@ -2180,7 +2194,16 @@ class Parser:
                 self._pending_decs = decs
                 return self._parse_trait()
             if kw.kind == "KW" and kw.value == "comptime":
-                return self._parse_comptime()
+                # Same carve-out as the statement-level dispatch: only a
+                # real comptime-statement shape commits; `comptime.foo` etc.
+                # falls through (and the decorator path below will 404 with
+                # a clear expect-error rather than misparse).
+                nxt = self._peek(1)
+                if ((nxt.kind == "KW" and nxt.value in ("if", "for", "assert"))
+                        or nxt.kind == "NAME"
+                        or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
+                    return self._parse_comptime()
+                # else: fall through
             # Handle 'async def' — async is tokenized as NAME not KW. Milestone
             # 3a: build a real is_async=True FunctionDef instead of silently
             # discarding the `async` token (see AwaitExpr's docstring).
@@ -4451,6 +4474,10 @@ class Parser:
         while self._peek().kind == "COMMA":
             self._advance()
             if self._is_kw("in"):
+                break
+            # Trailing comma inside a paren/bracket pattern: `(fpath,)` /
+            # `[off,]` — leave the closer for the caller's _expect.
+            if self._peek().kind in ("RPAREN", "RBRACKET"):
                 break
             sub_t = self._peek()
             if sub_t.kind == "LPAREN":

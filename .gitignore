@@ -22,6 +22,7 @@ stage2/
 *.ast
 *.pyi
 *.o
+*.aout
 mojoc
 bfib
 bnbody

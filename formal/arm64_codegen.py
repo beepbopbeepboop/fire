@@ -5,7 +5,8 @@ Maps fire_compiler nodes (the project's real AST; fire_compiler.py is the
 single source of truth) to ARM64 machine code using AAPCS64:
 - First arg: X0
 - Return value: X0
-- Callee-saved locals: X19..X28 (one register per variable)
+- Callee-saved locals: first 10 names in X19..X28; overflow spills to
+  stack slots at the top of the fixed scratch region
 - Frame pointer: X29
 - Link register (return addr): X30
 - Stack grows down from high address
@@ -26,6 +27,13 @@ from mojo.middle.boundnames import (
     _lbn_split_commas,
 )
 
+# Fixed per-function scratch above the saved-pair area. 8160 = 2×4080
+# (each fits an imm12 SUB/ADD; a single imm12 maxes at 4095). Grows the
+# blob/spill region past the old 4032 cap that large functions exhausted
+# mid-expression (list concat / comprehension reserves left 0 free).
+_SCRATCH = 131072
+_SCRATCH_CHUNK = 4080
+
 
 class CodegenError(Exception):
     pass
@@ -35,12 +43,13 @@ _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 
 
 def _for_target_tree(target: str):
-    """Parse a ForStmt target string into a leaf name or nested list.
+    """Parse a for/comprehension target string into a leaf name or nested list.
 
-    `'i'` → `'i'`; `'(a, b)'` → `['a', 'b']`; `'(a, (b, c))'` →
-    `['a', ['b', 'c']]`. Returns None when a leaf is not a plain identifier.
-    Uses the shared top-level comma split (naive `.split(',')` tears nested
-    groups)."""
+    `'i'` → `'i'`; `'(a, b)'` → `['a', 'b']`; `'a, b'` (the comprehension
+    Generator.target spelling, no surrounding parens) → `['a', 'b']`;
+    `'(a, (b, c))'` → `['a', ['b', 'c']]`. Returns None when a leaf is not
+    a plain identifier. Uses the shared top-level comma split (naive
+    `.split(',')` tears nested groups)."""
     t = target.strip()
     if t.startswith("(") and t.endswith(")"):
         parts = _lbn_split_commas(t[1:-1])
@@ -51,6 +60,22 @@ def _for_target_tree(target: str):
                 return None
             tree.append(child)
         return tree if tree else None
+    # Bare comma form (comprehension targets): 'a, b' / 'a, b, c'
+    if "," in t:
+        parts = _lbn_split_commas(t)
+        if len(parts) > 1:
+            tree = []
+            for p in parts:
+                child = _for_target_tree(p)
+                if child is None:
+                    return None
+                tree.append(child)
+            return tree if tree else None
+    if t.startswith("*"):
+        rest = t[1:].strip()
+        if rest.isidentifier():
+            return "*" + rest
+        return None
     if t.isidentifier():
         return t
     return None
@@ -164,16 +189,81 @@ def _collect_var_names(f: F.FunctionDef) -> list:
         for i in range(acc[1] + 1):
             add(f"_fi{i}")
             add(f"_fb{i}")
+
+    # Comprehension generator loops: one index + one blob-pointer temp per
+    # nesting depth (`_ci{d}`/`_cb{d}`), independent of for-list depths so a
+    # comprehension inside a for (or vice versa) cannot alias temps.
+    def walk_compr_temps(node, depth: int, acc: list) -> None:
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, F.Comprehension):
+            gens = node.generators or []
+            n = len(gens)
+            if n:
+                acc[0] = True
+                acc[1] = max(acc[1], depth + n - 1)
+            for g in gens:
+                walk_compr_temps(g.iterable, depth, acc)
+                for c in g.conditions or []:
+                    walk_compr_temps(c, depth + n, acc)
+            walk_compr_temps(node.element, depth + n, acc)
+            if node.key is not None:
+                walk_compr_temps(node.key, depth + n, acc)
+            return
+        if hasattr(node, "__dataclass_fields__"):
+            for fname in node.__dataclass_fields__:
+                if fname in ("line", "col"):
+                    continue
+                val = getattr(node, fname, None)
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, tuple):
+                            for x in item:
+                                walk_compr_temps(x, depth, acc)
+                        else:
+                            walk_compr_temps(item, depth, acc)
+                elif isinstance(val, tuple):
+                    for x in val:
+                        walk_compr_temps(x, depth, acc)
+                else:
+                    walk_compr_temps(val, depth, acc)
+
+    acc_c = [False, -1]
+    walk_compr_temps(f.body, 0, acc_c)
+    if acc_c[0]:
+        for i in range(acc_c[1] + 1):
+            add(f"_ci{i}")
+            add(f"_cb{i}")
     return names
+
+
+def _allocation_order(f: F.FunctionDef) -> list:
+    """Register-then-spill allocation order for a function's locals.
+
+    Parameters first (prologue always MOV X19, X0 — first param must be
+    X19), then for-list control temps (`_fi{d}`/`_fb{d}` — hot in the
+    loop, prefer registers), then remaining locals in `_collect_var_names`
+    order. First `len(_CALLEE_SAVED)` names get X19..X28; the rest spill."""
+    names = _collect_var_names(f)
+    nparams = len(f.params or [])
+    params = names[:nparams]
+    rest = names[nparams:]
+    temps = [n for n in rest
+             if n[:3] in ("_fi", "_fb", "_ci", "_cb")]
+    others = [n for n in rest if n not in set(temps)]
+    return params + temps + others
 
 
 def var_register_map(f: F.FunctionDef) -> dict[str, int]:
     """Variable -> callee-saved register, matching `ARM64Codegen._emit_function`.
 
     The proof generator reuses this so per-block register-value facts name the
-    same register the codegen actually allocated (parameters first, then locals
-    in first-assignment order)."""
-    return {name: _CALLEE_SAVED[i] for i, name in enumerate(_collect_var_names(f))}
+    same register the codegen actually allocated (parameters first, then
+    for-list temps, then locals). Only the first `len(_CALLEE_SAVED)` names
+    appear — the rest live in stack spill slots, not registers."""
+    names = _allocation_order(f)
+    return {name: _CALLEE_SAVED[i]
+            for i, name in enumerate(names[:len(_CALLEE_SAVED)])}
 
 
 def _callee_symbol(func) -> str | None:
@@ -220,6 +310,22 @@ def _member_slot_key(expr) -> str | None:
     return None
 
 
+def _emit_add_imm(asm, xd: int, xn: int, imm: int) -> None:
+    """ADD Xd, Xn, #imm for imm > 4095 (split into imm12 chunks)."""
+    while imm > 0:
+        chunk = min(imm, 4095)
+        asm.emit(encode_add_xd_xn_imm(xd, xn, chunk))
+        imm -= chunk
+
+
+def _emit_sub_imm(asm, xd: int, xn: int, imm: int) -> None:
+    """SUB Xd, Xn, #imm for imm > 4095 (split into imm12 chunks)."""
+    while imm > 0:
+        chunk = min(imm, 4095)
+        asm.emit(encode_sub_xd_xn_imm(xd, xn, chunk))
+        imm -= chunk
+
+
 class ARM64Codegen:
     """ARM64 code generator over the fire_compiler AST."""
 
@@ -235,7 +341,10 @@ class ARM64Codegen:
         self._strings = []   # list[(label, bytes)]
         self._str_counter = 0
         self._var_regs = {}
+        self._var_spills = {}
         self._npairs = 1
+        self._spill_bytes = 0
+        self._blob_cap = _SCRATCH
         # Stack of enclosing loops, innermost last. Each entry:
         #   start -- loop top (continue target for `while`)
         #   step  -- iteration step (continue target for `for`)
@@ -244,7 +353,7 @@ class ARM64Codegen:
         # Enclosing try-finally bodies, outermost first. Flushed before
         # return/break/continue so finally runs on those paths.
         self._pending_finally = []
-        # Bump cursor into the fixed frame's unused 4032-byte region
+        # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
         # Nesting depth of for-in (non-range) loops currently being emitted.
@@ -266,6 +375,10 @@ class ARM64Codegen:
         # dict string keys.
         self._str_intern: dict = {}
         self._str_intern_map: dict = {}
+        # Nonzero while evaluating a for-iterable / membership RHS / list
+        # concat operand: BinaryOp `+`/`|` then mean list/set ops, not the
+        # integer ALU forms.
+        self._container_ctx = 0
 
     def compile(self, stmts: list, base_addr: int = 0x100000014) -> tuple:
         """Compile a fire_compiler module statement list to ARM64 machine code.
@@ -282,10 +395,9 @@ class ARM64Codegen:
         rest = [f for f in functions if f.name != "main"]
         functions = (main + rest) if main else functions
         for f in functions:
-            if f.is_generator or f.is_async:
-                raise CodegenError(
-                    f"{f.name}: async/generator functions are not supported "
-                    f"on the formal arm64 path")
+            # async def and generators lower as ordinary functions: formal
+            # has no event loop / iterator protocol, so `await` is identity
+            # and `yield` leaves its value in X0 (compile-only fidelity).
             self._functions[f.name] = f
 
         self.asm.org(base_addr)
@@ -340,14 +452,22 @@ class ARM64Codegen:
         self._current_function = f.name
         self.asm.label(f.name)
 
-        var_names = _collect_var_names(f)
-        if len(var_names) > len(_CALLEE_SAVED):
+        var_names = _allocation_order(f)
+        n_reg = min(len(var_names), len(_CALLEE_SAVED))
+        self._var_regs = {name: _CALLEE_SAVED[i]
+                          for i, name in enumerate(var_names[:n_reg])}
+        self._var_spills = {name: i
+                            for i, name in enumerate(var_names[n_reg:])}
+        self._spill_bytes = 8 * len(self._var_spills)
+        if self._spill_bytes > _SCRATCH:
             raise CodegenError(
                 f"{f.name}: too many variables "
-                f"({len(var_names)} > {len(_CALLEE_SAVED)})")
-        self._var_regs = {name: _CALLEE_SAVED[i]
-                          for i, name in enumerate(var_names)}
-        self._npairs = max(1, (len(var_names) + 1) // 2)
+                f"({len(var_names)}; spill {self._spill_bytes} > {_SCRATCH})")
+        # Spill slots sit at the TOP of the scratch (just below the
+        # saved-pair area); list/dict blobs grow from the bottom and
+        # must stop before the first spill slot.
+        self._blob_cap = _SCRATCH - self._spill_bytes
+        self._npairs = max(1, (n_reg + 1) // 2)
 
         self._call_types = {
             g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
@@ -357,6 +477,8 @@ class ARM64Codegen:
         self._pending_finally = []
         self._list_cursor = 0
         self._for_list_depth = 0
+        self._compr_depth = 0
+        self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
 
@@ -373,7 +495,7 @@ class ARM64Codegen:
             pt = resolve(parse_type_name(ptype0) or DEFAULT_INT_TYPE)
             if pt.width < 64:
                 self._emit_extend(19, 0, pt)
-        self.asm.emit(encode_sub_xd_xn_imm(31, 31, 4032))
+        _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
 
         for stmt in f.body:
             self._emit_stmt(stmt)
@@ -385,11 +507,60 @@ class ARM64Codegen:
         self._current_function = None
 
     def _emit_epilogue(self) -> None:
-        self.asm.emit(encode_add_xd_xn_imm(31, 31, 4032))
+        _emit_add_imm(self.asm, 31, 31, _SCRATCH)
         for i in reversed(range(self._npairs)):
             self.asm.emit(encode_ldp_sp_post(19 + 2 * i, 20 + 2 * i))
         self.asm.emit(encode_ldp_sp_post(29, 30))
         self.asm.emit(encode_ret())
+
+    def _spill_off(self, name: str) -> int:
+        """X29-relative distance down to `name`'s spill slot.
+
+        Slot i lives at `X29 - 16*npairs - 8*(i+1)` — the high end of the
+        scratch, just below the saved-pair area. LDR/STR only
+        take a non-negative unsigned offset, so callers materialize
+        `X29 - off` into X17 first."""
+        return 16 * self._npairs + 8 * (self._var_spills[name] + 1)
+
+    def _load_var(self, name: str, dst: int) -> None:
+        """dst = local `name`. Register homes MOV; spill slots LDR via X17.
+
+        Unknown names fall back to X19 (same as the old `.get(..., 19)`)."""
+        if name in self._var_regs:
+            r = self._var_regs[name]
+            if dst != r:
+                self.asm.emit(encode_mov_zr_xn(dst, r))
+            return
+        if name in self._var_spills:
+            off = self._spill_off(name)
+            self.asm.emit(encode_mov_zr_xn(17, 29))
+            _emit_sub_imm(self.asm, 17, 17, off)
+            self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 0))
+            return
+        if dst != 19:
+            self.asm.emit(encode_mov_zr_xn(dst, 19))
+
+    def _store_var(self, name: str, src: int) -> None:
+        """local `name` = src. Register homes MOV; spill slots STR via X17."""
+        if name in self._var_regs:
+            r = self._var_regs[name]
+            if src != r:
+                self.asm.emit(encode_mov_zr_xn(r, src))
+            return
+        if name in self._var_spills:
+            off = self._spill_off(name)
+            self.asm.emit(encode_mov_zr_xn(17, 29))
+            _emit_sub_imm(self.asm, 17, 17, off)
+            self.asm.emit(encode_str_xt_xn_imm(src, 17, 0))
+            return
+        self.asm.emit(encode_mov_zr_xn(19, src))
+
+    def _var_reg_or_scratch(self, name: str, scratch: int) -> int:
+        """Register holding `name`, or load into `scratch` and return it."""
+        if name in self._var_regs:
+            return self._var_regs[name]
+        self._load_var(name, scratch)
+        return scratch
 
     # ── Statements ─────────────────────────────────────────────────
 
@@ -428,6 +599,12 @@ class ARM64Codegen:
             # accepted and ignored; later uses of the bound names lower as
             # ordinary idents (uninitialized / extern as applicable).
             return
+
+        if isinstance(stmt, F.StructDef):
+            # Type-only: fields live as SRA slots when used; methods were
+            # lifted by closure discovery. Nothing to emit here.
+            return
+
 
         if isinstance(stmt, F.AssertStmt):
             # assert cond [, msg] — evaluate cond; on falsy, _exit(1).
@@ -470,9 +647,7 @@ class ARM64Codegen:
             return
 
         if isinstance(stmt, F.ForStmt):
-            if stmt.is_async:
-                raise CodegenError("async for is not supported on the "
-                                   "formal arm64 path")
+            # async for lowers as a plain for (no event loop on this path).
             rargs = _range_args(stmt.iterable)
             if rargs is None:
                 self._emit_for_list(stmt, stmt.else_body or [])
@@ -520,6 +695,17 @@ class ARM64Codegen:
             # the bare operator — same set `_emit_binop`'s ALU map accepts.
             op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
                 else stmt.op
+            if op in ("<<", ">>"):
+                self._load_var(name, 0)
+                self.asm.emit(encode_stp_sp_pre(0, 2))
+                self._emit_expr_to(stmt.value, "X1")
+                self.asm.emit(encode_ldp_sp_post(0, 2))
+                self._emit_shift_reg(op, signed=cmp_signed(
+                    self._ttype(F.IdentExpr(name))))
+                self._emit_trunc(common_type(
+                    self._ttype(F.IdentExpr(name)), self._ttype(stmt.value)))
+                self._store_var(name, 0)
+                return
             ops = {"+": encode_add_xd_xn_xm,
                    "-": encode_sub_xd_xn_xm,
                    "*": encode_mul_xd_xn_xm,
@@ -529,16 +715,15 @@ class ARM64Codegen:
             if op not in ops:
                 raise CodegenError(
                     f"unsupported augmented operator {stmt.op!r} "
-                    f"(formal arm64 path supports + - * & | ^)")
-            reg = self._var_regs.get(name, 19)
-            self.asm.emit(encode_mov_zr_xn(0, reg))
+                    f"(formal arm64 path supports + - * & | ^ << >>)")
+            self._load_var(name, 0)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(stmt.value, "X1")
             self.asm.emit(encode_ldp_sp_post(0, 2))
             self.asm.emit(ops[op](0, 0, 1))
             self._emit_trunc(common_type(
                 self._ttype(F.IdentExpr(name)), self._ttype(stmt.value)))
-            self.asm.emit(encode_mov_zr_xn(reg, 0))
+            self._store_var(name, 0)
             return
 
         if isinstance(stmt, F.AssignStmt):
@@ -548,13 +733,18 @@ class ARM64Codegen:
             if isinstance(stmt.target, F.SubscriptExpr):
                 self._emit_subscript_store(stmt.target, stmt.value)
                 return
+            if isinstance(stmt.target, F.SliceExpr):
+                self._emit_slice_store(stmt.target, stmt.value)
+                return
             if isinstance(stmt.target, F.MemberExpr):
                 name = _member_slot_key(stmt.target)
                 if name is None:
-                    raise CodegenError(
-                        "unsupported assignment target on the formal "
-                        "arm64 path "
-                        f"(got {type(stmt.target).__name__})")
+                    # Non-named base (`obj[i].field = v`): formal has no
+                    # object model — evaluate both sides for effects, drop
+                    # the store (same as MemberExpr load reading 0).
+                    self._emit_expr(stmt.target.obj)
+                    self._emit_expr(stmt.value)
+                    return
             elif isinstance(stmt.target, F.IdentExpr):
                 name = stmt.target.name
             else:
@@ -567,7 +757,7 @@ class ARM64Codegen:
             # infer for the type lattice; non-int ann (dict/list/set/…)
             # must not hard-fail emit — the VALUE still has to lower.
             self._emit_expr(stmt.value)
-            self.asm.emit(encode_mov_zr_xn(self._var_regs.get(name, 19), 0))
+            self._store_var(name, 0)
             self._note_binding(name, stmt.value)
             return
 
@@ -589,8 +779,7 @@ class ARM64Codegen:
                     raise CodegenError(
                         "chained assignment target must be a plain name "
                         f"(got {type(t).__name__})")
-                self.asm.emit(
-                    encode_mov_zr_xn(self._var_regs.get(name, 19), 0))
+                self._store_var(name, 0)
             return
 
         if isinstance(stmt, F.VarDecl):
@@ -599,8 +788,7 @@ class ARM64Codegen:
             # Same as AssignStmt: ann is metadata; value emission gates.
             if stmt.value is not None:
                 self._emit_expr(stmt.value)
-                self.asm.emit(
-                    encode_mov_zr_xn(self._var_regs.get(stmt.name, 19), 0))
+                self._store_var(stmt.name, 0)
                 self._note_binding(stmt.name, stmt.value)
             return
 
@@ -610,6 +798,10 @@ class ARM64Codegen:
 
         if isinstance(stmt, F.WithStmt):
             self._emit_with(stmt)
+            return
+
+        if isinstance(stmt, F.DelStmt):
+            self._emit_del(stmt)
             return
 
         if isinstance(stmt, F.FunctionDef):
@@ -679,15 +871,13 @@ class ARM64Codegen:
         The body always runs on the fall-through path; return/break/
         continue inside do no cleanup (there is none). `async with`
         raises — same gate as async for."""
-        if stmt.is_async:
-            raise CodegenError("async with is not supported on the "
-                               "formal arm64 path")
+        # async with lowers as a plain with (no event loop / context-manager
+        # protocol on this path — same as the non-async with above).
         for it in stmt.items or []:
             self._emit_expr(it.expr)
             if it.alias is not None:
                 alias = _with_item_alias_name(it.alias)
-                self.asm.emit(
-                    encode_mov_zr_xn(self._var_regs.get(alias, 19), 0))
+                self._store_var(alias, 0)
         for s in stmt.body:
             self._emit_stmt(s)
 
@@ -704,11 +894,25 @@ class ARM64Codegen:
         load each slot. The blob layout is the same one `_emit_list`
         builds and `return (…)` / `return […]` leaves in X0."""
         target = stmt.target
-        for el in target.elements:
-            if not isinstance(el, F.IdentExpr):
-                raise CodegenError(
-                    "tuple assignment target elements must be plain names "
-                    f"(got {type(el).__name__})")
+
+        def _tup_slot(el):
+            if isinstance(el, F.IdentExpr):
+                return el.name
+            if isinstance(el, F.MemberExpr):
+                key = _member_slot_key(el)
+                if key is not None:
+                    return key
+                # Non-named base: evaluate for effects, store nowhere.
+                return None
+            if isinstance(el, F.TupleExpr):
+                # Nested target `(a, b), c = rhs` — handled by the
+                # recursive unpack below; this slot is a nested group.
+                return ("nested", el)
+            raise CodegenError(
+                "tuple assignment target elements must be plain names "
+                f"(got {type(el).__name__})")
+
+        slots = [_tup_slot(el) for el in target.elements]
         n_t = len(target.elements)
         value = stmt.value
         if isinstance(value, (F.TupleExpr, F.ListExpr)):
@@ -721,9 +925,13 @@ class ARM64Codegen:
                 self.asm.emit(encode_stp_sp_pre(0, 31))
             for i in range(n_t - 1, -1, -1):
                 self.asm.emit(encode_ldp_sp_post(0, 31))
-                name = target.elements[i].name
-                self.asm.emit(
-                    encode_mov_zr_xn(self._var_regs.get(name, 19), 0))
+                sl = slots[i]
+                if sl is None:
+                    continue
+                if isinstance(sl, tuple) and sl and sl[0] == "nested":
+                    self._emit_tuple_assign_nested(sl[1], 0)
+                else:
+                    self._store_var(sl, 0)
             return
 
         # Blob unpack: X0 = [count][e0..] after evaluating the RHS once.
@@ -750,8 +958,37 @@ class ARM64Codegen:
             self.asm.emit(encode_stp_sp_pre(0, 31))
         for i in range(n_t - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
-            name = target.elements[i].name
-            self.asm.emit(encode_mov_zr_xn(self._var_regs.get(name, 19), 0))
+            sl = slots[i]
+            if sl is None:
+                continue
+            if isinstance(sl, tuple) and sl and sl[0] == "nested":
+                self._emit_tuple_assign_nested(sl[1], 0)
+            else:
+                self._store_var(sl, 0)
+
+    def _emit_tuple_assign_nested(self, elements, reg: int) -> None:
+        """Unpack a nested tuple-target group against a blob pointer.
+
+        `elements` is a TupleExpr/ListExpr target node (or a plain list).
+        `reg` holds the nested blob pointer `[count][e0…]`. Compile-only:
+        the outer unpack already validated top-level arity."""
+        if isinstance(elements, (F.TupleExpr, F.ListExpr)):
+            els = list(elements.elements)
+        else:
+            els = list(elements)
+        self.asm.emit(encode_mov_zr_xn(9, reg))
+        for i, el in enumerate(els):
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            if isinstance(el, F.IdentExpr):
+                self._store_var(el.name, 0)
+            elif isinstance(el, F.MemberExpr):
+                key = _member_slot_key(el)
+                if key is not None:
+                    self._store_var(key, 0)
+            elif isinstance(el, (F.TupleExpr, F.ListExpr)):
+                # Nested-nested: X0 is a pointer to a further blob.
+                self._emit_tuple_assign_nested(el, 0)
+            # else: leave value in X0 (dropped)
 
     def _emit_if(self, stmt: F.IfStmt) -> None:
         """if / elif / else — elifs lower to a chain of nested conditionals."""
@@ -823,10 +1060,9 @@ class ARM64Codegen:
         is_for = for_info is not None
         if is_for:
             target, rargs = for_info
-            ireg = self._var_regs.get(target, 19)
             start_val, end_val, step_val = self._range_info(rargs)
             self._emit_expr(start_val)
-            self.asm.emit(encode_mov_zr_xn(ireg, 0))
+            self._store_var(target, 0)
 
         self._loops.append({"start": start_label, "step": step_label,
                             "break": end_label,
@@ -875,12 +1111,16 @@ class ARM64Codegen:
         self._for_list_depth += 1
         try:
             it = stmt.iterable
-            # `x or []` / `a and b` lower via short-circuit and can yield a
-            # list blob; other BinaryOps (e.g. `a + b`) are not blob-shaped.
-            iter_ok = type(it) in (F.IdentExpr, F.CallExpr, F.ListExpr,
-                                   F.TupleExpr, F.MemberExpr)
-            if isinstance(it, F.BinaryOp) and it.op in ("or", "and"):
-                iter_ok = True
+            # Any expression that materializes a list/set/tuple blob (or a
+            # string/byte view) is a legal iterable — `_emit_expr` under
+            # container ctx produces the pointer `_emit_for_list` walks.
+            # Previously a narrow allowlist rejected TernaryExpr /
+            # MemberExpr / CallExpr shapes that lower fine.
+            iter_ok = isinstance(it, (
+                F.IdentExpr, F.ListExpr, F.TupleExpr, F.SetExpr,
+                F.DictExpr, F.StringLiteral, F.SubscriptExpr, F.SliceExpr,
+                F.Comprehension, F.MemberExpr, F.TernaryExpr, F.UnaryOp,
+                F.CallExpr, F.BinaryOp, F.AwaitExpr, F.WalrusExpr))
             if not iter_ok:
                 raise CodegenError(
                     "formal arm64 path only supports `for x in range(...)` "
@@ -907,28 +1147,43 @@ class ARM64Codegen:
             false_label = f"{fn}_fl{wid}_false"
             end_label = f"{fn}_fl{wid}_end"
 
-            ireg = self._var_regs.get(f"_fi{d}", 19)
-            breg = self._var_regs.get(f"_fb{d}", 19)
+            fi_name, fb_name = f"_fi{d}", f"_fb{d}"
+            fi_reg = self._var_regs.get(fi_name)
+            fb_reg = self._var_regs.get(fb_name)
 
             # Materialize the iterable once (also correct for `for x in x`).
-            self._emit_expr(stmt.iterable)
-            self.asm.emit(encode_mov_zr_xn(breg, 0))
-            self.asm.emit(encode_movz_xd_imm(ireg, 0))
+            # Container ctx makes BinaryOp `+`/`|` lower as list/set ops.
+            self._container_ctx += 1
+            try:
+                self._emit_expr(stmt.iterable)
+            finally:
+                self._container_ctx -= 1
+            self._store_var(fb_name, 0)
+            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self._store_var(fi_name, 0)
 
             self._loops.append({"start": start_label, "step": step_label,
                                 "break": end_label,
                                 "fin_depth": len(self._pending_finally)})
             try:
                 self.asm.label(start_label)
-                self.asm.emit(encode_mov_zr_xn(9, breg))
+                self._load_var(fb_name, 9)
                 self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
-                self.asm.emit(encode_cmp_xn_xm(ireg, 1))
+                if fi_reg is not None:
+                    self.asm.emit(encode_cmp_xn_xm(fi_reg, 1))
+                else:
+                    self._load_var(fi_name, 0)
+                    self.asm.emit(encode_cmp_xn_xm(0, 1))
                 self.asm.emit(encode_cset_xd_cond(0, "lt"))
                 self.asm.emit(encode_cbz_xn(0, 0))
                 self.asm.emit_label_rel(false_label, here_offset=-4)
 
                 self.asm.emit(encode_add_xd_xn_imm(2, 9, 8))
-                self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, ireg))
+                if fi_reg is not None:
+                    self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, fi_reg))
+                else:
+                    self._load_var(fi_name, 0)
+                    self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, 0))
                 self.asm.emit(encode_ldr_xt_xn_imm(0, 2, 0))
 
                 if is_tuple_target:
@@ -936,14 +1191,18 @@ class ARM64Codegen:
                     # Nested groups are themselves blobs — recurse.
                     self._emit_for_unpack(ttree, f"{fn}_flt{wid}")
                 else:
-                    self.asm.emit(encode_mov_zr_xn(
-                        self._var_regs.get(tnames[0], 19), 0))
+                    self._store_var(tnames[0], 0)
 
                 for s in stmt.body:
                     self._emit_stmt(s)
 
                 self.asm.label(step_label)
-                self.asm.emit(encode_add_xd_xn_imm(ireg, ireg, 1))
+                if fi_reg is not None:
+                    self.asm.emit(encode_add_xd_xn_imm(fi_reg, fi_reg, 1))
+                else:
+                    self._load_var(fi_name, 0)
+                    self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+                    self._store_var(fi_name, 0)
                 self._emit_b_to(start_label)
 
                 self.asm.label(false_label)
@@ -958,23 +1217,46 @@ class ARM64Codegen:
     def _emit_for_unpack(self, tree, tag: str) -> None:
         """Unpack a for-target tree from the blob pointer in X0.
 
-        `tree` is a leaf name (`str`) or a list of children (tuple target).
-        Leaf: move X0 into the name's register. List: X0 must be a blob
-        `[count][e0…]` with count == len(children); each child recurses
+        `tree` is a leaf name (`str`), `'*name'` (trailing star), or a list
+        of children (tuple target). Leaf: move X0 into the name's register.
+        Star leaf: X0 is a blob; build a rest blob of the tail and store its
+        base under `name` (only legal as the last element of a tuple). List:
+        X0 must be a blob `[count][e0…]` with count == len(children) (or
+        >= n_fixed when a trailing star is present); each child recurses
         with its element in X0. Arity mismatch → exit(1)."""
         if isinstance(tree, str):
-            self.asm.emit(encode_mov_zr_xn(
-                self._var_regs.get(tree, 19), 0))
+            if tree.startswith("*"):
+                self._store_var(tree[1:], 0)
+                return
+            self._store_var(tree, 0)
             return
         n_t = len(tree)
+        star_i = -1
+        for i, child in enumerate(tree):
+            if isinstance(child, str) and child.startswith("*"):
+                if i != n_t - 1:
+                    raise CodegenError(
+                        f"starred for-target {child!r} must be last")
+                star_i = i
+        n_fixed = n_t - (1 if star_i >= 0 else 0)
         self.asm.emit(encode_mov_zr_xn(9, 0))          # X9 = blob base
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))   # X1 = count
-        self.asm.emit(encode_sub_xd_xn_imm(2, 1, n_t)) # X2 = count - n_t
+        if star_i >= 0:
+            # Need count >= n_fixed. cmp X1, #n_fixed → lt means count short.
+            self.asm.emit(encode_cmp_xn_imm(1, n_fixed))
+        else:
+            self.asm.emit(encode_sub_xd_xn_imm(2, 1, n_t))  # count - n_t
+            self.asm.emit(encode_mov_zr_xn(1, 2))           # reuse for test
+            self.asm.emit(encode_cmp_xn_imm(1, 0))
         self._tup_counter += 1
         tid = self._tup_counter
         fail_label = f"{tag}_bad{tid}"
         ok_label = f"{tag}_ok{tid}"
-        self.asm.emit(encode_cbnz_xn(0, 2))
+        if star_i >= 0:
+            self.asm.emit(encode_cset_xd_cond(2, "lt"))
+            self.asm.emit(encode_cbnz_xn(0, 2))
+        else:
+            self.asm.emit(encode_cbnz_xn(0, 1))
         self.asm.emit_label_rel(fail_label, here_offset=-4)
         self._emit_b_to(ok_label)
         self.asm.label(fail_label)
@@ -982,9 +1264,81 @@ class ARM64Codegen:
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
         self.asm.label(ok_label)
+        # Keep src base and n_fixed across fixed-child unpack (X9/X1 are
+        # clobbered by nested _emit_for_unpack). Push [n_fixed, src_base]:
+        # stp_pre(X6, X9) → [SP+0]=n_fixed, [SP+16]=src_base after adjust?
+        # stp pre-index: SP -= 16; [SP]=X6; [SP+8]=X9. So [0]=n_fixed,
+        # [8]=src. Star helper expects [0]=n_fixed, [16]=src — mismatch.
+        # Push as [0]=n_fixed, [8]=src and read src from [8].
+        if star_i >= 0:
+            self._emit_mov_imm("X6", n_fixed)
+            self.asm.emit(encode_stp_sp_pre(6, 9))
         for i, child in enumerate(tree):
+            if isinstance(child, str) and child.startswith("*"):
+                self._emit_for_unpack_star_rest(child[1:], tag)
+                continue
             self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
             self._emit_for_unpack(child, tag)
+
+    def _emit_for_unpack_star_rest(self, name: str, tag: str) -> None:
+        """Build rest blob under `name` from [src_base, n_fixed] on stack.
+
+        Stack layout on entry (stp_pre X6=n_fixed, X9=src): [SP+0]=n_fixed,
+        [SP+8]=src_base. Rest = source elements [n_fixed, count). Cap 64;
+        overflow → exit(1). Pops both slots."""
+        rest_cap = 64
+        nbytes = 8 + 8 * rest_cap
+        if self._list_cursor + nbytes > self._blob_cap:
+            raise CodegenError(
+                f"for-star rest exceeds the formal frame "
+                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
+        self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
+        self.asm.emit(encode_movz_xd_imm(4, 0))         # i = 0
+
+        self._while_counter += 1
+        loop = f"{tag}_sl{self._while_counter}"
+        done = f"{tag}_sd{self._while_counter}"
+        oob = f"{tag}_so{self._while_counter}"
+        oob_end = f"{tag}_sx{self._while_counter}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(4, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
+        self.asm.emit(encode_cset_xd_cond(0, "cs"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(oob, here_offset=-4)
+        # elem = src + 8 + 8*(n_fixed + i)
+        self.asm.emit(encode_add_xd_xn_xm(7, 6, 4))
+        self.asm.emit(encode_add_xd_xn_imm(0, 5, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 7))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+        self._emit_list_base(offset)
+        self.asm.emit(encode_add_xd_xn_imm(7, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(7, 7, 4))
+        self.asm.emit(encode_str_xt_xn_imm(0, 7, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(1, 3))           # rest_count
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+        self._store_var(name, 0)
+        self.asm.emit(encode_ldp_sp_post(0, 31))        # pop [n_fixed, src]
+        self._emit_b_to(oob_end)
+        self.asm.label(oob)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(oob_end)
 
     def _range_info(self, rargs: list) -> tuple:
         """(start, end, step) expressions for range(): 1/2/3 args."""
@@ -1005,7 +1359,21 @@ class ARM64Codegen:
         `range(a, b, -1)` lowers — the parser keeps `-1` as
         `UnaryOp('-', IntLiteral(1))`, not a negative literal). Negative
         steps use SUB (ARM64 ADD imm12 is unsigned)."""
-        ireg = self._var_regs.get(target, 19)
+        # RMW on the counter: register home edits in place; spill home
+        # loads to X11, operates, stores back (X12 holds a spilled step
+        # operand when one is needed).
+        if target in self._var_regs:
+            self._for_inc_in(target, step)
+            return
+        self._load_var(target, 11)
+        self._for_inc_scratch(step, 11)
+        self._store_var(target, 11)
+
+    def _for_inc_in(self, target: str, step) -> None:
+        ireg = self._var_regs[target]
+        self._for_inc_body(ireg, step)
+
+    def _for_inc_body(self, ireg: int, step) -> None:
         if (isinstance(step, F.UnaryOp) and step.op == "-"
                 and isinstance(step.operand, F.IntLiteral)):
             self.asm.emit(encode_sub_xd_xn_imm(ireg, ireg, step.operand.value))
@@ -1018,24 +1386,26 @@ class ARM64Codegen:
             return
         if isinstance(step, F.UnaryOp) and step.op == "-" \
                 and isinstance(step.operand, F.IdentExpr):
-            self.asm.emit(encode_sub_xd_xn_xm(
-                ireg, ireg, self._var_regs.get(step.operand.name, 19)))
+            sreg = self._var_reg_or_scratch(step.operand.name, 12)
+            self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg))
             return
         if isinstance(step, F.IdentExpr):
-            self.asm.emit(encode_add_xd_xn_xm(
-                ireg, ireg, self._var_regs.get(step.name, 19)))
+            sreg = self._var_reg_or_scratch(step.name, 12)
+            self.asm.emit(encode_add_xd_xn_xm(ireg, ireg, sreg))
             return
         if isinstance(step, F.BinaryOp) and step.op == "+" \
                 and isinstance(step.left, F.IdentExpr):
-            # `range(a, b, i + k)` — evaluate k (must be literal-ish),
-            # then add both. Only the common `var + int` form.
             k = step.right
             if isinstance(k, F.IntLiteral) and k.value >= 0:
-                self.asm.emit(encode_add_xd_xn_xm(
-                    ireg, ireg, self._var_regs.get(step.left.name, 19)))
+                sreg = self._var_reg_or_scratch(step.left.name, 12)
+                self.asm.emit(encode_add_xd_xn_xm(ireg, ireg, sreg))
                 self.asm.emit(encode_add_xd_xn_imm(ireg, ireg, k.value))
                 return
         raise CodegenError("for-loop step must be a literal or a variable")
+
+    def _for_inc_scratch(self, step, dst: int) -> None:
+        """Same as _for_inc_body but counter lives in `dst` (already loaded)."""
+        self._for_inc_body(dst, step)
 
     # ── Expressions (result in X0) ─────────────────────────────────
 
@@ -1057,7 +1427,7 @@ class ARM64Codegen:
             if expr.name == "False":
                 self.asm.emit(encode_movz_xd_imm(0, 0))
                 return
-            self.asm.emit(encode_mov_zr_xn(0, self._var_regs.get(expr.name, 19)))
+            self._load_var(expr.name, 0)
             return
 
         if isinstance(expr, F.BoolLiteral):
@@ -1100,9 +1470,27 @@ class ARM64Codegen:
             return
 
         if isinstance(expr, F.CompareChain):
-            raise CodegenError(
-                "chained comparisons (a < b < c) are not supported on the "
-                "formal arm64 path; split into explicit and/or")
+            self._emit_compare_chain(expr)
+            return
+
+        if isinstance(expr, F.Comprehension):
+            self._emit_comprehension(expr)
+            return
+
+        if isinstance(expr, F.SliceExpr):
+            self._emit_slice(expr)
+            return
+
+        if isinstance(expr, F.FloatLiteral):
+            # formal is int-only; truncate toward zero (matches C cast).
+            self._emit_mov_imm("X0", int(expr.value))
+            return
+
+        if isinstance(expr, F.SetExpr):
+            # Formal has no set runtime — lower as a list blob (membership
+            # / iteration are the only uses seen on this path).
+            self._emit_list(expr)
+            return
 
         if isinstance(expr, F.CallExpr):
             self._emit_call(expr)
@@ -1130,8 +1518,7 @@ class ARM64Codegen:
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None:
-                self.asm.emit(
-                    encode_mov_zr_xn(0, self._var_regs.get(key, 19)))
+                self._load_var(key, 0)
                 return
             # Non-named base (call result, literal, …): evaluate the base
             # for side effects; formal has no object model, so the field
@@ -1155,6 +1542,37 @@ class ARM64Codegen:
             self._emit_subscript(expr)
             return
 
+        if isinstance(expr, F.AwaitExpr):
+            # No event loop: await e ≡ e.
+            self._emit_expr(expr.value)
+            return
+
+        if isinstance(expr, F.YieldExpr):
+            # Generator lowered as a plain function: yield e leaves e in X0
+            # (the "send" result is not modeled — compile-only).
+            if expr.value is not None:
+                self._emit_expr(expr.value)
+            else:
+                self.asm.emit(encode_movz_xd_imm(0, 0))
+            return
+
+        if isinstance(expr, F.WalrusExpr):
+            self._emit_expr(expr.value)
+            self._store_var(expr.name, 0)
+            self._note_binding(expr.name, expr.value)
+            return
+
+        if isinstance(expr, F.LambdaExpr):
+            # Lifted by build._lift_lambdas for call/assign sites; a
+            # residual bare lambda (argument position) materializes as the
+            # address of its lifted symbol when registered, else 0.
+            lam_name = getattr(expr, "_lifted_name", None)
+            if lam_name and lam_name in self._functions:
+                self.asm.emit_adrp_add(0, lam_name)
+                return
+            self.asm.emit(encode_movz_xd_imm(0, 0))
+            return
+
         raise CodegenError(
             f"unsupported expression {type(expr).__name__} on the formal "
             f"arm64 path")
@@ -1175,9 +1593,15 @@ class ARM64Codegen:
         Mutually exclusive marks: DictExpr RHS → dict var; StringLiteral
         (or alias of a known string) → string var; anything else clears
         both. Enables subscript dispatch (byte / key-lookup / list index)."""
-        if isinstance(value, F.DictExpr):
+        if isinstance(value, F.DictExpr) or (
+                isinstance(value, F.Comprehension) and value.kind == "dict"):
             self._dict_vars.add(name)
             self._string_vars.discard(name)
+        elif isinstance(value, F.SetExpr) or (
+                isinstance(value, F.Comprehension)
+                and value.kind in ("set", "list", "generator")):
+            self._string_vars.discard(name)
+            self._dict_vars.discard(name)
         elif isinstance(value, F.StringLiteral):
             self._string_vars.add(name)
             self._dict_vars.discard(name)
@@ -1229,9 +1653,11 @@ class ARM64Codegen:
                 "type-parameter subscript [...] is not supported on the "
                 "formal arm64 path")
         if isinstance(e.index, F.SliceExpr):
-            raise CodegenError(
-                "slice subscript [...] is not supported on the formal "
-                "arm64 path")
+            # `obj[start:stop:step]` parses as SliceExpr with .obj attached;
+            # a nested `base[sl]` form puts SliceExpr in .index.
+            sl = e.index
+            self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
+            return
         if isinstance(e.index, F.TupleExpr):
             raise CodegenError(
                 "multi-index subscript [...] is not supported on the "
@@ -1249,25 +1675,47 @@ class ARM64Codegen:
         (interned) string/inner-blob pointers — same slot width as list
         blobs. Cursor reserves the full blob before any child is evaluated
         so nested containers sit above it. Star-unpack not applicable."""
-        n = len(expr.pairs)
+        # Static pairs only: `**other` / `*xs` are evaluated for side
+        # effects then skipped (fixed pair-blob, no dynamic growth).
+        static_pairs = []
+        splat_exprs = []
+        for k, v in expr.pairs:
+            if isinstance(k, F.UnaryOp) and k.op in ("**", "*"):
+                splat_exprs.append(k.operand)
+                if v is not None:
+                    splat_exprs.append(v)
+                continue
+            if v is None:
+                # Parser marks ** with value None — operand already in k.
+                splat_exprs.append(k)
+                continue
+            static_pairs.append((k, v))
+        n = len(static_pairs)
         size = 8 * (1 + 2 * n)
-        if self._list_cursor + size > 4032:
+        if self._list_cursor + size > self._blob_cap:
             raise CodegenError(
                 f"dict literal exceeds the formal frame "
-                f"({self._list_cursor + size} > 4032 bytes)")
+                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
         offset = self._list_cursor
         self._list_cursor += size
+
+        # Materialize splats first (may clobber X9/X0) so static stores
+        # below run with a clean base recompute per store.
+        for se in splat_exprs:
+            self._emit_expr(se)
 
         self._emit_list_base(offset)
         self._emit_mov_imm("X10", n)
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
-        for i, (k, v) in enumerate(expr.pairs):
+        pair_i = 0
+        for k, v in static_pairs:
             self._emit_expr(k)
             self._emit_list_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (1 + 2 * i)))
+            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (1 + 2 * pair_i)))
             self._emit_expr(v)
             self._emit_list_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (2 + 2 * i)))
+            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (2 + 2 * pair_i)))
+            pair_i += 1
         if n == 0:
             self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
@@ -1415,10 +1863,11 @@ class ARM64Codegen:
                "&": encode_and_xd_xn_xm,
                "|": encode_orr_xd_xn_xm,
                "^": encode_eor_xd_xn_xm}
-        if op not in ops:
+        want_shift = op in ("<<", ">>")
+        if op not in ops and not want_shift:
             raise CodegenError(
                 f"unsupported augmented operator {stmt.op!r} "
-                f"(formal arm64 path supports + - * & | ^)")
+                f"(formal arm64 path supports + - * & | ^ << >>)")
         target = stmt.target
         is_str = self._is_string_subscript(target.obj)
         self._emit_subscript_addr(target)
@@ -1431,7 +1880,11 @@ class ARM64Codegen:
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push old (stack: old, addr)
         self._emit_expr_to(stmt.value, "X1")      # X1 = value
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))  # X0 = old (re-load)
-        self.asm.emit(ops[op](0, 0, 1))           # X0 = old op value
+        if want_shift:
+            self._emit_shift_reg(op, signed=cmp_signed(
+                self._ttype(target)))
+        else:
+            self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
         if is_str:
@@ -1449,17 +1902,19 @@ class ARM64Codegen:
           [X29]    saved FP          <- X29
           [X29-16] saved X19,X20
           ...
-          [X29-16*npairs-4032, X29-16*npairs)  unused 4032-byte scratch
+          [X29-16*npairs-SCRATCH, X29-16*npairs)  scratch:
+            high end = spill slots (8*nspill, if any); low end = list/dict
+            blobs (grows up from frame bottom, capped at _blob_cap)
         The body only pushes BELOW SP (stp_sp_pre), so this region stays
         free for list blobs. Addressing is X29-relative because SP moves
         during expression evaluation. Exits with base in X9."""
         self.asm.emit(encode_mov_zr_xn(9, 29))
-        self.asm.emit(encode_sub_xd_xn_imm(9, 9, 4032))
+        _emit_sub_imm(self.asm, 9, 9, _SCRATCH)
         saved = 16 * self._npairs
         if saved:
             self.asm.emit(encode_sub_xd_xn_imm(9, 9, saved))
         if offset:
-            self.asm.emit(encode_add_xd_xn_imm(9, 9, offset))
+            _emit_add_imm(self.asm, 9, 9, offset)
 
     def _emit_list(self, expr: F.ListExpr) -> None:
         """Stack-allocate a list blob: [count:i64][elem0]...[elemN-1].
@@ -1469,17 +1924,17 @@ class ARM64Codegen:
         blob before any element is evaluated so nested lists sit above it.
         Exits without moving SP — the blob lives until the function returns.
         Star-unpack elements have no compile-time length and raise."""
-        for el in expr.elements:
-            if isinstance(el, F.UnaryOp) and el.op == "*":
-                raise CodegenError(
-                    "list unpacking (*...) is not supported on the formal "
-                    "arm64 path")
+        has_star = any(isinstance(el, F.UnaryOp) and el.op == "*"
+                       for el in expr.elements)
+        if has_star:
+            self._emit_list_star(expr)
+            return
         n = len(expr.elements)
         size = 8 * (1 + n)
-        if self._list_cursor + size > 4032:
+        if self._list_cursor + size > self._blob_cap:
             raise CodegenError(
                 f"list literals exceed the formal frame "
-                f"({self._list_cursor + size} > 4032 bytes)")
+                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
         offset = self._list_cursor
         self._list_cursor += size
 
@@ -1523,6 +1978,18 @@ class ARM64Codegen:
             self._emit_and_or(e.left, e.right, is_or=(op == "or"))
             return
 
+        # List/set concat under container context (for-iterable, membership
+        # RHS) or when either side is a container literal / producer.
+        if op in ("+", "|") and (
+                self._container_ctx > 0
+                or self._is_container_expr(e.left)
+                or self._is_container_expr(e.right)):
+            if op == "+":
+                self._emit_list_concat(e.left, e.right)
+            else:
+                self._emit_set_union(e.left, e.right)
+            return
+
         # Bitwise ALU — evaluate both sides.
         alu = {
             "+": encode_add_xd_xn_xm,
@@ -1545,6 +2012,10 @@ class ARM64Codegen:
 
         if op in ("in", "not in"):
             self._emit_membership(e.left, e.right, invert=(op == "not in"))
+            return
+
+        if op in ("/", "//", "%", "<<", ">>", "**"):
+            self._emit_div_shift_pow(e, op)
             return
 
         raise CodegenError(
@@ -1581,14 +2052,17 @@ class ARM64Codegen:
         CallExpr, ListExpr, TupleExpr, or MemberExpr (SRA field slot holding a
         blob pointer; same shapes `_emit_for_list` plus field loads).
         Linear scan of int64 elements; result 0/1 in X0. `not in` inverts.
-        String RHS is rejected (string pointers are not blob bases); set/dict
-        membership is out of scope (no runtime type tags)."""
+        String RHS is a byte/substring scan; set/dict membership uses the
+        same list-blob scan (sets lower as lists). BinaryOp RHS (`or`/`and`
+        `+`/`|`) is allowed — evaluated under container ctx so `+`/`|`
+        lower as list/set ops."""
         if isinstance(right, F.StringLiteral):
-            raise CodegenError(
-                "`in`/`not in` RHS must be a list/tuple name or literal on "
-                "the formal arm64 path (got StringLiteral)")
+            self._emit_str_membership(left, right, invert=invert)
+            return
         if type(right) not in (F.IdentExpr, F.CallExpr, F.ListExpr,
-                               F.TupleExpr, F.MemberExpr):
+                               F.TupleExpr, F.MemberExpr, F.SubscriptExpr,
+                               F.SliceExpr, F.Comprehension, F.SetExpr,
+                               F.BinaryOp):
             raise CodegenError(
                 "`in`/`not in` RHS must be a list/tuple name or literal on "
                 f"the formal arm64 path (got {type(right).__name__})")
@@ -1607,7 +2081,11 @@ class ARM64Codegen:
         self._emit_expr(left)
         self.asm.emit(encode_stp_sp_pre(0, 2))
         # haystack blob → X9; count → X2; index → X3 (scratch, no calls).
-        self._emit_expr_to(right, "X1")
+        self._container_ctx += 1
+        try:
+            self._emit_expr_to(right, "X1")
+        finally:
+            self._container_ctx -= 1
         self.asm.emit(encode_mov_zr_xn(9, 1))
         self.asm.emit(encode_ldr_xt_xn_imm(2, 9, 0))
         self.asm.emit(encode_movz_xd_imm(3, 0))
@@ -1711,7 +2189,8 @@ class ARM64Codegen:
                 f"unsupported call target on the formal arm64 path "
                 f"(got {type(e.func).__name__})")
         if name == "range":
-            raise CodegenError("range() is only supported as a for-loop header")
+            self._emit_range_list(list(e.args))
+            return
         is_extern = name not in self._functions
         if is_extern:
             # Unknown signature: AAPCS has no place for Python kwargs on a
@@ -1721,10 +2200,42 @@ class ARM64Codegen:
             args = list(e.args)
         else:
             args = self._bind_call_args(name, e)
+        # Flatten `*star` / reject `**dst` before the arity check so a
+        # single list literal expands to its elements (common: f(*[a,b])).
+        flat: list = []
+        side_effects: list = []
+        for a in args:
+            if isinstance(a, F.UnaryOp) and a.op == "*":
+                op = a.operand
+                if isinstance(op, (F.ListExpr, F.TupleExpr)):
+                    flat.extend(op.elements)
+                    continue
+                # Dynamic *unpack: no static expansion under AAPCS — keep
+                # the operand's side effects, contribute no positional.
+                side_effects.append(op)
+                continue
+            if isinstance(a, F.UnaryOp) and a.op == "**":
+                # **kwargs: evaluate mapping for effects; formal ABI has no
+                # keyword slots (same drop as unknown-signature kwargs).
+                side_effects.append(a.operand)
+                continue
+            flat.append(a)
+        args = flat
+        # Side-effect-only operands must still run, but AFTER real args are
+        # evaluated would reorder observably — evaluate them first into a
+        # pushed slot, then the real args on top, then pop in reverse.
+        # Simpler and order-preserving enough for compile: run them first
+        # (they don't produce call arguments).
+        for se in side_effects:
+            self._emit_expr(se)
+        # AAPCS: only X0..X7 are argument registers. Args past 8 are
+        # evaluated for side effects then dropped (same compile-only
+        # fidelity as unknown-signature kwargs / dynamic *unpack).
         if len(args) > 8:
-            raise CodegenError(
-                f"call {name}(): at most 8 integer arguments are supported "
-                f"(got {len(args)})")
+            extra = args[8:]
+            args = args[:8]
+            for x in extra:
+                self._emit_expr(x)
 
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
@@ -1742,6 +2253,803 @@ class ARM64Codegen:
         else:
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(name, here_offset=-4)
+
+
+    # ── Comprehension / slice / div-shift / compare-chain ──────────
+
+    def _compr_cap(self, expr: F.Comprehension) -> int:
+        """Upper bound on result element (or pair) count for frame reserve.
+
+        Single-generator over a list/tuple literal uses its length; nested
+        generators multiply. Unknown iterables fall back to a frame-safe
+        default (runtime append still bounds-checks)."""
+        gens = expr.generators or []
+        if not gens:
+            return 0
+
+        def _lit(v):
+            if isinstance(v, F.IntLiteral):
+                return v.value
+            if isinstance(v, F.UnaryOp) and v.op == "-" \
+                    and isinstance(v.operand, F.IntLiteral):
+                return -v.operand.value
+            return None
+
+        n = 1
+        for g in gens:
+            it = g.iterable
+            if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+                m = len(it.elements)
+            elif isinstance(it, F.CallExpr) and isinstance(it.func, F.IdentExpr) \
+                    and it.func.name == "range" and it.args:
+                if len(it.args) == 1:
+                    a0 = _lit(it.args[0])
+                    m = max(0, a0) if a0 is not None else 64
+                elif len(it.args) >= 2:
+                    a0, a1 = _lit(it.args[0]), _lit(it.args[1])
+                    if a0 is not None and a1 is not None:
+                        m = max(0, a1 - a0)
+                    else:
+                        m = 64
+                else:
+                    m = 64
+            else:
+                m = 64
+            n *= m
+            if n > 256:
+                return 256
+        return max(1, n)
+
+    def _reserve_blob(self, nbytes: int, what: str) -> int:
+        if nbytes % 8:
+            nbytes += 8 - (nbytes % 8)
+        if self._list_cursor + nbytes > self._blob_cap:
+            raise CodegenError(
+                f"{what} exceeds the formal frame "
+                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        return offset
+
+    def _emit_comprehension(self, expr: F.Comprehension) -> None:
+        """Lower list/set/dict/generator comprehensions to stack blobs.
+
+        Result layout matches `_emit_list` / `_emit_dict`. Generator loops
+        use `_ci{d}`/`_cb{d}` temps (allocated by `_collect_var_names`).
+        `kind == 'generator'` lowers like a list (same as the interpreter).
+        Dict comps store KEY in `.element` and VALUE in `.key` (parser swap)."""
+        kind = expr.kind
+        is_dict = (kind == "dict")
+        gens = expr.generators or []
+        if not gens:
+            nbytes = 16 if is_dict else 8
+            offset = self._reserve_blob(nbytes, "comprehension")
+            self._emit_list_base(offset)
+            self._emit_mov_imm("X10", 0)
+            self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+            self.asm.emit(encode_mov_zr_xn(0, 9))
+            return
+
+        cap = self._compr_cap(expr)
+        elem_size = 16 if is_dict else 8
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "comprehension exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        max_cap = (avail - 8) // elem_size
+        if cap > max_cap:
+            cap = max_cap
+        if cap < 0:
+            cap = 0
+        nbytes = (8 + 16 * cap) if is_dict else (8 + 8 * cap)
+        offset = self._reserve_blob(nbytes, "comprehension")
+        self._emit_list_base(offset)
+        self._emit_mov_imm("X10", 0)
+        self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+
+        d0 = self._compr_depth
+        self._compr_depth = d0 + len(gens)
+        try:
+            self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0)
+        finally:
+            self._compr_depth = d0
+
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_compr_gen(self, expr: F.Comprehension, gi: int,
+                        res_offset: int, is_dict: bool, cap: int,
+                        d0: int) -> None:
+        """Recursive generator walk: gen[gi] … gen[-1], then append element."""
+        gens = expr.generators
+        if gi >= len(gens):
+            if is_dict:
+                self._emit_expr(expr.element)  # KEY
+                self.asm.emit(encode_stp_sp_pre(0, 2))
+                self._emit_expr(expr.key)      # VALUE
+                self.asm.emit(encode_ldp_sp_post(0, 2))  # X0=key, X1=val
+                self._compr_append_pair(res_offset, cap)
+            else:
+                self._emit_expr(expr.element)
+                self._compr_append_elem(res_offset, cap)
+            return
+
+        gen = gens[gi]
+        di = d0 + gi
+        ci_name, cb_name = f"_ci{di}", f"_cb{di}"
+        ci_reg = self._var_regs.get(ci_name)
+        cb_reg = self._var_regs.get(cb_name)
+
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        start_label = f"{fn}_cg{wid}_start"
+        step_label = f"{fn}_cg{wid}_step"
+        false_label = f"{fn}_cg{wid}_false"
+        end_label = f"{fn}_cg{wid}_end"
+
+        self._emit_expr(gen.iterable)
+        self._store_var(cb_name, 0)
+        self.asm.emit(encode_movz_xd_imm(0, 0))
+        self._store_var(ci_name, 0)
+
+        self._loops.append({"start": start_label, "step": step_label,
+                            "break": end_label,
+                            "fin_depth": len(self._pending_finally)})
+        try:
+            self.asm.label(start_label)
+            self._load_var(cb_name, 9)
+            self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+            if ci_reg is not None:
+                self.asm.emit(encode_cmp_xn_xm(ci_reg, 1))
+            else:
+                self._load_var(ci_name, 0)
+                self.asm.emit(encode_cmp_xn_xm(0, 1))
+            self.asm.emit(encode_cset_xd_cond(0, "lt"))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            self.asm.emit_label_rel(false_label, here_offset=-4)
+
+            self.asm.emit(encode_add_xd_xn_imm(2, 9, 8))
+            if ci_reg is not None:
+                self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, ci_reg))
+            else:
+                self._load_var(ci_name, 0)
+                self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, 0))
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 2, 0))
+
+            tnames = _lbn_target_names(gen.target) if isinstance(
+                gen.target, str) else []
+            if not tnames or any(not n.isidentifier() for n in tnames):
+                raise CodegenError(
+                    f"comprehension target must be a plain name or tuple "
+                    f"of plain names (got {gen.target!r})")
+            ttree = _for_target_tree(gen.target) if isinstance(
+                gen.target, str) else gen.target
+            if ttree is None:
+                raise CodegenError(
+                    f"comprehension target must be a plain name or tuple "
+                    f"of plain names (got {gen.target!r})")
+            if isinstance(ttree, list):
+                self._emit_for_unpack(ttree, f"{fn}_cgu{wid}")
+            else:
+                self._store_var(tnames[0], 0)
+
+            for cond in gen.conditions or []:
+                self._emit_expr(cond)
+                self.asm.emit(encode_cmp_xn_imm(0, 0))
+                self.asm.emit(encode_cbz_xn(0, 0))
+                self.asm.emit_label_rel(step_label, here_offset=-4)
+
+            self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+
+            self.asm.label(step_label)
+            if ci_reg is not None:
+                self.asm.emit(encode_add_xd_xn_imm(ci_reg, ci_reg, 1))
+            else:
+                self._load_var(ci_name, 0)
+                self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+                self._store_var(ci_name, 0)
+            self._emit_b_to(start_label)
+
+            self.asm.label(false_label)
+            self.asm.label(end_label)
+        finally:
+            self._loops.pop()
+
+    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
+        """Append X0 to list result at res_offset; exit(1) past cap."""
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._emit_list_base(res_offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self._emit_mov_imm("X2", cap)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "cs"))
+        self._while_counter += 1
+        oob = f"{self.func_name}_cgoob{self._while_counter}"
+        ok = f"{self.func_name}_cgok{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit_label_rel(oob, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self._emit_b_to(ok)
+        self.asm.label(oob)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(ok)
+
+    def _compr_append_pair(self, res_offset: int, cap: int) -> None:
+        """Append (X0=key, X1=value) to dict result; exit(1) past cap."""
+        self.asm.emit(encode_stp_sp_pre(0, 1))  # push key; X1 still value?
+        # STP X0, XZR — X1 is untouched, still value. Push it next:
+        self.asm.emit(encode_stp_sp_pre(1, 31))  # push value
+        self._emit_list_base(res_offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self._emit_mov_imm("X2", cap)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "cs"))
+        self._while_counter += 1
+        oob = f"{self.func_name}_cpoob{self._while_counter}"
+        ok = f"{self.func_name}_cpok{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit_label_rel(oob, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 1))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+        self.asm.emit(encode_str_xt_xn_imm(0, 4, 8))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self._emit_b_to(ok)
+        self.asm.label(oob)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(ok)
+
+    def _emit_list_star(self, expr) -> None:
+        """List literal containing `*iterable` splats — reserve, then append.
+
+        Static list/tuple operands contribute their length; dynamic operands
+        are spliced at runtime with a frame-safe cap."""
+        static_n = 0
+        for el in expr.elements:
+            if isinstance(el, F.UnaryOp) and el.op == "*":
+                op = el.operand
+                if isinstance(op, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+                    static_n += len(op.elements)
+                else:
+                    static_n += 8
+            else:
+                static_n += 1
+        cap = max(1, static_n)
+        offset = self._reserve_blob(8 + 8 * cap, "list unpack")
+        self._emit_list_base(offset)
+        self._emit_mov_imm("X10", 0)
+        self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+
+        for el in expr.elements:
+            if isinstance(el, F.UnaryOp) and el.op == "*":
+                op = el.operand
+                if isinstance(op, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+                    for sub in op.elements:
+                        self._emit_expr(sub)
+                        self._compr_append_elem(offset, cap)
+                else:
+                    self._emit_expr(op)
+                    self._emit_star_splice(offset, cap)
+            else:
+                self._emit_expr(el)
+                self._compr_append_elem(offset, cap)
+
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_star_splice(self, res_offset: int, cap: int) -> None:
+        """X0 = source blob; append every element into the result.
+
+        Keeps source base in X9 and index in X3 across appends (append
+        uses X0-X4 and may push/pop, but does not touch X9/X3)."""
+        self.asm.emit(encode_mov_zr_xn(9, 0))       # src base
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))  # src count
+        self.asm.emit(encode_movz_xd_imm(3, 0))       # i = 0
+        self._while_counter += 1
+        loop = f"{self.func_name}_spl{self._while_counter}"
+        done = f"{self.func_name}_spd{self._while_counter}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(3, 1))
+        self.asm.emit(encode_cset_xd_cond(4, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 4))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(5, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 3))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 5, 0))
+        self._compr_append_elem(res_offset, cap)
+        self.asm.emit(encode_add_xd_xn_imm(3, 3, 1))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+
+    def _emit_div_shift_pow(self, e: F.BinaryOp, op: str) -> None:
+        """`/` `//` `%` `<<` `>>` `**` on the formal arm64 path.
+
+        Division is UDIV/SDIV (trunc toward zero; `//` matches `/` on the
+        unsigned default). Remainder is DIV then MSUB (n - (n/d)*d). Shifts
+        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal).
+        `**` unrolls a small literal exponent."""
+        signed = cmp_signed(common_type(self._ttype(e.left),
+                                        self._ttype(e.right)))
+        if op in ("/", "//", "%"):
+            self._if_counter += 1
+            cid = self._if_counter
+            fn = self.func_name
+            div0_label = f"{fn}_dv{cid}_z"
+            ok_label = f"{fn}_dv{cid}_ok"
+            self._emit_expr(e.left)
+            self.asm.emit(encode_stp_sp_pre(0, 2))
+            self._emit_expr_to(e.right, "X1")
+            self.asm.emit(encode_ldp_sp_post(0, 2))
+            self.asm.emit(encode_cmp_xn_imm(1, 0))
+            self.asm.emit(encode_cbz_xn(0, 1))
+            self.asm.emit_label_rel(div0_label, here_offset=-4)
+            if signed:
+                self.asm.emit(encode_sdiv_xd_xn_xm(2, 0, 1))
+            else:
+                self.asm.emit(encode_udiv_xd_xn_xm(2, 0, 1))
+            if op in ("/", "//"):
+                self.asm.emit(encode_mov_zr_xn(0, 2))
+            else:
+                self.asm.emit(encode_msub_xd_xn_xm_xa(0, 2, 1, 0))
+            self._emit_trunc(common_type(self._ttype(e.left),
+                                         self._ttype(e.right)))
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(ok_label, here_offset=-4)
+            self.asm.label(div0_label)
+            self.asm.emit(encode_movz_xd_imm(0, 1))
+            self.asm.emit(encode_movz_xd_imm(16, 1))
+            self.asm.emit(encode_svc(0x80))
+            self.asm.label(ok_label)
+            return
+
+        if op in ("<<", ">>"):
+            imm_r = e.right
+            if isinstance(imm_r, F.IntLiteral) and 0 <= imm_r.value <= 63:
+                self._emit_expr(e.left)
+                if op == "<<":
+                    self.asm.emit(encode_lsl_xd_xn_imm(0, 0, imm_r.value))
+                elif signed:
+                    self.asm.emit(encode_asr_xd_xn_imm(0, 0, imm_r.value))
+                else:
+                    self.asm.emit(encode_lsr_xd_xn_imm(0, 0, imm_r.value))
+                self._emit_trunc(common_type(self._ttype(e.left),
+                                             self._ttype(e.right)))
+                return
+            self._emit_expr(e.left)
+            self.asm.emit(encode_stp_sp_pre(0, 2))
+            self._emit_expr_to(e.right, "X1")
+            self.asm.emit(encode_ldp_sp_post(0, 2))
+            if op == "<<":
+                self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
+            elif signed:
+                self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
+            else:
+                self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
+            self._emit_trunc(common_type(self._ttype(e.left),
+                                         self._ttype(e.right)))
+            return
+
+        if op == "**":
+            exp = e.right
+            lit = self._static_int(exp)
+            if lit is not None and 0 <= lit <= 64:
+                n = lit
+                if n == 0:
+                    self.asm.emit(encode_movz_xd_imm(0, 1))
+                    return
+                self._emit_expr(e.left)
+                if n == 1:
+                    return
+                self.asm.emit(encode_stp_sp_pre(0, 2))  # push base
+                for _ in range(n - 1):
+                    self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 0))
+                    self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
+                self.asm.emit(encode_ldp_sp_post(0, 2))
+                self._emit_trunc(common_type(self._ttype(e.left),
+                                             self._ttype(e.right)))
+                return
+            if lit is not None and lit < 0:
+                # Integer ** negative → 0 (matches Python for |base| > 1
+                # and the formal int lattice has no fractions).
+                self.asm.emit(encode_movz_xd_imm(0, 0))
+                return
+            # Runtime exponent: result = 1; while exp > 0: result *= base;
+            # exp >>= 1; base *= base (binary exponentiation). Negative exp
+            # exits with 0.
+            self._if_counter += 1
+            pid = self._if_counter
+            fn = self.func_name
+            loop = f"{fn}_pow{pid}_l"
+            body = f"{fn}_pow{pid}_b"
+            done = f"{fn}_pow{pid}_d"
+            neg = f"{fn}_pow{pid}_n"
+            self._emit_expr(e.left)
+            self.asm.emit(encode_stp_sp_pre(0, 2))       # base
+            self._emit_expr(e.right)
+            # X0 = exp
+            self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self.asm.emit(encode_cset_xd_cond(1, "lt"))
+            self.asm.emit(encode_cbz_xn(0, 1))
+            self.asm.emit_label_rel(neg, here_offset=-4)
+            # result = 1 in X2; keep exp in X0, base on stack
+            self.asm.emit(encode_movz_xd_imm(2, 1))
+            self.asm.label(loop)
+            self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self.asm.emit(encode_cset_xd_cond(1, "le"))
+            self.asm.emit(encode_cbz_xn(0, 1))
+            self.asm.emit_label_rel(done, here_offset=-4)
+            self.asm.label(body)
+            # if exp & 1: result *= base  (X1 = exp & 1; skip if zero)
+            self.asm.emit(encode_movz_xd_imm(4, 1))
+            self.asm.emit(encode_and_xd_xn_xm(1, 0, 4))  # exp & 1
+            so = f"{fn}_pow{pid}_so"
+            self.asm.emit(encode_cbz_xn(0, 1))
+            self.asm.emit_label_rel(so, here_offset=-4)
+            self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
+            self.asm.emit(encode_mul_xd_xn_xm(2, 2, 5))
+            self.asm.label(so)
+            # base *= base
+            self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
+            self.asm.emit(encode_mul_xd_xn_xm(5, 5, 5))
+            self.asm.emit(encode_str_xt_xn_imm(5, 31, 0))
+            # exp >>= 1
+            self.asm.emit(encode_lsr_xd_xn_imm(0, 0, 1))
+            self._emit_b_to(loop)
+            self.asm.label(done)
+            self.asm.emit(encode_mov_zr_xn(0, 2))
+            self.asm.emit(encode_ldp_sp_post(0, 31))     # drop base
+            self._emit_trunc(common_type(self._ttype(e.left),
+                                         self._ttype(e.right)))
+            self._emit_b_to(f"{fn}_pow{pid}_end")
+            self.asm.label(neg)
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self.asm.emit(encode_movz_xd_imm(0, 0))
+            self.asm.label(f"{fn}_pow{pid}_end")
+            return
+
+        raise CodegenError(
+            f"unsupported binary operator {op!r} on the formal arm64 path")
+
+    def _emit_compare_chain(self, e: F.CompareChain) -> None:
+        """`a < b < c` — each operand evaluated once; results ANDed.
+
+        Left of link i is the right of link i-1 (kept on the stack).
+        Result 0/1 in X0."""
+        ops = e.ops
+        operands = e.operands
+        if len(operands) != len(ops) + 1:
+            raise CodegenError("malformed compare chain")
+        cmp_conds = {
+            "<=": ("ls", "le"),
+            ">": ("hi", "gt"),
+            "==": ("eq", "eq"),
+            ">=": ("cs", "ge"),
+            "<": ("cc", "lt"),
+            "!=": ("ne", "ne"),
+            "is": ("eq", "eq"),
+            "is not": ("ne", "ne"),
+        }
+        for op in ops:
+            if op not in cmp_conds:
+                raise CodegenError(
+                    f"unsupported compare-chain operator {op!r} on the "
+                    f"formal arm64 path")
+
+        self._if_counter += 1
+        cid = self._if_counter
+        fn = self.func_name
+        false_label = f"{fn}_cc{cid}_false"
+        end_label = f"{fn}_cc{cid}_end"
+
+        self._emit_expr(operands[0])
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+
+        for i, op in enumerate(ops):
+            u, s = cmp_conds[op]
+            self._emit_expr_to(operands[i + 1], "X1")
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+            self.asm.emit(encode_cmp_xn_xm(0, 1))
+            if cmp_signed(common_type(self._ttype(operands[i]),
+                                      self._ttype(operands[i + 1]))):
+                self.asm.emit(encode_cset_xd_cond(0, s))
+            else:
+                self.asm.emit(encode_cset_xd_cond(0, u))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            self.asm.emit_label_rel(false_label, here_offset=-4)
+            if i < len(ops) - 1:
+                self.asm.emit(encode_str_xt_xn_imm(1, 31, 0))
+
+        self.asm.emit(encode_ldp_sp_post(0, 2))
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(end_label, here_offset=-4)
+        self.asm.label(false_label)
+        self.asm.emit(encode_ldp_sp_post(0, 2))
+        self.asm.emit(encode_movz_xd_imm(0, 0))
+        self.asm.label(end_label)
+
+    def _emit_slice(self, expr: F.SliceExpr) -> None:
+        self._emit_slice_parts(expr.obj, expr.start, expr.stop, expr.step)
+
+    def _emit_slice_parts(self, obj, start_e, stop_e, step_e) -> None:
+        """`obj[start:stop:step]` → new list blob in X0.
+
+        Defaults: start=0, stop=count, step=1 (None nodes). Negative bounds
+        wrap against count then clamp to [0, count]. step==0 exits(1).
+        Negative step iterates i from stop-1 down while i >= start and
+        i >= 0 (Python's stop-default of -1 for reversed slices is mapped
+        to start=0 / stop=count via the None defaults when both are
+        omitted; explicit negative-step bounds follow the clamped rule).
+        Result capacity is a static upper bound (literal length or 64)."""
+        if isinstance(obj, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            src_cap = len(obj.elements)
+        elif isinstance(obj, F.Comprehension):
+            src_cap = self._compr_cap(obj)
+        else:
+            src_cap = 64
+        src_cap = max(1, src_cap)
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                f"slice exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        if src_cap > (avail - 8) // 8:
+            src_cap = max(1, (avail - 8) // 8)
+        offset = self._reserve_blob(8 + 8 * src_cap, "slice")
+        self._emit_list_base(offset)
+        self._emit_mov_imm("X10", 0)
+        self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+
+        self._emit_expr(obj)
+        self.asm.emit(encode_stp_sp_pre(0, 2))  # [SP+0]=src base
+
+        if step_e is None:
+            self.asm.emit(encode_movz_xd_imm(8, 1))
+        else:
+            self._emit_expr_to(step_e, "X8")
+        self.asm.emit(encode_stp_sp_pre(8, 31))  # push step
+        # SP+0=step, SP+16=src
+
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 9, 0))  # count
+
+        if start_e is None:
+            self.asm.emit(encode_movz_xd_imm(4, 0))
+        else:
+            self._emit_expr_to(start_e, "X4")
+        self.asm.emit(encode_stp_sp_pre(4, 31))  # push start
+        # SP+0=start, SP+16=step, SP+32=src
+
+        if stop_e is None:
+            self.asm.emit(encode_mov_zr_xn(5, 9))
+        else:
+            self._emit_expr_to(stop_e, "X5")
+        self.asm.emit(encode_stp_sp_pre(5, 31))  # push stop
+        # SP+0=stop, SP+16=start, SP+32=step, SP+48=src
+
+        # Wrap negatives and clamp to [0, count].
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))
+        self.asm.emit(encode_cmp_xn_imm(4, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        w1 = f"{self.func_name}_slw{self._while_counter}a"
+        self.asm.emit_label_rel(w1, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_xm(4, 4, 9))
+        self.asm.emit(encode_str_xt_xn_imm(4, 31, 16))
+        self.asm.label(w1)
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
+        self.asm.emit(encode_cmp_xn_imm(5, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        w2 = f"{self.func_name}_slw{self._while_counter}b"
+        self.asm.emit_label_rel(w2, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_xm(5, 5, 9))
+        self.asm.emit(encode_str_xt_xn_imm(5, 31, 0))
+        self.asm.label(w2)
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))
+        self.asm.emit(encode_cmp_xn_xm(9, 4))
+        self.asm.emit(encode_cset_xd_cond(0, "hi"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        c1 = f"{self.func_name}_slk{self._while_counter}a"
+        self.asm.emit_label_rel(c1, here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(4, 9))
+        self.asm.emit(encode_str_xt_xn_imm(4, 31, 16))
+        self.asm.label(c1)
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
+        self.asm.emit(encode_cmp_xn_xm(9, 5))
+        self.asm.emit(encode_cset_xd_cond(0, "hi"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        c2 = f"{self.func_name}_slk{self._while_counter}b"
+        self.asm.emit_label_rel(c2, here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(5, 9))
+        self.asm.emit(encode_str_xt_xn_imm(5, 31, 0))
+        self.asm.label(c2)
+
+        # step == 0 → exit 1 (cbnz skips the exit when step != 0)
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 32))
+        self.asm.emit(encode_cmp_xn_imm(8, 0))
+        zstep = f"{self.func_name}_slz{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 8))
+        self.asm.emit_label_rel(zstep, here_offset=-4)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(zstep)
+
+        # i → X6: start if step>0 else stop-1
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 16))  # start
+        self.asm.emit(encode_cmp_xn_imm(8, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        neg_init = f"{self.func_name}_sln{self._while_counter}"
+        self.asm.emit_label_rel(neg_init, here_offset=-4)
+        self._emit_b_to(f"{self.func_name}_slm{self._while_counter}")
+        self.asm.label(neg_init)
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
+        self.asm.emit(encode_sub_xd_xn_imm(6, 5, 1))
+        self.asm.label(f"{self.func_name}_slm{self._while_counter}")
+
+        # Loop: determine signedness of step, then test against stop/start.
+        self._while_counter += 1
+        wid = self._while_counter
+        loop = f"{self.func_name}_slt{wid}"
+        body = f"{self.func_name}_slb{wid}"
+        step_lbl = f"{self.func_name}_sls{wid}"
+        done = f"{self.func_name}_sld{wid}"
+        neg_body = f"{self.func_name}_sln{wid}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_imm(8, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))  # 1 if step < 0
+        self.asm.emit(encode_cbz_xn(0, 0))            # step >= 0 → positive
+        self.asm.emit_label_rel(neg_body, here_offset=-4)
+        # positive: body if i < stop else done
+        self._emit_b_to(body)
+        self.asm.label(neg_body)
+        # negative: body if i >= 0 else done
+        self.asm.emit(encode_cmp_xn_imm(6, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self._emit_b_to(body)
+
+        self.asm.label(body)
+        # append src[i]
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 48))  # src base
+        self.asm.emit(encode_add_xd_xn_imm(5, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 6))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 5, 0))
+        self._compr_append_elem(offset, src_cap)
+        # append may clobber X6/X8 — reload step and update i from stack
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 32))  # step
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))  # start (keep live)
+        self.asm.emit(encode_add_xd_xn_xm(6, 6, 8))     # i += step
+        self._emit_b_to(loop)
+
+        self.asm.label(step_lbl)  # unused alias kept for label uniqueness
+        self.asm.label(done)
+        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop stop
+        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop start
+        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop step
+        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop src (clobbers X0)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
+        """`obj[a:b] = value` — same-length replace of the slice range.
+
+        Formal list blobs cannot change length without a compaction pass;
+        if len(value) != slice_len at runtime, Darwin exit(1). step must
+        be 1 (or None)."""
+        if target.step is not None:
+            st = target.step
+            if not (isinstance(st, F.IntLiteral) and st.value == 1):
+                raise CodegenError(
+                    "slice assignment with step != 1 is not supported on "
+                    "the formal arm64 path")
+        obj = target.obj
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        fail_label = f"{fn}_ss{sid}_fail"
+        done_label = f"{fn}_ss{sid}_done"
+
+        self._emit_expr(value)
+        self.asm.emit(encode_stp_sp_pre(0, 2))  # [SP]=val base
+        self._emit_expr(obj)
+        self.asm.emit(encode_stp_sp_pre(0, 2))  # [SP]=obj, [SP+16]=val
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 9, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 16))
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))
+
+        if target.start is None:
+            self.asm.emit(encode_movz_xd_imm(4, 0))
+        else:
+            self._emit_expr_to(target.start, "X4")
+        if target.stop is None:
+            self.asm.emit(encode_mov_zr_xn(5, 2))
+        else:
+            self._emit_expr_to(target.stop, "X5")
+        self.asm.emit(encode_cmp_xn_imm(4, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        w1 = f"{fn}_ssw{sid}1"
+        self.asm.emit_label_rel(w1, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_xm(4, 4, 2))
+        self.asm.label(w1)
+        self.asm.emit(encode_cmp_xn_imm(5, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        w2 = f"{fn}_ssw{sid}2"
+        self.asm.emit_label_rel(w2, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_xm(5, 5, 2))
+        self.asm.label(w2)
+        self.asm.emit(encode_cmp_xn_xm(2, 4))
+        self.asm.emit(encode_cset_xd_cond(0, "hi"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        c1 = f"{fn}_ssc{sid}1"
+        self.asm.emit_label_rel(c1, here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(4, 2))
+        self.asm.label(c1)
+        self.asm.emit(encode_cmp_xn_xm(2, 5))
+        self.asm.emit(encode_cset_xd_cond(0, "hi"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        c2 = f"{fn}_ssc{sid}2"
+        self.asm.emit_label_rel(c2, here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(5, 2))
+        self.asm.label(c2)
+        self.asm.emit(encode_cmp_xn_xm(5, 4))
+        self.asm.emit(encode_cset_xd_cond(0, "cs"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(fail_label, here_offset=-4)
+        self.asm.emit(encode_sub_xd_xn_xm(6, 5, 4))
+        self.asm.emit(encode_cmp_xn_xm(3, 6))
+        self.asm.emit(encode_cset_xd_cond(0, "eq"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(fail_label, here_offset=-4)
+        self.asm.emit(encode_movz_xd_imm(7, 0))
+        loop = f"{fn}_ssl{sid}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(7, 6))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done_label, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_xm(10, 4, 7))
+        self.asm.emit(encode_add_xd_xn_imm(11, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(11, 11, 10))
+        self.asm.emit(encode_add_xd_xn_imm(12, 8, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 12, 7))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 12, 0))
+        self.asm.emit(encode_str_xt_xn_imm(0, 11, 0))
+        self.asm.emit(encode_add_xd_xn_imm(7, 7, 1))
+        self._emit_b_to(loop)
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(done_label, here_offset=-4)
+        self.asm.label(fail_label)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(done_label)
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+
 
     def _ttype(self, e) -> IntType:
         return infer_expr(e, self._vtypes, self._call_types)
@@ -1787,6 +3095,8 @@ class ARM64Codegen:
         rd = _reg_num(reg)
         if imm < 0:
             imm = imm & 0xffffffffffffffff
+        if imm > 0xffffffffffffffff:
+            imm = imm & 0xffffffffffffffff
         if imm == 0:
             self.asm.emit(encode_movz_xd_imm(rd, 0))
         elif imm <= 0xffff:
@@ -1796,11 +3106,807 @@ class ARM64Codegen:
             self.asm.emit(encode_movz_xd_imm(rd, low16))
             imm >>= 16
             pos = 16
-            while imm > 0:
+            while imm > 0 and pos <= 48:
                 chunk = imm & 0xffff
                 self.asm.emit(encode_movk_xd_imm(rd, chunk, pos))
                 imm >>= 16
                 pos += 16
+
+    def _emit_shift_reg(self, op: str, signed: bool) -> None:
+        """Variable shift X0 = X0 <op> X1 (LSLV/LSRV/ASRV)."""
+        if op == "<<":
+            self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
+        elif signed:
+            self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
+        else:
+            self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
+
+    def _is_container_expr(self, e) -> bool:
+        """True when `e` is known to lower to a list/set/tuple blob."""
+        if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr,
+                          F.Comprehension, F.SliceExpr)):
+            return True
+        if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
+            return e.func.name in ("range", "list", "sorted", "set",
+                                   "reversed")
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "or", "and"):
+            return (self._is_container_expr(e.left)
+                    or self._is_container_expr(e.right))
+        return False
+
+    def _blob_est(self, e) -> int:
+        """Static upper bound on element count for frame reservation."""
+        if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            return len(e.elements)
+        if isinstance(e, F.Comprehension):
+            return self._compr_cap(e)
+        if isinstance(e, F.SliceExpr):
+            return 64
+        if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
+            if e.func.name == "range":
+                si = self._static_int(e.args[0]) if e.args else None
+                ti = self._static_int(e.args[1]) if len(e.args) > 1 else None
+                pi = self._static_int(e.args[2]) if len(e.args) > 2 else 1
+                if si is not None and ti is not None and pi is not None \
+                        and pi != 0:
+                    if pi > 0:
+                        return max(0, (ti - si + pi - 1) // pi)
+                    return max(0, (si - ti + (-pi) - 1) // (-pi))
+                return 64
+            if e.func.name in ("list", "sorted", "set", "reversed"):
+                return 64
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
+            return self._blob_est(e.left) + self._blob_est(e.right)
+        if isinstance(e, F.BinaryOp) and e.op in ("or", "and"):
+            return max(self._blob_est(e.left), self._blob_est(e.right))
+        if isinstance(e, F.IdentExpr):
+            return 64
+        return 64
+
+    def _static_int(self, e):
+        if isinstance(e, F.IntLiteral):
+            return e.value
+        if isinstance(e, F.UnaryOp) and e.op == "-" \
+                and isinstance(e.operand, F.IntLiteral):
+            return -e.operand.value
+        return None
+
+    def _emit_list_concat(self, left, right) -> None:
+        """`a + b` as list-blob concat → base pointer in X0."""
+        est = max(1, self._blob_est(left) + self._blob_est(right))
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "list concat exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(est, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # left
+        self._emit_expr(right)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # right, left
+        # Nested emits above may have advanced the cursor — re-clamp.
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "list concat exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(est, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        nbytes = 8 + 8 * cap
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        # X0 = right ptr (top of stack); pop both into temps via loads.
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
+        self.asm.emit(encode_ldp_sp_post(0, 31))        # drop right
+        self.asm.emit(encode_ldp_sp_post(0, 31))        # drop left
+        # counts
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
+        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # n
+        self._emit_list_base(offset)
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
+        # copy left elements
+        self.asm.emit(encode_movz_xd_imm(5, 0))         # i = 0
+        self._while_counter += 1
+        cl = f"{self.func_name}_lcl{self._while_counter}"
+        cld = f"{self.func_name}_lcd{self._while_counter}"
+        self.asm.label(cl)
+        self.asm.emit(encode_cmp_xn_xm(5, 2))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(cld, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, 7, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+        self._emit_list_base(offset)
+        self.asm.emit(encode_add_xd_xn_imm(6, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
+        self.asm.emit(encode_str_xt_xn_imm(0, 6, 0))
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(cl)
+        self.asm.label(cld)
+        # copy right elements at nL+i
+        self.asm.emit(encode_movz_xd_imm(5, 0))         # j = 0
+        self._while_counter += 1
+        cr = f"{self.func_name}_lcr{self._while_counter}"
+        crd = f"{self.func_name}_lrd{self._while_counter}"
+        self.asm.label(cr)
+        self.asm.emit(encode_cmp_xn_xm(5, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(crd, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, 8, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+        self._emit_list_base(offset)
+        self.asm.emit(encode_add_xd_xn_imm(6, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm(6, 6, 2))     # + nL
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
+        self.asm.emit(encode_str_xt_xn_imm(0, 6, 0))
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(cr)
+        self.asm.label(crd)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_set_union(self, left, right) -> None:
+        """`a | b` as set union over list blobs (right deduped into left
+        copy). Result is a fresh list blob of unique elements in X0."""
+        # Build via concat then… for sweep purposes concat is enough to
+        # compile; full dedup would need a membership scan per element.
+        # Dedup: append left as-is, then for each right elem scan result.
+        est = max(1, self._blob_est(left) + self._blob_est(right))
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "set union exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(est, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # left
+        self._emit_expr(right)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # right, left
+        # Nested emits above may have advanced the cursor — re-clamp.
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                "set union exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        cap = min(est, (avail - 8) // 8)
+        if cap < 1:
+            cap = 1
+        nbytes = 8 + 8 * cap
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
+        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # n (upper bound)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
+        # copy all of left into result[0..nL)
+        self.asm.emit(encode_movz_xd_imm(5, 0))
+        self._while_counter += 1
+        ul = f"{self.func_name}_sul{self._while_counter}"
+        uld = f"{self.func_name}_sud{self._while_counter}"
+        self.asm.label(ul)
+        self.asm.emit(encode_cmp_xn_xm(5, 2))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(uld, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, 7, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+        self._emit_list_base(offset)
+        self.asm.emit(encode_add_xd_xn_imm(6, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
+        self.asm.emit(encode_str_xt_xn_imm(0, 6, 0))
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(ul)
+        self.asm.label(uld)
+        # append right elements not already in result[0..count)
+        # X2=nL, X3=nR, X5=j; result count reloaded each inner scan
+        self.asm.emit(encode_movz_xd_imm(5, 0))         # j = 0
+        self._while_counter += 1
+        ur = f"{self.func_name}_sur{self._while_counter}"
+        ur_next = f"{self.func_name}_sun{self._while_counter}"
+        urd = f"{self.func_name}_srd{self._while_counter}"
+        urs = f"{self.func_name}_sus{self._while_counter}"
+        urd2 = f"{self.func_name}_su2{self._while_counter}"
+        self.asm.label(ur)
+        self.asm.emit(encode_cmp_xn_xm(5, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(urd, here_offset=-4)     # j >= nR → done
+        # elem = right[j]
+        self.asm.emit(encode_add_xd_xn_imm(0, 8, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))     # X6 = elem
+        # scan result[0..count)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))     # count
+        self.asm.emit(encode_movz_xd_imm(0, 0))          # k = 0
+        self.asm.label(urs)
+        self.asm.emit(encode_cmp_xn_xm(0, 1))
+        self.asm.emit(encode_cset_xd_cond(4, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(urd2, here_offset=-4)    # not found → append
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 4, 0))
+        self.asm.emit(encode_cmp_xn_xm(4, 6))
+        self.asm.emit(encode_cset_xd_cond(4, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(ur_next, here_offset=-4)  # found → next j
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._emit_b_to(urs)
+        self.asm.label(urd2)
+        # append: result[count] = elem; count++
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        self.asm.emit(encode_str_xt_xn_imm(6, 4, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.label(ur_next)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(ur)
+        self.asm.label(urd)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_str_membership(self, left, right: F.StringLiteral,
+                             invert: bool) -> None:
+        """`needle in 'haystack'` — byte or substring scan → 0/1 in X0.
+
+        Both-literal short-circuits at compile time. Otherwise the needle
+        is either an int byte (subscript/literal) or a string pointer; the
+        haystack is the interned literal."""
+        hay = right.value
+        if isinstance(left, F.StringLiteral):
+            found = left.value in hay if left.value else True
+            result = (0 if found else 1) if not invert else (
+                1 if found else 0)
+            self.asm.emit(encode_movz_xd_imm(0, result))
+            return
+        label = self._intern_string(hay)
+        self._if_counter += 1
+        mid = self._if_counter
+        fn = self.func_name
+        str_needle = (
+            isinstance(left, F.IdentExpr) and left.name in self._string_vars
+        ) or (isinstance(left, F.MemberExpr)
+              and _member_slot_key(left) in self._string_vars)
+        # haystack address → X9 (does not clobber X0)
+        self.asm.emit_adrp_add(9, label)
+        if str_needle:
+            # X0 = needle ptr. Push it; scan as substring.
+            self._emit_expr(left)
+            self.asm.emit(encode_stp_sp_pre(0, 2))
+            # nlen: walk needle until NUL → X2, needle base → X7
+            self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 0))
+            self.asm.emit(encode_mov_zr_xn(1, 7))
+            self._while_counter += 1
+            nl = f"{fn}_sml{self._while_counter}"
+            nd = f"{fn}_smd{self._while_counter}"
+            self.asm.label(nl)
+            self.asm.emit(encode_ldrb_wd_wn(2, 1, 0))
+            self.asm.emit(encode_cmp_xn_imm(2, 0))
+            self.asm.emit(encode_cset_xd_cond(3, "eq"))
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(nd, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+            self._emit_b_to(nl)
+            self.asm.label(nd)
+            self.asm.emit(encode_sub_xd_xn_imm(2, 1, 7))  # nlen
+            # empty needle → found
+            self.asm.emit(encode_cmp_xn_imm(2, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "eq"))
+            self._while_counter += 1
+            found = f"{fn}_smf{self._while_counter}"
+            notf = f"{fn}_smn{self._while_counter}"
+            end = f"{fn}_smx{self._while_counter}"
+            outloop = f"{fn}_smo{self._while_counter}"
+            inloop = f"{fn}_smi{self._while_counter}"
+            inok = f"{fn}_smk{self._while_counter}"
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(found, here_offset=-4)
+            self.asm.emit(encode_movz_xd_imm(8, 0))       # i = 0
+            self.asm.label(outloop)
+            # hay[i] == 0 → not found
+            self.asm.emit(encode_add_xd_xn_imm(0, 9, 0))
+            self.asm.emit(encode_add_xd_xn_xm(0, 0, 8))
+            self.asm.emit(encode_ldrb_wd_wn(2, 0, 0))
+            self.asm.emit(encode_cmp_xn_imm(2, 0))
+            self.asm.emit(encode_cset_xd_cond(3, "eq"))
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(notf, here_offset=-4)
+            self.asm.emit(encode_movz_xd_imm(0, 0))       # b = 0
+            self.asm.label(inloop)
+            # b >= nlen → matched
+            self.asm.emit(encode_cmp_xn_xm(0, 2))
+            self.asm.emit(encode_cset_xd_cond(3, "ge"))
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(found, here_offset=-4)
+            # compare hay[i+b] vs needle[b]
+            self.asm.emit(encode_add_xd_xn_imm(4, 9, 0))
+            self.asm.emit(encode_add_xd_xn_xm(4, 4, 8))  # + i
+            self.asm.emit(encode_add_xd_xn_xm(4, 4, 0))  # + b
+            self.asm.emit(encode_ldrb_wd_wn(5, 4, 0))
+            self.asm.emit(encode_add_xd_xn_xm(4, 7, 0))  # needle[b]
+            self.asm.emit(encode_ldrb_wd_wn(6, 4, 0))
+            self.asm.emit(encode_cmp_xn_xm(5, 6))
+            self.asm.emit(encode_cset_xd_cond(3, "ne"))
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(inok, here_offset=-4)  # match → next b
+            self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+            self._emit_b_to(inloop)
+            self.asm.label(inok)
+            self.asm.emit(encode_add_xd_xn_imm(8, 8, 1))  # i++
+            self._emit_b_to(outloop)
+            self.asm.label(found)
+            self.asm.emit(encode_ldp_sp_post(0, 1))
+            self.asm.emit(encode_movz_xd_imm(0, 0 if invert else 1))
+            self._emit_b_to(end)
+            self.asm.label(notf)
+            self.asm.emit(encode_ldp_sp_post(0, 1))
+            self.asm.emit(encode_movz_xd_imm(0, 1 if invert else 0))
+            self.asm.label(end)
+            return
+        # Byte needle: X0 = byte value. Mask, push, scan hay bytes.
+        self._emit_expr(left)
+        self.asm.emit(encode_and_xd_xn_imm(0, 0, 8))
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._while_counter += 1
+        loop = f"{fn}_bml{self._while_counter}"
+        hit = f"{fn}_bmf{self._while_counter}"
+        miss = f"{fn}_bmn{self._while_counter}"
+        end = f"{fn}_bmx{self._while_counter}"
+        self.asm.label(loop)
+        self.asm.emit(encode_ldrb_wd_wn(2, 9, 0))
+        self.asm.emit(encode_cmp_xn_imm(2, 0))
+        self.asm.emit(encode_cset_xd_cond(3, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit_label_rel(miss, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))    # needle byte
+        self.asm.emit(encode_cmp_xn_xm(0, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit_label_rel(hit, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(9, 9, 1))
+        self._emit_b_to(loop)
+        self.asm.label(hit)
+        self.asm.emit(encode_ldp_sp_post(0, 1))
+        self.asm.emit(encode_movz_xd_imm(0, 0 if invert else 1))
+        self._emit_b_to(end)
+        self.asm.label(miss)
+        self.asm.emit(encode_ldp_sp_post(0, 1))
+        self.asm.emit(encode_movz_xd_imm(0, 1 if invert else 0))
+        self.asm.label(end)
+
+    def _emit_string_addr(self, reg: int, label: str) -> None:
+        """X{reg} = address of interned string `label` (ADRP+ADD)."""
+        self.asm.emit_adrp_add(reg, label)
+
+    def _emit_range_list(self, rargs: list) -> None:
+        """Materialize range(...) as a list blob [count][i0…] in X0.
+
+        Static when start/stop/step are all int literals; otherwise a
+        runtime loop with a frame-safe cap (overflow → exit(1))."""
+        start_e, stop_e, step_e = self._range_info(rargs)
+        si = self._static_int(start_e)
+        ti = self._static_int(stop_e)
+        pi = self._static_int(step_e)
+        if si is not None and ti is not None and pi is not None:
+            if pi == 0:
+                raise CodegenError("range() step must not be zero")
+            vals = []
+            v = si
+            if pi > 0:
+                while v < ti:
+                    vals.append(v)
+                    v += pi
+            else:
+                while v > ti:
+                    vals.append(v)
+                    v += pi
+            n = len(vals)
+            size = 8 * (1 + n)
+            if self._list_cursor + size > self._blob_cap:
+                raise CodegenError(
+                    f"range() literal exceeds the formal frame "
+                    f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+            offset = self._list_cursor
+            self._list_cursor += size
+            self._emit_list_base(offset)
+            self._emit_mov_imm("X10", n)
+            self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+            for i, val in enumerate(vals):
+                self._emit_mov_imm("X0", val)
+                self._emit_list_base(offset)
+                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self.asm.emit(encode_mov_zr_xn(0, 9))
+            return
+        # Dynamic: evaluate start/stop/step onto stack, loop, append.
+        self._emit_expr(start_e)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # start
+        self._emit_expr(stop_e)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # stop, start
+        self._emit_expr(step_e)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # step, stop, start
+        elem_cap = max(1, min(
+            256, (self._blob_cap - self._list_cursor - 8) // 8))
+        nbytes = 8 + 8 * elem_cap
+        if self._list_cursor + nbytes > self._blob_cap:
+            raise CodegenError(
+                f"range() exceeds the formal frame "
+                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        self._emit_list_base(offset)
+        self._emit_mov_imm("X10", 0)
+        self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+        # idx = start (X4), stop in X5, step in X6
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 32))  # start
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 16))  # stop
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # step
+        # step == 0 → exit(1)
+        self.asm.emit(encode_cmp_xn_imm(6, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "eq"))
+        self._while_counter += 1
+        zstep = f"{self.func_name}_rsz{self._while_counter}"
+        zok = f"{self.func_name}_rsk{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(zstep, here_offset=-4)
+        self._emit_b_to(zok)
+        self.asm.label(zstep)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(zok)
+        # loop
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        start_label = f"{fn}_rl{wid}_start"
+        step_label = f"{fn}_rl{wid}_step"
+        end_label = f"{fn}_rl{wid}_end"
+        oob = f"{fn}_rl{wid}_oob"
+        oob_end = f"{fn}_rl{wid}_oe"
+        # determine loop condition by step sign (runtime branch once)
+        # We re-check each iteration: if step > 0 use lt, else gt.
+        self.asm.label(start_label)
+        self.asm.emit(encode_cmp_xn_imm(6, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))     # 1 if step < 0
+        self._while_counter += 1
+        neg = f"{fn}_rn{self._while_counter}"
+        pos = f"{fn}_rp{self._while_counter}"
+        after = f"{fn}_ra{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(neg, here_offset=-4)
+        # step >= 0: continue while idx < stop
+        self.asm.emit(encode_cmp_xn_xm(4, 5))
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(after, here_offset=-4)
+        self._emit_b_to(end_label)
+        self.asm.label(neg)
+        # step < 0: continue while idx > stop
+        self.asm.emit(encode_cmp_xn_xm(4, 5))
+        self.asm.emit(encode_cset_xd_cond(0, "gt"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(after, here_offset=-4)
+        self._emit_b_to(end_label)
+        self.asm.label(after)
+        # append idx if count < elem_cap
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_cmp_xn_imm(1, elem_cap))
+        self.asm.emit(encode_cset_xd_cond(0, "cs"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(oob, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(2, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, 1))
+        self.asm.emit(encode_str_xt_xn_imm(4, 2, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.label(step_label)
+        self.asm.emit(encode_add_xd_xn_xm(4, 4, 6))     # idx += step
+        self._emit_b_to(start_label)
+        self.asm.label(end_label)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+        self.asm.emit(encode_ldp_sp_post(0, 31))        # drop step/stop/start
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self._emit_b_to(oob_end)
+        self.asm.label(oob)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(oob_end)
+
+    def _emit_del(self, stmt) -> None:
+        """`del target…` — list index/slice remove, dict key shift-delete.
+
+        Bare Ident/Member del is a no-op (no GC; SRA slots persist)."""
+        for target in stmt.targets:
+            if isinstance(target, (F.IdentExpr, F.MemberExpr)):
+                continue
+            if isinstance(target, F.SliceExpr):
+                self._emit_del_slice(target)
+                continue
+                if isinstance(target, F.SubscriptExpr):
+                    if self._is_dict_subscript(target.obj):
+                        self._emit_del_dict_key(target)
+                        continue
+                    if isinstance(target.index, F.SliceExpr):
+                        self._emit_del_slice_index(target)
+                        continue
+                    if self._is_string_subscript(target.obj):
+                        raise CodegenError(
+                            "del on a string index is not supported on the "
+                            "formal arm64 path")
+                    self._emit_del_list_index(target)
+                    continue
+                # Dict/list slot behind a bare MemberExpr base is handled
+                # above via _member_slot_key; unknown shapes fall through.
+                raise CodegenError(
+                    f"unsupported del target on the formal arm64 path "
+                    f"(got {type(target).__name__})")
+
+    def _emit_del_list_index(self, target) -> None:
+        """`del lst[i]` / `del obj.attr[i]` — shift left, count-- (OOB → exit).
+
+        Base may be IdentExpr or an IdentExpr-rooted MemberExpr (SRA slot);
+        evaluated once via `_emit_expr` into X10 after the bounds-checked
+        element address is pushed."""
+        if not isinstance(target.obj, (F.IdentExpr, F.MemberExpr)):
+            raise CodegenError(
+                "del on a non-name list is not supported on the formal "
+                "arm64 path")
+        self._emit_subscript_addr(target)   # X0 = &elem (bounds-checked)
+        self.asm.emit(encode_stp_sp_pre(0, 2))  # elem addr
+        self._emit_expr(target.obj)
+        self.asm.emit(encode_mov_zr_xn(10, 0))  # X10 = base
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 10, 0))  # count
+        # i = (elem - (base+8)) / 8
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))  # elem addr
+        self.asm.emit(encode_add_xd_xn_imm(2, 10, 8))
+        self.asm.emit(encode_sub_xd_xn_xm(0, 0, 2))
+        self.asm.emit(encode_lsr_xd_xn_imm(0, 0, 3))
+        # shift elements [i+1, count) → [i, count-1)
+        self.asm.emit(encode_add_xd_xn_imm(3, 0, 1))  # j = i+1
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_dls{wid}"
+        endl = f"{fn}_dle{wid}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(3, 1))
+        self.asm.emit(encode_cset_xd_cond(4, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 4))
+        self.asm.emit_label_rel(endl, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(5, 10, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 3))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 5, 0))
+        self.asm.emit(encode_sub_xd_xn_imm(5, 5, 8))
+        self.asm.emit(encode_str_xt_xn_imm(6, 5, 0))
+        self.asm.emit(encode_add_xd_xn_imm(3, 3, 1))
+        self._emit_b_to(loop)
+        self.asm.label(endl)
+        self.asm.emit(encode_sub_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 10, 0))
+        self.asm.emit(encode_ldp_sp_post(0, 1))
+
+    def _emit_del_dict_key(self, target) -> None:
+        """`del d[k]` / `del obj.d[k]` — shift-delete; missing → exit(1)."""
+        if not isinstance(target.obj, (F.IdentExpr, F.MemberExpr)):
+            raise CodegenError(
+                "del on a non-name dict is not supported on the formal "
+                "arm64 path")
+        base_name = (target.obj.name if isinstance(target.obj, F.IdentExpr)
+                     else _member_slot_key(target.obj))
+        if base_name is None:
+            raise CodegenError(
+                "del on a non-name dict is not supported on the formal "
+                "arm64 path")
+        self._emit_expr(target.index)
+        self.asm.emit(encode_stp_sp_pre(0, 2))  # key
+        self._load_var(base_name, 9)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))  # count
+        self.asm.emit(encode_movz_xd_imm(2, 0))       # i = 0
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        loop = f"{fn}_ddk{sid}"
+        miss = f"{fn}_ddm{sid}"
+        found = f"{fn}_ddf{sid}"
+        shift = f"{fn}_dds{sid}"
+        shd = f"{fn}_ddd{sid}"
+        end = f"{fn}_dde{sid}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(2, 1))
+        self.asm.emit(encode_cset_xd_cond(3, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit_label_rel(miss, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_imm(5, 2, 0))
+        self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 4, 0))  # pair key
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))  # want key
+        self.asm.emit(encode_cmp_xn_xm(4, 5))
+        self.asm.emit(encode_cset_xd_cond(4, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(found, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(2, 2, 1))
+        self._emit_b_to(loop)
+        self.asm.label(found)
+        # shift pairs [i+1, count) → [i, count-1); count--
+        self.asm.emit(encode_add_xd_xn_imm(2, 2, 1))  # j = i+1
+        self.asm.label(shift)
+        self.asm.emit(encode_cmp_xn_xm(2, 1))
+        self.asm.emit(encode_cset_xd_cond(3, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit_label_rel(shd, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 2))
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 4, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 4, 8))
+        self.asm.emit(encode_sub_xd_xn_imm(4, 4, 16))
+        self.asm.emit(encode_str_xt_xn_imm(5, 4, 0))
+        self.asm.emit(encode_str_xt_xn_imm(6, 4, 8))
+        self.asm.emit(encode_add_xd_xn_imm(2, 2, 1))
+        self._emit_b_to(shift)
+        self.asm.label(shd)
+        self.asm.emit(encode_sub_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_ldp_sp_post(0, 1))
+        self._emit_b_to(end)
+        self.asm.label(miss)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(end)
+
+    def _emit_del_slice(self, target) -> None:
+        """`del obj[a:b]` bare SliceExpr — range remove on a list name/slot."""
+        if not isinstance(target.obj, (F.IdentExpr, F.MemberExpr)):
+            raise CodegenError(
+                "del slice on a non-name list is not supported on the "
+                "formal arm64 path")
+        key = (target.obj.name if isinstance(target.obj, F.IdentExpr)
+               else _member_slot_key(target.obj))
+        if key is None:
+            raise CodegenError(
+                "del slice on a non-name list is not supported on the "
+                "formal arm64 path")
+        self._emit_del_list_range(key, target.start, target.stop,
+                                  target.step)
+
+    def _emit_del_slice_index(self, target) -> None:
+        """`del obj[i:j]` SubscriptExpr with SliceExpr index."""
+        sl = target.index
+        if sl.step is not None:
+            raise CodegenError(
+                "del slice with step is not supported on the formal arm64 "
+                "path")
+        if not isinstance(target.obj, (F.IdentExpr, F.MemberExpr)):
+            raise CodegenError(
+                "del slice on a non-name list is not supported on the "
+                "formal arm64 path")
+        key = (target.obj.name if isinstance(target.obj, F.IdentExpr)
+               else _member_slot_key(target.obj))
+        if key is None:
+            raise CodegenError(
+                "del slice on a non-name list is not supported on the "
+                "formal arm64 path")
+        self._emit_del_list_range(key, sl.start, sl.stop, None)
+
+    def _emit_del_list_range(self, name: str, start, stop, step) -> None:
+        """Remove [start, stop) from list `name` (memmove tail + count).
+
+        Bounds are Python-normalized (negative → +count; stop clamped to
+        [start, count]). start >= stop is a no-op. Callers reject step."""
+        if step is not None:
+            raise CodegenError(
+                "del slice with step is not supported on the formal arm64 "
+                "path")
+        self._load_var(name, 10)                       # X10 = base
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 10, 0))  # X1 = count
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        # --- start index → X2 ---
+        if start is None:
+            self.asm.emit(encode_movz_xd_imm(2, 0))
+        else:
+            self._emit_expr_to(start, "X2")
+            self.asm.emit(encode_cmp_xn_imm(2, 0))
+            self.asm.emit(encode_cset_xd_cond(3, "lt"))
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(f"{fn}_drn{wid}", here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_xm(2, 2, 1))  # start += count
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(f"{fn}_drc{wid}", here_offset=-4)
+            self.asm.label(f"{fn}_drn{wid}")
+            self.asm.emit(encode_movz_xd_imm(2, 0))       # negative → 0
+            self.asm.label(f"{fn}_drc{wid}")
+        # --- stop index → X4 ---
+        if stop is None:
+            self.asm.emit(encode_mov_zr_xn(4, 1))
+        else:
+            self._emit_expr_to(stop, "X4")
+            self.asm.emit(encode_cmp_xn_imm(4, 0))
+            self.asm.emit(encode_cset_xd_cond(3, "lt"))
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(f"{fn}_dro{wid}", here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_xm(4, 4, 1))  # stop += count
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(f"{fn}_drp{wid}", here_offset=-4)
+            self.asm.label(f"{fn}_dro{wid}")
+            self.asm.emit(encode_movz_xd_imm(4, 0))       # negative → 0
+            self.asm.label(f"{fn}_drp{wid}")
+        # stop = min(stop, count)
+        self.asm.emit(encode_cmp_xn_xm(4, 1))
+        self.asm.emit(encode_cset_xd_cond(3, "hi"))
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(f"{fn}_dru{wid}", here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(4, 1))
+        self.asm.label(f"{fn}_dru{wid}")
+        # stop = max(stop, start)  (empty when stop <= start)
+        self.asm.emit(encode_cmp_xn_xm(4, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "lt"))
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(f"{fn}_drv{wid}", here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(4, 2))
+        self.asm.label(f"{fn}_drv{wid}")
+        # n_del = stop - start; if 0 → done
+        self.asm.emit(encode_sub_xd_xn_xm(5, 4, 2))
+        self.asm.emit(encode_cmp_xn_imm(5, 0))
+        self.asm.emit(encode_cset_xd_cond(3, "eq"))
+        self._while_counter += 1
+        dskip = f"{fn}_drs{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit_label_rel(dskip, here_offset=-4)
+        # copy [stop, count) → [start, start + (count - stop))
+        self.asm.emit(encode_mov_zr_xn(6, 4))             # j = stop
+        self._while_counter += 1
+        mloop = f"{fn}_drm{self._while_counter}"
+        mend = f"{fn}_dre{self._while_counter}"
+        self.asm.label(mloop)
+        self.asm.emit(encode_cmp_xn_xm(6, 1))
+        self.asm.emit(encode_cset_xd_cond(3, "ge"))
+        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit_label_rel(mend, here_offset=-4)
+        self.asm.emit(encode_sub_xd_xn_xm(7, 6, 4))       # j - stop
+        self.asm.emit(encode_add_xd_xn_xm(7, 7, 2))       # + start
+        self.asm.emit(encode_add_xd_xn_imm(0, 10, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 6))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+        self.asm.emit(encode_add_xd_xn_imm(8, 10, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(8, 8, 7))
+        self.asm.emit(encode_str_xt_xn_imm(0, 8, 0))
+        self.asm.emit(encode_add_xd_xn_imm(6, 6, 1))
+        self._emit_b_to(mloop)
+        self.asm.label(mend)
+        self.asm.emit(encode_sub_xd_xn_xm(1, 1, 5))       # count -= n_del
+        self.asm.emit(encode_str_xt_xn_imm(1, 10, 0))
+        self.asm.label(dskip)
 
 
 def _always_returns(stmts: list) -> bool:

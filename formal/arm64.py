@@ -83,6 +83,15 @@ def encode_br_xn(xn: int) -> bytes:
     return struct.pack('<I', insn)
 
 
+def encode_blr_xn(xn: int) -> bytes:
+    """BLR Xn. Branch-with-link to register (indirect call).
+    Encoding: 11010110001 11111 000000 Rn 00000 = 0xd63f0000 | (Rn << 5)
+    """
+    assert 0 <= xn <= 30
+    insn = 0xd63f0000 | (xn << 5)
+    return struct.pack('<I', insn)
+
+
 def encode_svc(imm8: int) -> bytes:
     """SVC #imm8. Software interrupt.
     Encoding (matches clang/ld's `svc #0x80` = 0xd4001001):
@@ -487,6 +496,90 @@ def encode_and_xd_xn_imm(xd: int, xn: int, width: int) -> bytes:
     assert 0 <= xn <= 31
     assert width in _AND_IMM_BASES
     return struct.pack('<I', _AND_IMM_BASES[width] | (xn << 5) | xd)
+
+
+def encode_sdiv_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
+    """SDIV Xd, Xn, Xm. Signed integer division (trunc toward zero).
+    Encoding: 1 0 0 11010110 Rm 000011 Rn Rd = 0x9ac00c00 | ...
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    insn = 0x9ac00c00 | (xm << 16) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_udiv_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
+    """UDIV Xd, Xn, Xm. Unsigned integer division.
+    Encoding: 0x9ac00800 | (xm << 16) | (xn << 5) | xd
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    insn = 0x9ac00800 | (xm << 16) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_lslv_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
+    """LSLV Xd, Xn, Xm. Shift left (variable). Bottom 6 bits of Xm used.
+    Encoding: 0x9ac02000 | (xm << 16) | (xn << 5) | xd
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    insn = 0x9ac02000 | (xm << 16) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_lsrv_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
+    """LSRV Xd, Xn, Xm. Logical shift right (variable).
+    Encoding: 0x9ac02400 | (xm << 16) | (xn << 5) | xd
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    insn = 0x9ac02400 | (xm << 16) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_asrv_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
+    """ASRV Xd, Xn, Xm. Arithmetic shift right (variable).
+    Encoding: 0x9ac02800 | (xm << 16) | (xn << 5) | xd
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    insn = 0x9ac02800 | (xm << 16) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_msub_xd_xn_xm_xa(xd: int, xn: int, xm: int, xa: int) -> bytes:
+    """MSUB Xd, Xn, Xm, Xa. Xd = Xa - Xn * Xm.
+    Encoding: 1 0 0 11011 000 Rm 1 Ra Rn Rd = 0x9b008000 | ...
+    """
+    assert all(0 <= r <= 30 for r in (xd, xn, xm, xa))
+    insn = 0x9b008000 | (xm << 16) | (xa << 10) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_lsl_xd_xn_imm(xd: int, xn: int, shift: int) -> bytes:
+    """LSL Xd, Xn, #shift (immediate, 0..63). UBFM-based.
+    Encoding: UBFM Xd, Xn, #(-shift mod 64), #(63-shift)
+    sf=1, opc=10, 100110, N=1 → 0xd3400000 base with immr/imms.
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= shift <= 63
+    immr = (-shift) & 63
+    imms = 63 - shift
+    insn = 0xd3780000 | (immr << 16) | (imms << 10) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_asr_xd_xn_imm(xd: int, xn: int, shift: int) -> bytes:
+    """ASR Xd, Xn, #shift (immediate, 0..63). SBFM-based.
+    Encoding: SBFM Xd, Xn, #shift, #63 → 0x93400000 | shift<<16 | 63<<10
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= shift <= 63
+    insn = 0x93400000 | (shift << 16) | (63 << 10) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_lsr_xd_xn_imm(xd: int, xn: int, shift: int) -> bytes:
+    """LSR Xd, Xn, #shift (immediate, 0..63). UBFM-based.
+    Encoding: UBFM Xd, Xn, #shift, #63 → 0xd3400000 | shift<<16 | 63<<10
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= shift <= 63
+    insn = 0xd3400000 | (shift << 16) | (63 << 10) | (xn << 5) | xd
+    return struct.pack('<I', insn)
 
 
 class Assembler:
