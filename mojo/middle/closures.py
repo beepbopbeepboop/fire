@@ -428,7 +428,17 @@ def discover_closures(ctx, stmts) -> dict:
                 if not _selfhost_fn_reassigns_method(s):
                     _hook = getattr(ctx, 'selfhost_param_ctype', None)
                     if _hook is not None:
-                        _sh_ct = _hook(pname, ptype, s)
+                        # `_hook` is the module-level
+                        # `_selfhost_gen_self_param_ctype(gen, pname, ptype,
+                        # node)` — a NON-capturing function, so its stored
+                        # value is a raw code pointer. Pass `ctx` explicitly
+                        # (4 args): the previous 3-arg call site invoked a
+                        # capturing nested `def` wrapper through
+                        # `mojo_fnptr_call_3`, which jumped to the closure's
+                        # DATA pointer and SIGBUS'd
+                        # (^EXC_BAD_ACCESS at a heap address; repro:
+                        # std/atomic/atomic.mojo).
+                        _sh_ct = _hook(ctx, pname, ptype, s)
                 outer_scope[pname] = _sh_ct or ctx._resolve_type(ptype)
             _saved_vt = dict(ctx.var_types)
             ctx.var_types.update(outer_scope)

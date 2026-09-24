@@ -1427,6 +1427,15 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
     # erased one is emitted as its own address in the cast written below.
     src = _as_str(src)
     dst = _as_str(dst)
+    # An erased/unknown type on either side is emitted as an EMPTY cast
+    # `()val` (not even valid C). Common arrival: an unpack element whose
+    # type could not be resolved. Fall back to int64_t, the lattice's own
+    # default, rather than emit the broken cast (repro:
+    # std/test/builtin/test_int.mojo's `var a, b = divmod(7, 3)`).
+    if not src:
+        src = 'int64_t'
+    if not dst:
+        dst = 'int64_t'
 
     # A dot-accessed struct member (e.g. a non-pointer module-globals
     # instance's own field, `_typing_globals.some_field`) needs the exact

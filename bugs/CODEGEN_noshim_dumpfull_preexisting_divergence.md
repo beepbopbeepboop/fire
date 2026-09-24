@@ -1,5 +1,200 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-native-dumpfull fails on b00955c itself
 
+## Status (2026-09-24, tenth entry — AST/TOK-DIFF and SELFHOST-CRASHED both driven to ZERO; 11 root causes fixed + one pulled-in build blocker unblocked; the whole remaining backlog is CI-DIFF)
+
+Session started from the two `formal/` sweep commits (`219e88c`, `089ceb3`)
+on top of the ninth entry's state. NOTE: the whole tree could NOT self-build
+when this session began — `089ceb3`'s new `_lbn_compr_targets` had a nested
+loop that aborted `python3 fire.py build` with a hard C error (see item 5).
+Fixes, ordered by discovery:
+
+1. **`comptime_aliases` dict key was a POINTER decimal** (`fire_compiler.py`
+   `_parse_struct`). `aliases = {s.target: s.value for s in body if
+   isinstance(s, ComptimeVarStmt)}` — the comprehension's element `s` is an
+   unknown-typed list element, so `s.target` lowered through runtime dispatch
+   and its boxed int64_t result was stored via `mojo_str_from_int`, making
+   every alias key `'51753641216'` instead of `'name'`. Rewritten as an
+   explicit loop through a new `_as_comptimevar_node` static view (the same
+   idiom the sibling `_alias_by_name` loop already uses). Fixes 6 of the 13
+   `--dump` AST-DIFF files (`std/_plugin/{_trait,cuda,hip,metal}` +
+   `device_attribute`, `_nicheable`).
+
+2. **`mojo_repr_float` used 6-significant-digit `%g`** (`runtime/fire_runtime.c`).
+   `repr(3.141592653589793)` came out `3.14159`. Now widens precision 1..17
+   and stops at the first `strtod()` round-trip, reproducing Python's
+   shortest-round-trip repr. Fixes `std/math/constants`' AST-DIFF.
+
+3. **`_mojo_classattr_init()` was never called in the compiled binary**
+   (`emit_funcs.py` `_gen_toplevel`). The call lived only in `gen_func`'s
+   `node.name == 'main' and emit_struct_defs` branch — correct for a
+   single-module program, but `main` belongs to the ROOT module while the
+   class-attr table can live in an IMPORTED module whose TU has no `main`.
+   The whole-program binary lands in exactly that shape: the disassembly
+   (`otool -tvV mojoc`) showed a single `_mojo_classattr_init` symbol with
+   ZERO `bl` targets. Now also emitted at the top of every module's
+   `_toplevel` (gated on `emit_struct_defs`, the same flag that emits the
+   definition), so it runs whichever module owns it.
+
+4. **`CallExpr.kwargs` / `StringLiteral.is_bytes` absent from the hardcoded
+   `struct_field_types` map** (`module_gen.py`). The C struct HAS the fields,
+   but the typer map did not, so even a statically-typed `_cnode.kwargs`
+   read fell back to `_mojo_dispatch_getattr` and returned the miss sentinel
+   `1`. Registered both (the audit tool
+   `tools/audit_selfhost_struct_fields.py` flags these as the remaining
+   non-line/col gaps; `FromImportStmt.name_alias_strs` still deferred — the
+   ninth entry noted it was net-negative on its own).
+
+5. **BUILD BLOCKER (pulled in by `089ceb3`): `_lbn_compr_targets`'s nested
+   `for x in item:` mis-typed `x`** (`mojo/middle/boundnames.py`). The
+   self-hosted inference typed `item` as `char *` (a str), so `x` became a
+   plain `char` and its use as an int64_t recursion argument emitted
+   `x = (char *)_mojo_dict_iter_key(...)` — a real `-Wint-conversion` HARD
+   ERROR that aborted every `python3 fire.py build`. Flattened to a single
+   `for _elt in expr:` over `isinstance(expr, (list, tuple))` (a tuple still
+   descends, because it hits the same branch on the next call).
+
+6. **The 24-file `mojo_list_len(0x1)` SIGSEGV class, root-caused to a
+   `gcc -fgimple` MISCOMPILE** (`emit_methods.py` `lower_struct_method_call`).
+   The condition
+   `if _method_candidates and (len(_method_candidates) > 1 or _cnode.kwargs):`
+   lowers `if <list>` to `len(<list>) != 0`, then calls `len(_method_candidates)`
+   AGAIN for the `> 1` test. `-fgimple` then reuses the FIRST `len` call's
+   return value (a LENGTH) as the SECOND call's POINTER argument — so a
+   1-element candidate list produced `mojo_list_len(1)`. Worse, the `or`
+   mixed an int comparison with the list-valued `_cnode.kwargs`, so the whole
+   condition was typed `MojoList *` and the enclosing `if` became
+   `mojo_list_len(<the boolean>)`. Rewritten to compute `_n_candidates`/
+   `_n_kwargs` into explicit ints and compare them, so every operand is bool
+   and each container is measured exactly once. This alone took
+   SELFHOST-CRASHED 24 → 15 (interval/dict/counter/deque/set/dtype/
+   string_literal/span/bencher all now compile).
+
+Per-file `--dump` sweep after the fixes (only the ~40 affected files were
+re-run; the rest of `bside/` is stale, so CI-DIFF is not yet a valid total):
+clean 58 → 67, SELFHOST-CRASHED 24 → 15, **AST/TOK-DIFF 13 → 0**. `mojoc`
+rebuilds clean; `interval.mojo`/`raw=`/`comptime_aliases`/float all verified.
+
+**Continuation (same session): the remaining 15 crashes and the last
+AST-diff class fixed; full clean re-sweep now SELFHOST-CRASHED 0 /
+AST-TOK-DIFF 0.**
+
+7. **`selfhost_param_ctype` hook was a capturing nested `def`** (repro
+   `std/atomic/atomic.mojo`). `module_gen.py` installed a nested closure
+   wrapper and `closures.py` called it through
+   `getattr(ctx, 'selfhost_param_ctype', None)`. The wrapper captures `self`,
+   so its stored value is a CLOSURE (a data pointer); the dynamically-typed
+   `_hook(...)` call lowered to `mojo_fnptr_call_3`, which jumped to that
+   data pointer and SIGBUS'd. Fixed by assigning the module-level,
+   NON-capturing `_ggf_dup._selfhost_gen_self_param_ctype` directly and
+   passing `ctx` explicitly (4-arg call) in `closures.py`. This cleared the
+   whole remaining crash set.
+8. **`TypeLattice.is_float/is_int/...` crashed on a NULL type**
+   (`mojo/middle/types.py`). `None in _TYPE_FLOAT` / `'*' in None` lower to a
+   runtime `in` whose `strcmp` dereferenced the NULL (SIGSEGV in
+   `_dict_lookup` via `mojo_in_dispatch_str`). Guarded every predicate with
+   `if not t: return False`. Repro: `std/runtime/tracing.mojo`'s
+   `join(t1=NULL, ...)`.
+9. **`gimple_ctypes.dataclasses.fields(...)` (aliased form) not recognized**
+   (`mojo/middle/types.py` `_is_dataclasses_module_ref`, used by 3 sites in
+   `emit_methods.py` + 1 in `emit_loops.py`). The interception/loop tracking
+   matched only the bare `dataclasses` IdentExpr, so the alias form
+   `import mojo.middle.types as gimple_ctypes` fell through to dynamic
+   attribute access; `f.name` then raised `AttributeError('name')` and
+   `compile_to_gimple` bailed to an EMPTY `.ci` (repro: `std/collections/
+   deque.mojo` 0 B → 206 KB, `bitset`, `test_gimple`, …).
+10. **`StringLiteral` seed map broke repr field order**
+    (`module_gen.py`). Adding `is_bytes` to the seed put it BEFORE the
+    augmentation's `line`/`col`, so the native repr printed
+    `value, is_bytes, line, col` where Python prints `value, line, col,
+    is_bytes` — 64 `.ast` diffs. Fixed by seeding `line`/`col` ahead of
+    `is_bytes` so the seed stays a prefix of the dataclass field order.
+11. **`_renamed_builtin_calls` emission boxed the return-type string**
+    (`module_gen.py`). The inline dict-`.items()` comprehension's 2-tuple
+    unpack boxed `rt`, so a C TYPE NAME f-stringed as its pointer decimal:
+    `4370499496 mojo_index(...);` instead of `int64_t mojo_index(...);`
+    (repro: `std/test/builtin/test_uint`). Rewritten as an explicit loop with
+    `_as_str` (the established fix family).
+
+**Full clean re-sweep (both `aside` and `bside` regenerated after all
+changes), the TRUE current state: 765 files — clean=72, CI-DIFF=690,
+SELFHOST-CRASHED=0, AST/TOK-DIFF=0, SHIM-FAILED=2, BOTH-FAILED=1.**
+
+**Continuation 2 (CI-DIFF triage): clean 72 -> 146; CI-DIFF 690 -> 616.**
+Worked the CI-DIFF backlog by repeatedly taking the files with the FEWEST
+differing lines (the closest to clean) and fixing the one root cause each
+turned up. Fixes, roughly in order of files-fixed-per-fix:
+
+12. **`_method_overload_id` used `hashlib.md5`, which the compiled backend
+    stubs** (`mojo/middle/types.py`). Every overload of a name got the SAME
+    suffix: `CStringSlice___init___cbf29c` + `_2`/`_3` where the reference
+    emits distinct `_d264de`/`_76edc3`/`_10ada0`. Replaced with the same
+    hand-rolled polynomial hash `emit_funcs.overload_suffix_for` already
+    uses (both sides now agree). (c) in the class list above.
+13. **`_walk_type_expr` could not recognize a plain-STRING type annotation
+    self-hosted** (`isinstance(<char*>, str)` is unreliable), so it fell to
+    `type(node).__name__` == `'<type>'` — overload sigs became
+    `self:any,value:<type>` vs the reference's `self:any,value:Self._mlir_type`.
+    The trailing fallback now re-views via `_as_str`. Also removed an
+    `id(node)`-keyed memo cache (address-dependent).
+14. **`mojo_repr_float` used `%g`/wrong formatting** — now Python's exact
+    repr: shortest round-trip precision, fixed notation for
+    `1e-4 <= |v| < 1e16`, scientific outside (verified against CPython on 15
+    values incl. `1e9`, `1e16`, `-0.0`, `1/3`).
+15. **`mojo_repr_int`/`mojo_repr_float` returned a shared `static buffer`**
+    (`runtime/fire_runtime.c`) — two live `repr()` results aliased, so the
+    compiler's `_lower_ListExpr` emitted `[2.0, 3.0]` as `3.0, 3.0`. Both now
+    `strdup` a fresh copy.
+16. **`_lower_FloatLiteral` read `node.value` reflectively** (double boxed to
+    int64_t and TRUNCATED) — new `_as_floatlit_node` static view gives a
+    direct `double` load (`4.2`/`0.1`/`1.5` were emitted `4.0`/`0.0`/`1.0`).
+17. **`_safe_coerce_emit` emitted an EMPTY cast `()val`** when either side's
+    type was erased — now falls back to `int64_t`. Repro
+    `std/test/builtin/test_int.mojo`'s `var a, b = divmod(7, 3)` (`a = ()_t5`).
+    `_tuple_elem_value`'s unknown-element case and `_assign_target`'s
+    declaration also default to `int64_t` now.
+18. **`_decode_str_literal_text`-driven f-string join boxed the value slot** —
+    a no-interpolation f-string interned a pointer decimal
+    (`_slit_10070 = "33323208400"`; repro `test_dispatch_promotions.py`'s
+    `f"...(def->fn):"`). The `_pv2` piece now goes through `_as_str`.
+19. **`isinstance(<char*>, str)` is unreliable, so `mlir.unwrap`'s
+    `m[0] == '`'` indexing test was always False** — backticks never
+    stripped; switched to `startswith`/`endswith` (an earlier pass in this
+    file already fixed the same shape at `emit_funcs.overload_suffix_for`).
+20. **`gen._comptime_vals.get(name)` returns `0` (not `None`) for a missing
+    key natively**, so `isinstance(_, int)` was True and an unknown
+    identifier skipped the `/* ct param or undeclared: <name> */` placeholder
+    branch. Guarded with a `name in gen._comptime_vals` membership test.
+21. **Numeric-literal underscores not stripped before `int(t.value, 0)`** —
+    the compiled `int(str, 0)` stops at `_`, so `0x2000_0000` parsed as
+    `0x2000` (8192 vs 536870912; repro `test_print_long_string.mojo`).
+22. **`sys.exit(main())` not detected as a toplevel `main()` call** — extended
+    the shallow `_sm_stmt_calls_main` scan to inspect call arguments, so the
+    wrapper stops emitting a double `_gimple_main ()`.
+23. **`gimple_ctypes.dataclasses.fields(...)` (aliased module form) not
+    recognized** by the interception/loop tracking (`_is_dataclasses_module_ref`).
+24. **A comptime value that is a STRING was treated as an int** — a boxed
+    `char *` satisfies `isinstance(_, int)` self-hosted, so `str(_ct)`
+    emitted the pointer decimal instead of the placeholder; guarded with
+    `_ptr_slot_in_range` (a genuine comptime int is not a heap pointer).
+25. **`_exc_type_id`/`coro._exc_type_tag` used `zlib.crc32` (stubbed
+    self-hosted)** so EVERY exception got id `1` where the reference emits
+    the real crc32; added a pure-Python `types._crc32_str` (verified equal to
+    `zlib.crc32` for AttributeError/StopIteration/struct.error/…) used by both.
+
+**Final state after continuation 2: 765 files — clean=147, CI-DIFF=615,
+SELFHOST-CRASHED=0, AST/TOK-DIFF=0, SHIM-FAILED=2, BOTH-FAILED=1.**
+
+STILL OPEN — 616 CI-DIFF, now with a much flatter tail of mostly
+single-cause files: (a) local pointer-vs-scalar type inference
+(`int64_t * _t1` vs `int64_t _t1`, `uint16_t _t2` vs `uint16_t * _t2`),
+(b) `_MOJO_STUB_*` set differences (the self-hosted resolver misses some
+cross-module symbols), (c) a comptime value that is a STRING treated as an
+int (`str(_ct)` of a boxed pointer; `_comptime_vals`), (d) `len(<Span *>)`
+unlowered, (e) `extern int chdir (char *)` losing its parameter type,
+(f) `_plugin/*/__init__` dispatch/stub registration. Each is a small,
+targeted fix; the `score`-ranked sweep (`fewest differing lines first`) is
+the efficient way to keep working them.
+
 ## Status (2026-09-21, ninth entry — SIX more self-hosted-only bugs fixed; `check-ab-native` now 30/30 (was 25/30); `make bootstrap` verify failures 14 → 9; whole-program first-diff moved 52 KiB → 143 KiB; the remaining divergences are the documented architectural classes, not these bugs)
 
 Picked up the WIP `fire.py`/`ownership_destruct.py` changes and worked the

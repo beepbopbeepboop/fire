@@ -1551,6 +1551,7 @@ def gen_module_impl(self, stmts):
         self.struct_field_types['CallExpr'] = {
             'func': 'int64_t',
             'args': 'MojoList *',
+            'kwargs': 'MojoList *',
         }
         self.struct_field_types['BinaryOp'] = {
             'op': 'char *',
@@ -1773,6 +1774,16 @@ def gen_module_impl(self, stmts):
     self.struct_field_types['NoneLiteral'] = {}
     self.struct_field_types['StringLiteral'] = {
         'value': 'char *',
+        # `line`/`col` must stay in the seed AHEAD of `is_bytes`: the
+        # reflection repr iterates `struct_field_types` in insertion order
+        # and the later self-host augmentation appends any missing dataclass
+        # fields, so the seed has to remain a PREFIX of
+        # `StringLiteral(value, line, col, is_bytes)` or the native repr
+        # emits `value, is_bytes, line, col` and every file with a string
+        # literal diverges from the reference (64 `.ast` diffs).
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'is_bytes': '_Bool',
     }
     self.struct_field_types['TstringLiteral'] = {
         'value': 'char *',
@@ -5029,12 +5040,15 @@ def gen_module_impl(self, stmts):
                 _dt.methods = _rows
 
     # Shared closure discovery (one copy for gimple + formal + future archs).
-    # Optional selfhost param-ctype hook: original inline used
-    # _ggf_dup._selfhost_gen_self_param_ctype; discover_closures calls
-    # ctx.selfhost_param_ctype when present.
-    def _selfhost_param_ctype(pname, ptype, fn):
-        return _ggf_dup._selfhost_gen_self_param_ctype(self, pname, ptype, fn)
-    self.selfhost_param_ctype = _selfhost_param_ctype
+    # The selfhost param-ctype hook is the module-level, NON-capturing
+    # `_selfhost_gen_self_param_ctype(gen, pname, ptype, node)` itself —
+    # assigned directly, NOT via a nested `def` wrapper. A nested (capturing)
+    # wrapper is stored as a closure value (a DATA pointer); calling it
+    # through the dynamically-typed `getattr(ctx, ...)` result lowered to
+    # `mojo_fnptr_call_3`, which jumped to that data pointer and SIGBUS'd
+    # (repro: std/atomic/atomic.mojo). The module-level function is a raw
+    # code pointer, and discover_closures passes `ctx` explicitly.
+    self.selfhost_param_ctype = _ggf_dup._selfhost_gen_self_param_ctype
     try:
         discover_closures(self, stmts)
     finally:
@@ -5578,8 +5592,24 @@ def gen_module_impl(self, stmts):
     # into an IfStmt then/elif/else body).
     def _sm_stmt_calls_main(_st) -> bool:
         _v = getattr(_st, 'value', None) if isinstance(_st, ExprStmt) else None
-        return (isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
-                and _as_str(_v.func.name) == 'main')
+        if not isinstance(_v, CallExpr):
+            return False
+        _f = _v.func
+        if isinstance(_f, IdentExpr) and _as_str(_f.name) == 'main':
+            return True
+        # `sys.exit(main())` / `raise SystemExit(main())`: the `main()` call
+        # is an ARGUMENT of the outer call, not the whole expression. The
+        # generic `_walk_ast` pass below is supposed to catch this but does
+        # not reliably on the self-hosted path, so `_toplevel_calls_main`
+        # stayed False natively and the wrapper emitted a SECOND
+        # `_gimple_main ()` after `_toplevel ()` (repro:
+        # test_no_new_container_casts.py). One argument level covers the
+        # real `sys.exit(main())` idiom.
+        for _a in (_v.args or []):
+            if (isinstance(_a, CallExpr) and isinstance(_a.func, IdentExpr)
+                    and _as_str(_a.func.name) == 'main'):
+                return True
+        return False
     for _ts in stmts:
         if _sm_stmt_calls_main(_ts):
             self._toplevel_calls_main = True
@@ -6131,6 +6161,22 @@ def gen_module_impl(self, stmts):
         guard = _stub_guard_name(name)
         return f'#ifndef {guard}\n#define {guard}\n' + (decl + '\n#endif')
     _util_stubs = [_guarded_stub(name, decl) for name, decl in _util_pairs if name not in _skip_util]
+    # Explicit accumulation loop, NOT the
+    # `[{rt} {fn}(...); for fn, rt in sorted(...)]` comprehension that used
+    # to live inline in the `parts.extend` below: the 2-tuple unpack of a
+    # dict `.items()` element boxes both slots to int64_t on the
+    # self-hosted path, so `rt` (a C TYPE NAME) f-stringed as its POINTER
+    # DECIMAL — the emitted prototype was
+    # `4370499496 mojo_index(...);` instead of `int64_t mojo_index(...);`
+    # (repro: std/test/builtin/test_uint). `_as_str` keeps both as strings.
+    _renamed_lines = []
+    for _rb_fn, _rb_rt in sorted(self._renamed_builtin_calls.items()):
+        _rb_fn = _as_str(_rb_fn)
+        _rb_rt = _as_str(_rb_rt)
+        if (_rb_fn not in _skip_util and _rb_fn not in _imported_names
+                and _rb_fn not in _local_funcs and _rb_fn not in _local_funcs_renamed
+                and _rb_fn not in _imported_names_renamed):
+            _renamed_lines.append(f'{_rb_rt} {_rb_fn}(...);')
     parts.extend([
         '/* Mojo iterator and utility functions */',
         *_util_stubs,
@@ -6139,11 +6185,7 @@ def gen_module_impl(self, stmts):
         *[f'int64_t {_as_str(s)}___new(...);' for s in sorted(self._self_ctor_stubs)],
         '',
         '/* Renamed C-reserved builtins called without import (e.g. abs→mojo_abs) */',
-        *[f'{rt} {fn}(...);'
-          for fn, rt in sorted(self._renamed_builtin_calls.items())
-          if fn not in _skip_util and fn not in _imported_names
-          and fn not in _local_funcs and fn not in _local_funcs_renamed
-          and fn not in _imported_names_renamed],
+        *_renamed_lines,
         '',
         '',
         'char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);',

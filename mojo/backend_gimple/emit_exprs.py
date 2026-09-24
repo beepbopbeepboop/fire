@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    Parser, py_tokenize, _as_str, _sms_key,
+    Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
 )
 import regex_compile
 import mlir
@@ -176,7 +176,11 @@ def _lower_IntLiteral(gen, node) -> tuple[str, str]:
 
 
 def _lower_FloatLiteral(gen, node) -> tuple[str, str]:
-    s = repr(node.value)
+    # `_as_floatlit_node(...).value` for a DIRECT `double` field load —
+    # `node.value` off the boxed `node` went through reflective dispatch and
+    # truncated the double to the boxed int64_t, so `repr(4.2)` came out
+    # `'4.0'` (see _as_floatlit_node).
+    s = repr(_as_floatlit_node(node).value)
     if '.' not in s and 'e' not in s.lower():
         s += '.0'
     return 'double', s
@@ -259,7 +263,13 @@ def _lower_StringLiteral(gen, node):
     if not parts or _all_lit:
         plain = ''
         for _pk2, _pv2, _ps2, _pc2 in parts:
-            plain += _pv2
+            # `_as_str(_pv2)`: the 4-tuple unpack can still leave the value
+            # slot boxed to int64_t even though the `kind` slot compares as a
+            # string, so `plain += _pv2` concatenated a POINTER decimal and
+            # the pool got `static char * _slit_N = "33323208400";` for a
+            # no-interpolation f-string (repro: test_dispatch_promotions.py's
+            # `f"  Functions that can be promoted (def→fn):"`).
+            plain += _as_str(_pv2)
         escaped = gimple_ctypes._c_escape(plain)
         temp = gen._new_val('char *', f'{gen._intern_string(escaped)}')
         return 'char *', temp
@@ -673,17 +683,31 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # Consulted here too, before the placeholder, so a comptime
     # variable behaves like the ordinary compile-time constant it is
     # regardless of which kind of expression context reads it.
-    _ct = gen._comptime_vals.get(name)
-    if isinstance(_ct, bool):
-        return '_Bool', gen._new_val('_Bool', 'true' if _ct else 'false')
-    if isinstance(_ct, int):
-        # Pass the BARE literal (not pre-wrapped in a cast) so
-        # `_new_val`'s own int64_t/_Bool literal handling applies —
-        # including its negative-literal parenthesization fix, needed
-        # since a comptime int can legitimately be negative (e.g. a
-        # sentinel `comptime _InvalidIndex: Int = -1`) and `-fgimple`
-        # rejects a cast applied directly to a negative literal.
-        return 'int64_t', gen._new_val('int64_t', str(_ct))
+    # Membership-gated, NOT a bare `.get(name)` + isinstance: on the
+    # self-hosted path a missing dict key comes back as `0` (a MojoDict
+    # value slot, not Python's `None`), and `isinstance(0, int)` is TRUE —
+    # so an unknown identifier (`AddressSpace` in a compile-fail test) took
+    # the comptime-int branch and emitted a bare `(int64_t)0;`, dropping the
+    # `/* ct param or undeclared: <name> */` comment the reference emits.
+    if name in gen._comptime_vals:
+        _ct = gen._comptime_vals.get(name)
+        if isinstance(_ct, bool):
+            return '_Bool', gen._new_val('_Bool', 'true' if _ct else 'false')
+        # `and not _ptr_slot_in_range(_ct)`: a comptime value that is a
+        # STRING arrives natively as a boxed `char *`, and `isinstance(_,
+        # int)` is TRUE for it — so the int branch ran and `str(_ct)`
+        # emitted the pointer's DECIMAL (`_t2 = (int64_t)81333460464;`
+        # instead of the `/* ct param or undeclared */` placeholder the
+        # reference emits). A genuine comptime int is a small value that is
+        # NOT a plausible heap pointer.
+        if isinstance(_ct, int) and not _ptr_slot_in_range(_ct):
+            # Pass the BARE literal (not pre-wrapped in a cast) so
+            # `_new_val`'s own int64_t/_Bool literal handling applies —
+            # including its negative-literal parenthesization fix, needed
+            # since a comptime int can legitimately be negative (e.g. a
+            # sentinel `comptime _InvalidIndex: Int = -1`) and `-fgimple`
+            # rejects a cast applied directly to a negative literal.
+            return 'int64_t', gen._new_val('int64_t', str(_ct))
     # Unknown identifier (compile-time param, undeclared external, etc.).
     # Emit a placeholder so GCC doesn't see an undeclared reference.
     t = gen._new_temp('int64_t')

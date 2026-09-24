@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <ctype.h>
@@ -3640,7 +3641,12 @@ char *mojo_repr_int(int64_t obj) {
      * garbage number as the .ast file's entire content. */
     static char buffer[32];
     snprintf(buffer, sizeof(buffer), "%" PRId64, obj);
-    return buffer;
+    /* Fresh heap copy, NOT the shared `static buffer`: callers routinely
+     * hold two `repr()` results live at once (e.g. the compiler's
+     * `_lower_ListExpr` lowers every element and only then emits the append
+     * lines), and a static return made the second call overwrite the first —
+     * `[2.0, 3.0]` emitted `3.0, 3.0`. */
+    return strdup(buffer);
 }
 
 char *mojo_repr_str(char *s) {
@@ -3699,15 +3705,50 @@ char *mojo_repr_float(double v) {
      * never be confused with an int at a glance. Plain "%g" doesn't do
      * this: %g for 0.0 is just "0", indistinguishable from an int repr.
      * Found via a compiled AST's FloatLiteral(value=0.0, ...) printing as
-     * value=0 once self-hosted. */
+     * value=0 once self-hosted.
+     *
+     * Precision: Python's repr picks the SHORTEST decimal string that
+     * round-trips back to the same double (repr(3.141592653589793) is
+     * "3.141592653589793", not the 6-significant-digit "%g" default
+     * "3.14159"). Reproduce that by widening precision from 1 to 17 and
+     * stopping at the first value strtod() parses back exactly; 17
+     * significant digits always round-trip for an IEEE-754 double, so the
+     * loop is guaranteed to terminate with a correct representation. */
     static char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%g", v);
+    /* Special values first: Python's repr is "nan"/"inf"/"-inf". */
+    if (v != v) return "nan";
+    if (v == (double)INFINITY) return "inf";
+    if (v == (double)-INFINITY) return "-inf";
+    /* Shortest significant precision that strtod() parses back exactly.
+     * 17 digits always round-trip for an IEEE-754 double. */
+    int _prec = 17;
+    for (int _p = 1; _p <= 17; _p++) {
+        snprintf(buffer, sizeof(buffer), "%.*g", _p, v);
+        if (strtod(buffer, NULL) == v) { _prec = _p; break; }
+    }
+    /* Python switches to SCIENTIFIC form only outside 1e-4 <= |v| < 1e16
+     * (repr(1e9) is "1000000000.0", not "1e+09"); plain "%g" switches as
+     * soon as the exponent reaches the precision, so re-format explicitly
+     * from the decimal exponent. */
+    char _ebuf[64];
+    snprintf(_ebuf, sizeof(_ebuf), "%.*e", _prec - 1, v);
+    char *_ep = strchr(_ebuf, 'e');
+    int _E = _ep ? atoi(_ep + 1) : 0;
+    if (_E >= -4 && _E < 16) {
+        int _fprec = _prec - 1 - _E;
+        if (_fprec < 0) _fprec = 0;
+        snprintf(buffer, sizeof(buffer), "%.*f", _fprec, v);
+    } else {
+        snprintf(buffer, sizeof(buffer), "%.*e", _prec - 1, v);
+    }
     int has_marker = 0;
     for (char *p = buffer; *p; p++) {
         if (*p == '.' || *p == 'e' || *p == 'E' || *p == 'n' || *p == 'i') { has_marker = 1; break; }
     }
     if (!has_marker) strncat(buffer, ".0", sizeof(buffer) - strlen(buffer) - 1);
-    return buffer;
+    /* Fresh heap copy — see mojo_repr_int's identical note: a shared static
+     * return aliased two live results (`[2.0, 3.0]` came out `3.0, 3.0`). */
+    return strdup(buffer);
 }
 
 char *mojo_repr_list_doubles(MojoList *l) {

@@ -1158,7 +1158,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         sn_cls = gimple_exprtypes._struct_name_of(ot_cls)
         if sn_cls in gen.struct_field_types:
             return gen._lower_struct_constructor(
-                sn_cls, list(node.args), node.kwargs or [])
+                sn_cls, list(node.args), _gmm_callexpr_node(node).kwargs or [])
         for a in node.args:
             gen.lower_expr(a)
         return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
@@ -1248,12 +1248,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # attribute in this codebase is `.name`; see the for-loop lowering's
     # _dataclass_fields_vars handling for how `f.name` resolves back to
     # `f` itself).
-    if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'dataclasses'
+    if (gimple_ctypes._is_dataclasses_module_ref(func.obj)
             and func.member == 'fields' and len(node.args) == 1):
         at, av = gen.lower_expr(node.args[0])
         vp = gen._ensure_local(at, av)
         return 'MojoList *', gen._call_expr('MojoList *', '_mojo_dispatch_fields', [(at, vp)])
-    if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'dataclasses'
+    if (gimple_ctypes._is_dataclasses_module_ref(func.obj)
             and func.member == 'is_dataclass' and len(node.args) == 1):
         at, av = gen.lower_expr(node.args[0])
         vp = gen._ensure_local(at, av)
@@ -1268,7 +1268,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Must be intercepted here, before the receiver ('dataclasses', an
     # opaque module reference) can reach the generic char*.replace()
     # dispatch and get a real but semantically wrong string-replace call.
-    if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'dataclasses'
+    if (gimple_ctypes._is_dataclasses_module_ref(func.obj)
             and func.member == 'replace' and node.args):
         return gen.lower_expr(node.args[0])
 
@@ -4293,8 +4293,22 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # `len(node.kwargs)` SIGSEGV in mojo_list_len(0x1). Same fix family as
     # `_gmm_as_str`/`_as_ident_node`.
     _cnode = _gmm_callexpr_node(node)
-    if _method_candidates and (len(_method_candidates) > 1 or node.kwargs):
-        _chosen_method = ggc._resolve_overload(gen, _method_candidates, _cnode.args, node.kwargs)
+    # Compute counts into explicit ints and compare them, rather than
+    # letting a MojoList-valued operand (`_cnode.kwargs`) participate in the
+    # `or`/`and`. On the self-hosted path a boolean `or` whose operands are
+    # `(<int> > <int>)` and a `MojoList *` was itself typed `MojoList *`, so
+    # the enclosing `if` lowered to `mojo_list_len(<the boolean>)` and
+    # SIGSEGV'd on `mojo_list_len(0x1)` for a 1-element candidate list
+    # (std/collections/interval.mojo's IntervalTree.insert). All-bool
+    # operands keep the condition's type bool.
+    _n_candidates = 0
+    if _method_candidates is not None:
+        _n_candidates = len(_method_candidates)
+    _n_kwargs = 0
+    if _cnode.kwargs is not None:
+        _n_kwargs = len(_cnode.kwargs)
+    if _n_candidates > 0 and (_n_candidates > 1 or _n_kwargs > 0):
+        _chosen_method = ggc._resolve_overload(gen, _method_candidates, _cnode.args, _cnode.kwargs)
         if _chosen_method is not None:
             _method_overload_suffix = _chosen_method['overload_id']
     # `_gmm_as_str`: `_struct_method_csym`'s `-> str` return type goes
@@ -4364,7 +4378,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         _method_dflt_map[_gmm_as_str(_pn0)] = _dv0
     if _chosen_method is not None:
         arg_pairs = ggc._build_call_args_for_candidate(
-            gen, _chosen_method, _cnode.args, node.kwargs, defaults=_method_dflt_map)
+            gen, _chosen_method, _cnode.args, _cnode.kwargs, defaults=_method_dflt_map)
     else:
         # Explicit accumulation loop, NOT `[gen.lower_expr(a) for a in
         # _cnode.args]` — a list comprehension is the established

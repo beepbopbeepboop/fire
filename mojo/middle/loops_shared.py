@@ -51,6 +51,13 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
         # Pointer elem that isn't char* (e.g. a nested MojoList*): read the
         # opaque int64_t then cast, matching the old 'int'-suffix handling.
+        # An UNKNOWN/empty element type (the tuple handle's elem type was
+        # never tracked) reads back as int64_t with NO cast — the previous
+        # `({elem}){raw}` produced an empty `()` cast
+        # (`a = ()_t5;` — not even valid C; repro:
+        # std/test/builtin/test_int.mojo's `a, b = divmod(...)`).
+        if not elem or elem == 'unknown':
+            return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
         raw = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
         return elem, gen._new_val(elem, f"({elem}){raw}")
     # Non-container / untracked: despite this function's name, its real

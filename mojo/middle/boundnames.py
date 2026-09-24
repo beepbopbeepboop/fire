@@ -228,23 +228,26 @@ def _lbn_compr_targets(bound, expr) -> None:
         return
     if isinstance(expr, (str, int, float, bool)):
         return
+    # A plain list/tuple container: recurse into each element. Written as a
+    # SINGLE flat loop rather than the original list-then-nested-tuple form.
+    # The nested `for x in item:` bound `x` to `item`'s element type, and the
+    # self-hosted inference mis-typed `item` as `char *` (a str) — so `x`
+    # became a plain `char` and its use as an int64_t recursion argument
+    # emitted `x = (char *)_mojo_dict_iter_key(...)`, a real
+    # `-Wint-conversion` HARD ERROR ("assignment to 'char' from 'char *'")
+    # that aborted the compiled build. Flattening removes the misleading
+    # inner loop; recursing into a tuple element still descends, because a
+    # tuple lands in this same branch on the next call.
+    if isinstance(expr, (list, tuple)):
+        for _elt in expr:
+            _lbn_compr_targets(bound, _elt)
+        return
     if hasattr(expr, "__dataclass_fields__"):
         for fname in expr.__dataclass_fields__:
             if fname in ("line", "col"):
                 continue
             val = getattr(expr, fname, None)
-            if isinstance(val, list):
-                for item in val:
-                    if isinstance(item, tuple):
-                        for x in item:
-                            _lbn_compr_targets(bound, x)
-                    else:
-                        _lbn_compr_targets(bound, item)
-            elif isinstance(val, tuple):
-                for x in val:
-                    _lbn_compr_targets(bound, x)
-            else:
-                _lbn_compr_targets(bound, val)
+            _lbn_compr_targets(bound, val)
 
 
 def bound_names_in_order(body, params=None) -> list:

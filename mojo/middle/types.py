@@ -103,18 +103,32 @@ class TypeLattice:
 
     @classmethod
     def is_float(cls, t: str) -> bool:
+        # `if not t` first: the compiled path can hand these predicates a
+        # NULL/empty type string where the reference never does, and
+        # `None in <dict>`/`'*' in None` lower to a runtime `in` whose
+        # `strcmp` then dereferences the NULL (SIGSEGV in `_dict_lookup`
+        # via `mojo_in_dispatch_str`). Repro: std/runtime/tracing.mojo's
+        # `join(t1=NULL, ...)`.
+        if not t:
+            return False
         return t in _TYPE_FLOAT
 
     @classmethod
     def is_signed(cls, t: str) -> bool:
+        if not t:
+            return False
         return t in _TYPE_SIGNED
 
     @classmethod
     def is_unsigned(cls, t: str) -> bool:
+        if not t:
+            return False
         return t in _TYPE_UNSIGNED
 
     @classmethod
     def is_int(cls, t: str) -> bool:
+        if not t:
+            return False
         return t in _TYPE_SIGNED or t in _TYPE_UNSIGNED
 
     @classmethod
@@ -123,10 +137,14 @@ class TypeLattice:
 
     @classmethod
     def is_pointer(cls, t: str) -> bool:
+        if not t:
+            return False
         return '*' in t
 
     @classmethod
     def is_bool(cls, t: str) -> bool:
+        if not t:
+            return False
         return t == '_Bool'
 
     @classmethod
@@ -333,6 +351,24 @@ def _class_attr_ctype(v) -> str | None:
     return None
 _FIXED_ARRAY_ANN_RE = re.compile('^\\[\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*([A-Za-z_0-9]+)\\s*\\]$')
 
+
+def _is_dataclasses_module_ref(obj) -> bool:
+    """True for an AST expression referencing the `dataclasses` module,
+    written either bare (`dataclasses`) or through the
+    `gimple_ctypes.dataclasses` alias `mojo/middle/resolve_shared.py` uses
+    (`import mojo.middle.types as gimple_ctypes`). The
+    `dataclasses.fields`/`is_dataclass`/`replace` interception and the
+    `for f in dataclasses.fields(x)` loop tracking previously matched ONLY
+    the bare-IdentExpr form, so the aliased form fell through to dynamic
+    attribute access — `f.name` then raised `AttributeError('name')` and
+    the compile silently bailed to an EMPTY `.ci` (repro:
+    std/collections/deque.mojo, std/collections/bitset.mojo, many others)."""
+    if isinstance(obj, IdentExpr):
+        return obj.name == 'dataclasses'
+    if isinstance(obj, MemberExpr) and isinstance(obj.obj, IdentExpr):
+        return obj.member == 'dataclasses'
+    return False
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'
@@ -443,15 +479,22 @@ def _strip_mojo_param_modifiers(pname: str) -> str:
 _type_walk_cache: dict[int, str] = {}
 
 def _walk_type_expr(node) -> str:
-    """Recursively serialize an AST type expression to a canonical string."""
+    """Recursively serialize an AST type expression to a canonical string.
+
+    NOTE: intentionally NO `id(node)`-keyed memo cache. An earlier version
+    cached results by `id(node)`, which is address-dependent: on the
+    self-hosted path a freed node's address can be reused by a different
+    node, so the cache returned the WRONG type string and two distinct
+    method overloads hashed to the same/different suffix non-reproducibly
+    (e.g. `NoneType___init___3cbddd` reference vs `_be49df` self-hosted for
+    the same `Self._mlir_type` param, while the single-param overload
+    matched). `_walk_type_expr` is tiny and only called during overload-id
+    computation, so the cache bought little.
+    """
     if node is None:
         return 'any'
     if isinstance(node, str):
         return node
-    nid = id(node)
-    cached = _type_walk_cache.get(nid)
-    if cached is not None:
-        return cached
     if isinstance(node, IdentExpr):
         result = node.name
     elif isinstance(node, SubscriptExpr):
@@ -471,8 +514,18 @@ def _walk_type_expr(node) -> str:
     elif isinstance(node, StringLiteral):
         result = f'"{node.value}"'
     else:
-        result = type(node).__name__
-    _type_walk_cache[nid] = result
+        # `FunctionDef.params` stores each type annotation as a PLAIN STRING
+        # (not a parsed node) for the overwhelmingly common case. The
+        # leading `isinstance(node, str)` above is unreliable self-hosted —
+        # a `char *` argument frequently does NOT match the `str` runtime
+        # tag — so a string annotation reached here and the old
+        # `type(node).__name__` fallback produced the literal string
+        # `'<type>'`. That made overload ids diverge
+        # (`NoneType___init___be49df` vs the reference `_3cbddd`, sig
+        # `self:any,value:<type>` vs `self:any,value:Self._mlir_type`).
+        # `_as_str` re-views the value as a `char *`; for the (rare)
+        # non-string fallback it is at worst the previous behaviour.
+        result = _as_str(node)
     return result
 
 def _param_sig_str(params: tuple) -> str:
@@ -491,12 +544,66 @@ def _method_overload_id(param_types: tuple, struct_name: str='', method_name: st
     Walks each param's type expression recursively, hashes the canonical
     string, and returns the first 6 hex digits as the suffix.
     Also registers the mapping in _overload_hash_registry for demangling.
+
+    The hash is a hand-rolled polynomial over the signature's bytes, NOT
+    `hashlib.md5` — the compiled/self-hosted backend has no md5 (it stubs),
+    so EVERY overload of a name got the SAME suffix once `mojoc` ran its own
+    codegen: `CStringSlice___init___cbf29c`, `_cbf29c_2`, `_cbf29c_3` where
+    the reference emits distinct `_d264de`/`_76edc3`/`_10ada0`. Same shape
+    and rationale as `emit_funcs.overload_suffix_for` (which already made
+    this switch for free functions); both sides now agree because both use
+    this function.
     """
     sig = _param_sig_str(param_types)
-    h = hashlib.md5(sig.encode(), usedforsecurity=False).hexdigest()[:6]
+    _h = 0
+    _i = 0
+    _n = len(sig)
+    while _i < _n:
+        _c = sig[_i]
+        if isinstance(_c, str):
+            _c = ord(_c)
+        _h = (_h * 31 + _c) & 0x7FFFFFFF
+        _i = _i + 1
+    _h = _h & 0xFFFFFF
+    _out = ''
+    _k = 0
+    while _k < 6:
+        _d = _h % 16
+        _h = _h // 16
+        if _d < 10:
+            _out = chr(48 + _d) + _out
+        else:
+            _out = chr(87 + _d) + _out
+        _k = _k + 1
     full = f'{struct_name}.{method_name}({sig})' if struct_name else sig
-    _overload_hash_registry[h] = full
-    return f'_{h}'
+    _overload_hash_registry[_out] = full
+    return f'_{_out}'
+
+def _crc32_str(s: str) -> int:
+    """Pure-Python CRC-32 (IEEE 802.3, reflected, poly 0xEDB88320) over a
+    string's bytes — IDENTICAL to `zlib.crc32(s.encode())`.
+
+    `zlib.crc32` is not available in the compiled/self-hosted backend (it
+    stubs), so `_exc_type_id` returned 1 for EVERY exception class, emitting
+    `mojo_exc_type_set (1)` where the reference emits the real crc32
+    (`... (471634805)`; repro: std/test/builtin/test_issue_1004). The runtime
+    HARDCODES crc32 tags for the builtin exceptions
+    (runtime/fire_runtime.c), so the ids must stay real crc32 values — this
+    reproduces them exactly on both paths. `ord()`/`& 0xFF` and the
+    `while`-free inner 8-bit fold are all shapes the compiled backend already
+    lowers (see overload_suffix_for / _method_overload_id)."""
+    _crc = 0xFFFFFFFF
+    for _ch in s:
+        _b = ord(_ch) & 0xFF
+        _crc = _crc ^ _b
+        _bit = 0
+        while _bit < 8:
+            if _crc & 1:
+                _crc = (_crc >> 1) ^ 0xEDB88320
+            else:
+                _crc = _crc >> 1
+            _bit = _bit + 1
+    return _crc ^ 0xFFFFFFFF
 
 def demangle_overload(c_name: str) -> str:
     """Demangle a C function name with an overload hash suffix back to Mojo form.

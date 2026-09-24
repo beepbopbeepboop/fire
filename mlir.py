@@ -36,7 +36,12 @@ from __future__ import annotations
 def unwrap(member: str) -> str:
     """Strip the backtick quoting MLIR identifiers carry, e.g. ``\\`index.add\\``."""
     m = member.strip()
-    if len(m) >= 2 and m[0] == '`' and m[-1] == '`':
+    # `startswith`/`endswith`, NOT `m[0] == '`'`: a compiled `char *`
+    # subscription yields the byte's INTEGER value, not a 1-char string, so
+    # the old indexing test was always False self-hosted and the backticks
+    # were never stripped (`mlir __mlir_op.`llvm.intr.debugtrap`: not
+    # modeled` instead of the reference's `deferred: llvm intrinsic`).
+    if len(m) >= 2 and m.startswith('`') and m.endswith('`'):
         m = m[1:-1]
     return m.strip()
 

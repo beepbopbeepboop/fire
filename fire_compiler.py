@@ -1422,6 +1422,17 @@ def _as_boollit_node(e: object) -> BoolLiteral:
     return e
 
 
+def _as_floatlit_node(e: object) -> FloatLiteral:
+    """See _as_intlit_node: static FloatLiteral view of a boxed handle, so a
+    following `.value` read compiles to a direct `double` field load rather
+    than a `_mojo_dispatch_getattr` that TRUNCATES the double to the boxed
+    int64_t. Needed by `_lower_FloatLiteral`'s `repr(node.value)`: a
+    reflective read gave `repr(4.2)` == `'4.0'` self-hosted (the fraction was
+    lost), which then emitted `4.0`/`0.0`/`1.0` for source literals
+    `4.2`/`0.1`/`1.5`."""
+    return e
+
+
 def _as_assignstmt_node(e: object) -> AssignStmt:
     """See _as_ident_node: static AssignStmt view of a boxed handle."""
     return e
@@ -1447,6 +1458,16 @@ def _as_callexpr_node(e: object) -> CallExpr:
 
 def _as_multiassignstmt_node(e: object) -> MultiAssignStmt:
     """See _as_ident_node: static MultiAssignStmt view of a boxed handle."""
+    return e
+
+
+def _as_comptimevar_node(e: object) -> ComptimeVarStmt:
+    """See _as_ident_node: static ComptimeVarStmt view of a boxed handle, so a
+    following `.target` read compiles to a direct `char *` field load.
+    Needed by `_parse_struct`'s `comptime_aliases` map: read straight off a
+    boxed loop var, `s.target` lowered through runtime dispatch and its
+    int64_t result was stored via `mojo_str_from_int`, so every alias key
+    became the pointer's decimal ADDRESS instead of the alias name."""
     return e
 
 
@@ -3161,7 +3182,18 @@ class Parser:
         # Capture them so member access can expand `self.NAME` to its expression
         # (this codegen does not monomorphize, so e.g. _words_size depends on the
         # runtime `size` field).
-        aliases = {s.target: s.value for s in body if isinstance(s, ComptimeVarStmt)}
+        # Explicit loop + static narrowing, not a comprehension: `s` inside
+        # `{s.target: s.value for s in body ...}` is an unknown-typed list
+        # element, so `s.target` lowered through runtime dispatch and its
+        # boxed int64_t result was stored as a decimal address key (see
+        # _as_comptimevar_node). `_cs` is statically ComptimeVarStmt, so
+        # `.target` compiles to a direct `char *` load on both backends.
+        aliases = {}
+        for _cs in body:
+            if not isinstance(_cs, ComptimeVarStmt):
+                continue
+            _cvnode = _as_comptimevar_node(_cs)
+            aliases[_cvnode.target] = _cvnode.value
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
@@ -3238,7 +3270,7 @@ class Parser:
                 if isinstance(value_expr, IntLiteral):
                     next_auto = value_expr.value + 1
             else:
-                aliases[member_name] = IntLiteral(next_auto)
+                aliases[member_name] = IntLiteral(next_auto, raw='')
                 next_auto += 1
         return StructDef(name=name, fields=[], methods=[], decorators=decs,
                          comptime_aliases=aliases)
@@ -3751,7 +3783,14 @@ class Parser:
                 self._advance()
                 # Check for empty subscript [] (dereference/special case)
                 if self._peek().kind == "RBRACKET":
-                    idx = IntLiteral(value=0)  # dummy index for empty subscript
+                    # `raw=''` explicit: the self-hosted compiled backend does
+                    # not materialize the `IntLiteral.raw: str = ''` dataclass
+                    # field default (its `_alloc_IntLiteral` class-attr seed is
+                    # dropped depending on which temp_gen emits it), so an
+                    # omitted `raw` dumps as `raw=None` where the reference has
+                    # `raw=''`. Every synthetic IntLiteral in this file passes
+                    # it explicitly for that reason.
+                    idx = IntLiteral(value=0, raw='')  # dummy index for empty subscript
                     self._advance()  # consume RBRACKET
                     expr = SubscriptExpr(obj=expr, index=idx)
                 else:
@@ -3776,7 +3815,7 @@ class Parser:
                                 self._parse_expr(0)
                             if self._peek().kind != "COMMA" and self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")
-                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0))
+                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0, raw=''))
                     # Check if this is a keyword-style bracket (func=value, attr=value)
                     elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
                         # Keyword arguments (may include positional args with dotted names and slice values).
@@ -3813,7 +3852,7 @@ class Parser:
                             if self._peek().kind == "COMMA": self._advance()
                             elif self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")
-                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0), attrs=_attrs)
+                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0, raw=''), attrs=_attrs)
                     else:
                         # Parse a comma-separated list of subscript items. Each
                         # item is a slice (start:stop:step) or a plain expression,
@@ -4210,9 +4249,15 @@ class Parser:
         t = self._peek()
         line, col = t.line, t.col
         if t.kind == "INT":
-            self._advance(); return IntLiteral(int(t.value, 0), line=line, col=col, raw=t.value)
+            # Strip numeric-literal underscore separators before `int(...)`:
+            # the compiled backend's `int(str, base)` lowers to a C
+            # `strtol`-style parse that STOPS at `_`, so `0x2000_0000`
+            # parsed as `0x2000` (8192) where the reference gives
+            # 536870912 (repro: std/test/builtin/test_print_long_string's
+            # `print("*" * 0x2000_0000)`).
+            self._advance(); return IntLiteral(int(t.value.replace('_', ''), 0), line=line, col=col, raw=t.value)
         if t.kind == "FLOAT":
-            self._advance(); return FloatLiteral(float(t.value), line=line, col=col)
+            self._advance(); return FloatLiteral(float(t.value.replace('_', '')), line=line, col=col)
         if t.kind == "IMAG":
             self._advance(); return ImagLiteral(float(t.value[:-1]), line=line, col=col)
         if t.kind == "KW" and t.value in ("True","False"):

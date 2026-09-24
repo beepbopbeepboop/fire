@@ -485,7 +485,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # set to make `f.name` resolve to `f`.
     is_dataclass_fields_loop = (
         isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.MemberExpr)
-        and isinstance(it.func.obj, gimple_ctypes.IdentExpr) and it.func.obj.name == 'dataclasses'
+        and gimple_ctypes._is_dataclasses_module_ref(it.func.obj)
         and it.func.member == 'fields')
     if is_dataclass_fields_loop:
         gen._dataclass_fields_vars.add(var)

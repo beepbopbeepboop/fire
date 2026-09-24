@@ -2560,6 +2560,24 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     # Plain C (this function is never `__GIMPLE`-tagged — see gen_module's
     # identically-shaped `main()` wrapper, which already freely uses
     # `if`/function calls/etc.), so a local `static` flag is safe here.
+    # Initialize this module's class-attribute defaults before ANY of its
+    # top-level statements run. `_mojo_classattr_init` is emitted (and
+    # forward-declared) exactly when this module emits struct definitions
+    # (`emit_struct_defs`), so this is the one place guaranteed to both see
+    # the definition and run before the first construction. Previously the
+    # call lived only in `gen_func`'s `node.name == 'main' and
+    # emit_struct_defs` branch — correct for a single-module program, but
+    # `main` belongs to the ROOT module while the struct table (and hence
+    # the init body) can live in an IMPORTED module whose TU has no `main`.
+    # The binary's whole-program build lands in exactly that shape: one
+    # `_mojo_classattr_init` is emitted, never called, so every class-attr
+    # default stays NULL/0. Reproduced with `IntLiteral.raw: str = ''`
+    # (the synthetic `s[byte=i]` index literal dumped `raw=None` instead
+    # of `raw=''`); harmless for most defaults only because a NULL
+    # list/dict renders as `[]`/`{}` anyway, but visible for `char *`.
+    _cai_call = []
+    if gen.emit_struct_defs:
+        _cai_call.append("  _mojo_classattr_init ();")
     lines = [
         *_dep_init_lines,
         f"void {fn_name} (void)",
@@ -2568,6 +2586,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
         "  static int _ran = 0;",
         "  if (_ran) return;",
         "  _ran = 1;",
+        *_cai_call,
         *_dep_init_calls,
         *gen.body_lines,
         "}",

@@ -660,10 +660,19 @@ def _struct_method_overload_ids(stmt: StructDef) -> list:
     `Counter___init__` / `Counter_inc` / `Counter_get`."""
     counts = {}
     for m in stmt.methods:
+        # `_as_funcdef_node`: same static-view requirement as the `stmt:
+        # StructDef` annotation above — `m` is an untyped list element, so
+        # `m.name`/`m.params` otherwise lower through runtime dispatch. When
+        # `.params` came back as the miss sentinel, EVERY overload of a name
+        # hashed `_param_sig_str(())` to the SAME id (`CStringSlice___
+        # init___cbf29c`, then `_cbf29c_2`/`_3` disambiguation) where the
+        # reference emits distinct `_d264de`/`_76edc3`/`_10ada0`.
+        m = _as_funcdef_node(m)
         counts[m.name] = counts.get(m.name, 0) + 1
     used: dict = {}
     ids = []
     for m in stmt.methods:
+        m = _as_funcdef_node(m)
         oid = ''
         if counts[m.name] > 1:
             oid = gimple_ctypes._method_overload_id(tuple(m.params or []), stmt.name, m.name)

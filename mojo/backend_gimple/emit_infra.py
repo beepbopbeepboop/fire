@@ -77,7 +77,9 @@ def _exc_type_id(gen, name: str) -> int:
     build looks like new content, forcing a full stdlib rebuild every
     time instead of a cache hit)."""
     if name not in gen._exc_type_ids:
-        gen._exc_type_ids[name] = (gimple_ctypes.zlib.crc32(name.encode()) & 0x7fffffff) or 1
+        # `_crc32_str`, NOT `zlib.crc32` — the compiled backend stubs zlib,
+        # so every exception class got the id `1`. See `_crc32_str`.
+        gen._exc_type_ids[name] = (gimple_ctypes._crc32_str(name) & 0x7fffffff) or 1
     return gen._exc_type_ids[name]
 
 

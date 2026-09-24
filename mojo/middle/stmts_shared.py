@@ -199,7 +199,12 @@ def _assign_target(gen, tgt, et, ev):
         if tgt.name not in gen.var_types:
             hint = gen._inferred_var_types.get(gen.current_func_name, {}).get(tgt.name) \
                 if hasattr(gen, '_inferred_var_types') else None
-            gen._declare_var(tgt.name, hint or et)
+            # `or 'int64_t'` fallback: an unpack element whose real type could
+            # not be resolved arrives as '' here, and declaring a local with
+            # the EMPTY type produced `a = ()_t5;` (an empty cast — not even
+            # valid C) at the later assignment. Repro:
+            # std/test/builtin/test_int.mojo's `var a, b = divmod(7, 3)`.
+            gen._declare_var(tgt.name, hint or et or 'int64_t')
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
         # A `MojoBoundMethod *` value stored into a local whose declared C
