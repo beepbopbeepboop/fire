@@ -250,6 +250,34 @@ was int64_t and the sanitize loop left every external_call name EMPTY
 (int64_t *);`, repro `std/sys/arg.mojo`); explicit if/else + `_as_str`.
 clean 155 -> 159, CI-DIFF 607 -> 603.
 
+**Continuation 5 — a downstream session committed `ef1632a` ("Fix self-host
+call and integer literal lowering") on top; made its integer-literal
+lowering self-host-safe (clean 155 -> 157).** `ef1632a` added
+`_signed_int64`/`_signed_int64_c_literal` and used them in
+`_lower_IntLiteral`/`_extract_init_expr`/`_cpp_expr`, but those helpers used
+64-bit int literals (`0xFFFFFFFFFFFFFFFF`, `0x8000000000000000`,
+`-0x8000000000000000`) — which the compiled backend turns into `-1` (the rule
+`ef1632a`'s own `determinism_trace` note documents) — AND the parser still
+called `int(text, 0)`, which lowers to a strtoll-style parse that SATURATES
+on overflow. Net effect: large literals came out INT64_MAX natively
+(`-8446744073709551616LL` vs `9223372036854775807LL`; repro
+`std/collections/string/_parsing_numbers/constants`), and 3 `.ast` diffs
+appeared from the `raw`-decimal repr special-case.
+- `_wrap_signed64` (new): in-range test on the DECIMAL TEXT (int32 /
+  short-string ops only); the `1 << 64` modulo branch is unreachable
+  self-hosted. `_signed_int64` delegates; `_signed_int64_c_literal` finds
+  INT64_MIN by string.
+- `_parse_int_literal` (new): decimal/0x/0o/0b with underscores, accumulated
+  `v = v*base + digit` (wraps naturally in the self-hosted int64; exact
+  bignum under CPython then wrapped), using `ord(body[i:i+1])` rather than a
+  possibly-ambiguous `body[i]` subscript.
+- Dropped the `IntLiteral.value` repr special-case that printed `raw`'s exact
+  decimal (now that `.value` is signed-wrapped on BOTH sides, the reference
+  prints the wrapped int too) — fixed the 3 AST-DIFFs.
+
+**State after continuation 5: clean=157, CI-DIFF=605, SELFHOST-CRASHED=0,
+AST/TOK-DIFF=0.**
+
 ## Status (2026-09-21, ninth entry — SIX more self-hosted-only bugs fixed; `check-ab-native` now 30/30 (was 25/30); `make bootstrap` verify failures 14 → 9; whole-program first-diff moved 52 KiB → 143 KiB; the remaining divergences are the documented architectural classes, not these bugs)
 
 Picked up the WIP `fire.py`/`ownership_destruct.py` changes and worked the
