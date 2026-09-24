@@ -243,6 +243,13 @@ confirmed.
 **Final state after continuation 3: 765 files — clean=155, CI-DIFF=607,
 SELFHOST-CRASHED=0, AST/TOK-DIFF=0, SHIM-FAILED=2, BOTH-FAILED=1.**
 
+**Continuation 4 (small):** `_lower_external_call` read the name via a
+ternary that unified the reflective int64_t `.value` with `None`, so `cname`
+was int64_t and the sanitize loop left every external_call name EMPTY
+(`extern void  (int64_t *);` vs `extern void KGEN_CompilerRT_GetArgV
+(int64_t *);`, repro `std/sys/arg.mojo`); explicit if/else + `_as_str`.
+clean 155 -> 159, CI-DIFF 607 -> 603.
+
 ## Status (2026-09-21, ninth entry — SIX more self-hosted-only bugs fixed; `check-ab-native` now 30/30 (was 25/30); `make bootstrap` verify failures 14 → 9; whole-program first-diff moved 52 KiB → 143 KiB; the remaining divergences are the documented architectural classes, not these bugs)
 
 Picked up the WIP `fire.py`/`ownership_destruct.py` changes and worked the
