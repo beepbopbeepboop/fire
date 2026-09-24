@@ -233,14 +233,28 @@ class LayoutSolver:
         return result
 
     def _has_try(self, stmts: list) -> bool:
+        # Explicit loops, NOT `any((self._has_try(eb) for _, eb in
+        # node.elifs))` and careful with `node.else_body` truthiness: a bare
+        # generator expression whose body is empty on the compiled path, and
+        # a tuple-unpacking genexpr, are both established self-hosted traps
+        # (see tools/audit_determinism.py). The genexpr form returned the
+        # garbage non-list 1, so the enclosing `mojo_list_len(0x1)` SIGSEGV'd
+        # while compiling myinterpreter.py/module_loader.py.
         for node in stmts:
             if isinstance(node, TryStmt):
                 return True
             if isinstance(node, IfStmt):
-                if self._has_try(node.then_body) or any((self._has_try(eb) for _, eb in node.elifs)) or (node.else_body and self._has_try(node.else_body)):
+                if self._has_try(node.then_body):
                     return True
-            if isinstance(node, (WhileStmt, ForStmt)) and self._has_try(node.body):
-                return True
+                for _eb_i in range(len(node.elifs)):
+                    if self._has_try(node.elifs[_eb_i][1]):
+                        return True
+                if node.else_body:
+                    if self._has_try(node.else_body):
+                        return True
+            if isinstance(node, (WhileStmt, ForStmt)):
+                if self._has_try(node.body):
+                    return True
         return False
 
 class DispatchTable:
@@ -729,7 +743,16 @@ class DispatchSolver:
         if ptype in self.struct_field_types:
             return f'{ptype} *'
         if '.' in ptype:
-            if any((ast_type in ptype for ast_type in ['Module', 'BinaryOp', 'UnaryOp', 'AssignStmt', 'IfStmt', 'WhileStmt', 'ForStmt', 'ReturnStmt', 'FunctionDef', 'StructDef', 'BreakStmt', 'ContinueStmt', 'PassStmt', 'ImportStmt', 'FromImportStmt', 'ExprStmt', 'TryStmt', 'WithStmt', 'BoolLiteral', 'IntLiteral', 'FloatLiteral', 'StringLiteral', 'NoneLiteral', 'ListLiteral', 'DictLiteral', 'SetLiteral', 'TupleLiteral', 'IdentExpr', 'MemberExpr', 'SubscriptExpr', 'SliceExpr', 'CallExpr', 'BinaryOp', 'UnaryOp', 'TernaryExpr'])):
+            _ast_types = ['Module', 'BinaryOp', 'UnaryOp', 'AssignStmt', 'IfStmt', 'WhileStmt', 'ForStmt', 'ReturnStmt', 'FunctionDef', 'StructDef', 'BreakStmt', 'ContinueStmt', 'PassStmt', 'ImportStmt', 'FromImportStmt', 'ExprStmt', 'TryStmt', 'WithStmt', 'BoolLiteral', 'IntLiteral', 'FloatLiteral', 'StringLiteral', 'NoneLiteral', 'ListLiteral', 'DictLiteral', 'SetLiteral', 'TupleLiteral', 'IdentExpr', 'MemberExpr', 'SubscriptExpr', 'SliceExpr', 'CallExpr', 'TernaryExpr']
+            # Explicit loop, NOT `any((ast_type in ptype for ast_type in
+            # [...]))` — the genexpr erases to the garbage non-list 1 on the
+            # self-hosted path (mojo_list_len(0x1) SIGSEGV).
+            _has_ast_type = False
+            for _at0 in _ast_types:
+                if _at0 in ptype:
+                    _has_ast_type = True
+                    break
+            if _has_ast_type:
                 return 'int'
             return 'void *'
         if '|' in ptype:
@@ -766,7 +789,15 @@ class DispatchSolver:
 
     def get_patterns_for_function(self, func_name: str) -> list[DispatchPattern]:
         """Get all dispatch patterns used in a specific function."""
-        return [p for p in self.dispatch_patterns.values() if any((cs for cs in p.call_sites))]
+        _out = []
+        for _p0 in self.dispatch_patterns.values():
+            _has_cs = False
+            for _cs0 in _p0.call_sites:
+                _has_cs = True
+                break
+            if _has_cs:
+                _out.append(_p0)
+        return _out
 
     def get_possible_callees(self, pattern_id: str) -> set:
         """Get all functions that could be called via a dispatch pattern."""
@@ -859,14 +890,27 @@ class FunctionCompilability:
         for stmt in stmts:
             if isinstance(stmt, FunctionDef):
                 if stmt.return_type is not None:
-                    has_all_params = all((ptype is not None for _, ptype in stmt.params))
+                    _allp = True
+                    for _pp0 in stmt.params:
+                        if _pp0[1] is None:
+                            _allp = False
+                            break
+                    has_all_params = _allp
                     if has_all_params:
                         candidates.append((stmt.name, stmt, False))
             elif isinstance(stmt, StructDef):
                 for method in stmt.methods:
                     if method.return_type is not None:
-                        non_self_params = [(pname, ptype) for pname, ptype in method.params if pname != 'self']
-                        has_all_params = all((ptype is not None for _, ptype in non_self_params))
+                        non_self_params = []
+                        for _mp0 in method.params:
+                            if _mp0[0] != 'self':
+                                non_self_params.append((_mp0[0], _mp0[1]))
+                        _allp2 = True
+                        for _pp1 in non_self_params:
+                            if _pp1[1] is None:
+                                _allp2 = False
+                                break
+                        has_all_params = _allp2
                         if has_all_params:
                             full_name = f'{stmt.name}_{method.name}'
                             candidates.append((full_name, method, True))
@@ -1015,7 +1059,12 @@ class TypePromotionSolver:
             elif 'float' in var_type.lower() or 'double' in var_type.lower():
                 float_types.add(var_type)
         if int_types:
-            promoted_int = 'int64_t' if any(('64' in t for t in int_types)) else 'int'
+            _has64 = False
+            for _t0 in int_types:
+                if '64' in _t0:
+                    _has64 = True
+                    break
+            promoted_int = 'int64_t' if _has64 else 'int'
             for var_name in list(self.promoted_types.keys()):
                 if 'int' in self.promoted_types[var_name].lower():
                     self.promoted_types[var_name] = promoted_int

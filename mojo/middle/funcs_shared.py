@@ -140,7 +140,11 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
       func_param_types, 'MojoList *' for emitted declarations), and the rest
       collapse into it.
     """
-    has_kw = any(pn.startswith('**') for pn, _ in (params or []))
+    has_kw = False
+    for _hk0 in (params or []):
+        if _hk0[0].startswith('**'):
+            has_kw = True
+            break
     out = []
     seen_vararg = False
     for i, (pn, pt) in enumerate(params or []):
@@ -223,7 +227,12 @@ def _note_vararg_trailing_param_types(gen, s) -> None:
     this line just computed avoids re-deriving anything."""
     if not isinstance(s, gimple_ctypes.FunctionDef) or not s.params:
         return
-    if not any(pn.startswith('**') for pn, _ in s.params):
+    _has_kw2 = False
+    for _hk1 in s.params:
+        if _hk1[0].startswith('**'):
+            _has_kw2 = True
+            break
+    if not _has_kw2:
         _last_pn = s.params[-1][0]
         if not _last_pn.startswith('*'):
             _sig = gen.func_param_types.get(s.name)

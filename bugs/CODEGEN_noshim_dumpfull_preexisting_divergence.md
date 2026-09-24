@@ -3141,3 +3141,118 @@ Two `.o`/`.ci` scratch files removed; no debug/trace leftovers in the tree.
    regression checked; `name_alias_strs` was net-negative on its own).
 4. Then `make check-native-dumpfull` (full 33.7 MB byte-identity) and
    `make bootstrap` verify.
+
+## Continuation 20 — `.ast` divergence triage for the *.py files
+
+Follow-up to the `.tok` result (tokenization solid). Built the restructured
+tree (mojo/middle + mojo/backend_gimple), regenerated the sweep, and diffed
+every `.ast` shim-vs-self-host: 763 files, **374 `.ast` diffs**. First-diff
+classification (the `.ast` is `repr(ast)`, so these are REPR/reflection
+differences, not necessarily parser differences):
+
+| count | first-diff class | PY | NC |
+|------:|------------------|----|----|
+| 180 | `param_convs` value | `{'b': 'mut'}` | `{'b': None}` |
+| 130 | `raw=` on IntLiteral | `raw=''` | `raw=None` |
+|  24 | truncated NC (prefix of PY) | full | cut mid-node |
+|   9 | `kwargs` | full | differs |
+|   4+ | `comptime_aliases` | full | differs |
+|   3 | `yield_bearing_node_ids` | `frozenset({<ADDRESSES>})` | `''` |
+|   2 | `is_bytes` bytes literal | `'\x00missing:'` | `'missing:'` |
+
+Notable:
+- `yield_bearing_node_ids` prints a **frozenset of `id()` addresses** in the
+  PY reference — the .ast is ADDRESS-DEPENDENT (non-reproducible) for any
+  file with a generator on the reference side, and empty (`''`) natively.
+- the 24 "truncated" cases mean the native `.ast` WRITE stops early (a raw
+  NUL in the rendered repr, or a mid-write failure) — the native file is a
+  strict prefix of the reference's.
+- `is_bytes`: a `b'\x00...'` bytes literal loses its leading NUL natively.
+- `raw=''` vs `raw=None`: an empty string field renders as NULL natively
+  (empty-string vs NULL distinction).
+
+`fire_compiler._canon_conv` was the first suspect for the `param_convs`
+class (`cls._CONV_CANON.get(conv, conv)` — class-attribute dict read erases
+to int64_t, so `.get` hit the scalar stub) and was rewritten to explicit
+`==` comparisons — but that alone did NOT change the count, so the value is
+lost by the time it is stored (the parser's `conv`, or the dict store), not
+only at canonicalisation. Next step: file-trace `param_convs` immediately
+after `_parse_funcdef`'s param loop on a file with a `mut` parameter, on
+both sides, to decide parser-vs-repr.
+
+## Continuation 21 — AST-based audit tooling + genexpr crash-class fixes
+
+Built `tools/audit_selfhost_ast.py` (real Python `ast`, at scale) for the
+self-host-unsafe syntactic shapes. Counts over the compiler's own source:
+`any/all(<genexpr>)` 102, genexpr-tuple-target 41, listcomp-unpack 37,
+dictcomp-unpack 24, for-clause-tuple 438. These are the crash class
+(`mojo_list_len(0x1)`), not cosmetic.
+
+Fixes landed (gate-green):
+- `mojo/middle/solvers.py`: `_has_try` genexpr (`any(... for _, eb in ...)`)
+  -> explicit loops; plus 4 more `any/all(genexpr)` sites.
+- `mojo/middle/funcs_shared.py`: two `any(pn.startswith('**') for pn, _ in
+  ...)` -> explicit loops.
+- `mojo/middle/infra_infer.py`: `all(...)` genexprs -> explicit loops
+  (this one, done wrong the first time, briefly broke the whole build — the
+  accumulator must be computed AFTER the `isinstance(it, ...)` guard, since
+  `it.elements` does not exist on every `it`).
+- `fire_compiler.py`: `*args` parser fix (variadic was dropped — the
+  `*args` branch was mis-indented inside the `while _CONV_KWS` loop),
+  `_canon_conv` explicit comparisons + internal `_as_str` re-view.
+- `mojo/backend_gimple/module_gen.py`: `_mojo_repr_dict` now renders a
+  `kind==2` (mojo_dict_set_str) value via `mojo_repr_str` instead of
+  reading its pointer as an int.
+
+Effect: SELFHOST-CRASHED 55 -> 24, CI-DIFF 634 -> 665, `.ast` diffs
+374 -> 351, `.ast` truncations 24 -> 1. `fire_compiler`/`myinterpreter`/
+`module_loader` all `--dump` clean; check-gimple 308/0, check-selfhost 1/0,
+check-modcache 81/0, check-linkmode 3/0, check-no-new-casts 28.
+
+STILL OPEN — the `param_convs` `.ast` class (180 files). Evidence gathered:
+`_canon_conv('mut')` returns `'mut'` (file trace `ret=[mut]`); emitted C is
+`mojo_dict_set_str(param_convs, pname, _t214)` with `_t214 = Parser__canon_conv(...)`
+returning `char *`; the emitted `_mojo_repr_dict` HAS the `kind==2` branch —
+yet the native `.ast` still prints `param_convs={'x': ''}`. So the value is
+lost between a correct store and a correct repr; the next step is a minimal
+native repro of `d["x"]="mut"; repr(d)` (I could not drive `.mojo` `Dict`
+from the CLI — `No handler for FromImportStmt`) or an lldb watch on the
+`_DictSlot` written by that `mojo_dict_set_str` call.
+
+## Continuation 22 — `param_convs` class SOLVED (classmethod-called-via-self
+argument mis-binding); `.ast` diffs 351 -> 280
+
+Root cause of the 180-file `param_convs={'x': ''}` class, found by calling
+the compiled symbol directly from lldb
+(`_fire_compiler_Parser__canon_conv(0, "mut")` -> `"mut"`, correct), then
+reading the emitted call site:
+
+    _t538 = (int64_t)conv;          /* caller's conv, NON-null */
+    _t542 = (char *)(void *)0;      /* <-- the classmethod's 2nd arg = NULL */
+    _t537 = Parser__canon_conv(_t538, _t542);
+
+A `@classmethod` invoked through an INSTANCE (`self._canon_conv(conv)`) was
+lowered with the receiver passed as `cls`, so the real first argument landed
+in the `cls` slot and the `conv` parameter got NULL. Every
+`param_convs[pname] = self._canon_conv(conv)` therefore stored the empty
+string. Qualifying the call at the source —
+`_as_str(Parser._canon_conv(conv))` (class-name receiver, which the
+classmethod-resolution path handles correctly) — fixes all three call sites.
+
+Also in this pass:
+- `fire_compiler._canon_conv` gained a `conv: str` annotation (so the
+  parameter is typed `char *` not `int64_t`) and a separate `_cv` local;
+  the emitted comparison previously re-read the erased PARAMETER
+  (`_t5 = (int64_t)conv; mojo_cstr_cmp((char*)conv, ...)`) even after the
+  `conv = _as_str(conv)` reassignment — a fresh local name avoids that.
+
+Effect: the `param_convs` `.ast` class is **180 -> 0**; total `.ast` diffs
+**351 -> 280**. Remaining classes: `raw=` 193 (a repr nit: an omitted
+`IntLiteral.raw` prints `None` vs the reference's `''`; the alloc path that
+sets it is correct in the single-file config, so it is a different
+construction/repr path), `kwargs` 10, `comptime_aliases` ~15, `yield_bearing`
+3, `is_bytes` 2.
+
+Gate green (check-gimple 308/0, check-selfhost 1/0, check-modcache 81/0,
+check-linkmode 3/0, check-no-new-casts 28); the three self-host files dump
+clean. Sweep: clean=58, CI-DIFF=665, SELFHOST-CRASHED=24, AST/TOK-DIFF=13.

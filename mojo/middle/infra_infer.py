@@ -632,8 +632,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                                 'basename', 'splitext', 'split', 'splitdrive',
                                 'splitroot', 'expanduser',
                                 'abspath', 'dirname', 'exists', 'join')):
-                        for i, arg in enumerate(expr.args):
-                            if (isinstance(arg, gimple_ctypes.IdentExpr)
+                         for i, arg in enumerate(expr.args):
+                             if (isinstance(arg, gimple_ctypes.IdentExpr)
                                     and _as_ident_node(arg).name == param_name):
                                 function_calls.append('__os_path_arg' + _FC_SEP + str(i))
                 scan_expr(expr.func)
@@ -722,12 +722,17 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # an all-string-literal tuple/list/set literal is a
                         # string, so the loop target is a string variable (a
                         # dict-key source for `param[name]` subscripts).
-                        if (isinstance(it, (gimple_ctypes.TupleExpr,
-                                            gimple_ctypes.ListExpr,
-                                            gimple_ctypes.SetExpr))
-                                and it.elements
-                                and all(isinstance(el, gimple_ctypes.StringLiteral)
-                                        for el in it.elements)):
+                        _ii_all0 = False
+                        if isinstance(it, (gimple_ctypes.TupleExpr,
+                                           gimple_ctypes.ListExpr,
+                                           gimple_ctypes.SetExpr)):
+                            if it.elements:
+                                _ii_all0 = True
+                                for _iel0 in it.elements:
+                                    if not isinstance(_iel0, gimple_ctypes.StringLiteral):
+                                        _ii_all0 = False
+                                        break
+                        if _ii_all0:
                             tgt = node.target
                             if isinstance(tgt, gimple_ctypes.IdentExpr):
                                 str_vars.add(tgt.name)
@@ -921,12 +926,15 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # unresolvable sinks make this signal silent (no flip),
                     # never wrong. Motivating repro in aug_member_targets's
                     # declaration above.
+                    _aug_all0 = True
+                    for _amt0 in aug_member_targets:
+                        if not (_amt0[0] == 'self'
+                                and gen.struct_field_types.get(owner_struct, {}).get(_amt0[1]) == 'char *'):
+                            _aug_all0 = False
+                            break
                     _aug_into_str = (
                         bool(aug_member_targets) and owner_struct is not None
-                        and all(
-                            _root == 'self'
-                            and gen.struct_field_types.get(owner_struct, {}).get(_member) == 'char *'
-                            for _root, _member in aug_member_targets))
+                        and _aug_all0)
                     if is_string_method or is_char_compared or _aug_into_str:
                         inferred[pname] = 'char *'
                     elif is_dict_method:

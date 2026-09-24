@@ -2642,8 +2642,38 @@ class Parser:
     # older synonym and pass through unchanged.
     _CONV_CANON = {'inout': 'mut', 'borrowed': 'read', 'var': 'owned'}
     @classmethod
-    def _canon_conv(cls, conv):
-        return cls._CONV_CANON.get(conv, conv)
+    def _canon_conv(cls, conv: str):
+        # `cls._CONV_CANON.get(conv, conv)` was the original form: a
+        # CLASS-attribute dict read erases to int64_t on the self-hosted
+        # path, so the following `dict.get(...)` fell to the scalar-receiver
+        # stub and returned 0 for EVERY convention — the single largest .ast
+        # divergence class (`param_convs={'x': None}` vs the reference's
+        # `'mut'`/`'read'`/`'owned'`).
+        #
+        # Explicit `==` comparisons alone are NOT enough: `conv` arrives
+        # BOXED (its callers pass `_as_str(self._advance().value)` through a
+        # local, and the two-argument classmethod erases it) — a boxed
+        # int64_t compared against a `char *` string literal is the
+        # constant-FALSE static guard, so `conv == 'inout'` was always
+        # False and the function fell through to `return conv`, whose own
+        # boxed return then rendered as `''` in `param_convs`. Re-view the
+        # argument with `_as_str` INSIDE this one place so every comparison
+        # and the returned value are real `char *`.
+        # A SEPARATE local name (`_cv`), not `conv = _as_str(conv)` + reuse:
+        # the codegen re-read the PARAMETER `conv` (erased int64_t) in every
+        # comparison below even after the reassignment (`_t5 = (int64_t)conv;
+        # _t6 = (char*)conv; mojo_cstr_cmp(_t6, ...)` in the emitted .ci), so
+        # `conv == 'inout'` was still the constant-FALSE static guard. A
+        # fresh local that is only ever written from `_as_str(...)` keeps the
+        # real `char *` type through every use.
+        _cv = _as_str(conv)
+        if _cv == 'inout':
+            return 'mut'
+        if _cv == 'borrowed':
+            return 'read'
+        if _cv == 'var':
+            return 'owned'
+        return _cv
     def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
@@ -2680,7 +2710,11 @@ class Parser:
             while self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
                 if self._peek(1).kind in ("COLON", "ASSIGN", "COMMA", "RPAREN"):
                     break
-                conv = self._advance().value
+                # `conv` is captured across the rest of the param loop
+                # and used much later (param_convs[pname]=...), by which
+                # point a bare `.value` read lost its char* (emptied to '');
+                # pin the str view at capture.
+                conv = _as_str(self._advance().value)
             # Skip positional-only parameter separator /
             if self._peek().kind == "OP" and self._peek().value == "/":
                 self._advance()
@@ -2696,7 +2730,7 @@ class Parser:
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     params.append(("**" + pname, ptype))
-                    if conv is not None: param_convs[pname] = self._canon_conv(conv)
+                    if conv is not None: param_convs[pname] = _as_str(Parser._canon_conv(conv))
                     if self._peek().kind == "COMMA": self._advance()
                     while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
                         self._advance()
@@ -2706,32 +2740,64 @@ class Parser:
                 self._advance()
                 # Skip lifetime parameters if present after *
                 if self._peek().kind == "LBRACKET": self._skip_bracketed()
-                # Handle convention keywords after * (e.g., *, var x: Int)
+                # An optional convention keyword may follow the `*`
+                # (`*, var x: Int`). Captured early, used later — pin the
+                # str view at capture (a bare `.value` read lost its char*).
+                conv = None
                 while self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
                     if self._peek(1).kind in ("COLON", "ASSIGN", "COMMA", "RPAREN"):
                         break
-                    conv = self._advance().value
-                # If followed by NAME/KW, it's a variadic parameter (*args) or keyword-only param
+                    conv = _as_str(self._advance().value)
+                # After the optional convention keyword: a NAME/KW is either a
+                # VARIADIC parameter (`*args` -> packed into one MojoList*) or
+                # a keyword-only param (`*, x`); the variadic form is
+                # distinguished by `conv is None` (a convention keyword can
+                # only precede a keyword-only param, never a `*args`). An
+                # ASSIGN on the variadic form is impossible in Python syntax.
+                #
+                # This branch used to sit INSIDE the `while _CONV_KWS` loop
+                # body, so a BARE `*args` (no convention keyword) never
+                # reached it: the `while` was never entered, the `*` was
+                # consumed as a separator, and `args` was left to be read as
+                # the NEXT parameter name — which for `def _git(*args):` is
+                # `RPAREN`, ending the loop with `params == []`. The closure
+                # then emitted as `(<void>)` while every call site still
+                # passed the loose args ("too many arguments to function
+                # 'version__git'; expected 0, have 3"). See version.py's own
+                # nested `def _git(*args)`.
                 t = self._peek()
                 if t.kind in ("NAME", "KW"):
-                    if t.kind == "NAME": pname = self._advance().value
-                    else: pname = self._advance().value
+                    pname = self._advance().value
                     ptype = None
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
+                    if conv is None:
+                        # `*args` — the variadic parameter
+                        if self._peek().kind == "ASSIGN":
+                            self._advance()
+                            default_expr = self._parse_expr(0)
+                            param_has_default[pname] = True
+                            param_defaults[pname] = default_expr
+                        params.append(("*" + pname, ptype))
+                        if self._peek().kind == "COMMA": self._advance()
+                        while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
+                            self._advance()
+                        continue
+                    # keyword-only param after a bare star (`*, var x`)
                     if self._peek().kind == "ASSIGN":
                         self._advance()
                         default_expr = self._parse_expr(0)
                         param_has_default[pname] = True
                         param_defaults[pname] = default_expr
-                    params.append(("*" + pname, ptype))
-                    if conv is not None: param_convs[pname] = self._canon_conv(conv)
+                    params.append((pname, ptype))
+                    param_convs[pname] = _as_str(Parser._canon_conv(conv))
+                    if seen_bare_star: kwonly.append(pname)
                     if self._peek().kind == "COMMA": self._advance()
                     while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
                         self._advance()
                     continue
                 # Otherwise it's a separator: skip following comma and check for end
-                elif self._peek().kind == "COMMA": self._advance()
+                if self._peek().kind == "COMMA": self._advance()
                 seen_bare_star = True
                 if self._peek().kind == "RPAREN": break
                 # Continue to next parameter (convention keywords might follow)
@@ -2755,7 +2821,7 @@ class Parser:
                 param_has_default[pname] = True
                 param_defaults[pname] = default_expr
             params.append((pname, ptype))
-            if conv is not None: param_convs[pname] = self._canon_conv(conv)
+            if conv is not None: param_convs[pname] = _as_str(Parser._canon_conv(conv))
             if seen_bare_star: kwonly.append(pname)
             # Skip trailing comma and newlines
             if self._peek().kind == "COMMA": self._advance()
