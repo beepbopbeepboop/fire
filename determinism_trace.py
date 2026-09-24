@@ -111,7 +111,10 @@ def note_str(s: str) -> int:
 # codegen materialises large literals specially) — a multiply-based hash
 # therefore produced DIFFERENT streams for the same string (caught by the
 # facility's own smoke test). shift/add/xor with a 63-bit mask is identical.
-_MASK63 = 0x7FFFFFFFFFFFFFFF
+# 31-bit, matching `_MASK`: the compiled backend turns any literal
+# wider than `int` into -1 (see the portability note above), so a 64-bit
+# mask here overflowed and produced a warning + wrong values.
+_MASK63 = 0x7FFFFFFF
 
 
 def str_hash(s: str) -> int:

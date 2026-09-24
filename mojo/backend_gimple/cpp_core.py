@@ -29,7 +29,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize,
-    _as_str,
+    _as_str, _signed_int64, _signed_int64_c_literal,
 )
 import regex_compile
 import mlir
@@ -1195,7 +1195,7 @@ def _cpp_list_literal_arg_expr(gen, lit):
         if isinstance(el, gimple_ctypes.StringLiteral):
             kinds.append(('str', gen._cpp_expr(el)))
         elif isinstance(el, gimple_ctypes.IntLiteral):
-            kinds.append(('int', str(el.value)))
+            kinds.append(('int', gen._cpp_expr(el)))
         elif isinstance(el, gimple_ctypes.FloatLiteral):
             kinds.append(('flt', gen._cpp_expr(el)))
         else:
@@ -1390,7 +1390,8 @@ def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: s
 
 def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.IntLiteral):
-        return str(e.value)
+        value = _signed_int64(e.value)
+        return _signed_int64_c_literal(value)
     if isinstance(e, gimple_ctypes.FloatLiteral):
         s = repr(e.value)
         if '.' not in s and 'e' not in s.lower():

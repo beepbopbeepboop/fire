@@ -1842,7 +1842,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # first-decl-wins `char *` (a sibling `_gen_for_dict` branch declared
     # it for the dict-iteration arm), so treat any var-types local as a
     # fnptr call rather than guessing it names a C function.
-    if (fname_raw in gen.var_types) or (_fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool')):
+    if (fname_raw in gen.var_types) or (
+            _fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool')
+            and fname_raw not in gen._mangled_funcs
+            and fname_raw not in gen.func_return_types):
         return gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
 
     return gen._lower_named_call(fname_raw, node)

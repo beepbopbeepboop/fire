@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 _WALK_AST_MAX_DEPTH = 900
 
@@ -415,7 +415,8 @@ def _local_literal_ctype(value) -> str | None:
     actually special-cases via a bare lowered literal are recognized here;
     anything else returns None (not a guess)."""
     if isinstance(value, IntLiteral):
-        return 'uint64_t' if value.value > 9223372036854775807 else 'int'
+        value64 = _signed_int64(value.value)
+        return 'int' if -0x80000000 <= value64 <= 0x7FFFFFFF else 'int64_t'
     if isinstance(value, FloatLiteral):
         return 'double'
     if isinstance(value, BoolLiteral):

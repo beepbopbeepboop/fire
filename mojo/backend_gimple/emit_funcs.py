@@ -917,7 +917,7 @@ def _selfhost_scan_gimplegen_extra_fields(_src_dir=None) -> dict[str, str]:
     _fields: dict[str, str] = {}
     for _f in _files:
         try:
-            _mod = ast_rewriter.rewrite(
+            _mod: list = ast_rewriter.rewrite(
                 Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
         except Exception:
             continue

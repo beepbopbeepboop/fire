@@ -44,13 +44,9 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     cf = getattr(gen, '_current_filename', None)
     if not cf or not cf.endswith('.py'):
         return False
-    _base = gimple_ctypes.os.path.basename(cf)
-    _parts = gimple_ctypes.os.path.normpath(cf).split(gimple_ctypes.os.sep)
-    if not (_base.startswith('gimple') or 'mojo' in _parts):
-        return False
     cur_abs = gimple_ctypes.os.path.abspath(cf)
     sd = gimple_codegen._SELFHOST_DIR
-    # Path-INDEPENDENT sibling signal (`fire_compiler.py` next to the file),
+    # Path-INDEPENDENT sibling signal (`fire_compiler.py` at the tree root),
     # mirroring gimple_module_gen._is_selfhost_source_dir. The bare
     # `_SELFHOST_DIR` equality/prefix check alone is FALSE when the compiler
     # is compiled from a DIFFERENT checkout than the one acting as driver —
@@ -62,9 +58,26 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     # `_mojo_dispatch_setattr` on a bogus pointer. Re-derived locally rather
     # than imported cross-module (see _is_selfhost_source_dir's own docstring
     # for the self-hosted resolution gap that forces the duplication).
-    if not (cur_abs == sd or cur_abs.startswith(sd + gimple_ctypes.os.sep)
-            or gimple_ctypes.os.path.isfile(gimple_ctypes.os.path.join(
-                gimple_ctypes.os.path.dirname(cur_abs), 'fire_compiler.py'))):
+    _rcur = gimple_ctypes.os.path.realpath(cur_abs)
+    _rsd = gimple_ctypes.os.path.realpath(sd)
+    _in_shtree = (cur_abs == sd or cur_abs.startswith(sd + gimple_ctypes.os.sep)
+                  or _rcur == _rsd or _rcur.startswith(_rsd + gimple_ctypes.os.sep))
+    if not _in_shtree:
+        # Walk up to the tree root: a genuine compiler-source tree is the
+        # one holding a `fire_compiler.py` next to the file or at any
+        # ancestor. This recognizes a SUBDIRECTORY (`mojo/middle`,
+        # `mojo/backend_gimple`) reached through a SYMLINKED source root,
+        # where `_SELFHOST_DIR` (realpath) and `cur_abs` (symlink path)
+        # never prefix-match. Same defect and same fix as gimple_module_gen.
+        # _is_selfhost_source_dir.
+        _rparts = _rcur.split(gimple_ctypes.os.sep)
+        for _p in range(len(_rparts), 0, -1):
+            _cand = gimple_ctypes.os.sep.join(_rparts[:_p])
+            if gimple_ctypes.os.path.isfile(gimple_ctypes.os.path.join(
+                    _cand, 'fire_compiler.py')):
+                _in_shtree = True
+                break
+    if not _in_shtree:
         return False
     if module_name in getattr(gen, '_module_alias_names', ()):
         _info = (getattr(gen, 'imported_symbols', {}) or {}).get(module_name) or {}
@@ -81,18 +94,9 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # --- dependency _SELFHOST_SIBLING_MODULE_PREFIXES (from gimple_gen_methods.py) ---
-_SELFHOST_SIBLING_MODULE_PREFIXES = ('gimple_', 'mojo.',
-                                     'ast_rewriter', 'mlir',
-                                     'regex_compile', 'module_loader',
-                                     'ownership_destruct', 'fire_compiler',
-                                     # gated determinism-trace facility
-                                     # (see determinism_trace.py): without
-                                     # this, `import determinism_trace as
-                                     # _dtrace` in the resolve backend
-                                     # resolved to a bare module-GLOBAL
-                                     # int64_t named `_dtrace` instead of the
-                                     # module, so `_dtrace.enabled()` was a
-                                     # scalar stub returning 0 and the trace
-                                     # never fired.
-                                     'determinism_trace')
+_SELFHOST_SIBLING_MODULE_PREFIXES = (
+    'gimple_', 'mojo.', 'ast_rewriter', 'mlir', 'regex_compile',
+    'module_loader', 'ownership_destruct', 'fire_compiler',
+    'determinism_trace', 'imports', 'elaborate', 'monomorphize', 'comptime',
+    'cas', 'build_stdlib_dylib', 'driver')
 

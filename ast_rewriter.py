@@ -723,7 +723,7 @@ def _rewrite_node(node, trie):
     return node
 
 
-def rewrite_module(stmts, trie):
+def rewrite_module(stmts, trie) -> list:
     """Bottom-up rewrite of every statement in a parsed module, in place."""
     for i in range(len(stmts)):
         stmts[i] = _rewrite_node(stmts[i], trie)
@@ -910,12 +910,12 @@ RULES = [
 TRIE = build_trie(RULES)
 
 
-def rewrite(stmts):
+def rewrite(stmts) -> list:
     """Entry point: run the full registered ruleset over a parsed module."""
     return rewrite_module(stmts, TRIE)
 
 
-def rewrite_node(node):
+def rewrite_node(node) -> object:
     """Entry point for rewriting a single expression/statement node, not a
     whole module — needed for f-string interpolations, which gimple_codegen.py
     parses lazily at codegen time (from raw source text still embedded in a

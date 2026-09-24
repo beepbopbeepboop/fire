@@ -4818,25 +4818,8 @@ class Interpreter:
 
     @staticmethod
     def _wrap_int(v):
-        """Mojo's Int is a fixed-width 64-bit signed integer (unlike Python's
-        arbitrary-precision int), so arithmetic on it wraps on overflow instead
-        of growing. Only ints (not bools, not floats) that come out of a
-        user-source BinaryOp/UnaryOp are Mojo Int values, so wrapping here
-        cannot affect interpreter-internal bookkeeping."""
         if isinstance(v, int) and not isinstance(v, bool):
-            v &= 0xFFFFFFFFFFFFFFFF
-            if v >= 0x8000000000000000:
-                # 2**64 (0x10000000000000000) doesn't fit in any C integer
-                # type this self-hosts to, not even uint64_t (max is
-                # 2**64-1) — the existing large-int-literal fix (an explicit
-                # ULL suffix, see gimple_codegen.py's _lower_IntLiteral)
-                # only covers values up to UINT64_MAX, so this one still
-                # warned ("integer constant is too large for its type") once
-                # compiled. Split into two in-range subtractions of 2**63
-                # (already used, and already known to compile cleanly, a
-                # few lines up) instead — same net effect.
-                v -= 0x8000000000000000
-                v -= 0x8000000000000000
+            return N._signed_int64(v)
         return v
 
     @staticmethod

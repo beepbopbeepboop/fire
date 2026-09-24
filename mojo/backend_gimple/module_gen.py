@@ -29,7 +29,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
-    _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node,
+    _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -97,8 +97,24 @@ def _is_selfhost_source_dir(_dir: str) -> bool:
     than working around it."""
     if not _dir:
         return False
-    return (_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
-            or os.path.isfile(os.path.join(_dir, 'fire_compiler.py')))
+    _rdir = os.path.realpath(_dir)
+    _rsd = os.path.realpath(_SELFHOST_DIR)
+    if (_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
+            or _rdir == _rsd or _rdir.startswith(_rsd + os.sep)
+            or os.path.isfile(os.path.join(_dir, 'fire_compiler.py'))):
+        return True
+    # A subdirectory (`mojo/middle`, `mojo/backend_gimple`) of a genuine
+    # compiler-source tree: walk up to find the `fire_compiler.py` that
+    # marks the tree's root. This is what tells apart a vendored copy
+    # compiled via a SYMLINKED path (`_dir` = `/…/fire/fire/mojo/middle`)
+    # from the tree's own `_SELFHOST_DIR` (`os.path.realpath` resolves to
+    # `/…/.mojo/fire/.fire-fire`), where neither the raw nor the realpath
+    # prefix test matches because only the LEAF path was symlinked.
+    for _p in range(len(_rdir.split(os.sep)), 0, -1):
+        _cand = os.sep.join(_rdir.split(os.sep)[:_p])
+        if os.path.isfile(os.path.join(_cand, 'fire_compiler.py')):
+            return True
+    return False
 
 
 
@@ -5155,7 +5171,10 @@ def gen_module_impl(self, stmts):
             return 'MojoList *'
         elif isinstance(_value, SetExpr):
             return 'MojoSet *'
-        elif isinstance(_value, (IntLiteral, BoolLiteral)):
+        elif isinstance(_value, IntLiteral):
+            value64 = _signed_int64(_value.value)
+            return 'int' if -0x80000000 <= value64 <= 0x7FFFFFFF else 'int64_t'
+        elif isinstance(_value, BoolLiteral):
             return 'int'
         elif isinstance(_value, StringLiteral):
             return 'char *'
@@ -7178,7 +7197,7 @@ def gen_module_impl(self, stmts):
                                 if isinstance(elt, StringLiteral):
                                     _lit_init_lines.append(f'  mojo_set_add_str ({mangled}, "{_c_escape(elt.value)}");')
                                 elif isinstance(elt, IntLiteral):
-                                    _lit_init_lines.append(f'  mojo_set_add_int ({mangled}, {elt.value});')
+                                    _lit_init_lines.append(f'  mojo_set_add_int ({mangled}, {_signed_int64_c_literal(elt.value)});')
                             class_attr_inits.extend(_lit_init_lines)
                         elif ctype == 'MojoDict *':
                             _di = [f"  {mangled} = mojo_dict_new();"]
@@ -7240,7 +7259,7 @@ def gen_module_impl(self, stmts):
                                 if isinstance(elt, StringLiteral):
                                     _lit_init_lines.append(f'  mojo_list_append_str ({mangled}, "{_c_escape(elt.value)}");')
                                 elif isinstance(elt, IntLiteral):
-                                    _lit_init_lines.append(f'  mojo_list_append_int ({mangled}, {elt.value});')
+                                    _lit_init_lines.append(f'  mojo_list_append_int ({mangled}, {_signed_int64_c_literal(elt.value)});')
                                 else:
                                     _lit_init_lines = None
                                     break
@@ -7260,7 +7279,7 @@ def gen_module_impl(self, stmts):
                             class_attr_inits.append(f'  {mangled} = "{_c_escape(v.value)}";')
                         elif isinstance(v, IntLiteral):
                             ctype = 'int64_t'
-                            class_attr_inits.append(f'  {mangled} = {v.value};')
+                            class_attr_inits.append(f'  {mangled} = {_signed_int64_c_literal(v.value)};')
                         else:
                             ctype = 'int64_t'
                         class_attr_decls.append(f"{ctype} {mangled};")

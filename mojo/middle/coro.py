@@ -35,6 +35,17 @@ import copy
 import os
 
 import fire_compiler as N
+
+
+def _cm_as_str(x) -> str:
+    """Same-module `str`-view helper (see gimple_gen_calls' `_ggc_as_str`).
+
+    The imported `N._as_str(...)` alias call minted a PER-CALL-SITE hash
+    suffix for its argument type (`fire_compiler__as_str_d719e0`) instead of
+    resolving to fire_compiler.py's one real `_as_str_9f63a2` definition, so
+    the generated C had an implicit declaration and a pointer-from-int
+    assignment. A SAME-MODULE `-> str` function resolves."""
+    return x
 # `_is_asyncio_sleep_call`/`_is_asyncio_sock_recv_call` used to be defined
 # a second time here, byte-for-byte the same structural check as gimple_
 # exprtypes.py's own (the cpp-path's identical `asyncio.sleep`/`sock_recv`
@@ -1328,8 +1339,8 @@ def _async_method_setup(fn, base, struct_name):
     _lower_one's generator-method path), so `__mojo_gen_arg` indices for
     the ordinary params start at 1 and `self` gets no prologue entry."""
     is_method = struct_name is not None
-    base = base or (f'__mgco_{N._as_str(struct_name)}_{N._as_str(fn.name)}' if is_method
-                    else f'__mgco_{N._as_str(fn.name)}')
+    base = base or (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
+                    else f'__mgco_{_cm_as_str(fn.name)}')
     real_params = fn.params[1:] if is_method else fn.params
     arg_base = 1 if is_method else 0
     prologue = []
@@ -1370,7 +1381,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd.is_generator = False
     body_fd.is_async = False
     meta.append({
-        'name': N._as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
+        'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'is_async_gen': True,
         'base': base, 'body_name': body_name,
         'params': c_params,
@@ -1393,7 +1404,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd.is_generator = False
     body_fd.is_async = False
     meta.append({
-        'name': N._as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
+        'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'base': base, 'body_name': body_name,
         'params': c_params,
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
@@ -2496,8 +2507,8 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     # with one extra leading (ignored) int64_t arg slot.
     is_classmethod = is_method and (getattr(fn, 'decorators', None) or []) == ['classmethod']
     has_self = is_method and not is_classmethod
-    base = (f'__mgco_{N._as_str(struct_name)}_{N._as_str(fn.name)}' if is_method
-            else f'__mgco_{N._as_str(fn.name)}')
+    base = (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
+            else f'__mgco_{_cm_as_str(fn.name)}')
     body_name = f'{base}_body'
     env = _static_env(fn, struct_def)
     kind, _ = _generator_value_kind(fn, env)
@@ -2555,7 +2566,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         _real_ct.append(ct)
     c_params = _lead + _real_ct
     meta.append({
-        'name': N._as_str(fn.name),
+        'name': _cm_as_str(fn.name),
         'struct': struct_name,
         'is_method': is_method,
         'has_self': has_self,

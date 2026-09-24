@@ -486,7 +486,9 @@ def _resolve_test_relative_module(gen, module: str) -> str | None:
 def _parsed_import(gen, module: str):
     """(path, source_text, stmts) for an imported module, parsed once and
     cached. (None, '', None) on failure."""
-    cache = gen._imported_src_cache
+    # `_as_dict`: the field read is erased to int64_t on the self-hosted path
+    # (assignment to 'int64_t' from 'MojoList *'), so view it as the dict it is.
+    cache = _as_dict(gen._imported_src_cache)
     closure_module = gen.do_imports and module in gen._compiled_modules
     if module not in cache or (closure_module and not cache[module][0]):
         try:
@@ -1030,7 +1032,7 @@ def _selfhost_extracted_fn_index() -> dict:
     _idx: dict = {}
     for _f in _files:
         try:
-            _mod = ast_rewriter.rewrite(
+            _mod: list = ast_rewriter.rewrite(
                 Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
         except Exception:
             continue

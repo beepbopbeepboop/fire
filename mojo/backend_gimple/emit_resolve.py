@@ -1514,6 +1514,29 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')
     if True:
+        literal = v.lstrip('-').isdigit()
+        if literal and s in gimple_ctypes._SCALAR_INT_TYPES and d in gimple_ctypes._SCALAR_INT_TYPES:
+            if d == 'uint8_t':
+                gen._emit(f'  {dest} = mojo_uint8_from_int64 ({v}LL);')
+            elif d == 'uint16_t':
+                gen._emit(f'  {dest} = mojo_uint16_from_int64 ({v}LL);')
+            elif d == 'uint32_t':
+                gen._emit(f'  {dest} = mojo_uint32_from_int64 ({v}LL);')
+            elif d == 'uint64_t':
+                gen._emit(f'  {dest} = {v}ULL;')
+            elif d == 'int8_t':
+                gen._emit(f'  {dest} = mojo_int8_from_int64 ({v}LL);')
+            elif d == 'int16_t':
+                gen._emit(f'  {dest} = mojo_int16_from_int64 ({v}LL);')
+            elif d == 'int32_t':
+                gen._emit(f'  {dest} = mojo_int32_from_int64 ({v}LL);')
+            elif d == 'int64_t':
+                gen._emit(f'  {dest} = {v}LL;')
+            elif d == '_Bool':
+                gen._emit(f'  {dest} = (_Bool){v};')
+            else:
+                gen._emit(f'  {dest} = {v};')
+            return
         # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
         if s == d:
             if d == 'int64_t' and v.lstrip('-').isdigit():

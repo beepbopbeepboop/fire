@@ -28,6 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
+    _signed_int64, _signed_int64_c_literal, _as_intlit_node,
 )
 import regex_compile
 import mlir
@@ -118,61 +119,12 @@ def lower_expr(gen, node) -> tuple[str, str]:
 
 
 def _lower_IntLiteral(gen, node) -> tuple[str, str]:
-    # A literal beyond INT64_MAX (e.g. UInt64.MAX == 2**64-1, used as a
-    # mask) doesn't fit any signed C integer type; GCC silently treats
-    # the bare decimal as unsigned but still warns ("integer constant is
-    # so large that it is unsigned"). An explicit ULL suffix says what we
-    # mean and silences the warning without changing the value.
-    #
-    # `node.value < 0` is ALSO checked, not just `> 0x7FFFFFFFFFFFFFFF`:
-    # under self-hosted compilation, `node.value` itself is stored as a
-    # real int64_t (this compiler's own runtime has no arbitrary-
-    # precision integer type), so a literal like `0xFFFFFFFFFFFFFFFF`
-    # (2**64-1) has ALREADY WRAPPED to -1 by the time this function
-    # runs — `node.value > 0x7FFFFFFFFFFFFFFF` then compares -1 against
-    # a huge positive constant and is FALSE, silently skipping the
-    # uint64_t widening entirely (a real, reproducible `make bootstrap`
-    # divergence: `x * 0x2545F4914F6CDD1D & 0xFFFFFFFFFFFFFFFF`, a
-    # 64-bit hash-mixing idiom, dropped its whole `(uint64_t)`-cast-and-
-    # mask sequence under native compilation). A literal `IntLiteral`
-    # node from the parser is never itself negative (unary minus is a
-    # separate AST node), so `node.value < 0` is unambiguous evidence of
-    # this wraparound and never true for a real small/negative literal
-    # under plain CPython either.
-    if node.value > 0x7FFFFFFFFFFFFFFF or node.value < 0:
-        # Also widen the type tag to uint64_t: a plain 'int' temp holding
-        # this literal would itself overflow (e.g. UInt64.MAX truncating
-        # to -1) before any later cast gets a chance to widen it.
-        #
-        # Materialize into a temp with the SAME signed decimal + `ULL`
-        # suffix (`-1ULL` for 0xFFFFFFFFFFFFFFFF) on both paths:
-        #   * Under CPython `node.value` for 0xFFFFFFFFFFFFFFFF is the
-        #     positive 2**64-1, but the self-hosted compiler stores the
-        #     literal in an int64_t and sees the already-wrapped -1; only
-        #     by converting CPython's value to that same signed form here
-        #     (`- 0x10000000000000000`) do the two paths emit identical
-        #     text, which `make bootstrap`'s stage1-vs-stage2 `verify`
-        #     requires.
-        #   * gcc's `-fgimple` strict frontend REJECTS a large literal as a
-        #     direct BINARY operand in several spellings — `(uint64_t)
-        #     (-1LL)` ("expected expression before '(' token") and `x &
-        #     -1ULL` ("expected expression before '-' token") both fail,
-        #     while a plain `_t = -1ULL;` ASSIGNMENT is accepted. Assigning
-        #     to a temp first is therefore the one form that is both
-        #     GIMPLE-valid everywhere and byte-identical across paths. (The
-        #     entry-8 `(uint64_t)(...)` rewrite broke every stdlib module
-        #     with such a literal once the CPython path emitted it too.)
-        # The `>= 2**64` literal in the positive branch wraps to 0 under
-        # self-host, but that branch is dead there (node.value < 0 is
-        # taken instead), so it never runs.
-        if node.value < 0:
-            _signed = node.value
-        else:
-            _signed = node.value - 0x10000000000000000
-        _t = gen._new_temp('uint64_t')
-        gen._emit(f"  {_t} = {_signed}ULL;")
-        return 'uint64_t', _t
-    return 'int', str(node.value)
+    value = _signed_int64(_as_intlit_node(node).value)
+    if -0x80000000 <= value <= 0x7FFFFFFF:
+        return 'int', str(value)
+    t = gen._new_temp('int64_t')
+    gen._emit(f"  {t} = {_signed_int64_c_literal(value)};")
+    return 'int64_t', t
 
 
 def _lower_FloatLiteral(gen, node) -> tuple[str, str]:
@@ -3138,7 +3090,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rv_str = rv if rt == 'char *' else (gen._new_val('char *', f'(char *){rv}') if rt == 'int64_t' else gen._stringify_value(rt, rv))
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_str)])
         return 'char *', t
-    t = gen._new_val(res_type, f"{lv} {c_op} {rv}")
+    t = gen._new_temp(res_type)
+    gen._emit(f"  {t} = {lv} {c_op} {rv};")
     return res_type, t
 
 

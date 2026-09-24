@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range, _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range, _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -108,7 +108,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     for _f in _files:
         _mod = _selfhost_module_name_for_path(sd, _f)
         try:
-            _stmts = ast_rewriter.rewrite(
+            _stmts: list = ast_rewriter.rewrite(
                 Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
         except Exception:
             continue
@@ -169,7 +169,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
     _out: dict = {}
     for _f in _files:
         try:
-            _stmts = ast_rewriter.rewrite(
+            _stmts: list = ast_rewriter.rewrite(
                 Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
         except Exception:
             continue
@@ -252,7 +252,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
 
     for _f in _files:
         try:
-            _stmts = ast_rewriter.rewrite(
+            _stmts: list = ast_rewriter.rewrite(
                 Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
         except Exception:
             continue
@@ -832,8 +832,11 @@ def _gmi_global_init_code(value) -> str:
     identity view compiles a following field read to a direct struct load."""
     if isinstance(value, IntLiteral):
         _il = _as_intlit_node(value)
-        _r = _as_str(_il.raw)
-        return _r if _r else str(_as_int(_il.value))
+        _v64 = _signed_int64(_as_int(_il.value))
+        if -0x80000000 <= _v64 <= 0x7FFFFFFF:
+            _r = _as_str(_il.raw)
+            return _r if _r else str(_v64)
+        return _signed_int64_c_literal(_v64)
     if isinstance(value, BoolLiteral):
         return '1' if _as_boollit_node(value).value else '0'
     return _extract_init_expr(value)

@@ -15,7 +15,7 @@ import re
 import sys
 import zlib
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -939,10 +939,13 @@ def _extract_init_expr(stmt_value) -> str:
         return '0'
     if isinstance(stmt_value, IntLiteral):
         _il = _as_intlit_node(stmt_value)
-        _raw = _as_str(_il.raw)
-        if _raw:
-            return _raw
-        return str(_as_int(_il.value))
+        _v64 = _signed_int64(_as_int(_il.value))
+        if -0x80000000 <= _v64 <= 0x7FFFFFFF:
+            _raw = _as_str(_il.raw)
+            if _raw:
+                return _raw
+            return str(_v64)
+        return _signed_int64_c_literal(_v64)
     if isinstance(stmt_value, BoolLiteral):
         return '1' if _as_boollit_node(stmt_value).value else '0'
     if isinstance(stmt_value, DictExpr):

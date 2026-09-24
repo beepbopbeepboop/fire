@@ -5621,6 +5621,62 @@ fn main():
         print(c)
 """)
 
+    def test_signed64_integer_literal_boundaries():
+        global _PASS, _FAIL
+        name = "signed64_integer_literal_boundaries"
+        from fire_compiler import Parser, py_tokenize
+        values = []
+        for spelling in ('0x7FFFFFFF', '0x80000000', '0x7FFFFFFFFFFFFFFF',
+                         '0x8000000000000000', '0xFFFFFFFFFFFFFFFF'):
+            stmts = Parser(py_tokenize(f'x = {spelling}')).parse_module()
+            values.append(stmts[0].value.value)
+        expected = (0x7FFFFFFF, 0x80000000, 0x7FFFFFFFFFFFFFFF,
+                    -0x8000000000000000, -1)
+        src = """\
+def main():
+    var values = [0x7FFFFFFF, 0x80000000, 0x7FFFFFFFFFFFFFFF,
+                  0x8000000000000000, 0xFFFFFFFFFFFFFFFF]
+    print(values[1])
+"""
+        ok, _c_src, stderr = gimple_compiles(src)
+        if tuple(values) != expected or not ok or 'integer constant is too large for its type' in stderr:
+            print(f"FAIL  {name}: values={values!r}, ok={ok}, stderr={stderr!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_signed64_integer_literal_boundaries()
+
+    def test_known_function_not_shadowed_by_global_fnptr():
+        global _PASS, _FAIL
+        name = "known_function_not_shadowed_by_global_fnptr"
+        src = """\
+import cas
+def root_cas_hash_call(parts) -> str:
+    return cas._hash(*parts)
+"""
+        try:
+            c_src = compile_to_gimple(
+                src, do_imports=True,
+                filename=os.path.join(_PROJECT_DIR, "fire.py"))
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        start = c_src.find("root_cas_hash_call_")
+        start = c_src.find("root_cas_hash_call_", start + 1)
+        end = c_src.find("\n}", start)
+        body = c_src[start:end] if start >= 0 and end >= 0 else ""
+        if "cas__hash (" not in body or "mojo_fnptr_call" in body:
+            print(f"FAIL  {name}: qualified function call used function-pointer lowering")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_known_function_not_shadowed_by_global_fnptr()
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

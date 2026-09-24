@@ -33,6 +33,15 @@ typedef float mojo_float;
 typedef char* mojo_string;
 typedef void* mojo_any;
 
+static inline uint8_t mojo_uint8_from_int64(int64_t v) { return (uint8_t)v; }
+static inline uint16_t mojo_uint16_from_int64(int64_t v) { return (uint16_t)v; }
+static inline uint32_t mojo_uint32_from_int64(int64_t v) { return (uint32_t)v; }
+static inline uint64_t mojo_uint64_from_int64(int64_t v) { return (uint64_t)v; }
+static inline int8_t mojo_int8_from_int64(int64_t v) { return (int8_t)v; }
+static inline int16_t mojo_int16_from_int64(int64_t v) { return (int16_t)v; }
+static inline int32_t mojo_int32_from_int64(int64_t v) { return (int32_t)v; }
+static inline int64_t mojo_int64_from_int64(int64_t v) { return v; }
+
 /* Generic function pointer type (for storing any function as void*) */
 typedef void* (*mojo_func_ptr)(void);
 typedef void* mojo_generic_func;

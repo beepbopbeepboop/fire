@@ -109,6 +109,20 @@ class HostBuffer:
 
 
 # ── AST nodes ──────────────────────────────────────────────────────
+def _signed_int64(value: int) -> int:
+    value &= 0xFFFFFFFFFFFFFFFF
+    if value >= 0x8000000000000000:
+        value -= 0x10000000000000000
+    return value
+
+def _signed_int64_c_literal(value: int) -> str:
+    value = _signed_int64(value)
+    if value == -0x8000000000000000:
+        return '(-0x7FFFFFFFFFFFFFFFLL - 1)'
+    if -0x80000000 <= value <= 0x7FFFFFFF:
+        return str(value)
+    return f'{value}LL'
+
 @dataclass
 class IntLiteral:
     value: int
@@ -1591,7 +1605,7 @@ class Parser:
                 if nxt.kind == "NAME":
                     self._known_traits.add(nxt.value)
 
-    def with_filename(self, filename: str):
+    def with_filename(self, filename: str) -> Parser:
         """Attach a source filename for `file:line:col:` diagnostics.
         Kept as a separate setter (not an __init__ param) because the
         self-hosted compiled path emits one fixed C signature per function —
@@ -4255,7 +4269,7 @@ class Parser:
             # parsed as `0x2000` (8192) where the reference gives
             # 536870912 (repro: std/test/builtin/test_print_long_string's
             # `print("*" * 0x2000_0000)`).
-            self._advance(); return IntLiteral(int(t.value.replace('_', ''), 0), line=line, col=col, raw=t.value)
+            self._advance(); return IntLiteral(_signed_int64(int(t.value.replace('_', ''), 0)), line=line, col=col, raw=t.value)
         if t.kind == "FLOAT":
             self._advance(); return FloatLiteral(float(t.value.replace('_', '')), line=line, col=col)
         if t.kind == "IMAG":
