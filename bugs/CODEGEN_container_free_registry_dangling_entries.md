@@ -1,6 +1,32 @@
 # RUNTIME: `mojo_{list,dict,set}_free` never unregister from the kind-registries — latent type-confusion on address reuse
 
-Found 2026-09-15 alongside
+## Status (2026-09-24 — RESOLVED, verified against current `runtime/fire_runtime.c`)
+
+The fix this doc calls for is PRESENT in the current runtime (the file was
+renamed `runtime/mojo_runtime.c` -> `runtime/fire_runtime.c` since this doc
+was written). Each container's `_destroy` helper now discards its own
+address from every registry it was added to, and `mojo_*_free` routes
+through it:
+
+- `mojo_list_destroy` (`fire_runtime.c:578`): discards from
+  `_mojo_list_registry` AND `_mojo_tuple_registry`, then `free(l->data)`.
+- `mojo_dict_destroy` (`:2548`): discards from `_mojo_dict_registry` and
+  `_mojo_bool_dict_registry`.
+- `mojo_set_destroy` (`:3022`): discards from `_mojo_set_registry`, guarded
+  by `_mojo_set_registry_busy` (a set's own discard must not recurse into
+  the registry).
+
+`mojo_set_discard_int`/`_str` (`:3200`-ish) are NULL-safe and tolerate an
+absent value (`if (idx < 0 || s->slots[idx].tag != ...) return;`), so the
+discard is a no-op for a never-registered or already-removed container —
+the sanity-check this doc explicitly asked for. The companion
+`CODEGEN_container_no_deallocation_unbounded_growth.md` is also fixed
+(codegen now emits the cleanup calls), so this path is no longer "latent":
+containers really are freed, and the discard is really exercised (verified
+there by a flat-memory loop repro).
+
+## Found 2026-09-15 (original text follows)
+Found alongside
 `CODEGEN_container_no_deallocation_unbounded_growth.md` while auditing
 `runtime/mojo_runtime.c`'s container lifetime for that leak-check.
 Currently **latent/unreachable** in practice because codegen never calls

@@ -1,5 +1,26 @@
 # CODEGEN: compiled-path dict/list/set are never freed — unbounded memory growth
 
+## Status (2026-09-24 — RESOLVED, verified empirically)
+
+Codegen now emits the container cleanup calls this doc's "Where the fix
+goes" section asked for (the ownership model's Phase 6): `gimple_gen_*.py`'s
+scope-exit / ownership machinery routes a `MojoDict *`/`MojoList *`/
+`MojoSet *` local through `mojo_cleanup_push_{dict,list,set}` (see
+`mojo/backend_gimple/emit_infra.py`'s cleanup-function tables) and the
+runtime tears them down via `mojo_*_free` at scope exit.
+
+Verified with this doc's own repro shape (`for i in range(n): d = {}; ...;
+s = {..}; l = [..]`) built via `python3 fire.py build`, run at 200,000 and
+1,000,000 iterations: `maximum resident set size` is IDENTICAL (9,355,264
+bytes) at both counts — flat memory, not growth. Before the Phase 6 fix
+this doc measured ~267 MB for the 200,000-iteration form.
+
+The companion `CODEGEN_container_free_registry_dangling_entries.md` (which
+this doc's fix would otherwise have made live) is also fixed — the
+`_destroy` helpers discard their registry entries.
+
+## Original text (2026-09-15) follows
+
 Found 2026-09-15 while checking the compiled path for leaks with macOS `leaks`.
 
 ## What the bug is

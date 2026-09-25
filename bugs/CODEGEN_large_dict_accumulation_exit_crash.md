@@ -1,6 +1,18 @@
 # CODEGEN_large_dict_accumulation_exit_crash: exit status 140 after a large list-of-dicts loop
 
-## Status (2026-09-15 — found by accident, not investigated, unrelated to the ownership-model work in progress)
+## Status (2026-09-24 — NO LONGER REPRODUCES on current master)
+
+Re-ran this doc's exact minimal repro on current master:
+`python3 fire.py build` (rc=0) then the built binary ->
+`done` and **exit status 0** (was 140/SIGSYS). Also re-ran the companion
+container-lifetime repros (`CODEGEN_container_no_deallocation_unbounded_
+growth.md`'s `{}`/`[]`/set loop) — flat 9.3 MB RSS at 200k and 1M
+iterations. The exit-140 teardown crash is gone, consistent with the
+container cleanup/lifetime work (Phase 6) that landed since 2026-09-15;
+most likely it was the large `_mojo_dict_registry` teardown this doc
+already suspected. No code change needed.
+
+## Original finding (2026-09-15) follows
 
 Found while verifying `doc/OWNERSHIP_MODEL.md`'s Phase 3/exception-safety
 fixes with a stress-test loop. Minimal repro, no classes/candidates
