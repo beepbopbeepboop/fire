@@ -289,6 +289,33 @@ theorem frameBound_descend (stride : Nat) (st st' : Arm64State) (arg x : UInt64)
   rw [hinit] at hb
   omega
 
+/-- **Frame bound for a recursive call, at any smaller argument.**
+
+    `frameBound_descend` is the special case where the caller's entry state is
+    the initial one.  Inside the contract the caller's own `FrameBound` is in
+    scope instead, and the callee's argument need only be *at most* one below
+    the caller's — a tree recursion's second call (`arg - 2`) descends one
+    level like any other but asks for strictly less, which is why stating the
+    descent at exactly `arg - 1` was not enough to discharge it.
+
+    One `stride` of the caller's `(arg + 1)` reservation pays for the level
+    being entered, so the callee's `x.toNat + 1` levels still fit. -/
+theorem frameBound_descend_le (stride P : Nat) (st : Arm64State) (arg x : UInt64)
+    (hP : stride ≥ P) (hPlt : P < 2 ^ 64)
+    (hx : x.toNat + 1 ≤ arg.toNat)
+    (hPge : P ≤ st.sp.toNat)
+    (hb : FrameBound stride st arg) :
+    FrameBound stride ({ st with sp := st.sp - UInt64.ofNat P }) x := by
+  have hsub : (st.sp - UInt64.ofNat P).toNat = st.sp.toNat - P :=
+    u64_toNat_sub_lit st.sp P hPlt hPge
+  simp only [FrameBound] at hb ⊢
+  simp only [hsub]
+  have hmul := Nat.mul_le_mul_left stride hx
+  have hsplit : stride * (arg.toNat + 1) = stride * arg.toNat + stride := by
+    rw [Nat.mul_add, Nat.mul_one]
+  rw [hsplit] at hb
+  omega
+
 /-- `ProofLib.mem_read_after_write_u64_high_nw` with the frame bound and the
     store offset discharged by the caller's chosen stride.  This is the
     `simp`-ready form the generator uses to prove `FrameOk`'s no-wrap window

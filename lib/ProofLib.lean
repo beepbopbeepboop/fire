@@ -579,6 +579,16 @@ theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
     exact Nat.mod_eq_of_lt hab
   exact this
 
+/-- **Collapse a literal difference back into a single offset.**  `u64_sub_add`
+    rewrites `(sp - a) + b` into `sp - (a - b)`, so an STP pair's second half
+    (`(sp - 16) + 8`) comes out as `sp - (16 - 8)` rather than the
+    `sp - UInt64.ofNat 8` the frame combinators and `mem_read_write_below`
+    expect.  This puts it back, so a peeled store stack reduces all the way to
+    the base memory. -/
+theorem u64_sub_lit_sub (sp : UInt64) (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
+    sp - (UInt64.ofNat a - UInt64.ofNat b) = sp - UInt64.ofNat (a - b) := by
+  rw [u64_ofNat_sub a b h hM]
+
 /-- **Frame-window re-index.**  `sp - K = (sp - P) + (P - K)` for `K ≤ P`
     (all `UInt64`, no wrap).  This is the arithmetic that converts an
     entry-relative address `sp - K` into a call-time-relative one
@@ -1462,6 +1472,26 @@ theorem toNat_sub_two (n : UInt64) (h0 : n ≠ 0) (h1 : n ≠ 1) : (n - 2).toNat
 
 /-- Helper: derive False from n.toNat = 0 and n.toNat ≥ 2. -/
 theorem uint64_toNat_ge_two_ne_zero {n : UInt64} (h0 : n.toNat = 0) (h_ge : n.toNat ≥ 2) : False := by
+  omega
+
+/-- The `dec2` step of a tree recursion: with `n` at least 2, `(n - 2).toNat`
+    sits two below `n`'s, so the callee's `(arg - 2 + 1) = arg - 1` levels
+    fit well inside the caller's reservation.  The `dec1` counterpart is
+    `u64_sub_one_toNat_le`; both are stated on the `UInt64` value because `n - d`
+    wraps when `n < d`, which the non-zero premises rule out. -/
+theorem u64_sub_two_toNat_le (n x : UInt64) (h0 : n ≠ 0) (h1 : n ≠ 1)
+    (h : x = n - 2) :
+    x.toNat + 1 ≤ n.toNat := by
+  subst h
+  rw [toNat_sub_two n h0 h1]
+  have hpos : 2 ≤ n.toNat := by
+    have hzero' : n.toNat ≠ 0 := by
+      intro hz
+      exact h0 (eq_of_toNat_eq hz)
+    have hone' : n.toNat ≠ 1 := by
+      intro hz
+      exact h1 (eq_of_toNat_eq hz)
+    omega
   omega
 
 /-- A `UInt64` is its `toNat` cast back (`ofNat` is injective on the range). -/
@@ -4630,3 +4660,111 @@ theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
       if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15,
       if_neg hne_16, if_neg hne_17]
   simp [h, cbz_off64, cbnz_off64]
+
+/-- **Peel one STP pair below `sp`.**
+
+    The emitter writes a frame slot pair as two `mem_write_u64`s at
+    `(sp - K)` and `(sp - K) + 8`.  Both are strictly below `sp` for `K ≥ 8`,
+    so neither can affect a read at `sp + j`, and the pair peels in one step.
+
+    Peeling per-distance instead would have to canonicalise `(sp - K) + 8` into
+    `sp - UInt64.ofNat (K - 8)` first — the frame canonicalisation's
+    `u64_sub_add` produces that split form, and folding it back needs a rewrite
+    whose side conditions `simp` will not discharge on its own.  Matching the
+    pair's shape directly keeps the generator from reshaping addresses at all.
+
+    `16 ≤ K` is not decoration: the pair's second half lands at
+    `sp - UInt64.ofNat (K - 8)`, so it clears `sp` only when `K - 8 ≥ 8`.  At
+    `K = 8` that half sits *at* `sp` and overlaps a read at `sp + 0`, so the
+    caller has to use the single-store peel for that distance instead.  The
+    emitter's frame slots are all 16-byte aligned, so the pair form is the
+    common case and `K = 8` the exception. -/
+theorem mem_read_write_pair_below (mem : Nat → UInt8) (sp : UInt64)
+    {K j : Nat} (hKlt : K < 2 ^ 64) (hjnw : sp.toNat + j < 2 ^ 64)
+    (hKsp : K ≤ sp.toNat) (hK : 16 ≤ K) (v1 v2 : UInt64) :
+    mem_read_u64
+        (mem_write_u64
+          (mem_write_u64 mem ((sp - UInt64.ofNat K).toNat) v1)
+          ((sp - UInt64.ofNat K) + UInt64.ofNat 8).toNat v2)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) := by
+  have hsub : (sp - UInt64.ofNat K).toNat = sp.toNat - K :=
+    u64_toNat_sub_lit sp K hKlt hKsp
+  have hlt : sp.toNat < 2 ^ 64 := UInt64.toNat_lt sp
+  have hlt' : sp.toNat ≤ 18446744073709551615 := by omega
+  have h8n : (UInt64.ofNat 8).toNat = 8 := rfl
+  -- `8 ≤ K` puts the pair's second half back inside the frame, so the `+ 8`
+  -- stays below the stack top and cannot wrap.
+  have hplus : ((sp - UInt64.ofNat K) + UInt64.ofNat 8).toNat
+      = (sp.toNat - K) + 8 := by
+    rw [u64_toNat_add_lit, hsub, h8n]
+    apply Nat.mod_eq_of_lt
+    have hle : (sp.toNat - K) + 8 ≤ sp.toNat := by omega
+    omega
+  have hj64 : j < 2 ^ 64 := by omega
+  have hjnw' : (sp + UInt64.ofNat j).toNat = sp.toNat + j := by
+    rw [u64_toNat_add_lit, UInt64.toNat_ofNat', Nat.mod_eq_of_lt hj64]
+    exact Nat.mod_eq_of_lt hjnw
+  -- The pair sits below `sp` and the read at or above it, so the write's
+  -- 8 bytes must clear the read's: `write + 8 ≤ read`.
+  have hwrite8 : ((sp - UInt64.ofNat K) + UInt64.ofNat 8).toNat + 8
+      ≤ ((sp + UInt64.ofNat j).toNat) := by
+    rw [hplus, hjnw']
+    have hge : K ≤ sp.toNat := hKsp
+    have h8 : (8 : Nat) ≤ K := by omega
+    omega
+  -- Stated in the goal's own shape, so no address rewriting is needed on
+  -- either side of the `rw`.
+  have hne : mem_read_u64
+        (mem_write_u64
+          (mem_write_u64 mem ((sp - UInt64.ofNat K).toNat) v1)
+          ((sp - UInt64.ofNat K) + UInt64.ofNat 8).toNat v2)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64
+        (mem_write_u64 mem ((sp - UInt64.ofNat K).toNat) v1)
+        ((sp + UInt64.ofNat j).toNat) :=
+    mem_read_after_write_u64_ne _ _ _ _ (Or.inr hwrite8)
+  rw [hne]
+  exact mem_read_write_below mem sp hjnw hKsp (by omega) v1
+
+/-- **Split offset back into an STP pair's shape.**  `u64_sub_add` rewrites an
+    address `(sp - K) + 8` into the split form `sp - (K - 8)`, which is what
+    the frame canonicalisation wants for the *sp value* but not for a store
+    address.  This is the inverse, so a store address that has been through
+    `u64_sub_add` can be handed to `mem_read_write_pair_below`, which matches
+    the pair's two stores in their natural `(sp - K)` / `(sp - K) + 8` shape.
+
+    `u64_sub_add` is an unconditional bitvector equality, so its inverse is too
+    and needs no side conditions. -/
+theorem u64_add_sub_lit (sp : UInt64) (a b : Nat) :
+    sp - (UInt64.ofNat a - UInt64.ofNat b)
+      = (sp - UInt64.ofNat a) + UInt64.ofNat b :=
+  (u64_sub_add sp (UInt64.ofNat a) (UInt64.ofNat b)).symm
+
+/-- **Collapse a nested literal offset into a single subtraction.**
+
+    The frame canonicalisation rewrites each address of a store pair,
+    `(sp - K) + 8`, into the split `sp - (K - 8)`, and applying it across
+    several blocks nests those splits:
+    `sp - (K - (K2 - (K2 - 8)))`.  Peeling such a stack needs every address
+    back in the single-literal form `sp - UInt64.ofNat K`.
+
+    `u64_sub_add` is an unconditional bitvector equality, so it converts each
+    split back without side conditions; only the `ofNat` reduction inside one
+    address needs the literals' bounds.  Feeding `u64_sub_lit_sub` and
+    `u64_ofNat_sub` to `simp` in sequence instead oscillates, because each
+    exposes work for the other. -/
+theorem u64_sub_nest_lit (sp : UInt64) (a b c : Nat)
+    (h1 : c ≤ b) (h2 : b ≤ a) (hMa : a < 2 ^ 64) (hMb : b < 2 ^ 64)
+    (hMc : c < 2 ^ 64) :
+    sp - (UInt64.ofNat a - (UInt64.ofNat b - UInt64.ofNat c))
+      = sp - UInt64.ofNat (a - (b - c)) := by
+  rw [← u64_sub_add, u64_ofNat_sub b c h1 hMb, u64_sub_add,
+      u64_ofNat_sub a (b - c) (by omega) hMa]
+
+example (sp : UInt64) (a b c : Nat)
+    (h1 : c ≤ b) (h2 : b ≤ a) (hMa : a < 2 ^ 64) (hMb : b < 2 ^ 64)
+    (hMc : c < 2 ^ 64) :
+    sp - (UInt64.ofNat a - (UInt64.ofNat b - UInt64.ofNat c))
+      = sp - UInt64.ofNat (a - (b - c)) :=
+  u64_sub_nest_lit sp a b c h1 h2 hMa hMb hMc

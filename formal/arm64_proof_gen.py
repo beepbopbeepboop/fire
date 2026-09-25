@@ -1095,9 +1095,17 @@ _VALUE_SIMP = (
     "arm64_cset_eq, UInt64.add_zero, u64_ofNat_zero, UInt64.ofNat_toNat"
 )
 
+# `u64_sub_add` folds `(sp - a) + b` into a single subtraction.  Removing it
+# from the memory-address goals -- so the store offsets would stay in the
+# `(sp - K)` / `(sp - K) + 8` shape the block defs write and the pair peel could
+# match them directly -- was tried and regressed 24 of the 43 examples, because
+# the frame-register and `sp`-value goals in the *same* `refine` block do need
+# the fold.  The two cannot be separated by simp set, so the split offsets stay
+# and the peel list carries the collapse rewrites instead.
 _SP_CANON = ['arm64_set_reg_sp', 'u64_sub_sub', 'u64_sub_add', 'u64_ofNat_add',
-             'u64_ofNat_sub', 'Nat.reduceAdd', 'Nat.reduceSub', 'u64_ofNat_zero',
-             'u64_sub_zero']
+             'u64_ofNat_sub', 'u64_sub_lit_sub', 'Nat.reduceAdd',
+             'Nat.reduceSub', 'u64_ofNat_zero', 'u64_sub_zero']
+_SP_VALUE_CANON = _SP_CANON
 
 _STEP_CONDS = [
     (None, 0xd65f03c0),      # 0 RET
@@ -4080,6 +4088,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  all_goals intro j hj")
             A(f"{IND}  all_goals try simp +decide only [h8, {_fs}, {_VSP}, "
               f"mem_read_after_write_u64_high_fb, hf, hj]")
+            # The callee's return state is abstract (introduced by `obtain` from
+            # the contract), so its memory can only be reached through
             # Peel the callee's store stack outermost-first: the goal's
             # outermost `mem_write_u64` is the one `rw` can see, so the
             # distances are replayed in reverse order of emission.  The
@@ -4090,13 +4100,58 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             if not _store_ks:
                 _store_ks = sorted({k for k in ctx.get("stores", []) if 8 <= k},
                                    reverse=True)
-            for _K in _store_ks:
-                A(f"{IND}  all_goals try "
-                  f"rw [mem_read_write_below _ st.sp (K := {_K}) (j := j) "
-                  f"hj (by omega) (by decide) _]")
-            A(f"{IND}  all_goals try rfl")
+
+            def _emit_peels():
+                # STP pairs first.  The block defs write a slot pair as
+                # `(sp - K)` and `(sp - K) + 8`, and the pair peel matches that
+                # shape directly, so no address rewriting is needed.  A
+                # distance under 16 is a bare store rather than a pair -- its
+                # second half would sit at `sp` and overlap a read at `sp + 0`
+                # -- and falls through to the single-store peel.
+                for _K in _store_ks:
+                    if _K >= 16:
+                        A(f"{IND}  all_goals try "
+                          f"rw [mem_read_write_pair_below _ st.sp (K := {_K}) "
+                          f"(j := j) (by decide) hj (by omega) (by decide) _ _]")
+                for _K in _store_ks:
+                    A(f"{IND}  all_goals try "
+                      f"rw [mem_read_write_below _ st.sp (K := {_K}) (j := j) "
+                      f"hj (by omega) (by decide) _]")
+
+            # First round: the caller-frame goals (`sp - K` reads, and the
+            # frame registers), which the window facts below cannot reach.
+            _emit_peels()
+            # `_SP_CANON` (no `u64_sub_add`): this goal is about the caller's
+            # memory, and splitting a store address here is what nests the
+            # offsets the second peel round has to undo.
             A(f"{IND}  all_goals try simp +decide only [{', '.join(_SP_CANON)}]")
             A(f"{IND}  all_goals try omega")
+            # The callee's return state is abstract (introduced by `obtain` from
+            # the contract), so its memory can only be reached through
+            # `FrameOk`'s window.  Chain through the window so the goal names a
+            # concrete store stack.  This has to come after the canonicalising
+            # `simp` above, which is what puts the goal's address into the same
+            # shape the fact is stated in, and `Eq.trans` rather than `rw`
+            # because `rw`'s keyed matching declines to abstract
+            # `mem_read_u64 s_ret_k.mem _` even when the goal matches it exactly.
+            _winups = ctx.get("win_ups") or []
+            if _winups:
+                _alts = " | ".join(f"(refine ({_n} j hj).trans ?_)" for _n in _winups)
+                A(f"{IND}  all_goals first | {_alts} | skip")
+                # The hop lands on the call-state record, whose `mem` is still
+                # the walk state `s_k`.  Unfold it so the store chain becomes
+                # visible to the peels, then collapse literal differences back
+                # into a single offset.  Only the collapsing half of the frame
+                # canonicalisation is used here: `u64_sub_add` re-splits what
+                # `u64_sub_lit_sub` just merged, so the two in one `simp` nest
+                # the offsets instead of flattening them.
+                A(f"{IND}  all_goals try simp only [{_fs}, {_VSP}]")
+                A(f"{IND}  all_goals try simp only [u64_sub_lit_sub, u64_ofNat_sub, "
+                  f"u64_ofNat_add, Nat.reduceSub, Nat.reduceAdd]")
+                # Second round: the goal the window exposed is now a concrete
+                # store stack, so the same peels finish it.
+                _emit_peels()
+            A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals rfl")
             A(f"{IND}· exact {ctx['hmid']}")
             A(f"{IND}all_goals done")
@@ -4169,31 +4224,49 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                              else f"({_inx}).sp + UInt64.ofNat {_d}"))
                     A(f"{IND}  have eb{_i} : ({_qt} ({_inx})).sp = {_rhs} := by")
                     A(f"{IND}    simp only [{_qt}, arm64_set_reg_sp]")
-                    A(f"{IND}    simp +decide only [{', '.join(_dn + _SP_CANON)}]")
+                    A(f"{IND}    simp +decide only [{', '.join(_dn + _SP_VALUE_CANON)}]")
                 _rws = [x for _i in range(len(_path) - 1, -1, -1) for x in (f"ea{_i}", f"eb{_i}")]
                 A(f"{IND}  rw [{', '.join(_rws)}]")
-                A(f"{IND}  try simp only [{', '.join(_SP_CANON)}]")
+                A(f"{IND}  try simp only [{', '.join(_SP_VALUE_CANON)}]")
             else:
                 raise ValueError("unsupported: call-time sp after the prologue")
-            # Descending a recursion level costs `_P` bytes of stack and
-            # decrements the argument, so the frame bound carries over by one
-            # application of the library lemma `frameBound_succ`.  The generator
-            # supplies only concrete data: the stride, `_P`, and the caller's
-            # `hbnd`.  The previous inline proof re-derived this by hand against
-            # a hardcoded `65536` stride, which stopped dominating `_P` once the
-            # emitter's scratch reservation grew past it.
+            # Descending a recursion level costs `_P` bytes of stack and lowers
+            # the argument, so the frame bound carries over by one application
+            # of the library lemma `frameBound_descend_le`.  The generator
+            # supplies only concrete data: the stride, `_P`, the caller's
+            # `hbnd`, and which decrement this call uses.  The previous inline
+            # proof re-derived this by hand against a hardcoded `65536` stride,
+            # which stopped dominating `_P` once the emitter's scratch
+            # reservation grew past it -- and it landed the bound at exactly
+            # `arg - 1`, which cannot state a tree recursion's `arg - 2` call.
+            _sub_dec = 1
+            _m = re.fullmatch(r"arg - (\d+)", _subarg)
+            if _m:
+                _sub_dec = int(_m.group(1))
+            if _sub_dec == 1:
+                _argrel = (f"u64_sub_one_toNat_le arg ({_subarg}) hargne0 (by rfl)")
+            elif _sub_dec == 2:
+                _argrel = (f"u64_sub_two_toNat_le arg ({_subarg}) hargne0 "
+                           f"hargne_one (by rfl)")
+            else:
+                raise ValueError(
+                    f"unsupported: recursion sub-argument {_subarg!r} (not dec1/dec2)")
             A(f"{IND}have hbndsub_{n} : "
               f"FrameBound {stride} ({call_state}) ({_subarg}) := by")
-            A(f"{IND}  have hargne : arg ≠ 0 := by "
+            A(f"{IND}  have hargne0 : arg ≠ 0 := by "
               f"intro h; rw [h] at hk; simp at hk")
+            if _sub_dec >= 2:
+                A(f"{IND}  have hargne_one : arg ≠ 1 := by "
+                  f"intro h; rw [h] at hk; simp at hk")
+            A(f"{IND}  have hargrel : ({_subarg}).toNat + 1 ≤ arg.toNat := {_argrel}")
             A(f"{IND}  have hcur : ({cur}).sp = ({st0}).sp - UInt64.ofNat {_P} := by")
             A(f"{IND}    rw [hsp_{n}]")
             A(f"{IND}  have hPge : {_P} ≤ ({st0}).sp.toNat := by")
             A(f"{IND}    have hbn := hbnd; simp only [FrameBound] at hbn")
             A(f"{IND}    have hlt := UInt64.toNat_lt ({st0}).sp")
             A(f"{IND}    omega")
-            A(f"{IND}  have h := frameBound_succ {stride} {_P} ({st0}) arg "
-              f"(by omega) (by decide) hargne hPge hbnd")
+            A(f"{IND}  have h := frameBound_descend_le {stride} {_P} ({st0}) arg "
+              f"({_subarg}) (by omega) (by decide) hargrel hPge hbnd")
             A(f"{IND}  simp only [FrameBound] at h ⊢")
             A(f"{IND}  rw [hcur]")
             A(f"{IND}  exact h")
@@ -4238,6 +4311,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
               f"(P := {_P}) hsp_{n} hfrwin_{n} "
               f"(by have := hbnd; simp only [FrameBound] at this; omega)")
             _frfacts.append(_upnm)
+            # Remember it so a later `FrameOk` goal can rewrite a callee's
+            # abstract return memory through the window before trying to peel
+            # stores.  The return state is introduced by `obtain`, so it has no
+            # `hsid` chain to unfold -- the window fact is the only handle on
+            # its memory, and the peel cannot see through it.  All of them are
+            # kept: a goal reached several calls later names an earlier
+            # callee's memory, not the most recent one's.
+            ctx.setdefault("win_ups", []).append(_upnm)
             nxt_bi = start_to_bi.get(ret)
             if nxt_bi is None or nxt_bi in path:
                 raise ValueError(f"unsupported runs bl continuation to {hex(ret)}")
@@ -4351,7 +4432,13 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # dominate the machine path so the step's split of `2^(k+2)` into
             # `2^(k+1) + 2^k` leaves enough fuel.
             PATH = 512
-            BASE = 41
+            # `BASE` has to cover the *base case's own* walk, which runs the
+            # real CFG path and is not bounded by the exponential term at all
+            # (`arg` is 0 or 1 there, so `2^arg` is 1 or 2).  A literal went
+            # stale the moment the base-case path grew past it and the
+            # `k ≤ fuel` obligation became false.  Any acyclic path visits each
+            # block at most once, so the block-instruction total bounds it.
+            BASE = max(1, sum(len(b["instrs"]) for b in blocks))
         A("set_option maxHeartbeats 2000000 in")
         A(f"theorem {name}_contract (fuel : Nat) (arg : UInt64) (st : Arm64State)")
         _hfuel_ty = (f"{BASE} + {PATH} * 2 ^ arg.toNat" if _tree
