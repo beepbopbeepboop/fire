@@ -37,6 +37,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
+from gimple_codegen import _selfhost_impl_py_files
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
@@ -905,7 +906,7 @@ def _selfhost_scan_gimplegen_extra_fields(_src_dir=None) -> dict[str, str]:
     for _cand_dir in (_src_dir, gimple_codegen._SELFHOST_DIR, '.', '..'):
         if _cand_dir is None:
             continue
-        _cand_files = gimple_codegen._selfhost_impl_py_files(_cand_dir)
+        _cand_files = _selfhost_impl_py_files(_cand_dir)
         _cand_files = [f for f in _cand_files if gimple_ctypes.os.path.isfile(f)]
         if _cand_files:
             _files = _cand_files

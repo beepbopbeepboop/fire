@@ -17,6 +17,7 @@ from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 import gimple_codegen  # constants used by some extracted helpers
+from gimple_codegen import _selfhost_impl_py_files
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1025,7 +1026,7 @@ def _selfhost_extracted_fn_index() -> dict:
     forwards to. Cached with the field scanner's cache key."""
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('fnidx')
     _sd = gimple_codegen._SELFHOST_DIR
-    _files = sorted(gimple_codegen._selfhost_impl_py_files(_sd))
+    _files = sorted(_selfhost_impl_py_files(_sd))
     _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
     if _hit is not None and _hit[0] == _key:
         return _hit[1]

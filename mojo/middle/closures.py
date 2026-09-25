@@ -23,7 +23,7 @@ from __future__ import annotations
 from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
     IdentExpr, IfStmt, LambdaExpr, MemberExpr, StructDef, TryStmt, VarDecl,
-    WhileStmt, WithStmt, _as_funcdef_node, _as_str,
+    WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
 from mojo.middle.exprtypes import _walk_ast, _struct_name_of
@@ -107,7 +107,7 @@ def mutated_free_names(inner: FunctionDef, candidate_names) -> frozenset:
     Those names need by-REFERENCE capture; everything else is by-value.
     """
     mutated: set = set()
-    _stack = list(inner.body)
+    _stack = list(_as_list(inner.body))
     while _stack:
         n = _stack.pop(0)
         if isinstance(n, FunctionDef):
@@ -207,6 +207,8 @@ def discover_closures(ctx, stmts) -> dict:
             # `outer_<garbage-bytes>`, the `_all_closures` key is garbage, and
             # every nested `def` degrades to a weak "unavailable" stub.
             inner     = _as_funcdef_node(stmt)
+            inner_body = _as_list(inner.body)
+            inner_params = _as_list(inner.params)
             if inner.is_async and not inner.is_generator:
                 continue
             lifted    = f"{outer_name}_{inner.name}"
@@ -218,11 +220,11 @@ def discover_closures(ctx, stmts) -> dict:
             # closure gains a spurious capture whose env-struct allocation
             # (`_alloc_X_env()` vs `(X *)0`) flips run to run.
             used      = set()
-            for body_node in inner.body:
+            for body_node in inner_body:
                 for _ui in _used_idents_node(body_node):
                     used.add(_as_str(_ui))
             inner_assign_targets = set()
-            for bstmt in _gmi_all_stmts_nonfunc(inner.body):
+            for bstmt in _gmi_all_stmts_nonfunc(inner_body):
                 if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
                     inner_assign_targets.add(bstmt.target.name)
                 elif isinstance(bstmt, ForStmt):
@@ -254,11 +256,11 @@ def discover_closures(ctx, stmts) -> dict:
             # row disagreeing with ITSELF at a closure call's argument
             # count (module_loader.py's `_scan_source` closure).
             _ipn: set = set()
-            for _pn, _pt in inner.params:
+            for _pn, _pt in inner_params:
                 _ipn.add(_pn)
             inner_declared: set = set()
             for _idv in (_ipn
-                         | _declared_vars_body(inner.body)
+                         | _declared_vars_body(inner_body)
                          | inner_assign_targets):
                 inner_declared.add(_as_str(_idv))
             outer_params: set = set()
@@ -274,12 +276,12 @@ def discover_closures(ctx, stmts) -> dict:
             # to boxed int64_t under self-compile — without the static
             # `str` view `v in enriched_scope` would hash the pointer.
             captures     = []
-            for v in sorted(free):
+            for v in _as_list(sorted(free)):
                 v = _as_str(v)
                 if v in enriched_scope:
                     captures.append((v, enriched_scope[v]))
             _cap_names_so_far = {_cn for _cn, _ in captures}
-            _called_names = {nd.func.name for nd in _walk_ast(inner.body)
+            _called_names = {nd.func.name for nd in _walk_ast(inner_body)
                               if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)}
             _transitive_mut: set = set()
             for _called in _called_names:
@@ -308,19 +310,19 @@ def discover_closures(ctx, stmts) -> dict:
             if inner.return_type is not None:
                 ctx.func_return_types[lifted] = ctx._resolve_type(inner.return_type)
             else:
-                for pname, ptype in inner.params:
+                for pname, ptype in inner_params:
                     ctx.var_types[pname] = ctx._resolve_type(ptype)
-                ctx.func_return_types[lifted] = ctx._infer_return_type(inner.body)
+                ctx.func_return_types[lifted] = ctx._infer_return_type(inner_body)
                 ctx.var_types.clear()
             inner_scope = dict(enriched_scope)
-            for pn, pt in inner.params:
+            for pn, pt in inner_params:
                 inner_scope[pn] = ctx._resolve_type(pt)
-            for bstmt in inner.body:
+            for bstmt in inner_body:
                 if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
                     name = bstmt.target.name
                     if name not in inner_scope:
                         inner_scope[name] = ctx._quick_type(bstmt.value)
-            _scan_for_closures(ctx, lifted, inner_scope, inner.body)
+            _scan_for_closures(ctx, lifted, inner_scope, inner_body)
 
         # Mutually-recursive SIBLING closures (e.g. `_infer_param_types`'s
         # `scan_expr` <-> `scan_nodes`) each got their OWN env struct with

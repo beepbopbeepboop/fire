@@ -24,6 +24,7 @@ from mojo.middle.closures import (
     _gmi_all_stmts_nonfunc, _selfhost_fn_reassigns_method,
 )
 import gimple_codegen  # constants used by some extracted helpers
+from gimple_codegen import _selfhost_impl_py_files
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -87,7 +88,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     seeded: those are exactly what `_gscan_declare_global` itself would
     conclude for the same assignment, so the pre-seed can never disagree
     with the eventual per-module scan."""
-    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
+    _files = sorted(_selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
                         'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',
@@ -158,7 +159,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
     `_str_pool: dict[str, str]` value type was lost — `for k, v in
     self._str_pool.items()` then unpacked `v` as int64 and `str()`'d the
     pointer (garbage decimal `_slit_N` names in the emitted string pool)."""
-    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
+    _files = sorted(_selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('module_loader.py', 'fire_compiler.py')])
     _files = [f for f in _files if os.path.isfile(f)]
@@ -220,7 +221,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
     importing module — so `GimpleGen._decode_str_literal_text`'s
     `(char*, char*)` return was unpacked via `mojo_list_get_int` and every
     user `StringLiteral`'s text read back as 0 (empty string-pool entries)."""
-    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
+    _files = sorted(_selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in ('module_loader.py', 'fire_compiler.py')])
     _files = [f for f in _files if os.path.isfile(f)]
     _key = tuple((f, os.path.getmtime(f)) for f in _files)

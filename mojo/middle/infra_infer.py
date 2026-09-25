@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node
 import regex_compile
 import mlir
 import ownership_destruct
@@ -313,7 +313,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         # `self.<member> = <init>` assignments by gen_module's
         # _collect_self_assigns pass). Collected here as pure names; judged
         # there.
-        aug_member_targets: set = set()
+        aug_member_targets: dict = {}
 
         def _is_param_ident(e) -> bool:
             """`e` is a bare read of this parameter. Routes the boxed AST
@@ -766,8 +766,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         while isinstance(_aug_root, gimple_ctypes.MemberExpr):
                             _aug_root = _aug_root.obj
                         if isinstance(_aug_root, gimple_ctypes.IdentExpr):
-                            aug_member_targets.add((_aug_root.name,
-                                                    node.target.member))
+                            aug_member_targets[(_aug_root.name,
+                                                node.target.member)] = True
                 elif isinstance(node, gimple_ctypes.MultiAssignStmt):
                     for t in node.targets:
                         scan_expr(t)
@@ -856,6 +856,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # arithmetic below works (`format_token(tok)` -> `Token *`).
             fields_accessed = _as_set(fields_accessed)
             called_methods = _as_set(called_methods)
+            aug_member_targets = _as_dict(aug_member_targets)
 
             # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
             # Explicit indexed loop, NOT `any(fn == 'isinstance' and ai == 0
