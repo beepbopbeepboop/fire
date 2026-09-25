@@ -28,9 +28,18 @@ BIND_DONE = 0x00
 BIND_SET_DYLIB_ORDINAL_IMM = 0x10
 BIND_SET_SYMBOL_TRAILING_FLAGS_IMM = 0x40
 BIND_SET_TYPE_IMM = 0x50
+# The segment index is the low nibble OF THE OPCODE: ld emits a literal 0x72
+# (0x70 | segment 2) followed by the ULEB offset. Writing 0x70 and then the
+# segment as a separate byte — as this used to — makes dyld read the segment
+# byte as the offset, so it bound at __DATA_CONST+2 and left the real GOT slot
+# at zero for the stub to branch through.
 BIND_SET_SEGMENT_AND_OFFSET_ULEB = 0x70
 BIND_DO_BIND = 0x90
 BIND_TYPE_POINTER = 0x1
+# Flag byte ld emits for a function symbol (verified against the lazy-bind
+# stream of an ld-linked C program calling printf: `40 5f "_printf\0" 90 00`).
+BIND_SYMBOL_FLAGS_FUNCTION = 0x5F
+GOT_SEGMENT_INDEX = 2      # segment ordinal of __DATA_CONST (0=__PAGEZERO, 1=__TEXT)
 
 LIBSYSTEM_PATH = b"/usr/lib/libSystem.B.dylib\0"
 
@@ -40,9 +49,30 @@ DATA_BASE = 0x100004000
 LINKEDIT_BASE = 0x100008000
 PAGE_SIZE = 0x4000
 
+def _dylinker_cmd() -> bytes:
+    """LC_LOAD_DYLINKER pointing at /usr/lib/dyld, in the form ld emits.
+
+    dylinker_command is {cmd, cmdsize, {name, timestamp}} — 16 bytes of fixed
+    part — so `name` must be an offset *past* that, and `timestamp` is a real
+    field. Writing the path at offset 12 (over the timestamp) is what this
+    builder used to do; ld puts it at 24 with a 40-byte command.
+    """
+    name = b"/usr/lib/dyld\0"
+    cmdsize = (24 + len(name) + 7) & ~7
+    buf = bytearray(cmdsize)
+    struct.pack_into("<III", buf, 0, LOAD_DYLINKER_CMD, cmdsize, 24)
+    struct.pack_into("<I", buf, 12, 0)          # timestamp
+    buf[24:24 + len(name)] = name
+    return bytes(buf)
+
+
+DYLINKER_CMDSIZE = len(_dylinker_cmd())
+
+
 # sizeofcmds of each executable layout (see the two builders below).
-NOEXTERN_SIZEOFCMDS = 72 + 152 + 72 + 48 + 32 + 24 + 24 + 24
-EXTERN_SIZEOFCMDS = 72 + 232 + 152 + 72 + 48 + 32 + 24 + 56 + 24
+NOEXTERN_SIZEOFCMDS = 72 + 152 + 72 + 48 + DYLINKER_CMDSIZE + 24 + 24 + 24
+EXTERN_SIZEOFCMDS = (72 + 232 + 152 + 72 + 48 + DYLINKER_CMDSIZE + 24
+                     + 24 + 56 + 24)
 
 # sizeofcmd of LC_CODE_SIGNATURE, and the alignment the entry offset needs.
 #
@@ -58,16 +88,19 @@ EXTERN_SIZEOFCMDS = 72 + 232 + 152 + 72 + 48 + 32 + 24 + 56 + 24
 CODE_SIGNATURE_CMDSIZE = 16
 
 
+
+
+
 def executable_entry_offset(sizeofcmds: int) -> int:
     """File offset of the entry point for a layout with this sizeofcmds.
 
     32-byte aligned and leaving CODE_SIGNATURE_CMDSIZE bytes of slack after the
     load commands, so post-hoc codesigning has somewhere to put
-    LC_CODE_SIGNATURE. The 32-byte alignment is what buys the slack: aligning
-    to 16 would leave 0-15 bytes, i.e. a coin flip on whether signing corrupts
-    the entry.
+    LC_CODE_SIGNATURE. 32-byte alignment is what makes the slack guaranteed
+    rather than a coin flip: rounding to 16 instead can leave 0-15 bytes, i.e.
+    sometimes not enough room for the command codesign adds.
     """
-    return ((32 + sizeofcmds + CODE_SIGNATURE_CMDSIZE) + 31) & ~15
+    return ((32 + sizeofcmds + CODE_SIGNATURE_CMDSIZE) + 31) & ~31
 
 
 NOEXTERN_ENTRYOFF = executable_entry_offset(NOEXTERN_SIZEOFCMDS)
@@ -157,11 +190,8 @@ def build_macho_executable(code: bytes) -> bytes:
     patch(o + 4, "<I", 48)
     o += 48
 
-    patch(o + 0, "<I", LOAD_DYLINKER_CMD)
-    patch(o + 4, "<I", 32)
-    patch(o + 8, "<I", 12)
-    file[o + 12 : o + 26] = b"/usr/lib/dyld\0"
-    o += 32
+    file[o : o + DYLINKER_CMDSIZE] = _dylinker_cmd()
+    o += DYLINKER_CMDSIZE
 
     patch(o + 0, "<I", UUID_CMD)
     patch(o + 4, "<I", 24)
@@ -183,6 +213,7 @@ def build_macho_executable(code: bytes) -> bytes:
 
     assert o <= entryoff, (o, entryoff)
     file[entryoff : entryoff + len(code)] = code
+    _assert_no_unclaimed_bytes(file, [(0, 0x4000), (0x4000, 0x4000)])
     return bytes(file)
 
 
@@ -197,16 +228,48 @@ def _bind_info(external_syms: list[str]) -> bytes:
     out = bytearray()
     for i, sym in enumerate(external_syms):
         out += bytes((BIND_SET_DYLIB_ORDINAL_IMM | 0x1,))
-        out += bytes((BIND_SET_SYMBOL_TRAILING_FLAGS_IMM | 0x0,))
-        out += sym.encode()
+        out += bytes((BIND_SET_SYMBOL_TRAILING_FLAGS_IMM,))
+        # BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM is *trailing*: the symbol
+        # flags are a separate byte after the opcode, before the name. Folding
+        # them into the opcode byte (or omitting them) desynchronises the whole
+        # stream — the first character of every symbol is eaten as the flags
+        # byte, and every later opcode is read from the wrong offset, which is
+        # what made dyld (and `codesign`, which runs the same validator) reject
+        # the image outright.
+        out += bytes((BIND_SYMBOL_FLAGS_FUNCTION,))
+        # The stream carries the bare C name; dyld prepends the Mach-O
+        # underscore when it forms the symbol it looks up. Both spellings were
+        # measured against a real dyld: "printf" binds and calls through, while
+        # "_printf" gets "Symbol not found: __printf" — the underscore in the
+        # message is dyld's own, on top of ours. The codegen hands us the name
+        # as the source spelled it, so normalise to the C spelling here.
+        out += sym.lstrip("_").encode()
         out += b"\0"
         out += bytes((BIND_SET_TYPE_IMM | BIND_TYPE_POINTER,))
-        out += bytes((BIND_SET_SEGMENT_AND_OFFSET_ULEB,))
-        out += bytes((2,))          # segment ordinal: __DATA_CONST
+        out += bytes((BIND_SET_SEGMENT_AND_OFFSET_ULEB | GOT_SEGMENT_INDEX,))
         _uleb(out, i * 8)           # offset within __DATA_CONST
         out += bytes((BIND_DO_BIND,))
     out += bytes((BIND_DONE,))
     return bytes(out)
+
+
+def _assert_no_unclaimed_bytes(image: bytes, segments: list) -> None:
+    """Every byte of the file must be claimed by some segment.
+
+    A slice assignment whose value is longer than its slice makes bytearray
+    *insert* the extra bytes and shift the tail, which leaves the finished image
+    longer than the last segment's declared filesize. Nothing else notices: the
+    image still parses, still assembles, and `codesign` refuses it with the
+    famously unhelpful "main executable failed strict validation" (that one
+    unclaimed byte was the whole reason the extern path could not be built).
+    """
+    end = 0
+    for fileoff, filesize in segments:
+        end = max(end, fileoff + filesize)
+    if end != len(image):
+        raise ValueError(
+            f"image is {len(image)} bytes but its segments claim only {end}: "
+            f"a byte was inserted past the end of the last segment")
 
 
 def _uleb(out: bytearray, value: int) -> None:
@@ -280,7 +343,7 @@ def build_macho_executable_extern(
     patch(4, "<I", CPU_TYPE_ARM64)
     patch(8, "<I", 0)
     patch(12, "<I", MH_EXECUTE)
-    patch(16, "<I", 9)
+    patch(16, "<I", 10)
     patch(20, "<I", sizeofcmds)
     patch(24, "<I", MH_EXECUTE_FLAGS)
 
@@ -393,11 +456,8 @@ def build_macho_executable_extern(
     o += 48
 
     # LC_LOAD_DYLINKER
-    patch(o + 0, "<I", LOAD_DYLINKER_CMD)
-    patch(o + 4, "<I", 32)
-    patch(o + 8, "<I", 12)
-    file[o + 12 : o + 26] = b"/usr/lib/dyld\0"
-    o += 32
+    file[o : o + DYLINKER_CMDSIZE] = _dylinker_cmd()
+    o += DYLINKER_CMDSIZE
 
     # LC_UUID
     patch(o + 0, "<I", UUID_CMD)
@@ -405,14 +465,35 @@ def build_macho_executable_extern(
     o += 24
 
     # LC_LOAD_DYLIB (libSystem)
+    #
+    # The name slice must be exactly as wide as the name. Writing 27 bytes
+    # ("/usr/lib/libSystem.B.dylib\0") into a 26-byte slice makes bytearray
+    # *insert* the extra byte and shift everything after it right by one, which
+    # left the finished image a byte longer than __LINKEDIT's declared
+    # filesize — one unclaimed trailing byte, which is all it takes for
+    # `codesign` to refuse the whole executable with "main executable failed
+    # strict validation" and for the extern path to be unbuildable.
     patch(o + 0, "<I", LOAD_DYLIB_CMD)
     patch(o + 4, "<I", 56)
     patch(o + 8, "<I", 24)
-    patch(o + 12, "<I", 2)
-    patch(o + 16, "<I", 0x10000)
-    patch(o + 20, "<I", 0x10000)
-    file[o + 24 : o + 24 + 26] = LIBSYSTEM_PATH
+    patch(o + 12, "<I", 0)          # timestamp
+    patch(o + 16, "<I", 0x10000)    # current version
+    patch(o + 20, "<I", 0x10000)    # compatibility version
+    file[o + 24 : o + 24 + len(LIBSYSTEM_PATH)] = LIBSYSTEM_PATH
     o += 56
+
+    # LC_BUILD_VERSION — not optional decoration. Without it this image is
+    # rejected by `codesign` with "main executable failed strict validation"
+    # (dyld has no declared platform/minimum OS to validate the load commands
+    # against), which is why the extern path could not be signed at all. Every
+    # other layout here has always carried one.
+    patch(o + 0, "<I", BUILD_VERSION_CMD)
+    patch(o + 4, "<I", 24)
+    patch(o + 8, "<I", 1)             # platform: macOS
+    patch(o + 12, "<I", 0x000B0000)   # minos 11.0
+    patch(o + 16, "<I", 0x000B0000)   # sdk 11.0
+    patch(o + 20, "<I", 0)            # ntools
+    o += 24
 
     # LC_MAIN
     patch(o + 0, "<I", MAIN_CMD)
@@ -433,6 +514,8 @@ def build_macho_executable_extern(
         f = stub_file + i * 12
         file[f : f + 12] = _stub_bytes(got_vm, stub_vm)
     file[bind_file : bind_file + bind_len] = bind
+    _assert_no_unclaimed_bytes(file, [(0, 0x4000), (0x4000, 0x4000),
+                                      (bind_file, bind_len)])
     return bytes(file)
 
 

@@ -1,6 +1,6 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-ab-native \
-        check-coro check-formal check-formal-dylib \
+        check-coro check-formal check-formal-dylib check-formal-run \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -200,6 +200,19 @@ lib/ProofLib.olean lib/work.olean lib/Refine.olean: $(wildcard lib/*.lean) \
               formal/lean.py
 	@test -n "$(FORMAL_LEAN)" || (echo "lean not found (see ./lean-toolchain)"; exit 1)
 	LEAN_PATH=lib python3 -c "import formal.lean as l; l.ensure_library('$(FORMAL_LEAN)', 'lib')"
+
+# ── check-formal-run: formal arm64 executables that actually RUN ───────────
+# test_formal.py only typechecks the generated proof, never the binary, so a
+# long stretch of Mach-O bugs (an image dyld refused to load, a code signature
+# landing on the first instructions, a GOT slot nothing ever bound) sat behind a
+# green proof suite. This one builds and executes, checking exit status and
+# stdout, and covers the extern path (printf via stubs + __got + dyld bind
+# opcodes). Needs no lean, so unlike check-formal it is cheap and always runnable.
+check-formal-run: $(FORMAL_SOURCES) test_formal_run.py fire.py fire_compiler.py
+	python3 checked_run.py check-formal-run \
+		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
+		--extra test_formal_run.py --extra fire.py --extra fire_compiler.py \
+		-- python3 test_formal_run.py
 
 # ── check-formal-dylib: formal arm64 dylib emission + load + proof ──────────
 # Builds multi-module dylibs through `fire.py dylib --formal`, re-reads the
