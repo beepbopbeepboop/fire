@@ -12,6 +12,9 @@ Modes:
 - mojo formalbuild <file.mojo>     Build with the formal arm64 codegen (Mach-O)
 - mojo formalbuild -o <out> <file> Same, with specified output path
 - mojo formalbuild --prove <file>  Same, also emit <stem>_proof.lean (Lean 4)
+- mojo formalbuild --no-prove <f> Same, skip proof generation and checking
+- mojo dylib --formal -o <out> <f> [...]  One arm64 dylib from N modules, formal codegen
+- mojo --formal <file.mojo>        Route a build through the formal backend
 - mojo --jit <file.mojo>           JIT compile and execute (ARM64)
 - mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
 - mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
@@ -86,6 +89,20 @@ def _extract_backend(args: list):
               file=sys.stderr)
         sys.exit(2)
     return backend, remaining
+
+
+def _extract_formal_flags(args: list):
+    formal = False
+    prove = True
+    remaining = []
+    for a in args:
+        if a == '--formal':
+            formal = True
+        elif a in ('--no-prove', '--no-proof'):
+            prove = False
+        else:
+            remaining.append(a)
+    return formal, prove, remaining
 
 
 def _load_formal_build():
@@ -608,6 +625,9 @@ def main():
     # (default) vs 'arm64' (formal arm64 codegen + Mach-O, no gimple).
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
     backend, rest = _extract_backend(rest)
+    formal, prove, rest = _extract_formal_flags(rest)
+    if formal:
+        backend = 'arm64'
     sys.argv = [sys.argv[0]] + rest
 
     # No arguments: run REPL
@@ -639,14 +659,26 @@ def main():
   mojo --backend=gimple ...        Select the gimple backend (default)
   mojo dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
   mojo dylib -o <out> <file> [...] Same, with specified output path
+  mojo dylib --formal -o <out> <f> [...]  One arm64 dylib from N modules, formal codegen;
+                                    public fns export as _<module>__<fn> (leading _ = private)
+  mojo --no-prove <file> [...]     Formal backend only: skip proof generation/checking
   mojo formalbuild <file.mojo>     Build with the formal arm64 codegen (Mach-O .aout)
   mojo formalbuild -o <out> <file> Same, with specified output path
   mojo formalbuild -n <int> <file> Same, with X0 test input for the entry call (default 10)
-  mojo formalbuild --prove <file>  Same, also emit <stem>_proof.lean (Lean 4)
+  mojo formalbuild --prove <file>  Same, emit <stem>_proof.lean and check it (default)
+  mojo formalbuild --no-prove <f> Same, skip proof generation and checking
+  mojo --formal <file.mojo>        Route a build through the formal backend
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
   mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
   mojo -v, --version               Show the compiler version (git SHA / release)
   mojo -h, --help                  Show this help message
+
+Formal backend notes:
+  Proofs are emitted next to the output (<stem>_proof.lean) and typechecked with
+  the Lean version pinned in ./lean-toolchain. Each verdict is cached in the
+  content-addressed store (~/.gmojo/cas/proof) keyed on the proof bytes, the
+  lib/*.olean bytes and the toolchain, so an unchanged proof is not re-checked
+  ("(verified from cache)"). Any of those changing re-runs Lean from scratch.
 
 Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
   -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
@@ -725,6 +757,20 @@ Backend selector (may appear anywhere; selects the codegen path):
         if not dylib_inputs:
             print("mojo dylib: at least one .mojo file is required", file=sys.stderr)
             sys.exit(1)
+        if formal:
+            _fb = _load_formal_build()
+            try:
+                result = _fb.compile_formal_dylib(
+                    dylib_inputs, output=dylib_output,
+                    prove=prove, check=prove)
+            except Exception as e:
+                print(f"formal dylib: {e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Built: {result['path']}")
+            if result.get("proof_path"):
+                cached = " (verified from cache)" if result.get("proof_cached") else ""
+                print(f"Proof: {result['proof_path']}{cached}")
+            sys.exit(0)
         import driver
         rc = driver.compile_dylib(dylib_inputs, output=dylib_output, opt_flag=opt_flag)
         sys.exit(rc)
@@ -739,13 +785,10 @@ Backend selector (may appear anywhere; selects the codegen path):
         backend = 'arm64'  # formalbuild is shorthand for --backend=arm64
         formal_output = None
         formal_test_input = 10
-        formal_prove = False
+        formal_prove = prove
         if '--prove' in sys.argv:
             formal_prove = True
             sys.argv.remove('--prove')
-        if '--no-proof' in sys.argv:
-            formal_prove = False
-            sys.argv.remove('--no-proof')
         if '-o' in sys.argv:
             idx = sys.argv.index('-o')
             if idx + 1 < len(sys.argv):
@@ -769,7 +812,7 @@ Backend selector (may appear anywhere; selects the codegen path):
         try:
             result = compile_formal(formal_inputs[0], output=formal_output,
                                     test_input=formal_test_input,
-                                    prove=formal_prove)
+                                    prove=formal_prove, check=formal_prove)
         except FormalBuildError as e:
             print(f"formalbuild: {e}", file=sys.stderr)
             sys.exit(1)
@@ -780,7 +823,8 @@ Backend selector (may appear anywhere; selects the codegen path):
             sys.exit(1)
         print(f"Built: {result['path']}")
         if result.get("proof_path"):
-            print(f"Proof: {result['proof_path']}")
+            cached = " (verified from cache)" if result.get("proof_cached") else ""
+            print(f"Proof: {result['proof_path']}{cached}")
         sys.exit(0)
 
     dump_full = '--dump-full' in sys.argv
@@ -842,7 +886,8 @@ Backend selector (may appear anywhere; selects the codegen path):
             compile_formal = _fb.compile_formal
             FormalBuildError = _fb.FormalBuildError
             try:
-                result = compile_formal(input_file, output=build_output)
+                result = compile_formal(input_file, output=build_output,
+                                        prove=prove, check=prove)
             except FormalBuildError as e:
                 print(f"build: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -1014,7 +1059,7 @@ Backend selector (may appear anywhere; selects the codegen path):
             compile_formal = _fb.compile_formal
             FormalBuildError = _fb.FormalBuildError
             try:
-                result = compile_formal(input_file)
+                result = compile_formal(input_file, prove=prove, check=prove)
             except FormalBuildError as e:
                 print(f"build: {e}", file=sys.stderr)
                 sys.exit(1)

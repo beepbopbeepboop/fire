@@ -14,17 +14,31 @@ fire AST via aliases (no AST-to-AST translation).
 """
 
 import os
+import re
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import fire_compiler as F
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
-from formal.macho_linker import EXTERN_ENTRYOFF, TEXT_BASE
+from formal.macho_linker import (EXTERN_ENTRYOFF, TEXT_BASE, build_macho_dylib,
+                                 dylib_code_offset)
 from mojo.middle.closures import discover_closures
 
 
 class FormalBuildError(Exception):
     pass
+
+
+def _ad_hoc_sign(path: str) -> None:
+    if sys.platform != "darwin":
+        return
+    result = subprocess.run(["codesign", "-s", "-", path],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        raise FormalBuildError(
+            (result.stderr or result.stdout or "codesign failed").strip())
 
 
 def parse_module(source: str, filename: str = "<input>") -> list:
@@ -481,7 +495,7 @@ def _lift_lambdas(functions) -> list:
     return functions + lifted
 
 
-def _extract_functions(stmts: list) -> list:
+def _extract_functions(stmts: list, synthetic: bool = True) -> list:
     """Extract top-level FunctionDefs from a full module statement list.
 
     Imports, module-level assignments, structs, control flow, etc. are
@@ -494,7 +508,7 @@ def _extract_functions(stmts: list) -> list:
     Returns the FunctionDef list with `main` first when present (the
     startup stub BLs functions[0])."""
     functions = [s for s in stmts if isinstance(s, F.FunctionDef)]
-    if not functions:
+    if not functions and synthetic:
         functions = [_synthetic_main()]
     main = [f for f in functions if f.name == "main"]
     rest = [f for f in functions if f.name != "main"]
@@ -502,7 +516,8 @@ def _extract_functions(stmts: list) -> list:
 
 
 def compile_formal(source_path: str, output: str = None,
-                   test_input: int = 10, prove: bool = False) -> dict:
+                   test_input: int = 10, prove: bool = True,
+                   check: bool = True) -> dict:
     """Compile `source_path` via the formal arm64 path to a Mach-O binary.
 
     output: destination path; defaults to <stem>.aout next to the source.
@@ -575,6 +590,7 @@ def compile_formal(source_path: str, output: str = None,
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)
+    _ad_hoc_sign(output)
 
     result = {
         "path": output,
@@ -599,5 +615,121 @@ def compile_formal(source_path: str, output: str = None,
             f.write(proof)
         os.chmod(proof_path, 0o444)  # a-w, same as formal's Makefile
         result["proof_path"] = proof_path
+        if check:
+            from formal.lean import check_proof_cached
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ok, detail, cached = check_proof_cached(proof_path, repo_root=repo_root)
+            result["proof_checked"] = ok
+            result["proof_cached"] = cached
+            if not ok:
+                raise FormalBuildError(f"proof check failed: {detail}")
 
+    return result
+
+
+def _formal_module_functions(source_path: str) -> tuple[str, list]:
+    try:
+        with open(source_path) as f:
+            source = f.read()
+    except OSError as e:
+        raise FormalBuildError(f"cannot read {source_path}: {e}")
+    try:
+        stmts = parse_module(source, filename=source_path)
+    except SyntaxError as e:
+        raise FormalBuildError(f"{source_path}: parse error: {e}")
+    functions = _extract_functions(stmts, synthetic=False)
+    if not functions:
+        raise FormalBuildError(f"{source_path}: no top-level functions")
+    ctx = FormalClosureCtx()
+    discover_closures(ctx, stmts)
+    functions = _flatten_closures(functions, ctx._all_closures)
+    functions = _lift_lambdas(functions)
+    module = re.sub(r"[^A-Za-z0-9_]", "_",
+                    os.path.splitext(os.path.basename(source_path))[0])
+    return module, functions
+
+
+def compile_formal_dylib(source_paths: list, output: str = None,
+                         test_input: int = 10, prove: bool = True,
+                         check: bool = True) -> dict:
+    if not source_paths:
+        raise FormalBuildError("at least one source file is required")
+    ordered = []
+    module_by_name = {}
+    for source_path in source_paths:
+        module, functions = _formal_module_functions(source_path)
+        for fn in functions:
+            if fn.name in module_by_name:
+                raise FormalBuildError(
+                    f"duplicate function '{fn.name}' in "
+                    f"{module_by_name[fn.name]} and {source_path}")
+            module_by_name[fn.name] = source_path
+            ordered.append(fn)
+
+    if output is None:
+        stem = os.path.splitext(os.path.basename(source_paths[0]))[0] or "module"
+        output = os.path.join(
+            os.path.dirname(os.path.abspath(source_paths[0])),
+            stem + ".dylib")
+    install_name = "@rpath/" + os.path.basename(output)
+    base_addr = TEXT_BASE + dylib_code_offset(install_name)
+    codegen = ARM64Codegen(test_input=test_input)
+    try:
+        code, info = codegen.compile(ordered, base_addr=base_addr,
+                                     emit_startup=False)
+    except CodegenError as e:
+        raise FormalBuildError(str(e))
+    if info.get("external_syms"):
+        raise FormalBuildError("external symbols are not supported in formal dylibs")
+
+    exports = []
+    for fn in ordered:
+        if fn.name.startswith("_"):
+            continue
+        module = re.sub(r"[^A-Za-z0-9_]", "_",
+                        os.path.splitext(os.path.basename(
+                            module_by_name[fn.name]))[0])
+        exports.append({
+            "module": module,
+            "name": fn.name,
+            "symbol": f"_{module}__{fn.name}",
+            "entry": info["labels"][fn.name],
+            "arity": len(fn.params),
+        })
+    if not exports:
+        raise FormalBuildError("formal dylib has no public functions")
+
+    binary = build_macho_dylib(code, base_addr, exports, install_name)
+    with open(output, "wb") as f:
+        f.write(binary)
+    os.chmod(output, 0o755)
+    _ad_hoc_sign(output)
+
+    result = {
+        "path": output,
+        "code": code,
+        "binary": binary,
+        "info": info,
+        "exports": exports,
+        "backend": "arm64/macho-dylib",
+    }
+
+    if prove:
+        from formal.arm64_proof_gen import generate_dylib_proof
+        proof = generate_dylib_proof(code, info, exports)
+        proof_path = os.path.splitext(output)[0] + "_proof.lean"
+        if os.path.exists(proof_path):
+            os.chmod(proof_path, 0o644)
+        with open(proof_path, "w") as f:
+            f.write(proof)
+        os.chmod(proof_path, 0o444)
+        result["proof_path"] = proof_path
+        if check:
+            from formal.lean import check_proof_cached
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ok, detail, cached = check_proof_cached(proof_path, repo_root=repo_root)
+            result["proof_checked"] = ok
+            result["proof_cached"] = cached
+            if not ok:
+                raise FormalBuildError(f"proof check failed: {detail}")
     return result

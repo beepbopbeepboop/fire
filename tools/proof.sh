@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# formalbuild --prove <stem>, then typecheck the generated Lean 4 proof
-# statically with pixi's lean. Does NOT execute the generated binary.
+# formalbuild <stem> (which now generates AND checks the Lean 4 proof by
+# default), for a serial single-example run. Does NOT execute the built
+# binary; use `make check-formal` for the whole suite.
 #
 # usage: tools/proof.sh <example-stem> [more-stems...]
 # e.g.:  tools/proof.sh const2
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LEAN="${ROOT}/.pixi/envs/default/bin/lean"
+# Resolve lean exactly as the Makefile and the python paths do (formal/lean.py):
+# a bare `command -v lean` on an elan machine is a shim that resolves a
+# toolchain from the *current directory*, so from anywhere but the repo root it
+# silently uses - and can download - elan's default instead of the version
+# pinned in ./lean-toolchain.
+LEAN="$(cd "$ROOT" && python3 -c 'import formal.lean as l; print(l.find_lean(".") or "")')"
 OUTDIR="${ROOT}/output"
 SRC_DIR="${ROOT}/formal/examples"
-LIB="${ROOT}/lib"
 
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 <example-stem> [more-stems...]" >&2
   exit 2
 fi
-if [[ ! -x "$LEAN" ]]; then
-  echo "missing lean at $LEAN (run: pixi install)" >&2
-  exit 1
-fi
-if [[ ! -f "${LIB}/ProofLib.olean" ]]; then
-  echo "missing ${LIB}/ProofLib.olean (run: pixi run prooflib)" >&2
+if [[ -z "$LEAN" || ! -x "$LEAN" ]]; then
+  echo "missing lean (install the version pinned in ./lean-toolchain via elan)" >&2
   exit 1
 fi
 
@@ -37,19 +38,12 @@ for stem in "$@"; do
     status=1
     continue
   fi
-  echo "== formalbuild --prove ${stem}"
-  if ! python3 "${ROOT}/fire.py" formalbuild --prove -o "${OUTDIR}/${stem}.aout" "$src"; then
-    echo "FAIL build ${stem}"
-    status=1
-    fail=$((fail+1))
-    continue
-  fi
-  echo "== lean typecheck ${stem}_proof.lean"
-  if (cd "$OUTDIR" && LEAN_PATH=".:${LIB}" "$LEAN" "${stem}_proof.lean"); then
-    echo "Proof type-checked for ${stem}."
+  echo "== formalbuild ${stem}"
+  if python3 "${ROOT}/fire.py" formalbuild -o "${OUTDIR}/${stem}.aout" "$src"; then
+    echo "Proof generated and checked for ${stem}."
     pass=$((pass+1))
   else
-    echo "FAIL proof ${stem}"
+    echo "FAIL build/proof ${stem}"
     status=1
     fail=$((fail+1))
   fi

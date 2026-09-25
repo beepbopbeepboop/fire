@@ -343,3 +343,10 @@ theorem u64_sp_add_chunks (sp : UInt64) (chunks : List Nat) (total : Nat)
           = sp + (UInt64.ofNat c + UInt64.ofNat cs.sum) := UInt64.add_assoc _ _ _
         _ = sp + UInt64.ofNat (c + cs.sum) := by rw [u64_ofNat_add]
         _ = sp + UInt64.ofNat total := by rw [hsum]
+
+def work_export_names (exports : List DylibExport) : List String :=
+  exports.map DylibExport.symbol
+
+theorem work_export_names_length (exports : List DylibExport) :
+    (work_export_names exports).length = exports.length := by
+  simp [work_export_names]

@@ -379,6 +379,157 @@ def build_macho_executable_extern(
     return bytes(file)
 
 
+MH_DYLIB = 6
+ID_DYLIB_CMD = 0x0D
+DYLD_EXPORTS_TRIE_CMD = 0x80000033
+
+
+def _export_trie(exports: list) -> bytes:
+    """Flat (single-level) export trie: every symbol is one edge off the root.
+
+    The terminal's flags word is 0, i.e. EXPORT_SYMBOL_FLAGS_KIND_REGULAR.
+    The low two bits of that word are the symbol *kind* (0 = regular,
+    1 = thread-local, 2 = absolute), so a nonzero value here does not merely
+    look odd: dyld reports every such symbol as "[per-thread]" in
+    `dyld_info -exports`, and any consumer that honours the kind (a TLS-aware
+    caller, or dyld's own validation) would treat an ordinary function as a
+    thread-local one.
+    """
+    ordered = sorted(exports, key=lambda e: e["symbol"])
+    children = []
+    for export in ordered:
+        raw = export["symbol"].encode("utf-8")
+        addr = bytearray()
+        _uleb(addr, export["entry"] - TEXT_BASE)
+        flags = bytearray()
+        _uleb(flags, 0)
+        terminal = bytes(flags) + bytes(addr)
+        children.append((raw, bytes([len(terminal)]) + terminal + b"\0"))
+    offsets = [1] * len(ordered)
+    root = b""
+    for _ in range(8):
+        root = bytearray([0, len(ordered)])
+        for (raw, _), offset in zip(children, offsets):
+            root += raw
+            root.append(0)
+            _uleb(root, offset)
+        next_offsets = []
+        cursor = len(root)
+        for _, payload in children:
+            next_offsets.append(cursor)
+            cursor += len(payload)
+        if next_offsets == offsets:
+            break
+        offsets = next_offsets
+    out = bytearray(root)
+    for _, payload in children:
+        out += payload
+    return bytes(out)
+
+
+def dylib_code_offset(install_name: str) -> int:
+    name = install_name.encode("utf-8") + b"\0"
+    id_cmdsize = (24 + len(name) + 7) & ~7
+    sizeofcmds = 152 + 72 + id_cmdsize + 24 + 24 + 48 + 16
+    return ((32 + sizeofcmds + 31) & ~15)
+
+
+def build_macho_dylib(code: bytes, base_addr: int, exports: list,
+                      install_name: str) -> bytes:
+    trie = _export_trie(exports)
+    name = install_name.encode("utf-8") + b"\0"
+    id_cmdsize = (24 + len(name) + 7) & ~7
+    sizeofcmds = 152 + 72 + id_cmdsize + 24 + 24 + 48 + 16
+    code_file = dylib_code_offset(install_name)
+    if base_addr != TEXT_BASE + code_file:
+        raise ValueError("dylib base address does not match Mach-O layout")
+    linkedit_file = ((code_file + len(code) + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE
+    file = bytearray(linkedit_file + len(trie))
+
+    def patch(off, fmt, *vals):
+        struct.pack_into(fmt, file, off, *vals)
+
+    patch(0, "<I", MAGIC_64)
+    patch(4, "<I", CPU_TYPE_ARM64)
+    patch(8, "<I", 0)
+    patch(12, "<I", MH_DYLIB)
+    patch(16, "<I", 7)
+    patch(20, "<I", sizeofcmds)
+    patch(24, "<I", 0x800005)
+    o = 32
+
+    patch(o, "<I", SEGMENT_64_CMD)
+    patch(o + 4, "<I", 152)
+    file[o + 8 : o + 24] = b"__TEXT".ljust(16, b"\0")
+    patch(o + 24, "<Q", TEXT_BASE)
+    patch(o + 32, "<Q", PAGE_SIZE)
+    patch(o + 40, "<Q", 0)
+    patch(o + 48, "<Q", PAGE_SIZE)
+    patch(o + 56, "<I", 5)
+    patch(o + 60, "<I", 5)
+    patch(o + 64, "<I", 1)
+    patch(o + 68, "<I", 0)
+    s = o + 72
+    file[s : s + 16] = b"__text".ljust(16, b"\0")
+    file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
+    patch(s + 32, "<Q", base_addr)
+    patch(s + 40, "<Q", len(code))
+    patch(s + 48, "<I", code_file)
+    patch(s + 52, "<I", 2)
+    patch(s + 56, "<I", 0)
+    patch(s + 60, "<I", 0)
+    patch(s + 64, "<I", 0x80000400)
+    o += 152
+
+    patch(o, "<I", SEGMENT_64_CMD)
+    patch(o + 4, "<I", 72)
+    file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
+    patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
+    patch(o + 32, "<Q", ((len(trie) + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE)
+    patch(o + 40, "<Q", linkedit_file)
+    patch(o + 48, "<Q", len(trie))
+    patch(o + 56, "<I", 1)
+    patch(o + 60, "<I", 1)
+    o += 72
+
+    patch(o, "<I", ID_DYLIB_CMD)
+    patch(o + 4, "<I", id_cmdsize)
+    patch(o + 8, "<I", 24)
+    patch(o + 12, "<I", 0)
+    patch(o + 16, "<I", 0x10000)
+    patch(o + 20, "<I", 0x10000)
+    file[o + 24 : o + 24 + len(name)] = name
+    o += id_cmdsize
+
+    patch(o, "<I", BUILD_VERSION_CMD)
+    patch(o + 4, "<I", 24)
+    patch(o + 8, "<I", 1)
+    patch(o + 12, "<I", 0x000B0000)
+    patch(o + 16, "<I", 0x000B0000)
+    patch(o + 20, "<I", 0)
+    o += 24
+
+    patch(o, "<I", UUID_CMD)
+    patch(o + 4, "<I", 24)
+    o += 24
+
+    patch(o, "<I", DYLD_INFO_ONLY_CMD)
+    patch(o + 4, "<I", 48)
+    o += 48
+
+    patch(o, "<I", DYLD_EXPORTS_TRIE_CMD)
+    patch(o + 4, "<I", 16)
+    patch(o + 8, "<I", linkedit_file)
+    patch(o + 12, "<I", len(trie))
+    o += 16
+
+    if o > code_file:
+        raise ValueError("dylib load commands overlap code")
+    file[code_file : code_file + len(code)] = code
+    file[linkedit_file : linkedit_file + len(trie)] = trie
+    return bytes(file)
+
+
 if __name__ == "__main__":
     main_code = bytes([0x00, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6])
     with open("/tmp/a.out", "wb") as f:

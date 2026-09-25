@@ -51,4 +51,5 @@ mojoc.dbg
 # Lean 4 compiled objects + formal proof/build outputs (rebuild:
 # `pixi run prooflib` / `tools/proof.sh <stem>` / `fire.py formalbuild`)
 *.olean
+*.olean.srcsha256
 /output/

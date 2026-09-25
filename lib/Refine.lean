@@ -543,4 +543,23 @@ theorem compiled_correct (p : Prog) (obs : UInt64 → UInt64) (n : UInt64)
   rw [hrun]
   exact hx0
 
+def dylibExportProg (image : DylibImage) (code : Nat → UInt8)
+    (export_ : DylibExport) : Prog :=
+  { fname := export_.module ++ "." ++ export_.symbol
+    code := code
+    base := image.base
+    entry := export_.entry
+    exit := image.base + image.codeSize
+    fuel := fun _ => 100000
+    blocks := []
+    rets := [] }
+
+def DylibExportContract (p : Prog) (obs : UInt64 → UInt64) (n : UInt64) : Prop :=
+  ∀ s, runProg p n = some s → s.x0 = obs n
+
+theorem dylib_export_contract_stub (p : Prog) (obs : UInt64 → UInt64) (n : UInt64) :
+    DylibExportContract p obs n := by
+  intro s _
+  sorry
+
 end Refine

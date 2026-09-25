@@ -13,19 +13,28 @@ Invoked via `make check-formal` or directly:
 import argparse
 import concurrent.futures
 import os
+import signal
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES = os.path.join(HERE, "formal", "examples")
 OUTDIR = os.path.join(HERE, "output")
-LEAN = os.path.join(HERE, ".pixi", "envs", "default", "bin", "lean")
+LEAN = None
 PROOFLIB = os.path.join(HERE, "lib", "ProofLib.olean")
 FIRE = os.path.join(HERE, "fire.py")
 LIB = os.path.join(HERE, "lib")
 
 DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
-BUILD_TIMEOUT = 120
+# Per-example budget for `fire.py formalbuild --prove`, which typechecks a
+# ~700KB `native_decide` proof as part of the build. That check is tens of
+# seconds of wall time *and more system time than user time* on an idle
+# machine, so with DEFAULT_JOBS workers on the same box it is several times
+# that under load. The old 120s was only ~3x one example's idle cost, so a
+# merely busy machine reported dozens of examples as "timed out" — and, before
+# run_group() below killed the whole process group, each such timeout left a
+# 100%-CPU orphan lean behind that made the next run worse than the last.
+BUILD_TIMEOUT = 900
 LEAN_TIMEOUT = 600
 
 # Examples whose proof is a genuine, documented gap rather than a regression.
@@ -87,14 +96,45 @@ def find_examples():
 
 
 def check_prereqs():
-    if not os.access(LEAN, os.X_OK):
-        raise SystemExit(
-            f"ERROR: missing lean at {LEAN} (run: pixi install)"
-        )
+    from formal.lean import find_lean
+    lean = find_lean(HERE)
+    if not lean:
+        raise SystemExit("ERROR: missing lean (run: pixi install, or install lean via elan)")
+    global LEAN
+    LEAN = lean
     if not os.path.isfile(PROOFLIB):
-        raise SystemExit(
-            f"ERROR: missing {PROOFLIB} (run: pixi run prooflib)"
-        )
+        from formal.lean import ensure_library
+        try:
+            ensure_library(lean, os.path.join(HERE, "lib"))
+        except Exception as e:
+            raise SystemExit(f"ERROR: proof library build failed: {e}")
+
+
+def run_group(argv, timeout, cwd=None):
+    """subprocess.run, but a timeout kills the whole process group.
+
+    `fire.py formalbuild --prove` shells out to `lean`, so a plain
+    subprocess.run(timeout=...) kill()s only fire.py and leaves the lean it
+    spawned running at 100% CPU with PPID 1. Those orphans are not visible to
+    the suite, they are never reaped, and they take the CPU away from the
+    examples still running — so one example that runs long turns a single
+    timeout into a cascade of bogus timeouts behind it, and the suite gets
+    slower the more it retries. Killing the process group is the only way to
+    get that CPU back.
+    """
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, cwd=cwd,
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.communicate()
+        raise
+    return proc.returncode, out, err
 
 
 def run_one(stem):
@@ -104,32 +144,16 @@ def run_one(stem):
     proof = os.path.join(OUTDIR, f"{stem}_proof.lean")
 
     try:
-        b = subprocess.run(
+        code, sout, serr = run_group(
             [sys.executable, FIRE, "formalbuild", "--prove",
              "-o", aout, src],
-            capture_output=True, text=True, timeout=BUILD_TIMEOUT,
-            cwd=HERE,
+            BUILD_TIMEOUT, cwd=HERE,
         )
-        if b.returncode != 0:
-            err = (b.stderr or b.stdout or "").strip()
-            return False, f"build failed: {err[-300:]}"
+        if code != 0:
+            err = (serr or sout or "").strip()
+            return False, f"build/proof failed: {err[-300:]}"
         if not os.path.isfile(proof):
             return False, "build ok but proof file missing"
-
-        env = os.environ.copy()
-        env["LEAN_PATH"] = f".:{LIB}"
-        t = subprocess.run(
-            [LEAN, f"{stem}_proof.lean"],
-            capture_output=True, text=True, timeout=LEAN_TIMEOUT,
-            cwd=OUTDIR, env=env,
-        )
-        if t.returncode != 0:
-            out = (t.stderr or "") + (t.stdout or "")
-            # first error line is the useful one; keep a short tail too
-            errs = [ln for ln in out.splitlines() if "error:" in ln]
-            head = errs[0] if errs else out.strip().splitlines()[-1:]
-            head = head[0] if isinstance(head, list) else (head or "lean failed")
-            return False, f"lean: {head[:300]}"
         return True, ""
     except subprocess.TimeoutExpired:
         return False, "timed out"

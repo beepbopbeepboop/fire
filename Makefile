@@ -1,6 +1,6 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-ab-native \
-        check-coro check-formal \
+        check-coro check-formal check-formal-dylib \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -172,20 +172,51 @@ check-gimple-runner:
 # tools/proof.sh <stem>.
 FORMAL_SOURCES  := $(wildcard formal/*.py)
 FORMAL_EXAMPLES := $(wildcard formal/examples/*.mojo)
+# Resolve lean through formal/lean.py rather than `command -v lean`: on a
+# machine with elan, the `lean` on PATH is a shim that picks a toolchain from
+# the *current directory*, so a shim run from anywhere but the repo root (or
+# from a directory with no lean-toolchain) silently uses — and can download —
+# elan's default instead of the version pinned in ./lean-toolchain.
+FORMAL_LEAN     := $(shell python3 -c "import formal.lean as l; print(l.find_lean('.') or '')")
 
 check-formal: $(FORMAL_SOURCES) $(FORMAL_EXAMPLES) test_formal.py fire.py \
-              fire_compiler.py lib/ProofLib.olean
+              fire_compiler.py lib/ProofLib.olean lib/work.olean lib/Refine.olean
 	python3 checked_run.py check-formal \
 		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
 		$(foreach s,$(FORMAL_EXAMPLES),--extra $(s)) \
 		--extra test_formal.py --extra fire.py --extra fire_compiler.py \
-		--extra lib/ProofLib.olean \
+		--extra lib/ProofLib.olean --extra lib/work.olean \
+		--extra lib/Refine.olean \
 		-- python3 test_formal.py
 
-# ProofLib.olean is required by check-formal / tools/proof.sh; build it here
-# if missing so the Make prereq above can be satisfied from a fresh clone.
-lib/ProofLib.olean: lib/ProofLib.lean lib/work.lean lib/Refine.lean pixi.toml
-	pixi run prooflib
+# One implementation for building lib/*.olean, not two: formal/lean.py's
+# ensure_library checks the source *content* (via the .srcsha256 stamp beside
+# each .olean) and reuses the content-addressed store, so `make` and the python
+# paths agree on what is stale and neither can rebuild an .olean the other just
+# built. Duplicating the lean invocation here instead meant a `touch` of
+# lib/*.lean cost a ~90s ProofLib.olean rebuild inside make and then another one
+# inside the first fire.py that ran afterwards.
+lib/ProofLib.olean lib/work.olean lib/Refine.olean: $(wildcard lib/*.lean) \
+              formal/lean.py
+	@test -n "$(FORMAL_LEAN)" || (echo "lean not found (see ./lean-toolchain)"; exit 1)
+	LEAN_PATH=lib python3 -c "import formal.lean as l; l.ensure_library('$(FORMAL_LEAN)', 'lib')"
+
+# ── check-formal-dylib: formal arm64 dylib emission + load + proof ──────────
+# Builds multi-module dylibs through `fire.py dylib --formal`, re-reads the
+# emitted Mach-O independently (header, load commands, export trie), then
+# dlopen()s the result and calls every exported function, and finally checks
+# the default prove path emits a Lean proof that typechecks. Separate from
+# check-formal (which only covers the MH_EXECUTE formalbuild path) because the
+# dylib path has its own linker, its own export naming, and its own proof
+# entry point. Same lean dependency as check-formal; not gated into `check`.
+check-formal-dylib: $(FORMAL_SOURCES) test_formal_dylib.py fire.py \
+              fire_compiler.py lib/ProofLib.olean lib/work.olean lib/Refine.olean
+	python3 checked_run.py check-formal-dylib \
+		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
+		--extra test_formal_dylib.py --extra fire.py --extra fire_compiler.py \
+		--extra lib/ProofLib.olean --extra lib/work.olean \
+		--extra lib/Refine.olean \
+		-- python3 test_formal_dylib.py
 
 # Parse and validate entire stdlib (all .mojo files)
 stdlib:

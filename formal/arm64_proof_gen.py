@@ -5469,7 +5469,84 @@ theorem {func_name}_compiles_correctly :
    | none => 0) = mojo {test_input} := by
   native_decide
 
-{universal_section}
+    {universal_section}
+    """
+
+
+def _lean_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _lean_export_id(name: str) -> str:
+    ident = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    if not ident or not (ident[0].isalpha() or ident[0] == "_"):
+        ident = "e_" + ident
+    return ident
+
+
+def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
+    base = info["base_addr"]
+    test_input = info.get("test_input", 10)
+    export_defs = []
+    proofs = []
+    for index, export in enumerate(exports):
+        ident = f"dylib_export_{index}_{_lean_export_id(export['name'])}"
+        export_defs.append(
+            f"def {ident} : DylibExport :=\n"
+            f"  {{ module := {_lean_string(export['module'])}\n"
+            f"    symbol := {_lean_string(export['symbol'])}\n"
+            f"    entry := {export['entry']}\n"
+            f"    arity := {export['arity']} }}"
+        )
+        proofs.append(
+            f"theorem {ident}_in_image : DylibExport.InImage dylib_image {ident} :=\n"
+            f"  DylibExport.in_image_stub dylib_image {ident}\n\n"
+            f"theorem {ident}_semantics :\n"
+            f"    DylibExport.Semantics dylib_image {ident} dylib_observables :=\n"
+            f"  DylibExport.semantics_stub dylib_image {ident} dylib_observables\n\n"
+            f"def {ident}_prog : Refine.Prog :=\n"
+            f"  Refine.dylibExportProg dylib_image dylib_code {ident}\n\n"
+            f"theorem {ident}_contract :\n"
+            f"    Refine.DylibExportContract {ident}_prog (fun n => n) n :=\n"
+            f"  Refine.dylib_export_contract_stub {ident}_prog (fun n => n) n"
+        )
+    image_exports = ", ".join(f"dylib_export_{i}_{_lean_export_id(e['name'])}"
+                               for i, e in enumerate(exports))
+    export_defs_text = "\n\n".join(export_defs)
+    proofs_text = "\n\n".join(proofs)
+    return f"""import ProofLib
+import work
+import Refine
+
+set_option maxRecDepth 100000
+set_option maxHeartbeats 20000000
+set_option linter.unusedSimpArgs false
+set_option linter.unusedVariables false
+
+{_gen_code_defs("dylib", code, base, test_input)}
+
+{_gen_decode_lemmas("dylib", code, base)}
+
+{_gen_step_lemmas("dylib", code, base) + "\n\n" + _gen_step_result_lemmas("dylib", code, base)}
+
+def dylib_observables : List (UInt64 → UInt64) := []
+
+{export_defs_text}
+
+def dylib_image : DylibImage :=
+  {{ base := {base}
+    codeSize := {len(code)}
+    exports := [{image_exports}] }}
+
+def dylib_exports : List DylibExport := dylib_image.exports
+
+theorem dylib_exports_count : dylib_exports.length = {len(exports)} := rfl
+
+theorem dylib_export_names_count :
+    (work_export_names dylib_exports).length = dylib_exports.length :=
+  work_export_names_length dylib_exports
+
+{proofs_text}
 """
 
 

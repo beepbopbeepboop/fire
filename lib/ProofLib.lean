@@ -4768,3 +4768,38 @@ example (sp : UInt64) (a b c : Nat)
     sp - (UInt64.ofNat a - (UInt64.ofNat b - UInt64.ofNat c))
       = sp - UInt64.ofNat (a - (b - c)) :=
   u64_sub_nest_lit sp a b c h1 h2 hMa hMb hMc
+
+structure DylibExport where
+  module : String
+  symbol : String
+  entry : Nat
+  arity : Nat
+
+structure DylibImage where
+  base : Nat
+  codeSize : Nat
+  exports : List DylibExport
+
+namespace DylibExport
+
+def offset (image : DylibImage) (export_ : DylibExport) : Nat :=
+  export_.entry - image.base
+
+def InImage (image : DylibImage) (export_ : DylibExport) : Prop :=
+  export_.entry ≥ image.base ∧ offset image export_ < image.codeSize
+
+def Semantics (image : DylibImage) (export_ : DylibExport)
+    (observables : List (UInt64 → UInt64)) : Prop :=
+  ∀ observable, observable ∈ observables → True
+
+theorem offset_stub (image : DylibImage) (export_ : DylibExport) :
+    offset image export_ = export_.entry - image.base := rfl
+
+theorem in_image_stub (image : DylibImage) (export_ : DylibExport) :
+    InImage image export_ := by sorry
+
+theorem semantics_stub (image : DylibImage) (export_ : DylibExport)
+    (observables : List (UInt64 → UInt64)) :
+    Semantics image export_ observables := by sorry
+
+end DylibExport

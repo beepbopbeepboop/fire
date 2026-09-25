@@ -386,7 +386,8 @@ class ARM64Codegen:
         # integer ALU forms.
         self._container_ctx = 0
 
-    def compile(self, stmts: list, base_addr: int = 0x100000014) -> tuple:
+    def compile(self, stmts: list, base_addr: int = 0x100000014,
+                emit_startup: bool = True) -> tuple:
         """Compile a fire_compiler module statement list to ARM64 machine code.
 
         `stmts` is Parser(...).parse_module()'s output — may contain imports,
@@ -396,10 +397,10 @@ class ARM64Codegen:
         functions = [s for s in stmts if isinstance(s, F.FunctionDef)]
         if not functions:
             raise CodegenError("no function definitions to compile")
-        # Prefer main as entry when present (startup stub BLs functions[0]).
-        main = [f for f in functions if f.name == "main"]
-        rest = [f for f in functions if f.name != "main"]
-        functions = (main + rest) if main else functions
+        if emit_startup:
+            main = [f for f in functions if f.name == "main"]
+            rest = [f for f in functions if f.name != "main"]
+            functions = (main + rest) if main else functions
         for f in functions:
             # async def and generators lower as ordinary functions: formal
             # has no event loop / iterator protocol, so `await` is identity
@@ -408,20 +409,19 @@ class ARM64Codegen:
 
         self.asm.org(base_addr)
 
-        # Startup stub: save LR, set X0 = test_input, BL entry, restore, RET.
-        # (Entry is functions[0]; main is preferred when present.)
-        self.asm.emit(encode_stp_sp_pre(29, 30))
-        test_val = self.test_input
-        if test_val <= 0xffff:
-            self.asm.emit(encode_movz_xn_imm(0, test_val))
-        else:
-            self.asm.emit(encode_movz_xn_imm(0, test_val & 0xffff))
-            self.asm.emit(encode_movk_xd_imm(0, (test_val >> 16) & 0xffff, 16))
         first_func_name = functions[0].name
-        self.asm.emit(encode_bl(0))
-        self.asm.emit_label_rel(first_func_name, here_offset=-4)
-        self.asm.emit(encode_ldp_sp_post(29, 30))
-        self.asm.emit(encode_ret())
+        if emit_startup:
+            self.asm.emit(encode_stp_sp_pre(29, 30))
+            test_val = self.test_input
+            if test_val <= 0xffff:
+                self.asm.emit(encode_movz_xn_imm(0, test_val))
+            else:
+                self.asm.emit(encode_movz_xn_imm(0, test_val & 0xffff))
+                self.asm.emit(encode_movk_xd_imm(0, (test_val >> 16) & 0xffff, 16))
+            self.asm.emit(encode_bl(0))
+            self.asm.emit_label_rel(first_func_name, here_offset=-4)
+            self.asm.emit(encode_ldp_sp_post(29, 30))
+            self.asm.emit(encode_ret())
 
         for f in functions:
             self._emit_function(f)
