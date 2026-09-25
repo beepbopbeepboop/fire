@@ -96,6 +96,120 @@ def _resolve_type(gen, ann: str | None) -> str:
             return f"{elem_ann} *"
     return gimple_ctypes._mojo_type(ann)
 
+
+def _definitely_bytes_expr(e, bytes_vars: set, fn_ret_types: dict) -> bool:
+    if isinstance(e, StringLiteral) and getattr(e, 'is_bytes', False):
+        return True
+    if isinstance(e, IdentExpr) and e.name in bytes_vars:
+        return True
+    if isinstance(e, SliceExpr):
+        return _definitely_bytes_expr(e.obj, bytes_vars, fn_ret_types)
+    if isinstance(e, BinaryOp) and e.op == '+':
+        return (_definitely_bytes_expr(e.left, bytes_vars, fn_ret_types)
+                or _definitely_bytes_expr(e.right, bytes_vars, fn_ret_types))
+    if not isinstance(e, CallExpr) or not isinstance(e.func, IdentExpr):
+        return False
+    name = e.func.name
+    return name in ('bytes', 'bytearray') or fn_ret_types.get(name) == 'MojoBytes *'
+
+
+def _collect_bytes_locals(nodes: list, fn_ret_types: dict, bytes_vars: set) -> set:
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            targets = []
+            value = None
+            if isinstance(node, AssignStmt):
+                targets = [node.target]
+                value = node.value
+            elif isinstance(node, VarDecl):
+                targets = [IdentExpr(node.name)]
+                value = node.value
+            elif isinstance(node, MultiAssignStmt):
+                targets = node.targets
+                value = node.value
+            if value is not None and _definitely_bytes_expr(value, bytes_vars, fn_ret_types):
+                for target in targets:
+                    if isinstance(target, IdentExpr) and target.name not in bytes_vars:
+                        bytes_vars.add(target.name)
+                        changed = True
+            elif isinstance(node, IfStmt):
+                before = len(bytes_vars)
+                _collect_bytes_locals(node.then_body, fn_ret_types, bytes_vars)
+                if node.else_body:
+                    _collect_bytes_locals(node.else_body, fn_ret_types, bytes_vars)
+                _elifs = getattr(node, 'elifs', None) or []
+                for _ei in range(len(_elifs)):
+                    _collect_bytes_locals(_elifs[_ei][1], fn_ret_types, bytes_vars)
+                changed = changed or len(bytes_vars) != before
+            elif isinstance(node, (ForStmt, WhileStmt)):
+                before = len(bytes_vars)
+                _collect_bytes_locals(node.body, fn_ret_types, bytes_vars)
+                if node.else_body:
+                    _collect_bytes_locals(node.else_body, fn_ret_types, bytes_vars)
+                changed = changed or len(bytes_vars) != before
+            elif isinstance(node, TryStmt):
+                before = len(bytes_vars)
+                _collect_bytes_locals(node.body, fn_ret_types, bytes_vars)
+                for handler in node.handlers:
+                    _collect_bytes_locals(handler.body, fn_ret_types, bytes_vars)
+                if node.else_body:
+                    _collect_bytes_locals(node.else_body, fn_ret_types, bytes_vars)
+                if node.finally_body:
+                    _collect_bytes_locals(node.finally_body, fn_ret_types, bytes_vars)
+                changed = changed or len(bytes_vars) != before
+            elif isinstance(node, WithStmt):
+                before = len(bytes_vars)
+                _collect_bytes_locals(node.body, fn_ret_types, bytes_vars)
+                changed = changed or len(bytes_vars) != before
+    return bytes_vars
+
+
+def _slice_root_is_param(e, param_name: str) -> bool:
+    while isinstance(e, (SliceExpr, SubscriptExpr)):
+        e = e.obj
+    return isinstance(e, IdentExpr) and e.name == param_name
+
+
+def _has_bytes_destination_param_slice(nodes: list, param_name: str,
+                                       bytes_vars: set) -> bool:
+    for node in nodes:
+        if isinstance(node, (AssignStmt, VarDecl)):
+            target = node.target if isinstance(node, AssignStmt) else IdentExpr(node.name)
+            if (isinstance(target, IdentExpr) and target.name in bytes_vars
+                    and isinstance(node.value, SliceExpr)
+                    and _slice_root_is_param(node.value.obj, param_name)):
+                return True
+        elif isinstance(node, IfStmt):
+            if _has_bytes_destination_param_slice(node.then_body, param_name, bytes_vars):
+                return True
+            if node.else_body and _has_bytes_destination_param_slice(node.else_body, param_name, bytes_vars):
+                return True
+            _elifs = getattr(node, 'elifs', None) or []
+            for _ei in range(len(_elifs)):
+                if _has_bytes_destination_param_slice(_elifs[_ei][1], param_name, bytes_vars):
+                    return True
+        elif isinstance(node, (ForStmt, WhileStmt)):
+            if _has_bytes_destination_param_slice(node.body, param_name, bytes_vars):
+                return True
+            if node.else_body and _has_bytes_destination_param_slice(node.else_body, param_name, bytes_vars):
+                return True
+        elif isinstance(node, TryStmt):
+            if _has_bytes_destination_param_slice(node.body, param_name, bytes_vars):
+                return True
+            for handler in node.handlers:
+                if _has_bytes_destination_param_slice(handler.body, param_name, bytes_vars):
+                    return True
+            if node.else_body and _has_bytes_destination_param_slice(node.else_body, param_name, bytes_vars):
+                return True
+            if node.finally_body and _has_bytes_destination_param_slice(node.finally_body, param_name, bytes_vars):
+                return True
+        elif isinstance(node, WithStmt) and _has_bytes_destination_param_slice(node.body, param_name, bytes_vars):
+            return True
+    return False
+
+
 def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                        owner_struct: str | None = None) -> dict[str, str]:
     """Infer parameter types from member accesses and function calls in function body.
@@ -805,9 +919,13 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 is_nondict_key_subscripted, called_methods, is_dict_method,
                 aug_member_targets, is_bytes_method)
 
+    _bytes_locals = _collect_bytes_locals(func.body, gen.func_return_types, set())
     # For each parameter without a type annotation, infer from usage
     for pname, ptype in func.params:
         if ptype is None:
+            if _has_bytes_destination_param_slice(func.body, pname, _bytes_locals):
+                inferred[pname] = 'MojoBytes *'
+                continue
             # Phase 3 (bugs/hard/PERF_nested_module_compile_walk_ast_
             # quadratic_rescan.md): `analyze_param_usage` is an
             # expensive recursive body scan and a PURE function of

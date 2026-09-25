@@ -2239,6 +2239,22 @@ def main():
             print(x)
 """, "root\nsub\na\nb\nroot/sub\nx\ny\nc\n")
 
+    test_generator_stdout("gen_tuple_mixed_arity_preserves_length", """\
+def pairs(wide):
+    if wide:
+        yield 1, 2, 3
+    else:
+        yield 4, 5, 6, 7
+
+def main():
+    for row in pairs(True):
+        print(len(row))
+    for a, b, c in pairs(True):
+        print(a, b, c)
+    for a, b, c, d in pairs(False):
+        print(a, b, c, d)
+""", "3\n1 2 3\n4 5 6 7\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

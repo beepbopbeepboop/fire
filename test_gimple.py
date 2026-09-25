@@ -5529,6 +5529,16 @@ fn main():
     print(hx(b'\\x00\\xff'))
 """)
 
+    test("bytes_param_inferred_from_bytes_slice_destination", """\
+fn header_size(p):
+    var header = b''
+    if len(p) > 0:
+        header = p[0:2]
+    return len(header)
+fn main():
+    print(header_size(b'abcdef'))
+""")
+
     # bytes value type (Stage 3) — bytearray + memoryview compile checks
     test("bytearray_construct_and_mutate", """\
 fn main():
