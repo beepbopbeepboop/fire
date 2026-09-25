@@ -393,16 +393,46 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
         if k == 'tuple':
             # A nested tuple literal in a slot (Lib/modulefinder.py's
             # `yield "store", (name,)` / `yield "relative_import", (level,
-            # fromlist, name)`) would box recursively into its own
-            # MojoList *, but the consumer side has no channel to recover
-            # the INNER elements' types (they are heterogeneous across
-            # sites: str / list / int), so `for x in args:` / `a, b = args`
-            # in the consumer body reads raw pointer bits. Refuse honestly
-            # rather than silently miscompile -- see
-            # bugs/CODEGEN_generator_function_Lib_modulefinder.md.
-            return None            # nested tuple in a slot -- needs a tagged inner value model
+            # fromlist, name)`): boxed RECURSIVELY as its own MojoList *, but
+            # carrying a runtime TYPE TAG per element (see
+            # `_tagged_nested_box` / runtime/fire_coro_gen.c's MOJO_TAG_*),
+            # so the consumer can recover each inner element's real type
+            # (`_generator_nested_slots` records which slots are tagged, and
+            # `_emit_generator_tuple_unpack` + the tagged unpack path in
+            # `_assign_target` read them back via `mojo_tagged_*`). The inner
+            # arity MAY differ across sites (`(name,)` vs `(level, fromlist,
+            # name)`) -- the tag is what makes that safe.
+            slots.append('MojoList *')
+            continue
         slots.append(_KIND_TO_SLOT_CTYPE[k])
     return slots
+
+
+def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
+    """Per-slot bool aligned with `_generator_tuple_slots`'s result: True
+    where that slot is a nested TUPLE (a tagged nested-tuple box, not an
+    ordinary list-valued slot). None when the tuple shape is inconsistent
+    (same refusal conditions as `_generator_tuple_slots`)."""
+    shapes = []
+    for n in _walk(fn):
+        if isinstance(n, N.YieldExpr):
+            if not isinstance(n.value, N.TupleExpr):
+                return None
+            shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
+    if not shapes:
+        return None
+    ar = len(shapes[0])
+    if any(len(s) != ar for s in shapes):
+        return None
+    flags = []
+    for i in range(ar):
+        kinds = {s[i] for s in shapes}
+        kinds.discard(None)
+        if len(kinds) > 1:
+            return None
+        k = list(kinds)[0] if kinds else None
+        flags.append(k == 'tuple')
+    return flags
 
 
 def _generator_value_kind(fn: N.FunctionDef,
@@ -1633,40 +1663,99 @@ def _exc_arg_to_shim_args(arg, cvar: str) -> tuple:
     return N.IntLiteral(value=tag), msg
 
 
-def _rewrite_expr(node, cvar: str, kind: str):
+def _box_tag(e, env) -> int:
+    """Runtime tag for a nested-tuple element (see the `MOJO_TAG_*` constants
+    in runtime/fire_coro_gen.c): STR=1, DOUBLE=2, LIST=3 (any container /
+    tuple), NONE=4, INT=0 (default)."""
+    if isinstance(e, (N.StringLiteral, N.TstringLiteral)):
+        return 1
+    if isinstance(e, N.FloatLiteral):
+        return 2
+    if isinstance(e, N.NoneLiteral):
+        return 4
+    if isinstance(e, N.IdentExpr) and e.name == 'None':
+        return 4
+    if isinstance(e, (N.TupleExpr, N.ListExpr, N.DictExpr, N.SetExpr)):
+        return 3
+    if isinstance(e, N.CallExpr):
+        # `<list>(...)` / `<dict>(...)` / `<set>(...)` constructors, and an
+        # unknown call — treat a known container ctor as LIST, else INT.
+        if isinstance(e.func, N.IdentExpr) and e.func.name in (
+                'list', 'tuple', 'set', 'frozenset', 'dict', 'List', 'Dict', 'Set'):
+            return 3
+        return 0
+    if isinstance(e, N.MemberExpr) and isinstance(e.obj, N.IdentExpr) \
+            and e.obj.name == 'self':
+        v = env.get(f'self.{e.member}')
+        return {'p': 1, 'd': 2}.get(v, 0)
+    if isinstance(e, N.IdentExpr):
+        v = env.get(e.name)
+        # env values are the _yield_kind single-letter codes ('i' int, 'd'
+        # double, 'p' str) — a 'p' element is a str pointer; treat a
+        # container-kinded name as LIST.
+        if v in ('l', 't'):
+            return 3
+        return {'p': 1, 'd': 2}.get(v, 0)
+    return 0
+
+
+def _tagged_nested_box(inner, cvar: str, kind: str, env) -> N.CallExpr:
+    """Build `__mojo_tuple_box_tag_{K}(tag0, word0, tag1, word1, ...)` for a
+    nested-tuple element `inner` (see runtime/fire_coro_gen.c's `MOJO_TAG_*`
+    constants and `mojo_tagged_*` readers)."""
+    args = []
+    for e in inner.elements:
+        t = _box_tag(e, env)
+        args.append(N.IntLiteral(value=t))
+        rev = _rewrite_expr(e, cvar, kind, env)
+        if t == 2:
+            # a double's raw word must be its IEEE bits, not a value cast
+            args.append(_call('mojo_double_bits', [rev]))
+        else:
+            args.append(rev)
+    return _call(f'__mojo_tuple_box_tag_{len(inner.elements)}', args)
+
+
+def _rewrite_expr(node, cvar: str, kind: str, env=None):
     """Recursively replace YieldExpr with a call to the kind-specific yield
     shim. Returns the (possibly new) node."""
+    env = env or {}
     if node is None or not hasattr(node, '__dict__'):
         return node
     if isinstance(node, N.YieldExpr):
         if kind == 'tuple' and isinstance(node.value, N.TupleExpr):
-            els = [_rewrite_expr(e, cvar, kind) for e in node.value.elements]
+            els = []
+            for e in node.value.elements:
+                if isinstance(e, N.TupleExpr):
+                    els.append(_tagged_nested_box(e, cvar, kind, env))
+                else:
+                    els.append(_rewrite_expr(e, cvar, kind, env))
             boxed = _call(f'__mojo_tuple_box_{len(els)}', els)
             return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
-        val = (_rewrite_expr(node.value, cvar, kind) if node.value is not None
+        val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
                else N.IntLiteral(value=0))
         return _call(_yield_shim(kind), [_c_ident(cvar), val])
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
         if isinstance(v, list):
-            setattr(node, k, [_rewrite_expr(x, cvar, kind) if hasattr(x, '__dict__') else x
+            setattr(node, k, [_rewrite_expr(x, cvar, kind, env) if hasattr(x, '__dict__') else x
                               for x in v])
         elif hasattr(v, '__dict__'):
-            setattr(node, k, _rewrite_expr(v, cvar, kind))
+            setattr(node, k, _rewrite_expr(v, cvar, kind, env))
     return node
 
 
 _yf_counter = [0]
 
 
-def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
+def _rewrite_stmts(stmts: list, cvar: str, kind: str, env=None) -> list:
     out = []
     for s in stmts:
         if isinstance(s, N.ReturnStmt):
             if s.value is not None:
                 out.append(N.ExprStmt(value=_call(SETRET_SHIM,
-                                                  [_c_ident(cvar), _rewrite_expr(s.value, cvar, kind)])))
+                                                  [_c_ident(cvar), _rewrite_expr(s.value, cvar, kind, env)])))
             out.append(N.ReturnStmt(value=None))
             continue
         if isinstance(s, N.ExprStmt) and isinstance(s.value, N.YieldFromExpr):
@@ -1677,7 +1766,7 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
             # separate stacks -- no special handling.
             _yf_counter[0] += 1
             tgt = f'__yf{_yf_counter[0]}'
-            it = _rewrite_expr(s.value.value, cvar, kind)
+            it = _rewrite_expr(s.value.value, cvar, kind, env)
             out.append(N.ForStmt(
                 target=tgt, iterable=it,
                 body=[N.ExprStmt(value=_call(_yield_shim(kind),
@@ -1686,18 +1775,18 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str) -> list:
             continue
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
-                h.body = _rewrite_stmts(h.body, cvar, kind)
+                h.body = _rewrite_stmts(h.body, cvar, kind, env)
         # recurse into compound-statement bodies
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
             if isinstance(v, list) and v and all(hasattr(x, '__dict__') for x in v) \
                     and _looks_like_stmt_list(v):
-                setattr(s, k, _rewrite_stmts(v, cvar, kind))
+                setattr(s, k, _rewrite_stmts(v, cvar, kind, env))
             elif isinstance(v, list):
-                setattr(s, k, [_rewrite_expr(x, cvar, kind) if hasattr(x, '__dict__') else x for x in v])
+                setattr(s, k, [_rewrite_expr(x, cvar, kind, env) if hasattr(x, '__dict__') else x for x in v])
             elif hasattr(v, '__dict__'):
-                setattr(s, k, _rewrite_expr(v, cvar, kind))
+                setattr(s, k, _rewrite_expr(v, cvar, kind, env))
         out.append(s)
     return out
 
@@ -2543,7 +2632,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
                                       value=_call(ARG_SHIM, [_c_ident(_CVAR),
                                                              N.IntLiteral(value=arg_base + i)])))
 
-    new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind)
+    new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind, env)
     body_params = [(_CVAR, 'Int')]
     if has_self:
         body_params.append(('self', struct_name))
@@ -2578,6 +2667,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
         'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
+        'tuple_slot_nested': _generator_nested_slots(fn, env) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd
@@ -2682,6 +2772,39 @@ def emit_c(meta_entry: dict) -> str:
     )
 
 
+def register_abi_externs(gen) -> None:
+    """Register the A3 tuple-box / tagged-reader ABI externs on `gen`.
+
+    Split out of `register` and called UNCONDITIONALLY (see
+    gimple_codegen.gimple_gen_coro.register_abi_externs): a call to
+    `mojo_tagged_str`/`__mojo_tuple_box_tag_K` can appear in a module that
+    defines no generator of its own (e.g. the compiled-consumer path, or a
+    plain `.mojo` snippet calling the readers directly), so gating this on
+    `_coro_meta` left the name out of `func_return_types` and the extern
+    pass emitted a variadic `int64_t mojo_tagged_str (...)` "unavailable in
+    compiled mode" STUB — every tagged read then returned 0 at runtime."""
+    for _k in range(2, 9):
+        gen.func_param_types.setdefault(f'__mojo_tuple_box_{_k}', ['int64_t'] * _k)
+        gen.func_return_types.setdefault(f'__mojo_tuple_box_{_k}', 'int64_t')
+    for _k in range(1, 9):
+        gen.func_param_types.setdefault(f'__mojo_tuple_box_tag_{_k}', ['int64_t'] * (2 * _k))
+        gen.func_return_types.setdefault(f'__mojo_tuple_box_tag_{_k}', 'int64_t')
+    gen.func_param_types.setdefault('mojo_double_bits', ['double'])
+    gen.func_return_types.setdefault('mojo_double_bits', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_int', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_int', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_word_dyn', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_word_dyn', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_tag_dyn', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_tag_dyn', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_str', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_str', 'char *')
+    gen.func_param_types.setdefault('mojo_tagged_list', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_list', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_double', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_double', 'double')
+
+
 def register(gen, meta: list) -> None:
     """Populate gen so the ordinary generator-call / for / next consumers
     treat each lowered generator exactly like a cpp-path one."""
@@ -2707,20 +2830,7 @@ def register(gen, meta: list) -> None:
     gen.func_param_types.setdefault('__mojo_gen_arg_d', ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_arg_d', 'double')
     gen.func_param_types.setdefault('__mojo_gen_set_return', ['int64_t', 'int64_t'])
-    for _k in range(2, 9):
-        gen.func_param_types.setdefault(f'__mojo_tuple_box_{_k}', ['int64_t'] * _k)
-        gen.func_return_types.setdefault(f'__mojo_tuple_box_{_k}', 'int64_t')
-    for _k in range(1, 9):
-        gen.func_param_types.setdefault(f'__mojo_tuple_box_tag_{_k}', ['int64_t'] * (2 * _k))
-        gen.func_return_types.setdefault(f'__mojo_tuple_box_tag_{_k}', 'int64_t')
-    gen.func_param_types.setdefault('mojo_tagged_int', ['int64_t', 'int64_t'])
-    gen.func_return_types.setdefault('mojo_tagged_int', 'int64_t')
-    gen.func_param_types.setdefault('mojo_tagged_str', ['int64_t', 'int64_t'])
-    gen.func_return_types.setdefault('mojo_tagged_str', 'char *')
-    gen.func_param_types.setdefault('mojo_tagged_list', ['int64_t', 'int64_t'])
-    gen.func_return_types.setdefault('mojo_tagged_list', 'int64_t')
-    gen.func_param_types.setdefault('mojo_tagged_double', ['int64_t', 'int64_t'])
-    gen.func_return_types.setdefault('mojo_tagged_double', 'double')
+    register_abi_externs(gen)
     # await/asyncio.run shims -- registered unconditionally (cheap; a call
     # to asyncio.run(<imported async fn>()) can appear in a module with no
     # async def of its own, so gating this on `meta` containing an
@@ -2818,6 +2928,7 @@ def register(gen, meta: list) -> None:
             'value_ctype': m['value_ctype'],
             'params': m['params'],
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
+            'tuple_slot_nested': m.get('tuple_slot_nested'),
             'has_return_value': True,
             'is_async_gen': m.get('is_async_gen', False),
         }

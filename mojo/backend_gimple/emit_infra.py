@@ -143,6 +143,18 @@ def _reset_func(gen, body: list = None, params: list = None):
     # only AT the address-of statement itself left that earlier read
     # unprotected -- a real regression this whole-body pre-pass fixes).
     gen._addressed_locals: set = set()
+    # Locals bound to a TAGGED nested generator-tuple slot (see
+    # _emit_generator_tuple_unpack's nested path). Reset per function.
+    gen._tagged_gen_tuple_locals: set = set()
+    # name -> (tagged_box_cvar, pos_literal): a destructured element of a
+    # tagged nested generator tuple whose STATIC type is genuinely unknown
+    # (`name`/`fromlist`/`level` all land in slot 0 across Lib/modulefinder's
+    # yield sites). Reads of the name dispatch at RUNTIME via the tag stored
+    # in the box (see emit_exprs._lower_IdentExpr + the mojo_tagged_* callers).
+    gen._tagged_dyn_src: dict = {}
+    # temp-name -> (box, pos) for reads of a _tagged_dyn_src local, consulted
+    # by use-site dispatch (_tagged_dyn_read / print). Reset per function.
+    gen._tagged_dyn_vals: dict = {}
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
     # Entry `len(loop_stack)` of each currently-open `try` body. A
@@ -1348,6 +1360,26 @@ def _ensure_local(gen, ctype: str, val: str) -> str:
     return t
 
 
+def _tagged_dyn_read(gen, val: str, want: str) -> str | None:
+    """If `val` is a temp read from a tagged nested generator-tuple slot
+    (registered in `gen._tagged_dyn_vals` by `_lower_IdentExpr`), return the
+    `mojo_tagged_*` read of the requested kind (`'str'`/`'list'`/`'int'`/
+    `'double'`); else None. The tag stored in the box decides at runtime
+    whether the raw word is actually that kind (mismatch yields NULL/0)."""
+    _tdv = getattr(gen, '_tagged_dyn_vals', None)
+    if not _tdv or val not in _tdv:
+        return None
+    box, pos = _tdv[val]
+    if want == 'str':
+        return gen._new_val('char *', f"mojo_tagged_str ((int64_t){box}, {pos})")
+    if want == 'list':
+        _raw = gen._new_val('int64_t', f"mojo_tagged_list ((int64_t){box}, {pos})")
+        return gen._coerce_to_type('int64_t', 'MojoList *', _raw)
+    if want == 'double':
+        return gen._new_val('double', f"mojo_tagged_double ((int64_t){box}, {pos})")
+    return gen._new_val('int64_t', f"mojo_tagged_int ((int64_t){box}, {pos})")
+
+
 def _char_to_cstr(gen, typ: str, val: str) -> tuple[str, str]:
     """Convert a char-type value to char * for string operations.
     Returns (new_type, new_val) — if typ is 'char', calls mojo_char_to_str.
@@ -1356,6 +1388,9 @@ def _char_to_cstr(gen, typ: str, val: str) -> tuple[str, str]:
     if typ == 'char':
         return 'char *', gen._call_expr('char *', 'mojo_char_to_str', [('char', val)])
     if typ in ('int', 'int64_t'):
+        _td = _tagged_dyn_read(gen, val, 'str')
+        if _td is not None:
+            return 'char *', _td
         actual = gen._actual_types.get(val)
         if actual == 'char':
             cv = gen._new_val('char', f'(char){val}')
@@ -1727,6 +1762,9 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     if src_type == 'MojoSet *':
         return gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
+        _td = _tagged_dyn_read(gen, value, 'list')
+        if _td is not None:
+            return _td
         it64 = gen._to_int64(src_type, value)
         result = gen._new_temp('MojoList *')
         bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
@@ -2042,6 +2080,9 @@ def _sprintf_one(gen, c_spec: str, arg_val: str) -> str:
 
 def _to_int64(gen, ctype: str, val: str) -> str:
     """Cast val to int64_t; emits to a temp so the result is always an lvalue."""
+    _td = _tagged_dyn_read(gen, val, 'int')
+    if _td is not None:
+        return _td
     if ctype == 'int64_t':
         # GIMPLE: can't redundantly cast global int64_t to int64_t; just load
         return gen._ensure_local('int64_t', val)
@@ -2666,6 +2707,49 @@ def _gen_print(gen, args: list, kwargs: list = None):
     # from it carried that same wrong value into `.value`.
     resolved_parts = []
     for atype, aval in parts:
+        # A DYNAMIC tagged nested-generator-tuple element (see
+        # _lower_IdentExpr's _tagged_dyn_src branch): the real kind is only
+        # known at runtime, so emit a tag-dispatched repr — str passes the
+        # pointer straight through, list/dict go through their repr helpers,
+        # everything else formats the int/double word. Without this the
+        # generic numeric path printed the raw boxed word (modulefinder's
+        # `print(nm)` printed a pointer address).
+        _tdv = getattr(gen, '_tagged_dyn_vals', None)
+        if _tdv and aval in _tdv and atype in ('int', 'int64_t'):
+            box, pos = _tdv[aval]
+            _res = gen._new_temp('char *')
+            bb_str = gen._new_bb(); bb_chk3 = gen._new_bb()
+            bb_list = gen._new_bb(); bb_chk2 = gen._new_bb()
+            bb_dbl = gen._new_bb(); bb_int = gen._new_bb()
+            bb_done = gen._new_bb()
+            _tag = gen._new_val('int64_t', f"mojo_tagged_tag_dyn ((int64_t){box}, {pos})")
+            _sp = gen._new_val('char *', f"mojo_tagged_str ((int64_t){box}, {pos})")
+            _lp = gen._coerce_to_type(
+                'int64_t', 'MojoList *',
+                gen._new_val('int64_t', f"mojo_tagged_list ((int64_t){box}, {pos})"))
+            _dp = gen._new_val('double', f"mojo_tagged_double ((int64_t){box}, {pos})")
+            gen._emit(f'  if ({_tag} == 1) goto {bb_str}; else goto {bb_chk3};')
+            gen._emit_label(bb_str)
+            gen._emit(f'  {_res} = {_sp};')
+            gen._emit(f'  goto {bb_done};')
+            gen._emit_label(bb_chk3)
+            gen._emit(f'  if ({_tag} == 3) goto {bb_list}; else goto {bb_chk2};')
+            gen._emit_label(bb_list)
+            _lrepr = gen._call_expr('char *', gen._list_repr_fn(_lp), [('MojoList *', _lp)])
+            gen._emit(f'  {_res} = {_lrepr};')
+            gen._emit(f'  goto {bb_done};')
+            gen._emit_label(bb_chk2)
+            gen._emit(f'  if ({_tag} == 2) goto {bb_dbl}; else goto {bb_int};')
+            gen._emit_label(bb_dbl)
+            _sd = _sprintf_one(gen, '%g', _dp)
+            gen._emit(f'  {_res} = {_sd};')
+            gen._emit(f'  goto {bb_done};')
+            gen._emit_label(bb_int)
+            _s = _sprintf_one(gen, '%ld', aval)
+            gen._emit(f'  {_res} = {_s};')
+            gen._emit_label(bb_done)
+            resolved_parts.append(('char *', _res))
+            continue
         if atype in ('int', 'int64_t'):
             real = gen._get_actual_type(atype, aval)
             if real == 'char *':

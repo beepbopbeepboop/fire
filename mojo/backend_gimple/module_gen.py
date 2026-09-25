@@ -5960,6 +5960,8 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_tuple_box_tag_7 (int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_tag_8 (int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);',
             'extern int64_t mojo_tagged_int (int64_t, int64_t);',
+            'extern int64_t mojo_tagged_word_dyn (int64_t, int64_t);',
+            'extern int64_t mojo_tagged_tag_dyn (int64_t, int64_t);',
             'extern char *  mojo_tagged_str (int64_t, int64_t);',
             'extern int64_t mojo_tagged_list (int64_t, int64_t);',
             'extern double  mojo_tagged_double (int64_t, int64_t);',

@@ -666,6 +666,43 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             # RHS is a single iterable — lower it, then index each element
             vtype, v = gen.lower_expr(node.value)
+            # A TAGGED nested generator tuple (`args` from
+            # `for what, args in scan_opcodes(co):`, see
+            # `_emit_generator_tuple_unpack`'s nested-slot path): destructure
+            # each element as a DYNAMIC local reading the tagged box (the
+            # layout is [tag0,word0,tag1,word1,...]), never a raw
+            # `mojo_list_get_int` at the slot position.
+            if v in getattr(gen, '_tagged_gen_tuple_locals', ()):
+                for i, tgt in enumerate(targets):
+                    # For a plain NAME target, the runtime TAG is the only
+                    # reliable source of its type: static inference is wrong
+                    # for Lib/modulefinder's slot 0 (`name`/`fromlist`/`level`
+                    # are str/list/int across sites), and even `--dump` and
+                    # the linked build disagree on what `_infer_local_var_types`
+                    # guesses (int64_t vs MojoList *). Bind every name target
+                    # as a DYNAMIC local whose reads dispatch on the tag; a
+                    # real int/str/list target all work through the same path.
+                    if isinstance(tgt, gimple_ctypes.IdentExpr):
+                        gen._tagged_dyn_src[tgt.name] = (v, i)
+                        # `force=True` when a prior inference already declared
+                        # the name with a pointer type (the linked build seeds
+                        # `nm` as `MojoList *` from _infer_local_var_types):
+                        # a dynamic local MUST be int64_t storage, and
+                        # _declare_var's default first-decl-wins guard would
+                        # otherwise keep the stale pointer decl and the
+                        # tagged read assignment fails to compile.
+                        if tgt.name not in gen.var_types:
+                            gen._declare_var(tgt.name, 'int64_t')
+                        elif gen.var_types.get(tgt.name) != 'int64_t':
+                            gen._declare_var(tgt.name, 'int64_t', force=True)
+                        continue
+                    # A nested-tuple / subscript target: best-effort int read
+                    # (no static type channel); real consumers of these bind
+                    # a further dynamic local on the next unpack.
+                    gen._assign_target(
+                        tgt, 'int64_t',
+                        gen._new_val('int64_t', f'mojo_tagged_int ((int64_t){v}, {i})'))
+                return
             for i, tgt in enumerate(targets):
                 # _tuple_elem_value resolves an int64_t-boxed tuple handle
                 # (a call result — the codegen's own `-> tuple[str, str]`

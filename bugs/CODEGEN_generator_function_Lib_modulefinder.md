@@ -1,5 +1,59 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (2026-09-25 — nested-tuple slots with heterogeneous inner elements LANDED; `scan_opcodes` now compiles)
+
+The feature-sized blocker this doc has carried since 2026-09-05 is
+CLOSED. `scan_opcodes` (`yield "store", (name,)` / `yield
+"absolute_import", (fromlist, name)` / `yield "relative_import", (level,
+fromlist, name)`) now compiles through the A3 stack-switch path with a
+per-element runtime TYPE TAG and its consumers destructure correctly.
+
+What landed:
+
+- **Producer** (`mojo/middle/coro.py`): a nested TupleExpr in a tuple-yield
+  slot is boxed as `__mojo_tuple_box_tag_K(tag0, word0, ...)`
+  (`_tagged_nested_box`/`_box_tag`), producing a MojoList laid out
+  `[tag0, word0, tag1, word1, ...]`. Tags: INT=0/STR=1/DOUBLE=2/LIST=3/
+  NONE=4 (`runtime/fire_coro_gen.c`). `_generator_tuple_slots` now
+  ADMITS a nested tuple as a `MojoList *` slot (was a hard refusal), and
+  a new `_generator_nested_slots` reports which slots are tagged.
+- **ABI registration** (`register_abi_externs`, split out of `register`):
+  the box/tag/reader externs are now registered UNCONDITIONALLY — before
+  this, a module with no generator of its own that merely *called*
+  `mojo_tagged_str` got a variadic `int64_t mojo_tagged_str (...)` weak
+  "unavailable in compiled mode" STUB and every tagged read returned 0.
+- **Consumer** (`emit_loops.py:_emit_generator_tuple_unpack` +
+  `emit_stmts.py` tuple-target + `emit_exprs.py`/`emit_infra.py`):
+  a destructured NAME from a tagged nested slot is bound as a DYNAMIC
+  local (int64_t word + recorded `(box,pos)` source). Static typing is
+  genuinely impossible here (`name`/`fromlist`/`level` all land in slot 0
+  across sites), so reads dispatch on the runtime tag via
+  `mojo_tagged_{int,str,list,double,word_dyn,tag_dyn}` — at dict-key/str
+  use (`_char_to_cstr`), list use (`_materialize_as_list`), int use
+  (`_to_int64`), and `print()` (tag-dispatched repr).
+- **Parser** (`fire_compiler.py`): `nm, = args` (a 1-element tuple target
+  with a trailing comma) was being parsed as a plain `nm = args` —
+  `_group_to_expr` dropped tuple-ness. Now tracked via a parallel
+  `had_comma` list. NOTE the self-host trap found while fixing this: a
+  list of `(elems, flag)` TUPLES corrupts under the self-hosted compiler
+  (2-tuple unpack over `list` elements boxes slots to int64_t) and caused
+  a 58-file A/B regression — the landed form uses two PARALLEL lists.
+
+Verified: a synthetic 3-branch heterogeneous `scan_opcodes`-style driver
+compiles+links+runs identically to the reference; the real
+`/Users/mrs/net/Python-3.14.6/Lib/modulefinder.py` compiles clean AND
+`python3 fire.py build modulefinder.py` links (14 tagged box sites, 6
+tagged reads, 13 `__mgco_` refs). Full quality gate green (check-gimple
+310/0, check-selfhost, stdlib 664/0, linkmode, modcache, runtimediff,
+no-new-casts; A/B clean=157, SELFHOST-CRASHED=0, AST/TOK-DIFF=0).
+`check-native-dumpfull`/`make bootstrap` remain the documented
+pre-existing failures (not this feature).
+
+Residual (NOT this doc's blocker, downstream of the generator): driving
+the real `modulefinder.scan_opcodes` through the *compiled* `compile()`
+builtin still hits the unrelated "compile: unavailable in compiled mode"
+gap — the generator lowering itself is correct.
+
 ## Status (2026-09-07 — "cluster B" feature session: outer heterogeneous slots CONFIRMED working; this file's real blocker is nested-tuple slots with heterogeneous inner elements)
 
 Feature-build pass on cluster B. Key finding: the A3 stack-switch

@@ -3534,3 +3534,38 @@ construction/repr path), `kwargs` 10, `comptime_aliases` ~15, `yield_bearing`
 Gate green (check-gimple 308/0, check-selfhost 1/0, check-modcache 81/0,
 check-linkmode 3/0, check-no-new-casts 28); the three self-host files dump
 clean. Sweep: clean=58, CI-DIFF=665, SELFHOST-CRASHED=24, AST/TOK-DIFF=13.
+
+## Status (2026-09-25 — cluster B nested-tuple generator slots landed; parser self-host trap fixed; clean unchanged, no regressions)
+
+Worked the cluster B feature (`bugs/CODEGEN_generator_function_Lib_modulefinder.md`).
+Landed the tagged nested-tuple generator value model described there: producer
+tags (`__mojo_tuple_box_tag_K` + `_box_tag`/`_tagged_nested_box` in
+`mojo/middle/coro.py`), `_generator_tuple_slots` now admits a nested tuple and a
+new `_generator_nested_slots` reports tagged slots, unconditional ABI extern
+registration (`register_abi_externs` — was gated on `_coro_meta`, so a
+non-generator module calling `mojo_tagged_str` silently bound to a weak
+"unavailable in compiled mode" STUB returning 0), and dynamic-local consumers
+(`emit_loops._emit_generator_tuple_unpack` nested path + `emit_stmts` tuple
+target + `_tagged_dyn_read` in `emit_infra` hooked into `_char_to_cstr`/
+`_materialize_as_list`/`_to_int64`/`gen._gen_print`). New runtime readers
+`mojo_tagged_word_dyn`/`mojo_tagged_tag_dyn` in `runtime/fire_coro_gen.c`.
+
+Parser fix (`fire_compiler.py`): `nm, = args` (1-element tuple target,
+trailing comma) parsed as plain `nm = args`. **Self-host trap found the hard
+way**: the first fix built a `groups` list of `(elems, flag)` TUPLES and
+unpacked with `_group_to_expr(*g)`; the self-hosted compiler boxes 2-tuple
+unpacking over `list` elements to int64_t, so the compiled parser dropped
+module globals and the A/B sweep fell clean=157 -> 98 (58-file regression).
+Landed form uses two PARALLEL lists (`group_elems`/`group_had_comma`) with
+explicit indexing — no tuple-of-tuples, no `*` spread. Sweep restored
+clean=157 (the parser fix alone netted 157->158 on the unmerged tree).
+
+Gate (merged tree `326ac5e`): check-gimple 310/0, check-selfhost 1/0,
+check-modcache 81/0, check-linkmode 3/0, check-runtimediff 24/0,
+check-no-new-casts 28 (baseline), stdlib dylib 0 skips, compile_stdlib 664/0,
+A/B clean=157 CI-DIFF=605 SELFHOST-CRASHED=0 AST/TOK-DIFF=0. New feature
+verified end-to-end: synthetic 3-branch heterogeneous `scan_opcodes`-style
+driver matches the reference, and real `Python-3.14.6/Lib/modulefinder.py`
+compiles + links. `check-native-dumpfull` still the known pre-existing
+SIGSEGV (NO fire.ci, exit 139); `make bootstrap` still the documented Stage 2
+failure (skipped this session — another agent is on it).

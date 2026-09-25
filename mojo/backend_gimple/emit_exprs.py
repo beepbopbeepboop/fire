@@ -321,6 +321,20 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name == 'None':  return 'int', '0'
     if name == 'True':  return 'int', '1'
     if name == 'False': return 'int', '0'
+    # A DYNAMIC local bound to an element of a tagged nested generator tuple
+    # (see emit_stmts' tuple-target branch / gen._tagged_dyn_src): its static
+    # type is genuinely unknown, so read the raw element WORD (an int64_t)
+    # and record the (box, pos) source against a fresh temp — use sites that
+    # need a str/list/double consult `_tagged_dyn_vals` and call the matching
+    # `mojo_tagged_*` accessor (tag dispatch at runtime).
+    _tds = getattr(gen, '_tagged_dyn_src', None)
+    if _tds and name in _tds:
+        box, pos = _tds[name]
+        _w = gen._new_val('int64_t', f'mojo_tagged_word_dyn ((int64_t){box}, {pos})')
+        if not hasattr(gen, '_tagged_dyn_vals'):
+            gen._tagged_dyn_vals = {}
+        gen._tagged_dyn_vals[_w] = (box, pos)
+        return 'int64_t', _w
     # Flow-sensitive `isinstance` narrowing: inside `if isinstance(name,
     # T):` every read of `name` is a `T *` (see _apply_isinstance_
     # narrowings). The cast temp was already materialised at the guard.

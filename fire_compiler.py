@@ -2364,25 +2364,47 @@ class Parser:
         # (formerly below) were mutually exclusive passes, so a tuple target
         # followed by another `= target` link hit "Unexpected ASSIGN".
         if self._peek().kind == "ASSIGN":
-            groups = [first_group]
+            # Parallel lists `group_elems` / `group_had_comma`: `had_comma`
+            # records that this group was written with a trailing comma
+            # (`nm,`), i.e. a 1-element TUPLE target / value (`nm, = args`
+            # unpacks args' single element), NOT a bare `nm`. Without the
+            # flag a single-element comma group is indistinguishable from a
+            # plain target and `nm, = args` silently became `nm = args`.
+            # Two PARALLEL lists (not a list of (elems, flag) tuples): this
+            # file is compiled by the self-hosted compiler, and 2-tuple
+            # unpacking over `list` elements boxes the slots to int64_t
+            # there — the tuple-of-tuples form silently corrupted the parse
+            # (58-file A/B regression, found 2026-09-25).
+            group_elems = [first_group]
+            group_had_comma = [saw_comma]
             while self._peek().kind == "ASSIGN":
                 self._advance()
                 val_expr = self._parse_expr_or_yield()
                 group = [val_expr]
+                had_comma = False
                 while self._peek().kind == "COMMA":
+                    had_comma = True
                     self._advance()
                     if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "ASSIGN"):
                         break
                     group.append(self._parse_expr(0))
-                groups.append(group)
+                group_elems.append(group)
+                group_had_comma.append(had_comma)
+
+            def _group_to_expr(g, had_comma):
+                if len(g) == 1 and not had_comma:
+                    return g[0]
+                return TupleExpr(elements=g)
+
             # The last group parsed is the real RHS; every group before it
             # (starting with `first_group`) is a target in the chain — a
-            # single-element group is a plain target, a multi-element group
-            # is a tuple-unpacking target.
-            def _group_to_expr(g):
-                return g[0] if len(g) == 1 else TupleExpr(elements=g)
-            val = _group_to_expr(groups[-1])
-            targets = [_group_to_expr(g) for g in groups[:-1]]
+            # single-element group WITHOUT a trailing comma is a plain
+            # target, otherwise it is a tuple-unpacking target.
+            _last = len(group_elems) - 1
+            val = _group_to_expr(group_elems[_last], group_had_comma[_last])
+            targets = []
+            for _gi in range(_last):
+                targets.append(_group_to_expr(group_elems[_gi], group_had_comma[_gi]))
             if len(targets) == 1:
                 return AssignStmt(target=targets[0], value=val, line=line, col=col)
             return MultiAssignStmt(targets=targets, value=val, line=line, col=col)

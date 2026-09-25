@@ -2060,7 +2060,8 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     return '\n'.join(lines)
 
 
-def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_ptr: str) -> None:
+def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_ptr: str,
+                                 nested_flags: list | None = None) -> None:
     """Unpacks a boxed-tuple `MojoList *` (produced by a tuple-yielding
     compiled generator's `_cpp_yield_tuple` boxing — see that method's
     docstring for the producer side) into `var_names`, one runtime
@@ -2083,6 +2084,22 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
     `slot_types`."""
     for i, vn in enumerate(var_names):
         slot_elem = slot_types[i] if i < len(slot_types) else 'int64_t'
+        # A slot that is a nested tuple: read the boxed pointer and mark the
+        # local as a TAGGED nested tuple, so a later `a, b = <vn>` unpack
+        # reads its elements via `mojo_tagged_*` (see the tagged-unpack path
+        # in stmts_shared._assign_target / emit_stmts' tuple-target branch),
+        # not as a plain list of int64 slots.
+        if nested_flags and i < len(nested_flags) and nested_flags[i]:
+            gen._declare_var(vn, 'MojoList *')
+            cvn = gen._cname(vn)
+            pv = gen._coerce_to_type(
+                'int64_t', 'MojoList *',
+                gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})"))
+            gen._emit(f"  {cvn} = {pv};")
+            if not hasattr(gen, '_tagged_gen_tuple_locals'):
+                gen._tagged_gen_tuple_locals = set()
+            gen._tagged_gen_tuple_locals.add(vn)
+            continue
         gen._declare_var(vn, slot_elem)
         cvn = gen._cname(vn)
         suf = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
@@ -2146,6 +2163,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # fix doesn't attempt to handle (falls through to the ordinary
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
+    tuple_slot_nested = api.get('tuple_slot_nested')
     is_tuple_target = var.startswith('(') and var.endswith(')') and tuple_slot_ctypes is not None
     if is_tuple_target:
         var_names = gen._split_top_level_comma(var[1:-1])
@@ -2166,7 +2184,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     val = gen._new_val(vct, f"{base}_value ({gen_val})")
     if is_tuple_target:
-        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val)
+        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested)
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
     gen.loop_stack.append((bb_post, bb_after))

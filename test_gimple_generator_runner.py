@@ -25,17 +25,17 @@ RUNTIME_DIR = os.path.join(HERE, 'runtime')
 GCC = find_gcc()
 GXX = find_gxx()
 
-_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'fire_coro_ctx_aarch64.S')
                  if platform.machine().lower() in ('arm64', 'aarch64')
-                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
+                 else os.path.join(RUNTIME_DIR, 'fire_coro_ctx_generic.c'))
 
 # Runtime object set for a stack-switch (A3) program: compiled ONCE, reused
 # by every test in this file (these never change across test cases).
 _SS_RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
+    os.path.join(RUNTIME_DIR, 'fire_coro.c'),
+    os.path.join(RUNTIME_DIR, 'fire_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'fire_async_sched.c'),
     _CORO_CTX_SRC,
 ]
 _ss_runtime_objs_cache = None

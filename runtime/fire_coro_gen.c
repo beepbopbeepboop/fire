@@ -285,6 +285,10 @@ _tagged_tag(int64_t box, int64_t p)
 }
 int64_t mojo_tagged_int(int64_t box, int64_t p)
 { return _tagged_tag(box, p) == MOJO_TAG_INT ? _tagged_word(box, p) : 0; }
+int64_t mojo_tagged_word_dyn(int64_t box, int64_t p)
+{ return _tagged_word(box, p); }
+int64_t mojo_tagged_tag_dyn(int64_t box, int64_t p)
+{ return _tagged_tag(box, p); }
 char *mojo_tagged_str(int64_t box, int64_t p)
 { return _tagged_tag(box, p) == MOJO_TAG_STR ? (char *)(uintptr_t)_tagged_word(box, p) : NULL; }
 int64_t mojo_tagged_list(int64_t box, int64_t p)
