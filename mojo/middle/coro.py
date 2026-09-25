@@ -2710,6 +2710,17 @@ def register(gen, meta: list) -> None:
     for _k in range(2, 9):
         gen.func_param_types.setdefault(f'__mojo_tuple_box_{_k}', ['int64_t'] * _k)
         gen.func_return_types.setdefault(f'__mojo_tuple_box_{_k}', 'int64_t')
+    for _k in range(1, 9):
+        gen.func_param_types.setdefault(f'__mojo_tuple_box_tag_{_k}', ['int64_t'] * (2 * _k))
+        gen.func_return_types.setdefault(f'__mojo_tuple_box_tag_{_k}', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_int', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_int', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_str', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_str', 'char *')
+    gen.func_param_types.setdefault('mojo_tagged_list', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_list', 'int64_t')
+    gen.func_param_types.setdefault('mojo_tagged_double', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('mojo_tagged_double', 'double')
     # await/asyncio.run shims -- registered unconditionally (cheap; a call
     # to asyncio.run(<imported async fn>()) can appear in a module with no
     # async def of its own, so gating this on `meta` containing an

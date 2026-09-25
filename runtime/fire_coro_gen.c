@@ -213,6 +213,91 @@ int64_t __mojo_tuple_box_7(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e
 int64_t __mojo_tuple_box_8(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
 { int64_t s[8] = { a, b, c, d, e, f, g, h }; return tuple_box(s, 8); }
 
+/* ── tagged nested-tuple slots (cluster B) ───────────────────────────────
+ * A generator `yield` whose tuple has a slot that is ITSELF a tuple with a
+ * heterogeneous inner shape across sites (Lib/modulefinder.py's
+ * `yield "store", (name,)` / `yield "absolute_import", (fromlist, name)` /
+ * `yield "relative_import", (level, fromlist, name)`) boxes that inner
+ * tuple as a MojoList carrying a runtime TYPE TAG next to each element:
+ *
+ *     [ tag0, word0, tag1, word1, ... ]        (2*K int64 slots)
+ *
+ * `word_i` is the element's raw 64-bit representation (int value, pointer,
+ * or a double's IEEE bits), `tag_i` names its kind (below). The consumer
+ * (`_emit_generator_tuple_unpack` + the tagged unpack path in
+ * `_assign_target`) reads a name back via the `mojo_tagged_*` accessor
+ * matching that name's own C type, so each per-branch unpack is correct
+ * regardless of which yield site produced the value -- the reason plain
+ * box-without-tags would silently miscompile. */
+#define MOJO_TAG_INT    0
+#define MOJO_TAG_STR    1
+#define MOJO_TAG_DOUBLE 2
+#define MOJO_TAG_LIST   3
+#define MOJO_TAG_NONE   4
+
+extern void   *mojo_list_new(void);
+extern void    mojo_list_append_int(void *, int64_t);
+extern int64_t mojo_list_get_int(void *, int64_t);
+extern int64_t mojo_list_len(void *);
+
+static int64_t
+tuple_box_tagged(const int64_t *pairs, int k)
+{
+    void *l = mojo_list_new();
+    for (int i = 0; i < k; i++) {
+        mojo_list_append_int(l, pairs[2 * i]);      /* tag */
+        mojo_list_append_int(l, pairs[2 * i + 1]);  /* word */
+    }
+    return (int64_t)(uintptr_t)l;
+}
+
+int64_t __mojo_tuple_box_tag_1(int64_t t0, int64_t v0)
+{ int64_t s[2] = { t0, v0 }; return tuple_box_tagged(s, 1); }
+int64_t __mojo_tuple_box_tag_2(int64_t t0, int64_t v0, int64_t t1, int64_t v1)
+{ int64_t s[4] = { t0, v0, t1, v1 }; return tuple_box_tagged(s, 2); }
+int64_t __mojo_tuple_box_tag_3(int64_t t0, int64_t v0, int64_t t1, int64_t v1, int64_t t2, int64_t v2)
+{ int64_t s[6] = { t0, v0, t1, v1, t2, v2 }; return tuple_box_tagged(s, 3); }
+int64_t __mojo_tuple_box_tag_4(int64_t t0, int64_t v0, int64_t t1, int64_t v1, int64_t t2, int64_t v2, int64_t t3, int64_t v3)
+{ int64_t s[8] = { t0, v0, t1, v1, t2, v2, t3, v3 }; return tuple_box_tagged(s, 4); }
+int64_t __mojo_tuple_box_tag_5(int64_t t0, int64_t v0, int64_t t1, int64_t v1, int64_t t2, int64_t v2, int64_t t3, int64_t v3, int64_t t4, int64_t v4)
+{ int64_t s[10] = { t0, v0, t1, v1, t2, v2, t3, v3, t4, v4 }; return tuple_box_tagged(s, 5); }
+int64_t __mojo_tuple_box_tag_6(int64_t t0, int64_t v0, int64_t t1, int64_t v1, int64_t t2, int64_t v2, int64_t t3, int64_t v3, int64_t t4, int64_t v4, int64_t t5, int64_t v5)
+{ int64_t s[12] = { t0, v0, t1, v1, t2, v2, t3, v3, t4, v4, t5, v5 }; return tuple_box_tagged(s, 6); }
+int64_t __mojo_tuple_box_tag_7(int64_t t0, int64_t v0, int64_t t1, int64_t v1, int64_t t2, int64_t v2, int64_t t3, int64_t v3, int64_t t4, int64_t v4, int64_t t5, int64_t v5, int64_t t6, int64_t v6)
+{ int64_t s[14] = { t0, v0, t1, v1, t2, v2, t3, v3, t4, v4, t5, v5, t6, v6 }; return tuple_box_tagged(s, 7); }
+int64_t __mojo_tuple_box_tag_8(int64_t t0, int64_t v0, int64_t t1, int64_t v1, int64_t t2, int64_t v2, int64_t t3, int64_t v3, int64_t t4, int64_t v4, int64_t t5, int64_t v5, int64_t t6, int64_t v6, int64_t t7, int64_t v7)
+{ int64_t s[16] = { t0, v0, t1, v1, t2, v2, t3, v3, t4, v4, t5, v5, t6, v6, t7, v7 }; return tuple_box_tagged(s, 8); }
+
+int64_t mojo_double_bits(double d)
+{ int64_t w; __builtin_memcpy(&w, &d, 8); return w; }
+
+static int64_t
+_tagged_word(int64_t box, int64_t p)
+{
+    if (p < 0 || 2 * p + 1 >= mojo_list_len((void *)(uintptr_t)box)) return 0;
+    return mojo_list_get_int((void *)(uintptr_t)box, 2 * p + 1);
+}
+static int64_t
+_tagged_tag(int64_t box, int64_t p)
+{
+    if (p < 0 || 2 * p >= mojo_list_len((void *)(uintptr_t)box)) return MOJO_TAG_NONE;
+    return mojo_list_get_int((void *)(uintptr_t)box, 2 * p);
+}
+int64_t mojo_tagged_int(int64_t box, int64_t p)
+{ return _tagged_tag(box, p) == MOJO_TAG_INT ? _tagged_word(box, p) : 0; }
+char *mojo_tagged_str(int64_t box, int64_t p)
+{ return _tagged_tag(box, p) == MOJO_TAG_STR ? (char *)(uintptr_t)_tagged_word(box, p) : NULL; }
+int64_t mojo_tagged_list(int64_t box, int64_t p)
+{ int64_t t = _tagged_tag(box, p); return (t == MOJO_TAG_LIST) ? _tagged_word(box, p) : 0; }
+double mojo_tagged_double(int64_t box, int64_t p)
+{
+    int64_t t = _tagged_tag(box, p);
+    if (t != MOJO_TAG_DOUBLE) return 0.0;
+    int64_t w = _tagged_word(box, p);
+    double d; __builtin_memcpy(&d, &w, 8);
+    return d;
+}
+
 /* resume: 1 = produced a value (read via __mojo_gen_value), 0 = done. On an
    uncaught exception in the body, __mojo_coro_resume re-raises here (live
    stack) -- so a 0 return is always genuine exhaustion by the time we see
