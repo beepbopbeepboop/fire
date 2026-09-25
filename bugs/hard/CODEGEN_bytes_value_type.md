@@ -1,5 +1,26 @@
 # CODEGEN: `bytes` value type in the compiled path (multi-stage feature)
 
+## Status (2026-09-25 — destination-driven bytes parameter inference LANDED)
+
+The remaining Stage 2 body-usage inference gap for a slice assigned to an
+already-known bytes local is now implemented in `mojo/middle/infra_infer.py`.
+For an unannotated parameter, a slice rooted at that parameter assigned to a
+local known to contain bytes is positive evidence that the parameter is
+`MojoBytes *`. Known-bytes locals are collected to a fixed point from byte
+literals, `bytes(...)` / `bytearray(...)`, already-known locals, slices, and
+compatible concatenation; control-flow bodies are scanned recursively. The
+existing bytes-only method signal still wins independently.
+
+This closes `pickletools.optimize(p)`'s
+`protoheader = p[pos:end_pos]` shape: `p` now infers as `MojoBytes *`, so the
+slice lowers through `mojo_bytes_slice` rather than `mojo_list_slice`, and the
+real `Lib/pickletools.py` no longer fails the incompatible-container coercion
+at compile time. Tests:
+`bytes_param_inferred_from_bytes_slice_destination` (compile) and
+`gimple_bytes_param_inferred_from_slice_destination` /
+`gimple_list_param_slice_destination_stays_list` (behavior, including the
+negative list case) in `test_gimple.py` / `test_gimple_runner.py`.
+
 ## Problem
 
 The compiled path (`mojo_compiler.py` parser -> `gimple_gen_*.py` -> C/GIMPLE,

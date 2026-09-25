@@ -831,6 +831,25 @@ fn main():
     print(dec(b'hello'))
 """, "hello\n")
 
+    test_gimple_stdout("gimple_bytes_param_inferred_from_slice_destination", """\
+fn header_size(p):
+    var header = b''
+    if len(p) > 0:
+        header = p[0:2]
+    return len(header)
+fn main():
+    print(header_size(b'abcdef'))
+""", "2\n")
+
+    test_gimple_stdout("gimple_list_param_slice_destination_stays_list", """\
+fn header_size(p):
+    var header = []
+    header = p[0:2]
+    return len(header)
+fn main():
+    print(header_size([1, 2, 3]))
+""", "2\n")
+
     # ── bytes value type (Stage 3): bytearray + memoryview ───────────────
     test_gimple_stdout("gimple_bytearray_mutation", """\
 fn main():

@@ -365,31 +365,48 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
 _KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'p': 'char *', 'd': 'double', None: 'int64_t'}
 
 
-def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
-    """If every `yield` in `fn` yields a tuple LITERAL of the same arity,
-    return the per-slot C type list; else None. Used only when
-    _generator_value_kind says 'tuple'."""
+def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
+    """Per-yield-site slot-KIND tuples, or None for a non-tuple yield."""
     shapes = []
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
             if not isinstance(n.value, N.TupleExpr):
                 return None
             shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
+    return shapes or None
+
+
+def _generator_tuple_unify(shapes):
+    """Return the max-width compatible slot-KIND list, or None."""
     if not shapes:
         return None
-    ar = len(shapes[0])
-    if any(len(s) != ar for s in shapes):
-        return None
-    slots = []
+    ar = 0
+    for s in shapes:
+        if len(s) > ar:
+            ar = len(s)
+    out = []
     for i in range(ar):
-        kinds = {s[i] for s in shapes}
+        kinds = set()
+        for s in shapes:
+            if i < len(s):
+                kinds.add(s[i])
         kinds.discard(None)
         if len(kinds) > 1:
-            return None            # inconsistent slot type across yields
-        # avoid next(iter(...)) -- a known self-host miscompile trigger
-        # (see project memory: "next(iter(...)) -> _next undefined-symbol
-        # regression"); a plain list index compiles cleanly instead.
-        k = list(kinds)[0] if kinds else None
+            return None
+        out.append(list(kinds)[0] if kinds else None)
+    return out
+
+
+def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
+    """Return compatible max-width tuple slot C types, or None."""
+    shapes = _generator_tuple_shapes(fn, env)
+    if shapes is None:
+        return None
+    kinds = _generator_tuple_unify(shapes)
+    if kinds is None:
+        return None
+    slots = []
+    for k in kinds:
         if k == 'tuple':
             # A nested tuple literal in a slot (Lib/modulefinder.py's
             # `yield "store", (name,)` / `yield "relative_import", (level,
@@ -413,26 +430,13 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
     where that slot is a nested TUPLE (a tagged nested-tuple box, not an
     ordinary list-valued slot). None when the tuple shape is inconsistent
     (same refusal conditions as `_generator_tuple_slots`)."""
-    shapes = []
-    for n in _walk(fn):
-        if isinstance(n, N.YieldExpr):
-            if not isinstance(n.value, N.TupleExpr):
-                return None
-            shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
-    if not shapes:
+    shapes = _generator_tuple_shapes(fn, env)
+    if shapes is None:
         return None
-    ar = len(shapes[0])
-    if any(len(s) != ar for s in shapes):
+    kinds = _generator_tuple_unify(shapes)
+    if kinds is None:
         return None
-    flags = []
-    for i in range(ar):
-        kinds = {s[i] for s in shapes}
-        kinds.discard(None)
-        if len(kinds) > 1:
-            return None
-        k = list(kinds)[0] if kinds else None
-        flags.append(k == 'tuple')
-    return flags
+    return [k == 'tuple' for k in kinds]
 
 
 def _generator_value_kind(fn: N.FunctionDef,

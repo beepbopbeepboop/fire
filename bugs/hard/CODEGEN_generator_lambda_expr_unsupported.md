@@ -1,5 +1,15 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
+## Status (2026-09-25 — `pickletools._genops` lambda occurrence confirmed superseded on A3)
+
+The A3 mixed-arity tuple-yield work now makes real `Lib/pickletools.py`
+`_genops` eligible and lowering-capable; its `getpos = data.tell` /
+`getpos = lambda: None` callable-local pattern is no longer the active
+blocker. The module now compiles and links, and its runtime failure has moved
+past lambda/callable lowering to imported module-global and file-object
+runtime support. The legacy C++ coroutine-path lambda gaps below remain
+scoped to that backend; occurrence #1 is resolved on the default A3 path.
+
 ## Status (2026-09-05, A3 stack-switch cutover — mostly RESOLVED, one narrow shape left)
 
 The §5.5 A3 stack-switch cutover (doc/COROUTINE.html) changed the whole
