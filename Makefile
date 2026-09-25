@@ -164,7 +164,7 @@ check-gimple-runner:
 	python3 test_gimple_runner.py
 
 # ── check-formal: formal arm64 + Lean 4 proof typecheck ──────────────────────
-# Every formal/examples/*.mojo through formalbuild --prove, then pixi's lean
+# Every formal/examples/*.mojo through `fire.py build --formal`, which
 # typechecks the generated proof statically (no binary execution). Parallel
 # by default (min(cpu_count, 20) workers — see test_formal.py). Not gated
 # into `check`: lean/pixi (pixi install + pixi run prooflib) is an extra
@@ -206,7 +206,7 @@ lib/ProofLib.olean lib/work.olean lib/Refine.olean: $(wildcard lib/*.lean) \
 # emitted Mach-O independently (header, load commands, export trie), then
 # dlopen()s the result and calls every exported function, and finally checks
 # the default prove path emits a Lean proof that typechecks. Separate from
-# check-formal (which only covers the MH_EXECUTE formalbuild path) because the
+# check-formal (which only covers the MH_EXECUTE build --formal path) because the
 # dylib path has its own linker, its own export naming, and its own proof
 # entry point. Same lean dependency as check-formal; not gated into `check`.
 check-formal-dylib: $(FORMAL_SOURCES) test_formal_dylib.py fire.py \

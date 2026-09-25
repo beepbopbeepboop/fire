@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# formalbuild <stem> (which now generates AND checks the Lean 4 proof by
-# default), for a serial single-example run. Does NOT execute the built
+# `fire.py build --formal <stem>` (which generates AND checks the Lean 4 proof
+# by default) for a serial single-example run. Does NOT execute the built
 # binary; use `make check-formal` for the whole suite.
 #
 # usage: tools/proof.sh <example-stem> [more-stems...]
@@ -38,8 +38,8 @@ for stem in "$@"; do
     status=1
     continue
   fi
-  echo "== formalbuild ${stem}"
-  if python3 "${ROOT}/fire.py" formalbuild -o "${OUTDIR}/${stem}.aout" "$src"; then
+  echo "== build --formal ${stem}"
+  if python3 "${ROOT}/fire.py" build --formal -o "${OUTDIR}/${stem}.aout" "$src"; then
     echo "Proof generated and checked for ${stem}."
     pass=$((pass+1))
   else

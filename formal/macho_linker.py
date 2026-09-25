@@ -34,21 +34,71 @@ BIND_TYPE_POINTER = 0x1
 
 LIBSYSTEM_PATH = b"/usr/lib/libSystem.B.dylib\0"
 
-EXTERN_ENTRYOFF = 744  # 32 (header) + 712 (sizeofcmds), fixed for extern layout
 PAGEZERO_SIZE = 0x100000000
 TEXT_BASE = 0x100000000
 DATA_BASE = 0x100004000
 LINKEDIT_BASE = 0x100008000
 PAGE_SIZE = 0x4000
 
+# sizeofcmds of each executable layout (see the two builders below).
+NOEXTERN_SIZEOFCMDS = 72 + 152 + 72 + 48 + 32 + 24 + 24 + 24
+EXTERN_SIZEOFCMDS = 72 + 232 + 152 + 72 + 48 + 32 + 24 + 56 + 24
 
-def build_macho_executable(code: bytes, entryoff: int) -> bytes:
+# sizeofcmd of LC_CODE_SIGNATURE, and the alignment the entry offset needs.
+#
+# Every image this module emits is signed after the fact by `codesign -s -`,
+# and codesign ADDS an LC_CODE_SIGNATURE (16 bytes) to the load-command list.
+# It can only do that where there is slack between the end of the load commands
+# and the first byte of code; with the code starting flush against sizeofcmds,
+# those 16 bytes land ON the first instructions instead. The image still signs
+# and dyld still maps it, but LC_MAIN's entry offset now points at a load
+# command, so the process dies of SIGILL/SIGKILL at launch with nothing on
+# stderr — which is exactly what this reserve exists to prevent. (The dylib
+# builder has always had this slack; see dylib_code_offset.)
+CODE_SIGNATURE_CMDSIZE = 16
+
+
+def executable_entry_offset(sizeofcmds: int) -> int:
+    """File offset of the entry point for a layout with this sizeofcmds.
+
+    32-byte aligned and leaving CODE_SIGNATURE_CMDSIZE bytes of slack after the
+    load commands, so post-hoc codesigning has somewhere to put
+    LC_CODE_SIGNATURE. The 32-byte alignment is what buys the slack: aligning
+    to 16 would leave 0-15 bytes, i.e. a coin flip on whether signing corrupts
+    the entry.
+    """
+    return ((32 + sizeofcmds + CODE_SIGNATURE_CMDSIZE) + 31) & ~15
+
+
+NOEXTERN_ENTRYOFF = executable_entry_offset(NOEXTERN_SIZEOFCMDS)
+EXTERN_ENTRYOFF = executable_entry_offset(EXTERN_SIZEOFCMDS)
+
+# MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE. The last two are not
+# cosmetic: a main executable without MH_DYLDLINK and MH_PIE is killed by
+# dyld before it reaches its entry point (verified by bisecting the load
+# commands of a hand-built image — the same image runs with these flags set).
+MH_EXECUTE_FLAGS = 0x1 | 0x4 | 0x80 | 0x200000
+
+
+def build_macho_executable(code: bytes) -> bytes:
+    """Minimal MH_EXECUTE: no external symbols, no stubs, no GOT.
+
+    The entry offset is derived from this layout (see executable_entry_offset)
+    rather than passed in, so the code, LC_MAIN and the __text section offset
+    cannot drift apart the way a caller-supplied constant allowed.
+    """
+    entryoff = NOEXTERN_ENTRYOFF
     file = bytearray(0x8000)
+    if entryoff + len(code) > 0x4000:
+        raise ValueError(
+            f"code of {len(code)} bytes at offset {entryoff} overruns __TEXT "
+            f"(0x4000 bytes reserved before __LINKEDIT); the executable "
+            f"layout needs multiple __TEXT pages")
 
     def patch(off: int, fmt: str, *vals) -> None:
         struct.pack_into(fmt, file, off, *vals)
 
-    sizeofcmds = 72 + 152 + 72 + 48 + 32 + 24 + 24 + 24
+    sizeofcmds = NOEXTERN_SIZEOFCMDS
 
     patch(0, "<I", MAGIC_64)
     patch(4, "<I", CPU_TYPE_ARM64)
@@ -56,7 +106,7 @@ def build_macho_executable(code: bytes, entryoff: int) -> bytes:
     patch(12, "<I", MH_EXECUTE)
     patch(16, "<I", 8)
     patch(20, "<I", sizeofcmds)
-    patch(24, "<I", 0)
+    patch(24, "<I", MH_EXECUTE_FLAGS)
 
     o = 32
 
@@ -99,8 +149,8 @@ def build_macho_executable(code: bytes, entryoff: int) -> bytes:
     patch(o + 32, "<Q", 0x4000)
     patch(o + 40, "<Q", 0x4000)
     patch(o + 48, "<Q", 0x4000)
-    patch(o + 56, "<I", 5)
-    patch(o + 60, "<I", 5)
+    patch(o + 56, "<I", 1)   # maxprot r--: __LINKEDIT holds the code signature
+    patch(o + 60, "<I", 1)   # initprot r-- (dyld maps it read-only)
     o += 72
 
     patch(o + 0, "<I", DYLD_INFO_ONLY_CMD)
@@ -185,27 +235,31 @@ def _stub_bytes(got_vm: int, stub_vm: int) -> bytes:
 def externer_layout(code_len: int, external_syms: list[str]) -> dict:
     """Stub/GOT layout for the extern executable.
 
-    Returns the entry offset, the file offset of __text,__stubs, and the stub
-    vmaddr for each symbol (sorted so both BL patching and binary emission
-    agree on slot ordering)."""
+    Returns the file offset of __text,__stubs and the stub vmaddr for each
+    symbol (sorted so both BL patching and binary emission agree on slot
+    ordering). The entry offset is deliberately NOT reported: it belongs to
+    EXTERN_ENTRYOFF alone, and a second copy of it is exactly the kind of
+    constant that let code and LC_MAIN drift apart."""
     syms = sorted(external_syms)
-    entryoff = EXTERN_ENTRYOFF
-    stub_file = (entryoff + code_len + 3) & ~3
+    stub_file = (EXTERN_ENTRYOFF + code_len + 3) & ~3
     stub_base_vm = TEXT_BASE + stub_file
     return {
-        "entryoff": entryoff,
         "stub_file": stub_file,
         "stub_addrs": {sym: stub_base_vm + i * 12 for i, sym in enumerate(syms)},
     }
 
 
 def build_macho_executable_extern(
-    code: bytes, entryoff: int, external_syms: list[str]
+    code: bytes, external_syms: list[str]
 ) -> bytes:
     """Executable with __TEXT,__stubs + __DATA_CONST,__got + LC_LOAD_DYLIB
     libSystem + classic bind. `code` already contains BL instructions whose
     targets (stub addresses) end in immediate zero placeholders; the caller
-    patches them to the real stub vmaddrs via resolve_extern before calling."""
+    patches them to the real stub vmaddrs via resolve_extern before calling.
+
+    Like build_macho_executable, the entry offset comes from this layout
+    (executable_entry_offset) rather than from the caller."""
+    entryoff = EXTERN_ENTRYOFF
     external_syms = sorted(external_syms)
     n = len(external_syms)
     stub_file = (entryoff + len(code) + 3) & ~3
@@ -215,8 +269,7 @@ def build_macho_executable_extern(
     bind_file = PAGE_SIZE * 2
     bind_len = len(bind)
 
-    sizeofcmds = 72 + 232 + 152 + 72 + 48 + 32 + 24 + 56 + 24
-    assert entryoff == 32 + sizeofcmds, entryoff
+    sizeofcmds = EXTERN_SIZEOFCMDS
     total = bind_file + bind_len
     file = bytearray(total)
 
@@ -229,7 +282,7 @@ def build_macho_executable_extern(
     patch(12, "<I", MH_EXECUTE)
     patch(16, "<I", 9)
     patch(20, "<I", sizeofcmds)
-    patch(24, "<I", 0)
+    patch(24, "<I", MH_EXECUTE_FLAGS)
 
     o = 32
 
@@ -319,8 +372,8 @@ def build_macho_executable_extern(
     patch(o + 32, "<Q", 0x4000)
     patch(o + 40, "<Q", PAGE_SIZE * 2)
     patch(o + 48, "<Q", bind_len)
-    patch(o + 56, "<I", 5)
-    patch(o + 60, "<I", 5)
+    patch(o + 56, "<I", 1)   # maxprot r--: __LINKEDIT holds the code signature
+    patch(o + 60, "<I", 1)   # initprot r--; dyld only reads the bind opcodes
     o += 72
 
     # LC_DYLD_INFO_ONLY -> bind_off/bind_size = bind data in __LINKEDIT.
@@ -368,7 +421,11 @@ def build_macho_executable_extern(
     patch(o + 16, "<Q", 0)
     o += 24
 
-    assert o == entryoff, (o, entryoff)
+    # The code starts after the load commands with CODE_SIGNATURE_CMDSIZE bytes
+    # of slack in between (executable_entry_offset), which is what
+    # `codesign -s -` needs to add LC_CODE_SIGNATURE without landing it on the
+    # first instructions.
+    assert o + CODE_SIGNATURE_CMDSIZE <= entryoff, (o, entryoff)
     file[entryoff : entryoff + len(code)] = code
     for i in range(n):
         got_vm = got_base_vm + i * 8

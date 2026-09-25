@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run every formal/ example through formalbuild --prove + Lean 4 typecheck,
-in parallel (default: min(cpu_count, 20) workers).
+"""Run every formal/ example through `fire.py build --formal` + Lean 4
+typecheck, in parallel (default: min(cpu_count, 20) workers).
 
-Each example is independent: fire.py formalbuild --prove writes
+Each example is independent: fire.py build --formal writes
 output/<stem>.aout + output/<stem>_proof.lean, then pixi's lean typechecks
 the proof statically (no binary execution — see tools/proof.sh for the
 serial single-stem path; this is the suite runner).
@@ -26,7 +26,7 @@ FIRE = os.path.join(HERE, "fire.py")
 LIB = os.path.join(HERE, "lib")
 
 DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
-# Per-example budget for `fire.py formalbuild --prove`, which typechecks a
+# Per-example budget for `fire.py build --formal`, which typechecks a
 # ~700KB `native_decide` proof as part of the build. That check is tens of
 # seconds of wall time *and more system time than user time* on an idle
 # machine, so with DEFAULT_JOBS workers on the same box it is several times
@@ -113,7 +113,7 @@ def check_prereqs():
 def run_group(argv, timeout, cwd=None):
     """subprocess.run, but a timeout kills the whole process group.
 
-    `fire.py formalbuild --prove` shells out to `lean`, so a plain
+    `fire.py build --formal` shells out to `lean`, so a plain
     subprocess.run(timeout=...) kill()s only fire.py and leaves the lean it
     spawned running at 100% CPU with PPID 1. Those orphans are not visible to
     the suite, they are never reaped, and they take the CPU away from the
@@ -138,15 +138,14 @@ def run_group(argv, timeout, cwd=None):
 
 
 def run_one(stem):
-    """formalbuild --prove, then typecheck. Returns (ok, detail)."""
+    """build --formal (which generates and checks the proof), or fail."""
     src = os.path.join(EXAMPLES, f"{stem}.mojo")
     aout = os.path.join(OUTDIR, f"{stem}.aout")
     proof = os.path.join(OUTDIR, f"{stem}_proof.lean")
 
     try:
         code, sout, serr = run_group(
-            [sys.executable, FIRE, "formalbuild", "--prove",
-             "-o", aout, src],
+            [sys.executable, FIRE, "build", "--formal", "-o", aout, src],
             BUILD_TIMEOUT, cwd=HERE,
         )
         if code != 0:

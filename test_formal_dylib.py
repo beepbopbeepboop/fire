@@ -2,7 +2,7 @@
 """Regression tests for the formal arm64 *dylib* path
 (`fire.py dylib --formal`).
 
-test_formal.py covers the MH_EXECUTE `formalbuild` path; this covers the
+test_formal.py covers the MH_EXECUTE `build --formal` path; this covers the
 dylib path, which has its own Mach-O emitter, its own export naming scheme
 and its own proof entry point, so none of test_formal.py's checks reach it.
 

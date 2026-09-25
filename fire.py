@@ -9,12 +9,12 @@ Modes:
 - mojo build <file.mojo>           Compile to executable (output name = file basename)
 - mojo build -o <output> <file>    Compile to executable with specified output name
 - mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple)
-- mojo formalbuild <file.mojo>     Build with the formal arm64 codegen (Mach-O)
-- mojo formalbuild -o <out> <file> Same, with specified output path
-- mojo formalbuild --prove <file>  Same, also emit <stem>_proof.lean (Lean 4)
-- mojo formalbuild --no-prove <f> Same, skip proof generation and checking
+- mojo build --formal <file.mojo>  Formal arm64 build (Mach-O + Lean proof)
+- mojo build --formal -o <out> <f> Same, with specified output path
+- mojo build --formal -n <int> <f> Same, with X0 input for the entry call (default 10)
+- mojo --no-prove <file>           Skip proof generation and checking
+- mojo --formal <file.mojo>        Formal build, then run it
 - mojo dylib --formal -o <out> <f> [...]  One arm64 dylib from N modules, formal codegen
-- mojo --formal <file.mojo>        Route a build through the formal backend
 - mojo --jit <file.mojo>           JIT compile and execute (ARM64)
 - mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
 - mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
@@ -103,6 +103,93 @@ def _extract_formal_flags(args: list):
         else:
             remaining.append(a)
     return formal, prove, remaining
+
+
+def _pop_flag_value(argv: list, flag: str):
+    """Remove `flag <value>` from argv in place; return the value, or None.
+
+    One implementation of the `-o <out>` shape for both `build` and `dylib`,
+    rather than the same four lines of index/pop copied into each.
+    """
+    if flag in argv:
+        i = argv.index(flag)
+        if i + 1 < len(argv):
+            value = argv[i + 1]
+            del argv[i:i + 2]
+            return value
+    return None
+
+
+def _first_input_index(argv: list) -> int:
+    """Index of the first argument that is an input file, else len(argv)."""
+    return next((i for i in range(1, len(argv))
+                 if argv[i].endswith(('.mojo', '.py')) or
+                 os.path.isfile(argv[i])), len(argv))
+
+
+def _pop_test_input(argv: list):
+    """Pop the formal backend's `-n <int>` (entry function's X0 argument).
+
+    Only from the CLI's own portion of the command line: `-n` is consumed when
+    it appears before the input file, and left alone when it appears after it,
+    so `mojo --formal -n 5 prog.mojo` sets the entry argument while
+    `mojo --formal prog.mojo -n 5` still hands -n to prog (everything after the
+    input file is the program's argv). A bare `-n` with no value, or a
+    non-integer one, is a usage error.
+    """
+    argv = sys.argv
+    first_file = _first_input_index(argv)
+    if '-n' not in argv[1:first_file]:
+        return None
+    i = argv.index('-n', 1, first_file)
+    if i + 1 >= len(argv):
+        print("mojo: -n requires an integer argument", file=sys.stderr)
+        sys.exit(2)
+    raw = argv[i + 1]
+    del argv[i:i + 2]
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"mojo: -n expects an integer, got {raw!r}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _formal_executable(input_file: str, output, test_input: int, prove: bool,
+                       run_it: bool) -> int:
+    """The one formal Mach-O executable path: `mojo build --formal` and bare
+    `mojo --formal <file>` both land here, and nothing else builds one.
+
+    `run_it` is the only difference between them, and it mirrors the gimple
+    split exactly: `build` compiles and stops, a bare filename compiles and
+    runs. The entry function's return value becomes the process exit status,
+    which is what makes a formal build runnable at all (see
+    macho_linker.executable_entry_offset for why it used not to be).
+    """
+    _fb = _load_formal_build()
+    try:
+        result = _fb.compile_formal(input_file, output=output,
+                                    test_input=test_input,
+                                    prove=prove, check=prove)
+    except _fb.FormalBuildError as e:
+        print(f"build: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"build: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return 1
+    print(f"Built: {result['path']}")
+    if result.get("proof_path"):
+        cached = " (verified from cache)" if result.get("proof_cached") else ""
+        print(f"Proof: {result['proof_path']}{cached}")
+    if not run_it:
+        return 0
+    try:
+        completed = subprocess.run([result["path"]])
+    except OSError as e:
+        print(f"build: cannot run {result['path']}: {e}", file=sys.stderr)
+        return 1
+    return completed.returncode
 
 
 def _load_formal_build():
@@ -655,25 +742,28 @@ def main():
   mojo --jit <file.mojo>           JIT compile and execute (ARM64)
   mojo build <file.mojo>           Compile to executable (same name as file, no extension)
   mojo build -o <output> <file>    Compile to executable with specified output name
-  mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple)
+  mojo build --formal [-o <out>] [-n <int>] <file.mojo>
+                                    Formal arm64 build: Mach-O executable + a Lean
+                                    proof (checked by default). -n is the X0 value
+                                    the entry function is called with (default 10);
+                                    it needs --formal.
+  mojo --formal [-n <int>] <file.mojo>
+                                    Same, then run it (bare form = build and run)
+  mojo --no-prove <file> [...]     Formal backend only: skip proof generation/checking
+  mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple) [same as --formal]
   mojo --backend=gimple ...        Select the gimple backend (default)
   mojo dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
   mojo dylib -o <out> <file> [...] Same, with specified output path
   mojo dylib --formal -o <out> <f> [...]  One arm64 dylib from N modules, formal codegen;
                                     public fns export as _<module>__<fn> (leading _ = private)
-  mojo --no-prove <file> [...]     Formal backend only: skip proof generation/checking
-  mojo formalbuild <file.mojo>     Build with the formal arm64 codegen (Mach-O .aout)
-  mojo formalbuild -o <out> <file> Same, with specified output path
-  mojo formalbuild -n <int> <file> Same, with X0 test input for the entry call (default 10)
-  mojo formalbuild --prove <file>  Same, emit <stem>_proof.lean and check it (default)
-  mojo formalbuild --no-prove <f> Same, skip proof generation and checking
-  mojo --formal <file.mojo>        Route a build through the formal backend
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
   mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
   mojo -v, --version               Show the compiler version (git SHA / release)
   mojo -h, --help                  Show this help message
 
 Formal backend notes:
+  `formalbuild` is gone: it was `build --formal` with a second name, and now
+  that --formal covers -o/-n/prove, one spelling does everything.
   Proofs are emitted next to the output (<stem>_proof.lean) and typechecked with
   the Lean version pinned in ./lean-toolchain. Each verdict is cached in the
   content-addressed store (~/.gmojo/cas/proof) keyed on the proof bytes, the
@@ -725,13 +815,17 @@ Backend selector (may appear anywhere; selects the codegen path):
     if sys.argv[1] == 'build':
         build = True
         sys.argv.pop(1)
-        # Check for -o <output> flag
-        if '-o' in sys.argv:
-            idx = sys.argv.index('-o')
-            if idx + 1 < len(sys.argv):
-                build_output = sys.argv[idx + 1]
-                sys.argv.pop(idx)   # remove -o
-                sys.argv.pop(idx)   # remove output filename
+        build_output = _pop_flag_value(sys.argv, '-o')
+
+    # -n is the formal backend's entry-argument flag (the X0 value the startup
+    # stub hands the entry function). Take it from the CLI's own portion of the
+    # command line — before the input file — and reject it on the gimple
+    # backend, where there is no such stub and it would silently do nothing.
+    if not formal and '-n' in sys.argv[1:_first_input_index(sys.argv)]:
+        print("mojo: -n is the formal backend's entry-argument flag (X0) and "
+              "requires --formal", file=sys.stderr)
+        sys.exit(2)
+    formal_test_input = _pop_test_input(sys.argv)
 
     # Check for dylib command: compile one or more .mojo LIBRARY modules
     # (no main()/top-level entry point needed — same "library module" shape
@@ -746,14 +840,12 @@ Backend selector (may appear anywhere; selects the codegen path):
     # several library modules can be bundled into one output dylib.
     if sys.argv[1] == 'dylib':
         sys.argv.pop(1)
-        dylib_output = None
-        if '-o' in sys.argv:
-            idx = sys.argv.index('-o')
-            if idx + 1 < len(sys.argv):
-                dylib_output = sys.argv[idx + 1]
-                sys.argv.pop(idx)   # remove -o
-                sys.argv.pop(idx)   # remove output filename
+        dylib_output = _pop_flag_value(sys.argv, '-o')
         dylib_inputs = sys.argv[1:]
+        if formal_test_input is not None:
+            print("mojo dylib --formal: -n does not apply — a dylib has no "
+                  "entry stub to pass an argument to", file=sys.stderr)
+            sys.exit(2)
         if not dylib_inputs:
             print("mojo dylib: at least one .mojo file is required", file=sys.stderr)
             sys.exit(1)
@@ -775,57 +867,12 @@ Backend selector (may appear anywhere; selects the codegen path):
         rc = driver.compile_dylib(dylib_inputs, output=dylib_output, opt_flag=opt_flag)
         sys.exit(rc)
 
-    # Check for formalbuild command: the formal arm64 codegen path
-    # (formal/arm64_codegen.py + formal/macho.py + formal/arm64_proof_gen.py,
-    # ported from the toy proof-carrying compiler and re-targeted onto
-    # fire_compiler's AST). Emits a Mach-O executable directly — no gcc,
-    # no GIMPLE, no CAS. With --prove, also emits <stem>_proof.lean.
     if sys.argv[1] == 'formalbuild':
-        sys.argv.pop(1)
-        backend = 'arm64'  # formalbuild is shorthand for --backend=arm64
-        formal_output = None
-        formal_test_input = 10
-        formal_prove = prove
-        if '--prove' in sys.argv:
-            formal_prove = True
-            sys.argv.remove('--prove')
-        if '-o' in sys.argv:
-            idx = sys.argv.index('-o')
-            if idx + 1 < len(sys.argv):
-                formal_output = sys.argv[idx + 1]
-                sys.argv.pop(idx)   # remove -o
-                sys.argv.pop(idx)   # remove output filename
-        if '-n' in sys.argv:
-            idx = sys.argv.index('-n')
-            if idx + 1 < len(sys.argv):
-                formal_test_input = int(sys.argv[idx + 1])
-                sys.argv.pop(idx)   # remove -n
-                sys.argv.pop(idx)   # remove value
-        formal_inputs = sys.argv[1:]
-        if len(formal_inputs) != 1:
-            print("mojo formalbuild: exactly one .mojo file is required",
-                  file=sys.stderr)
-            sys.exit(1)
-        _fb = _load_formal_build()
-        compile_formal = _fb.compile_formal
-        FormalBuildError = _fb.FormalBuildError
-        try:
-            result = compile_formal(formal_inputs[0], output=formal_output,
-                                    test_input=formal_test_input,
-                                    prove=formal_prove, check=formal_prove)
-        except FormalBuildError as e:
-            print(f"formalbuild: {e}", file=sys.stderr)
-            sys.exit(1)
-        except Exception as e:
-            print(f"formalbuild: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
-            sys.exit(1)
-        print(f"Built: {result['path']}")
-        if result.get("proof_path"):
-            cached = " (verified from cache)" if result.get("proof_cached") else ""
-            print(f"Proof: {result['proof_path']}{cached}")
-        sys.exit(0)
+        # Removed rather than aliased: `build --formal` is the same code path
+        # (see _formal_executable), so there is nothing left to forward to.
+        print("mojo formalbuild: removed. Use: mojo build --formal "
+              "[-n <int>] [-o <out>] <file.mojo>", file=sys.stderr)
+        sys.exit(2)
 
     dump_full = '--dump-full' in sys.argv
     dump = '--dump' in sys.argv
@@ -870,7 +917,11 @@ Backend selector (may appear anywhere; selects the codegen path):
             src = f.read()
     except Exception as e:
         print(f"Error reading {input_file}: {e}", file=sys.stderr)
-        return
+        # Nonzero: this used to `return`, i.e. exit 0, so every caller that
+        # shells out to fire.py (make targets, CI, the formal sweep) saw a
+        # *successful* build of a file that was never read — a missing input
+        # silently "passed".
+        sys.exit(1)
 
     # If JIT requested, compile and execute
     if jit:
@@ -882,22 +933,10 @@ Backend selector (may appear anywhere; selects the codegen path):
     # (link mode + per-import dylibs + CAS + reflection) with inline fallback.
     if build:
         if backend == 'arm64':
-            _fb = _load_formal_build()
-            compile_formal = _fb.compile_formal
-            FormalBuildError = _fb.FormalBuildError
-            try:
-                result = compile_formal(input_file, output=build_output,
-                                        prove=prove, check=prove)
-            except FormalBuildError as e:
-                print(f"build: {e}", file=sys.stderr)
-                sys.exit(1)
-            except Exception as e:
-                print(f"build: {e}", file=sys.stderr)
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-                sys.exit(1)
-            print(f"Built: {result['path']}")
-            sys.exit(0)
+            sys.exit(_formal_executable(
+                input_file, build_output,
+                10 if formal_test_input is None else formal_test_input,
+                prove, run_it=False))
         try:
             import driver
             rc = driver.compile_program(input_file, src, output=build_output,
@@ -1055,21 +1094,13 @@ Backend selector (may appear anywhere; selects the codegen path):
     # block execution; that is deferred).
     if input_file.endswith('.mojo'):
         if backend == 'arm64':
-            _fb = _load_formal_build()
-            compile_formal = _fb.compile_formal
-            FormalBuildError = _fb.FormalBuildError
-            try:
-                result = compile_formal(input_file, prove=prove, check=prove)
-            except FormalBuildError as e:
-                print(f"build: {e}", file=sys.stderr)
-                sys.exit(1)
-            except Exception as e:
-                print(f"build: {e}", file=sys.stderr)
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-                sys.exit(1)
-            print(f"Built: {result['path']}")
-            sys.exit(0)
+            # Bare `mojo --formal f.mojo` (and `mojo --backend=arm64 f.mojo`)
+            # compile AND run, exactly like a bare `mojo f.mojo` on the gimple
+            # backend; `mojo build --formal` compiles and stops.
+            sys.exit(_formal_executable(
+                input_file, None,
+                10 if formal_test_input is None else formal_test_input,
+                prove, run_it=True))
         try:
             import driver
             rc = driver.compile_program(input_file, src, run=True,

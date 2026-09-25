@@ -1,5 +1,5 @@
-"""formalbuild — formal arm64 codegen + Mach-O emission, selected by
-`./fire.py formalbuild <file.mojo>`.
+"""Formal arm64 codegen + Mach-O emission, selected by
+`./fire.py build --formal <file.mojo>` (or a bare `./fire.py --formal`).
 
 Pipeline:
     source → fire_compiler.py tokenize/parse (the real AST)
@@ -22,8 +22,8 @@ from types import SimpleNamespace
 import fire_compiler as F
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
-from formal.macho_linker import (EXTERN_ENTRYOFF, TEXT_BASE, build_macho_dylib,
-                                 dylib_code_offset)
+from formal.macho_linker import (EXTERN_ENTRYOFF, NOEXTERN_ENTRYOFF, TEXT_BASE,
+                                  build_macho_dylib, dylib_code_offset)
 from mojo.middle.closures import discover_closures
 
 
@@ -565,7 +565,7 @@ def compile_formal(source_path: str, output: str = None,
         # We don't know external_syms until after compile(), so compile once
         # at the extern base if anything turns out external and re-emit.
         base_extern = TEXT_BASE + EXTERN_ENTRYOFF
-        base_noextern = TEXT_BASE + 480  # 32-byte header + 448 sizeofcmds
+        base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
         code, info = codegen.compile(ordered, base_addr=base_noextern)
         external_syms = info.get("external_syms") or []
         if external_syms:
@@ -580,8 +580,7 @@ def compile_formal(source_path: str, output: str = None,
     except CodegenError as e:
         raise FormalBuildError(str(e))
 
-    binary = build_macho(code, entry=info["base_addr"],
-                         external_syms=external_syms)
+    binary = build_macho(code, external_syms=external_syms)
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"

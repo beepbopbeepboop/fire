@@ -145,13 +145,14 @@ def _build_load_dylib(path: str, timestamp: int = 0, current_version: int = 0, c
 
 def build_macho(
     code: bytes,
-    entry: int = 0x100000000,
     external_syms: list[str] | None = None,
-    vaddr: int = 0x100000000,
 ) -> bytes:
     """Build a Mach-O64 executable for ARM64 from scratch.
-    
-    This builds the Mach-O binary from scratch without templates.
+
+    This builds the Mach-O binary from scratch without templates. The entry
+    offset comes from formal.macho_linker's layout constants (see
+    executable_entry_offset), not from a literal here, so `code` must have been
+    compiled for the matching base address.
     """
     if external_syms is None:
         external_syms = []
@@ -160,17 +161,16 @@ def build_macho(
         # External symbols: build __stubs + __got + LC_LOAD_DYLIB + bind.
         # BL instructions in `code` must already point at the real stub
         # vmaddrs (see compute_macho_got_addrs + asm.resolve_extern).
-        from formal.macho_linker import build_macho_executable_extern, externer_layout
-        layout = externer_layout(len(code), external_syms)
-        return build_macho_executable_extern(code, layout["entryoff"], external_syms)
+        from formal.macho_linker import build_macho_executable_extern
+        return build_macho_executable_extern(code, external_syms)
 
     from formal.macho_linker import build_macho_executable
 
-    # Entry point sits after the header + load commands. sizeofcmds for this
-    # layout is 448 (72+152+72+48+32+24+24+24), so code starts at 32+448=480.
-    # (The upstream formal tree passed 456 here, which overlaps LC_MAIN —
-    # its no-extern Mach-O path asserts/fails; fixed for this port.)
-    return build_macho_executable(code, entryoff=480)
+    # The entry offset is the linker's to decide (it is derived from the load
+    # command list plus the slack post-hoc codesigning needs) — the caller only
+    # has to have emitted `code` for that same offset, which it learns from
+    # NOEXTERN_ENTRYOFF / EXTERN_ENTRYOFF before compiling.
+    return build_macho_executable(code)
 
 
 def compute_macho_got_addrs(code_size: int, external_syms: list[str], vaddr: int = 0x100000000) -> dict[str, int]:

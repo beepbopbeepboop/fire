@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep every *.py under the repo through formalbuild (arm64 Mach-O).
+"""Sweep every *.py under the repo through `build --formal` (arm64 Mach-O).
 
 Mojo is a Python superset, so .py files are valid inputs. Prints one
 FAIL: line per failure; PASS lines are counted but not printed.
@@ -67,13 +67,13 @@ def run_one(path):
         with tempfile.TemporaryDirectory(prefix="formal_sweep_") as td:
             out = os.path.join(td, "a.out")
             proc = subprocess.run(
-                [sys.executable, FIRE, "formalbuild", "-o", out, path],
+                [sys.executable, FIRE, "build", "--formal", "-o", out, path],
                 capture_output=True, text=True, timeout=TIMEOUT, cwd=REPO,
             )
         if proc.returncode == 0:
             return True, ""
         err = (proc.stderr or proc.stdout or "").strip()
-        # keep the last non-empty line — that's formalbuild's actual message
+        # keep the last non-empty line — that's the formal build's actual message
         lines = [ln for ln in err.splitlines() if ln.strip()]
         detail = lines[-1] if lines else f"exit {proc.returncode}"
         return False, detail
@@ -97,7 +97,7 @@ def main():
         sys.exit(2)
 
     jobs = max(1, args.jobs)
-    print(f"Sweeping {len(files)} .py files through formalbuild "
+    print(f"Sweeping {len(files)} .py files through build --formal "
           f"({jobs} workers)...", file=sys.stderr)
 
     results = {}
