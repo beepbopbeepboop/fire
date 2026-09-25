@@ -39,6 +39,28 @@ from formal.build import ImportBuildError  # noqa: E402  (cycle-free: build
 _BUILT: dict = {}
 
 
+# CPython's standard library. These have no Mojo source and no symbol the
+# formal model could bind, so a file importing one cannot be built here — but
+# that is a statement about the target, not a module-resolution failure.
+HOST_MODULES = frozenset((
+    "os", "sys", "ast", "json", "re", "argparse", "dataclasses", "typing",
+    "collections", "itertools", "functools", "math", "random", "time",
+    "pathlib", "subprocess", "shutil", "textwrap", "inspect", "abc", "enum",
+    "io", "csv", "copy", "pickle", "struct", "threading", "socket", "glob",
+    "hashlib", "base64", "urllib", "http", "unittest", "logging", "warnings",
+    "importlib", "importlib.util", "importlib.machinery", "contextlib",
+    "traceback", "gc", "atexit", "signal", "errno", "stat", "platform",
+    "tempfile", "uuid", "zlib", "gzip", "codecs", "locale", "getpass",
+    "webbrowser", "unittest.mock", "difflib", "fnmatch", "operator",
+    "heapq", "bisect", "array", "numbers", "decimal", "fractions", "secrets",
+    "select", "queue", "weakref", "types", "dis", "pprint", "reprlib",
+))
+
+
+def _is_host_module(name: str) -> bool:
+    return name in HOST_MODULES or name.split(".")[0] in HOST_MODULES
+
+
 def _manifest_path(dylib_path: str) -> str:
     from formal.build import dylib_manifest_path
     return dylib_manifest_path(dylib_path)
@@ -195,10 +217,22 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
         dep_path = resolve_module_path(mod, relative_to=source_path,
                                        project_root=project_root or source_path)
         if dep_path is None:
+            # A HOST module is a different answer from a typo. `import os` in
+            # a Python-superset language names the CPython standard library,
+            # which has no Mojo source to compile and no symbol this backend
+            # could bind; that is a property of the target, not a resolution
+            # failure, and saying so keeps it from reading as one. It stays an
+            # error either way — the file genuinely cannot be built here — but
+            # it is the file's use of the host stdlib, not a broken module
+            # path, and lumping the two together buries the real failures.
+            kind = ("a host module (CPython standard library), which has no "
+                    "Mojo source for this backend to compile"
+                    if _is_host_module(mod)
+                    else "not a stdlib or sibling module, and no such file "
+                         "exists")
             raise ImportBuildError(
-                f"{os.path.basename(source_path)} imports {mod!r}, which "
-                f"does not resolve to a source file (this path resolves "
-                f"stdlib and sibling modules only)")
+                f"{os.path.basename(source_path)} imports {mod!r}, which is "
+                f"{kind}")
         depends.append((mod, dep_path))
     # Build the dependencies first, and keep their dylibs: they go on THIS
     # library's link line, both so cross-module calls get the right exported

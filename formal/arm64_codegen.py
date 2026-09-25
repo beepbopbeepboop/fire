@@ -2542,11 +2542,19 @@ class ARM64Codegen:
                 f"(a formal value is one 64-bit word, and {name} is not one "
                 f"thing) — previously this emitted a call to a symbol named "
                 f"{name!r} that nothing defines")
-        if len(e.args) != 1 or e.kwargs:
+        # A keyword argument names the same single value a positional one
+        # does, so it is accepted as the operand rather than rejected:
+        # `String(unsafe_from_utf8_ptr=p.value())` is how std/os/env.mojo
+        # builds a string from a raw pointer, and refusing every keyword form
+        # blocked 78 stdlib files on a shape the language allows. What is
+        # still refused is a genuine mismatch of ARITY — a conversion has one
+        # operand, and two of them (positioned or named) is not a conversion.
+        operands = list(e.args) + [v for _n, v in e.kwargs]
+        if len(operands) != 1:
             raise CodegenError(
                 f"{name}(...) takes exactly one value to convert on this path "
-                f"(got {len(e.args)} argument(s))")
-        self._emit_expr(e.args[0])
+                f"(got {len(operands)} argument(s))")
+        self._emit_expr(operands[0])
         if kind == "identity":
             return
         width, signed = info

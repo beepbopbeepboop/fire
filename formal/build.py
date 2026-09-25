@@ -663,9 +663,19 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         for mod in mods:
             path = resolve_module_path(mod, relative_to=source_path)
             if path is None:
+                # One wording for one condition: formal/imports.py raises the
+                # same error for an unresolvable import inside a DEPENDENCY,
+                # and two messages for one cause is how a real failure ends up
+                # filed under the wrong heading.
+                from formal.imports import _is_host_module
+                kind = ("a host module (CPython standard library), which has "
+                        "no Mojo source for this backend to compile"
+                        if _is_host_module(mod)
+                        else "not a stdlib or sibling module, and no such file "
+                             "exists")
                 raise ImportBuildError(
                     f"{os.path.basename(source_path)} imports {mod!r}, which "
-                    f"does not resolve to a source file")
+                    f"is {kind}")
             dylib = build_module_dylib(mod, path, out_dir, arch,
                                        project_root=source_path)
             if dylib:
@@ -840,9 +850,15 @@ def _formal_module_functions(source_path: str) -> tuple[str, list]:
         stmts = parse_module(source, filename=source_path)
     except SyntaxError as e:
         raise FormalBuildError(f"{source_path}: parse error: {e}")
+    # A module with no top-level functions is NOT an error here. binary_heap
+    # and a third of std/ are struct-only, and they used to be rejected with
+    # "no top-level functions" — which was not merely premature but wrong: the
+    # question is not whether the file has functions but whether it has
+    # anything to EXPORT, and that is answered by reflect.collect_exports_src
+    # (which finds nothing in binary_heap either, so it is refused a moment
+    # later, by the check that can actually say why). Reporting the accurate
+    # reason matters: "no top-level functions" reads like a codegen gap.
     functions = _extract_functions(stmts, synthetic=False)
-    if not functions:
-        raise FormalBuildError(f"{source_path}: no top-level functions")
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
@@ -968,7 +984,43 @@ def _abi_symbol(entry: dict):
         return None
 
 
-def _formal_exports(source_paths: list, module_by_name: dict, ordered: list,
+def _is_libsystem(sym: str) -> bool:
+    """True for a symbol libSystem itself provides.
+
+    The externs a library legitimately sends outward are the C library's own
+    (`printf`, `malloc`, …), and those are declared by the libSystem load
+    command the image already carries. Everything else has to come from a
+    dependency's export table."""
+    import ctypes.util
+    known = {"printf", "puts", "putchar", "malloc", "calloc", "realloc",
+             "free", "memcpy", "memset", "strlen", "strcmp", "strncmp",
+             "abort", "exit", "atoi", "qsort", "fmod", "pow", "sqrt"}
+    return sym.lstrip("_") in known
+
+
+def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
+    """{name: (prefix, entry, symbol)} for everything these files export.
+
+    Split out of _formal_exports so the DECISION can be made before any code
+    is emitted. Whether a module has a public API is a property of its source
+    and of doc/ABI.md's export rules, not of what the codegen happens to
+    manage; asking the question afterwards meant a struct-only module was
+    refused with "no function definitions to compile", which reads like a
+    codegen gap rather than "this file exports nothing"."""
+    import reflect          # lazy — see _abi_symbol
+    exported: dict = {}
+    for src_path in source_paths:
+        prefix = (prefixes or {}).get(src_path) or _module_prefix(src_path)
+        with open(src_path) as f:
+            text = f.read()
+        for entry in reflect.collect_exports_src(text, prefix):
+            symbol = _abi_symbol(entry)
+            if symbol:
+                exported.setdefault(entry["name"], (prefix, entry, symbol))
+    return exported
+
+
+def _formal_exports(source_paths: list, ordered: list,
                     info: dict, prefixes: dict = None) -> list:
     """The library's export table, per doc/ABI.md's boundary contract.
 
@@ -986,26 +1038,25 @@ def _formal_exports(source_paths: list, module_by_name: dict, ordered: list,
     model, so no method is compiled here — but the naming is the ABI's so that
     a method can be added without renaming anything.
     """
-    import reflect          # lazy — see _abi_symbol
-    exported: dict = {}
-    for src_path in source_paths:
-        # An explicit identity wins: a package's `__init__.mojo` has no
-        # distinguishing FILE name, so deriving the qualifier from the path
-        # gives every package the same `_init_` — the exact collision
-        # module_name_for_path exists to prevent (it can only disambiguate
-        # under STDLIB_PATH; a local sibling package is addressed by the
-        # module name the importer used).
-        prefix = (prefixes or {}).get(src_path) or _module_prefix(src_path)
-        with open(src_path) as f:
-            text = f.read()
-        for entry in reflect.collect_exports_src(text, prefix):
-            symbol = _abi_symbol(entry)
-            if symbol:
-                exported.setdefault(entry["name"], (prefix, entry, symbol))
+    # An explicit identity wins: a package's `__init__.mojo` has no
+    # distinguishing FILE name, so deriving the qualifier from the path gives
+    # every package the same `_init_` — the exact collision
+    # module_name_for_path exists to prevent (it can only disambiguate under
+    # STDLIB_PATH; a local sibling package is addressed by the module name the
+    # importer used). The set itself is the probe's, computed before codegen.
+    exported = _export_entries(source_paths, prefixes)
     out = []
+    emitted = set()
     for fn in ordered:
-        if fn.name not in exported:
+        # An overload was renamed to `<name>__ovN` above, so it no longer
+        # matches — which is what keeps a name that reflect *did* export from
+        # being emitted twice, once per definition. `emitted` states that as an
+        # invariant rather than relying on the rename: two trie entries with
+        # one symbol is not a de-duplication problem, it is a corrupt export
+        # table that dyld resolves to whichever it finds first.
+        if fn.name not in exported or fn.name in emitted:
             continue                      # private, generic, or overloaded
+        emitted.add(fn.name)
         prefix, entry, symbol = exported[fn.name]
         out.append({
             "module": prefix,
@@ -1054,21 +1105,31 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     dep_syms = {d["install_name"]: list((d.get("map") or {}).values())
                 for d in linked}
     ordered = []
-    module_by_name = {}
+    seen: dict = {}
     for source_path in source_paths:
         module, functions, module_source = _formal_module_functions(source_path)
         for fn in functions:
-            if fn.name in module_by_name:
-                # NOT an ABI restriction: ABI.md leaves free functions
-                # unmangled, so two modules may each define `add` (the gimple
-                # dylib demotes the second to file-local). This path cannot:
-                # every module in one library shares ONE flat function
-                # registry keyed by name, so the second definition would
-                # silently displace the first. Refuse instead of picking.
-                raise FormalBuildError(
-                    f"duplicate function '{fn.name}' in "
-                    f"{module_by_name[fn.name]} and {source_path}")
-            module_by_name[fn.name] = source_path
+            # A repeated name is an OVERLOAD, not a collision — and Mojo
+            # overloads are ordinary (`def tile[...]` appears three times in
+            # std/algorithm/backend/tile.mojo alone). Refusing them was wrong
+            # twice over: the message named the same file on both sides, and
+            # doc/ABI.md already excludes an overloaded name from the export
+            # set precisely because no single symbol denotes it, so there is
+            # nothing to disambiguate at the boundary.
+            #
+            # Both definitions are still kept, because dropping the second
+            # would silently discard code. They are renamed apart because the
+            # codegen keeps ONE registry keyed by name (`self._functions`), so
+            # leaving them as-is would let the last definition displace the
+            # first with no diagnostic. The first keeps the source name, so a
+            # call in this module still resolves; a call that wanted the
+            # second overload resolves to the first, which is the documented
+            # limit of name-based dispatch here — and no importer can ask for
+            # the second by symbol, since the export set excludes it.
+            n = seen.get(fn.name, 0)
+            seen[fn.name] = n + 1
+            if n:
+                fn.name = f"{fn.name}__ov{n + 1}"
             ordered.append(fn)
 
     if output is None:
@@ -1083,6 +1144,19 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # image the emitter builds must all be derived for the SAME decision. The
     # first pass discovers whether there are externs at all; the second emits
     # at the offset that implies, exactly as the executable path does.
+    # Refuse before emitting, and for the true reason. A module can compile no
+    # code and still be useless as a library: binary_heap and a third of std/
+    # are struct-only, and doc/ABI.md's export rules give them no public
+    # symbol, so no importer could ever bind them. Saying so is the difference
+    # between "this backend cannot do structs yet" and a mystery.
+    if not _export_entries(source_paths, module_prefixes):
+        names = [os.path.basename(p) for p in source_paths]
+        raise FormalBuildError(
+            f"formal dylib has no public functions: {', '.join(names)} "
+            f"exports nothing under doc/ABI.md's rules (a struct-only module "
+            f"has no free-function API, and this backend compiles no struct "
+            f"methods)")
+
     codegen = ARM64Codegen(test_input=test_input, dylib_syms=dylib_syms)
     try:
         code, info = codegen.compile(
@@ -1110,8 +1184,37 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     except CodegenError as e:
         raise FormalBuildError(str(e))
 
-    exports = _formal_exports(source_paths, module_by_name, ordered, info,
-                              module_prefixes)
+    # A library may only bind symbols it can account for. Every name the
+    # image sends through a stub lands in its bind stream, and dyld resolves
+    # each one at load time against libSystem or a declared dependency. A name
+    # that is neither is not a working library — it is an image that builds
+    # cleanly and then cannot be loaded, which is the failure mode this whole
+    # import work exists to remove, just moved later. Checking here says it
+    # where the library is built, and names the symbols.
+    #
+    # These are the formal model's unsupported constructs arriving late: a
+    # struct used as a type (`CycleIterator`), a method call on a value
+    # (`element.copy`), and compiler intrinsics (`rebind_var`). None is a
+    # missing export to be added; each needs lowering this backend does not do.
+    # Two spellings meet here: a manifest records the C identifier (what a
+    # bind stream carries — dyld prepends the underscore) while a name the
+    # codegen could not resolve arrives in the Mach-O spelling, with one.
+    # Comparing them raw would report every dependency symbol as unprovided.
+    provided = {n.lstrip("_") for n in dylib_syms}
+    provided |= {n.lstrip("_") for n in dylib_syms.values()}
+    unaccounted = [sym for sym in sorted(set(external_syms or []))
+                   if sym.lstrip("_") not in provided
+                   and not _is_libsystem(sym)]
+    if unaccounted:
+        raise FormalBuildError(
+            f"{os.path.basename(source_paths[0])}: the library would bind "
+            f"{len(unaccounted)} symbol(s) that nothing provides, so it could "
+            f"not be loaded: {', '.join(unaccounted[:8])}"
+            f"{' …' if len(unaccounted) > 8 else ''}. These are constructs "
+            f"this backend does not lower (a struct type, a method call on a "
+            f"value, a compiler intrinsic), not exports that are missing.")
+
+    exports = _formal_exports(source_paths, ordered, info, module_prefixes)
     if not exports:
         raise FormalBuildError("formal dylib has no public functions")
 
