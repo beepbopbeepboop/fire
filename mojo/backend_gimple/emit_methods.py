@@ -4374,7 +4374,10 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # Explicit loop, NOT `{pn: dv for pn, dv in _method_dflts}` (self-host
     # comprehension trap; tuple-unpacked `pn` also erases to int64_t).
     _method_dflt_map = {}
-    for _pn0, _dv0 in _method_dflts:
+    for _dflt in _method_dflts:
+        if not isinstance(_dflt, tuple):
+            continue
+        _pn0, _dv0 = _dflt
         _method_dflt_map[_gmm_as_str(_pn0)] = _dv0
     if _chosen_method is not None:
         arg_pairs = ggc._build_call_args_for_candidate(

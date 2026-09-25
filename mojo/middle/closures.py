@@ -141,7 +141,7 @@ def mutated_free_names(inner: FunctionDef, candidate_names) -> frozenset:
     return frozenset(mutated)
 
 
-def discover_closures(ctx, stmts) -> dict:
+def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
     """Discover every nested FunctionDef under `stmts`; fill `ctx._all_closures`.
 
     Returns `ctx._all_closures`: outer_name -> {inner_name -> ClosureInfo}.
