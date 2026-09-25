@@ -24,7 +24,7 @@ import re
 import struct
 
 import fire_compiler as F
-from formal.arm64_codegen import var_register_map
+from formal.arm64_codegen import var_register_map, _SCRATCH
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
@@ -339,6 +339,32 @@ def _collect_conds(fn, param: str, env: dict) -> list:
     return conds
 
 
+def _pow_model(l: str, r: str, e) -> str:
+    """Model for `base ** exp` (Lean UInt64 term), mirroring codegen.
+
+    Codegen unrolls literal exponents 0..64 into n-1 MULs, so the model
+    emits the same multiplication chain (terminal goal stays in ring form,
+    closable by the existing simp/rfl machinery).  Negative literal
+    exponents are 0 (codegen's `MOVZ x0, #0` path).  Runtime exponents keep
+    the u64pow binary-exponentiation loop model.
+    """
+    n = None
+    if isinstance(e, Int):
+        n = e.value
+    elif isinstance(e, Unary) and e.op == "-" and isinstance(e.operand, Int):
+        n = -e.operand.value
+    if n is None or n > 64:
+        return f"(u64pow {l} {r})"
+    if n < 0:
+        return "(0 : UInt64)"
+    if n == 0:
+        return "(1 : UInt64)"
+    acc = l
+    for _ in range(n - 1):
+        acc = f"({acc} * {l})"
+    return acc
+
+
 def _expr_go(e, param: str, env: dict) -> str:
     """Translate a Mojo expression to a Lean UInt64 term for the model."""
     if isinstance(e, Var):
@@ -360,6 +386,19 @@ def _expr_go(e, param: str, env: dict) -> str:
         k = _lean_op(e.op)
         if k in ("+", "-", "*"):
             return f"({l} {k} {r})"
+        bit = {"&": "&&&", "|": "|||", "^": "^^^"}
+        if k in bit:
+            return f"({l} {bit[k]} {r})"
+        if k in ("/", "//"):
+            return f"({l} / {r})"
+        if k == "%":
+            return f"({l} % {r})"
+        if k == "<<":
+            return f"({l} <<< {r})"
+        if k == ">>":
+            return f"({l} >>> {r})"
+        if k == "**":
+            return _pow_model(l, r, e.right)
         cmp = {"<=": "≤", "<": "<", ">": ">", ">=": "≥", "=": "=", "!=": "≠"}
         if k in cmp:
             return f"(if {l} {cmp[k]} {r} then (1 : UInt64) else (0 : UInt64))"
@@ -410,9 +449,9 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list, help
         return _stmts_go(rest, param, env, fname, loop_counter, helpers)
     if isinstance(st, AugAssign):
         env = dict(env)
-        _op = {"+": " + ", "-": " - ", "*": " * "}[st.op.rstrip("=")]
-        env[_target_name(st)] = (f"({env.get(_target_name(st), '(0 : UInt64)')} {_op} "
-                        f"{_expr_go(st.value, param, env)})")
+        _base = st.op.rstrip("=")
+        _bin = F.BinaryOp(op=_base, left=Var(name=_target_name(st)), right=st.value)
+        env[_target_name(st)] = _expr_go(_bin, param, env)
         return _stmts_go(rest, param, env, fname, loop_counter, helpers)
     if isinstance(st, (ForStmt, Break, Continue)):
         raise NotImplementedError(
@@ -503,6 +542,36 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict) -> str:
             t = common_type(infer_expr(e.left, vtypes, call_types),
                             infer_expr(e.right, vtypes, call_types))
             return _t_wrap(f"({l} {k} {r})", t)
+        bit = {"&": "&&&", "|": "|||", "^": "^^^"}
+        if k in bit:
+            t = common_type(infer_expr(e.left, vtypes, call_types),
+                            infer_expr(e.right, vtypes, call_types))
+            return _t_wrap(f"({l} {bit[k]} {r})", t)
+        if k in ("/", "//"):
+            t = common_type(infer_expr(e.left, vtypes, call_types),
+                            infer_expr(e.right, vtypes, call_types))
+            fnm = "sdiv64" if cmp_signed(t) else "/"
+            return _t_wrap(f"({fnm} {l} {r})" if fnm == "sdiv64" else f"({l} / {r})", t)
+        if k == "%":
+            t = common_type(infer_expr(e.left, vtypes, call_types),
+                            infer_expr(e.right, vtypes, call_types))
+            if cmp_signed(t):
+                return _t_wrap(f"(srem64 {l} {r})", t)
+            return _t_wrap(f"({l} % {r})", t)
+        if k == "<<":
+            t = common_type(infer_expr(e.left, vtypes, call_types),
+                            infer_expr(e.right, vtypes, call_types))
+            return _t_wrap(f"({l} <<< {r})", t)
+        if k == ">>":
+            t = common_type(infer_expr(e.left, vtypes, call_types),
+                            infer_expr(e.right, vtypes, call_types))
+            if cmp_signed(t):
+                return _t_wrap(f"(asr64 {l} {r})", t)
+            return _t_wrap(f"({l} >>> {r})", t)
+        if k == "**":
+            t = common_type(infer_expr(e.left, vtypes, call_types),
+                            infer_expr(e.right, vtypes, call_types))
+            return _t_wrap(_pow_model(l, r, e.right), t)
         if k in _CMP_OPS:
             t = common_type(infer_expr(e.left, vtypes, call_types),
                             infer_expr(e.right, vtypes, call_types))
@@ -554,8 +623,7 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
                            loop_counter, helpers)
     if isinstance(st, AugAssign):
         env = dict(env)
-        _kind = {"+": "+", "-": "-",
-                 "*": "*"}[st.op.rstrip("=")]
+        _kind = st.op.rstrip("=")
         _b = F.BinaryOp(op=_kind, left=Var(name=_target_name(st)), right=st.value)
         env[_target_name(st)] = _expr_go_t(_b, param, env, vtypes, call_types)
         return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
@@ -1074,6 +1142,15 @@ _STEP_CONDS = [
     (0xffc0fc00, 0x92401c00),  # 39 AND imm #0xff
     (0xffc0fc00, 0x92403c00),  # 40 AND imm #0xffff
     (0xffc0fc00, 0x92407c00),  # 41 AND imm #0xffffffff
+    (0xffe0fc00, 0x9ac00800),  # 42 UDIV
+    (0xffe0fc00, 0x9ac00c00),  # 43 SDIV
+    (0xffe0fc00, 0x9ac02000),  # 44 LSLV
+    (0xffe0fc00, 0x9ac02400),  # 45 LSRV
+    (0xffe0fc00, 0x9ac02800),  # 46 ASRV
+    (0xffe08000, 0x9b008000),  # 47 MSUB
+    (0xffc0fc00, 0xd340fc00),  # 48 LSR imm (UBFM imms=63)
+    (0xffc0fc00, 0x9340fc00),  # 49 ASR imm (SBFM imms=63)
+    (0xffc00000, 0xd3400000),  # 50 LSL imm (UBFM64 remaining)
 ]
 
 
@@ -1251,6 +1328,35 @@ def _step_rhs(w: int, idx: int):
     if idx in (39, 40, 41):  # AND Xd, Xn, #imm (zero-truncate)
         tname = {39: "t8u", 40: "t16u", 41: "t32u"}[idx]
         return f"some (arm64_set_reg {rd} s ({tname} (arm64_reg {rn} s)))"
+    if idx == 42:  # UDIV
+        return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s / arm64_reg {rm} s))"
+    if idx == 43:  # SDIV
+        return (f"some (arm64_set_reg {rd} s (sdiv64 (arm64_reg {rn} s) "
+                f"(arm64_reg {rm} s)))")
+    if idx == 44:  # LSLV
+        return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s <<< arm64_reg {rm} s))"
+    if idx == 45:  # LSRV
+        return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s >>> arm64_reg {rm} s))"
+    if idx == 46:  # ASRV
+        return (f"some (arm64_set_reg {rd} s (asr64 (arm64_reg {rn} s) "
+                f"(arm64_reg {rm} s)))")
+    if idx == 47:  # MSUB Xd = Xa - Xn*Xm
+        xa = (w >> 10) & 0x1f
+        return (f"some (arm64_set_reg {rd} s (arm64_reg {xa} s - "
+                f"(arm64_reg {rn} s * arm64_reg {rm} s)))")
+    if idx == 48:  # LSR imm
+        immr = (w >> 16) & 0x3f
+        return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s >>> "
+                f"UInt64.ofNat {immr}))")
+    if idx == 49:  # ASR imm
+        immr = (w >> 16) & 0x3f
+        return (f"some (arm64_set_reg {rd} s (asr64 (arm64_reg {rn} s) "
+                f"UInt64.ofNat {immr}))")
+    if idx == 50:  # LSL imm: imms = 63 - shift
+        imms = (w >> 10) & 0x3f
+        sh = 63 - imms
+        return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s <<< "
+                f"UInt64.ofNat {sh}))")
     return None
 
 
@@ -1370,6 +1476,33 @@ def _step_rhs_generic(idx: int):
         return f"some {{ s with pc := (arm64_reg {_RN} s).toNat }}"
     if idx == 35:
         return "some s"
+    if idx == 42:
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s / arm64_reg {_RM} s))"
+    if idx == 43:
+        return (f"some (arm64_set_reg {_RD} s (sdiv64 (arm64_reg {_RN} s) "
+                f"(arm64_reg {_RM} s)))")
+    if idx == 44:
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s <<< arm64_reg {_RM} s))"
+    if idx == 45:
+        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s >>> arm64_reg {_RM} s))"
+    if idx == 46:
+        return (f"some (arm64_set_reg {_RD} s (asr64 (arm64_reg {_RN} s) "
+                f"(arm64_reg {_RM} s)))")
+    if idx == 47:
+        _XA = "(((w >>> 10) &&& 0x1f).toNat)"
+        return (f"some (arm64_set_reg {_RD} s (arm64_reg {_XA} s - "
+                f"(arm64_reg {_RN} s * arm64_reg {_RM} s)))")
+    if idx in (48, 49, 50):
+        _IMMR = "(((w >>> 16) &&& 0x3f).toNat)"
+        _IMMS = "(((w >>> 10) &&& 0x3f).toNat)"
+        if idx == 48:
+            return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s >>> "
+                    f"UInt64.ofNat {_IMMR}))")
+        if idx == 49:
+            return (f"some (arm64_set_reg {_RD} s (asr64 (arm64_reg {_RN} s) "
+                    f"UInt64.ofNat {_IMMR}))")
+        return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s <<< "
+                f"UInt64.ofNat (63 - {_IMMS})))")
     return None
 
 
@@ -1743,6 +1876,60 @@ def _written_expr(rhs: str, r: int):
     return None
 
 
+def _cbz_reg_const(block, words: dict, r: int):
+    """If register `r` holds a known constant at the block's trailing CBZ,
+    return that constant; otherwise None.
+
+    Conservative forward scan of the block prefix: tracks MOVZ/MOVN/ADD-imm
+    constants and clears a register on any other write to it."""
+    known = {}
+    for pc in block["instrs"][:-1]:
+        w = words[pc]
+        idx = _step_branch_index(w)
+        rd = w & 0x1f
+        rn = (w >> 5) & 0x1f
+        if idx is None:
+            if rd != 31:
+                known.pop(rd, None)
+            continue
+        writes = _regs_written(w, idx)
+        if writes is None:
+            if rd != 31:
+                known.pop(rd, None)
+            continue
+        if not writes:
+            continue
+        if idx in (23, 24):  # MOVZ (hw forced 0 by the step-cond mask)
+            if rd != 31:
+                known[rd] = (w >> 5) & 0xffff
+        elif idx in (9, 10):  # ADD imm 32/64
+            imm = (w >> 10) & 0xfff
+            if (w >> 22) & 1:
+                imm <<= 12
+            if rd == 31:
+                continue
+            if rn == 31 or rn not in known:
+                known.pop(rd, None)
+            elif idx == 9:
+                known[rd] = (known[rn] + imm) & 0xffffffff
+            else:
+                v = known[rn] + imm
+                if v >= (1 << 64):
+                    known.pop(rd, None)
+                else:
+                    known[rd] = v
+        elif idx in (28, 29):  # MOVN
+            imm16 = (w >> 5) & 0xffff
+            if rd != 31:
+                known[rd] = ((0xffffffff - imm16) if idx == 28
+                             else (0xffffffffffffffff - imm16))
+        else:
+            for wr in writes:
+                if wr != 31:
+                    known.pop(wr, None)
+    return known.get(r)
+
+
 def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st: str = "st",
                     hname: str = None):
     """Emit a per-instruction `arm64_reg r` chain over a block run.
@@ -1913,20 +2100,23 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
               f"({{ {S}_qT{m - 1} st with pc := {run_pcs[-1] + 4} }})")
         exit_expr = f"({{ {S}_qT{m - 1} st with pc := {run_pcs[-1] + 4} }})"
     A("")
-    hexit_ty = " ∧ ".join(f"{pc} ≠ exit" for pc in run_pcs)
+    # The exit-avoidance hypothesis is stated over the run's pc *list*, not as
+    # a nested conjunction of per-pc disequalities: Lean cannot synthesise
+    # `Decidable` for the nested `And` past ~40 conjuncts, and `native_decide`
+    # fails the same way since it needs the same instance.  `simp` discharges
+    # `∀ p ∈ [p₀, …], p ≠ exit` leaf-by-leaf, so the cost scales with block
+    # length instead of failing.  `work_mid_hk` turns it into the per-case fact.
+    pcs_lit = ", ".join(str(pc) for pc in run_pcs)
     A(f"theorem {S}_mid (exit : Nat) (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
-    A(f"    (hexit : {hexit_ty}) :")
+    A(f"    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit) :")
     A(f"    ∀ u < {m}, ∀ su, arm64_runs {name}_code u st = some su → su.pc ≠ exit := by")
     A("  intro u hu su hsu")
     cases = " ∨ ".join(f"u = {k}" for k in range(m))
     A(f"  have hcases : {cases} := by omega")
     A(f"  rcases hcases with " + " | ".join("rfl" for _ in range(m)))
     for k in range(m):
-        if k == m - 1:
-            proj = ".2" * (m - 1)
-        else:
-            proj = ".2" * k + ".1"
-        A(f"  · have hk := hexit{proj}")
+        A(f"  · have hk : {run_pcs[k]} ≠ exit := "
+          f"work_mid_hk hexit (by simp)")
         if k == 0:
             A("    simp [runs_zero] at hsu")
             A("    subst su")
@@ -1960,6 +2150,69 @@ def _reduced_sp(pcs: list, words: dict) -> str:
         m = re.search(r"sp := ([^,}]+)", rhs)
         if m:
             sp = m.group(1).strip().replace("s.sp", f"({sp})")
+    return sp
+
+
+def _eval_arith_expr(expr: str):
+    """Evaluate a `+`/`-` arithmetic term over numerals, or return None.
+
+    Used to turn a symbolic `s.sp`-relative `sp` update into the byte offset it
+    denotes.  Restricted to integer literals, `+`, `-` and parentheses so the
+    input can never name anything outside the generated expression.
+    """
+    import ast as _ast
+
+    def _go(node):
+        if isinstance(node, _ast.Expression):
+            return _go(node.body)
+        if isinstance(node, _ast.Constant) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, _ast.UnaryOp) and isinstance(node.op, (_ast.UAdd, _ast.USub)):
+            v = _go(node.operand)
+            return v if isinstance(node.op, _ast.UAdd) else -v
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, (_ast.Add, _ast.Sub)):
+            a, b = _go(node.left), _go(node.right)
+            if not isinstance(a, int) or not isinstance(b, int):
+                return None
+            return a + b if isinstance(node.op, _ast.Add) else a - b
+        return None
+
+    try:
+        tree = _ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+    return _go(tree)
+
+
+def _reduced_sp_num(pcs: list, words: dict):
+    """The byte offset `_reduced_sp` shifts `s.sp` by, or None.
+
+    The loop helpers state their saved-frame slot as a literal `s.sp + SLOT`
+    and prove it equal to the folded `sp` expression.  Pinning `SLOT` to a
+    literal constant in the generator made the obligation depend on the
+    emitter's frame layout: when the layout grew (the `_SCRATCH` reservation),
+    the literal went stale and the proof was simply false.  Deriving it from
+    the same instruction run keeps the two in step by construction.
+
+    Returns None when the run contains a `sp` update this evaluator cannot
+    read (a conditional add, say), so callers can decline the pattern rather
+    than emit a wrong literal.
+    """
+    sp = 0
+    for pc in pcs:
+        idx = _step_branch_index(words[pc])
+        rhs = _step_rhs(words[pc], idx)
+        if rhs is None:
+            continue
+        m = re.search(r"sp := ([^,}]+)", rhs)
+        if not m:
+            continue
+        expr = re.sub(r"UInt64\.ofNat (\d+)", r"\1", m.group(1).strip())
+        expr = expr.replace("s.sp", str(sp))
+        val = _eval_arith_expr(expr)
+        if val is None:
+            return None
+        sp = val
     return sp
 
 
@@ -2117,7 +2370,16 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     ccond = f"({{ {cqt} s with pc := {cbz_pc} }})"
     bmid = f"({{ {bqt} s with pc := {bmid_pc} }})"
     bbody = f"({{ {bmid} with pc := {cbz_start} }})"
-    Pf = f"(fun s => mem_read_u64 s.mem (s.sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc})"
+    # The saved-frame slot the loop reads its exit pc from, as a byte offset
+    # above the current `sp`.  Derived from the exit run's own `sp` reduction
+    # (see `_reduced_sp_num`) rather than pinned to a literal: the emitter's
+    # frame layout is not a fixed size, so a literal here goes stale the moment
+    # a prologue changes and leaves the proof outright false.
+    _slot_off = _reduced_sp_num(exit_only_pcs[:me - 2], words)
+    if _slot_off is None:
+        return None
+    SLOT = _slot_off + 8
+    Pf = f"(fun s => mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc})"
     fuel_bound = f"({mc} + {mb} + 2) * arg.toNat + ({mc} + {me} + 2)"
 
     A(f"/- Loop contract for {name}: thin wrapper over `while_dec_exit_contract`.")
@@ -2126,13 +2388,13 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     for hname, hsig, hbody in [
         (f"{name}_loop_frame_cond",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start})\n"
-         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc}) :\n"
-         f"    mem_read_u64 ({cqt} s).mem (({cqt} s).sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc}",
+         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :\n"
+         f"    mem_read_u64 ({cqt} s).mem (({cqt} s).sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}",
          None),
         (f"{name}_loop_frame_body",
          f"(s : Arm64State) (hpc : s.pc = {cbz_fall})\n"
-         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc}) :\n"
-         f"    mem_read_u64 {bbody}.mem ({bbody}.sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc}",
+         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :\n"
+         f"    mem_read_u64 {bbody}.mem ({bbody}.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}",
          None),
         (f"{name}_loop_cond_flag",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
@@ -2148,12 +2410,12 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
          None),
         (f"{name}_loop_exit_x30",
          f"(s : Arm64State) (hpc : s.pc = {cbz_taken})\n"
-         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc}) :\n"
+         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :\n"
          f"    ({eqs} s).x30.toNat ≠ {exit_last}",
          None),
         (f"{name}_loop_exit_pc",
          f"(s : Arm64State) (hpc : s.pc = {cbz_taken})\n"
-         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc}) :\n"
+         f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :\n"
          f"    ({eqt} s).pc = {exit_pc}",
          None),
         (f"{name}_loop_exit_x0",
@@ -2196,7 +2458,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
             _red = _reduced_sp(exit_only_pcs[:me - 2], words)
             _slot = f"({_red} + 8)"
             A(f"  simp only [{_defs}, arm64_set_reg]")
-            A(f"  have hslot : {_slot} = (s.sp + UInt64.ofNat 4056) := by grind")
+            A(f"  have hslot : {_slot} = (s.sp + UInt64.ofNat {SLOT}) := by grind")
             A(f"  rw [hslot, h]")
             if hname == f"{name}_loop_exit_pc":
                 A(f"  rfl")
@@ -2206,21 +2468,21 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
             _defs = ", ".join([f"{cc}_qS{k}" for k in range(mc)]
                              + [f"{cc}_qT{k}" for k in range(mc)])
             _red = _reduced_sp(cbz_prefix_pcs, words)
-            _slot = f"({_red} + UInt64.ofNat 4056)"
+            _slot = f"({_red} + UInt64.ofNat {SLOT})"
             A(f"  simp only [{_defs}, arm64_set_reg]")
-            A(f"  have hslot : {_slot} = (s.sp + UInt64.ofNat 4056) := by grind")
+            A(f"  have hslot : {_slot} = (s.sp + UInt64.ofNat {SLOT}) := by grind")
             A(f"  rw [hslot]")
-            A(f"  rw [mem_read_push_frame s.mem s.sp (by decide : 4056 < 2^63)]")
+            A(f"  rw [mem_read_push_frame s.mem s.sp (by decide : {SLOT} < 2^63)]")
             A(f"  rw [h]")
         elif hname == f"{name}_loop_frame_body":
             _defs = ", ".join([f"{qb}_qS{k}" for k in range(mb0)]
                              + [f"{qb}_qT{k}" for k in range(mb0)])
             _red = _reduced_sp(_body_run, words)
-            _slot = f"({_red} + UInt64.ofNat 4056)"
+            _slot = f"({_red} + UInt64.ofNat {SLOT})"
             A(f"  simp only [{_defs}, arm64_set_reg]")
-            A(f"  have hslot : {_slot} = (s.sp + UInt64.ofNat 4056) := by grind")
+            A(f"  have hslot : {_slot} = (s.sp + UInt64.ofNat {SLOT}) := by grind")
             A(f"  rw [hslot]")
-            A(f"  rw [mem_read_push_frame s.mem s.sp (by decide : 4056 < 2^63)]")
+            A(f"  rw [mem_read_push_frame s.mem s.sp (by decide : {SLOT} < 2^63)]")
             A(f"  rw [h]")
         elif hname == f"{name}_loop_cond_flag":
             _defs = ", ".join([f"{cc}_qS{k}" for k in range(mc)]
@@ -2257,7 +2519,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
         A("")
     A(f"theorem {name}_cd_loop (arg : UInt64) (st : Arm64State)")
     A(f"    (hpc : st.pc = {cbz_start}) (hx19 : st.x19 = arg)")
-    A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat 4056).toNat = UInt64.ofNat {exit_pc}) :")
+    A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :")
     A(f"    ∀ (fuel : Nat), {fuel_bound} ≤ fuel →")
     A(f"      ∃ s, arm64_go_exit st {C} {exit_pc} fuel = some s ∧ s.x0 = mojo arg := by")
     A(f"  intro fuel hfuel")
@@ -2273,23 +2535,23 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
     A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; simp [hs])")
     A(f"    {cc}_runs")
-    A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by decide))")
+    A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
     A(f"    {name}_loop_cond_flag")
     A(f"    {name}_loop_cond_x19")
     A(f"    (by intro s hs; exact work_body_run {C} {mb0} s {bmid} {cbz_start} ({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) (by decide : {cbz_start} ≠ {bmid_pc}))")
-    A(f"    (by intro s hs; exact work_body_mid {C} {mb0} s {bmid} {cbz_start} {exit_pc} ({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) ({qb}_mid {exit_pc} s hs (by decide)) (by decide) (by decide : {bmid_pc} ≠ {exit_pc}))")
+    A(f"    (by intro s hs; exact work_body_mid {C} {mb0} s {bmid} {cbz_start} {exit_pc} ({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) ({qb}_mid {exit_pc} s hs (by simp)) (by decide) (by decide : {bmid_pc} ≠ {exit_pc}))")
     A(f"    (by intro s hs; rfl)")
     A(f"    {name}_loop_body_dec")
     A(f"    (by intro s hs h; exact {qe}_runs s hs ({name}_loop_exit_x30 s hs h))")
-    A(f"    (fun st hs => {qe}_mid {exit_pc} st hs (by decide))")
+    A(f"    (fun st hs => {qe}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs h; exact {name}_loop_exit_pc s hs h)")
     A(f"    (by intro s hs hx; exact {name}_loop_exit_x0 s hs hx)")
     A(f"    (by intro a _; simp [mojo, {name}_go_zero])")
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    arg st fuel (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
     A("")
-    return "\n".join(L)
+    return "\n".join(L), SLOT
 
 # Fallback leaf word for structured value-flow obligations the generator
 # cannot yet close automatically.  The Makefile source gate greps this file
@@ -2429,11 +2691,17 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     rb = vregs[param]   # bound (the parameter)
     rr = vregs[target]  # counter
     ra = vregs[pat["acc"]]  # accumulator
-    # Frame slot holding the saved return address:
-    #   sp + 4032 + 16*npairs + 8  (X30 of the prologue's first STP pair)
-    _nvars = len(vregs)
-    _npairs = max(1, (_nvars + 1) // 2)
-    _slot = 4032 + 16 * _npairs + 8
+    # Frame slot holding the saved return address: the X30 half of the
+    # prologue's first STP pair, which the epilogue's LDP-post reloads.  Its
+    # offset above the post-prologue `sp` is the exit run's own `sp` reduction
+    # (see `_reduced_sp_num`) plus the 8 bytes into the pair.  Deriving it from
+    # the emitted code rather than from `4032 + 16*npairs + 8` keeps it correct
+    # when the frame layout changes; the old literal silently went stale and
+    # left the `hslot` obligation false.
+    _slot_off = _reduced_sp_num(exit_only_pcs[:me - 2], words)
+    if _slot_off is None:
+        return None
+    _slot = _slot_off + 8
 
     cc = f"{name}_b{cbz_bi}"
     qb = f"{name}_b{b_bi}"
@@ -2673,7 +2941,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
     A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; simp [hs])")
     A(f"    {cc}_runs")
-    A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by decide))")
+    A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
     A(f"    {name}_loop_cond_flag")
     A(f"    {name}_loop_cond_rb")
@@ -2683,26 +2951,27 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
       f"(by decide : {cbz_start} ≠ {bmid_pc}))")
     A(f"    (by intro s hs; exact work_body_mid {C} {mb0} s {bmid} {cbz_start} "
       f"{exit_pc} ({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) "
-      f"({qb}_mid {exit_pc} s hs (by decide)) (by decide) "
+      f"({qb}_mid {exit_pc} s hs (by simp)) (by decide) "
       f"(by decide : {bmid_pc} ≠ {exit_pc}))")
     A(f"    (by intro s hs; rfl)")
     A(f"    {name}_loop_body_inc")
     A(f"    {name}_loop_body_bound")
     A(f"    {name}_loop_body_model")
     A(f"    (by intro s hs h; exact {qe}_runs s hs ({name}_loop_exit_x30 s hs h))")
-    A(f"    (fun st hs => {qe}_mid {exit_pc} st hs (by decide))")
+    A(f"    (fun st hs => {qe}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs h; exact {name}_loop_exit_pc s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_exit_x0 s hs h)")
     A(f"    (by intro s pc; simp [{name}_loop_model, arm64_reg])")
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    st fuel hfuel hpc hframe")
     A("")
-    return "\n".join(L)
+    return "\n".join(L), _slot
 
 
 def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                            recursive: bool = False, go_lemmas: list = None,
-                           fn=None, tw_extra: str = "", tc: dict = None):
+                           fn=None, tw_extra: str = "", tc: dict = None,
+                           cond_branches: set = None):
     """CompCert-style universal e2e driven by the control-flow graph.
 
     The generator is thin: it emits, per basic block, wrapper defs + a
@@ -2729,6 +2998,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         return None
     _TOTAL = max(1, sum(len(b["instrs"]) for b in blocks))
     _RETS = ", ".join(str(b["instrs"][-1]) for b in blocks if b["kind"] == "ret")
+    # Stack consumed by one call frame: the `_SCRATCH` reservation plus the
+    # callee-saved pairs the prologue pushed (16 bytes each).  Counted from the
+    # emitted code so it tracks the backend's frame layout automatically.
+    _nframe_pairs = sum(1 for _pc, _w in words.items()
+                        if _pc >= func_entry
+                        and (_w & 0xffc00000) == 0xa9800000
+                        and ((_w >> 5) & 0x1f) == 31)
+    stride = _SCRATCH + 16 * _nframe_pairs
     # Value-flow simp set, extended with the t-w truncator helpers for typed
     # programs (they delta-reduce to the arm64_step SXTB/SXTW/AND-imm terms).
     _VSP = _VALUE_SIMP + ((", " + tw_extra) if tw_extra else "")
@@ -2817,11 +3094,21 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # materialised as a 0/1 flag).  Non-recursive functions with an entry
     # conditional have the same fact when the branch tests `n == 0`
     # (e.g. bigconst's `n <= 0`, which for UInt64 is `n == 0`).
+    # Only when the entry CBZ corresponds to a *source-level* condition:
+    # codegen-internal guards (div0 CBZ from `_emit_div_shift_pow`) have
+    # no AST condition, and emitting `{name}_entry_cond` for them would
+    # either crash on an empty `_collect_conds` or state a false iff.
     entry_cond_needed = dec1_nonconst or is_dec1
     if (not entry_cond_needed and fn is not None and not recursive
             and not _has_while(fn.body)
             and any(b["kind"] == "cbz" for b in blocks)):
-        entry_cond_needed = True
+        _first_cbz = next((b for b in blocks if b["kind"] == "cbz"), None)
+        if _first_cbz is not None and (
+                _first_cbz["start"] in _cbz_src_map
+                or (fn is not None and fn.params
+                    and bool(_collect_conds(fn, fn.params[0][0],
+                                            {fn.params[0][0]: "n"})))):
+            entry_cond_needed = True
     # The terminal x0 handler is only needed when the terminal goal is not
     # already closed by the `{name}_go_zero`/`_go` simp (constant-recursion
     # functions like `count` close on their own).
@@ -2830,34 +3117,82 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     entry_exit = None
     if entry_cond_needed:
         _entry_bpc = None
-        for b in blocks:
-            if b["kind"] == "cbz":
-                entry_reg = words[b["instrs"][-1]] & 0x1f
-                _entry_bpc = b["start"]
-                break
-        _e = run_info[0]
-        m0, def0 = _e[3], _e[4]
+        _entry_bi = None
+        for _bi, b in enumerate(blocks):
+            if b["kind"] != "cbz":
+                continue
+            # Prefer the block whose terminator the codegen recorded as an
+            # `if`/`while` condition branch.  Without this, a short-circuit
+            # `and`/`or` in the condition is picked up instead: it emits a
+            # CBZ/CBNZ that ends a block just the same, and the entry
+            # condition then gets modelled as the `and`/`or`'s *left* operand
+            # (`if a or b:` read as `if a:`), which is simply false.
+            if cond_branches and b["instrs"][-1] not in cond_branches:
+                continue
+            entry_reg = words[b["instrs"][-1]] & 0x1f
+            _entry_bpc = b["start"]
+            _entry_bi = _bi
+            break
+        if _entry_bi is None and cond_branches:
+            # No recorded branch matched a block terminator (a recording that
+            # has drifted from the emitted layout).  Fall back to the old
+            # first-cbz pick rather than dropping the entry condition entirely.
+            for _bi, b in enumerate(blocks):
+                if b["kind"] == "cbz":
+                    entry_reg = words[b["instrs"][-1]] & 0x1f
+                    _entry_bpc = b["start"]
+                    _entry_bi = _bi
+                    break
         entry_init = (f"{{ Arm64State.init n {base} with pc := {func_entry}, "
                       f"x30 := UInt64.ofNat {exit_pc} }}")
-        entry_exit = f"{name}_b0_qT{m0 - 1} ({entry_init})"
+        # The CBZ tests the condition register as it stands *at the branch*, so
+        # the state to reason about is the end of the straight-line run the
+        # branch closes (`qT` chains stop one transition short of the
+        # terminator, which is the branch itself).
+        entry_exit = (f"{name}_b{_entry_bi}_qT"
+                      f"{run_info[_entry_bi][3] - 1} ({entry_init})")
+        # The `qT` chain of the condition block is rooted at the initial state,
+        # so the unfold has to cover every block from the entry up to it, not
+        # just the condition block's own transitions.
+        def0 = [d for _i in range(_entry_bi + 1)
+                for d in (run_info[_i][4] or [])]
         # Typed: the CSET tests the sign-flipped sign-extended comparison, so the
         # entry condition must be the typed (sign-flipped) source condition.
-        entry_condition = (_cbz_src_map.get(_entry_bpc)
-                           or _collect_conds(fn, fn.params[0][0], {fn.params[0][0]: "n"})[0])
-        A(f"theorem {name}_entry_cond (n : UInt64) :")
-        A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
-        A(f"  simp only [{', '.join(def0)}, arm64_reg, arm64_set_reg, Arm64State.init]")
-        A(f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
-          f"mem_read_two_writes_same, arm64_matches_condition, arm64_subs_flags, "
-          f"UInt64.zero_le{', ' + _tw_defs if _tw_defs else ''}]")
-        A(f"  all_goals bv_decide")
-        A("")
+        entry_condition = _cbz_src_map.get(_entry_bpc)
+        if entry_condition is None and fn is not None and fn.params:
+            _ec = _collect_conds(fn, fn.params[0][0], {fn.params[0][0]: "n"})
+            if _ec:
+                entry_condition = _ec[0]
+        if entry_condition is None:
+            # Entry CBZ has no source-level condition (codegen-internal
+            # guard); nothing to state.
+            entry_cond_needed = False
+            terminal_handler_needed = False
+        else:
+            A(f"theorem {name}_entry_cond (n : UInt64) :")
+            A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
+            A(f"  simp only [{', '.join(def0)}, arm64_reg, arm64_set_reg, Arm64State.init]")
+            A(f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+              f"mem_read_two_writes_same, arm64_matches_condition, arm64_subs_flags, "
+              f"UInt64.zero_le{', ' + _tw_defs if _tw_defs else ''}]")
+            A(f"  all_goals bv_decide")
+            A("")
 
     # block start -> index map; pc facts for rcases-bound exit states
     s_pc_facts = {}
 
+    # Per-level step budget.  The recursion contract demands
+    # `BASE + PATH * arg ≤ fuel` with `PATH` = the whole-function instruction
+    # count, so the entry fuel has to supply at least `PATH` per level or the
+    # obligation is false for large arguments (it was: a fixed `60`/level was
+    # below the `PATH = 128` the contract actually asked for, so every dec1
+    # example's fuel obligation was unprovable).  Tying the multiplier to `PATH`
+    # keeps the two in step by construction.
+    _PATH0 = max(1, sum(len(b["instrs"]) for b in blocks))
+    if _tree:
+        _PATH0 = 512
     FUEL0 = ("(200000 + 1000 * 2 ^ n.toNat)" if _tree
-             else "(200000 + 60 * n.toNat)")
+             else f"(200000 + {_PATH0} * n.toNat)")
 
     def _pc_fact_lookup(sc: str):
         sc = sc.strip()
@@ -2945,12 +3280,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}have hpc_s_{bi} : (s_{bi}).pc = {run_last_pc + 4} := by")
                 A(f"{IND}  exact (congrArg (fun st => st.pc) hsid_{bi}).trans (by rfl)")
                 s_pc_facts[bi] = f"hpc_s_{bi}"
-            hexit_ty = " ∧ ".join(f"{pc} ≠ {EXIT}" for pc in run_pcs)
-            if is_contract:
-                A(f"{IND}have hexit_{bi} : {hexit_ty} := by decide "
-                  f"-- value flow: return address not among block addresses")
-            else:
-                A(f"{IND}have hexit_{bi} : {hexit_ty} := by simp")
+            hexit_ty = f"∀ p ∈ [{', '.join(str(pc) for pc in run_pcs)}], p ≠ {EXIT}"
+            A(f"{IND}have hexit_{bi} : {hexit_ty} := by simp "
+              f"-- value flow: return address not among block addresses")
             A(f"{IND}have h_adv_{bi} : arm64_go_exit ({state}) {C} {EXIT} {fuel_n}")
             A(f"{IND}    = arm64_go_exit s_{bi} {C} {EXIT} {fuel_next} := by")
             A(f"{IND}  have hg := rec1_glue_gen {C} {EXIT} {m_run} {fuel_next} "
@@ -3031,6 +3363,13 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                           f"u64_not_lt_zero_toNat {_bv} {_bs}; simp [hn0]; "
                           f"all_goals try rfl; all_goals try omega; "
                           f"all_goals try grind)")
+                # UDIV/SDIV+MSUB remainder identity: `a - a/b*b = a%b` when b≠0.
+                # Unsigned model uses `%`/`/` (u64_div_msub); signed uses
+                # srem64/sdiv64 (srem64_sub).  Try both; `try` no-ops on miss.
+                A(f"{IND}all_goals try exact u64_div_msub _ _ (by "
+                  f"first | decide | omega | simp | native_decide)")
+                A(f"{IND}all_goals try exact srem64_sub _ _ (by "
+                  f"first | decide | omega | simp | native_decide)")
                 A(f"{IND}all_goals done")
         elif kind == "seq":
             nxt_pc = block["instrs"][-1] + 4
@@ -3066,8 +3405,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     _lc_exit = _lc["exit_pc"]
                     if _lc.get("kind") == "range":
                         # --- for-range loop contract (while_lt_exit_contract) ---
-                        _np = max(1, (len(_var_regs) + 1) // 2)
-                        _slot = 4032 + 16 * _np + 8
+                        # The saved-x30 slot offset comes from the loop
+                        # generator's own derivation off the emitted code
+                        # (`_slot` there), not a recomputed frame-size formula.
+                        _slot = _lc["slot"]
                         # Subst chain: unfold every state on the executed path
                         # down to the concrete initial state so the frame slot
                         # (written once in the prologue) is provably preserved.
@@ -3215,7 +3556,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  rw [← hx0_arg, hsid_{bi}, {name}_b2_qT6]")
                         A(f"{IND}  simp [arm64_reg, arm64_set_reg, u64_add_ofNat_zero_r]")
                         A(f"{IND}have hframe_arg : mem_read_u64 ({{ {s_cur} with pc := {tgt} }}).mem "
-                          f"(({{ {s_cur} with pc := {tgt} }}).sp + UInt64.ofNat 4056).toNat "
+                          f"(({{ {s_cur} with pc := {tgt} }}).sp + UInt64.ofNat "
+                          f"{ctx['loop_contract'].get('slot', 0)}).toNat "
                           f"= UInt64.ofNat {_lc_exit} := by")
                         A(f"{IND}  rw [hsid_{bi}, hsid_1, hsid_0]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
@@ -3270,23 +3612,37 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             _cw_names = def_names or []
             _sdefs = ", ".join(list(_b0_names) + list(_cw_names)
                                + ["arm64_reg", "arm64_set_reg", "Arm64State.init"])
-            A(f"{IND}have harg_{bi} : ({arg_term}).toNat ≤ n.toNat := by")
+            # The callee's argument is `n - 1`; state that directly (rather than
+            # the weaker `≤ n`) so the callee's frame bound has the one-stride
+            # headroom the descent needs.
             if is_dec1:
-                A(f"{IND}    simp only [hsid_{bi}, hsid_0, {_sdefs}]")
-                A(f"{IND}    simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                A(f"{IND}have hargeq_{bi} : ({arg_term}) = n - 1 := by")
+                A(f"{IND}  simp only [hsid_{bi}, hsid_0, {_sdefs}]")
+                A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
                   f"mem_read_two_writes_same]")
-                A(f"{IND}    rw [toNat_sub_one n hsrc_0]")
-                A(f"{IND}    omega")
+                A(f"{IND}have harg_{bi} : ({arg_term}).toNat + 1 ≤ n.toNat := "
+                  f"u64_sub_one_toNat_le n ({arg_term}) hsrc_0 hargeq_{bi}")
             else:
                 raise ValueError("unsupported: recursion argument bound (not a dec1 pattern)")
-            A(f"{IND}have hbndbl_{bi} : FrameBound ({call_state}) ({arg_term}) := by")
-            A(f"{IND}  show 65536 * (({arg_term}).toNat + 1) ≤ ({call_state}).sp.toNat")
+            # The callee's frame bound is the caller's bound carried down one
+            # level, i.e. exactly `frameBound_succ` at the frame size the
+            # emitter used.  The generator supplies the call site's `sp`
+            # relation and the argument relation; the stride and the descent
+            # arithmetic live in the library lemma.
+            # The callee's frame bound is the caller's bound carried down one
+            # level.  `hspd` is the ground fact that the call site's `sp` is
+            # still at least `2^64-16-stride`; combined with the caller's
+            # `hbnd` (which reserved `stride` per level) and `harg` (the callee
+            # argument is no larger than the caller's), the descent closes.
+            # The stride and descent arithmetic live in `FrameBound` itself, so
+            # the generator only supplies the concrete numbers.
+            A(f"{IND}have hbndbl_{bi} : FrameBound {stride} ({call_state}) ({arg_term}) := by")
             if is_dec1:
-                A(f"{IND}  have hspd : 18446744073709551600 - 65536 ≤ ({call_state}).sp.toNat := by")
+                A(f"{IND}  have hspd : 18446744073709551600 - {stride} ≤ ({call_state}).sp.toNat := by")
                 A(f"{IND}    simp only [hsid_{bi}, hsid_0, {_sdefs}]")
                 A(f"{IND}    native_decide")
-                A(f"{IND}  have := harg_{bi}")
-                A(f"{IND}  omega")
+                A(f"{IND}  exact frameBound_descend {stride} {init} ({call_state}) n "
+                  f"({arg_term}) harg_{bi} (by rfl) hspd hbnd")
             else:
                 raise ValueError("unsupported: FrameBound for recursion (not a dec1 pattern)")
             # Step-counted recursion contract: `hc` gives a call step bound
@@ -3454,6 +3810,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  rw [{', '.join(_hcond_mem_rws(_all_instrs, blocks[bi]['instrs'], words, _init))}]")
                         A(f"{IND}  by_cases h : ({_src}) <;> simp [h, {', '.join(_fls)}, Arm64State.init"
                           f"{', ' + _tw_defs if _tw_defs else ''}] <;> bv_decide")
+            # Codegen-internal CBZ (no source-level condition): if the tested
+            # register holds a compile-time non-zero constant at the CBZ, the
+            # taken (div0/error) arm is statically dead — close it by
+            # contradiction instead of exploring the dead path.
+            _reg_const = None
+            if _src is None and not is_contract and cbz_force is None:
+                _reg_const = _cbz_reg_const(block, words, r)
+            _taken_dead = (_reg_const is not None and _reg_const != 0)
             if cbz_force == "taken":
                 raise ValueError("unsupported: forced-taken cbz branch condition")
             elif cbz_force == "fall":
@@ -3465,7 +3829,18 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             BIND = IND if cbz_force is not None else IND + "  "
             if _src is not None:
                 A(f"{BIND}have hsrc_{bi} : ¬({_src}) := hcond_{bi}.mp hc_{bi}")
-            if cbz_force != "fall":
+            if _taken_dead:
+                _hsid_rev = list(reversed(ctx.get("flow_hsid") or []))
+                _bdefs = list(ctx.get("flow_defs") or [])
+                _unfold = _hsid_rev + _bdefs + ['arm64_reg', 'arm64_set_reg',
+                                                'Arm64State.init']
+                A(f"{BIND}have hne_{bi} : arm64_reg {r} {s_cur} ≠ 0 := by")
+                A(f"{BIND}  simp only [{', '.join(_unfold)}]")
+                A(f"{BIND}  simp (disch := decide) [mem_read_after_write_u64, "
+                  f"mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+                A(f"{BIND}  all_goals native_decide")
+                A(f"{BIND}exact absurd hc_{bi} hne_{bi}")
+            elif cbz_force != "fall":
                 if is_contract:
                     A(f"{BIND}let s_t : Arm64State := ({{ {s_cur} with pc := {taken} }})")
                     A(f"{BIND}have hst : ({{ {s_cur} with pc := {taken} }}) = s_t := rfl")
@@ -3626,7 +4001,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  rw [runs_append_some {C} ({acc}) {m_run} {st0} ({cur}) {hacc}]")
             A(f"{IND}  exact hrun_{n}")
             append_avoid(acc, m_run, cur, hacc,
-                         f"({mid_name} {exit_pc} ({cur}) {cur_pc} (by decide))", "block")
+                         f"({mid_name} {exit_pc} ({cur}) {cur_pc} (by simp))", "block")
             if not is_ret:
                 rhs_pc = run_pcs[-1] + 4
                 A(f"{IND}have hpc_{n} : (s_{n}).pc = {rhs_pc} := by rw [hsid_{n}]")
@@ -3697,14 +4072,31 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             _fs = ', '.join(_hs + _sd)
             A(f"{IND}· clear {' '.join(ctx.get('avoid_facts', []))}")
             A(f"{IND}  have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
-            A(f"{IND}  have hf : 65536 ≤ st.sp.toNat := by")
+            A(f"{IND}  have hf : {stride} ≤ st.sp.toNat := by")
             A(f"{IND}    have := hbnd; simp only [FrameBound] at this; omega")
             A(f"{IND}  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩ <;> "
               f"(simp +decide only [h8, {_fs}, {_VSP}, u64_sub_zero] "
               f"<;> all_goals try rfl)")
             A(f"{IND}  all_goals intro j hj")
-            A(f"{IND}  all_goals simp +decide only [h8, {_fs}, {_VSP}, "
-              f"mem_read_after_write_u64_high, mem_read_after_write_u64_high_fb, hf, hj]")
+            A(f"{IND}  all_goals try simp +decide only [h8, {_fs}, {_VSP}, "
+              f"mem_read_after_write_u64_high_fb, hf, hj]")
+            # Peel the callee's store stack outermost-first: the goal's
+            # outermost `mem_write_u64` is the one `rw` can see, so the
+            # distances are replayed in reverse order of emission.  The
+            # distances are data the emitter produced and the peel itself is a
+            # library lemma, so the generator just names each `K`; surplus
+            # peels are no-ops under `try`.
+            _store_ks = [k for k in reversed(ctx.get("stores", [])) if 8 <= k]
+            if not _store_ks:
+                _store_ks = sorted({k for k in ctx.get("stores", []) if 8 <= k},
+                                   reverse=True)
+            for _K in _store_ks:
+                A(f"{IND}  all_goals try "
+                  f"rw [mem_read_write_below _ st.sp (K := {_K}) (j := j) "
+                  f"hj (by omega) (by decide) _]")
+            A(f"{IND}  all_goals try rfl")
+            A(f"{IND}  all_goals try simp +decide only [{', '.join(_SP_CANON)}]")
+            A(f"{IND}  all_goals try omega")
             A(f"{IND}  all_goals rfl")
             A(f"{IND}· exact {ctx['hmid']}")
             A(f"{IND}all_goals done")
@@ -3783,15 +4175,28 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  try simp only [{', '.join(_SP_CANON)}]")
             else:
                 raise ValueError("unsupported: call-time sp after the prologue")
-            A(f"{IND}have hbndsub_{n} : FrameBound ({call_state}) ({_subarg}) := by")
-            A(f"{IND}  have hspnw : ({call_state}).sp.toNat = ({st0}).sp.toNat - {_P} := by")
+            # Descending a recursion level costs `_P` bytes of stack and
+            # decrements the argument, so the frame bound carries over by one
+            # application of the library lemma `frameBound_succ`.  The generator
+            # supplies only concrete data: the stride, `_P`, and the caller's
+            # `hbnd`.  The previous inline proof re-derived this by hand against
+            # a hardcoded `65536` stride, which stopped dominating `_P` once the
+            # emitter's scratch reservation grew past it.
+            A(f"{IND}have hbndsub_{n} : "
+              f"FrameBound {stride} ({call_state}) ({_subarg}) := by")
+            A(f"{IND}  have hargne : arg ≠ 0 := by "
+              f"intro h; rw [h] at hk; simp at hk")
+            A(f"{IND}  have hcur : ({cur}).sp = ({st0}).sp - UInt64.ofNat {_P} := by")
             A(f"{IND}    rw [hsp_{n}]")
-            A(f"{IND}    exact u64_slot_nowrap ({st0}).sp (d := {_P}) (by decide) "
-              f"(by have := hbnd; simp only [FrameBound] at this; omega)")
-            A(f"{IND}  show 65536 * (({_subarg}).toNat + 1) ≤ ({call_state}).sp.toNat")
-            A(f"{IND}  rw [{_hnm}]")
-            A(f"{IND}  rw [hspnw]")
-            A(f"{IND}  have := hbnd; simp only [FrameBound] at this; omega")
+            A(f"{IND}  have hPge : {_P} ≤ ({st0}).sp.toNat := by")
+            A(f"{IND}    have hbn := hbnd; simp only [FrameBound] at hbn")
+            A(f"{IND}    have hlt := UInt64.toNat_lt ({st0}).sp")
+            A(f"{IND}    omega")
+            A(f"{IND}  have h := frameBound_succ {stride} {_P} ({st0}) arg "
+              f"(by omega) (by decide) hargne hPge hbnd")
+            A(f"{IND}  simp only [FrameBound] at h ⊢")
+            A(f"{IND}  rw [hcur]")
+            A(f"{IND}  exact h")
             A(f"{IND}have hsub_{n} := {_ih} {call_state} ({fuel_sub2}) {_hfproof} (by rfl) hx0sub_{n} "
               f"hbndsub_{n} hx30ret_{n}")
             A(f"{IND}obtain ⟨k_{n}, s_ret_{n}, hk_{n}, hrun_{n}, hx0_{n}, hpc_{n}, hfr_{n}, hmidcall_{n}⟩ := hsub_{n}")
@@ -3953,11 +4358,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                      else f"{BASE} + {PATH} * arg.toNat")
         A(f"    (hfuel : {_hfuel_ty} ≤ fuel)")
         A(f"    (hpc : st.pc = {func_entry}) (hx0 : st.x0 = arg)")
-        A(f"    (hbnd : FrameBound st arg)")
+        A(f"    (hbnd : FrameBound {stride} st arg)")
         A(f"    (hx30ret : ∀ pc, pc ∈ {name}_prog.rets → pc ≠ st.x30.toNat) :")
         A(f"    Post {name}_prog fuel mojo st arg := by")
         if _tree:
-            A(f"  refine contract_sound_tree {name}_prog mojo {BASE} {PATH} ?_ ?_ arg st "
+            A(f"  refine contract_sound_tree {name}_prog mojo {BASE} {PATH} {stride} ?_ ?_ arg st "
               f"fuel hfuel hpc hx0 hbnd hx30ret")
             A(f"  · intro fuel st hb hpc hlt2 hbnd hx30ret")
             A(f"    have hacc0 : arm64_runs {C} 0 st = some st := runs_zero {C} st")
@@ -3984,12 +4389,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             tree_init = (f"{{ Arm64State.init n {base} with pc := {func_entry}, "
                          f"x30 := UInt64.ofNat {exit_pc} }}")
             A(f"theorem {name}_compiles_correctly_universal (n : UInt64)")
-            A("    (hn : 65536 * (n.toNat + 1) + 65536 ≤ 18446744073709551600) :")
+            A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600) :")
             A(f"    (match runProg {name}_prog n with")
             A("     | some s => s.x0 = mojo n")
             A("     | none => False) := by")
-            A(f"  have hbnd : FrameBound ({tree_init}) n := by")
-            A("    change 65536 * (n.toNat + 1) ≤ 18446744073709551600")
+            A(f"  have hbnd : FrameBound {stride} ({tree_init}) n := by")
+            A(f"    change {stride} * (n.toNat + 1) ≤ 18446744073709551600")
             A("    omega")
             A(f"  have hret : ∀ pc, pc ∈ {name}_prog.rets → pc ≠ {exit_pc} := by")
             A(f"    simp [{name}_prog]")
@@ -3999,7 +4404,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A("    | some s => s.x0 = mojo n | none => False)")
             A(f"  exact Post.exit_correct {name}_prog _ _ mojo _ n hc rfl (by omega)")
             return "\n".join(L)
-        A(f"  refine contract_sound {name}_prog mojo {BASE} {PATH} ?_ ?_ arg st fuel "
+        A(f"  refine contract_sound {name}_prog mojo {BASE} {PATH} {stride} ?_ ?_ arg st fuel "
           f"hfuel hpc hx0 hbnd hx30ret")
         A(f"  · intro fuel st hb hpc hx0 hbnd hx30ret")
         A(f"    have hacc0 : arm64_runs {C} 0 st = some st := runs_zero {C} st")
@@ -4029,34 +4434,41 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             rl = _gen_range_loop(name, code, base, func_entry, exit_pc,
                                  blocks, fn, _var_regs)
             if rl is not None:
-                A(rl)
+                A(rl[0])
                 _loop_contract = {
                     "name": name,
                     "kind": "range",
                     "cbz_start": blocks[cbz_bi]["start"],
                     "exit_pc": exit_pc,
+                    "slot": rl[1],
                 }
             else:
                 cd = _gen_countdown_loop(name, code, base, func_entry, exit_pc,
                                          blocks, fn)
                 if cd is not None:
-                    A(cd)
+                    A(cd[0])
                     _loop_contract = {
                         "name": name,
                         "kind": "countdown",
                         "cbz_start": blocks[cbz_bi]["start"],
                         "exit_pc": exit_pc,
                         "body_pc": blocks[cbz_bi]["targets"][0],
+                        "slot": cd[1],
                     }
 
     # --- universal theorem: walk the CFG path ---
+    # The top-level entry state, shared by the walk closure (which needs it to
+    # seed the frame-bound descent) and the universal theorem's statement.
     init = (f"{{ Arm64State.init n {base} with pc := {func_entry}, "
             f"x30 := UInt64.ofNat {exit_pc} }}")
     A(f"theorem {name}_compiles_correctly_universal (n : UInt64)")
-    A(f"    (hn : 65536 * (n.toNat + 1) + 65536 ≤ 18446744073709551600) :")
+    A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600) :")
     A(f"    (match runProg {name}_prog n with")
     A("     | some s => s.x0 = mojo n")
     A("     | none => False) := by")
+    A(f"  have hbnd : FrameBound {stride} {init} n := by")
+    A(f"    change {stride} * (n.toNat + 1) ≤ 18446744073709551600")
+    A("    omega")
     A(f"  change (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
     A("     | some s => s.x0 = mojo n")
     A("     | none => False)")
@@ -4200,10 +4612,9 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
                 tactics.append(f"have hb : {lhs} := by native_decide")
         if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
             rn = w & 0x1f
-            cmpop = "=" if idx == 16 else "≠"
             tactics.append(f"unfold arm64_step")
             tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
-            tactics.append(f"by_cases hp : s.x{rn} {cmpop} 0")
+            tactics.append(f"by_cases hp : s.x{rn} {('=' if idx == 16 else '≠')} 0")
             tactics.append(
                 f"all_goals simp [hp, arm64_reg, arm64_set_reg]")
         else:
@@ -4736,7 +5147,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         param = fn.params[0][0] if fn.params else "n"
         rec_hrhs = _expr_rec_hrhs(fn.body[0].else_body[0].value, func_name, param)
         eval_eq_mojo_proof = (
-            f"simp [mojo, ast, evalFunc, evalBody, evalBodyEnv, evalExpr]\n"
+            f"simp +decide [mojo, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
             f"  by_cases hn : n = 0\n"
             f"  · subst n; simp [{func_name}_go]\n"
             f"  · have h1 : 1 ≤ n := by\n"
@@ -4786,12 +5197,12 @@ def generate_arm64_proof(prog, code, info) -> str:
         conds = _collect_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr"
+        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo"
         if len(conds) == 0:
-            eval_eq_mojo_proof = f"simp [{simp_lems}]"
+            eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
         else:
             eval_eq_mojo_proof = (
-                f"{by_cases} simp_all [{simp_lems}, "
+                f"{by_cases} simp_all +decide [{simp_lems}, "
                 f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
             )
     else:
@@ -4907,7 +5318,9 @@ def generate_arm64_proof(prog, code, info) -> str:
     universal_text = _gen_universal_e2e_cfg(func_name, code, base_addr, func_entry_addr,
                                             recursive=_is_recursive(fn),
                                             go_lemmas=_go_simp_lemmas(fn),
-                                            fn=fn, tw_extra=tw_extra, tc=tc)
+                                            fn=fn, tw_extra=tw_extra, tc=tc,
+                                            cond_branches=set(
+                                                info.get("cond_branches") or ()))
     if universal_text is not None:
         universal_section = universal_text
     else:

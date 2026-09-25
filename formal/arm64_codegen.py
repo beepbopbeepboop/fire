@@ -344,6 +344,12 @@ class ARM64Codegen:
         self._var_spills = {}
         self._npairs = 1
         self._spill_bytes = 0
+        # PCs of the branches that test an `if`/`elif`/`while` condition.
+        # A short-circuit `and`/`or` in a condition emits a CBZ/CBNZ of its
+        # own, so the proof generator cannot tell the `if`'s branch from the
+        # `and`/`or`'s by opcode alone -- it has to be told.  See
+        # `generate_arm64_proof`'s `_cond_branches` consumer.
+        self._cond_branch_pcs = []
         self._blob_cap = _SCRATCH
         # Stack of enclosing loops, innermost last. Each entry:
         #   start -- loop top (continue target for `while`)
@@ -441,6 +447,12 @@ class ARM64Codegen:
             "external_syms": external_syms,
             "extern_calls": extern_calls,
             "test_input": self.test_input,
+            # PCs of the branches that test an `if`/`elif`/`while`/ternary
+            # condition.  The proof generator needs these because a
+            # short-circuit `and`/`or` in a condition emits a CBZ/CBNZ that
+            # looks just like the `if`'s own branch, and picking the wrong one
+            # makes it model the condition as the `and`/`or`'s left operand.
+            "cond_branches": sorted(self._cond_branch_pcs),
         }
         return code, info
 
@@ -1018,6 +1030,7 @@ class ARM64Codegen:
             self.asm.label(next_labels[i])
             self._emit_expr(cond)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self._record_cond_branch()
             self.asm.emit(encode_cbz_xn(0, 0))
             fail = next_labels[i + 1] if i + 1 < len(tests) else (
                 else_label if has_fallthrough_else else end_label)
@@ -1074,6 +1087,7 @@ class ARM64Codegen:
             else:
                 self._emit_expr(cond)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self._record_cond_branch()
             self.asm.emit(encode_cbz_xn(0, 0))
             self.asm.emit_label_rel(false_label, here_offset=-4)
 
@@ -1506,6 +1520,7 @@ class ARM64Codegen:
             end_label = f"{fn}_tern{tid}_end"
             self._emit_expr(expr.condition)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self._record_cond_branch()
             self.asm.emit(encode_cbz_xn(0, 0))
             self.asm.emit_label_rel(else_label, here_offset=-4)
             self._emit_expr(expr.then_val)
@@ -2021,6 +2036,18 @@ class ARM64Codegen:
         raise CodegenError(
             f"unsupported binary operator {op!r} on the formal arm64 path")
 
+    def _record_cond_branch(self) -> None:
+        """Note that the next emitted instruction is an `if`'s own CBZ.
+
+        Call immediately before emitting that CBZ.  The assembler's cursor
+        `_org + len(text)` is the address the next 4 bytes land at, which is
+        the branch's own PC, and `_org` is the absolute load address, so the
+        recorded value is directly comparable with the proof generator's
+        `pc -> word` map.
+        """
+        self._cond_branch_pcs.append(
+            self.asm._org + len(self.asm.sections["text"]))
+
     def _emit_and_or(self, left, right, is_or: bool) -> None:
         """Python short-circuit `and`/`or` as a value in X0.
 
@@ -2438,6 +2465,7 @@ class ARM64Codegen:
             for cond in gen.conditions or []:
                 self._emit_expr(cond)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))
+                self._record_cond_branch()
                 self.asm.emit(encode_cbz_xn(0, 0))
                 self.asm.emit_label_rel(step_label, here_offset=-4)
 
@@ -2657,11 +2685,19 @@ class ARM64Codegen:
                 self._emit_expr(e.left)
                 if n == 1:
                     return
-                self.asm.emit(encode_stp_sp_pre(0, 2))  # push base
-                for _ in range(n - 1):
-                    self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 0))
-                    self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
-                self.asm.emit(encode_ldp_sp_post(0, 2))
+                if n == 2:
+                    # x0 = base * base; no stack traffic needed.
+                    self.asm.emit(encode_mul_xd_xn_xm(0, 0, 0))
+                else:
+                    self.asm.emit(encode_stp_sp_pre(0, 2))  # push base
+                    for _ in range(n - 1):
+                        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 0))
+                        self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
+                    # Pop without writing x0: the popped value is the pre-MUL
+                    # base, and x0 now holds the product.  LDP-post into
+                    # (0,2) would restore the base over it, so discard into
+                    # x2/x3, which are dead at this point.
+                    self.asm.emit(encode_ldp_sp_post(2, 3))
                 self._emit_trunc(common_type(self._ttype(e.left),
                                              self._ttype(e.right)))
                 return

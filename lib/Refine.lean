@@ -177,20 +177,130 @@ def FrameOk (st st' : Arm64State) : Prop :=
     mem_read_u64 st'.mem ((st.sp + UInt64.ofNat j).toNat) =
     mem_read_u64 st.mem ((st.sp + UInt64.ofNat j).toNat))
 
-/-- The per-frame size bound threaded through the contract: every frame's stores
-    (`sp - K`, `K ≤ FRAME`) sit in the non-wrapping regime, so `FrameOk`'s
-    window clause can be proved unconditionally on the caller's slots.  Depth
-    `d` costs `(d+1)*FRAME`, so at a call site the callee's bound follows from
-    the caller's by `P ≤ FRAME`. -/
-abbrev FrameBound (st : Arm64State) (arg : UInt64) : Prop :=
-  65536 * (arg.toNat + 1) ≤ st.sp.toNat
+/-- The per-frame size bound threaded through the contract, at `stride` bytes of
+    stack per recursion level: every frame's stores (`sp - K`, `K ≤ FRAME`) sit
+    in the non-wrapping regime, so `FrameOk`'s window clause can be proved
+    unconditionally on the caller's slots.
+
+    The stride is a parameter, not a constant, because it has to *dominate the
+    stack a level actually consumes*.  A level's consumption is fixed by the
+    emitter's frame layout (the `_SCRATCH` reservation, the callee-saved pairs,
+    and the argument push), which is ~131 KB for the current backend — larger
+    than any constant that predates the scratch reservation.  Carrying the real
+    value keeps `frameBound_succ` (below) provable; hardcoding a stride smaller
+    than one level's frame makes the recursion induction step unprovable, which
+    is exactly how the previous fixed `65536` failed. -/
+abbrev FrameBound (stride : Nat) (st : Arm64State) (arg : UInt64) : Prop :=
+  stride * (arg.toNat + 1) ≤ st.sp.toNat
+
+/-- **Frame bound across one recursion level.**  Descending a level costs `P`
+    bytes of stack and decrements `arg` by one, so a bound at `stride ≥ P`
+    carries over unchanged.  The generator supplies the `P` it emitted and
+    discharges `stride ≥ P` by literal arithmetic. -/
+theorem frameBound_succ (stride P : Nat) (st : Arm64State) (arg : UInt64)
+    (hP : stride ≥ P) (hPlt : P < 2 ^ 64) (hne : arg ≠ 0)
+    (hPge : P ≤ st.sp.toNat)
+    (hb : FrameBound stride st arg) :
+    FrameBound stride ({ st with sp := st.sp - UInt64.ofNat P }) (arg - 1) := by
+  have hsub : (arg - 1).toNat = arg.toNat - 1 := u64_toNat_sub_one' arg hne
+  have hslot : (st.sp - UInt64.ofNat P).toNat = st.sp.toNat - P :=
+    u64_toNat_sub_lit st.sp P hPlt hPge
+  simp only [FrameBound, hsub, hslot]
+  have hpos : 1 ≤ arg.toNat := by
+    have hne0 : arg.toNat ≠ 0 := by
+      intro hz
+      exact hne (UInt64.toNat_inj.mp (by simpa using hz))
+    have : 0 < arg.toNat := Nat.pos_of_ne_zero hne0
+    omega
+  have hmul : stride * (arg.toNat - 1 + 1) ≤ stride * arg.toNat := by
+    rw [show arg.toNat - 1 + 1 = arg.toNat by omega]
+    exact Nat.mul_le_mul_left _ (Nat.le_refl _)
+  -- `hb` bounds `stride * (arg.toNat + 1)`, so one `stride` is already spent
+  -- on the level being entered; the rest covers the remaining `arg.toNat`.
+  have hstr : stride * arg.toNat + stride ≤ st.sp.toNat := by omega
+  omega
+
+/-- **Frame bound at a call site.**  The callee is entered with `sp` unchanged
+    from the caller's (its own frame is reserved by its prologue), so the
+    caller's bound at `arg` covers the callee's bound at `arg - 1` whenever the
+    stride dominates one level.  This is `frameBound_succ` with the call-site
+    `sp` relation (already discharged by the generator). -/
+theorem frameBound_succ_call (stride P : Nat) (st : Arm64State) (arg : UInt64)
+    (ret entry : Nat) (hP : stride ≥ P) (hPlt : P < 2 ^ 64) (hne : arg ≠ 0)
+    (hPge : P ≤ st.sp.toNat)
+    (hb : FrameBound stride st arg) :
+    FrameBound stride ({ st with x30 := UInt64.ofNat ret, pc := entry })
+      (arg - 1) := by
+  have hsub : (arg - 1).toNat = arg.toNat - 1 := u64_toNat_sub_one' arg hne
+  simp only [FrameBound, hsub]
+  -- one `stride` of the caller's `(arg + 1)` levels pays for the level being
+  -- entered; the callee needs `arg` levels' worth.
+  have hpos : 1 ≤ arg.toNat := by
+    have hne0 : arg.toNat ≠ 0 := by
+      intro hz
+      exact hne (UInt64.toNat_inj.mp (by simpa using hz))
+    have : 0 < arg.toNat := Nat.pos_of_ne_zero hne0
+    omega
+  have hmul : stride * (arg.toNat - 1 + 1) ≤ stride * arg.toNat := by
+    rw [Nat.sub_add_cancel hpos]
+    exact Nat.le_refl _
+  simp only [FrameBound] at hb
+  -- `hb`: `stride * (arg + 1) ≤ sp`, i.e. `stride * arg + stride ≤ sp`, so
+  -- dropping the nonnegative `stride` term gives `stride * arg ≤ sp`.
+  have hsp' : stride * arg.toNat ≤ st.sp.toNat := by
+    have hsplit : stride * (arg.toNat + 1) = stride * arg.toNat + stride := by
+      rw [Nat.mul_add, Nat.mul_one]
+    have := hb
+    rw [hsplit] at this
+    omega
+  exact Nat.le_trans hmul hsp'
+
+/-- The `sp` every top-level invocation starts from: `Arm64State.init` seeds
+    the stack pointer at the architectural top of the 64-bit address space
+    minus the 16 bytes of red-zone/alignment the ABI reserves.  Named so the
+    descent arithmetic below is not open-coded against the literal. -/
+theorem init_sp_toNat (input : UInt64) (entry : Nat) :
+    (Arm64State.init input entry).sp.toNat = 18446744073709551600 := rfl
+
+/-- **Frame bound for a recursive call made from a top-level walk.**
+
+    At the top of a walk the entry state is the initial one, so the caller's
+    reservation is bounded by the literal stack top.  Descending to a call site
+    costs at least one `stride`, and the callee's argument is at most the
+    caller's argument less one, so the callee's `(arg - 1 + 1) = arg` levels
+    still fit below the caller's `sp` by exactly the `stride` the caller's
+    `(arg + 1)`-th level was paying for.
+
+    The two arithmetic premises are the concrete facts the walk already
+    establishes: `hsp` is the call site's own (ground) `sp` after the frame
+    drops so far, and `harg` is the `dec1` decrement at the call.  The stride
+    multiplication and the `Nat` subtraction are discharged here. -/
+theorem frameBound_descend (stride : Nat) (st st' : Arm64State) (arg x : UInt64)
+    (harg : x.toNat + 1 ≤ arg.toNat)
+    (hinit : st.sp.toNat = 18446744073709551600)
+    (hsp : 18446744073709551600 - stride ≤ st'.sp.toNat)
+    (hb : FrameBound stride st arg) :
+    FrameBound stride st' x := by
+  simp only [FrameBound] at hb ⊢
+  have hmul := Nat.mul_le_mul_left stride harg
+  have hsplit : stride * (arg.toNat + 1) = stride * arg.toNat + stride := by
+    rw [Nat.mul_add, Nat.mul_one]
+  rw [hsplit] at hb
+  rw [hinit] at hb
+  omega
 
 /-- `ProofLib.mem_read_after_write_u64_high_nw` with the frame bound and the
-    store offset discharged by literal arithmetic.  This is the `simp`-ready
-    form the generator uses to prove `FrameOk`'s no-wrap window clause. -/
+    store offset discharged by the caller's chosen stride.  This is the
+    `simp`-ready form the generator uses to prove `FrameOk`'s no-wrap window
+    clause.
+
+    The bounds are `stride`-parameterised rather than pinned to a literal
+    `65536`: the store offset `K` and the stack floor both come from the
+    emitter's frame layout, and a fixed literal silently stops discharging them
+    once that layout changes. -/
 theorem mem_read_after_write_u64_high_fb (mem : Nat → UInt8) (sp : UInt64)
-    {K j : Nat} (hK : 8 ≤ K) (hKF : K ≤ 65536) (hjnw : sp.toNat + j < 2^64)
-    (hbnd : 65536 ≤ sp.toNat) (val : UInt64) :
+    {stride K j : Nat} (hK : 8 ≤ K) (hKF : K ≤ stride) (hjnw : sp.toNat + j < 2^64)
+    (hbnd : stride ≤ sp.toNat) (val : UInt64) :
     mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val)
         ((sp + UInt64.ofNat j).toNat)
       = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
@@ -286,28 +396,28 @@ theorem Post.exit_correct (p : Prog) (fuel total : Nat) (obs : UInt64 → UInt64
     step case (`arg = k+1`, using the induction hypothesis for `arg-1` at any
     sufficient fuel) are supplied by the generator as per-level CFG walks; the
     induction itself is generic. -/
-theorem contract_sound (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat)
+theorem contract_sound (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat) (stride : Nat)
     (hbase : ∀ (fuel : Nat) (st : Arm64State),
       BASE ≤ fuel → st.pc = p.entry → st.x0 = 0 →
-      FrameBound st 0 →
+      FrameBound stride st 0 →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st 0)
     (hstep : ∀ (k : Nat) (arg : UInt64) (st : Arm64State) (fuel : Nat),
       arg.toNat = k + 1 → BASE + PATH * (k + 1) ≤ fuel →
       st.pc = p.entry → st.x0 = arg →
-      FrameBound st arg →
+      FrameBound stride st arg →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) →
       (∀ (sub : Arm64State) (fuel' : Nat),
         BASE + PATH * k ≤ fuel' → sub.pc = p.entry → sub.x0 = arg - 1 →
-        FrameBound sub (arg - 1) →
+        FrameBound stride sub (arg - 1) →
         (∀ pc, pc ∈ p.rets → pc ≠ sub.x30.toNat) →
         Post p fuel' mojo sub (arg - 1)) →
       Post p fuel mojo st arg) :
     ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
       BASE + PATH * arg.toNat ≤ fuel → st.pc = p.entry → st.x0 = arg →
-      FrameBound st arg →
+      FrameBound stride st arg →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
   have key : ∀ k, ∀ arg st fuel, arg.toNat = k → BASE + PATH * k ≤ fuel →
-      st.pc = p.entry → st.x0 = arg → FrameBound st arg →
+      st.pc = p.entry → st.x0 = arg → FrameBound stride st arg →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
     intro k
     induction k with
@@ -333,35 +443,35 @@ theorem contract_sound (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat)
     `arg - 2` (`toNat = k`).  The fuel bound is **exponential** in `arg.toNat`
     (`BASE + PATH * 2^arg.toNat`, `PATH ≥ BASE + <machine path length>`), since
     a doubled recursion runs `Θ(2^n)` steps. -/
-theorem contract_sound_tree (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat)
+theorem contract_sound_tree (p : Prog) (mojo : UInt64 → UInt64) (BASE PATH : Nat) (stride : Nat)
     (hbase : ∀ (fuel : Nat) (st : Arm64State),
       BASE ≤ fuel → st.pc = p.entry → st.x0.toNat < 2 →
-      FrameBound st st.x0 →
+      FrameBound stride st st.x0 →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st st.x0)
     (hstep : ∀ (k : Nat) (arg : UInt64) (st : Arm64State) (fuel : Nat),
       arg.toNat = k + 2 → BASE + PATH * 2 ^ (k + 2) ≤ fuel →
       st.pc = p.entry → st.x0 = arg →
-      FrameBound st arg →
+      FrameBound stride st arg →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) →
       (∀ (sub : Arm64State) (fuel' : Nat),
         BASE + PATH * 2 ^ (k + 1) ≤ fuel' → sub.pc = p.entry → sub.x0 = arg - 1 →
-        FrameBound sub (arg - 1) →
+        FrameBound stride sub (arg - 1) →
         (∀ pc, pc ∈ p.rets → pc ≠ sub.x30.toNat) →
         Post p fuel' mojo sub (arg - 1)) →
       (∀ (sub : Arm64State) (fuel' : Nat),
         BASE + PATH * 2 ^ k ≤ fuel' → sub.pc = p.entry → sub.x0 = arg - 2 →
-        FrameBound sub (arg - 2) →
+        FrameBound stride sub (arg - 2) →
         (∀ pc, pc ∈ p.rets → pc ≠ sub.x30.toNat) →
         Post p fuel' mojo sub (arg - 2)) →
       Post p fuel mojo st arg) :
     ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
       BASE + PATH * 2 ^ arg.toNat ≤ fuel → st.pc = p.entry → st.x0 = arg →
-      FrameBound st arg →
+      FrameBound stride st arg →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
   intro arg st fuel hfuel hpc hx0 hbnd hx30
   have key : ∀ m : Nat, ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
       arg.toNat = m → BASE + PATH * 2 ^ m ≤ fuel → st.pc = p.entry → st.x0 = arg →
-      FrameBound st arg →
+      FrameBound stride st arg →
       (∀ pc, pc ∈ p.rets → pc ≠ st.x30.toNat) → Post p fuel mojo st arg := by
     intro m
     induction m using Nat.strongRecOn with
