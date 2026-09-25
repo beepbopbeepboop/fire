@@ -1,0 +1,2860 @@
+#!/usr/bin/env python3
+"""x86-64 code generator for the formal path — consumes fire_compiler's AST.
+
+Maps fire_compiler nodes (the project's real AST; fire_compiler.py is the
+single source of truth) to x86-64 machine code, using the System V AMD64
+integer convention so the extern path needs no thunk:
+- arguments: RDI, RSI, RDX, RCX, R8, R9
+- return value: RAX
+- locals: RBX, R12, R13, R14, R15 (callee-saved), overflow to RBP-relative
+  spill slots
+- expression temporaries: RAX (result), R10/R11 (scratch), RDX:RAX for the
+  one-operand divide forms
+- frame pointer: RBP; the stack grows down
+
+Ported from /Users/mrs/net/chatgpt/claude/formal/compiler/codegen.py (the toy
+formal compiler's x86-64 backend) and re-targeted from that project's mini-AST
+onto fire_compiler nodes, mirroring formal/arm64_codegen.py's structure and
+its `compile()` contract. That toy's register handling collapsed every local
+onto RBX and its variable reads returned the last assignment rather than the
+named one; the register allocation here is the same shape the arm64 backend
+uses (locals in callee-saved registers, spill slots past the fifth).
+
+Scope: the integer/boolean surface — literals, variables, the arithmetic and
+bitwise operators, comparisons and compare chains, short-circuit and/or,
+if/elif/else, while, for over range(), break/continue, augmented assignment,
+recursion, and calls out to externs. Container and string values (lists,
+dicts, sets, comprehensions, subscripts, slices, string literals) are NOT
+lowered here: they need a heap/blob runtime that the toy x86-64 path never
+had and that the proof model in lib/ProofLib.lean does not describe. They
+raise CodegenError naming the construct rather than silently miscompiling.
+"""
+
+from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
+                          common_type, infer_expr, resolve, cmp_signed,
+                          parse_type_name, mask_of)
+from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
+
+import fire_compiler as F
+from mojo.middle.boundnames import bound_names_in_order
+
+# Bytes of stack the frame always reserves BELOW the spill slots: expression
+# temporaries live in 16-byte slots (see _push_slot), and a function that used
+# none would otherwise be sitting exactly at the spill area.
+_TEMP_SLACK = 256
+
+# Sizes of the push/pop slots the codegen uses. Both are 16 bytes so that RSP
+# is 16-byte aligned at every point where a CALL can happen — the System V AMD64
+# requirement, and the thing an SSE-using or variadic callee (a libc `printf`)
+# will fault on if it is violated. A left operand or an argument therefore
+# occupies a whole 16-byte slot, not 8: the low 8 bytes hold the value and the
+# high 8 are padding.
+_SLOT = 16
+
+# Bytes of frame reserved for container blobs (list/tuple/dict pair blobs,
+# comprehension results, slice views). A blob is [count:i64][element…], built
+# in the frame rather than on a heap — formal has no allocator — and lives
+# until the function returns. The cursor grows UP from the frame bottom (so a
+# nested container sits above its parent, as in the arm64 backend) and is
+# capped just below the spill/saved-register area.
+_BLOB_BYTES = 16384
+
+# Condition-code pairs for the six comparisons, as (unsigned, signed) setcc
+# mnemonics. The literal's type picks the row: `int` is unsigned 64-bit, so
+# `n < 0` on an unannotated parameter is an unsigned comparison — the same
+# lattice formal/types.py encodes and the arm64 backend follows.
+_CMP_CONDS = {
+    "<=": ("setbe", "setle"),
+    "<": ("setb", "setl"),
+    ">=": ("setae", "setge"),
+    ">": ("seta", "setg"),
+    "==": ("sete", "sete"),
+    "!=": ("setne", "setne"),
+    # Identity on the formal path is unboxed integer value equality (no heap
+    # objects, no interning table) — same reading the arm64 backend uses.
+    "is": ("sete", "sete"),
+    "is not": ("setne", "setne"),
+}
+_SETCC = {
+    "sete": encode_sete, "setne": encode_setne, "setl": encode_setl,
+    "setle": encode_setle, "setg": encode_setg, "setge": encode_setge,
+    "setb": encode_setb, "setbe": encode_setbe, "seta": encode_seta,
+    "setae": encode_setae,
+}
+_ALU_RR = {
+    "+": encode_add_r64_r64,
+    "-": encode_sub_r64_r64,
+    "*": encode_imul_r64_r64,
+    "&": encode_and_r64_r64,
+    "|": encode_or_r64_r64,
+    "^": encode_xor_r64_r64,
+}
+_SHIFT_IMM = {"<<": "<<", ">>": ">>"}
+_SHIFT_CL = {"<<": "<<", ">>": ">>signed"}
+
+
+class CodegenError(Exception):
+    pass
+
+
+def _always_returns(stmts: list) -> bool:
+    """Whether every path through `stmts` ends in a return.
+
+    Drives the implicit `return 0` a function needs so execution cannot fall
+    off the end of the body into whatever follows it in .text."""
+    for s in stmts or []:
+        if isinstance(s, F.ReturnStmt):
+            return True
+        if isinstance(s, F.RaiseStmt):
+            return True
+        if isinstance(s, F.IfStmt):
+            branches = [s.then_body] + [b for _c, b in (s.elifs or [])]
+            if s.else_body:
+                branches.append(s.else_body)
+            # An elif chain with no final else has a reachable fall-through,
+            # so it does not count as always returning.
+            if len(branches) < 2:
+                continue
+            if all(_always_returns(b) for b in branches):
+                return True
+        if isinstance(s, F.WhileStmt):
+            # `while True:` with no break never falls through.
+            cond = s.condition
+            if (isinstance(cond, F.BoolLiteral) and cond.value) \
+                    and not _has_break(s.body):
+                return True
+        if isinstance(s, F.TryStmt):
+            if _always_returns(s.body) and _always_returns(s.finally_body or []):
+                return True
+    return False
+
+
+def _has_break(stmts: list) -> bool:
+    """Whether `stmts` contains a `break` that belongs to THIS loop.
+
+    A break inside a nested loop belongs to that loop, so the walk does not
+    descend into one."""
+    for s in stmts or []:
+        if isinstance(s, F.BreakStmt):
+            return True
+        if isinstance(s, F.IfStmt):
+            if _has_break(s.then_body):
+                return True
+            for _c, body in (s.elifs or []):
+                if _has_break(body):
+                    return True
+            if _has_break(s.else_body):
+                return True
+        if isinstance(s, F.TryStmt):
+            if _has_break(s.body):
+                return True
+    return False
+
+
+def _range_args(iterable):
+    """range(...) arguments from a fire ForStmt iterable, else None."""
+    if (isinstance(iterable, F.CallExpr)
+            and isinstance(iterable.func, F.IdentExpr)
+            and iterable.func.name == "range"):
+        return list(iterable.args)
+    return None
+
+
+def _collect_var_names(f: F.FunctionDef) -> list:
+    """Parameters first, then locals in first-assignment order.
+
+    The bound names come from the shared middle-end walk
+    (`bound_names_in_order`) — the same list the arm64 backend allocates from,
+    so a name that is a local here is a local there. The only additions are
+    the loop control temps, which are backend-local (they hold a loop's bound,
+    step, index or iterable pointer, not a source-level value) and are
+    appended after every real name so they only ever spill.
+    """
+    names = bound_names_in_order(f.body, f.params)
+    seen = set(names)
+
+    def walk(stmts, depth: int, acc: list) -> None:
+        """Track the deepest loop nesting, whatever kind.
+
+        EVERY loop consumes a depth, range() included: `_emit_loop` indexes
+        its `_fe{d}`/`_fs{d}` bound/step temps with the same counter
+        `_emit_for_list` uses for `_fi{d}`/`_fb{d}`, and both need a fresh
+        index inside a nested loop or they would collide with the enclosing
+        one's. So this walk counts loops, not kinds — an earlier version that
+        let a range() loop share its parent's depth built the temp list for
+        the wrong function and failed at emit time with "no home for _fb1"."""
+        for s in stmts or []:
+            if isinstance(s, F.ForStmt):
+                acc[0] = max(acc[0], depth)
+                walk(s.body, depth + 1, acc)
+                walk(s.else_body, depth + 1, acc)
+            elif isinstance(s, F.IfStmt):
+                walk(s.then_body, depth, acc)
+                for _c, body in (s.elifs or []):
+                    walk(body, depth, acc)
+                walk(s.else_body, depth, acc)
+            elif isinstance(s, F.WhileStmt):
+                walk(s.body, depth, acc)
+                walk(s.else_body, depth, acc)
+            elif isinstance(s, F.TryStmt):
+                walk(s.body, depth, acc)
+                for h in (s.handlers or []):
+                    walk(h.body, depth, acc)
+                walk(s.else_body, depth, acc)
+                walk(s.finally_body, depth, acc)
+            elif isinstance(s, F.WithStmt):
+                walk(s.body, depth, acc)
+
+    acc = [-1]
+    walk(f.body, 0, acc)
+    if acc[0] >= 0:
+        # All four loop-temp families for every depth: the emitter indexes
+        # them with one counter, so a depth only used by a range() loop may
+        # still need the _fi/_fb pair reserved (and vice versa).
+        for i in range(acc[0] + 1):
+            for name in (f"_fe{i}", f"_fs{i}", f"_fi{i}", f"_fb{i}"):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+
+    # Comprehension generator loops: one index + one iterable-pointer temp per
+    # generator, counted from a base depth that leaves the for-in temps alone
+    # (so a comprehension inside a for, or the reverse, cannot alias).
+    def walk_compr(node, depth: int, acc: list) -> None:
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, F.Comprehension):
+            n = len(node.generators or [])
+            if n:
+                acc[0] = max(acc[0], depth + n - 1)
+            for g in node.generators or []:
+                walk_compr(g.iterable, depth, acc)
+                for c in g.conditions or []:
+                    walk_compr(c, depth + n, acc)
+            walk_compr(node.element, depth + n, acc)
+            walk_compr(node.key, depth + n, acc)
+            return
+        if hasattr(node, "__dataclass_fields__"):
+            for fname in node.__dataclass_fields__:
+                if fname in ("line", "col"):
+                    continue
+                val = getattr(node, fname, None)
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, tuple):
+                            for y in item:
+                                walk_compr(y, depth, acc)
+                        else:
+                            walk_compr(item, depth, acc)
+                elif isinstance(val, tuple):
+                    for y in val:
+                        walk_compr(y, depth, acc)
+                else:
+                    walk_compr(val, depth, acc)
+
+    acc_c = [-1]
+    for st in (f.body or []):
+        walk_compr(st, 0, acc_c)
+    if acc_c[0] >= 0:
+        for i in range(acc_c[0] + 1):
+            for name in (f"_ci{i}", f"_cb{i}"):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+    return names
+
+
+def var_register_map(f: F.FunctionDef) -> dict[str, Reg]:
+    """Variable -> callee-saved register, matching `_emit_function`.
+
+    Exported for a future proof generator, the way formal/arm64_codegen.py
+    exports its own `var_register_map`: per-value facts have to name the
+    register the codegen actually allocated. Only the first
+    `len(CALLEE_SAVED)` names appear — the rest live in spill slots."""
+    names = _collect_var_names(f)
+    return {name: CALLEE_SAVED[i]
+            for i, name in enumerate(names[:len(CALLEE_SAVED)])}
+
+
+def _with_item_alias_name(alias) -> str:
+    """The local name a `with ... as NAME` binds, or None."""
+    from mojo.middle.boundnames import _with_item_alias_name as _impl
+    return _impl(alias)
+
+
+def _callee_symbol(func) -> str | None:
+    """Flatten a CallExpr callee to a symbol name string.
+
+    IdentExpr → its name; MemberExpr → the dotted chain (`obj.method` →
+    "obj.method", `os.path.join` → "os.path.join"). A dotted name is never in
+    `self._functions`, so `_emit_call` lowers it to a call to that extern —
+    which is how a module-level or method call reaches the C library. Same
+    reading as the arm64 backend, so the two agree on what a callee name is.
+    """
+    if isinstance(func, F.IdentExpr):
+        return func.name
+    parts = []
+    node = func
+    while isinstance(node, F.MemberExpr):
+        parts.append(node.member)
+        node = node.obj
+    if parts:
+        if isinstance(node, F.IdentExpr):
+            parts.append(node.name)
+        parts.reverse()
+        return ".".join(parts)
+    return None
+
+
+class X86_64Codegen:
+    """x86-64 code generator over the fire_compiler AST."""
+
+    def __init__(self, test_input: int = 10, extern_style: str = "stub",
+                 dylib_syms: dict = None, comptime_hook=None,
+                 module_source: str = ""):
+        """test_input: the value the startup stub passes to the entry.
+
+        extern_style: how a call to an unbound symbol is emitted.
+          "stub" — `call rel32` to a __TEXT,__stubs trampoline that jumps
+            through a GOT slot. What the Mach-O image carries, and what
+            `formal.macho.compute_macho_got_addrs` hands back to
+            `Assembler.resolve_extern`.
+          "got" — `call [rip+disp32]` straight through the GOT slot, which
+            needs no stub section. What the ELF image carries
+            (`formal.elf.compute_got_addrs`), matching the toy x86-64 path
+            this was ported from.
+
+        dylib_syms: {source-level callee name: the spelling a linked formal
+        dylib exports it under}. A call whose callee is not defined in this
+        module but appears here is emitted against the mangled spelling, so
+        the recorded extern symbol is the one the linked dylib actually
+        defines. Built by formal.build._codegen_and_link from the dylib
+        manifests.
+
+        comptime_hook / module_source: the compile-time evaluation hook
+        `(name, args) -> int | None` built by
+        `formal.comptime_runner.make_call_hook`, and the module's own source.
+        ACCEPTED AND STORED, NOT YET USED: the arm64 backend folds these into
+        comptime specialization (a `f[x]` subscript call whose arguments are
+        all compile-time constants is expanded inline instead of called), and
+        this backend has no specialization pass yet, so every call still
+        lowers to a real `call`. Nothing here silently pretends to specialize
+        — a comptime-parameterized call is emitted as an ordinary call, which
+        runs correctly as long as the callee is a real function.
+        """
+        if extern_style not in ("stub", "got"):
+            raise CodegenError(
+                f"unknown extern_style {extern_style!r} (expected stub|got)")
+        self.test_input = test_input
+        self.extern_style = extern_style
+        self._dylib_syms = dict(dylib_syms or {})
+        self._comptime_hook = comptime_hook
+        self._module_source = module_source
+        self.asm = Assembler()
+
+
+        self._functions = {}
+        self._current_function = None
+        self._if_counter = 0
+        self._while_counter = 0
+        self._var_regs = {}
+        self._var_spills = {}
+        self._spill_bytes = 0
+        self._frame_bytes = 0
+        # PCs of the conditional branches that test an `if`/`elif`/`while`/
+        # ternary condition, so a later proof generator can tell an `if`'s own
+        # branch from a short-circuit `and`/`or`'s (same reason, and the same
+        # `cond_branches` key, as formal/arm64_codegen.py).
+        self._cond_branch_pcs = []
+        # Enclosing loops, innermost last: `start` (continue target for
+        # `while`), `step` (continue target for `for`, which must still
+        # advance the counter), `break` (label after the loop's else).
+        self._loops = []
+        # Nesting depth of for-range loops currently being emitted; selects
+        # the `_fe{d}`/`_fs{d}` temps. Reset per function.
+        self._for_depth = 0
+        self._string_vars = set()
+        # Nonzero while evaluating a for-iterable / membership RHS: a
+        # BinaryOp `+`/`|` there means list/set concatenation, not the
+        # integer ALU form.
+        self._container_ctx = 0
+        # Nesting depth of for-in (blob iteration) loops; selects the
+        # `_fi{d}`/`_fb{d}` temps. Reset per function.
+        self._for_depth = 0
+        # Base depth for comprehension generator temps (`_ci{d}`/`_cb{d}`),
+        # so a comprehension nested in a for-list cannot alias its temps.
+        self._compr_depth = 0
+        # Enclosing try-finally bodies, outermost first. Flushed before a
+        # return/break/continue so the finally runs on those paths too.
+        self._pending_finally = []
+        # Names bound to a string address this function (a StringLiteral RHS
+        # or an alias of one). A subscript on one of these is a byte load, not
+        # a list index. Reset per function.
+        self._string_vars = set()
+        # Names bound to a dict pair-blob pointer, whose subscript is a key
+        # lookup rather than an index. Mutually exclusive with the above.
+        self._dict_vars = set()
+        # Names bound to a list/tuple/set blob. This is what makes `a + b`
+        # on two LOCALS a concatenation: without it, two bare idents are
+        # indistinguishable from two integers, and the operator silently
+        # lowers to pointer arithmetic.
+        self._blob_vars = set()
+        # String-literal data, appended after all the code: (label, bytes).
+        # `_str_intern` maps content to label so equal literals share one
+        # address. Both persist across compile()'s two-pass re-emit so the
+        # labels stay unique.
+        self._strings = []
+        self._str_counter = 0
+        self._str_intern = {}
+
+    # ── entry point ──────────────────────────────────────────────────
+
+    def compile(self, stmts: list, base_addr: int = 0x100001000,
+                emit_startup: bool = True) -> tuple:
+        """Compile a fire_compiler module statement list to x86-64 code.
+
+        `stmts` is Parser(...).parse_module()'s output — may contain imports,
+        module-level assigns, etc.; only FunctionDefs are lowered. If a `main`
+        function is present it is the entry (first in the emitted order);
+        otherwise the first FunctionDef is.
+
+        The returned `info` mirrors the arm64 backend's: `labels` maps every
+        label to its absolute address, `external_syms`/`extern_calls` describe
+        the unbound calls the binary format has to stub, and `base_addr` /
+        `func_offset` locate the entry — a proof generator and the binary
+        emitters both read these rather than recomputing the layout."""
+        functions = [s for s in stmts if isinstance(s, F.FunctionDef)]
+        if not functions:
+            raise CodegenError("no function definitions to compile")
+        if emit_startup:
+            main = [f for f in functions if f.name == "main"]
+            rest = [f for f in functions if f.name != "main"]
+            functions = (main + rest) if main else functions
+        for f in functions:
+            # async def and generators lower as ordinary functions: formal
+            # has no event loop / iterator protocol, so `await` is identity
+            # and `yield` leaves its value in RAX (compile-only fidelity).
+            self._functions[f.name] = f
+
+        self.asm.org(base_addr)
+
+        first_func_name = functions[0].name
+        if emit_startup:
+            # Save/restore RBP around the call so the kernel's return lands
+            # with RAX still holding the entry function's value: that value
+            # becomes the process exit status, which is what makes a formal
+            # build runnable (same contract as the arm64 startup stub).
+            self.asm.emit(encode_push_r64(Reg.RBP))
+            self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
+            if functions[0].params:
+                self._emit_mov_imm(ARG_REGS[0], self.test_input)
+            self.asm.emit(encode_call_rel32(0))
+            self.asm.emit_label_rel32(first_func_name, here_offset=-4)
+            self.asm.emit(encode_pop_r64(Reg.RBP))
+            self.asm.emit(encode_ret())
+
+        for f in functions:
+            self._emit_function(f)
+
+        # String literal data goes after the code: its label is what the
+        # RIP-relative LEAs point at, so it has to exist before resolve().
+        for label, data in self._strings:
+            self.asm.label(label)
+            self.asm.emit(data)
+
+        self.asm.resolve()
+        code = bytes(self.asm.sections["text"])
+        external_syms = list({sym for sym, _, _, _ in self.asm.extern_refs})
+        extern_calls = sorted(
+            ({"sym": sym, "addr": pos, "kind": kind}
+             for sym, pos, _, kind in self.asm.extern_refs
+             if kind in ("call", "call_got")),
+            key=lambda c: c["addr"])
+        info = {
+            "base_addr": base_addr,
+            "entry_offset": self.asm.labels.get(first_func_name, 0),
+            "func_offset": self.asm.labels.get(first_func_name, 0),
+            "labels": dict(self.asm.labels),
+            "func_name": first_func_name,
+            "external_syms": external_syms,
+            "extern_calls": extern_calls,
+            "test_input": self.test_input,
+            "cond_branches": sorted(self._cond_branch_pcs),
+        }
+        return code, info
+
+    @property
+    def func_name(self):
+        return self._current_function or ""
+
+    # ── functions ────────────────────────────────────────────────────
+
+    def _emit_function(self, f: F.FunctionDef) -> None:
+        self._current_function = f.name
+        self.asm.label(f.name)
+
+        var_names = _collect_var_names(f)
+        n_reg = min(len(var_names), len(CALLEE_SAVED))
+        self._var_regs = {name: CALLEE_SAVED[i]
+                          for i, name in enumerate(var_names[:n_reg])}
+        self._var_spills = {name: i
+                            for i, name in enumerate(var_names[n_reg:])}
+        self._spill_bytes = 8 * len(self._var_spills)
+        # Frame geometry, all as negative offsets from RBP. RBP is 16-byte
+        # aligned (RSP is 8 mod 16 at entry and PUSH RBP makes it 16 mod 16),
+        # so a 16-aligned total keeps every call site aligned:
+        #
+        #   -8                        saved RBP
+        #   -8*(1+i)                  saved callee-saved registers holding locals
+        #   -8*(n_reg+1+i)            spill slots
+        #   -top .. -(top+_BLOB)      container blobs, cursor growing UP from
+        #                              the frame bottom and capped at -top
+        #   -(top+_BLOB) .. -(top+_BLOB+_TEMP_SLACK)   pushed temporaries
+        #                              (RSP lives at the bottom, and only ever
+        #                              moves below it, so it cannot reach a
+        #                              blob or a spill slot)
+        self._top_bytes = 8 * (len(self._var_regs) + len(self._var_spills))
+        self._blob_base = -(self._top_bytes + _BLOB_BYTES)
+        self._blob_cap = -self._top_bytes
+        self._list_cursor = self._blob_base
+        self._frame_bytes = _align16(self._top_bytes + _BLOB_BYTES
+                                     + _TEMP_SLACK)
+
+
+        self._call_types = {
+            g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
+            for g in self._functions.values()
+        }
+        self._vtypes = function_var_types(f, self._call_types)
+        self._for_depth = 0
+        self._compr_depth = 0
+        self._container_ctx = 0
+        self._string_vars = set()
+        self._dict_vars = set()
+        self._blob_vars = set()
+        self._pending_finally = []
+
+        # Prologue: establish the frame pointer, reserve the frame, spill the
+        # callee-saved registers this function borrows into the frame's tail
+        # (they hold locals, so the CALLER's values have to survive a
+        # recursive or nested call), then move each incoming argument home.
+        self.asm.emit(encode_push_r64(Reg.RBP))
+        self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
+        self.asm.emit(encode_sub_r64_imm32(Reg.RSP, self._frame_bytes))
+        for i, reg in enumerate(self._var_regs.values()):
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, self._saved_reg_off(i),
+                                              reg))
+        params = list(f.params or [])
+
+        if len(params) > len(ARG_REGS):
+            raise CodegenError(
+                f"{f.name}: {len(params)} parameters exceeds the "
+                f"{len(ARG_REGS)} the formal x86-64 ABI passes in registers")
+        for i, (pname, ptype) in enumerate(params):
+            ptype_t = parse_type_name(ptype) or DEFAULT_INT_TYPE
+            if pname in self._var_regs:
+                home = self._var_regs[pname]
+                self.asm.emit(encode_mov_r64_r64(home, ARG_REGS[i]))
+                # Normalize the incoming bits to the parameter's declared
+                # width: values are supposed to arrive already extended (the
+                # caller does it), but an extern caller need not, and a stale
+                # high word would poison every later comparison.
+                self._emit_extend(home, ptype_t)
+            else:
+                self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[i]))
+                self._emit_extend(Reg.R11, ptype_t)
+                self._store_var(pname, Reg.R11)
+
+        for stmt in f.body:
+            self._emit_stmt(stmt)
+
+        if not _always_returns(f.body):
+            self._emit_mov_imm(Reg.RAX, 0)
+            self._emit_epilogue()
+
+        self._current_function = None
+
+    def _emit_epilogue(self) -> None:
+        """Restore the borrowed callee-saved registers, then leave; ret.
+
+        The save/restore of the registers holding locals is the whole reason
+        they are callee-saved: a call in this function would otherwise destroy
+        the caller's copy. `leave` alone cannot do it — it moves RSP back to
+        the frame pointer and pops RBP, abandoning the frame (and the saved
+        registers with it) — so each one is reloaded from its frame slot
+        first.
+
+        The slots are addressed off RBP, so the restore does not depend on
+        where RSP happens to be."""
+        for i, reg in enumerate(self._var_regs.values()):
+            self.asm.emit(encode_mov_r64_rm64(reg, Reg.RBP,
+                                              self._saved_reg_off(i)))
+        self.asm.emit(encode_leave())
+        self.asm.emit(encode_ret())
+
+
+    def _push_slot(self, reg: Reg) -> None:
+        """Push `reg` as a 16-byte slot (see _SLOT)."""
+        self.asm.emit(encode_sub_r64_imm32(Reg.RSP, _SLOT))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, reg))
+
+    def _pop_slot(self, reg: Reg) -> None:
+        """Pop a 16-byte slot into `reg` and release it."""
+        self.asm.emit(encode_mov_r64_rm64(reg, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+
+
+    def _saved_reg_off(self, index: int) -> int:
+        """RBP-relative slot holding the `index`-th borrowed callee-saved
+        register. The first slot below RBP is the saved RBP itself, so these
+        start at -8."""
+        return -8 * (1 + index)
+
+    def _spill_off(self, name: str) -> int:
+        """RBP-relative slot for `name`'s spill home (negative).
+
+        Spill slots sit below the saved-register area, so a spilled local and
+        a borrowed register can never name the same 8 bytes."""
+        return -8 * (len(self._var_regs) + 1 + self._var_spills[name])
+
+    def _load_var(self, name: str, dst: Reg) -> None:
+        """dst = local `name`. Register homes MOV; spill slots load from
+        [RBP + off]. An unknown name reads 0 rather than whatever register
+        happens to hold — formal has no globals."""
+        if name in self._var_regs:
+            r = self._var_regs[name]
+            if dst != r:
+                self.asm.emit(encode_mov_r64_r64(dst, r))
+            return
+        if name in self._var_spills:
+            self.asm.emit(encode_mov_r64_rm64(dst, Reg.RBP,
+                                              self._spill_off(name)))
+            return
+        self._emit_mov_imm(dst, 0)
+
+    def _store_var(self, name: str, src: Reg) -> None:
+        """local `name` = src. Register homes MOV; spill slots store to
+        [RBP + off]."""
+        if name in self._var_regs:
+            r = self._var_regs[name]
+            if src != r:
+                self.asm.emit(encode_mov_r64_r64(r, src))
+            return
+        if name in self._var_spills:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, self._spill_off(name),
+                                              src))
+            return
+        raise CodegenError(
+            f"{self.func_name or '<module>'}: no home for {name!r} — it is "
+            f"neither a source-level local nor a loop temp this function "
+            f"reserved (the allocation walk and the emitter disagree)")
+
+    # ── statements ───────────────────────────────────────────────────
+
+    def _emit_stmt(self, stmt) -> None:
+        if isinstance(stmt, F.ReturnStmt):
+            if stmt.value is None:
+                self._emit_mov_imm(Reg.RAX, 0)
+            else:
+                self._emit_expr(stmt.value)
+            self._flush_pending_finally()
+            self._emit_epilogue()
+            return
+
+        if isinstance(stmt, F.ExprStmt):
+            self._emit_expr(stmt.value)
+            return
+
+        if isinstance(stmt, F.PassStmt):
+            return
+
+        if isinstance(stmt, F.GlobalStmt):
+            # `global NAME` is a binding declaration only. formal's locals are
+            # callee-saved registers or stack slots; there is no separate
+            # module-global storage to redirect subsequent stores into, so the
+            # declaration is a no-op and the AssignStmt still targets the
+            # local. Same reading as the arm64 backend.
+            return
+
+        if isinstance(stmt, (F.ImportStmt, F.FromImportStmt)):
+            # Single-file formal build: no dynamic loader, no sibling-module
+            # link. Matches build.py's top-level filter — imports are accepted
+            # and ignored; later uses of the bound names lower as ordinary
+            # idents (uninitialized, or extern where a call names them).
+            return
+
+        if isinstance(stmt, F.StructDef):
+            # Type-only; methods are lifted by build._flatten_closures. Nothing
+            # to emit.
+            return
+
+        if isinstance(stmt, F.AssertStmt):
+            # assert cond [, msg]: evaluate cond, exit(1) when falsy. The
+            # message is not formatted — there is no printf on this path — and
+            # the nonzero status is the signal.
+            self._emit_expr(stmt.value)
+            self._emit_mov_imm(Reg.R11, 1)
+            self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+            self._if_counter += 1
+            aid = self._if_counter
+            fail_label = f"{self.func_name}_assert{aid}_fail"
+            ok_label = f"{self.func_name}_assert{aid}_ok"
+            self._emit_jcc(COND_E, fail_label)
+            self.asm.label(fail_label)
+            self._emit_call_exit(1)
+            self.asm.label(ok_label)
+            return
+
+        if isinstance(stmt, F.RaiseStmt):
+            # No EH runtime: evaluate the exception expression for its side
+            # effects (the args of `raise RuntimeError(...)`), then exit(1).
+            # Handlers stay unreachable — there is no unwinder to route to.
+            if stmt.value is not None:
+                self._emit_expr(stmt.value)
+            self._flush_pending_finally()
+            self._emit_call_exit(1)
+            return
+
+        if isinstance(stmt, F.TryStmt):
+            self._emit_try(stmt)
+            return
+
+        if isinstance(stmt, F.WithStmt):
+            # async with lowers as a plain with (no event loop / context
+            # manager protocol on this path).
+            self._emit_with(stmt)
+            return
+
+        if isinstance(stmt, F.IfStmt):
+            self._emit_if(stmt)
+            return
+
+        if isinstance(stmt, F.WhileStmt):
+            self._emit_loop(cond=stmt.condition, body=stmt.body,
+                            else_body=stmt.else_body or [], for_info=None)
+            return
+
+        if isinstance(stmt, F.ForStmt):
+            rargs = _range_args(stmt.iterable)
+            if rargs is None:
+                self._emit_for_list(stmt, stmt.else_body or [])
+                return
+            if (not isinstance(stmt.target, str)
+                    or not stmt.target.isidentifier()):
+                raise CodegenError(
+                    f"for-loop target must be a plain name (got {stmt.target!r})")
+            self._emit_loop(cond=None, body=stmt.body,
+                            else_body=stmt.else_body or [],
+                            for_info=(stmt.target, rargs))
+            return
+
+        if isinstance(stmt, F.BreakStmt):
+            if not self._loops:
+                raise CodegenError("break outside of a loop")
+            self._flush_pending_finally(self._loops[-1]["fin_depth"])
+            self._emit_jmp(self._loops[-1]["break"])
+            return
+
+        if isinstance(stmt, F.ContinueStmt):
+            if not self._loops:
+                raise CodegenError("continue outside of a loop")
+            self._flush_pending_finally(self._loops[-1]["fin_depth"])
+            self._emit_jmp(self._loops[-1]["step"])
+            return
+
+        if isinstance(stmt, F.AugAssignStmt):
+            self._emit_aug_assign(stmt)
+            return
+
+        if isinstance(stmt, F.AssignStmt):
+            if isinstance(stmt.target, F.SubscriptExpr):
+                self._emit_subscript_store(stmt.target, stmt.value)
+                return
+            if isinstance(stmt.target, F.SliceExpr):
+                self._emit_slice_store(stmt.target, stmt.value)
+                return
+            if isinstance(stmt.target, F.TupleExpr):
+                self._emit_tuple_assign(stmt)
+                return
+            if not isinstance(stmt.target, F.IdentExpr):
+                # A MemberExpr target is a field of an object formal has no
+                # model for: evaluate both sides and drop the store (the same
+                # compile-only reading a MemberExpr load gets).
+                if isinstance(stmt.target, F.MemberExpr):
+                    self._emit_expr(stmt.target.obj)
+                    self._emit_expr(stmt.value)
+                    return
+                raise CodegenError(
+                    f"assignment to {type(stmt.target).__name__} is not "
+                    f"lowered on the formal x86-64 path; only a plain name "
+                    f"has a home")
+            # type_ann is metadata, not a storage decision: types.
+            # function_var_types already resolves ann-or-infer for the type
+            # lattice, so a non-int annotation must not stop the VALUE from
+            # lowering.
+            self._emit_expr(stmt.value)
+            self._store_var(stmt.target.name, Reg.RAX)
+            self._note_binding(stmt.target.name, stmt.value)
+            return
+
+        if isinstance(stmt, F.MultiAssignStmt):
+            # Chained `a = b = expr`: evaluate the RHS once, then MOV it into
+            # each target — a MOV does not clobber RAX.
+            self._emit_expr(stmt.value)
+            for t in stmt.targets:
+                if not isinstance(t, F.IdentExpr):
+                    raise CodegenError(
+                        "chained assignment target must be a plain name "
+                        f"(got {type(t).__name__})")
+                self._store_var(t.name, Reg.RAX)
+                self._note_binding(t.name, stmt.value)
+            return
+
+        if isinstance(stmt, F.VarDecl):
+            # The home is allocated by _collect_var_names; only an
+            # initializer emits anything.
+            if stmt.value is not None:
+                self._emit_expr(stmt.value)
+                self._store_var(stmt.name, Reg.RAX)
+                self._note_binding(stmt.name, stmt.value)
+            return
+
+        if isinstance(stmt, F.FunctionDef):
+            raise CodegenError("nested function definitions are not "
+                               "supported on the formal x86-64 path")
+
+        raise CodegenError(
+            f"unsupported statement {type(stmt).__name__} on the formal "
+            f"x86-64 path")
+
+    def _intern_string(self, s: str) -> str:
+        """Return a stable data label for `s`, emitting the bytes on first use.
+
+        The bytes live after all the code (see `compile`), so a string is
+        read-only data in the image's text — the same place the arm64 backend
+        puts them."""
+        if s in self._str_intern:
+            return self._str_intern[s]
+        label = f"str_{self._str_counter}"
+        self._str_counter += 1
+        self._strings.append((label, s.encode() + b"\0"))
+        self._str_intern[s] = label
+        return label
+
+    def _flush_pending_finally(self, depth: int = 0) -> None:
+        """Emit the pending try-finally frames from `depth` inward.
+
+        `depth` is 0 for a return (every enclosing finally runs) and the
+        enclosing loop's own `fin_depth` for break/continue (only the frames
+        opened INSIDE that loop). The list is truncated first, so a return
+        inside a finally does not re-enter the same body. RAX (the return
+        value being built) is saved across the flush in a 16-byte slot."""
+        if len(self._pending_finally) <= depth:
+            return
+        fins = self._pending_finally[depth:]
+        del self._pending_finally[depth:]
+        self._push_slot(Reg.RAX)
+        for fin in reversed(fins):
+            for s in fin:
+                self._emit_stmt(s)
+        self._pop_slot(Reg.RAX)
+
+    def _emit_try(self, stmt: F.TryStmt) -> None:
+        """try/except/else/finally without an exception runtime.
+
+        The except arms are SKIPPED: formal has no unwinder, so there is no
+        edge from a raise site to a handler — and `raise` itself exits the
+        process, so no handler is ever reachable. `else` runs on the success
+        path (which, without EH, is simply the fall-through). A `finally` is
+        pushed onto `_pending_finally` so the paths that leave early
+        (return/break/continue/raise) run it too, and the normal fall-through
+        emits it here."""
+        fin = stmt.finally_body or []
+        need_fallthrough = bool(fin)
+        if fin:
+            self._pending_finally.append(fin)
+        try:
+            for s in stmt.body:
+                self._emit_stmt(s)
+            for s in (stmt.else_body or []):
+                self._emit_stmt(s)
+        finally:
+            if fin:
+                if (self._pending_finally
+                        and self._pending_finally[-1] is fin):
+                    self._pending_finally.pop()
+                else:
+                    # A return/raise inside the body already flushed it, so
+                    # the frame is gone and this code is unreachable.
+                    need_fallthrough = False
+        if need_fallthrough:
+            for s in fin:
+                self._emit_stmt(s)
+
+    def _emit_with(self, stmt: F.WithStmt) -> None:
+        """with-items, without a context-manager protocol.
+
+        Evaluate each context expression for its side effects (open(), lock
+        acquisition, ...); with no __enter__/__exit__ runtime an `as` alias
+        binds to the context expression's own value, not to an entered one.
+        The body always runs on the fall-through path, and return/break/
+        continue inside it do no cleanup (there is none to do). `async with`
+        lowers as a plain with. Same reading as the arm64 backend.
+        """
+        for it in stmt.items or []:
+            self._emit_expr(it.expr)
+            if it.alias is not None:
+                alias = _with_item_alias_name(it.alias)
+                if alias is not None:
+                    self._store_var(alias, Reg.RAX)
+        for s in stmt.body:
+            self._emit_stmt(s)
+
+    def _emit_extern_call(self, name: str) -> None:
+        """Call an unbound symbol, in whichever of the two extern forms the
+        target binary format uses (see __init__'s `extern_style`)."""
+        if self.extern_style == "got":
+            self.asm.emit_extern_call_got(name)
+        else:
+            self.asm.emit_extern_call(name)
+
+    def _emit_call_exit(self, status: int) -> None:
+        """Call the C library's `exit(status)`.
+
+        The extern path (a stub the loader binds) rather than a raw syscall,
+        because the syscall number for exit differs between Darwin and Linux
+        and the formal x86-64 path emits the same code for both — the binary
+        format, not the instruction stream, is what differs per platform."""
+        self._emit_mov_imm(Reg.RDI, status)
+        self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
+        self._emit_extern_call("exit")
+
+    def _emit_aug_assign(self, stmt) -> None:
+        if isinstance(stmt.target, F.IdentExpr):
+            name = stmt.target.name
+        else:
+            raise CodegenError(
+                "augmented assignment target must be a plain name on the "
+                f"formal x86-64 path (got {type(stmt.target).__name__})")
+        op = stmt.op[:-1] if stmt.op.endswith("=") and stmt.op != "==" \
+            else stmt.op
+        ttype = self._ttype(F.IdentExpr(name))
+        # The accumulator is R11, not RAX: for `-` and `>>` the variable's
+        # OLD value is the left operand and the assigned expression the right
+        # one, and RAX is holding the right one. R11 is written as the left
+        # operand so the operation reads in source order.
+        self._load_var(name, Reg.RAX)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(stmt.value)
+        self._pop_slot(Reg.R11)
+        if op in _ALU_RR:
+            self.asm.emit(_ALU_RR[op](Reg.R11, Reg.RAX))   # R11 = old op rhs
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
+        elif op in ("<<", ">>"):
+            # Variable shift: the count has to be in CL, and the value being
+            # shifted in RAX.
+            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
+            self.asm.emit(encode_shift_r64_cl(
+                _SHIFT_CL[op] if cmp_signed(ttype) else _SHIFT_IMM[op],
+                Reg.RAX))
+        else:
+            raise CodegenError(
+                f"unsupported augmented operator {stmt.op!r} on the formal "
+                f"x86-64 path (supports + - * & | ^ << >>)")
+        self._emit_trunc(common_type(ttype, self._ttype(stmt.value)))
+        self._store_var(name, Reg.RAX)
+
+
+    # ── control flow ─────────────────────────────────────────────────
+
+    def _emit_jcc_bool(self, reg: Reg, cc: int, label: str) -> None:
+        """Branch on a 0/1 boolean already sitting in `reg`.
+
+        SETcc does NOT set flags, so a Jcc placed straight after it reads the
+        flags left by whatever CMP produced the boolean — i.e. it tests the
+        original comparison a second time instead of the result. That is not
+        a subtle difference: for `i >= count` the CMP's ZF is only set when
+        i EQUALS count, so a bare `jne` after the SETcc leaves the loop on
+        the first iteration. The TEST re-establishes flags from the value.
+        """
+        self.asm.emit(encode_test_r64_r64(reg, reg))
+        self._emit_jcc(cc, label)
+
+    def _emit_jcc(self, cc: int, label: str) -> None:
+        """Branch to `label` when condition `cc` holds.
+
+        ALWAYS the 6-byte rel32 form, never the 2-byte rel8 one. A rel8
+        branch reaches 127 bytes and a real function body runs to thousands,
+        so a short branch is not merely slower — it is a build failure
+        ("j8 offset out of range") for any function with a loop or a
+        comprehension in it, and picking the width per branch would mean the
+        width could not be known until every label is placed. The arm64
+        backend does not have to think about this: its branches are ±128 MiB.
+        """
+        self.asm.emit(encode_jcc_rel32(cc, 0))
+        self.asm.emit_label_rel32(label, here_offset=-4)
+
+    def _emit_jmp(self, label: str) -> None:
+        """Unconditional jump. Always the 5-byte rel32 form: x86-64 has no
+        short jmp the assembler will pick, and a fixed-width form means the
+        emitted size never depends on how far the target turns out to be."""
+        self.asm.emit(encode_jmp_rel32(0))
+        self.asm.emit_label_rel32(label, here_offset=-4)
+
+    def _record_cond_branch(self) -> None:
+        """Note that the next emitted instruction is an `if`'s own branch.
+
+        Call immediately before the Jcc. The cursor is the address the branch
+        itself will land at, which is what a later proof generator's pc → word
+        map is keyed on. A short-circuit `and`/`or` in a condition emits a
+        Jcc of its own that closes a block identically, so the consumer cannot
+        tell them apart without this list."""
+        self._cond_branch_pcs.append(
+            self.asm._org + len(self.asm.sections["text"]))
+
+    def _emit_branch_if_false(self, label: str) -> None:
+        """Jump to `label` when RAX is zero (the condition is falsy)."""
+        self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+        self._record_cond_branch()
+        self._emit_jcc(COND_E, label)
+
+    def _emit_if(self, stmt: F.IfStmt) -> None:
+        """if / elif / else — the elif chain lowers to sequential tests, each
+        failing branch jumping to the next test (or to else/end).
+
+            L_i:  <test i>  --falsy--> L_{i+1}
+                  <body i>  --jmp--> end
+            L_else: <else body>
+            end:"""
+        self._if_counter += 1
+        if_id = self._if_counter
+        fn = self.func_name
+        end_label = f"{fn}_endif_{if_id}"
+
+        tests = [(stmt.condition, stmt.then_body)]
+        for cond, body in (stmt.elifs or []):
+            tests.append((cond, body))
+        has_else = stmt.else_body is not None or bool(stmt.elifs)
+        else_label = f"{fn}_else_{if_id}"
+
+        for i, (cond, body) in enumerate(tests):
+            self.asm.label(f"{fn}_if{if_id}_alt_{i}")
+            self._emit_expr(cond)
+            fail = f"{fn}_if{if_id}_alt_{i + 1}" if i + 1 < len(tests) else (
+                else_label if has_else else end_label)
+            self._emit_branch_if_false(fail)
+            for s in body:
+                self._emit_stmt(s)
+            if i < len(tests) - 1 or stmt.else_body is not None:
+                self._emit_jmp(end_label)
+
+        if has_else:
+            self.asm.label(else_label)
+            for s in (stmt.else_body or []):
+                self._emit_stmt(s)
+        self.asm.label(end_label)
+
+    def _emit_loop(self, cond, body, else_body, for_info) -> None:
+        """while, or for over range(), with an optional else clause.
+
+            start:  <test>          --done--> false:
+                    <body>
+            step:   [for: i += step]
+                    jmp start
+            false:  [<else body>]
+            end:
+
+        `break` jumps to end (skipping the else); `continue` jumps to step, so
+        a for-loop still advances its counter."""
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        start_label = f"{fn}_loop{wid}_start"
+        step_label = f"{fn}_loop{wid}_step"
+        false_label = f"{fn}_loop{wid}_false"
+        end_label = f"{fn}_loop{wid}_end"
+
+        for_range = for_info is not None
+        depth = self._for_depth
+        end_tmp = f"_fe{depth}"
+        step_tmp = f"_fs{depth}"
+        descending = False
+        if for_range:
+            target, rargs = for_info
+            start_val, end_val, step_val = _range_info(rargs)
+            lit_step = self._static_int(step_val)
+            if lit_step is not None and lit_step < 0:
+                descending = True
+            # The bound and step are evaluated ONCE, before the loop, into
+            # temps: re-evaluating them per iteration would re-run any calls
+            # in the range() arguments.
+            self._emit_expr(end_val)
+            self._store_var(end_tmp, Reg.RAX)
+            if lit_step is None:
+                self._emit_expr(step_val)
+                self._store_var(step_tmp, Reg.RAX)
+            self._emit_expr(start_val)
+            self._store_var(target, Reg.RAX)
+            self._for_depth += 1
+
+        self._loops.append({"start": start_label, "step": step_label,
+                            "break": end_label,
+                            "fin_depth": len(self._pending_finally)})
+        try:
+            self.asm.label(start_label)
+            if for_range:
+                self._load_var(target, Reg.RAX)
+                self._load_var(end_tmp, Reg.R11)
+                self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+                self._record_cond_branch()
+                # The branch LEAVES the loop, so its condition is the negation
+                # of the loop's own: an ascending range runs while i < end and
+                # exits on i >= end, a descending one runs while i > end and
+                # exits on i <= end. (The `while` form below cannot get this
+                # wrong, because it branches on the negation of a value the
+                # condition expression already produced.) Signed, since the
+                # counter and the bound are int64 values.
+                cc = COND_LE if descending else COND_GE
+                self._emit_jcc(cc, false_label)
+            else:
+                self._emit_expr(cond)
+                self._emit_branch_if_false(false_label)
+
+            for s in body:
+                self._emit_stmt(s)
+
+            self.asm.label(step_label)
+            if for_range:
+                self._emit_for_inc(target, step_val, step_tmp, lit_step)
+            self._emit_jmp(start_label)
+
+            self.asm.label(false_label)
+            for s in (else_body or []):
+                self._emit_stmt(s)
+            self.asm.label(end_label)
+        finally:
+            if for_range:
+                self._for_depth -= 1
+            self._loops.pop()
+
+    def _emit_for_inc(self, target: str, step, step_tmp: str, lit_step) -> None:
+        """Advance a for-range counter by `step`."""
+        self._load_var(target, Reg.RAX)
+        if lit_step is not None:
+            if lit_step == 0:
+                raise CodegenError("range() step must not be zero")
+            if 0 < lit_step <= 0x7FFFFFFF:
+                self.asm.emit(encode_add_r64_imm32(Reg.RAX, lit_step))
+            elif -0x80000000 <= lit_step < 0:
+                self.asm.emit(encode_sub_r64_imm32(Reg.RAX, -lit_step))
+            else:
+                self.asm.emit(encode_mov_r64_imm32(Reg.R11, lit_step))
+                self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
+        else:
+            # A negative literal arrives as UnaryOp('-', IntLiteral(n)), so
+            # both spellings have to reduce to a static step.
+            self._load_var(step_tmp, Reg.R11)
+            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
+        self._store_var(target, Reg.RAX)
+
+    # ── containers ───────────────────────────────────────────────────
+    #
+    # A list, tuple, set or dict is a BLOB in the frame, not a heap object:
+    #     list/tuple/set:  [count:i64][element 0]…[element n-1]
+    #     dict:            [count:i64][key 0][value 0]…      (pairs, 16 bytes)
+    #     slice view:      [count:i64][element …]            (a materialized copy)
+    # and its VALUE is the blob's address. The layout is the arm64 backend's
+    # byte for byte, so a value produced by either backend describes the same
+    # thing and a future proof model only has to learn it once.
+
+    def _reserve_blob(self, nbytes: int, what: str) -> int:
+        """Reserve `nbytes` of blob area, returning its RBP-relative offset.
+
+        The whole blob is reserved BEFORE any element is evaluated, so a
+        nested container lands above its parent rather than inside the region
+        the parent is still filling."""
+        if self._list_cursor + nbytes > self._blob_cap:
+            raise CodegenError(
+                f"{what} exceed the formal frame "
+                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+        return offset
+
+    def _emit_elem_addr(self, base_reg: Reg, index_reg: Reg, dst_reg: Reg,
+                        header: int = 8, scale: int = 3) -> None:
+        """dst = base + header + (index << scale) — one blob element.
+
+        The blob's elements start `header` bytes in (past the count, or past
+        count+key for a dict pair) and are `1 << scale` bytes apart. Written
+        as a shift and two adds rather than a multiply of a partly-built
+        address, because `(base + header) * index` is a different — and
+        silently plausible — address."""
+        self.asm.emit(encode_mov_r64_r64(dst_reg, index_reg))
+        self.asm.emit(encode_shift_r64_imm8("<<", dst_reg, scale))
+        self.asm.emit(encode_add_r64_imm32(dst_reg, header))
+        self.asm.emit(encode_add_r64_r64(dst_reg, base_reg))
+
+    def _emit_blob_base(self, offset: int, reg: Reg) -> None:
+        """reg = RBP + offset — the blob's address.
+
+        RBP-relative rather than RSP-relative because RSP moves while
+        expressions are evaluated (pushed temporaries) but a blob lives until
+        the function returns."""
+        self.asm.emit(encode_lea_r64_rm64(reg, Reg.RBP, offset))
+
+    def _emit_list(self, expr) -> None:
+        """A list/tuple/set literal → its blob address in RAX.
+
+        Elements are int64s, string addresses or inner-blob addresses. `*xs`
+        has no compile-time length and raises; `*literal` is expanded
+        statically."""
+        elements = list(expr.elements)
+        flat = []
+        for el in elements:
+            if isinstance(el, F.UnaryOp) and el.op == "*":
+                if isinstance(el.operand, (F.ListExpr, F.TupleExpr)):
+                    flat.extend(el.operand.elements)
+                    continue
+                raise CodegenError(
+                    "star-unpack of a non-literal into a list is not "
+                    "lowered on the formal x86-64 path")
+            flat.append(el)
+        n = len(flat)
+        offset = self._reserve_blob(8 * (1 + n), "list literals")
+        self._emit_blob_base(offset, Reg.R11)
+        self._emit_mov_imm(Reg.R10, n)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        for i, el in enumerate(flat):
+            self._emit_expr(el)
+            # Recompute the base: element emission (a call, a string LEA)
+            # clobbers R11.
+            self._emit_blob_base(offset, Reg.R11)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * (i + 1), Reg.RAX))
+        self._emit_blob_base(offset, Reg.RAX)
+
+    def _emit_range_list(self, rargs: list) -> None:
+        """`range(a[,b[,step]])` as a VALUE → a list blob in RAX.
+
+        The element count is computed at run time (the bounds can be
+        variables), but the reservation cannot be — a blob is a fixed-size
+        frame object, and a nested container emitted while filling it must
+        land above the whole thing. So the reservation is the exact count when
+        every bound is a literal and a fixed cap otherwise, and the runtime
+        count is checked against it: too many elements exits(1) rather than
+        running past the blob area into the spill slots."""
+        start_e, stop_e, step_e = _range_info(rargs)
+        statics = [self._static_int(e) for e in (start_e, stop_e, step_e)]
+        exact = None
+        if all(v is not None for v in statics):
+            start, stop, step = statics
+            if step == 0:
+                raise CodegenError("range() step must not be zero")
+            span = (stop - start) if step > 0 else (start - stop)
+            exact = max(0, (span + abs(step) - 1) // abs(step))
+        cap = exact if exact is not None else 64
+        offset = self._reserve_blob(8 + 8 * cap, "range() lists")
+
+        # R10 = start, R11 = step; count goes in R9.
+        self._emit_expr(start_e)
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))
+        self._emit_expr(step_e)
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        # Unique per emission: a second range() in the same function would
+        # otherwise reuse these names, and the label table keeps only the LAST
+        # definition — so the first fill loop's backward branch would resolve
+        # to the second one.
+        self._while_counter += 1
+        rid = self._while_counter
+        zero_label = f"{self.func_name}_rz{rid}"
+        div_label = f"{self.func_name}_rd{rid}"
+        ok_label = f"{self.func_name}_rok{rid}"
+        fill_label = f"{self.func_name}_rfill{rid}"
+        done_label = f"{self.func_name}_rdone{rid}"
+        abs_label = f"{self.func_name}_rabs{rid}"
+        self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
+        self._emit_jcc_bool(Reg.R11, COND_E, zero_label)
+        self._emit_expr(stop_e)
+        # span = |stop - start|
+        self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.R10))
+        if (self._static_int(step_e) or 1) < 0:
+            self.asm.emit(encode_neg_r64(Reg.RAX))
+        # count = ceil(span / |step|). |step| has to be computed as a
+        # CONDITIONAL negate, not an unconditional one: NEG of 1 is
+        # 0xFFFF_FFFF_FFFF_FFFF, and `span + |step| - 1` then wraps, so the
+        # divide yields 0 and the list comes out empty. R11 keeps the SIGNED
+        # step for the fill below.
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R11))
+        self.asm.emit(encode_test_r64_r64(Reg.R8, Reg.R8))
+        abs_label = f"{self.func_name}_rabs"
+        self._emit_jcc(COND_GE, abs_label)
+        self.asm.emit(encode_neg_r64(Reg.R8))
+        self.asm.label(abs_label)
+        self.asm.emit(encode_add_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_sub_r64_imm8(Reg.R9, 1))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R9))
+        self.asm.emit(encode_xor_edx_edx())
+        self.asm.emit(encode_div_r64(Reg.R8))
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RAX))
+        self._emit_jmp(div_label)
+        self.asm.label(zero_label)
+        self._emit_mov_imm(Reg.R9, 0)
+        self.asm.label(div_label)
+        # Cap check: the reservation is `cap` elements.
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R9, cap))
+        self._emit_jcc(COND_BE, ok_label)
+        self._emit_call_exit(1)
+        self.asm.label(ok_label)
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R9))
+        # Fill: out[1+j] = start + j*step, walking the source by 8*|step| is
+        # not possible (the step is a runtime value), so compute each element.
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RDI))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))
+        self._emit_mov_imm(Reg.R8, 0)
+        self.asm.label(fill_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.R9))
+        self._emit_jcc(COND_AE, done_label)
+        # value = start + j*step
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
+        self.asm.emit(encode_imul_r64_r64(Reg.R8, Reg.R11))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R8))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))
+        self._emit_jmp(fill_label)
+        self.asm.label(done_label)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
+
+    def _is_string_subscript(self, obj) -> bool:
+        """True when `obj` is known to hold a string (char*) address, so a
+        subscript is a byte load rather than a list index."""
+        if isinstance(obj, F.StringLiteral):
+            return True
+        if isinstance(obj, F.IdentExpr):
+            return obj.name in self._string_vars
+        return False
+
+    def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
+        """RAX = the ADDRESS of `obj[index]` (not its value).
+
+        Split out so the same address computation serves a read, a store and
+        an augmented assignment. A list index is bounds-checked (negative
+        indices wrap like Python first, then the bound is checked); an
+        out-of-range index exits(1), which is the same signal the arm64
+        backend uses."""
+        if self._is_dict_subscript(e.obj):
+            self._emit_dict_lookup_addr(e)
+            return
+        self._emit_expr(e.obj)
+        self._push_slot(Reg.RAX)                    # base
+        self._emit_expr(e.index)
+        self._pop_slot(Reg.R11)                     # R11 = base
+        if self._is_string_subscript(e.obj):
+            # A string is a plain byte run: no header, no count, so there is
+            # nothing to bounds-check the index against and (deliberately) no
+            # check emitted — reading the NUL terminator is the same answer a
+            # NUL-terminated read gives.
+            # addr = base + index. RAX still holds the INDEX here and R11
+            # the base, so this is a plain add — copying the base into RAX
+            # first would compute base+base.
+            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
+            return
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))    # count
+        self._emit_bounds_check(Reg.RAX, Reg.R11)
+        self._emit_elem_addr(Reg.R10, Reg.RAX, Reg.RAX)
+
+    def _emit_bounds_check(self, index_reg: Reg, count_reg):
+        """Exit(1) unless `index_reg` is a valid element index.
+
+        A negative index counts from the end, Python-style: it is negated and
+        `count` added, and only then range-checked, so an index below `-count`
+        stays negative and is rejected by the same unsigned comparison. The
+        count register is left intact — the caller needs it for the address
+        arithmetic that follows.
+
+        `count_reg` None means a string, which has no count header: its
+        elements run to a NUL, so there is nothing to check the index against
+        and the read stops at the terminator."""
+        self._if_counter += 1
+        bid = self._if_counter
+        fn = self.func_name
+        ok_label = f"{fn}_bnds{bid}_ok"
+        bad_label = f"{fn}_bnds{bid}_bad"
+        wrapped_label = f"{fn}_bnds{bid}_wrapped"
+        if count_reg is None:
+            return
+        if True:
+            self.asm.emit(encode_cmp_r64_imm8(index_reg, 0))
+            self._emit_jcc(COND_GE, wrapped_label)
+            # Python: a negative index counts from the end, i.e. it is ADDED
+            # to the count (-1 + 3 == 2), not subtracted from it as an
+            # absolute value (3 - 1 == 2 coincides, 3 - |−1| == 4 does not).
+            # An index below -count stays negative and fails the check below.
+            self.asm.emit(encode_add_r64_r64(index_reg, count_reg))
+            self.asm.label(wrapped_label)
+            self.asm.emit(encode_cmp_r64_r64(index_reg, count_reg))
+        self._emit_jcc(COND_AE, bad_label)     # index >= count
+        self._emit_jmp(ok_label)
+        self.asm.label(bad_label)
+        self._emit_call_exit(1)
+        self.asm.label(ok_label)
+
+    def _emit_subscript(self, e: F.SubscriptExpr) -> None:
+        """`obj[index]` → the element (or byte, for a string) in RAX."""
+        if e.attrs is not None:
+            raise CodegenError(
+                "type-parameter subscript [...] is not supported on the "
+                "formal x86-64 path")
+        if isinstance(e.index, F.SliceExpr):
+            self._emit_slice_parts(e.obj, e.index.start, e.index.stop,
+                                   e.index.step)
+            return
+        self._emit_subscript_addr(e)
+        # The address is in RAX; a string's element is a BYTE at it, so the
+        # load has to happen before the zero-extension — MOVZX of the address
+        # itself would yield the low byte of a pointer.
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
+        if self._is_string_subscript(e.obj):
+            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+
+    def _blob_est(self, e) -> int:
+        """Static upper bound on a blob expression's element count.
+
+        A concat has to reserve its result BEFORE evaluating either operand
+        (a nested container must not land inside the region being filled), so
+        the size has to be known without running anything — hence an estimate
+        over the syntax rather than the value. The runtime count is checked
+        against it below, so an under-estimate fails loudly instead of
+        overrunning the frame."""
+        if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            return len(e.elements)
+        if isinstance(e, F.DictExpr):
+            return len(e.pairs)
+        if isinstance(e, F.SliceExpr):
+            return 64
+        if isinstance(e, F.Comprehension):
+            return self._compr_cap(e)
+        if isinstance(e, F.CallExpr):
+            return 64
+        if isinstance(e, F.BinaryOp):
+            if e.op in ("+", "|"):
+                return self._blob_est(e.left) + self._blob_est(e.right)
+            if e.op in ("or", "and"):
+                return max(self._blob_est(e.left), self._blob_est(e.right))
+        return 64
+
+    def _compr_cap(self, expr: F.Comprehension) -> int:
+        """Upper bound on a comprehension's RESULT size, for the reservation.
+
+        Nested generators MULTIPLY: `[i + j for i in range(n) for j in
+        range(n)]` can produce n*n elements, and taking the maximum of the
+        per-generator bounds (as an earlier version here did) reserves a
+        fraction of what the appends will need, so the result runs off the end
+        of its own blob. An unknown iterable falls back to a frame-safe
+        default, and the runtime append still bounds-checks against whatever
+        was reserved (see _compr_append_elem).
+
+        Capped at 256 the way the arm64 backend caps it, so a `range` of
+        something huge cannot reserve the whole frame at compile time."""
+        gens = expr.generators or []
+        if not gens:
+            return 1
+        total = 1
+        for g in gens:
+            total *= max(1, self._blob_est(g.iterable))
+            if total > 256:
+                return 256
+        return max(1, total)
+
+    def _emit_list_concat(self, left, right) -> None:
+        """`a + b` over two blobs → a fresh blob holding both, in RAX.
+
+        The result is a COPY: a blob is a fixed-size frame object with no
+        capacity to grow into, so the element counts are read at run time and
+        the two copies are loops. The reservation is a static estimate clamped
+        to the frame's remaining blob area, and the runtime total is checked
+        against it — an under-estimate exits(1) rather than overwriting the
+        spill slots above the blob area.
+
+        Register plan for the two copies (no call happens in between, so
+        caller-saved scratch is free): RSI/RDX the operands, RDI the result,
+        R8/R9 the two counts, RCX a walking destination pointer, RAX the
+        element, R11 the index."""
+        est = max(1, self._blob_est(left) + self._blob_est(right))
+        avail = self._blob_cap - self._list_cursor
+        if avail < 16:
+            raise CodegenError(
+                f"list concat exceeds the formal frame "
+                f"({self._list_cursor} > {self._blob_cap} bytes)")
+        cap = min(est, (avail - 8) // 8)
+
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                    # [rsp] = left
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))   # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+
+        # A nested emit above advanced the cursor; re-clamp against what is
+        # actually left.
+        avail = self._blob_cap - self._list_cursor
+        if avail < 16:
+            raise CodegenError(
+                f"list concat exceeds the formal frame "
+                f"({self._list_cursor} > {self._blob_cap} bytes)")
+        cap = min(est, (avail - 8) // 8)
+        offset = self._reserve_blob(8 + 8 * cap, "list concatenation")
+
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))   # nR
+        self._emit_blob_base(offset, Reg.RDI)                    # dst
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R9))       # total
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        self._while_counter += 1
+        fn = f"{self.func_name}_cat{self._while_counter}"
+        overflow_label = f"{fn}_ovf"
+        self.asm.emit(encode_cmp_r64_imm32(Reg.RAX, cap))
+        self._emit_jcc(COND_BE, overflow_label)
+        self._emit_call_exit(1)
+        self.asm.label(overflow_label)
+
+        self._while_counter += 2
+        cl = f"{fn}_lcl{self._while_counter}"
+        cld = f"{fn}_lcd{self._while_counter}"
+        cr = f"{fn}_lcr{self._while_counter - 1}"
+        crd = f"{fn}_lcrd{self._while_counter - 1}"
+        # left: dst[1+i] = left[1+i]
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RSI))
+        self.asm.emit(encode_add_r64_imm32(Reg.RAX, 8))
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RDI))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))
+        self._emit_mov_imm(Reg.R11, 0)
+        self.asm.label(cl)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R8))
+        self._emit_jcc(COND_AE, cld)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RAX, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.R10))
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(cl)
+        self.asm.label(cld)
+        # right: RCX already points at dst + 8 + 8*nL, which is where the
+        # right operand's elements start.
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
+        self.asm.emit(encode_add_r64_imm32(Reg.RAX, 8))
+        self._emit_mov_imm(Reg.R11, 0)
+        self.asm.label(cr)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R9))
+        self._emit_jcc(COND_AE, crd)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RAX, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.R10))
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(cr)
+        self.asm.label(crd)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
+
+    def _emit_membership(self, left, right, invert: bool) -> None:
+        """`needle in haystack` — a linear scan of the blob's elements.
+
+        The needle stays in its 16-byte stack slot for the whole scan and is
+        read (not popped) each iteration, because every register is scratch
+        inside the loop; it is released once, on whichever exit is taken."""
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                   # needle
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RAX))    # haystack
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R9, 0))   # count
+        self._emit_mov_imm(Reg.R8, 0)              # index
+        self._if_counter += 1
+        mid = self._if_counter
+        fn = self.func_name
+        loop_label = f"{fn}_in{mid}_loop"
+        notfound_label = f"{fn}_in{mid}_nf"
+        found_label = f"{fn}_in{mid}_hit"
+        end_label = f"{fn}_in{mid}_end"
+        self.asm.label(loop_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.R10))
+        self._emit_setcc_bool(Reg.R11, "setae")
+        self._emit_jcc_bool(Reg.R11, COND_NE, notfound_label)
+        self._emit_elem_addr(Reg.R9, Reg.R8, Reg.RDI)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RDI, 0))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))   # needle
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDI, Reg.R10))
+        self._emit_setcc_bool(Reg.R11, "sete")
+        # Equal -> found. (Jumping to `found` on NOT-equal is the same
+        # inverted-polarity trap as the loop exit above.)
+        self._emit_jcc_bool(Reg.R11, COND_NE, found_label)
+        self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))
+        self._emit_jmp(loop_label)
+        self.asm.label(found_label)
+        self._pop_slot(Reg.R10)
+        self._emit_mov_imm(Reg.RAX, 0 if invert else 1)
+        self._emit_jmp(end_label)
+        self.asm.label(notfound_label)
+        self._pop_slot(Reg.R10)
+        self._emit_mov_imm(Reg.RAX, 1 if invert else 0)
+        self.asm.label(end_label)
+
+    def _emit_for_list(self, stmt, else_body) -> None:
+        """`for x in <blob>` — including a tuple target.
+
+        The iterable is materialized ONCE (so `for x in x` behaves), the
+        index and the blob pointer live in per-depth temps `_fi{d}`/`_fb{d}`,
+        and `continue` jumps past the increment's target (step), so it still
+        advances — the same contract the range loop has."""
+        d = self._for_depth
+        self._for_depth += 1
+        try:
+            it = stmt.iterable
+            if not isinstance(it, (F.IdentExpr, F.ListExpr, F.TupleExpr,
+                                   F.SetExpr, F.DictExpr, F.StringLiteral,
+                                   F.SubscriptExpr, F.SliceExpr,
+                                   F.Comprehension, F.MemberExpr,
+                                   F.TernaryExpr, F.UnaryOp, F.CallExpr,
+                                   F.BinaryOp, F.AwaitExpr, F.WalrusExpr)):
+                raise CodegenError(
+                    f"unsupported for-loop iterable {type(it).__name__} on "
+                    f"the formal x86-64 path")
+            from mojo.middle.boundnames import _lbn_target_names
+            tnames = _lbn_target_names(stmt.target) \
+                if isinstance(stmt.target, str) else []
+            if not tnames or any(not n.isidentifier() for n in tnames):
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
+
+            self._while_counter += 1
+            wid = self._while_counter
+            fn = self.func_name
+            start_label = f"{fn}_fl{wid}_start"
+            step_label = f"{fn}_fl{wid}_step"
+            false_label = f"{fn}_fl{wid}_false"
+            end_label = f"{fn}_fl{wid}_end"
+            fi_name, fb_name = f"_fi{d}", f"_fb{d}"
+
+            # Materialize the iterable once, under container context so a
+            # BinaryOp `+` here means list concat rather than integer add.
+            self._container_ctx += 1
+            try:
+                self._emit_expr(it)
+            finally:
+                self._container_ctx -= 1
+            self._store_var(fb_name, Reg.RAX)
+            self._emit_mov_imm(Reg.RAX, 0)
+            self._store_var(fi_name, Reg.RAX)
+
+            self._loops.append({"start": start_label, "step": step_label,
+                                "break": end_label,
+                                "fin_depth": len(self._pending_finally)})
+            try:
+                self.asm.label(start_label)
+                self._load_var(fb_name, Reg.R11)
+                self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+                self._load_var(fi_name, Reg.RAX)
+                self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R10))
+                # R8, not R11: R11 holds the blob base, and the element
+                # address computed next is relative to it.
+                self._emit_setcc_bool(Reg.R8, "setae")
+                self._emit_jcc_bool(Reg.R8, COND_NE, false_label)
+                self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI)
+                self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
+                if len(tnames) == 1:
+                    self._store_var(tnames[0], Reg.RAX)
+                else:
+                    self._emit_for_unpack(tnames, Reg.RAX,
+                                          f"{fn}_flt{wid}")
+
+                for s in stmt.body:
+                    self._emit_stmt(s)
+
+                self.asm.label(step_label)
+                self._load_var(fi_name, Reg.RAX)
+                self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))
+                self._store_var(fi_name, Reg.RAX)
+                self._emit_jmp(start_label)
+
+                self.asm.label(false_label)
+                for s in (else_body or []):
+                    self._emit_stmt(s)
+                self.asm.label(end_label)
+            finally:
+                self._loops.pop()
+        finally:
+            self._for_depth -= 1
+
+    def _emit_dict(self, expr: F.DictExpr) -> None:
+        """A dict literal → its pair-blob address in RAX.
+
+        Layout `[count:i64][key0][value0]…` — pairs at 16-byte stride, which
+        is what makes a lookup a linear scan over the KEYS at that stride
+        (a stride-8 scan would walk keys and values alternately). `**other` /
+        `*xs` are evaluated for their side effects and skipped: a pair-blob
+        has a fixed size and no way to grow into a runtime-sized merge."""
+        pairs = []
+        for k, v in expr.pairs:
+            if isinstance(k, F.UnaryOp) and k.op in ("**", "*"):
+                self._emit_expr(k.operand)
+                if v is not None:
+                    self._emit_expr(v)
+                continue
+            pairs.append((k, v))
+        n = len(pairs)
+        offset = self._reserve_blob(8 + 16 * n, "dict literals")
+        self._emit_blob_base(offset, Reg.R11)
+        self._emit_mov_imm(Reg.R10, n)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        for i, (k, v) in enumerate(pairs):
+            self._emit_expr(k)
+            self._emit_blob_base(offset, Reg.R11)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 + 16 * i, Reg.RAX))
+            if v is not None:
+                self._emit_expr(v)
+            else:
+                self._emit_mov_imm(Reg.RAX, 0)
+            self._emit_blob_base(offset, Reg.R11)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 16 + 16 * i, Reg.RAX))
+        self._emit_blob_base(offset, Reg.RAX)
+
+    def _is_dict_subscript(self, obj) -> bool:
+        """True when `obj` is known to hold a dict pair-blob pointer, so a
+        subscript is a key lookup rather than an index."""
+        if isinstance(obj, F.DictExpr):
+            return True
+        if isinstance(obj, F.IdentExpr):
+            return obj.name in self._dict_vars
+        return False
+
+    def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
+        """RAX = the ADDRESS of the value stored under `e`'s key.
+
+        A linear scan over the pairs at 16-byte stride, comparing keys; a
+        miss exits(1), the same signal an out-of-range list index gives (this
+        path has no exception runtime to raise KeyError with). The key is
+        spilled first because the scan clobbers RAX."""
+        self._emit_expr(e.obj)
+        self._push_slot(Reg.RAX)                   # dict blob
+        self._emit_expr(e.index)
+        self._push_slot(Reg.RAX)                   # key
+        self._pop_slot(Reg.RDI)                    # key
+        self._pop_slot(Reg.RSI)                    # dict blob
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSI, 0))   # npairs
+        self._emit_mov_imm(Reg.R11, 0)             # i
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        loop_label = f"{fn}_dl{wid}_loop"
+        miss_label = f"{fn}_dl{wid}_miss"
+        hit_label = f"{fn}_dl{wid}_hit"
+        end_label = f"{fn}_dl{wid}_end"
+        self.asm.label(loop_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R10))
+        self._emit_setcc_bool(Reg.R8, "setae")
+        self._emit_jcc_bool(Reg.R8, COND_NE, miss_label)
+        # key at dict + 8 + 16*i
+        self._emit_elem_addr(Reg.RSI, Reg.R11, Reg.R9, header=8, scale=4)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.R9, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.RDI))
+        self._emit_setcc_bool(Reg.R8, "sete")
+        self._emit_jcc_bool(Reg.R8, COND_NE, hit_label)
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(loop_label)
+        self.asm.label(hit_label)
+        # value address = dict + 16 + 16*i
+        self._emit_elem_addr(Reg.RSI, Reg.R11, Reg.RAX, header=16, scale=4)
+        self._emit_jmp(end_label)
+        self.asm.label(miss_label)
+        self._emit_call_exit(1)
+        self.asm.label(end_label)
+
+    def _emit_for_unpack(self, tnames: list, blob_reg: Reg, tag: str) -> None:
+        """Bind a tuple target's names from the blob pointer in `blob_reg`.
+
+        The element must itself be a `[count][e0…]` blob whose count matches
+        the target's arity; a mismatch exits(1), the same signal `a, b = rhs`
+        gives."""
+        fn = self.func_name
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, blob_reg))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(tnames)))
+        self._if_counter += 1
+        uid = self._if_counter
+        ok_label = f"{fn}_fu{uid}_ok"
+        bad_label = f"{fn}_fu{uid}_bad"
+        self._emit_jcc(COND_NE, bad_label)
+        self._emit_jmp(ok_label)     # arity matches: skip the exit
+        self.asm.label(bad_label)
+        self._emit_call_exit(1)
+        self.asm.label(ok_label)
+        for i, name in enumerate(tnames):
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R10, 8 * (i + 1)))
+            self._store_var(name, Reg.RAX)
+
+    # ── expressions (result in RAX) ──────────────────────────────────
+
+    def _emit_expr(self, expr) -> None:
+        if isinstance(expr, F.IntLiteral):
+            self._emit_mov_imm(Reg.RAX, expr.value)
+            return
+
+        if isinstance(expr, F.BoolLiteral):
+            self._emit_mov_imm(Reg.RAX, 1 if expr.value else 0)
+            return
+
+        if isinstance(expr, F.NoneLiteral):
+            self._emit_mov_imm(Reg.RAX, 0)
+            return
+
+        if isinstance(expr, F.IdentExpr):
+            # Python singletons parse as bare idents (True/False are
+            # BoolLiterals; None stays an IdentExpr). Materialize them as
+            # integers so `x is None` compares against 0 rather than against
+            # whatever a register happens to hold.
+            if expr.name in ("None", "True", "False"):
+                self._emit_mov_imm(
+                    Reg.RAX, {"None": 0, "True": 1, "False": 0}[expr.name])
+                return
+            self._load_var(expr.name, Reg.RAX)
+            return
+
+        if isinstance(expr, F.FloatLiteral):
+            # formal is int-only; truncate toward zero (matches a C cast).
+            self._emit_mov_imm(Reg.RAX, int(expr.value))
+            return
+
+        if isinstance(expr, F.StringLiteral):
+            # The literal's ADDRESS is the value: a string is a pointer to
+            # bytes appended after the code, materialized with a RIP-relative
+            # LEA whose displacement the assembler back-patches once the data
+            # label is known. Interned by content, so equal literals share one
+            # address. Mirrors the arm64 backend's ADRP+ADD of the same data.
+            self.asm.emit(encode_lea_r64_rip(Reg.RAX, 0))
+            # -4, not -3: the 7-byte encoding is REX, opcode, ModRM, disp32,
+            # so the displacement FIELD starts 4 bytes before the end (and
+            # there is no SIB byte in front of it to skip).
+            self.asm.emit_label_rip(self._intern_string(expr.value),
+                                    here_offset=-4)
+            return
+
+        if isinstance(expr, F.UnaryOp):
+            self._emit_unary(expr)
+            return
+
+        if isinstance(expr, F.BinaryOp):
+            self._emit_binop(expr)
+            return
+
+        if isinstance(expr, F.CompareChain):
+            self._emit_compare_chain(expr)
+            return
+
+        if isinstance(expr, F.CallExpr):
+            self._emit_call(expr)
+            return
+
+        if isinstance(expr, F.TernaryExpr):
+            # `a if c else b` — same branch shape as if/else, both arms leave
+            # their value in RAX, joined at the end.
+            self._if_counter += 1
+            tid = self._if_counter
+            fn = self.func_name
+            else_label = f"{fn}_tern{tid}_else"
+            end_label = f"{fn}_tern{tid}_end"
+            self._emit_expr(expr.condition)
+            self._emit_branch_if_false(else_label)
+            self._emit_expr(expr.then_val)
+            self._emit_jmp(end_label)
+            self.asm.label(else_label)
+            self._emit_expr(expr.else_val)
+            self.asm.label(end_label)
+            return
+
+        if isinstance(expr, F.Comprehension):
+            self._emit_comprehension(expr)
+            return
+
+        if isinstance(expr, F.DictExpr):
+            self._emit_dict(expr)
+            return
+
+        if isinstance(expr, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            # TupleExpr and ListExpr have identical `elements` and one blob
+            # layout, so they share an emitter rather than two parallel ones.
+            # A set lowers as a list blob: membership and iteration are the
+            # only uses formal sees, and the blob gives both.
+            self._emit_list(expr)
+            return
+
+        if isinstance(expr, F.SubscriptExpr):
+            self._emit_subscript(expr)
+            return
+
+        if isinstance(expr, F.SliceExpr):
+            # `obj[a:b]` parses as a SliceExpr carrying the object; the other
+            # spelling, a subscript whose INDEX is a slice, is handled inside
+            # _emit_subscript.
+            self._emit_slice_parts(expr.obj, expr.start, expr.stop,
+                                   expr.step)
+            return
+
+        if isinstance(expr, F.AwaitExpr):
+            # No event loop: await e ≡ e.
+            self._emit_expr(expr.value)
+            return
+
+        if isinstance(expr, F.YieldExpr):
+            # Generator lowered as a plain function: yield e leaves e in RAX
+            # (the "send" result is not modeled — compile-only).
+            if expr.value is not None:
+                self._emit_expr(expr.value)
+            else:
+                self._emit_mov_imm(Reg.RAX, 0)
+            return
+
+        if isinstance(expr, F.WalrusExpr):
+            self._emit_expr(expr.value)
+            self._store_var(expr.name, Reg.RAX)
+            self._note_binding(expr.name, expr.value)
+            return
+
+        if isinstance(expr, F.LambdaExpr):
+            # Lifted by build._lift_lambdas at call/assign sites; a residual
+            # bare lambda (argument position) has no address to take without
+            # a function-pointer representation, so it reads as 0.
+            self._emit_mov_imm(Reg.RAX, 0)
+            return
+
+        if isinstance(expr, F.MemberExpr):
+            # No object model: evaluate the base for its side effects, read
+            # the field as 0. Same compile-only reading as the arm64 backend.
+            self._emit_expr(expr.obj)
+            self._emit_mov_imm(Reg.RAX, 0)
+            return
+
+        raise CodegenError(self._unsupported_expr_message(expr))
+
+    def _unsupported_expr_message(self, expr) -> str:
+        """Why an expression has no lowering, naming the construct.
+
+        The container and string forms need a heap/blob runtime (a list blob
+        is [count][elements…], a dict a pair blob, a string an interned
+        address) that neither the toy x86-64 path this was ported from nor
+        lib/ProofLib.lean's x86-64 model describes. Saying so beats emitting
+        something that runs and computes the wrong answer."""
+        return (f"unsupported expression {type(expr).__name__} on the formal "
+                f"x86-64 path: the integer/boolean surface is lowered, "
+                f"container and string values are not")
+
+    def _emit_unary(self, expr) -> None:
+        if expr.op == "not":
+            self._emit_expr(expr.operand)
+            self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+            self._emit_setcc_bool(Reg.RAX, "sete")
+            return
+        if expr.op == "-":
+            self._emit_expr(expr.operand)
+            self.asm.emit(encode_neg_r64(Reg.RAX))
+            self._emit_trunc(self._ttype(expr.operand))
+            return
+        if expr.op == "+":
+            self._emit_expr(expr.operand)
+            return
+        if expr.op == "~":
+            self._emit_expr(expr.operand)
+            self.asm.emit(encode_not_r64(Reg.RAX))
+            self._emit_trunc(self._ttype(expr.operand))
+            return
+        raise CodegenError(
+            f"unsupported unary operator {expr.op!r} on the formal x86-64 "
+            f"path")
+
+    def _emit_setcc_bool(self, reg: Reg, mnem: str) -> None:
+        """reg = 0/1 from the flags: SETcc the low byte, then zero-extend.
+
+        The zero-extension is not optional — a SETcc leaves the rest of the
+        register's old bits in place, and a stale high word would make every
+        later comparison of the same value wrong."""
+        self.asm.emit(_SETCC[mnem](reg))
+        self.asm.emit(encode_movzx_r64_r8(reg, reg))
+
+    def _emit_binop(self, e: F.BinaryOp) -> None:
+        op = e.op
+        if op in _CMP_CONDS:
+            unsigned, signed = _CMP_CONDS[op]
+            self._emit_cmp(e.left, e.right, unsigned, signed)
+            return
+
+        # Python `and`/`or` return the deciding OPERAND, not a bitwise mix
+        # of the two, so they branch rather than hitting the ALU table.
+        if op in ("and", "or"):
+            self._emit_and_or(e.left, e.right, is_or=(op == "or"))
+            return
+
+        # List/set concat, either because we are under a container context (a
+        # for-iterable or a membership RHS) or because one side is visibly a
+        # container literal / producer.
+        if op in ("+", "|") and (self._container_ctx > 0
+                                 or self._is_container_expr(e.left)
+                                 or self._is_container_expr(e.right)):
+            if op == "+":
+                self._emit_list_concat(e.left, e.right)
+            else:
+                self._emit_list_concat(e.left, e.right)
+            return
+
+        if op in ("in", "not in"):
+            self._emit_membership(e.left, e.right, invert=(op == "not in"))
+            return
+
+        if op in _ALU_RR:
+            self._emit_two_sided(e.left, e.right, _ALU_RR[op], Reg.R11)
+            if op in ("+", "-", "*"):
+                self._emit_trunc(common_type(self._ttype(e.left),
+                                             self._ttype(e.right)))
+            return
+
+        if op in ("/", "//", "%"):
+            self._emit_div_mod(e, op)
+            return
+
+        if op in ("<<", ">>"):
+            self._emit_shift(e, op)
+            return
+
+        if op == "**":
+            self._emit_pow(e)
+            return
+
+        raise CodegenError(
+            f"unsupported binary operator {op!r} on the formal x86-64 path")
+
+    def _emit_two_sided(self, left, right, alu, scratch: Reg) -> None:
+        """left OP right, both in RAX on exit.
+
+        The left operand is pushed while the right one is evaluated because
+        evaluating an expression clobbers RAX, and a nested call clobbers
+        every caller-saved register."""
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(scratch, Reg.RAX))
+        self._pop_slot(Reg.RAX)
+        self.asm.emit(alu(Reg.RAX, scratch))
+
+    def _emit_cmp(self, l, r, unsigned_mnem: str, signed_mnem: str) -> None:
+        """l <op> r as 0/1 in RAX, at the signedness of the operands' type."""
+        self._emit_expr(l)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(r)
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        self._pop_slot(Reg.RAX)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+        mnem = (signed_mnem if cmp_signed(
+            common_type(self._ttype(l), self._ttype(r))) else unsigned_mnem)
+        self._emit_setcc_bool(Reg.RAX, mnem)
+
+    def _emit_compare_chain(self, e: F.CompareChain) -> None:
+        """`a < b < c` — every operand evaluated once, the links ANDed.
+
+        All operands are evaluated and pushed BEFORE any link is compared: an
+        operand appears in two links (as one link's right side and the next
+        one's left), and re-evaluating it would run its side effects twice.
+        With them all on the stack, each link is two loads, a CMP and a SETcc,
+        and the running AND lives in R10 (not a local home, and nothing
+        clobbers it — no call happens in this loop)."""
+        operands = e.operands
+        ops = e.ops
+        if len(operands) != len(ops) + 1:
+            raise CodegenError("malformed compare chain")
+        for operand in operands:
+            self._emit_expr(operand)
+            self._push_slot(Reg.RAX)
+        n = len(operands)
+        # Operand i was pushed i-th, so it now sits one _SLOT above RSP per
+        # operand pushed after it.
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, _SLOT * (n - 1)))
+        for i, op in enumerate(ops):
+            if op not in _CMP_CONDS:
+                raise CodegenError(
+                    f"unsupported compare-chain operator {op!r} on the "
+                    f"formal x86-64 path")
+            unsigned, signed = _CMP_CONDS[op]
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP,
+                                              _SLOT * (n - 1 - i)))
+            self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP,
+                                              _SLOT * (n - 2 - i)))
+            self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+            mnem = (signed if cmp_signed(common_type(
+                self._ttype(operands[i]), self._ttype(operands[i + 1])))
+                else unsigned)
+            self._emit_setcc_bool(Reg.RAX, mnem)
+            self.asm.emit(encode_and_r64_r64(Reg.R10, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT * n))
+
+
+    def _emit_and_or(self, left, right, is_or: bool) -> None:
+        """Python short-circuit `and`/`or` as a value in RAX.
+
+        `or`: evaluate left; if nonzero keep it, else evaluate right.
+        `and`: evaluate left; if zero keep it, else evaluate right."""
+        self._if_counter += 1
+        aid = self._if_counter
+        fn = self.func_name
+        end_label = f"{fn}_ao{aid}_end"
+        skip_label = f"{fn}_ao{aid}_skip"
+        self._emit_expr(left)
+        self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+        self._record_cond_branch()
+        # or: nonzero → done (skip right); and: zero → done.
+        self._emit_jcc(COND_NE if is_or else COND_E, skip_label)
+        self._emit_expr(right)
+        self._emit_jmp(end_label)
+        self.asm.label(skip_label)
+        self.asm.label(end_label)
+
+    def _emit_div_mod(self, e: F.BinaryOp, op: str) -> None:
+        """`/` `//` `%`.
+
+        IDIV/DIV are the one-operand forms: RDX:RAX divided by the operand,
+        quotient in RAX and remainder in RDX. RDX is therefore not available
+        as general scratch for the right operand, and the left one has to
+        reach RAX before the divide. Division by zero is a hardware fault, so
+        it is turned into exit(1) — the same signal the arm64 backend uses
+        for its own divide-by-zero path.
+
+        `/` and `//` both truncate toward zero here: formal's default integer
+        type is unsigned, and the toy x86-64 path this was ported from made
+        the same conflation (there was one `BinOp.Kind.DIV` for both)."""
+        signed = cmp_signed(common_type(self._ttype(e.left),
+                                        self._ttype(e.right)))
+        self._if_counter += 1
+        cid = self._if_counter
+        fn = self.func_name
+        div0_label = f"{fn}_dv{cid}_z"
+        ok_label = f"{fn}_dv{cid}_ok"
+        self._emit_expr(e.left)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(e.right)
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        self._pop_slot(Reg.RAX)
+        self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
+        self._record_cond_branch()
+        self._emit_jcc(COND_E, div0_label)
+        if signed:
+            self.asm.emit(encode_cqo())
+            self.asm.emit(encode_idiv_r64(Reg.R11))
+        else:
+            self.asm.emit(encode_xor_edx_edx())
+            self.asm.emit(encode_div_r64(Reg.R11))
+        if op == "%":
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
+        self._emit_trunc(common_type(self._ttype(e.left),
+                                     self._ttype(e.right)))
+        self._emit_jmp(ok_label)
+        self.asm.label(div0_label)
+        self._emit_call_exit(1)
+        self.asm.label(ok_label)
+
+    def _emit_shift(self, e: F.BinaryOp, op: str) -> None:
+        """`<<` `>>`. A literal count in 0..63 uses the immediate form;
+        anything else moves the count into CL (the only register form)."""
+        result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+        signed = cmp_signed(result_t)
+        lit = self._static_int(e.right)
+        if lit is not None and 0 <= lit <= 63:
+            self._emit_expr(e.left)
+            self.asm.emit(encode_shift_r64_imm8(
+                _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX, lit))
+            self._emit_trunc(result_t)
+            return
+        self._emit_expr(e.left)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(e.right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
+        self._pop_slot(Reg.RAX)
+        self.asm.emit(encode_shift_r64_cl(
+            _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX))
+        self._emit_trunc(result_t)
+
+    def _emit_pow(self, e: F.BinaryOp) -> None:
+        """`**`.
+
+        A small literal exponent unrolls into that many multiplies (the common
+        `x ** 2`); anything else is binary exponentiation over a loop, which
+        needs scratch the register allocator does not hand out, so the base
+        and the accumulator live on the stack for the duration."""
+        result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+        lit = self._static_int(e.right)
+        if lit is not None and 0 <= lit <= 8:
+            if lit == 0:
+                self._emit_mov_imm(Reg.RAX, 1)
+                return
+            self._emit_expr(e.left)
+            if lit == 1:
+                self._emit_trunc(result_t)
+                return
+            if lit == 2:
+                self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.RAX))
+            else:
+                self._push_slot(Reg.RAX)
+                for _ in range(lit - 1):
+                    self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+                    self._pop_slot(Reg.RAX)
+                    self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.R11))
+                    self._push_slot(Reg.RAX)
+                self._pop_slot(Reg.R11)
+            self._emit_trunc(result_t)
+            return
+        if lit is not None and lit < 0:
+            # Integer ** negative → 0: formal's integer lattice has no
+            # fractions, and 0 matches the toy path for |base| > 1.
+            self._emit_mov_imm(Reg.RAX, 0)
+            return
+
+        # Binary exponentiation. Stack layout: [rsp] is the accumulator,
+        # [rsp+8] the base. The exponent stays in RAX for the whole loop — it
+        # is the loop counter — so the body only touches RCX/R11.
+        self._if_counter += 1
+        pid = self._if_counter
+        fn = self.func_name
+        loop_label = f"{fn}_pow{pid}_l"
+        body_label = f"{fn}_pow{pid}_b"
+        done_label = f"{fn}_pow{pid}_d"
+        neg_label = f"{fn}_pow{pid}_n"
+        end_label = f"{fn}_pow{pid}_end"
+        self._emit_expr(e.left)
+        self._push_slot(Reg.RAX)                          # base
+        self._emit_expr(e.right)                          # exponent -> RAX
+        self._emit_mov_imm(Reg.R11, 1)
+        self._push_slot(Reg.R11)                           # accumulator = 1
+        # A negative exponent yields 0.
+        self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
+        self._record_cond_branch()
+        self._emit_jcc(COND_L, neg_label)
+
+        self.asm.label(loop_label)
+        self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
+        self._record_cond_branch()
+        self._emit_jcc(COND_E, done_label)
+        self.asm.label(body_label)
+        # if exp & 1: acc *= base
+        self._emit_mov_imm(Reg.R11, 1)
+        self.asm.emit(encode_and_r64_r64(Reg.R11, Reg.RAX))
+        skip_label = f"{fn}_pow{pid}_so"
+        self._emit_jcc(COND_E, skip_label)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))     # acc
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, _SLOT))  # base
+        self.asm.emit(encode_imul_r64_r64(Reg.RCX, Reg.R11))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RCX))
+        self.asm.label(skip_label)
+        # base *= base
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, _SLOT))
+        self.asm.emit(encode_imul_r64_r64(Reg.RCX, Reg.RCX))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, _SLOT, Reg.RCX))
+        # exp >>= 1
+        self.asm.emit(encode_shift_r64_imm8(">>", Reg.RAX, 1))
+        self._emit_jmp(loop_label)
+        self.asm.label(done_label)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, 2 * _SLOT))  # drop both
+        self._emit_trunc(result_t)
+        self._emit_jmp(end_label)
+        self.asm.label(neg_label)
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, 2 * _SLOT))
+        self._emit_mov_imm(Reg.RAX, 0)
+        self.asm.label(end_label)
+
+    def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:
+        """`obj[index] = value` — the address is computed once, then stored.
+
+        The index expression is evaluated exactly once (it can contain calls),
+        and the value after it, so the two evaluate in source order."""
+        self._emit_expr(value)
+        self._push_slot(Reg.RAX)                   # value
+        self._emit_subscript_addr(target)          # RAX = address
+        self._pop_slot(Reg.R11)                    # R11 = value
+        if self._is_string_subscript(target.obj):
+            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+
+    def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
+        raise CodegenError(
+            "assignment to a slice target is not lowered on the formal "
+            "x86-64 path: a slice is a materialized copy here, so writing "
+            "through one would have to write back into its source blob")
+
+    def _emit_tuple_assign(self, stmt) -> None:
+        """`a, b = rhs` — the RHS must be a `[count][e0…]` blob.
+
+        The count is checked against the target arity and a mismatch
+        exits(1), the same signal an out-of-range subscript gives."""
+        names = []
+        for el in stmt.target.elements:
+            if isinstance(el, F.IdentExpr):
+                names.append(el.name)
+            elif isinstance(el, (F.ListExpr, F.TupleExpr)):
+                names.extend(e.name for e in el.elements
+                             if isinstance(e, F.IdentExpr))
+            else:
+                raise CodegenError(
+                    "tuple assignment targets must be plain names on the "
+                    f"formal x86-64 path (got {type(el).__name__})")
+        if not names:
+            raise CodegenError("tuple assignment needs at least one target")
+        self._emit_expr(stmt.value)
+        self._emit_for_unpack(names, Reg.RAX,
+                              f"{self.func_name}_ta{self._while_counter}")
+
+    def _emit_slice_parts(self, obj, start, stop, step) -> None:
+        """`obj[start:stop:step]` → a NEW blob holding the selected elements.
+
+        Python slice semantics over a blob: a missing bound defaults per side
+        (0 / len going up, -1 / len-1 coming down), a negative bound counts
+        from the end, and the result is empty when the range runs the wrong
+        way. The result is a copy — a blob has no spare capacity, and the
+        source may be shared with another name.
+
+        A non-literal step has no compile-time value, so the element stride
+        the copy loop folds into its address arithmetic is unknown here; that
+        raises rather than emitting a wrong stride."""
+        lit_step = self._static_int(step) if step is not None else 1
+        if lit_step is None:
+            raise CodegenError(
+                "a slice with a non-literal step is not lowered on the formal "
+                "x86-64 path: the copy loop's stride is fixed at emit time")
+        if lit_step == 0:
+            raise CodegenError(
+                "a slice step of 0 is a ValueError in Python and has no "
+                "meaning on the formal x86-64 path")
+        ascending = lit_step > 0
+        stride = 8 * abs(lit_step)
+
+        self._emit_expr(obj)
+        self._push_slot(Reg.RAX)                   # source blob
+        cap = 64
+        static_len = self._static_int(stop)
+        if static_len is not None and static_len > 0:
+            cap = static_len
+        offset = self._reserve_blob(8 + 8 * cap, "slice views")
+        self._pop_slot(Reg.RSI)                    # source
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # n
+
+        def bound(expr, default):
+            return expr if expr is not None else F.IntLiteral(default)
+
+        self._emit_expr(bound(start, 0 if ascending else -1))
+        self._push_slot(Reg.RAX)
+        if stop is None and ascending:
+            # `xs[3:]` runs to the END of the sequence, so the default stop
+            # is the element count — a runtime value, not a literal. Using 0
+            # here instead makes every open-ended slice empty (stop <= start)
+            # and every read of the result a bounds failure.
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+        else:
+            self._emit_expr(bound(stop, -1))
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))    # stop
+        self._pop_slot(Reg.RCX)                                 # start
+        # Clamp each bound into [0, n]; a negative one counts from the end.
+        for reg in (Reg.RCX, Reg.RDX):
+            tag = f"{self.func_name}_s{reg.value}"
+            self.asm.emit(encode_cmp_r64_imm8(reg, 0))
+            self._emit_jcc(COND_GE, f"{tag}a")
+            self.asm.emit(encode_add_r64_r64(reg, Reg.R8))
+            self.asm.label(f"{tag}a")
+            self.asm.emit(encode_cmp_r64_imm8(reg, 0))
+            self._emit_jcc(COND_GE, f"{tag}z")
+            self._emit_mov_imm(reg, 0)
+            self.asm.label(f"{tag}z")
+            self.asm.emit(encode_cmp_r64_r64(reg, Reg.R8))
+            self._emit_jcc(COND_LE, f"{tag}c")
+            self.asm.emit(encode_mov_r64_r64(reg, Reg.R8))
+            self.asm.label(f"{tag}c")
+        # n has done its work; R8 now carries the clamped start, which the
+        # copy loop needs and RCX does not have room for.
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.RCX))
+
+        fn = self.func_name
+        self._if_counter += 1
+        sid = self._if_counter
+        empty_label = f"{fn}_sl{sid}_empty"
+        go_label = f"{fn}_sl{sid}_go"
+        # count = ceil(|stop - start| / |step|) when the range runs the right
+        # way, else 0. The divide is the unsigned DIV form, so RDX is zeroed
+        # first and the quotient comes back in RAX.
+        if ascending:
+            self.asm.emit(encode_cmp_r64_r64(Reg.RDX, Reg.RCX))
+        else:
+            self.asm.emit(encode_cmp_r64_r64(Reg.RCX, Reg.RDX))
+        self._emit_jcc(COND_LE, empty_label)
+        # Two-operand SUB writes the difference into its FIRST operand, so
+        # the subtraction happens in RDX and the result moves to R9.
+        self.asm.emit(encode_sub_r64_r64(Reg.RDX, Reg.RCX))
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RDX))
+        if not ascending:
+            self.asm.emit(encode_neg_r64(Reg.R9))
+        self._emit_mov_imm(Reg.R10, abs(lit_step))
+        self.asm.emit(encode_add_r64_r64(Reg.R9, Reg.R10))
+        self.asm.emit(encode_sub_r64_imm32(Reg.R9, 1))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R9))
+        self.asm.emit(encode_xor_edx_edx())
+        self.asm.emit(encode_div_r64(Reg.R10))
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RAX))     # count
+        self._emit_jmp(go_label)
+        self.asm.label(empty_label)
+        self._emit_mov_imm(Reg.R9, 0)
+        self.asm.label(go_label)
+
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R9))
+        # src = blob + 8 + 8*start  (the element area, at the clamped start)
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RSI))
+        self.asm.emit(encode_add_r64_imm32(Reg.R10, 8))
+        self.asm.emit(encode_shift_r64_imm8("<<", Reg.R8, 3))
+        self.asm.emit(encode_add_r64_r64(Reg.R10, Reg.R8))
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RDI))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))
+        self._emit_mov_imm(Reg.R11, 0)
+        copy_label = f"{fn}_sl{sid}_copy"
+        done_label = f"{fn}_sl{sid}_done"
+        self.asm.label(copy_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R9))
+        self._emit_jcc(COND_AE, done_label)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R10, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.R8))
+        if ascending:
+            self.asm.emit(encode_add_r64_imm32(Reg.R10, stride))
+        else:
+            self.asm.emit(encode_sub_r64_imm32(Reg.R10, stride))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(copy_label)
+        self.asm.label(done_label)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
+
+    def _emit_comprehension(self, expr: F.Comprehension) -> None:
+        """Lower a list/set/dict/generator comprehension to a frame blob.
+
+        The result layout is the list/dict one (`[count][element…]`), built by
+        APPENDING: the blob is reserved with a capacity up front (a blob has
+        no way to grow), the count starts at 0 and is incremented per element,
+        and appending past the reserved capacity exits(1) rather than writing
+        past the blob area. Nested generators recurse, each with its own
+        `_ci{d}`/`_cb{d}` temps, so a comprehension inside a for (or the
+        reverse) cannot alias a loop's.
+
+        A dict comprehension stores its KEY in `.element` and its VALUE in
+        `.key` — the parser's swap, which the arm64 backend also relies on."""
+        is_dict = (getattr(expr, "kind", "list") == "dict")
+        gens = expr.generators or []
+        elem_size = 16 if is_dict else 8
+        if not gens:
+            offset = self._reserve_blob(8, "comprehension")
+            self._emit_blob_base(offset, Reg.RAX)
+            self._emit_mov_imm(Reg.R11, 0)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+            self._emit_blob_base(offset, Reg.RAX)
+            return
+
+        cap = self._compr_cap(expr)
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(
+                f"comprehension exceeds the formal frame "
+                f"({self._list_cursor} > {self._blob_cap} bytes)")
+        max_cap = (avail - 8) // elem_size
+        cap = max(0, min(cap, max_cap))
+        offset = self._reserve_blob(8 + elem_size * cap, "comprehension")
+        self._emit_blob_base(offset, Reg.R11)
+        self._emit_mov_imm(Reg.R10, 0)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+
+        d0 = self._compr_depth
+        self._compr_depth = d0 + len(gens)
+        try:
+            self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0)
+        finally:
+            self._compr_depth = d0
+        self._emit_blob_base(offset, Reg.RAX)
+
+    def _emit_compr_gen(self, expr: F.Comprehension, gi: int, res_offset: int,
+                        is_dict: bool, cap: int, d0: int) -> None:
+        """Recursive generator walk: gen[gi] … gen[-1], then append."""
+        gens = expr.generators
+        if gi >= len(gens):
+            if is_dict:
+                self._emit_expr(expr.element)          # KEY
+                self._push_slot(Reg.RAX)
+                self._emit_expr(expr.key)              # VALUE
+                self._compr_append_pair(res_offset, cap)
+            else:
+                self._emit_expr(expr.element)
+                self._compr_append_elem(res_offset, cap)
+            return
+
+        gen = gens[gi]
+        di = d0 + gi
+        ci_name, cb_name = f"_ci{di}", f"_cb{di}"
+
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        start_label = f"{fn}_cg{wid}_start"
+        step_label = f"{fn}_cg{wid}_step"
+        false_label = f"{fn}_cg{wid}_false"
+        end_label = f"{fn}_cg{wid}_end"
+
+        # Under container context so a BinaryOp `+` iterable means concat.
+        self._container_ctx += 1
+        try:
+            self._emit_expr(gen.iterable)
+        finally:
+            self._container_ctx -= 1
+        self._store_var(cb_name, Reg.RAX)
+        self._emit_mov_imm(Reg.RAX, 0)
+        self._store_var(ci_name, Reg.RAX)
+
+        self._loops.append({"start": start_label, "step": step_label,
+                            "break": end_label})
+        try:
+            self.asm.label(start_label)
+            self._load_var(cb_name, Reg.R11)
+            self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count
+            self._load_var(ci_name, Reg.RAX)
+            self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R10))
+            # R8, not R11: R11 holds the blob base, and the element
+            # address computed next is relative to it.
+            self._emit_setcc_bool(Reg.R8, "setae")
+            self._emit_jcc_bool(Reg.R8, COND_NE, false_label)
+            self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI)
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
+
+            from mojo.middle.boundnames import _lbn_target_names
+            tnames = _lbn_target_names(gen.target) \
+                if isinstance(gen.target, str) else []
+            if not tnames or any(not n.isidentifier() for n in tnames):
+                raise CodegenError(
+                    f"comprehension target must be a plain name or tuple of "
+                    f"plain names (got {gen.target!r})")
+            if len(tnames) == 1:
+                self._store_var(tnames[0], Reg.RAX)
+            else:
+                self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
+
+            for cond in gen.conditions or []:
+                self._emit_expr(cond)
+                self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+                self._record_cond_branch()
+                self._emit_jcc(COND_E, step_label)
+
+            self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+
+            self.asm.label(step_label)
+            self._load_var(ci_name, Reg.RAX)
+            self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))
+            self._store_var(ci_name, Reg.RAX)
+            self._emit_jmp(start_label)
+
+            self.asm.label(false_label)
+            self.asm.label(end_label)
+        finally:
+            self._loops.pop()
+
+    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
+        """Append RAX to the list result; exit(1) past the reserved capacity.
+
+        Registers: R11 the result blob, R10 the count, RDI the element's
+        address. RDI rather than R11 because `_emit_elem_addr` builds the
+        destination FROM the index first, so the base register has to survive
+        that first move — passing the same register for both computes
+        base+8*base."""
+        self._push_slot(Reg.RAX)                     # the element
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
+        self._emit_setcc_bool(Reg.R8, "setae")
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        oob = f"{fn}_cgoob{wid}"
+        ok = f"{fn}_cgok{wid}"
+        self._emit_jcc_bool(Reg.R8, COND_NE, oob)
+        self._emit_jmp(ok)          # in range: skip the exit
+        self.asm.label(oob)
+        self._emit_call_exit(1)
+        self.asm.label(ok)
+        self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI)
+        self._pop_slot(Reg.RAX)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+
+    def _compr_append_pair(self, res_offset: int, cap: int) -> None:
+        """Append a (key, value) pair to a dict result.
+
+        The caller leaves the KEY in a pushed slot and the VALUE in RAX, so
+        the VALUE is pushed here to complete the pair; the pop order below
+        unwinds it in the opposite order."""
+        self._push_slot(Reg.RAX)                     # VALUE above KEY
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # npairs
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
+        self._emit_setcc_bool(Reg.R8, "setae")
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        oob = f"{fn}_cpoob{wid}"
+        ok = f"{fn}_cpok{wid}"
+        self._emit_jcc_bool(Reg.R8, COND_NE, oob)
+        self._emit_jmp(ok)          # in range: skip the exit
+        self.asm.label(oob)
+        self._emit_call_exit(1)
+        self.asm.label(ok)
+        self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI, header=8, scale=4)
+        self._pop_slot(Reg.R8)                       # VALUE
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.R8))
+        self._pop_slot(Reg.R8)                       # KEY
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+
+    # ── calls ────────────────────────────────────────────────────────
+
+    def _note_binding(self, name: str, value) -> None:
+        """Record that `name` now holds a string address (or stop saying so).
+
+        A subscript on a string address is a byte load rather than a list
+        index, and nothing else in the value distinguishes the two, so the
+        binding has to be tracked at each store. An assignment of anything
+        else clears the mark."""
+        # A dict is checked FIRST: it is a pair-blob too, but its subscript is
+        # a key lookup, so it must not be recorded as a plain blob (which
+        # would make `d[k]` take the index path and read the key as data).
+        if isinstance(value, F.DictExpr) or (
+                isinstance(value, F.IdentExpr)
+                and value.name in self._dict_vars):
+            self._dict_vars.add(name)
+        elif self._is_container_expr(value) or (
+                isinstance(value, F.IdentExpr)
+                and value.name in self._blob_vars):
+            self._blob_vars.add(name)
+        elif isinstance(value, F.StringLiteral) or (
+                isinstance(value, F.IdentExpr)
+                and value.name in self._string_vars):
+            self._string_vars.add(name)
+        else:
+            self._string_vars.discard(name)
+            self._dict_vars.discard(name)
+            self._blob_vars.discard(name)
+
+    def _is_container_expr(self, e) -> bool:
+        """True when `e` is known to lower to a blob pointer rather than an
+        integer — the test that decides whether `+` concatenates."""
+        if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
+                          F.Comprehension, F.SliceExpr)):
+            return True
+        if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
+            return e.func.name in ("range", "list", "sorted", "set",
+                                   "reversed")
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "or", "and"):
+            return (self._is_container_expr(e.left)
+                    or self._is_container_expr(e.right))
+        if isinstance(e, F.IdentExpr):
+            return e.name in self._blob_vars
+        return False
+
+    def _emit_call(self, e: F.CallExpr) -> None:
+        name = _callee_symbol(e.func)
+        if name is None:
+            raise CodegenError(
+                "unsupported call target on the formal x86-64 path "
+                f"(got {type(e.func).__name__})")
+        if name == "range":
+            # A range() used as a VALUE rather than as a for-loop iterable:
+            # materialize it as a list blob, which is what makes
+            # `[i for i in range(n)]` and `for i in list(range(n))` work.
+            self._emit_range_list(list(e.args))
+            return
+        is_extern = name not in self._functions
+        # A callee that a linked formal dylib provides is emitted against the
+        # spelling that dylib exports, not the name the source used.
+        symbol = self._dylib_syms.get(name, name)
+        # An unknown signature has no place for keyword arguments on a raw
+        # call, so an extern call passes positionals only; those kwargs are
+        # almost always literals like `flush=True`. A known callee gets them
+        # bound to their parameters' registers.
+        args = list(e.args) if is_extern else self._bind_call_args(name, e)
+
+        if len(args) > len(ARG_REGS):
+            raise CodegenError(
+                f"call {name}(): {len(args)} arguments exceeds the "
+                f"{len(ARG_REGS)} the formal x86-64 ABI passes in registers")
+        # Evaluate left to right onto the stack, then pop in reverse into the
+        # argument registers: evaluating argument i+1 clobbers RAX and every
+        # caller-saved register, including the ones argument i belongs in.
+        # POP only ever targets RAX, so each popped value is moved across
+        # after the pop — including argument 0, whose register is RDI and not
+        # RAX the way the arm64 ABI's X0 would have been.
+        for arg in args:
+            self._emit_expr(arg)
+            self._push_slot(Reg.RAX)
+        for i in range(len(args) - 1, -1, -1):
+            self._pop_slot(Reg.RAX)
+            self.asm.emit(encode_mov_r64_r64(ARG_REGS[i], Reg.RAX))
+
+        if is_extern:
+            # AL = number of vector registers used, which the ABI requires a
+            # variadic callee be told; 0 is always right for the calls this
+            # path makes, and harmless for the rest.
+            self._emit_mov_imm(Reg.RAX, 0)
+            self._emit_extern_call(symbol)
+
+        else:
+            self.asm.emit(encode_call_rel32(0))
+            self.asm.emit_label_rel32(name, here_offset=-4)
+
+
+    def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
+        """Reorder args+kwargs into positional form for a known callee.
+
+        Gaps left by a kwarg targeting a later parameter take that
+        parameter's default; trailing optional parameters the caller omitted
+        are dropped, since the callee's prologue only reads the registers it
+        is actually passed."""
+        if not e.kwargs:
+            return list(e.args)
+        fdef = self._functions.get(name)
+        if fdef is None:
+            raise CodegenError(
+                f"keyword arguments are not supported ({[k for k, _ in e.kwargs]})")
+        params = [pname for pname, _ptype in fdef.params]
+        slots: list = list(e.args)
+        if len(slots) > len(params):
+            raise CodegenError(
+                f"call {name}(): too many positional arguments "
+                f"({len(slots)} for {len(params)} parameters)")
+        slots.extend([None] * (len(params) - len(slots)))
+        for k, v in e.kwargs:
+            idx = next((i for i, pname in enumerate(params)
+                        if pname == k or pname.lstrip("*") == k), None)
+            if idx is None:
+                if any(pname.startswith("**") for pname in params):
+                    continue    # **kwargs swallows it; no register to put it in
+                raise CodegenError(
+                    f"call {name}(): unexpected keyword argument {k!r}")
+            if idx < len(e.args):
+                raise CodegenError(
+                    f"call {name}(): multiple values for argument {k!r}")
+            if slots[idx] is not None:
+                raise CodegenError(
+                    f"call {name}(): multiple values for argument {k!r}")
+            slots[idx] = v
+        last = max((i for i, s in enumerate(slots) if s is not None),
+                   default=-1)
+        slots = slots[:last + 1]
+        for i, s in enumerate(slots):
+            if s is not None:
+                continue
+            pname = params[i]
+            if pname.startswith("*"):
+                slots[i] = F.IntLiteral(0)
+            elif fdef.param_has_default.get(pname):
+                slots[i] = fdef.param_defaults[pname]
+            else:
+                raise CodegenError(
+                    f"call {name}(): missing required argument {pname!r}")
+        return slots
+
+    # ── types and immediates ─────────────────────────────────────────
+
+    def _ttype(self, e) -> IntType:
+        return infer_expr(e, self._vtypes, self._call_types)
+
+    def _emit_extend(self, reg: Reg, t) -> None:
+        """Materialize the full 64-bit representative of type t in `reg`.
+
+        Values live in 64-bit registers throughout: signed types
+        sign-extended, unsigned zero-extended. The narrow unsigned cases mask
+        or zero-extend instead; a 32-bit unsigned value is a plain 32-bit MOV,
+        which the CPU zero-extends into the full register for free."""
+        t = resolve(t)
+        if t.width == 64:
+            return
+        if t.signed:
+            if t.width == 32:
+                self.asm.emit(encode_movsx_r64_r32(reg, reg))
+            elif t.width == 8:
+                self.asm.emit(encode_movsx_r64_r8(reg, reg))
+            elif t.width == 16:
+                self.asm.emit(encode_movsx_r64_r16(reg, reg))
+            else:
+                raise CodegenError(f"unsupported integer width {t.width}")
+        else:
+            if t.width == 8:
+                # 0xFF does not fit a signed imm8, so this needs the imm32
+                # form; with REX.W that sign-extends to 0x00000000_000000FF,
+                # which is the mask an 8-bit value wants.
+                self.asm.emit(encode_and_r64_imm32(reg, mask_of(t)))
+            elif t.width == 16:
+                self.asm.emit(encode_movzx_r64_r16(reg, reg))
+            elif t.width == 32:
+                self.asm.emit(encode_mov_r32_r32(reg, reg))
+            else:
+                raise CodegenError(f"unsupported integer width {t.width}")
+
+    def _emit_trunc(self, t) -> None:
+        self._emit_extend(Reg.RAX, t)
+
+    def _emit_mov_imm(self, reg: Reg, imm: int) -> None:
+        """Materialize `imm` in `reg`, choosing the shortest correct form.
+
+        A value that fits in a signed 32-bit field goes through the imm32
+        form, which the CPU sign-extends for free; anything wider needs the
+        full 10-byte mov-imm64. Negative values are normalized to their
+        two's-complement 64-bit pattern first."""
+        imm &= 0xFFFFFFFFFFFFFFFF
+        signed = imm - (1 << 64) if imm >> 63 else imm
+        if -(2 ** 31) <= signed < 2 ** 31:
+            self.asm.emit(encode_mov_r64_imm32(reg, signed))
+        else:
+            self.asm.emit(encode_mov_r64_imm64(reg, imm))
+
+    def _static_int(self, e):
+        """A literal integer value for `e`, else None.
+
+        UnaryOp('-', IntLiteral(n)) counts as -n, so `range(a, b, -1)` is
+        recognized as a descending range even though the parser keeps the
+        minus as a node."""
+        if isinstance(e, F.IntLiteral):
+            return e.value
+        if isinstance(e, F.UnaryOp) and e.op == "-" \
+                and isinstance(e.operand, F.IntLiteral):
+            return -e.operand.value
+        return None
+
+
+def _align16(value: int) -> int:
+    return (value + 15) & ~15
+
+
+def _range_info(rargs: list) -> tuple:
+    """(start, end, step) expressions for range(): 1/2/3 args."""
+    zero = F.IntLiteral(0)
+    one = F.IntLiteral(1)
+    if len(rargs) == 1:
+        return zero, rargs[0], one
+    if len(rargs) == 2:
+        return rargs[0], rargs[1], one
+    if len(rargs) == 3:
+        return rargs[0], rargs[1], rargs[2]
+    raise CodegenError(f"range() takes 1-3 arguments, got {len(rargs)}")

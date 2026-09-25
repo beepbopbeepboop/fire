@@ -33,6 +33,7 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.middle.types as gimple_ctypes
+import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
@@ -2806,72 +2807,54 @@ def _gen_print(gen, args: list, kwargs: list = None):
     _emit_literal_print('\\n', print_fn)
 
 
+def _comptime_call_hook(gen):
+    """Build the call hook for comptime_eval.eval_const_int: fold a call to
+    an *imported* function by running it at compile time as cached machine
+    code (elaborate.py extracts the source, comptime.evaluate runs it).
+
+    The hook is the one genuinely backend-specific piece of comptime folding,
+    which is why it is a parameter of the shared evaluator rather than part
+    of it — a backend with no import elaborator (the formal arm64 path) omits
+    it and simply does not fold calls."""
+    def hook(name, argvals):
+        src_path = gen._imported_fn_sources.get(name)
+        if not src_path:
+            return None
+        try:
+            # importlib (NOT a bare `import` statement): gen_module's
+            # find_imports AST-walk collects every ImportStmt at any
+            # nesting depth and would inline elaborate.py/comptime.py
+            # into the self-host closure — compiler-core sources that
+            # were never GIMPLE-clean. import_module is invisible to
+            # that walk while resolving identically at runtime.
+            import importlib as _importlib
+            _elab = _importlib.import_module('elaborate')
+            _comptime = _importlib.import_module('comptime')
+            module_src = open(src_path).read()
+            fn_src = _elab.extract_fn_source(module_src, name)
+            if fn_src:
+                return int(_comptime.evaluate(fn_src, name, argvals))
+        except Exception:
+            gimple_ctypes._debug_note('comptime evaluation failed', name)
+        return None
+    return hook
+
+
 def _eval_const_int(gen, node) -> int | None:
-    """Evaluate an expression as a compile-time integer, or return None."""
-    if isinstance(node, gimple_ctypes.IntLiteral):  return node.value
-    if isinstance(node, gimple_ctypes.BoolLiteral): return int(node.value)
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-':
-        v = gen._eval_const_int(node.operand)
-        return -v if v is not None else None
-    if isinstance(node, gimple_ctypes.BinaryOp):
-        l = gen._eval_const_int(node.left)
-        r = gen._eval_const_int(node.right)
-        if l is None or r is None: return None
-        ops = {'+': l+r, '-': l-r, '*': l*r, '//': l//r if r else None,
-               '%': l%r if r else None, '**': l**r,
-               '==': int(l == r), '!=': int(l != r), '<': int(l < r),
-               '<=': int(l <= r), '>': int(l > r), '>=': int(l >= r)}
-        return ops.get(node.op)
-    if isinstance(node, gimple_ctypes.CompareChain):
-        # Same short-circuit chained-comparison semantics as
-        # eval_CompareChain (myinterpreter.py) / _lower_compare_chain,
-        # just over compile-time constants instead of runtime values.
-        left = gen._eval_const_int(node.operands[0])
-        if left is None: return None
-        for op, operand in zip(node.ops, node.operands[1:]):
-            right = gen._eval_const_int(operand)
-            if right is None: return None
-            link = gen._eval_const_compare_op(op, left, right)
-            if link is None: return None
-            if not link: return 0
-            left = right
-        return 1
-    # comptime call to an imported function with constant args (slice 3):
-    # run it at compile time as cached machine code via comptime.evaluate.
-    if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.IdentExpr):
-        src_path = gen._imported_fn_sources.get(node.func.name)
-        if src_path:
-            argvals = [gen._eval_const_int(a) for a in node.args]
-            if argvals and all(v is not None for v in argvals):
-                try:
-                    # importlib (NOT a bare `import` statement): gen_module's
-                    # find_imports AST-walk collects every ImportStmt at any
-                    # nesting depth and would inline elaborate.py/comptime.py
-                    # into the self-host closure — compiler-core sources that
-                    # were never GIMPLE-clean. import_module is invisible to
-                    # that walk while resolving identically at runtime.
-                    import importlib as _importlib
-                    _elab = _importlib.import_module('elaborate')
-                    _comptime = _importlib.import_module('comptime')
-                    module_src = open(src_path).read()
-                    fn_src = _elab.extract_fn_source(module_src, node.func.name)
-                    if fn_src:
-                        return int(_comptime.evaluate(fn_src, node.func.name, argvals))
-                except Exception:
-                    gimple_ctypes._debug_note('comptime evaluation failed', node.func.name)
-    return None
+    """Evaluate an expression as a compile-time integer, or return None.
+
+    Folding rules are shared with the formal arm64 backend
+    (mojo/middle/comptime.py); this wrapper supplies the gimple path's
+    binding table and its compile-time-call hook."""
+    return comptime_eval.eval_const_int(node, gen._comptime_vals,
+                                          _comptime_call_hook(gen))
 
 
 def _eval_const_bool(gen, node) -> bool | None:
     """Evaluate an expression as a compile-time bool, or return None."""
-    v = gen._eval_const(node)
-    if isinstance(v, (bool, int)):
-        return bool(v)
-    # Fallback: _eval_const_int handles CallExpr (comptime function calls),
-    # which _eval_const above does not.
-    result = gen._eval_const_int(node)
-    return bool(result) if isinstance(result, (bool, int)) else None
-    return None
+    return comptime_eval.eval_const_bool(node, gen._comptime_vals,
+                                           _comptime_call_hook(gen),
+                                           gimple_ctypes.sys.platform)
 
 def _split_top_level_comma(s: str) -> list[str]:
     """Split s by top-level commas only (bracket-aware)."""

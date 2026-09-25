@@ -1050,7 +1050,7 @@ def _stmts_ast(stmts) -> list:
                          f'(MojoExpr.binop "{_lean_op(st.op.rstrip(chr(61)))}" (MojoExpr.var "{_target_name(st)}") '
                          f'({_expr_ast(st.value)}))')
         elif isinstance(st, ExprStmt):
-            parts.append(f"MojoStmt.valuestmt ({_expr_ast(st.value)})")
+            parts.append(f"MojoStmt.exprstmt ({_expr_ast(st.value)})")
         elif isinstance(st, WhileStmt):
             if st.else_body:
                 raise NotImplementedError(

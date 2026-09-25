@@ -1,16 +1,25 @@
-"""Formal arm64 codegen + Mach-O emission, selected by
-`./fire.py build --formal <file.mojo>` (or a bare `./fire.py --formal`).
+"""Formal codegen + binary emission, selected by
+`./fire.py build --formal <file.mojo>` (or a bare `./fire.py --formal`), with
+`--backend=arm64` (the default) or `--backend=x86_64` choosing the target.
 
-Pipeline:
+Pipeline (arm64):
     source → fire_compiler.py tokenize/parse (the real AST)
            → formal.arm64_codegen.ARM64Codegen (machine code)
-           → formal.macho.build_macho (MH_EXECUTE Mach-O64 / ARM64)
+           → formal.macho.build_macho (MH_EXECUTE Mach-O-64 / ARM64)
            → formal.arm64_proof_gen.generate_arm64_proof (Lean 4, opt-in)
+
+Pipeline (x86_64): the same front end and the same proof-free contract, with
+formal.x86_64_codegen.X86_64Codegen and formal.macho.build_macho(arch=
+"x86_64") — a Mach-O-64 / x86_64 image, which runs natively under Rosetta 2 on
+Apple Silicon. On Linux the same codegen emits an ELF64 image instead
+(formal.elf.build_elf, with the extern calls going through .got rather than a
+stub section); `default_format` picks that automatically.
 
 Unlike the toy formal tree (which had its own parser and mini-AST), this
 path parses with fire_compiler — fire_compiler.py is the single source of
 truth for the AST in this project. Proof generation consumes the same
-fire AST via aliases (no AST-to-AST translation).
+fire AST via aliases (no AST-to-AST translation), one generator per
+architecture: formal.arm64_proof_gen and formal.x86_64_proof_gen.
 """
 
 import os
@@ -23,12 +32,36 @@ import fire_compiler as F
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
 from formal.macho_linker import (EXTERN_ENTRYOFF, NOEXTERN_ENTRYOFF, TEXT_BASE,
-                                  build_macho_dylib, dylib_code_offset)
+                                  build_macho_dylib, dylib_code_offset,
+                                  externer_layout)
 from mojo.middle.closures import discover_closures
+from formal.comptime_runner import make_call_hook
 
 
 class FormalBuildError(Exception):
     pass
+
+
+class ImportBuildError(FormalBuildError):
+    """An import could not be turned into a linkable dependency.
+
+    A FormalBuildError so it reaches the user as an ordinary compile error
+    ("build: ...") rather than a traceback — an import that cannot be resolved
+    used to be dropped silently, and the program then died in dyld at launch
+    with "Symbol not found" for a function the source plainly imports.
+    """
+
+
+# The architectures the formal path can target.
+ARCHES = ("arm64", "x86_64")
+
+
+def default_format(arch: str) -> str:
+    """Binary format for `arch` on this host: Mach-O on macOS, ELF on Linux.
+
+    Both are native executable formats with no loader of ours involved, which
+    is the whole point of the formal path producing something runnable."""
+    return "macho" if sys.platform == "darwin" else "elf"
 
 
 def _ad_hoc_sign(path: str) -> None:
@@ -515,17 +548,179 @@ def _extract_functions(stmts: list, synthetic: bool = True) -> list:
     return main + rest
 
 
+def _make_codegen(arch: str, fmt: str, test_input: int,
+                  dylib_syms: dict = None, comptime_hook=None):
+    """The codegen for `arch`, configured for the `fmt` binary it feeds.
+
+    The only format-dependent choice is how an unbound symbol is called:
+    Mach-O carries a __TEXT,__stubs trampoline (`call rel32` to it), while
+    ELF has no stub section and calls through the .got slot the loader fills
+    (`call [rip+disp32]`). Everything else about the two backends is the
+    same contract, so it is selected here rather than at each call site."""
+    if arch == "arm64":
+        return ARM64Codegen(test_input=test_input,
+                            dylib_syms=dylib_syms,
+                            comptime_hook=comptime_hook)
+    if arch == "x86_64":
+        from formal.x86_64_codegen import X86_64Codegen
+        return X86_64Codegen(test_input=test_input,
+                             extern_style="got" if fmt == "elf" else "stub",
+                             dylib_syms=dylib_syms,
+                             comptime_hook=comptime_hook)
+    raise FormalBuildError(
+        f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
+
+
+def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
+                      dylibs: list = None, comptime_hook=None):
+    """Compile `ordered` for `arch` and wrap it in its binary container.
+
+    Returns (code, info, external_syms, binary). Mach-O needs two passes: the
+    entry offset (and so the base address the code is emitted for) depends on
+    whether the image carries the extern machinery, which is only known after
+    the first pass has seen every call site. ELF has one fixed base, so a
+    single pass plus the GOT back-patch is enough.
+
+    `dylibs` is the linked-library set (see `load_dylib_manifests`): each
+    entry's symbols are callee names the codegen must mangle to that library's
+    exported spelling, and each adds a load command — which moves the entry
+    point, so the second pass has to be emitted for the offset the *same*
+    dylib list implies."""
+    dylibs = list(dylibs or [])
+    dylib_syms = {}
+    for d in dylibs:
+        for bare, mangled in (d.get("map") or {}).items():
+            dylib_syms.setdefault(bare, mangled)
+    if fmt == "elf":
+        from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
+                                 compute_got_addrs)
+        codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
+        try:
+            code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE)
+        except CodegenError as e:
+            raise FormalBuildError(str(e))
+        external_syms = info.get("external_syms") or []
+        if external_syms:
+            got = compute_got_addrs(len(code), external_syms,
+                                    vaddr=info["base_addr"],
+                                    lib_name=DEFAULT_LIBC)
+            codegen.asm.resolve_extern(got)
+            code = bytes(codegen.asm.sections["text"])
+        binary = build_elf(code, entry=info["base_addr"],
+                           vaddr=info["base_addr"],
+                           external_syms=external_syms, lib_name=DEFAULT_LIBC)
+        return code, info, external_syms, binary
+
+    # The extern entry offset depends on the linked dylibs: each adds a load
+    # command, and the code starts after the whole list.
+    from formal.macho_linker import extern_entry_offset
+    base_extern = TEXT_BASE + extern_entry_offset(
+        [d["install_name"] for d in dylibs])
+    base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
+    codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
+    try:
+        code, info = codegen.compile(ordered, base_addr=base_noextern)
+        external_syms = info.get("external_syms") or []
+        if external_syms:
+            # Re-emit at the extern entry base (the layout differs, and so do
+            # every address the code computed off its own base).
+            codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
+            code, info = codegen.compile(ordered, base_addr=base_extern)
+            external_syms = info.get("external_syms") or []
+            # The stub addresses must be computed for the SAME entry offset
+            # the code was emitted at, which a linked dylib moves.
+            stub_addrs = compute_macho_got_addrs(
+                len(code), external_syms, vaddr=info["base_addr"], arch=arch,
+                entryoff=extern_entry_offset(
+                    [d["install_name"] for d in dylibs]))
+            codegen.asm.resolve_extern(stub_addrs)
+            code = bytes(codegen.asm.sections["text"])
+    except CodegenError as e:
+        raise FormalBuildError(str(e))
+    binary = build_macho(code, external_syms=external_syms, arch=arch,
+                         dylibs=[{"install_name": d["install_name"],
+                                  "symbols": set((d.get("map") or {}).values())}
+                                 for d in dylibs] or None)
+    return code, info, external_syms, binary
+
+
+def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
+    """Compile every module this file imports, and return their dylibs.
+
+    Returns [] when the file imports nothing. A file that imports something
+    unresolvable is an ERROR, not a shrug: the alternative is the failure this
+    replaces — an image that builds and then dies in dyld because a call's
+    symbol does not exist.
+    """
+    from formal.imports import (build_module_dylib, dylib_chain,
+                                imported_modules, resolve_module_path)
+    mods = imported_modules(stmts)
+    if not mods:
+        return []
+    if fmt_wants_macho(arch):
+        out_dir = os.path.join(cas_dir(), "formal-imports")
+        chain = []
+        for mod in mods:
+            path = resolve_module_path(mod, relative_to=source_path)
+            if path is None:
+                raise ImportBuildError(
+                    f"{os.path.basename(source_path)} imports {mod!r}, which "
+                    f"does not resolve to a source file")
+            dylib = build_module_dylib(mod, path, out_dir, arch,
+                                       project_root=source_path)
+            if dylib:
+                chain.extend(dylib_chain(dylib))
+        seen, out = set(), []
+        for d in chain:
+            if d not in seen:
+                seen.add(d)
+                out.append(d)
+        return out
+    return []
+
+
+def fmt_wants_macho(arch: str) -> bool:
+    return default_format(arch) == "macho"
+
+
+def cas_dir() -> str:
+    import cas
+    return cas.CAS_DIR
+
+
 def compile_formal(source_path: str, output: str = None,
                    test_input: int = 10, prove: bool = True,
-                   check: bool = True) -> dict:
-    """Compile `source_path` via the formal arm64 path to a Mach-O binary.
+                   check: bool = True, arch: str = "arm64",
+                   fmt: str = None, link_dylibs: list = None) -> dict:
+    """Compile `source_path` through the formal path for `arch`.
 
-    output: destination path; defaults to <stem>.aout next to the source.
-    test_input: value placed in X0 before the startup stub calls the entry
-    function (formal's `-n`; forwarded as the entry's first argument).
+    arch: "arm64" (default) or "x86_64".
+    fmt: "macho" or "elf"; defaults to the host's native format
+    (`default_format`). The two are interchangeable per architecture, so
+    either can be requested explicitly — useful for checking the ELF emitter
+    from a Mac.
+    output: destination path; defaults to <stem>.aout (Mach-O) or <stem>.elf
+    (ELF) next to the source.
+    link_dylibs: formal libraries (.dylib paths) this program links against.
+    A call to a name one of them exports is rewritten to that library's
+    exported symbol, so the image records the library as a dependency and dyld
+    binds the call at launch — see `load_dylib_manifests`. Without this a
+    cross-module call lowers to a BL against a symbol nothing defines.
+    test_input: value passed to the entry function by the startup stub
+    (formal's `-n`).
     prove: also emit <stem>_proof.lean next to the binary (Lean 4 static
-    typecheck target; does not execute the binary).
+    typecheck target; does not execute the binary). Supported for both
+    architectures.
     """
+    if arch not in ARCHES:
+        raise FormalBuildError(
+            f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
+    if fmt is None:
+        fmt = default_format(arch)
+    if fmt not in ("macho", "elf"):
+        raise FormalBuildError(f"unknown format {fmt!r} (expected macho|elf)")
+
+
     try:
         with open(source_path) as f:
             source = f.read()
@@ -537,12 +732,32 @@ def compile_formal(source_path: str, output: str = None,
     except SyntaxError as e:
         raise FormalBuildError(f"parse error: {e}")
 
+    # Structural acceptance: only FunctionDefs matter for codegen; imports /
+    # module-level statements are fine (filtered here + in the codegen).
+    functions = _extract_functions(stmts)
+
+    # The libraries this program links against, resolved before codegen: their
+    # export spellings decide both the callee mangling and (via their load
+    # commands) where the entry point lands.
+    linked = load_dylib_manifests(link_dylibs)
+
+    # `import X` means X is a dependency. Each imported module is compiled in
+    # FULL into a dylib that represents it (formal/imports.py) and goes on the
+    # link line with everything it itself needs, dependencies first. Without
+    # this an import was silently dropped and its calls became BLs against
+    # symbols nothing defines.
     try:
-        # Structural acceptance: only FunctionDefs matter for codegen;
-        # imports / module-level stmts are fine (filtered here + in codegen).
-        functions = _extract_functions(stmts)
-    except FormalBuildError:
-        raise
+        import_dylibs = _resolve_imports(source_path, stmts, arch)
+    except ImportBuildError as e:
+        # A clean compile error, not a traceback: an unresolvable import used
+        # to be dropped silently, and the resulting program died in dyld at
+        # launch with "Symbol not found" for a function the source plainly
+        # imports.
+        raise FormalBuildError(str(e))
+    if import_dylibs:
+        have = {d["install_name"] for d in linked}
+        linked = linked + [d for d in load_dylib_manifests(import_dylibs)
+                           if d["install_name"] not in have]
 
     # Shared closure discovery (same scan GIMPLE uses), then flatten nested
     # defs into top-level lifted functions with by-value capture params.
@@ -550,53 +765,37 @@ def compile_formal(source_path: str, output: str = None,
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
     # Lift LambdaExprs into top-level FunctionDefs so assigned/IIFE lambdas
-    # lower as BL targets (residual bare lambdas get `_lifted_name` for ADRP).
+    # lower as call targets (residual bare lambdas get `_lifted_name`).
     functions = _lift_lambdas(functions)
-
-    # Rebuild a statement list with main-first ordering for the codegen.
     ordered = functions
 
-    codegen = ARM64Codegen(test_input=test_input)
-    try:
-        has_extern_hint = True  # base chosen after we know external_syms
-        # First pass: emit with the extern-capable base so relative branches
-        # and string ADRP relocations are computed against the address the
-        # code will actually live at once we know whether stubs are needed.
-        # We don't know external_syms until after compile(), so compile once
-        # at the extern base if anything turns out external and re-emit.
-        base_extern = TEXT_BASE + EXTERN_ENTRYOFF
-        base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
-        code, info = codegen.compile(ordered, base_addr=base_noextern)
-        external_syms = info.get("external_syms") or []
-        if external_syms:
-            # Re-emit at the extern entry base (layout differs).
-            codegen = ARM64Codegen(test_input=test_input)
-            code, info = codegen.compile(ordered, base_addr=base_extern)
-            external_syms = info.get("external_syms") or []
-            stub_addrs = compute_macho_got_addrs(
-                len(code), external_syms, vaddr=info["base_addr"])
-            codegen.asm.resolve_extern(stub_addrs)
-            code = bytes(codegen.asm.sections["text"])
-    except CodegenError as e:
-        raise FormalBuildError(str(e))
-
-    binary = build_macho(code, external_syms=external_syms)
+    # `comptime f(...)` is resolved by RUNNING f through this same backend
+    # (formal/comptime_runner.py), so a folded constant and the emitted code
+    # can never come from two different implementations.
+    comptime_hook = make_call_hook(source)
+    code, info, external_syms, binary = _codegen_and_link(
+        arch, fmt, ordered, test_input, dylibs=linked,
+        comptime_hook=comptime_hook)
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"
+        ext = ".elf" if fmt == "elf" else ".aout"
         output = os.path.join(os.path.dirname(os.path.abspath(source_path)),
-                              stem + ".aout")
+                              stem + ext)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)
-    _ad_hoc_sign(output)
+    if fmt == "macho":
+        # Only Mach-O images are ad-hoc signed; the kernel refuses an
+        # unsigned one, and an ELF image carries no such requirement.
+        _ad_hoc_sign(output)
 
     result = {
         "path": output,
         "code": code,
         "binary": binary,
         "info": info,
-        "backend": "arm64/macho",
+        "backend": f"{arch}/{fmt}",
     }
 
     if prove:
@@ -604,9 +803,14 @@ def compile_formal(source_path: str, output: str = None,
         # constructs a Program. fire has no ExternFunction nodes on this
         # path — pass [] and let _gen_extern_test's `ret_type_of.get`
         # default handle any recorded extern_calls.
-        from formal.arm64_proof_gen import generate_arm64_proof
+        if arch == "x86_64":
+            from formal.x86_64_proof_gen import generate_x86_64_proof
+            generate_proof = generate_x86_64_proof
+        else:
+            from formal.arm64_proof_gen import generate_arm64_proof
+            generate_proof = generate_arm64_proof
         prog = SimpleNamespace(functions=ordered, externs=[])
-        proof = generate_arm64_proof(prog, code, info)
+        proof = generate_proof(prog, code, info)
         proof_path = os.path.splitext(output)[0] + "_proof.lean"
         if os.path.exists(proof_path):
             os.chmod(proof_path, 0o644)  # u+w so overwrite works
@@ -645,20 +849,222 @@ def _formal_module_functions(source_path: str) -> tuple[str, list]:
     functions = _lift_lambdas(functions)
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
-    return module, functions
+    return module, functions, source
+
+
+def dylib_manifest_path(dylib_path: str) -> str:
+    """Where a dylib's export manifest lives: `<dylib>.manifest.json`."""
+    return os.path.abspath(dylib_path) + ".manifest.json"
+
+
+def write_dylib_manifest(dylib_path: str, install_name: str,
+                         exports: list) -> str:
+    """Record what a formal dylib exports, next to the dylib.
+
+    An executable that links this library has to rewrite each call site's
+    callee to the library's exported spelling (`_<module>__<fn>`), and it
+    cannot know that mapping by looking at the source it is compiling — the
+    callee is just a bare name. The build that *made* the library is the only
+    place the mapping exists, so it leaves it behind. JSON because the
+    executable build has to read it without importing this module's
+    compile-time dependencies."""
+    import json
+    path = dylib_manifest_path(dylib_path)
+    payload = {
+        "dylib": os.path.abspath(dylib_path),
+        "install_name": install_name,
+        # What the executable records in its LC_LOAD_DYLIB. The library's own
+        # id is `@rpath/...`, which a dependent can only resolve with an
+        # LC_RPATH of its own, so a dependent links the real location.
+        "load_path": os.path.abspath(dylib_path),
+        # The reflection payload, in the shape doc/ABI.md's table carries: the
+        # boundary symbol, its signature, and the module that owns it, so a
+        # client can bind a call without ever reading the module's source.
+        "exports": [{"module": e["module"], "name": e["name"],
+                     "symbol": e["symbol"], "arity": e.get("arity"),
+                     "signature": e.get("signature", ""),
+                     "kind": e.get("kind")}
+                    for e in exports],
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=1, sort_keys=True)
+        f.write("\n")
+    return path
+
+
+def load_dylib_manifests(dylib_paths: list) -> list:
+    """Read the manifests of the libraries an executable links against.
+
+    Each entry is `{"install_name", "map": {bare callee -> exported symbol},
+    "exports"}`. A library whose manifest is missing is an error rather than a
+    silently ignored dependency: the executable would emit calls to symbols
+    nothing defines and produce an image that dies in dyld at launch — which
+    is exactly the failure this mechanism exists to prevent."""
+    import json
+    out = []
+    for dylib in dylib_paths or []:
+        mpath = dylib_manifest_path(dylib)
+        try:
+            with open(mpath) as f:
+                payload = json.load(f)
+        except OSError as e:
+            raise FormalBuildError(
+                f"cannot read the export manifest for {dylib} ({mpath}): {e}. "
+                f"It is written next to the dylib by `mojo dylib --formal`.")
+        exports = payload.get("exports") or []
+        if not exports:
+            raise FormalBuildError(
+                f"{dylib}'s manifest lists no exports")
+        # Two libraries may export the same callee name; first one listed
+        # wins, matching the dylib ordinal order the image will record.
+        amap = {}
+        for e in exports:
+            amap.setdefault(e["name"], e["symbol"])
+        out.append({
+            "install_name": payload.get("load_path") or payload["dylib"],
+            "map": amap,
+            "exports": exports,
+        })
+    return out
+
+
+def _module_prefix(source_path: str) -> str:
+    """This module's ABI qualifier — `module_loader.module_name_for_path`, the
+    single source of truth both backends must use (its own docstring: "both
+    MUST derive a struct's module-qualified symbol from the exact same
+    function applied to the exact same resolved file path, or the two sides can
+    disagree")."""
+    try:
+        from module_loader import module_name_for_path
+        return module_name_for_path(os.path.abspath(source_path))
+    except Exception:
+        return re.sub(r"[^A-Za-z0-9_]", "_",
+                      os.path.splitext(os.path.basename(source_path))[0])
+
+
+def _abi_symbol(entry: dict):
+    """The boundary symbol for a reflection entry, or None for a TYPE entry.
+
+    `reflect.export_csym` is the single source of truth for this — the same
+    function the gimple dylib's table and its `nm` cross-check use — so a
+    formal dylib advertises exactly the symbols a gimple dylib would, and an
+    importer cannot end up binding a name the other backend spells
+    differently. It is a C identifier (no leading underscore); the Mach-O name
+    is that with `_` prepended, which is what the export trie stores and what
+    dyld looks up.
+
+    A TYPE entry has no function symbol (and the formal path has no object
+    model to represent one), so it yields None.
+    """
+    # Lazy: `reflect` imports gimple_codegen, and this path must never pull
+    # the gimple engine in (the same reason _load_formal_build resolves
+    # formal.build through importlib in fire.py).
+    from reflect import SYM_TYPE, export_csym
+    if entry.get("kind") == SYM_TYPE:
+        return None
+    try:
+        return export_csym(entry)
+    except Exception:
+        return None
+
+
+def _formal_exports(source_paths: list, module_by_name: dict, ordered: list,
+                    info: dict, prefixes: dict = None) -> list:
+    """The library's export table, per doc/ABI.md's boundary contract.
+
+    The export SET is decided by `reflect.collect_exports_src` — the same
+    function the gimple dylib uses — so both dylibs advertise the same things
+    and a client cannot find a symbol in one that the other omits. That
+    function is also what keeps the awkward cases honest: a private (`_`)
+    name, a generic template (no single concrete symbol exists) and an
+    overloaded name (selected per call site, not one symbol) are all excluded
+    rather than exported under a name that means something else.
+
+    The SYMBOL spelling is the ABI's: a free function is bare (`name`), and a
+    struct method is module-qualified (`<module>_<Struct>_<method>`) so two
+    modules' same-named structs never collide. The formal path has no object
+    model, so no method is compiled here — but the naming is the ABI's so that
+    a method can be added without renaming anything.
+    """
+    import reflect          # lazy — see _abi_symbol
+    exported: dict = {}
+    for src_path in source_paths:
+        # An explicit identity wins: a package's `__init__.mojo` has no
+        # distinguishing FILE name, so deriving the qualifier from the path
+        # gives every package the same `_init_` — the exact collision
+        # module_name_for_path exists to prevent (it can only disambiguate
+        # under STDLIB_PATH; a local sibling package is addressed by the
+        # module name the importer used).
+        prefix = (prefixes or {}).get(src_path) or _module_prefix(src_path)
+        with open(src_path) as f:
+            text = f.read()
+        for entry in reflect.collect_exports_src(text, prefix):
+            symbol = _abi_symbol(entry)
+            if symbol:
+                exported.setdefault(entry["name"], (prefix, entry, symbol))
+    out = []
+    for fn in ordered:
+        if fn.name not in exported:
+            continue                      # private, generic, or overloaded
+        prefix, entry, symbol = exported[fn.name]
+        out.append({
+            "module": prefix,
+            "name": fn.name,
+            "symbol": symbol,
+            "entry": info["labels"][fn.name],
+            "arity": len(fn.params),
+            "signature": entry.get("signature", ""),
+            "kind": entry.get("kind"),
+        })
+    return out
+
+
+def _record_link_deps(manifest_path: str, linked: list) -> None:
+    """Note the libraries this dylib links, so a program can close the set."""
+    import json
+    try:
+        with open(manifest_path) as f:
+            payload = json.load(f)
+    except OSError:
+        return
+    payload["links"] = [{"install_name": d["install_name"],
+                         "path": d.get("path")} for d in linked]
+    with open(manifest_path, "w") as f:
+        json.dump(payload, f, indent=1, sort_keys=True)
+        f.write("\n")
 
 
 def compile_formal_dylib(source_paths: list, output: str = None,
                          test_input: int = 10, prove: bool = True,
-                         check: bool = True) -> dict:
+                         check: bool = True, module_prefixes: dict = None,
+                         link_dylibs: list = None) -> dict:
     if not source_paths:
         raise FormalBuildError("at least one source file is required")
+
+    # The libraries THIS library links. Their export spellings decide how a
+    # cross-module call is named — a call to a sibling's `base` has to become a
+    # reference to `leaf_base_<hash>`, or the library builds and then fails to
+    # load with "Symbol not found" for a function its sibling defines.
+    linked = load_dylib_manifests(link_dylibs)
+    dylib_syms = {}
+    for d in linked:
+        for bare, mangled in (d.get("map") or {}).items():
+            dylib_syms.setdefault(bare, mangled)
+    dep_install = [d["install_name"] for d in linked]
+    dep_syms = {d["install_name"]: list((d.get("map") or {}).values())
+                for d in linked}
     ordered = []
     module_by_name = {}
     for source_path in source_paths:
-        module, functions = _formal_module_functions(source_path)
+        module, functions, module_source = _formal_module_functions(source_path)
         for fn in functions:
             if fn.name in module_by_name:
+                # NOT an ABI restriction: ABI.md leaves free functions
+                # unmangled, so two modules may each define `add` (the gimple
+                # dylib demotes the second to file-local). This path cannot:
+                # every module in one library shares ONE flat function
+                # registry keyed by name, so the second definition would
+                # silently displace the first. Refuse instead of picking.
                 raise FormalBuildError(
                     f"duplicate function '{fn.name}' in "
                     f"{module_by_name[fn.name]} and {source_path}")
@@ -671,40 +1077,60 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             os.path.dirname(os.path.abspath(source_paths[0])),
             stem + ".dylib")
     install_name = "@rpath/" + os.path.basename(output)
-    base_addr = TEXT_BASE + dylib_code_offset(install_name)
-    codegen = ARM64Codegen(test_input=test_input)
+    # A library that calls out carries extra load commands (__DATA_CONST and an
+    # LC_LOAD_DYLIB for libSystem), which move its code — so the base the code
+    # is emitted for, the stub addresses its call sites branch to, and the
+    # image the emitter builds must all be derived for the SAME decision. The
+    # first pass discovers whether there are externs at all; the second emits
+    # at the offset that implies, exactly as the executable path does.
+    codegen = ARM64Codegen(test_input=test_input, dylib_syms=dylib_syms)
     try:
-        code, info = codegen.compile(ordered, base_addr=base_addr,
-                                     emit_startup=False)
+        code, info = codegen.compile(
+            ordered,
+            base_addr=TEXT_BASE + dylib_code_offset(install_name, False,
+                                                    dep_install),
+            emit_startup=False)
+        external_syms = info.get("external_syms") or []
+        if external_syms:
+            # The dependency load commands are known BEFORE compiling, so the
+            # no-extern offset already accounts for them; only the extern
+            # segment and libSystem are discovered by the first pass.
+            codegen = ARM64Codegen(test_input=test_input, dylib_syms=dylib_syms)
+            code_file = dylib_code_offset(install_name, True, dep_install)
+            code, info = codegen.compile(ordered,
+                                         base_addr=TEXT_BASE + code_file,
+                                         emit_startup=False)
+            external_syms = info.get("external_syms") or []
+            stub_addrs = externer_layout(len(code), external_syms,
+                                        entryoff=code_file)["stub_addrs"]
+            codegen.asm.resolve_extern(stub_addrs)
+            code = bytes(codegen.asm.sections["text"])
+        else:
+            external_syms = []
     except CodegenError as e:
         raise FormalBuildError(str(e))
-    if info.get("external_syms"):
-        raise FormalBuildError("external symbols are not supported in formal dylibs")
 
-    exports = []
-    for fn in ordered:
-        if fn.name.startswith("_"):
-            continue
-        module = re.sub(r"[^A-Za-z0-9_]", "_",
-                        os.path.splitext(os.path.basename(
-                            module_by_name[fn.name]))[0])
-        exports.append({
-            "module": module,
-            "name": fn.name,
-            "symbol": f"_{module}__{fn.name}",
-            "entry": info["labels"][fn.name],
-            "arity": len(fn.params),
-        })
+    exports = _formal_exports(source_paths, module_by_name, ordered, info,
+                              module_prefixes)
     if not exports:
         raise FormalBuildError("formal dylib has no public functions")
 
-    binary = build_macho_dylib(code, base_addr, exports, install_name)
+    binary = build_macho_dylib(
+        code,
+        TEXT_BASE + dylib_code_offset(install_name, bool(external_syms),
+                                      dep_install),
+        exports, install_name, external_syms=external_syms,
+        deps=dep_install, dep_syms=dep_syms)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
+    manifest_path = write_dylib_manifest(output, install_name, exports)
+    if linked:
+        _record_link_deps(manifest_path, linked)
 
     result = {
+        "manifest_path": manifest_path,
         "path": output,
         "code": code,
         "binary": binary,

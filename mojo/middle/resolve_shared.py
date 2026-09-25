@@ -18,6 +18,7 @@ from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
+import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 
@@ -1243,65 +1244,25 @@ def _eval_const(gen, node):
     _gen_stmt_ComptimeVarStmt into self._comptime_vals) — or None if it
     isn't foldable. A superset of _eval_const_int/_eval_const_bool used
     where the comptime value's own type (not just int/bool) matters,
-    e.g. a comptime `if` testing a comptime string alias."""
-    if isinstance(node, BoolLiteral): return node.value
-    if isinstance(node, IntLiteral):  return node.value
-    if isinstance(node, StringLiteral): return node.value
-    if isinstance(node, IdentExpr):
-        return gen._comptime_vals.get(node.name)
-    if isinstance(node, UnaryOp) and node.op == '-':
-        v = gen._eval_const(node.operand)
-        return -v if isinstance(v, (int, bool)) else None
-    if isinstance(node, UnaryOp) and node.op == 'not':
-        v = gen._eval_const(node.operand)
-        return not v if isinstance(v, (bool, int)) else None
-    if isinstance(node, BinaryOp):
-        l = gen._eval_const(node.left)
-        r = gen._eval_const(node.right)
-        if l is None or r is None: return None
-        op = node.op
-        if op == '+':   return l + r
-        if op == '-':   return l - r
-        if op == '*':   return l * r
-        if op == '/':   return l // r
-        if op == '==':  return l == r
-        if op == '!=':  return l != r
-        if op == '<':   return l < r
-        if op == '<=':  return l <= r
-        if op == '>':   return l > r
-        if op == '>=':  return l >= r
-        if op == 'and': return l and r
-        if op == 'or':  return l or r
-    if isinstance(node, CompareChain):
-        left = gen._eval_const(node.operands[0])
-        if left is None: return None
-        for op, operand in zip(node.ops, node.operands[1:]):
-            right = gen._eval_const(operand)
-            if right is None: return None
-            link = gen._eval_const_compare_op(op, left, right)
-            if link is None: return None
-            if not link: return False
-            left = right
-        return True
-    # `sys.platform` — a genuinely compile-time-constant value for THIS
-    # host (matching this compiler's own CPython `sys.platform`, since
-    # that's the platform any `if sys.platform == 'X': def f(): ...`
-    # conditional-toplevel-def idiom is really being resolved for — see
-    # gen_module's "conditional toplevel def" promotion, whose own TODO
-    # comment names this exact gap: "if the guarding condition is one
-    # this compiler can already resolve statically... pick the matching
-    # branch... instead of" always picking the syntactically-first
-    # branch regardless of whether its condition is actually true. Without
-    # this, `_MS_WINDOWS = (sys.platform == 'win32')` folds to `None`
-    # (unresolvable) on every host, and the promotion logic's "first-
-    # branch-wins" fallback silently picks the WINDOWS-only branch's
-    # body even when compiling on macOS/Linux — found via Lib/
-    # importlib/_bootstrap_external.py's `if _MS_WINDOWS: def
-    # _path_join(...): ... else: def _path_join(...): ...`.
-    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
-            and node.obj.name == 'sys' and node.member == 'platform'):
-        return gimple_ctypes.sys.platform
-    return None
+    e.g. a comptime `if` testing a comptime string alias.
+
+    The folding RULES live in mojo/middle/comptime.py, shared with
+    the formal arm64 backend so both compiled backends resolve `comptime`
+    the same way; this wrapper supplies the gimple path's binding table and
+    its `sys.platform`."""
+    # `sys.platform` — a genuinely compile-time-constant value for THIS host
+    # is folded by comptime_eval.eval_const, which takes the platform as a
+    # parameter so this path keeps resolving it exactly as it did before
+    # (gimple_ctypes.sys.platform). The reason it matters at all: gen_module's
+    # "conditional toplevel def" promotion needs a statically resolvable guard,
+    # and without this `_MS_WINDOWS = (sys.platform == 'win32')` folds to None
+    # (unresolvable) on every host, so the promotion's "first-branch-wins"
+    # fallback silently picks the WINDOWS-only branch's body even when
+    # compiling on macOS/Linux — found via Lib/importlib
+    # /_bootstrap_external.py's `if _MS_WINDOWS: def _path_join(...): ...
+    # else: def _path_join(...): ...`.
+    return comptime_eval.eval_const(node, gen._comptime_vals,
+                                      gimple_ctypes.sys.platform)
 
 
 # ---------------------------------------------------------------------------

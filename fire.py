@@ -9,7 +9,9 @@ Modes:
 - mojo build <file.mojo>           Compile to executable (output name = file basename)
 - mojo build -o <output> <file>    Compile to executable with specified output name
 - mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple)
+- mojo --backend=x86_64 ...        Select the x86-64 formal backend (no gimple)
 - mojo build --formal <file.mojo>  Formal arm64 build (Mach-O + Lean proof)
+- mojo build --formal --backend=x86_64 <f>  Formal x86-64 build (Mach-O, no proof)
 - mojo build --formal -o <out> <f> Same, with specified output path
 - mojo build --formal -n <int> <f> Same, with X0 input for the entry call (default 10)
 - mojo --no-prove <file>           Skip proof generation and checking
@@ -65,7 +67,9 @@ def _extract_backend(args: list):
 
     Returns (backend, remaining_args). 'gimple' is the default; 'arm64'
     (aliases: 'formal', 'arm64-formal', 'macho') selects the formal arm64
-    codegen path and must never import gimple_codegen / driver.
+    codegen path and must never import gimple_codegen / driver. 'x86_64'
+    (aliases: 'x86-64', 'amd64') selects the formal x86-64 codegen path, same
+    isolation.
     Last occurrence wins."""
     backend = 'gimple'
     remaining = []
@@ -84,11 +88,23 @@ def _extract_backend(args: list):
         i += 1
     if backend in ('formal', 'arm64-formal', 'macho'):
         backend = 'arm64'
-    if backend not in ('gimple', 'arm64'):
-        print(f"error: unknown backend '{backend}' (expected gimple|arm64)",
-              file=sys.stderr)
+    if backend in ('x86-64', 'amd64'):
+        backend = 'x86_64'
+    if backend not in ('gimple', 'arm64', 'x86_64'):
+        print(f"error: unknown backend '{backend}' "
+              f"(expected gimple|arm64|x86_64)", file=sys.stderr)
         sys.exit(2)
     return backend, remaining
+
+
+def _backend_was_explicit(argv: list) -> bool:
+    """Whether argv names a backend at all.
+
+    `--formal` on its own selects the arm64 formal backend, but `--formal
+    --backend=x86_64` is a different request, so the flag needs a way to tell
+    "no backend named" from "arm64 named explicitly" — both of which arrive
+    from _extract_backend as the same string."""
+    return any(a == "--backend" or a.startswith("--backend=") for a in argv)
 
 
 def _extract_formal_flags(args: list):
@@ -155,8 +171,8 @@ def _pop_test_input(argv: list):
 
 
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
-                       run_it: bool) -> int:
-    """The one formal Mach-O executable path: `mojo build --formal` and bare
+                       run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
+    """The one formal executable path: `mojo build --formal` and bare
     `mojo --formal <file>` both land here, and nothing else builds one.
 
     `run_it` is the only difference between them, and it mirrors the gimple
@@ -169,7 +185,9 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
     try:
         result = _fb.compile_formal(input_file, output=output,
                                     test_input=test_input,
-                                    prove=prove, check=prove)
+                                    prove=prove, check=prove,
+                                    arch=arch,
+                                    link_dylibs=list(link_dylibs or []))
     except _fb.FormalBuildError as e:
         print(f"build: {e}", file=sys.stderr)
         return 1
@@ -178,18 +196,31 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
         import traceback
         traceback.print_exc(file=sys.stderr)
         return 1
-    print(f"Built: {result['path']}")
+    print(f"Built: {result['path']}  [{result.get('backend', arch)}]")
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
         print(f"Proof: {result['proof_path']}{cached}")
     if not run_it:
         return 0
+    argv = _formal_run_argv(result["path"], arch)
     try:
-        completed = subprocess.run([result["path"]])
+        completed = subprocess.run(argv)
     except OSError as e:
         print(f"build: cannot run {result['path']}: {e}", file=sys.stderr)
         return 1
     return completed.returncode
+
+
+def _formal_run_argv(path: str, arch: str) -> list:
+    """How to execute a formal binary for `arch` on this host.
+
+    An x86-64 binary on Apple Silicon needs Rosetta 2, which is what
+    `arch -x86_64` asks the kernel for — the same thing a `clang -arch
+    x86_64` binary needs, and the reason the x86-64 path emits Mach-O rather
+    than ELF on macOS. Everywhere else the binary is native."""
+    if arch == "x86_64" and sys.platform == "darwin":
+        return ["arch", "-x86_64", path]
+    return [path]
 
 
 def _load_formal_build():
@@ -711,9 +742,13 @@ def main():
     # may appear anywhere. backend selects the codegen path: 'gimple'
     # (default) vs 'arm64' (formal arm64 codegen + Mach-O, no gimple).
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
+    backend_explicit = _backend_was_explicit(sys.argv[1:])
     backend, rest = _extract_backend(rest)
     formal, prove, rest = _extract_formal_flags(rest)
-    if formal:
+    if formal and not backend_explicit:
+        # --formal alone means the arm64 formal backend, but an explicit
+        # --backend wins: `build --formal --backend=x86_64` is how the x86-64
+        # path is asked for, and it must not be silently rewritten here.
         backend = 'arm64'
     sys.argv = [sys.argv[0]] + rest
 
@@ -812,10 +847,25 @@ Backend selector (may appear anywhere; selects the codegen path):
     # Check for build command
     build = False
     build_output = None
+    build_link_dylibs = []
     if sys.argv[1] == 'build':
         build = True
         sys.argv.pop(1)
         build_output = _pop_flag_value(sys.argv, '-o')
+        # Formal libraries this program links against: `mojo build --formal
+        # --link-dylib <path>`, repeatable. Each library's export manifest
+        # says which bare callee names it exports and under what symbol, so a
+        # cross-module call becomes a real dependency instead of a BL against
+        # a symbol nothing defines (which builds, then dies in dyld at launch).
+        build_link_dylibs = []
+        while '--link-dylib' in sys.argv:
+            i = sys.argv.index('--link-dylib')
+            if i + 1 >= len(sys.argv):
+                print("mojo build: --link-dylib needs a .dylib path",
+                      file=sys.stderr)
+                sys.exit(2)
+            build_link_dylibs.append(sys.argv[i + 1])
+            del sys.argv[i:i + 2]
 
     # -n is the formal backend's entry-argument flag (the X0 value the startup
     # stub hands the entry function). Take it from the CLI's own portion of the
@@ -932,11 +982,12 @@ Backend selector (may appear anywhere; selects the codegen path):
     # formal.build (no driver, no gimple); 'gimple' uses the module-cache system
     # (link mode + per-import dylibs + CAS + reflection) with inline fallback.
     if build:
-        if backend == 'arm64':
+        if backend in ('arm64', 'x86_64'):
             sys.exit(_formal_executable(
                 input_file, build_output,
                 10 if formal_test_input is None else formal_test_input,
-                prove, run_it=False))
+                prove, run_it=False, link_dylibs=build_link_dylibs,
+                arch=backend))
         try:
             import driver
             rc = driver.compile_program(input_file, src, output=build_output,
@@ -1093,14 +1144,16 @@ Backend selector (may appear anywhere; selects the codegen path):
     # formal.build only — never import driver/gimple (codesign may still
     # block execution; that is deferred).
     if input_file.endswith('.mojo'):
-        if backend == 'arm64':
+        if backend in ('arm64', 'x86_64'):
             # Bare `mojo --formal f.mojo` (and `mojo --backend=arm64 f.mojo`)
             # compile AND run, exactly like a bare `mojo f.mojo` on the gimple
-            # backend; `mojo build --formal` compiles and stops.
+            # backend; `mojo build --formal` compiles and stops. The x86_64
+            # image is a Mach-O and runs under Rosetta (see
+            # _formal_run_argv).
             sys.exit(_formal_executable(
                 input_file, None,
                 10 if formal_test_input is None else formal_test_input,
-                prove, run_it=True))
+                prove, run_it=True, arch=backend))
         try:
             import driver
             rc = driver.compile_program(input_file, src, run=True,

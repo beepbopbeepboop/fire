@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mach-O64 binary builder for macOS ARM64.
+"""Mach-O64 binary builder for macOS (arm64 and x86-64).
 
 Mach-O is the native executable format for macOS. It's simpler than ELF:
 - 32-byte header
@@ -9,7 +9,10 @@ Mach-O is the native executable format for macOS. It's simpler than ELF:
 - LC_MAIN for entry point
 
 Unlike ELF, Mach-O doesn't require a separate loader for arm64 on macOS.
-The OS kernel loads and executes Mach-O binaries directly.
+The OS kernel loads and executes Mach-O binaries directly. The x86-64
+variant is the same image with a different cpu type and stub geometry (see
+formal/macho_linker.py's `arch` parameter); on Apple Silicon it runs under
+Rosetta 2, transparently, the same way a clang `-arch x86_64` binary does.
 """
 
 import struct
@@ -146,8 +149,10 @@ def _build_load_dylib(path: str, timestamp: int = 0, current_version: int = 0, c
 def build_macho(
     code: bytes,
     external_syms: list[str] | None = None,
+    arch: str = "arm64",
+    dylibs: list | None = None,
 ) -> bytes:
-    """Build a Mach-O64 executable for ARM64 from scratch.
+    """Build a Mach-O-64 executable for `arch` from scratch.
 
     This builds the Mach-O binary from scratch without templates. The entry
     offset comes from formal.macho_linker's layout constants (see
@@ -156,13 +161,14 @@ def build_macho(
     """
     if external_syms is None:
         external_syms = []
-    
+
     if external_syms:
         # External symbols: build __stubs + __got + LC_LOAD_DYLIB + bind.
-        # BL instructions in `code` must already point at the real stub
+        # The call instructions in `code` must already point at the real stub
         # vmaddrs (see compute_macho_got_addrs + asm.resolve_extern).
         from formal.macho_linker import build_macho_executable_extern
-        return build_macho_executable_extern(code, external_syms)
+        return build_macho_executable_extern(code, external_syms, arch,
+                                             dylibs=dylibs)
 
     from formal.macho_linker import build_macho_executable
 
@@ -170,17 +176,22 @@ def build_macho(
     # command list plus the slack post-hoc codesigning needs) — the caller only
     # has to have emitted `code` for that same offset, which it learns from
     # NOEXTERN_ENTRYOFF / EXTERN_ENTRYOFF before compiling.
-    return build_macho_executable(code)
+    return build_macho_executable(code, arch)
 
 
-def compute_macho_got_addrs(code_size: int, external_syms: list[str], vaddr: int = 0x100000000) -> dict[str, int]:
+def compute_macho_got_addrs(code_size: int, external_syms: list[str],
+                            vaddr: int = 0x100000000,
+                            arch: str = "arm64",
+                            entryoff: int = None) -> dict[str, int]:
     """Compute the absolute vmaddr of each symbol's __TEXT,__stubs stub.
 
-    The extern executable links libSystem; each call site is a BL to a 12-byte
-    stub that does ADRP/LDR/BR through a __DATA_CONST,__got slot. Returns a
+    The extern executable links libSystem; each call site branches to a stub
+    that jumps through a __DATA_CONST,__got slot. Returns a
     {symbol: stub_vmaddr} map for the assembler's resolve_extern to backpatch.
     """
     if not external_syms:
         return {}
     from formal.macho_linker import externer_layout
-    return externer_layout(code_size, external_syms)["stub_addrs"]
+    return externer_layout(code_size, external_syms, arch,
+                           entryoff)["stub_addrs"]
+

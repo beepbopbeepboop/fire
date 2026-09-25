@@ -45,6 +45,27 @@ CASES = [
      0, "hello from mojo"),
     ("two_calls", 'def two(n):\n    printf("one")\n    printf("two")\n'
                  '    return 5\n', 5, "onetwo"),
+    # `comptime f(...)` is resolved by COMPILING f with this same backend and
+    # calling it at compile time (formal/comptime_runner.py), so a folded
+    # constant and the code emitted for the same expression cannot come from
+    # two different implementations. The callee here has a loop and a nested
+    # call, and the second binding is fed by the first, so this covers the
+    # whole path: run the callee, fold its result, fold arithmetic over that
+    # result, and emit the branch the folded condition selects.
+    # The entry function is the FIRST one in the file, so it comes first here
+    # and the comptime callees it folds follow.
+    ("comptime_call", "def comptime_call(n):\n"
+                      "    comptime var a = square(6)\n"
+                      "    comptime var b = add(a, 1)\n"
+                      "    comptime var c = fact(5)\n"
+                      "    comptime var flag = a > 30\n"
+                      "    if flag:\n        return b + c\n"
+                      "    return 0\n"
+                      "def square(x):\n    return x * x\n"
+                      "def add(a, b):\n    return a + b\n"
+                      "def fact(n):\n    var acc = 1\n    var i = 1\n"
+                      "    while i <= n:\n        acc = acc * i\n"
+                      "        i = i + 1\n    return acc\n", 157, None),
 ]
 
 

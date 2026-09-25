@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""Run x86-64 container/surface programs and check the ANSWER, not the build.
+
+`tools/formal_sweep.py` measures which files BUILD, and `test_x86_64_examples.py`
+differential-tests the 43 integer examples against the arm64 backend. Neither
+touches the blob runtime — lists, tuples, dicts, comprehensions, slices,
+for-in, unpacking, string subscripts — which is nearly all of the
+`formal/x86_64_codegen.py` surface those files exercise. A container emitter
+that assembles and computes the wrong number is invisible to both.
+
+So: each case is a whole program whose entry function returns a value, the
+expected value is written down here from Python's own answer, and the
+x86-64 binary is executed under Rosetta 2 with the exit status compared.
+`--arch arm64` runs the same cases through the arm64 backend, which is how a
+mismatch between the two is told apart from a bug in both.
+
+    python3 test_x86_64_containers.py [--arch x86_64]
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+
+def _p(*lines):
+    return "\n".join(lines) + "\n"
+
+
+# (name, source, expected)
+#
+# The entry function is `main` when present (the startup stub calls it with
+# the -n value); otherwise the FIRST top-level function is the entry, so
+# single-function cases below rely on that and return directly.
+CASES = [
+    ("list-literal-index", _p(
+        "def f():",
+        "    xs = [10, 20, 30]",
+        "    return xs[1]"), 20),
+    ("list-negative-index", _p(
+        "def f():",
+        "    xs = [10, 20, 30]",
+        "    return xs[-1]"), 30),
+    ("list-first-last", _p(
+        "def f(n):",
+        "    xs = [1, 2, 3, 4, 5]",
+        "    return xs[0] + xs[n - 1]"), 6),
+    ("list-assign", _p(
+        "def f():",
+        "    xs = [1, 2, 3]",
+        "    xs[1] = 42",
+        "    return xs[1] + xs[0]"), 43),
+    ("list-length-via-count", _p(
+        "def f():",
+        "    xs = [1, 2, 3, 4]",
+        "    return xs[3]"), 4),
+    ("tuple-literal", _p(
+        "def f():",
+        "    t = (7, 8, 9)",
+        "    return t[0] + t[2]"), 16),
+    ("tuple-unpack-assign", _p(
+        "def f():",
+        "    a = 0",
+        "    b = 0",
+        "    a, b = 5, 9",
+        "    return a * b"), 45),
+    ("tuple-swap", _p(
+        "def f():",
+        "    a = 1",
+        "    b = 2",
+        "    a, b = b, a",
+        "    return a * 10 + b"), 21),
+    ("nested-list-index", _p(
+        "def f():",
+        "    xs = [[1, 2], [3, 4]]",
+        "    inner = xs[1]",
+        "    return inner[0]"), 3),
+    ("for-in-sum", _p(
+        "def f():",
+        "    total = 0",
+        "    for x in [1, 2, 3, 4, 5]:",
+        "        total += x",
+        "    return total"), 15),
+    ("for-in-index", _p(
+        "def f():",
+        "    last = 0",
+        "    for x in [3, 5, 7]:",
+        "        last = x",
+        "    return last"), 7),
+    ("for-in-tuple-target", _p(
+        "def f():",
+        "    total = 0",
+        "    for a, b in [(1, 2), (3, 4)]:",
+        "        total += a * b",
+        "    return total"), 14),
+    ("for-in-empty", _p(
+        "def f():",
+        "    n = 0",
+        "    for x in []:",
+        "        n = 99",
+        "    return n"), 0),
+    # A for-else runs when the loop finishes WITHOUT break, so here it does
+    # run and out ends at 5.
+    ("for-in-else-runs", _p(
+        "def f():",
+        "    out = 0",
+        "    for x in [1]:",
+        "        out = 1",
+        "    else:",
+        "        out = 5",
+        "    return out"), 5),
+    ("for-in-else-skipped-by-break", _p(
+        "def f():",
+        "    out = 0",
+        "    for x in [1, 2]:",
+        "        break",
+        "    else:",
+        "        out = 5",
+        "    return out"), 0),
+    ("list-concat", _p(
+        "def f():",
+        "    a = [1, 2]",
+        "    b = [3, 4]",
+        "    c = a + b",
+        "    return c[0] + c[3]"), 5),
+    ("list-concat-then-sum", _p(
+        "def f():",
+        "    a = [1, 2]",
+        "    b = [3, 4]",
+        "    c = a + b",
+        "    t = 0",
+        "    for x in c:",
+        "        t += x",
+        "    return t"), 10),
+    ("membership", _p(
+        "def f():",
+        "    xs = [4, 5, 6]",
+        "    return (5 in xs) + (9 in xs)"), 1),
+    ("string-subscript", _p(
+        "def f():",
+        "    s = \"abc\"",
+        "    return s[1]"), 98),          # ord('b')
+    # Kept under 256: the answer travels out as the process exit status,
+    # which POSIX truncates to a byte, so a larger sum would compare against
+    # its own low byte (326 came back as 70 and looked like a codegen bug).
+    ("string-index-in-loop", _p(
+        "def f():",
+        "    s = \"ab\"",
+        "    t = 0",
+        "    for i in range(2):",
+        "        t += s[i]",
+        "    return t"), 97 + 98),
+    ("slice-basic", _p(
+        "def f():",
+        "    xs = [0, 1, 2, 3, 4, 5]",
+        "    s = xs[1:4]",
+        "    return s[0] * 10 + s[2]"), 13),
+    ("slice-to-end", _p(
+        "def f():",
+        "    xs = [0, 1, 2, 3, 4, 5]",
+        "    s = xs[3:]",
+        "    return s[0] * 10 + s[1]"), 34),
+    ("slice-step", _p(
+        "def f():",
+        "    xs = [0, 1, 2, 3, 4, 5]",
+        "    s = xs[0:6:2]",
+        "    return s[0] * 10 + s[1] * 10 + s[2]"), 24),
+    ("slice-negative-bound", _p(
+        "def f():",
+        "    xs = [0, 1, 2, 3, 4, 5]",
+        "    s = xs[-2:]",
+        "    return s[0] * 10 + s[1]"), 45),
+    ("slice-empty", _p(
+        "def f():",
+        "    xs = [0, 1, 2, 3]",
+        "    s = xs[3:1]",
+        "    t = 0",
+        "    for x in s:",
+        "        t = 99",
+        "    return t"), 0),
+    ("comprehension-simple", _p(
+        "def f(n):",
+        "    xs = [i * 2 for i in range(n)]",
+        "    t = 0",
+        "    for x in xs:",
+        "        t += x",
+        "    return t"), 20),          # 0+2+4+6+8
+    ("comprehension-filter", _p(
+        "def f(n):",
+        "    xs = [i for i in range(n) if i > 2]",
+        "    t = 0",
+        "    for x in xs:",
+        "        t += x",
+        "    return t"), 7),           # 3+4
+    ("comprehension-expr", _p(
+        "def f(n):",
+        "    xs = [i + 1 for i in range(n)]",
+        "    s = 0",
+        "    for x in xs:",
+        "        s += x",
+        "    return s"), 15),          # 1+2+3+4+5
+    ("comprehension-of-list", _p(
+        "def f():",
+        "    src = [5, 6, 7]",
+        "    xs = [v * 2 for v in src]",
+        "    t = 0",
+        "    for x in xs:",
+        "        t += x",
+        "    return t"), 36),          # 10+12+14
+    ("dict-literal-lookup", _p(
+        "def f():",
+        "    d = {1: 10, 2: 20}",
+        "    return d[2]"), 20),
+    ("dict-string-key", _p(
+        "def f():",
+        "    d = {\"a\": 1, \"b\": 2}",
+        "    return d[\"b\"]"), 2),
+    ("dict-in-loop", _p(
+        "def f():",
+        "    d = {1: 5, 2: 6, 3: 7}",
+        "    t = 0",
+        "    for k in [1, 2, 3]:",
+        "        t += d[k]",
+        "    return t"), 18),
+    ("nested-comprehension", _p(
+        "def f(n):",
+        "    xs = [i + j for i in range(n) for j in range(n)]",
+        "    t = 0",
+        "    for x in xs:",
+        "        t += x",
+        "    return t"), 100),         # n=5: 5*10 + 5*10
+    ("try-finally-runs", _p(
+        "def f():",
+        "    out = 0",
+        "    try:",
+        "        out = 1",
+        "    finally:",
+        "        out = out + 10",
+        "    return out"), 11),
+    ("return-inside-try", _p(
+        "def f():",
+        "    out = 0",
+        "    try:",
+        "        return 5",
+        "    finally:",
+        "        out = 1",
+        "    return out"), 5),
+    ("with-statement", _p(
+        "def f():",
+        "    x = 0",
+        "    with 7 as y:",
+        "        x = y",
+        "    return x"), 7),
+    # n=5: (5>5 is false -> 2) + (5>0 is true -> 3) = 5
+    ("ternary-and-chain", _p(
+        "def f(n):",
+        "    return (1 if n > 5 else 2) + (3 if n > 0 else 4)"), 5),
+    ("chained-compare", _p(
+        "def f(n):",
+        "    return (1 < n < 10) + (10 < n < 20)"), 1),
+    # n=5 is truthy, so `n or 99` is 5 -> 6
+    ("short-circuit-or", _p(
+        "def f(n):",
+        "    return (n or 99) + 1"), 6),
+    ("short-circuit-and", _p(
+        "def f(n):",
+        "    return (n and 3) + 1"), 4),
+    # `main` must be the entry when a module has several functions — the
+    # startup stub calls the FIRST function otherwise, with a second argument
+    # it was never given. n=5: 5*3 + 2*5 = 25.
+    ("nested-def-and-call", _p(
+        "def helper(a, b):",
+        "    return a * b",
+        "",
+        "def main():",
+        "    return helper(5, 3) + helper(2, 5)"), 25),
+    ("string-in-if", _p(
+        "def f(n):",
+        "    s = \"abc\"",
+        "    if n > 0:",
+        "        return s[0]",
+        "    return 0"), 97),
+    ("string-equality", _p(
+        "def f():",
+        "    a = \"xy\"",
+        "    b = \"xy\"",
+        "    return (a == b) + (a == b)"), 2),
+    ("break-in-for", _p(
+        "def f():",
+        "    t = 0",
+        "    for x in [1, 2, 3, 4]:",
+        "        if x == 3:",
+        "            break",
+        "        t += x",
+        "    return t"), 3),
+    ("continue-in-for", _p(
+        "def f():",
+        "    t = 0",
+        "    for x in [1, 2, 3, 4]:",
+        "        if x == 2:",
+        "            continue",
+        "        t += x",
+        "    return t"), 8),
+]
+
+
+def run_case(name: str, source: str, arch: str):
+    """Build and run one case; return (status, detail) with status None on a
+    build/run failure."""
+    import formal.build as B
+    with tempfile.TemporaryDirectory(prefix="formal-x86c-") as td:
+        src = os.path.join(td, "case.mojo")
+        with open(src, "w") as f:
+            f.write(source)
+        out = os.path.join(td, "a.out")
+        try:
+            B.compile_formal(src, output=out, test_input=5, prove=False,
+                             arch=arch)
+        except Exception as e:                          # noqa: BLE001
+            return None, f"build: {type(e).__name__}: {e}"
+        argv = ["arch", "-x86_64", out] if (arch == "x86_64"
+                                            and sys.platform == "darwin") \
+            else [out]
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode < 0:
+            return None, f"signal {-r.returncode}"
+        if "Bad CPU type" in (r.stderr or ""):
+            return None, "Bad CPU type in executable"
+        return r.returncode, ""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--arch", default="x86_64",
+                    choices=("x86_64", "arm64"))
+    ap.add_argument("-v", action="store_true")
+    args = ap.parse_args()
+
+    failed = passed = 0
+    for name, source, want in CASES:
+        got, detail = run_case(name, source, args.arch)
+        if got is None:
+            status, note = "FAIL", detail
+            failed += 1
+        elif got != want:
+            status, note = "FAIL", f"returned {got}, want {want}"
+            failed += 1
+        else:
+            status, note = "PASS", f"= {got}"
+            passed += 1
+        if status != "PASS" or args.v:
+            print(f"{status:4} {name:26} {note}")
+    print(f"[{args.arch}] PASS={passed} FAIL={failed} of {len(CASES)}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

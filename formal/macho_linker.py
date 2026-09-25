@@ -1,10 +1,20 @@
 """Mach-O executable (a.out) generator: constructs an MH_EXECUTE binary from scratch.
 
-Two builders:
+Three builders:
 - build_macho_executable: minimal executable, no external symbols.
 - build_macho_executable_extern: executable linking /usr/lib/libSystem.B.dylib
   via a __TEXT,__stubs section + __DATA_CONST,__got slot and classic dyld bind
   opcodes (LC_DYLD_INFO). dyld resolves the GOT slot at load time.
+- build_macho_dylib: MH_DYLIB with an export trie.
+
+Two architectures: `arch="arm64"` (the original target) and `arch="x86_64"`
+(the formal x86-64 codegen's target, which runs under Rosetta on Apple
+Silicon). The segment/load-command layout, the bind opcode stream and the
+entry-offset arithmetic are identical between them; only three things vary —
+the Mach-O cpu type/subtype, the per-symbol stub instruction sequence, and
+its size (12 bytes of ADRP/LDR/BR on arm64, 6 bytes of `jmpq *disp(%rip)` on
+x86-64). Each is a parameter here rather than a second copy of the builder,
+so the two architectures cannot drift apart on the parts that must match.
 """
 
 import struct
@@ -21,7 +31,45 @@ DYLD_INFO_ONLY_CMD = 0x80000022
 
 MAGIC_64 = 0xFEEDFACF
 CPU_TYPE_ARM64 = 0x0100000C
+# Subtypes come from <mach/machine.h>: CPU_SUBTYPE_ARM64_ALL is 0 and
+# CPU_SUBTYPE_X86_64_ALL is 3. They are NOT interchangeable — stamping the
+# arm64 image with 3 (the x86_64 value) still builds, still passes
+# `codesign -v`, and still disassembles under `otool`, but execve rejects it
+# with EBADARCH ("Bad CPU type in executable"), so only a test that actually
+# RUNS the binary can see it. test_x86_64_encoders.py asserts both pairs.
+CPU_SUBTYPE_ARM64_ALL = 0x00000000
+CPU_TYPE_X86_64 = 0x01000007
+CPU_SUBTYPE_X86_64_ALL = 0x00000003
 MH_EXECUTE = 2
+
+# Per-architecture Mach-O identity and stub geometry.
+ARCHES = {
+    "arm64": {
+        "cputype": CPU_TYPE_ARM64,
+        "cpusubtype": CPU_SUBTYPE_ARM64_ALL,
+        "stub_size": 12,
+    },
+    "x86_64": {
+        "cputype": CPU_TYPE_X86_64,
+        "cpusubtype": CPU_SUBTYPE_X86_64_ALL,
+        "stub_size": 6,
+    },
+}
+
+
+def arch_spec(arch: str) -> dict:
+    """Mach-O identity and stub geometry for `arch`, or a clear error."""
+    spec = ARCHES.get(arch)
+    if spec is None:
+        raise ValueError(
+            f"unknown arch {arch!r} (expected one of {sorted(ARCHES)})")
+    return spec
+
+
+def stub_size(arch: str = "arm64") -> int:
+    """Bytes each __TEXT,__stubs entry occupies for `arch`."""
+    return arch_spec(arch)["stub_size"]
+
 
 # dyld bind opcodes (classic LC_DYLD_INFO binding)
 BIND_DONE = 0x00
@@ -106,6 +154,68 @@ def executable_entry_offset(sizeofcmds: int) -> int:
 NOEXTERN_ENTRYOFF = executable_entry_offset(NOEXTERN_SIZEOFCMDS)
 EXTERN_ENTRYOFF = executable_entry_offset(EXTERN_SIZEOFCMDS)
 
+
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) & ~(alignment - 1)
+
+
+def _text_filesize(body_end: int) -> int:
+    """filesize/vmsize of __TEXT for content ending at file offset `body_end`.
+
+    Every image in this module puts the load commands, the code and (extern
+    path) the stubs in __TEXT, then puts each following segment on the next
+    page boundary. __TEXT is therefore sized from its CONTENT, not pinned to
+    one page: with a fixed 0x4000 __TEXT, any program whose code runs past the
+    end of the first page — i.e. anything real, ~45KB of arm64 code and up —
+    writes beyond a segment that never declared the bytes, bytearray silently
+    *extends* the image, and the result is a binary longer than every segment
+    claims (which `_assert_no_unclaimed_bytes` exists to catch, and which
+    `codesign` rejects outright). Growing __TEXT keeps vmaddr == TEXT_BASE +
+    fileoff for every segment, so nothing the codegen computed off the entry
+    base or a stub address moves.
+    """
+    return _align_up(body_end, PAGE_SIZE)
+
+
+def _write_text_segment(file: bytearray, o: int, filesize: int,
+                        sections: list) -> int:
+    """Write the __TEXT segment command and its section headers at `o`.
+
+    One section is a (name, vmaddr, size, fileoff, flags, reserved1) tuple —
+    reserved1 is what carries a stub section's stub size. Returns the offset
+    just past the command.
+    """
+    def patch(off, fmt, *vals):
+        struct.pack_into(fmt, file, off, *vals)
+
+    cmdsize = 72 + 80 * len(sections)
+    patch(o + 0, "<I", SEGMENT_64_CMD)
+    patch(o + 4, "<I", cmdsize)
+    file[o + 8 : o + 24] = b"__TEXT".ljust(16, b"\0")
+    patch(o + 24, "<Q", TEXT_BASE)
+    patch(o + 32, "<Q", filesize)   # vmsize
+    patch(o + 40, "<Q", 0)          # fileoff 0: __TEXT starts the file
+    patch(o + 48, "<Q", filesize)   # filesize
+    patch(o + 56, "<I", 5)          # maxprot r-x
+    patch(o + 60, "<I", 5)          # initprot r-x
+    patch(o + 64, "<I", len(sections))
+    patch(o + 68, "<I", 0)
+    s = o + 72
+    for name, vmaddr, size, fileoff, flags, reserved1 in sections:
+        file[s : s + 16] = name.ljust(16, b"\0")
+        file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
+        patch(s + 32, "<Q", vmaddr)
+        patch(s + 40, "<Q", size)
+        patch(s + 48, "<I", fileoff)
+        patch(s + 52, "<I", 2)      # align: 2**2 = 4-byte
+        patch(s + 56, "<I", 0)      # reloff
+        patch(s + 60, "<I", 0)      # nreloc
+        patch(s + 64, "<I", flags)
+        patch(s + 68, "<I", reserved1)
+        patch(s + 72, "<I", 0)      # reserved2
+        s += 80
+    return o + cmdsize
+
 # MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE. The last two are not
 # cosmetic: a main executable without MH_DYLDLINK and MH_PIE is killed by
 # dyld before it reaches its entry point (verified by bisecting the load
@@ -113,20 +223,20 @@ EXTERN_ENTRYOFF = executable_entry_offset(EXTERN_SIZEOFCMDS)
 MH_EXECUTE_FLAGS = 0x1 | 0x4 | 0x80 | 0x200000
 
 
-def build_macho_executable(code: bytes) -> bytes:
+def build_macho_executable(code: bytes, arch: str = "arm64") -> bytes:
     """Minimal MH_EXECUTE: no external symbols, no stubs, no GOT.
 
     The entry offset is derived from this layout (see executable_entry_offset)
     rather than passed in, so the code, LC_MAIN and the __text section offset
     cannot drift apart the way a caller-supplied constant allowed.
     """
+    spec = arch_spec(arch)
     entryoff = NOEXTERN_ENTRYOFF
-    file = bytearray(0x8000)
-    if entryoff + len(code) > 0x4000:
-        raise ValueError(
-            f"code of {len(code)} bytes at offset {entryoff} overruns __TEXT "
-            f"(0x4000 bytes reserved before __LINKEDIT); the executable "
-            f"layout needs multiple __TEXT pages")
+    body_end = entryoff + len(code)
+    text_size = _text_filesize(body_end)
+    linkedit_file = text_size          # __LINKEDIT starts on the next page
+    linkedit_size = PAGE_SIZE
+    file = bytearray(linkedit_file + linkedit_size)
 
     def patch(off: int, fmt: str, *vals) -> None:
         struct.pack_into(fmt, file, off, *vals)
@@ -134,8 +244,9 @@ def build_macho_executable(code: bytes) -> bytes:
     sizeofcmds = NOEXTERN_SIZEOFCMDS
 
     patch(0, "<I", MAGIC_64)
-    patch(4, "<I", CPU_TYPE_ARM64)
-    patch(8, "<I", 0)
+    patch(4, "<I", spec["cputype"])
+    patch(8, "<I", spec["cpusubtype"])
+
     patch(12, "<I", MH_EXECUTE)
     patch(16, "<I", 8)
     patch(20, "<I", sizeofcmds)
@@ -150,38 +261,18 @@ def build_macho_executable(code: bytes) -> bytes:
     patch(o + 32, "<Q", 0x100000000)
     o += 72
 
-    patch(o + 0, "<I", SEGMENT_64_CMD)
-    patch(o + 4, "<I", 152)
-    file[o + 8 : o + 24] = b"__TEXT".ljust(16, b"\0")
-    patch(o + 24, "<Q", 0x100000000)
-    patch(o + 32, "<Q", 0x4000)
-    patch(o + 40, "<Q", 0)
-    patch(o + 48, "<Q", 0x4000)
-    patch(o + 56, "<I", 5)
-    patch(o + 60, "<I", 5)
-    patch(o + 64, "<I", 1)
-    patch(o + 68, "<I", 0)
-    s = o + 72
-    file[s : s + 16] = b"__text".ljust(16, b"\0")
-    file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
-    patch(s + 32, "<Q", 0x100000000 + entryoff)
-    patch(s + 40, "<Q", len(code))
-    patch(s + 48, "<I", entryoff)
-    patch(s + 52, "<I", 2)
-    patch(s + 56, "<I", 0)
-    patch(s + 60, "<I", 0)
-    patch(s + 64, "<I", 0x80000400)
-    patch(s + 68, "<I", 0)
-    patch(s + 72, "<I", 0)
-    o += 152
+    o = _write_text_segment(file, o, text_size, [
+        (b"__text", TEXT_BASE + entryoff, len(code), entryoff,
+         0x80000400, 0),
+    ])
 
     patch(o + 0, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
-    patch(o + 24, "<Q", 0x100004000)
-    patch(o + 32, "<Q", 0x4000)
-    patch(o + 40, "<Q", 0x4000)
-    patch(o + 48, "<Q", 0x4000)
+    patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
+    patch(o + 32, "<Q", linkedit_size)
+    patch(o + 40, "<Q", linkedit_file)
+    patch(o + 48, "<Q", linkedit_size)
     patch(o + 56, "<I", 1)   # maxprot r--: __LINKEDIT holds the code signature
     patch(o + 60, "<I", 1)   # initprot r-- (dyld maps it read-only)
     o += 72
@@ -213,21 +304,62 @@ def build_macho_executable(code: bytes) -> bytes:
 
     assert o <= entryoff, (o, entryoff)
     file[entryoff : entryoff + len(code)] = code
-    _assert_no_unclaimed_bytes(file, [(0, 0x4000), (0x4000, 0x4000)])
+    _assert_no_unclaimed_bytes(file, [(0, text_size),
+                                      (linkedit_file, linkedit_size)])
     return bytes(file)
 
 
-def _bind_info(external_syms: list[str]) -> bytes:
+def dylib_command_size(install_name: str) -> int:
+    """sizeofcmds of an LC_LOAD_DYLIB naming `install_name`.
+
+    dylib_command is {cmd, cmdsize, name-offset, timestamp, current_version,
+    compatibility_version} — 24 bytes of fixed part, then the NUL-terminated
+    path, padded to 8. Needed UP FRONT by the executable build, because each
+    dependency adds a load command and the load-command list's size is what
+    sets the entry offset (see `extern_entry_offset`)."""
+    return (24 + len(install_name.encode("utf-8")) + 1 + 7) & ~7
+
+
+def extern_entry_offset(dylib_install_names=()) -> int:
+    """File offset of the entry point for the extern executable layout.
+
+    The no-dependency case is the historical constant; each linked dylib adds
+    one LC_LOAD_DYLIB to the load-command list, which pushes the entry point
+    down (the code has to start after the whole list, with room for the
+    LC_CODE_SIGNATURE codesign appends). The codegen needs this BEFORE it
+    emits, because the entry offset decides the base address every ADRP and
+    relative branch is computed against — hence a function rather than a
+    constant."""
+    extra = sum(dylib_command_size(n) for n in dylib_install_names)
+    return executable_entry_offset(EXTERN_SIZEOFCMDS + extra)
+
+
+def _bind_info(external_syms: list[str], dylib_of: dict = None,
+               got_segment: int = GOT_SEGMENT_INDEX) -> bytes:
     """Classic dyld bind opcodes pointing each __got slot at its symbol.
 
     A __got slot is a S_NON_LAZY_SYMBOL_POINTERS entry in __DATA_CONST (segment
     ordinal 2). The bind cursor starts at (segment base + offset); SET_SEGMENT_
     AND_OFFSET_ULEB places it at the slot, then DO_BIND writes the resolved
     pointer (8 bytes) and advances it by 8, naturally walking down the slots.
+
+    `dylib_of` maps a symbol name to the 1-based dylib ordinal that provides
+    it; ordinal 1 is libSystem (the default, and what every symbol gets when
+    this is None). Ordinals follow LC_LOAD_DYLIB order, so the caller must
+    pass them in the same order the load commands are emitted.
+
+    `got_segment` is the SEGMENT ORDINAL of the __DATA_CONST holding the GOT,
+    which is a per-image fact and NOT a constant: segment ordinals count the
+    image's segments from 0 and a Mach-O *executable* spends ordinal 0 on
+    __PAGEZERO, putting __DATA_CONST at 2 — but a MH_DYLIB has no __PAGEZERO,
+    so its __DATA_CONST is ordinal 1. Passing the executable's 2 to a dylib
+    points the bind at __LINKEDIT, and dyld faults writing the fixup into a
+    read-only page (an EXC_BAD_ACCESS inside dyld's own applyFixups).
     """
     out = bytearray()
     for i, sym in enumerate(external_syms):
-        out += bytes((BIND_SET_DYLIB_ORDINAL_IMM | 0x1,))
+        ordinal = (dylib_of or {}).get(sym, 1)
+        out += bytes((BIND_SET_DYLIB_ORDINAL_IMM | ordinal,))
         out += bytes((BIND_SET_SYMBOL_TRAILING_FLAGS_IMM,))
         # BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM is *trailing*: the symbol
         # flags are a separate byte after the opcode, before the name. Folding
@@ -243,10 +375,10 @@ def _bind_info(external_syms: list[str]) -> bytes:
         # "_printf" gets "Symbol not found: __printf" — the underscore in the
         # message is dyld's own, on top of ours. The codegen hands us the name
         # as the source spelled it, so normalise to the C spelling here.
-        out += sym.lstrip("_").encode()
+        out += (sym[1:] if sym.startswith("_") else sym).encode()
         out += b"\0"
         out += bytes((BIND_SET_TYPE_IMM | BIND_TYPE_POINTER,))
-        out += bytes((BIND_SET_SEGMENT_AND_OFFSET_ULEB | GOT_SEGMENT_INDEX,))
+        out += bytes((BIND_SET_SEGMENT_AND_OFFSET_ULEB | got_segment,))
         _uleb(out, i * 8)           # offset within __DATA_CONST
         out += bytes((BIND_DO_BIND,))
     out += bytes((BIND_DONE,))
@@ -283,9 +415,16 @@ def _uleb(out: bytearray, value: int) -> None:
             return
 
 
-def _stub_bytes(got_vm: int, stub_vm: int) -> bytes:
-    from formal.arm64 import encode_adrp, encode_ldr_xt_xn_imm, encode_br_xn
+def _stub_bytes(got_vm: int, stub_vm: int, arch: str = "arm64") -> bytes:
+    """One __TEXT,__stubs entry: jump through the GOT slot at `got_vm`.
 
+    arm64: ADRP X16, page / LDR X16, [X16, #off] / BR X16 — 12 bytes.
+    x86-64: JMPQ *disp(%rip), a single 6-byte RIP-relative indirect jump whose
+    displacement runs from the END of the instruction."""
+    if arch == "x86_64":
+        from formal.x86_64 import encode_jmp_rm64
+        return encode_jmp_rm64(got_vm - (stub_vm + 6))
+    from formal.arm64 import encode_adrp, encode_ldr_xt_xn_imm, encode_br_xn
     page_off = (got_vm & ~0xFFF) - (stub_vm & ~0xFFF)
     got_off = got_vm & 0xFFF
     return (
@@ -295,55 +434,93 @@ def _stub_bytes(got_vm: int, stub_vm: int) -> bytes:
     )
 
 
-def externer_layout(code_len: int, external_syms: list[str]) -> dict:
+def externer_layout(code_len: int, external_syms: list,
+                    arch: str = "arm64", entryoff: int = None) -> dict:
     """Stub/GOT layout for the extern executable.
 
     Returns the file offset of __text,__stubs and the stub vmaddr for each
-    symbol (sorted so both BL patching and binary emission agree on slot
-    ordering). The entry offset is deliberately NOT reported: it belongs to
-    EXTERN_ENTRYOFF alone, and a second copy of it is exactly the kind of
-    constant that let code and LC_MAIN drift apart."""
+    symbol (sorted so both call-site patching and binary emission agree on
+    slot ordering).
+
+    `entryoff` is where the code starts, and it is a PARAMETER because a
+    linked dylib adds a load command and so moves it (`extern_entry_offset`).
+    Falling back to the no-dependency constant is what made a dylib-linked
+    image branch into its own epilogue padding: every stub address came out
+    low by the load commands' size, so each cross-module BL landed in the
+    middle of the caller instead of on a stub. The caller and this function
+    must agree on the offset for the SAME dylib set."""
     syms = sorted(external_syms)
-    stub_file = (EXTERN_ENTRYOFF + code_len + 3) & ~3
+    ssize = stub_size(arch)
+    if entryoff is None:
+        entryoff = EXTERN_ENTRYOFF
+    stub_file = (entryoff + code_len + 3) & ~3
     stub_base_vm = TEXT_BASE + stub_file
     return {
         "stub_file": stub_file,
-        "stub_addrs": {sym: stub_base_vm + i * 12 for i, sym in enumerate(syms)},
+        "stub_addrs": {sym: stub_base_vm + i * ssize for i, sym in enumerate(syms)},
     }
 
 
 def build_macho_executable_extern(
-    code: bytes, external_syms: list[str]
+    code: bytes, external_syms: list, arch: str = "arm64",
+    dylibs: list = None,
 ) -> bytes:
     """Executable with __TEXT,__stubs + __DATA_CONST,__got + LC_LOAD_DYLIB
-    libSystem + classic bind. `code` already contains BL instructions whose
+    libSystem + classic bind. `code` already contains call instructions whose
     targets (stub addresses) end in immediate zero placeholders; the caller
     patches them to the real stub vmaddrs via resolve_extern before calling.
 
     Like build_macho_executable, the entry offset comes from this layout
-    (executable_entry_offset) rather than from the caller."""
-    entryoff = EXTERN_ENTRYOFF
+    (executable_entry_offset) rather than from the caller.
+
+    `dylibs` is an optional list of `{"install_name": str, "symbols": set}`
+    — formal libraries this executable links against, in the order the caller
+    wants their LC_LOAD_DYLIB commands emitted. Dylib ordinals are 1-based
+    over that list *after* libSystem, so a symbol in `dylibs[k]["symbols"]`
+    binds with ordinal k+2; everything else binds from libSystem (ordinal 1).
+    Each one adds a load command, which moves the entry point, so the caller
+    must have compiled `code` for the offset `extern_entry_offset` reports for
+    the SAME dylib list."""
+    spec = arch_spec(arch)
+    ssize = spec["stub_size"]
+    dylibs = list(dylibs or [])
+    entryoff = extern_entry_offset([d["install_name"] for d in dylibs])
     external_syms = sorted(external_syms)
     n = len(external_syms)
     stub_file = (entryoff + len(code) + 3) & ~3
     stub_base_vm = TEXT_BASE + stub_file
-    got_base_vm = DATA_BASE
-    bind = _bind_info(external_syms)
-    bind_file = PAGE_SIZE * 2
+    dylib_of = {}
+    for k, d in enumerate(dylibs):
+        for sym in d.get("symbols") or ():
+            dylib_of[sym] = k + 2          # ordinal 1 is libSystem
+    bind = _bind_info(external_syms, dylib_of)
     bind_len = len(bind)
 
-    sizeofcmds = EXTERN_SIZEOFCMDS
-    total = bind_file + bind_len
-    file = bytearray(total)
+    # Everything in __TEXT, then one page per `8 * n` of GOT, then __LINKEDIT
+    # — all sized from the content, so a program past the first page gets more
+    # __TEXT pages instead of running off the end of the segment (see
+    # _text_filesize and _assert_no_unclaimed_bytes).
+    text_size = _text_filesize(stub_file + ssize * n)
+    data_file = text_size
+    data_size = _align_up(8 * n, PAGE_SIZE) or PAGE_SIZE
+    bind_file = data_file + data_size
+    got_base_vm = TEXT_BASE + data_file
+    sizeofcmds = EXTERN_SIZEOFCMDS + sum(
+        dylib_command_size(d["install_name"]) for d in dylibs)
+    # The extern layout emits 10 load commands (…LC_LOAD_DYLIB libSystem,
+    # LC_BUILD_VERSION, LC_MAIN); each linked dylib adds one more.
+    ncmds = 10 + len(dylibs)
+    file = bytearray(bind_file + bind_len)
 
     def patch(off: int, fmt: str, *vals) -> None:
         struct.pack_into(fmt, file, off, *vals)
 
     patch(0, "<I", MAGIC_64)
-    patch(4, "<I", CPU_TYPE_ARM64)
-    patch(8, "<I", 0)
+    patch(4, "<I", spec["cputype"])
+    patch(8, "<I", spec["cpusubtype"])
+
     patch(12, "<I", MH_EXECUTE)
-    patch(16, "<I", 10)
+    patch(16, "<I", ncmds)
     patch(20, "<I", sizeofcmds)
     patch(24, "<I", MH_EXECUTE_FLAGS)
 
@@ -364,51 +541,20 @@ def build_macho_executable_extern(
     o += 72
 
     # __TEXT (vmaddr TEXT_BASE, fileoff 0) with __text + __stubs
-    patch(o + 0, "<I", SEGMENT_64_CMD)
-    patch(o + 4, "<I", 72 + 2 * 80)
-    file[o + 8 : o + 24] = b"__TEXT".ljust(16, b"\0")
-    patch(o + 24, "<Q", TEXT_BASE)
-    patch(o + 32, "<Q", 0x4000)
-    patch(o + 40, "<Q", 0)
-    patch(o + 48, "<Q", 0x4000)
-    patch(o + 56, "<I", 5)
-    patch(o + 60, "<I", 5)
-    patch(o + 64, "<I", 2)  # nsects: __text + __stubs
-    patch(o + 68, "<I", 0)
-    s = o + 72
-    file[s : s + 16] = b"__text".ljust(16, b"\0")
-    file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
-    patch(s + 32, "<Q", TEXT_BASE + entryoff)
-    patch(s + 40, "<Q", len(code))
-    patch(s + 48, "<I", entryoff)
-    patch(s + 52, "<I", 2)
-    patch(s + 56, "<I", 0)
-    patch(s + 60, "<I", 0)
-    patch(s + 64, "<I", 0x80000400)
-    patch(s + 68, "<I", 0)
-    patch(s + 72, "<I", 0)
-    s += 80
-    file[s : s + 16] = b"__stubs".ljust(16, b"\0")
-    file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
-    patch(s + 32, "<Q", stub_base_vm)
-    patch(s + 40, "<Q", 12 * n)
-    patch(s + 48, "<I", stub_file)
-    patch(s + 52, "<I", 2)
-    patch(s + 56, "<I", 0)
-    patch(s + 60, "<I", 0)
-    patch(s + 64, "<I", 0x80000408)
-    patch(s + 68, "<I", 12)
-    patch(s + 72, "<I", 0)
-    o += 72 + 2 * 80
+    o = _write_text_segment(file, o, text_size, [
+        (b"__text", TEXT_BASE + entryoff, len(code), entryoff,
+         0x80000400, 0),
+        (b"__stubs", stub_base_vm, ssize * n, stub_file, 0x80000408, ssize),
+    ])
 
-    # __DATA_CONST (vmaddr DATA_BASE, fileoff 0x4000) with __got
+    # __DATA_CONST (fileoff data_file, one page per 8 * n of GOT) with __got
     patch(o + 0, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72 + 80)
     file[o + 8 : o + 24] = b"__DATA_CONST".ljust(16, b"\0")
-    patch(o + 24, "<Q", DATA_BASE)
-    patch(o + 32, "<Q", 0x4000)
-    patch(o + 40, "<Q", PAGE_SIZE)
-    patch(o + 48, "<Q", PAGE_SIZE)
+    patch(o + 24, "<Q", got_base_vm)
+    patch(o + 32, "<Q", data_size)  # vmsize
+    patch(o + 40, "<Q", data_file)  # fileoff
+    patch(o + 48, "<Q", data_size)  # filesize
     patch(o + 56, "<I", 0x3)  # rw- : dyld writes the GOT slot at load time
     patch(o + 60, "<I", 0x3)
     patch(o + 64, "<I", 1)  # nsects: __got
@@ -418,7 +564,7 @@ def build_macho_executable_extern(
     file[s + 16 : s + 32] = b"__DATA_CONST".ljust(16, b"\0")
     patch(s + 32, "<Q", got_base_vm)
     patch(s + 40, "<Q", 8 * n)
-    patch(s + 48, "<I", PAGE_SIZE)
+    patch(s + 48, "<I", data_file)
     patch(s + 52, "<I", 3)
     patch(s + 56, "<I", 0)
     patch(s + 60, "<I", 0)
@@ -431,9 +577,9 @@ def build_macho_executable_extern(
     patch(o + 0, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
-    patch(o + 24, "<Q", LINKEDIT_BASE)
-    patch(o + 32, "<Q", 0x4000)
-    patch(o + 40, "<Q", PAGE_SIZE * 2)
+    patch(o + 24, "<Q", TEXT_BASE + bind_file)
+    patch(o + 32, "<Q", _align_up(bind_len, PAGE_SIZE))
+    patch(o + 40, "<Q", bind_file)
     patch(o + 48, "<Q", bind_len)
     patch(o + 56, "<I", 1)   # maxprot r--: __LINKEDIT holds the code signature
     patch(o + 60, "<I", 1)   # initprot r--; dyld only reads the bind opcodes
@@ -482,6 +628,24 @@ def build_macho_executable_extern(
     file[o + 24 : o + 24 + len(LIBSYSTEM_PATH)] = LIBSYSTEM_PATH
     o += 56
 
+    # One LC_LOAD_DYLIB per linked formal library, in the order the caller
+    # listed them — which is what fixes the dylib ordinals the bind stream
+    # uses (ordinal 1 is libSystem, so these are 2, 3, …). A dependency the
+    # loader cannot satisfy makes dyld refuse the image at launch, so the
+    # path recorded is the dylib's real location rather than its `@rpath`
+    # install name (which would additionally need an LC_RPATH here).
+    for d in dylibs:
+        name = d["install_name"].encode("utf-8") + b"\0"
+        dsize = dylib_command_size(d["install_name"])
+        patch(o + 0, "<I", LOAD_DYLIB_CMD)
+        patch(o + 4, "<I", dsize)
+        patch(o + 8, "<I", 24)
+        patch(o + 12, "<I", 0)          # timestamp
+        patch(o + 16, "<I", 0x10000)    # current version
+        patch(o + 20, "<I", 0x10000)    # compatibility version
+        file[o + 24 : o + 24 + len(name)] = name
+        o += dsize
+
     # LC_BUILD_VERSION — not optional decoration. Without it this image is
     # rejected by `codesign` with "main executable failed strict validation"
     # (dyld has no declared platform/minimum OS to validate the load commands
@@ -510,11 +674,11 @@ def build_macho_executable_extern(
     file[entryoff : entryoff + len(code)] = code
     for i in range(n):
         got_vm = got_base_vm + i * 8
-        stub_vm = stub_base_vm + i * 12
-        f = stub_file + i * 12
-        file[f : f + 12] = _stub_bytes(got_vm, stub_vm)
+        stub_vm = stub_base_vm + i * ssize
+        f = stub_file + i * ssize
+        file[f : f + ssize] = _stub_bytes(got_vm, stub_vm, arch)
     file[bind_file : bind_file + bind_len] = bind
-    _assert_no_unclaimed_bytes(file, [(0, 0x4000), (0x4000, 0x4000),
+    _assert_no_unclaimed_bytes(file, [(0, text_size), (data_file, data_size),
                                       (bind_file, bind_len)])
     return bytes(file)
 
@@ -538,7 +702,14 @@ def _export_trie(exports: list) -> bytes:
     ordered = sorted(exports, key=lambda e: e["symbol"])
     children = []
     for export in ordered:
-        raw = export["symbol"].encode("utf-8")
+        # The export table holds Mach-O names; `symbol` is the C identifier
+        # the ABI spells (what an importer's bind stream carries, and what
+        # dyld prepends its underscore to). Prepending it here keeps the two
+        # conventions from drifting: a trie written with the bare C name
+        # exports a symbol nothing can bind, and the program dies in dyld with
+        # "Symbol not found" for a function that is right there.
+        raw = (export["symbol"] if export["symbol"].startswith("_")
+               else "_" + export["symbol"]).encode("utf-8")
         addr = bytearray()
         _uleb(addr, export["entry"] - TEXT_BASE)
         flags = bytearray()
@@ -567,67 +738,183 @@ def _export_trie(exports: list) -> bytes:
     return bytes(out)
 
 
-def dylib_code_offset(install_name: str) -> int:
+def dylib_load_commands(install_name: str, has_externs: bool,
+                        deps: list = None) -> tuple:
+    """(sizeofcmds, ncmds) of a dylib's load-command list.
+
+    One function, because the code offset is DERIVED from this and the two
+    must agree: a dylib that calls out carries a __DATA_CONST segment and an
+    LC_LOAD_DYLIB for libSystem on top of the plain layout, which pushes the
+    code down, and every MODULE it depends on adds another LC_LOAD_DYLIB that
+    pushes it down further. Computing the offset from a separate copy of the
+    formula is what produced "dylib load commands overlap code" the moment
+    externs existed — the same drift the executable's entry offset had.
+
+    `deps` are the install names of the libraries this one links, in the order
+    their LC_LOAD_DYLIB commands are emitted. That order IS the bind stream's
+    ordinal space (1 = libSystem when present, then deps), so it is passed in
+    rather than sorted here: reordering it would silently rebind every symbol.
+    """
+    deps = list(deps or [])
     name = install_name.encode("utf-8") + b"\0"
     id_cmdsize = (24 + len(name) + 7) & ~7
-    sizeofcmds = 152 + 72 + id_cmdsize + 24 + 24 + 48 + 16
+    # __TEXT carries __text, plus __stubs when the library calls out, so its
+    # command is 72 + 80 per section.
+    text_cmdsize = 72 + 80 * (2 if has_externs else 1)
+    dep_cmds = sum(dylib_command_size(d) for d in deps)
+    sizeofcmds = (text_cmdsize + 72 + id_cmdsize + 24 + 24 + 48 + 16 + dep_cmds
+                  + (dylib_command_size(LIBSYSTEM_PATH.decode()) + 152
+                     if has_externs else 0))
+    return sizeofcmds, (7 + (2 if has_externs else 0) + len(deps))
+
+
+def dylib_code_offset(install_name: str, has_externs: bool = False,
+                      deps: list = None) -> int:
+    """File offset of a dylib's code.
+
+    `has_externs` and `deps` must match what the library is actually built
+    with — the caller needs them BEFORE compiling, because they decide the base
+    address the code is emitted for.
+    """
+    sizeofcmds, _n = dylib_load_commands(install_name, has_externs, deps)
     return ((32 + sizeofcmds + 31) & ~15)
 
 
+def _write_load_dylib(file, o: int, install_name: str) -> int:
+    """Emit one LC_LOAD_DYLIB at `o`; return the offset just past it."""
+    raw = install_name.encode("utf-8") + b"\0"
+    cmdsize = dylib_command_size(install_name)
+    struct.pack_into("<I", file, o, LOAD_DYLIB_CMD)
+    struct.pack_into("<I", file, o + 4, cmdsize)
+    struct.pack_into("<I", file, o + 8, 24)
+    struct.pack_into("<I", file, o + 12, 0)
+    struct.pack_into("<I", file, o + 16, 0x10000)
+    struct.pack_into("<I", file, o + 20, 0x10000)
+    file[o + 24 : o + 24 + len(raw)] = raw
+    return o + cmdsize
+
+
 def build_macho_dylib(code: bytes, base_addr: int, exports: list,
-                      install_name: str) -> bytes:
+                      install_name: str, arch: str = "arm64",
+                      external_syms: list = None,
+                      entryoff: int = None, deps: list = None,
+                      dep_syms: dict = None) -> bytes:
+    """MH_DYLIB with an export trie, and — when `external_syms` is given —
+    the same extern machinery an executable has: __TEXT,__stubs, a
+    __DATA_CONST,__got, an LC_LOAD_DYLIB for libSystem, and a bind stream.
+
+    A dylib that calls out is the normal case, not an exotic one: the stdlib
+    calls printf and malloc everywhere, so refusing externs here is what stops
+    a formal stdlib dylib from existing at all. The layout mirrors
+    `build_macho_executable_extern` deliberately — a caller reaching a symbol
+    goes through a stub and a GOT slot dyld fills at load time — so a program
+    and the library it links behave the same way.
+
+    `entryoff` is where the code starts (it moves with the load-command list,
+    which now includes the libSystem dependency), so the stub addresses the
+    caller patched its call sites to must be computed for the same value.
+
+    `deps` are install names of MODULE libraries this dylib links (a package
+    that calls its sibling's functions), and `dep_syms` maps each such
+    library's exported symbol to it. Without the load commands, a call to a
+    sibling binds against nothing: the image builds, and then dies in dyld
+    with "Symbol not found" for a function that exists in the sibling. Bind
+    ordinals are assigned in this order — libSystem is 1, then deps in the
+    order given — so the same list drives both the commands and the stream.
+    """
+    spec = arch_spec(arch)
     trie = _export_trie(exports)
     name = install_name.encode("utf-8") + b"\0"
     id_cmdsize = (24 + len(name) + 7) & ~7
-    sizeofcmds = 152 + 72 + id_cmdsize + 24 + 24 + 48 + 16
-    code_file = dylib_code_offset(install_name)
+    ssize = spec["stub_size"]
+    external_syms = sorted(external_syms or [])
+    n = len(external_syms)
+    # One LC_LOAD_DYLIB for libSystem, and the DYLD_INFO_ONLY now carries a
+    # real bind stream, so both add to the load-command list — which is what
+    # moves the code (and so the stubs).
+    deps = list(deps or [])
+    sizeofcmds, ncmds = dylib_load_commands(install_name, bool(n), deps)
+    code_file = dylib_code_offset(install_name, bool(n), deps)
     if base_addr != TEXT_BASE + code_file:
         raise ValueError("dylib base address does not match Mach-O layout")
-    linkedit_file = ((code_file + len(code) + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE
-    file = bytearray(linkedit_file + len(trie))
+    # Stubs follow the code exactly as in the executable, so a call site's
+    # patched target and the stub the image emits cannot drift apart.
+    stub_file = (code_file + len(code) + 3) & ~3 if n else 0
+    stub_base_vm = base_addr + (stub_file - code_file)
+    text_size = _text_filesize((stub_file + ssize * n) if n else code_file + len(code))
+    data_file = text_size if n else 0
+    data_size = _align_up(8 * n, PAGE_SIZE) if n else 0
+    got_base_vm = TEXT_BASE + data_file if n else 0
+    # A dylib has no __PAGEZERO, so its segments are 0=__TEXT,
+    # 1=__DATA_CONST, 2=__LINKEDIT — the GOT is ordinal 1 here, not the
+    # executable's 2 (see _bind_info).
+    # libSystem takes ordinal 1 (it is emitted first); each dep follows, in
+    # `deps` order, so a symbol must be attributed to the library that
+    # actually defines it or dyld binds it against the wrong image.
+    dylib_of = {}
+    for i, dep in enumerate(deps):
+        for sym in (dep_syms or {}).get(dep) or []:
+            dylib_of[sym] = (2 if n else 1) + i
+    bind = _bind_info(external_syms, dylib_of=dylib_of, got_segment=1) if n else b""
+    linkedit_file = data_file + data_size if n else text_size
+    file = bytearray(linkedit_file + len(trie) + len(bind))
 
     def patch(off, fmt, *vals):
         struct.pack_into(fmt, file, off, *vals)
 
     patch(0, "<I", MAGIC_64)
-    patch(4, "<I", CPU_TYPE_ARM64)
-    patch(8, "<I", 0)
+    patch(4, "<I", spec["cputype"])
+    patch(8, "<I", spec["cpusubtype"])
     patch(12, "<I", MH_DYLIB)
-    patch(16, "<I", 7)
+    patch(16, "<I", ncmds)
     patch(20, "<I", sizeofcmds)
     patch(24, "<I", 0x800005)
     o = 32
 
-    patch(o, "<I", SEGMENT_64_CMD)
-    patch(o + 4, "<I", 152)
-    file[o + 8 : o + 24] = b"__TEXT".ljust(16, b"\0")
-    patch(o + 24, "<Q", TEXT_BASE)
-    patch(o + 32, "<Q", PAGE_SIZE)
-    patch(o + 40, "<Q", 0)
-    patch(o + 48, "<Q", PAGE_SIZE)
-    patch(o + 56, "<I", 5)
-    patch(o + 60, "<I", 5)
-    patch(o + 64, "<I", 1)
-    patch(o + 68, "<I", 0)
-    s = o + 72
-    file[s : s + 16] = b"__text".ljust(16, b"\0")
-    file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
-    patch(s + 32, "<Q", base_addr)
-    patch(s + 40, "<Q", len(code))
-    patch(s + 48, "<I", code_file)
-    patch(s + 52, "<I", 2)
-    patch(s + 56, "<I", 0)
-    patch(s + 60, "<I", 0)
-    patch(s + 64, "<I", 0x80000400)
-    o += 152
+    if n:
+        o = _write_text_segment(file, o, text_size, [
+            (b"__text", base_addr, len(code), code_file, 0x80000400, 0),
+            (b"__stubs", stub_base_vm, ssize * n, stub_file, 0x80000408, ssize),
+        ])
+
+        # __DATA_CONST,__got — rw- because dyld writes the resolved pointer.
+        patch(o, "<I", SEGMENT_64_CMD)
+        patch(o + 4, "<I", 152)
+        file[o + 8 : o + 24] = b"__DATA_CONST".ljust(16, b"\0")
+        patch(o + 24, "<Q", got_base_vm)
+        patch(o + 32, "<Q", data_size)     # vmsize
+        patch(o + 40, "<Q", data_file)     # fileoff
+        patch(o + 48, "<Q", data_size)     # filesize
+        patch(o + 56, "<I", 0x3)
+        patch(o + 60, "<I", 0x3)
+        patch(o + 64, "<I", 1)             # nsects: __got
+        patch(o + 68, "<I", 0)
+        s2 = o + 72
+        file[s2 : s2 + 16] = b"__got".ljust(16, b"\0")
+        file[s2 + 16 : s2 + 32] = b"__DATA_CONST".ljust(16, b"\0")
+        patch(s2 + 32, "<Q", got_base_vm)
+        patch(s2 + 40, "<Q", 8 * n)
+        patch(s2 + 48, "<I", data_file)
+        patch(s2 + 52, "<I", 3)
+        patch(s2 + 56, "<I", 0)
+        patch(s2 + 60, "<I", 0)
+        patch(s2 + 64, "<I", 0x6)
+        patch(s2 + 68, "<I", 0)
+        patch(s2 + 72, "<I", 0)
+        o += 152
+    else:
+        o = _write_text_segment(file, o, text_size, [
+            (b"__text", base_addr, len(code), code_file, 0x80000400, 0),
+        ])
 
     patch(o, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
     patch(o + 24, "<Q", TEXT_BASE + linkedit_file)
-    patch(o + 32, "<Q", ((len(trie) + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE)
+    linkedit_len = len(trie) + len(bind)
+    patch(o + 32, "<Q", ((linkedit_len + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE)
     patch(o + 40, "<Q", linkedit_file)
-    patch(o + 48, "<Q", len(trie))
+    patch(o + 48, "<Q", linkedit_len)
     patch(o + 56, "<I", 1)
     patch(o + 60, "<I", 1)
     o += 72
@@ -640,6 +927,15 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(o + 20, "<I", 0x10000)
     file[o + 24 : o + 24 + len(name)] = name
     o += id_cmdsize
+
+    if n:
+        # The library's own dependency. Without it the bind stream's ordinal
+        # 1 has nothing to refer to and every extern is unresolvable at load.
+        o = _write_load_dylib(file, o, LIBSYSTEM_PATH.decode())
+
+    # Module libraries, in the same order the bind ordinals above assume.
+    for dep in deps:
+        o = _write_load_dylib(file, o, dep)
 
     patch(o, "<I", BUILD_VERSION_CMD)
     patch(o + 4, "<I", 24)
@@ -655,6 +951,9 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
 
     patch(o, "<I", DYLD_INFO_ONLY_CMD)
     patch(o + 4, "<I", 48)
+    # bind_off/bind_size, in that field order, so dyld has GOT slots to fill.
+    patch(o + 16, "<I", linkedit_file + len(trie) if n else 0)
+    patch(o + 20, "<I", len(bind))
     o += 48
 
     patch(o, "<I", DYLD_EXPORTS_TRIE_CMD)
@@ -666,12 +965,18 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     if o > code_file:
         raise ValueError("dylib load commands overlap code")
     file[code_file : code_file + len(code)] = code
+    if n:
+        for i in range(n):
+            f = stub_file + i * ssize
+            got_vm = got_base_vm + i * 8
+            file[f : f + ssize] = _stub_bytes(got_vm, stub_base_vm + i * ssize)
     file[linkedit_file : linkedit_file + len(trie)] = trie
+    file[linkedit_file + len(trie) : linkedit_file + linkedit_len] = bind
     return bytes(file)
 
 
 if __name__ == "__main__":
     main_code = bytes([0x00, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6])
     with open("/tmp/a.out", "wb") as f:
-        f.write(build_macho_executable(main_code, 480))
+        f.write(build_macho_executable(main_code))
     print("wrote /tmp/a.out")

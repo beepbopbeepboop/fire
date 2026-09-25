@@ -22,6 +22,8 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           parse_type_name, _range_args)
 
 import fire_compiler as F
+import mojo.middle.comptime as comptime_eval
+from formal import model as M
 from mojo.middle.boundnames import (
     _with_item_alias_name, bound_names_in_order, _lbn_target_names,
     _lbn_split_commas,
@@ -240,18 +242,32 @@ def _collect_var_names(f: F.FunctionDef) -> list:
 def _allocation_order(f: F.FunctionDef) -> list:
     """Register-then-spill allocation order for a function's locals.
 
-    Parameters first (prologue always MOV X19, X0 — first param must be
-    X19), then for-list control temps (`_fi{d}`/`_fb{d}` — hot in the
-    loop, prefer registers), then remaining locals in `_collect_var_names`
+    Comptime parameters first (they are leading arguments — the call site
+    passes them ahead of the runtime ones, see `_comptime_param_names` and
+    `_specialization_args`), then the runtime parameters (prologue always MOV
+    X19, X0 — the FIRST parameter must be X19, so a generic function's X19 is
+    its first comptime parameter and its first runtime parameter lands one
+    register later), then for-list control temps (`_fi{d}`/`_fb{d}` — hot in
+    the loop, prefer registers), then remaining locals in `_collect_var_names`
     order. First `len(_CALLEE_SAVED)` names get X19..X28; the rest spill."""
     names = _collect_var_names(f)
+    ct = _comptime_param_names(f)
     nparams = len(f.params or [])
     params = names[:nparams]
     rest = names[nparams:]
+    # A comptime parameter is only ever READ in the body, never assigned, so
+    # `bound_names_in_order` (which walks assignments) does not list it and it
+    # has to be added here or it gets no register home at all — every read
+    # then falls back to X19 and the generic's comptime and runtime
+    # parameters alias each other. A name that is also a runtime parameter
+    # (a shadowed comptime name) keeps the runtime parameter's home, so the
+    # de-dup below can never hand one register to two names.
+    taken = set(params) | set(rest)
+    ct = [n for n in ct if n not in taken]
     temps = [n for n in rest
              if n[:3] in ("_fi", "_fb", "_ci", "_cb")]
     others = [n for n in rest if n not in set(temps)]
-    return params + temps + others
+    return ct + params + temps + others
 
 
 def var_register_map(f: F.FunctionDef) -> dict[str, int]:
@@ -266,13 +282,28 @@ def var_register_map(f: F.FunctionDef) -> dict[str, int]:
             for i, name in enumerate(names[:len(_CALLEE_SAVED)])}
 
 
+# The comptime RULES (which branch, what a binding folds to, how a bracket
+# call binds parameters) live in mojo/middle/comptime.py, shared with the
+# gimple backend and usable as-is by the x86-64 one. What is left here is the
+# arm64 half: materialize a constant, and emit the runtime fallback when a
+# decision comes back "not statically known".
+
+
+def _comptime_param_names(f: F.FunctionDef) -> list:
+    return comptime_eval.param_names(f)
+
+
 def _callee_symbol(func) -> str | None:
     """Flatten a CallExpr callee to a symbol name string.
 
     IdentExpr → its name; MemberExpr → dotted chain (obj.method → "obj.method",
-    os.path.join → "os.path.join"); other shapes → None (unsupported).
+    os.path.join → "os.path.join"); a SubscriptExpr over either →
+    `<name>[<comptime bindings>]` (a comptime specialization, see
+    `_specialization_of`); other shapes → None (unsupported).
     Dotted names are treated as extern symbols by _emit_call (never in
     self._functions), so module/method calls lower to a BL to that name."""
+    if isinstance(func, F.SubscriptExpr):
+        return _specialization_of(func)
     if isinstance(func, F.IdentExpr):
         return func.name
     parts = []
@@ -285,6 +316,17 @@ def _callee_symbol(func) -> str | None:
             parts.append(node.name)
         parts.reverse()
         return ".".join(parts)
+    return None
+
+
+def _specialization_of(func: F.SubscriptExpr) -> str | None:
+    """`f[a, b](...)` → "f", the bare name of the generic being specialized."""
+    name = comptime_eval.specialization_name(func)
+    if name is not None:
+        return name
+    base = func.obj
+    if isinstance(base, F.MemberExpr):
+        return _member_slot_key(base)
     return None
 
 
@@ -329,7 +371,8 @@ def _emit_sub_imm(asm, xd: int, xn: int, imm: int) -> None:
 class ARM64Codegen:
     """ARM64 code generator over the fire_compiler AST."""
 
-    def __init__(self, test_input: int = 10):
+    def __init__(self, test_input: int = 10, dylib_syms: dict = None,
+                 comptime_hook=None, module_source: str = ""):
         self.test_input = test_input
         self.asm = Assembler()
         self._functions = {}
@@ -373,6 +416,31 @@ class ARM64Codegen:
         # RHS or an alias of one). Subscript on these is a key lookup, not
         # a list index. Reset per function.
         self._dict_vars = set()
+        # `comptime NAME = value` bindings for the function being emitted:
+        # name -> folded constant. These are compile-time constants, NOT
+        # locals — nothing is stored, and every read materializes the value
+        # (see `_emit_comptime_read`). Reset per function, exactly like the
+        # container-tracking sets above: a `comptime` in one function does
+        # not bind in the next.
+        self._comptime_vals: dict = {}
+        # {bare callee name -> exported symbol} for the formal libraries this
+        # program links against. A call to one of these names is emitted
+        # against the library's exported spelling, so the image can record the
+        # dependency and dyld can bind it; without the map the same call
+        # becomes a BL against a symbol nothing defines.
+        self._dylib_syms: dict = dict(dylib_syms or {})
+        # Compile-time evaluator for `comptime f(...)`: a (name, args) -> int
+        # hook that RUNS the callee with this backend (formal/
+        # comptime_runner.py). Keeping it out here is what lets the folding
+        # RULES stay in mojo/middle/comptime.py for every backend to share.
+        self._comptime_hook = comptime_hook
+        # `comptime NAME = [a, b, c]` — a list/tuple-valued binding, kept as
+        # its AST (the elements are not all one scalar, so there is nothing to
+        # fold them *to*). Only consulted to unroll `comptime for x in NAME`,
+        # the way the gimple path's `_comptime_list_asts` is; see
+        # mojo/middle/comptime.py for why a list binding is recorded rather
+        # than rejected. Reset per function, like _comptime_vals.
+        self._comptime_list_asts: dict = {}
         # Unique-label counter for subscript bounds-check exit paths.
         self._sub_counter = 0
         # String literal interning: content → label (same bytes share one
@@ -493,20 +561,63 @@ class ARM64Codegen:
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
+        self._comptime_vals = {}
+        self._comptime_list_asts = {}
 
-        # Prologue: save FP/LR, set FP, save callee-saved var regs, spill
-        # arg0 (X0) into X19 (always, matching formal — even with 0 params),
-        # narrow-extend when there is a param, SUB SP frame.
+        # Prologue: save FP/LR, set FP, save callee-saved var regs, move each
+        # incoming argument into ITS OWN callee-saved home (always arg0 into
+        # X19, matching formal — even with 0 params), narrow-extend each to its
+        # declared width, SUB SP frame.
         self.asm.emit(encode_stp_sp_pre(29, 30))
         self.asm.emit(encode_mov_zr_xn(29, 31))  # MOV X29, SP
         for i in range(self._npairs):
             self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
-        self.asm.emit(encode_mov_zr_xn(19, 0))   # MOV X19, X0 (save argument)
-        if f.params:
-            _pname0, ptype0 = f.params[0]
-            pt = resolve(parse_type_name(ptype0) or DEFAULT_INT_TYPE)
-            if pt.width < 64:
-                self._emit_extend(19, 0, pt)
+        self.asm.emit(encode_mov_zr_xn(19, 0))   # MOV X19, X0 (argument 0)
+        # AAPCS delivers argument i in Xi on entry, and Xi is caller-saved —
+        # so arguments 1..7 have to be moved into the callee-saved register
+        # they were allocated to BEFORE anything clobbers X0..X7. Only arg0
+        # used to be moved, which meant arguments 1..7 were read back from a
+        # callee-saved home that still held the CALLER's value: every function
+        # with 2+ parameters silently computed on garbage (`add2(3, 7)`
+        # returned 232, not 307; `add3(1, 2, 3)` returned 24, not 10203).
+        # Invisible in the single-argument cases the run tests cover, and
+        # invisible to compilation — only running the binary shows it.
+        # The incoming arguments, in ABI order: a generic function's comptime
+        # parameters first (the call site passes them ahead of the runtime
+        # ones), then its runtime parameters.
+        incoming = M.incoming_args(f)
+        for i, (pname, ptype) in enumerate(incoming):
+            if i >= 8:
+                break            # AAPCS has no register for argument 8+
+            if i == 0:
+                # Already in X19 by the unconditional save above, which also
+                # keeps the no-parameter case (unknown-name reads fall back to
+                # X19 and so still see the entry argument).
+                home, src = 19, 19
+            else:
+                home = self._var_regs.get(pname)
+                if home is None:
+                    # Past the 10 callee-saved registers, so this parameter's
+                    # home is a spill slot: write the incoming argument there
+                    # now, or its first read in the body would load whatever
+                    # the slot happened to hold. Same addressing as
+                    # `_store_var`'s spill path. NOT reachable today — the
+                    # caller only ever passes 8 arguments (AAPCS X0-X7, see
+                    # `_emit_call`), so at most 8 parameters exist to be
+                    # spilled — but it is written rather than left as a
+                    # silent-wrong-value trap for whoever raises that limit.
+                    if pname in self._var_spills:
+                        self.asm.emit(encode_mov_zr_xn(17, i))
+                        _emit_sub_imm(self.asm, 17, 17,
+                                      self._spill_off(pname))
+                        self.asm.emit(encode_str_xt_xn_imm(17, 17, 0))
+                    continue
+                self.asm.emit(encode_mov_zr_xn(home, i))
+                src = home
+            if ptype is None:
+                continue         # a comptime parameter: already a full word
+            self._emit_extend(home, src,
+                              resolve(parse_type_name(ptype) or DEFAULT_INT_TYPE))
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
 
         for stmt in f.body:
@@ -700,6 +811,7 @@ class ARM64Codegen:
                 name = slot
             elif isinstance(stmt.target, F.IdentExpr):
                 name = stmt.target.name
+                self._check_comptime_target(name, "augmented assignment")
             else:
                 raise CodegenError(
                     "augmented assignment target must be a plain name")
@@ -707,7 +819,7 @@ class ARM64Codegen:
             # the bare operator — same set `_emit_binop`'s ALU map accepts.
             op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
                 else stmt.op
-            if op in ("<<", ">>"):
+            if op in M.AUG_SHIFT_OPS:
                 self._load_var(name, 0)
                 self.asm.emit(encode_stp_sp_pre(0, 2))
                 self._emit_expr_to(stmt.value, "X1")
@@ -724,10 +836,23 @@ class ARM64Codegen:
                    "&": encode_and_xd_xn_xm,
                    "|": encode_orr_xd_xn_xm,
                    "^": encode_eor_xd_xn_xm}
-            if op not in ops:
+            if op not in M.AUG_OPS:
                 raise CodegenError(
                     f"unsupported augmented operator {stmt.op!r} "
-                    f"(formal arm64 path supports + - * & | ^ << >>)")
+                    f"(formal arm64 path supports "
+                    f"{' '.join(M.AUG_OPS)})")
+            if op in M.AUG_DIV_OPS or op == "**":
+                # Same lowering as the binary form (UDIV/SDIV, or DIV+MSUB
+                # for `%`, with the divide-by-zero exit; the `**` unroller for
+                # a small literal exponent), so `c //= 2` and `c = c // 2` —
+                # and `c **= 2` and `c = c ** 2` — agree.
+                self._emit_div_shift_pow(
+                    F.BinaryOp(op=op,
+                               left=F.IdentExpr(name=name),
+                               right=stmt.value),
+                    op)
+                self._store_var(name, 0)
+                return
             self._load_var(name, 0)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(stmt.value, "X1")
@@ -768,6 +893,7 @@ class ARM64Codegen:
             # in X0). types.function_var_types already resolves ann-or-
             # infer for the type lattice; non-int ann (dict/list/set/…)
             # must not hard-fail emit — the VALUE still has to lower.
+            self._check_comptime_target(name, "assignment")
             self._emit_expr(stmt.value)
             self._store_var(name, 0)
             self._note_binding(name, stmt.value)
@@ -819,6 +945,58 @@ class ARM64Codegen:
         if isinstance(stmt, F.FunctionDef):
             raise CodegenError("nested function definitions are not "
                                "supported on the formal arm64 path")
+
+        if isinstance(stmt, F.ComptimeVarStmt):
+            # `comptime NAME = <const>`: fold and record, emit nothing.
+            # Same rule as the gimple path's _gen_stmt_ComptimeVarStmt —
+            # a comptime binding is compile-time state, so it produces no
+            # instructions and no storage.
+            self._bind_comptime(stmt)
+            return
+
+        if isinstance(stmt, F.ComptimeIfStmt):
+            # Which branch is taken is a language decision, shared
+            # (comptime_eval.resolve_if); 'runtime' here just means the
+            # condition did not fold, and the arm64 half then emits the
+            # ordinary runtime branch — the same degradation the gimple path
+            # makes, so both agree on the observable behaviour.
+            which = comptime_eval.resolve_if(stmt, self._comptime_vals,
+                                             call_hook=self._comptime_hook)
+            if which == "then":
+                for s in stmt.then_body:
+                    self._emit_stmt(s)
+                return
+            if which == "else":
+                for s in (stmt.else_body or []):
+                    self._emit_stmt(s)
+                return
+            if isinstance(which, tuple) and which[0] == "elif":
+                for s in (stmt.elifs[which[1]][1]):
+                    self._emit_stmt(s)
+                return
+            self._emit_stmt(F.IfStmt(condition=stmt.condition,
+                                     then_body=stmt.then_body,
+                                     elifs=getattr(stmt, "elifs", None),
+                                     else_body=stmt.else_body,
+                                     line=stmt.line, col=stmt.col))
+            return
+
+        if isinstance(stmt, F.ComptimeForStmt):
+            # Folded when the iterable is a compile-time-known sequence (the
+            # `comptime for i in range(0, 8)` idiom), else emitted as the
+            # ordinary runtime loop.
+            vals = self._comptime_iterable(stmt.iterable)
+            if vals is None:
+                self._emit_stmt(F.ForStmt(target=stmt.target,
+                                          iterable=stmt.iterable,
+                                          body=stmt.body,
+                                          line=stmt.line, col=stmt.col))
+                return
+            for v in vals:
+                self._emit_comptime_target(stmt.target, v)
+                for s in stmt.body:
+                    self._emit_stmt(s)
+            return
 
         raise CodegenError(
             f"unsupported statement {type(stmt).__name__} on the formal "
@@ -920,6 +1098,12 @@ class ARM64Codegen:
                 # Nested target `(a, b), c = rhs` — handled by the
                 # recursive unpack below; this slot is a nested group.
                 return ("nested", el)
+            if isinstance(el, F.SubscriptExpr):
+                # `a[i], b = rhs` — an element target keeps its own
+                # bounds-checked store, the same one `a[i] = v` uses, so a
+                # tuple unpack and a single store agree on what an
+                # out-of-range index does (both exit(1)).
+                return ("sub", el)
             raise CodegenError(
                 "tuple assignment target elements must be plain names "
                 f"(got {type(el).__name__})")
@@ -940,10 +1124,7 @@ class ARM64Codegen:
                 sl = slots[i]
                 if sl is None:
                     continue
-                if isinstance(sl, tuple) and sl and sl[0] == "nested":
-                    self._emit_tuple_assign_nested(sl[1], 0)
-                else:
-                    self._store_var(sl, 0)
+                self._store_tup_slot(sl, 0)
             return
 
         # Blob unpack: X0 = [count][e0..] after evaluating the RHS once.
@@ -973,10 +1154,23 @@ class ARM64Codegen:
             sl = slots[i]
             if sl is None:
                 continue
-            if isinstance(sl, tuple) and sl and sl[0] == "nested":
-                self._emit_tuple_assign_nested(sl[1], 0)
+            self._store_tup_slot(sl, 0)
+
+    def _store_tup_slot(self, slot, reg: int) -> None:
+        """Store the unpacked value in X{reg} into one target slot.
+
+        One dispatcher for both unpack paths (literal tuple RHS and blob
+        RHS) and all three slot shapes, so a target kind can never be handled
+        in one path and missed in the other."""
+        if slot is None:
+            return
+        if isinstance(slot, tuple):
+            if slot[0] == "nested":
+                self._emit_tuple_assign_nested(slot[1], reg)
             else:
-                self._store_var(sl, 0)
+                self._emit_subscript_store_reg(slot[1], reg)
+            return
+        self._store_var(slot, reg)
 
     def _emit_tuple_assign_nested(self, elements, reg: int) -> None:
         """Unpack a nested tuple-target group against a blob pointer.
@@ -1429,6 +1623,17 @@ class ARM64Codegen:
             return
 
         if isinstance(expr, F.IdentExpr):
+            # A `comptime NAME = ...` binding is a compile-time constant, not
+            # a local: no register or slot was ever assigned to it, so the
+            # ordinary `_load_var` below would read whatever happens to be in
+            # a register. Materialize the folded value instead — which is also
+            # what makes the constant "dead-end" in a load-immediate, the same
+            # place the gimple path's bare `(int64_t)N` literal dead-ends in
+            # gcc. Consulted for EVERY expression context, not just other
+            # comptime ones, for the reason mojo/middle/comptime.py gives.
+            if expr.name in self._comptime_vals:
+                self._emit_comptime_read(expr.name)
+                return
             # Python singletons parse as bare idents (True/False become
             # BoolLiteral; None stays IdentExpr). Materialize them as
             # integers so `x is None` compares against 0, not a random var reg.
@@ -1473,6 +1678,11 @@ class ARM64Codegen:
                 self._emit_trunc(self._ttype(expr.operand))
                 return
             if expr.op == "+":
+                self._emit_expr(expr.operand)
+                return
+            if M.is_ownership_transfer(expr):
+                # `x^` — see formal/model.py: a compile-time-only marker, so
+                # the value flows straight through on every formal path.
                 self._emit_expr(expr.operand)
                 return
             raise CodegenError(
@@ -1674,9 +1884,16 @@ class ARM64Codegen:
             self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
             return
         if isinstance(e.index, F.TupleExpr):
-            raise CodegenError(
-                "multi-index subscript [...] is not supported on the "
-                "formal arm64 path")
+            # `d[(a, b)]` is a dict lookup with a tuple key, compared
+            # element-wise — it does not need the base to be a *known* dict,
+            # because in Python a tuple index is a dict key or a TypeError,
+            # never a list multi-index (which this path has no representation
+            # for anyway). A computed tuple index keeps the old error: there
+            # the base really could be a numpy-style multi-index.
+            if self._static_key_needle(e.index) is None:
+                raise CodegenError(
+                    "multi-index subscript [...] is not supported on the "
+                    "formal arm64 path")
         self._emit_subscript_addr(e)
         if self._is_string_subscript(e.obj):
             self.asm.emit(encode_ldrb_wd_wn(0, 0, 0))
@@ -1735,17 +1952,73 @@ class ARM64Codegen:
             self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
+    def _static_key_needle(self, e):
+        """Element expressions of a statically-known container key, or None.
+
+        The rule (and why a raw 64-bit compare is not value equality for a
+        tuple key) is formal/model.py's, shared with the x86-64 path so both
+        architectures agree on what "equal key" means."""
+        return M.static_key_elements(e)
+
+    def _emit_key_const(self, e, reg: int) -> None:
+        """X{reg} = the canonical 64-bit value of a literal key element."""
+        if isinstance(e, F.StringLiteral):
+            self._emit_string_addr(reg, self._intern_string(e.value))
+            return
+        if isinstance(e, F.BoolLiteral):
+            self._emit_mov_imm(f"X{reg}", 1 if e.value else 0)
+            return
+        self._emit_mov_imm(f"X{reg}", e.value)
+
+    def _emit_key_eq(self, needle, cand: int, ok: int) -> None:
+        """X{ok} = 1 iff the blob pointer in X{cand} is equal to `needle`.
+
+        Element-wise for a static container key (count first, then each
+        element against the element's own canonical value), raw 64-bit
+        equality otherwise. Clobbers X10-X13 and `ok` only; every caller
+        keeps its own live state in X0-X9.
+        """
+        elems = self._static_key_needle(needle)
+        self.asm.emit(encode_movz_xd_imm(ok, 1))
+        if elems is None:
+            self._emit_key_const(needle, 11)
+            self.asm.emit(encode_cmp_xn_xm(cand, 11))
+            self.asm.emit(encode_cset_xd_cond(ok, "eq"))
+            return
+        # The blob header is the element count, so a length mismatch is the
+        # cheapest rejection and needs no element compare at all.
+        self.asm.emit(encode_ldr_xt_xn_imm(11, cand, 0))
+        self._emit_mov_imm("X12", len(elems))
+        self.asm.emit(encode_cmp_xn_xm(11, 12))
+        self.asm.emit(encode_cset_xd_cond(13, "eq"))
+        self.asm.emit(encode_and_xd_xn_xm(ok, ok, 13))
+        for j, el in enumerate(elems):
+            off = M.element_offset(j)
+            if off <= 0xfff:
+                self.asm.emit(encode_add_xd_xn_imm(11, cand, off))
+            else:
+                self._emit_mov_imm("X12", off)
+                self.asm.emit(encode_add_xd_xn_xm(11, cand, 12))
+            self.asm.emit(encode_ldr_xt_xn_imm(11, 11, 0))
+            self._emit_key_const(el, 12)
+            self.asm.emit(encode_cmp_xn_xm(11, 12))
+            self.asm.emit(encode_cset_xd_cond(13, "eq"))
+            self.asm.emit(encode_and_xd_xn_xm(ok, ok, 13))
+
     def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
         """X0 = &dict[key] value slot. Missing key → Darwin exit(1).
 
         Pair-blob layout: [count][k0][v0]…; value i is at base+16+16*i.
         Key compare is raw 64-bit equality — valid for interned string
-        literals and integer keys (the formal dict surface).
+        literals and integer keys (the formal dict surface) — except for a
+        static container key, which is compared element-wise (see
+        `_static_key_needle`): a tuple key's blob pointer is not a value.
 
-        Stack on entry to the scan (two STP pushes):
+        Stack on entry to the scan (two STP pushes, or one when the key is
+        compared element-wise and never needs a slot):
           [SP+0]  key (lookup), [SP+8] XZR
           [SP+16] base,        [SP+24] junk
-        Hit path stashes the value address in X4 across the two pops."""
+        Hit path stashes the value address in X4 across the pops."""
         self._sub_counter += 1
         sid = self._sub_counter
         fn = self.func_name
@@ -1759,9 +2032,12 @@ class ARM64Codegen:
         else:
             self._emit_expr(e.obj)
         self.asm.emit(encode_stp_sp_pre(0, 2))          # push base
-        self._emit_expr_to(e.index, "X1")               # X1 = key
-        self.asm.emit(encode_stp_sp_pre(1, 31))         # push key
-        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))  # X9 = base
+        key_pushed = self._static_key_needle(e.index) is None
+        if key_pushed:
+            self._emit_expr_to(e.index, "X1")           # X1 = key
+            self.asm.emit(encode_stp_sp_pre(1, 31))     # push key
+        base_off = 16 if key_pushed else 0
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, base_off))  # X9 = base
         self.asm.emit(encode_ldr_xt_xn_imm(2, 9, 0))    # X2 = count
         self.asm.emit(encode_movz_xd_imm(3, 0))         # X3 = i
 
@@ -1774,33 +2050,47 @@ class ARM64Codegen:
         self.asm.emit(encode_add_xd_xn_imm(5, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 3))
         self.asm.emit(encode_ldr_xt_xn_imm(6, 5, 0))    # X6 = key_i
-        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 0))   # X7 = lookup key
-        self.asm.emit(encode_cmp_xn_xm(6, 7))
-        self.asm.emit(encode_cset_xd_cond(8, "eq"))
+        if key_pushed:
+            self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 0))   # X7 = lookup key
+            self.asm.emit(encode_cmp_xn_xm(6, 7))
+            self.asm.emit(encode_cset_xd_cond(8, "eq"))
+        else:
+            self._emit_key_eq(e.index, 6, 8)
         self.asm.emit(encode_cbnz_xn(0, 8))
         self.asm.emit_label_rel(hit_label, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(3, 3, 1))
         self.asm.emit(encode_b(0))
         self.asm.emit_label_rel(loop_label, here_offset=-4)
 
+        def _pop_scan():
+            if key_pushed:
+                self.asm.emit(encode_ldp_sp_post(0, 31))    # pop key
+            self.asm.emit(encode_ldp_sp_post(0, 31))        # pop base
+
         self.asm.label(hit_label)
         self.asm.emit(encode_add_xd_xn_imm(4, 5, 8))    # X4 = value slot
-        self.asm.emit(encode_ldp_sp_post(0, 31))        # pop key
-        self.asm.emit(encode_ldp_sp_post(0, 31))        # pop base
+        _pop_scan()
         self.asm.emit(encode_mov_zr_xn(0, 4))
         self._emit_b_to(end_label)
 
         self.asm.label(miss_label)
-        self.asm.emit(encode_ldp_sp_post(0, 31))
-        self.asm.emit(encode_ldp_sp_post(0, 31))
+        _pop_scan()
         self.asm.emit(encode_movz_xd_imm(0, 1))
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
         self.asm.label(end_label)
 
+    def _is_dict_key_subscript(self, e: F.SubscriptExpr) -> bool:
+        """True when this subscript is a dict lookup, key compare included.
+
+        A known dict base is one way; a static container key is the other,
+        since a tuple index on a list is not a Python operation at all."""
+        return (self._is_dict_subscript(e.obj)
+                or self._static_key_needle(e.index) is not None)
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
         """X0 = &obj[index]. Blob path bounds-checks (exit 1 on OOB)."""
-        if self._is_dict_subscript(e.obj):
+        if self._is_dict_key_subscript(e):
             self._emit_dict_lookup_addr(e)
             return
         if self._is_string_subscript(e.obj):
@@ -1858,14 +2148,24 @@ class ARM64Codegen:
 
     def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:
         """`obj[index] = value` — evaluate addr once, then store."""
+        self._emit_expr(value)                  # X0 = value
+        self._emit_subscript_store_reg(target, 0)
+
+    def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
+                                  reg: int) -> None:
+        """Store the value already in X{reg} into `target[index]`.
+
+        Split from `_emit_subscript_store` so a caller that already HAS the
+        value in a register — a tuple unpack popping its elements — does not
+        have to invent an AST node to carry it. The address is computed once
+        and survives the store, exactly as in the statement form."""
         self._emit_subscript_addr(target)
         self.asm.emit(encode_stp_sp_pre(0, 2))  # save addr
-        self._emit_expr(value)                  # X0 = value
-        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))  # X9 = addr
+        self.asm.emit(encode_mov_zr_xn(9, 0))   # X9 = addr
         if self._is_string_subscript(target.obj):
-            self.asm.emit(encode_strb_wd_wn(0, 9, 0))
+            self.asm.emit(encode_strb_wd_wn(reg, 9, 0))
         else:
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
+            self.asm.emit(encode_str_xt_xn_imm(reg, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
     def _emit_subscript_aug(self, stmt) -> None:
@@ -2079,10 +2379,12 @@ class ARM64Codegen:
         CallExpr, ListExpr, TupleExpr, or MemberExpr (SRA field slot holding a
         blob pointer; same shapes `_emit_for_list` plus field loads).
         Linear scan of int64 elements; result 0/1 in X0. `not in` inverts.
-        String RHS is a byte/substring scan; set/dict membership uses the
-        same list-blob scan (sets lower as lists). BinaryOp RHS (`or`/`and`
-        `+`/`|`) is allowed — evaluated under container ctx so `+`/`|`
-        lower as list/set ops."""
+        String RHS is a byte/substring scan; a dict RHS is a *pair* blob
+        `[count][k0][v0]…`, so it is scanned over its KEYS at stride 16 — a
+        stride-8 scan of a pair blob walks keys and values alternately and
+        stops at the pair count, i.e. it can only ever see the first half of
+        the dict. BinaryOp RHS (`or`/`and`/`+`/`|`) is allowed — evaluated
+        under container ctx so `+`/`|` lower as list/set ops."""
         if isinstance(right, F.StringLiteral):
             self._emit_str_membership(left, right, invert=invert)
             return
@@ -2094,6 +2396,8 @@ class ARM64Codegen:
                 "`in`/`not in` RHS must be a list/tuple name or literal on "
                 f"the formal arm64 path (got {type(right).__name__})")
 
+        is_dict = self._is_dict_subscript(right)
+        key_pushed = self._static_key_needle(left) is None
         self._if_counter += 1
         mid = self._if_counter
         fn = self.func_name
@@ -2104,9 +2408,11 @@ class ARM64Codegen:
 
         # needle (left) on the stack so element loads can clobber X0/X1.
         # Slot stays pushed for the whole scan; each exit pops it, then
-        # overwrites X0 with the boolean result.
-        self._emit_expr(left)
-        self.asm.emit(encode_stp_sp_pre(0, 2))
+        # overwrites X0 with the boolean result. A static container needle is
+        # compared element-wise and never needs a slot, so nothing is pushed.
+        if key_pushed:
+            self._emit_expr(left)
+            self.asm.emit(encode_stp_sp_pre(0, 2))
         # haystack blob → X9; count → X2; index → X3 (scratch, no calls).
         self._container_ctx += 1
         try:
@@ -2123,12 +2429,19 @@ class ARM64Codegen:
         self.asm.emit(encode_cbnz_xn(0, 4))
         self.asm.emit_label_rel(notfound_label, here_offset=-4)
 
-        self.asm.emit(encode_add_xd_xn_imm(5, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 3))
-        self.asm.emit(encode_ldr_xt_xn_imm(5, 5, 0))  # elem
-        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0)) # needle from [SP]
-        self.asm.emit(encode_cmp_xn_xm(5, 6))
-        self.asm.emit(encode_cset_xd_cond(7, "eq"))
+        self.asm.emit(encode_add_xd_xn_imm(5, 9, M.BLOB_HEADER_BYTES))
+        # A dict is a pair blob, so membership walks KEYS at the pair stride
+        # (formal/model.membership_stride) — at the element stride it would
+        # walk keys and values alternately and stop at the pair count.
+        self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 3) if is_dict
+                      else encode_add_xd_xn_xm_lsl3(5, 5, 3))
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 5, 0))  # elem / key
+        if key_pushed:
+            self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))  # needle from [SP]
+            self.asm.emit(encode_cmp_xn_xm(5, 6))
+            self.asm.emit(encode_cset_xd_cond(7, "eq"))
+        else:
+            self._emit_key_eq(left, 5, 7)
         self.asm.emit(encode_cbnz_xn(0, 7))
         self.asm.emit_label_rel(found_label, here_offset=-4)
 
@@ -2136,13 +2449,17 @@ class ARM64Codegen:
         self.asm.emit(encode_b(0))
         self.asm.emit_label_rel(loop_label, here_offset=-4)
 
+        def _pop_needle():
+            if key_pushed:
+                self.asm.emit(encode_ldp_sp_post(0, 1))
+
         self.asm.label(notfound_label)
-        self.asm.emit(encode_ldp_sp_post(0, 1))
+        _pop_needle()
         self.asm.emit(encode_movz_xd_imm(0, 1 if invert else 0))
         self._emit_b_to(end_label)
 
         self.asm.label(found_label)
-        self.asm.emit(encode_ldp_sp_post(0, 1))
+        _pop_needle()
         self.asm.emit(encode_movz_xd_imm(0, 0 if invert else 1))
 
         self.asm.label(end_label)
@@ -2209,6 +2526,39 @@ class ARM64Codegen:
                     f"call {name}(): missing required argument {pname!r}")
         return slots
 
+    def _emit_type_constructor(self, e: F.CallExpr, name: str,
+                               tkind: tuple) -> None:
+        """`Int(x)` / `String(s)` — a conversion, not a call.
+
+        On the formal paths a value is a 64-bit word and a string is already a
+        `char *`, so an integer construction is a width/sign normalization of
+        the operand and a string construction is the identity. Both take
+        exactly one operand, as in the language; anything else is a shape error
+        rather than a guess."""
+        kind, info = tkind
+        if kind == "unsupported":
+            raise CodegenError(
+                f"constructing {name} has no representation on this path "
+                f"(a formal value is one 64-bit word, and {name} is not one "
+                f"thing) — previously this emitted a call to a symbol named "
+                f"{name!r} that nothing defines")
+        if len(e.args) != 1 or e.kwargs:
+            raise CodegenError(
+                f"{name}(...) takes exactly one value to convert on this path "
+                f"(got {len(e.args)} argument(s))")
+        self._emit_expr(e.args[0])
+        if kind == "identity":
+            return
+        width, signed = info
+        self._emit_extend(0, 0, IntType(width, signed))
+
+    def _specialization_args(self, e: F.CallExpr, ct_params: list) -> list:
+        """The argument expressions binding `ct_params` at this call site."""
+        try:
+            return comptime_eval.specialization_args(e, ct_params)
+        except ValueError as exc:
+            raise CodegenError(str(exc))
+
     def _emit_call(self, e: F.CallExpr) -> None:
         name = _callee_symbol(e.func)
         if name is None:
@@ -2218,6 +2568,16 @@ class ARM64Codegen:
         if name == "range":
             self._emit_range_list(list(e.args))
             return
+        # A type constructor is a conversion, not a call. Intercepted before the
+        # extern path, because the extern path would emit a BL against a
+        # symbol named e.g. `Int` that nothing defines (the decision is
+        # formal/model.type_constructor_kind; the width normalization below is
+        # the arm64 half).
+        if name not in self._functions:
+            tkind = M.type_constructor_kind(name)
+            if tkind is not None:
+                self._emit_type_constructor(e, name, tkind)
+                return
         is_extern = name not in self._functions
         if is_extern:
             # Unknown signature: AAPCS has no place for Python kwargs on a
@@ -2227,6 +2587,21 @@ class ARM64Codegen:
             args = list(e.args)
         else:
             args = self._bind_call_args(name, e)
+        # A comptime specialization `f[a, b](x)` binds the callee's comptime
+        # parameters (which are leading arguments on this path), so the bracket
+        # expressions are evaluated here, in the caller's scope, and passed
+        # ahead of the call-time arguments. A bare `f(x)` to the same generic
+        # binds each comptime parameter to 0: this path has no type inference
+        # to deduce them from the arguments, and 0 is the same "unknown
+        # compile-time value" every other unresolved compile-time name
+        # already gets here — but the two spellings can never disagree about
+        # the callee's arity, because both go through the same parameter list.
+        if not is_extern:
+            fdef = self._functions.get(name)
+            ct_params = _comptime_param_names(fdef) if fdef is not None else []
+            if ct_params:
+                bound = self._specialization_args(e, ct_params)
+                args = bound + list(args)
         # Flatten `*star` / reject `**dst` before the arity check so a
         # single list literal expands to its elements (common: f(*[a,b])).
         flat: list = []
@@ -2276,7 +2651,10 @@ class ARM64Codegen:
             if i != 0:
                 self.asm.emit(encode_mov_zr_xn(i, 0))
         if is_extern:
-            self.asm.emit_extern_bl(name)
+            # A linked library's export spelling wins over the bare name, so
+            # the BL, the GOT slot and the bind stream all name the symbol the
+            # library actually defines.
+            self.asm.emit_extern_bl(self._dylib_syms.get(name, name))
         else:
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(name, here_offset=-4)
@@ -3156,6 +3534,78 @@ class ARM64Codegen:
             self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
         else:
             self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
+
+    def _check_comptime_target(self, name: str, what: str) -> None:
+        """Refuse a store to a name that is currently a `comptime` binding.
+
+        The store would otherwise be silently dropped: reads of the name go
+        through `_comptime_vals` (which is the whole point — the binding is a
+        constant, not a local), so a following `_store_var` would write a slot
+        nothing ever reads. That is a silent miscompile, so it is an error.
+        Real Mojo rejects the assignment too, for the same reason: a `comptime`
+        name is not assignable."""
+        if name in self._comptime_vals:
+            raise CodegenError(
+                f"{what} to comptime binding {name!r} (a `comptime` name is a "
+                "compile-time constant and cannot be assigned)")
+
+    def _bind_comptime(self, stmt) -> None:
+        """Record a `comptime NAME = value` binding, or fail honestly.
+
+        The decision itself is shared (comptime_eval.resolve_var); what is
+        arm64-specific is only that an unresolvable binding is an ERROR here
+        rather than a runtime local. The gimple path instead leaves the name
+        unbound so a later read hits its unknown-identifier placeholder —
+        same observable outcome (the name is not the declared value), reached
+        without a hard failure mid-function.
+        """
+        name = stmt.target
+        resolved = comptime_eval.resolve_var(
+                stmt, self._comptime_vals, self._comptime_hook)
+        if resolved is None:
+            raise CodegenError(
+                f"comptime {name} = ... does not fold to a compile-time "
+                "constant on the formal arm64 path")
+        kind, val = resolved
+        if kind == "list":
+            self._comptime_list_asts[name] = val
+        else:
+            self._comptime_vals[name] = val
+
+    def _emit_comptime_read(self, name: str) -> None:
+        """X0 = the value of the `comptime` binding `name`.
+
+        A string binding is not a machine word here: this path has no
+        interned comptime strings, so it materializes the interned literal
+        for the text, which is what the value *is* everywhere else a string
+        is (see `_emit_expr`'s StringLiteral case and the dict key compare,
+        which relies on literals being interned by content)."""
+        val = self._comptime_vals[name]
+        if isinstance(val, str):
+            self.asm.emit_adrp_add(0, self._intern_string(val))
+            return
+        self._emit_mov_imm("X0", int(val))
+
+    # A `comptime for` over more iterations than this is emitted as the
+    # ordinary runtime loop instead of unrolled: the point of folding is a
+    # compile-time-known trip count, not a guarantee it is small. The cap is
+    # passed to the shared resolver, which is where the expansion happens.
+    COMPTIME_UNROLL_CAP = 64
+
+    def _comptime_iterable(self, iterable):
+        """The elements of a `comptime for` iterable when they are all known
+        at compile time, else None (→ emit the ordinary runtime loop)."""
+        return comptime_eval.resolve_for_iterable(
+            iterable, self._comptime_vals, self._comptime_list_asts,
+            self.COMPTIME_UNROLL_CAP, self._comptime_hook)
+
+    def _emit_comptime_target(self, target, value) -> None:
+        """Bind a `comptime for` target for one iteration, as an ordinary
+        local assignment (the counter is a real runtime local — only the
+        trip count was compile-time here), so a folded and an unfolded
+        `comptime for` produce the same shape of code."""
+        self._emit_stmt(F.AssignStmt(target=F.IdentExpr(name=target),
+                                     value=value, line=0, col=0))
 
     def _is_container_expr(self, e) -> bool:
         """True when `e` is known to lower to a list/set/tuple blob."""

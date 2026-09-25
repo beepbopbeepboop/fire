@@ -301,6 +301,53 @@ def runtime_fingerprint() -> str:
     return _hash('mojo-runtime-fp-v1', *parts)
 
 
+# The formal (arm64 + Mach-O) backend's own inputs. Deliberately NOT folded
+# into compiler_fingerprint(): a formal artifact does not depend on the gimple
+# codegen, the C runtime or gcc at all, so putting these in the shared list
+# would invalidate every cached module object on every formal tweak.
+#
+# Auto-discovered for the same reason gimple_*.py is: a NEW formal/*.py has to
+# self-register, or editing it would silently keep serving stale verdicts (the
+# exact failure mode documented for gimple_*.py above). mojo/middle/** is
+# globbed because formal/*.py reaches into it (boundnames, closures, and their
+# own imports) — it is a subtree rather than an enumeration for that reason.
+_FORMAL_SOURCES = ['fire.py', 'fire_compiler.py']
+for _p in sorted(_glob.glob(os.path.join(HERE, 'formal', '**', '*.py'),
+                            recursive=True)):
+    if '__pycache__' in _p.split(os.sep):
+        continue
+    _FORMAL_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
+for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', 'middle', '*.py'))):
+    if '__pycache__' in _p.split(os.sep):
+        continue
+    _FORMAL_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
+
+_formal_fp_cache = None
+
+
+def formal_fingerprint() -> str:
+    """Hash of the sources a `build --formal` run reads: fire.py's dispatch,
+    the parser, formal/** and the mojo/middle subtree. Narrow on purpose —
+    see _FORMAL_SOURCES."""
+    global _formal_fp_cache
+    if _formal_fp_cache is None:
+        # Deliberately the same shape as runtime_fingerprint() below, down to
+        # the absence of a `set(...)`: the two globs that build _FORMAL_SOURCES
+        # are already sorted and disjoint, so the set bought nothing — and
+        # handing the static backends a set where they build a list is what
+        # made this fail the self-host compile with "passing argument 1 of
+        # 'mojo_list_len' makes pointer from integer without a cast".
+        parts = []
+        for name in sorted(_FORMAL_SOURCES):
+            try:
+                with open(os.path.join(HERE, name), 'rb') as f:
+                    parts += [name, f.read()]
+            except (FileNotFoundError, IsADirectoryError):
+                parts += [name, b'\0missing']
+        _formal_fp_cache = _hash('mojo-formal-fp-v1', *parts)
+    return _formal_fp_cache
+
+
 # ── Compile-to-GIMPLE keys ─────────────────────────────────────────────
 
 def compile_key(source: str, do_imports: bool, filename: str = "",
@@ -346,6 +393,43 @@ def gcc_syntax_key(gcc_variant: str, flags: tuple, c_source: str) -> str:
         toolchain_fingerprint(gcc_variant, flags),
         runtime_fingerprint(),
         c_source,
+    )
+
+
+def formal_build_key(source: str, path: str, flags: tuple = (),
+                     criteria: str = '') -> str:
+    """Key (`formal/<hash>`) for caching one `build --formal` VERDICT.
+
+    The same contract as every other key here — ABI version + a compiler-source
+    fingerprint + a toolchain + the exact source bytes — specialised for the
+    formal backend, which has no gcc and resolves no imports:
+
+      * "compiler" is formal_fingerprint() (formal/**, the parser, mojo/middle);
+      * "toolchain" is the Python interpreter that runs the in-process arm64
+        emitter, plus the flags, since the emitted code depends on both;
+      * "imported signatures" do not exist here — compile_formal compiles one
+        file and skips its import statements, so a stdlib edit cannot change
+        this artifact and stdlib_fingerprint() is deliberately not folded in.
+
+    `path` only enters the key through the source it names, but is kept for
+    diagnostics in the store. `flags` must carry every build flag that changes
+    the output (`--no-prove`; `-n` as well, since the entry argument is baked
+    into the startup stub).
+
+    `criteria` identifies whatever is DECIDING pass/fail — for the sweep that
+    is the tool's own source. A verdict is a function of the source AND the
+    rules applied to it, so a tool that tightens its checks (here: also
+    requiring the image's imports to be dyld-resolvable) must invalidate every
+    entry it previously wrote, or it keeps serving verdicts its own current
+    rules would no longer produce.
+    """
+    return 'formal/' + _hash(
+        'mojo-cas-v1-formal',
+        ABI_VERSION,
+        formal_fingerprint(),
+        toolchain_fingerprint(sys.executable, flags),
+        source,
+        criteria,
     )
 
 

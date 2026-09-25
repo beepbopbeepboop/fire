@@ -2205,14 +2205,16 @@ class Parser:
             if t.value == "comptime":
                 # Only commit to the comptime-statement parse when the next
                 # token could actually start one: `comptime if/for/assert`,
-                # `comptime NAME = ...`, or `comptime \`name\` = ...`.
+                # `comptime var NAME = ...`, `comptime NAME = ...`, or
+                # `comptime \`name\` = ...`.
                 # Anything else — `comptime.foo` (imported module named
                 # comptime), `comptime(...)`, `comptime = ...`, bare
                 # `comptime` — is an ordinary identifier use; fall through
                 # to expression/assignment parsing (same carve-out pattern
                 # as `enum` above; `_parse_primary` accepts KW as ident).
                 nxt = self._peek(1)
-                if ((nxt.kind == "KW" and nxt.value in ("if", "for", "assert"))
+                if ((nxt.kind == "KW"
+                     and nxt.value in ("if", "for", "assert", "var", "let"))
                         or nxt.kind == "NAME"
                         or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
                     return self._parse_comptime()
@@ -2307,7 +2309,8 @@ class Parser:
                 # falls through (and the decorator path below will 404 with
                 # a clear expect-error rather than misparse).
                 nxt = self._peek(1)
-                if ((nxt.kind == "KW" and nxt.value in ("if", "for", "assert"))
+                if ((nxt.kind == "KW"
+                     and nxt.value in ("if", "for", "assert", "var", "let"))
                         or nxt.kind == "NAME"
                         or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
                     return self._parse_comptime()
@@ -3526,6 +3529,18 @@ class Parser:
         # comptime assert expr[, msg]
         if t.value == "assert":
             return self._parse_assert(is_comptime=True)
+        # `comptime var NAME = expr` — the canonical Mojo spelling, and the
+        # one the stdlib uses throughout. `var` (like `let`) is only a
+        # declaration sigil here, so consume it and fall into the NAME shape
+        # below. Without this the keyword is silently dropped: the statement
+        # parses as ExprStmt(IdentExpr('comptime')) plus a separate VarDecl,
+        # which emits a load of an undefined name and dies on the interpreted
+        # path as `name 'comptime' is not defined` — a real misparse, not a
+        # missing feature, so it is fixed here rather than worked around in
+        # each backend.
+        if t.kind == "KW" and t.value in ("var", "let"):
+            self._advance()
+            t = self._peek()
         # comptime NAME [TypeParams] [: Type] = expr
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
         if t.kind == "NAME" or (t.kind == "STRING" and t.value.startswith("`")):

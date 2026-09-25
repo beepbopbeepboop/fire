@@ -214,6 +214,27 @@ def build_dylib(tmpdir, sources, out_name, extra_args=()):
         return out, f.read()
 
 
+def exported_symbol(dylib_path, name):
+    """The boundary symbol a dylib advertises for `name`, from its manifest.
+
+    Read from the manifest rather than recomputed with reflect.export_csym, so
+    this checks that the manifest and the export TRIE agree about the ABI
+    spelling instead of both being handed the same helper's answer.
+    """
+    import json
+    with open(dylib_path + ".manifest.json") as f:
+        payload = json.load(f)
+    for e in payload["exports"]:
+        if e["name"] == name:
+            return e["symbol"]
+    raise TestFailure(f"{os.path.basename(dylib_path)} exports no {name!r} "
+                      f"(has {[e['name'] for e in payload['exports']]})")
+
+
+def call_exported_by_name(dylib_path, name, *args):
+    return call_exported(dylib_path, exported_symbol(dylib_path, name), *args)
+
+
 def call_exported(path, symbol, *args):
     lib = ctypes.CDLL(path)
     fn = getattr(lib, symbol)
@@ -258,10 +279,32 @@ def test_dylib_structure_and_exports(tmpdir, shared):
           "export trie is not inside the __LINKEDIT segment's file range")
 
     check(info["exports"] is not None, "no export trie in the emitted dylib")
-    check(sorted(info["exports"]) == ["_extra__neg", "_libmath__add1",
-                                      "_libmath__mul2"],
-          f"unexpected export set {sorted(info['exports'])}")
-    check("_libmath___hidden" not in info["exports"],
+    # ABI.md's spelling: a dylib export is module-qualified with the overload
+    # suffix, so two modules' same-named functions cannot collide inside one
+    # library. Learn the exact names from the manifest rather than hardcoding
+    # a hash — the point is the SHAPE (qualified + suffixed), and the trie must
+    # carry the same string the manifest does.
+    import json as _json
+    with open(out + ".manifest.json") as _f:
+        _exports = _json.load(_f)["exports"]
+    _by_name = {e["name"]: e["symbol"] for e in _exports}
+    check(sorted(_by_name) == ["add1", "mul2", "neg"],
+          f"manifest exports {sorted(_by_name)}, expected add1/mul2/neg")
+    # TWO conventions, deliberately: the manifest records the C identifier
+    # (that is what an importer's bind stream carries — dyld prepends the
+    # underscore itself), while the export trie records the Mach-O name, which
+    # is that identifier with a leading underscore. Asserting the relationship
+    # rather than string equality is what pins the pair together: writing the
+    # trie with the bare C name exports a symbol nothing can bind, and the
+    # program dies in dyld with "Symbol not found" for a function that is
+    # right there in the library.
+    for _n, _sym in _by_name.items():
+        check(not _sym.startswith("_"),
+              f"the manifest's symbol {_sym!r} should be the C identifier")
+        check("_" + _sym in info["exports"],
+              f"manifest says {_n} -> {_sym!r}, so the trie should carry "
+              f"{'_' + _sym!r}, but it carries {sorted(info['exports'])}")
+    check(not any("_hidden" in e for e in info["exports"]),
           "a `_`-prefixed function was exported")
 
     sections = {(s["segname"], s["sectname"]): s for s in text["sections"]}
@@ -286,15 +329,15 @@ def test_dylib_structure_and_exports(tmpdir, shared):
 
 def test_exported_functions_execute(tmpdir, shared):
     path = shared["dylib"]
-    check(call_exported(path, "libmath__add1", 37) == 38,
-          "libmath__add1(37) did not return 38")
-    check(call_exported(path, "libmath__mul2", 21) == 42,
-          "libmath__mul2(21) did not return 42")
-    check(call_exported(path, "extra__neg", 5) == -5,
-          "extra__neg(5) did not return -5")
+    check(call_exported_by_name(path, "add1", 37) == 38,
+          "add1(37) did not return 38")
+    check(call_exported_by_name(path, "mul2", 21) == 42,
+          "mul2(21) did not return 42")
+    check(call_exported_by_name(path, "neg", 5) == -5,
+          "neg(5) did not return -5")
     lib = ctypes.CDLL(path)
     try:
-        getattr(lib, "libmath___hidden")
+        getattr(lib, "_hidden")
     except AttributeError:
         return
     raise TestFailure("dlsym resolved the private _hidden function")
@@ -309,8 +352,8 @@ def test_no_prove_skips_proof(tmpdir, shared):
     check(not os.path.exists(proof),
           f"--no-prove still wrote {proof}")
     # ... and the dylib it did write is still loadable and correct.
-    check(call_exported(out, "const2__const2", 37) == 2,
-          "const2__const2(37) did not return 2")
+    check(call_exported_by_name(out, "const2", 37) == 2,
+          "const2(37) did not return 2")
 
 
 def test_default_prove_emits_checked_proof(tmpdir, shared):
@@ -338,8 +381,8 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     from formal.lean import check_proof
     ok, detail = check_proof(proof, repo_root=root)
     check(ok, f"lean rejected the generated dylib proof: {detail[-400:]}")
-    check(call_exported(out, "proved__triple", 14) == 42,
-          "proved__triple(14) did not return 42")
+    check(call_exported_by_name(out, "triple", 14) == 42,
+          "triple(14) did not return 42")
 
 
 def test_duplicate_function_names_rejected(tmpdir, shared):
@@ -371,6 +414,103 @@ def test_private_only_module_rejected(tmpdir, shared):
           f"{(result.stderr or result.stdout).strip()[-200:]}")
 
 
+def test_executable_links_a_dylib(tmpdir, shared):
+    """An executable built with --link-dylib calls into the library and RUNS.
+
+    This is the whole point of the mechanism: without it a cross-module call
+    lowers to a BL against a symbol nothing defines, so the image builds and
+    then dies in dyld at launch. The subtle part it pins down is that the
+    entry offset has to agree across three places — the code the codegen
+    emitted for, the stub addresses the call sites branch to, and LC_MAIN.
+    Each linked dylib adds a load command and so moves that offset; when they
+    disagreed the call branched into the caller's own epilogue padding
+    (a SIGBUS at launch, with a perfectly well-formed image).
+    """
+    lib_a = os.path.join(tmpdir, "link_a.mojo")
+    with open(lib_a, "w") as f:
+        f.write("def triple(x):\n  return x * 3\n"
+                "def square(x):\n  return x * x\n")
+    lib_b = os.path.join(tmpdir, "link_b.mojo")
+    with open(lib_b, "w") as f:
+        f.write("def quad(x):\n  return x * x * x\n")
+    dylibs = []
+    for src, name in ((lib_a, "linklib_a"), (lib_b, "linklib_b")):
+        out = os.path.join(tmpdir, name + ".dylib")
+        rc = run_fire(["dylib", "--formal", "--no-prove", "-o", out,
+                       src]).returncode
+        check(rc == 0, f"dylib build failed: {rc}")
+        check(os.path.exists(out + ".manifest.json"),
+              "the dylib wrote no export manifest, so nothing can link it")
+        dylibs.append(out)
+
+    prog = os.path.join(tmpdir, "link_prog.mojo")
+    with open(prog, "w") as f:
+        f.write("def main():\n  return triple(2) + quad(3) + square(4) + 39\n")
+    exe = os.path.join(tmpdir, "link_prog.aout")
+    argv = ["build", "--formal", "--no-prove", "-o", exe]
+    for d in dylibs:
+        argv += ["--link-dylib", d]
+    argv.append(prog)
+    rc = run_fire(argv).returncode
+    check(rc == 0, f"executable build failed: {rc}")
+
+    # Both libraries must be real dependencies, not just recorded names.
+    otool = subprocess.run(["/usr/bin/otool", "-L", exe],
+                          capture_output=True, text=True)
+    for d in dylibs:
+        check(os.path.abspath(d) in otool.stdout,
+              f"{os.path.basename(d)} is not an LC_LOAD_DYLIB dependency:\n"
+              f"{otool.stdout}")
+
+    # And it must actually run: 6 + 27 + 16 + 39 = 88.
+    rc = subprocess.run([exe]).returncode
+    check(rc == 88, f"linked program returned {rc}, expected 88")
+
+
+def test_dylib_calls_out_to_libSystem(tmpdir, shared):
+    """A library that calls printf itself builds, loads, and RUNS.
+
+    This is the shape a formal stdlib dylib needs: the stdlib calls out to
+    libSystem everywhere, so a dylib that refuses externs can never hold it.
+    Two things this pins down that the executable path does not exercise:
+
+      * the dylib's own load-command list grows (__DATA_CONST plus an
+        LC_LOAD_DYLIB), which moves its code, so the base the code is emitted
+        for and the stub addresses its call sites branch to have to be
+        derived for the same decision;
+      * a MH_DYLIB has no __PAGEZERO, so its __DATA_CONST is segment ordinal 1
+        while the executable's is 2 — with the executable's value the bind
+        stream points at __LINKEDIT and dyld faults inside applyFixups.
+    """
+    lib = os.path.join(tmpdir, "shouty.mojo")
+    with open(lib, "w") as f:
+        f.write('def shout(x):\n  printf("from the dylib\\n")\n  return x + 1\n')
+    out = os.path.join(tmpdir, "libshouty.dylib")
+    rc = run_fire(["dylib", "--formal", "--no-prove", "-o", out,
+                   lib]).returncode
+    check(rc == 0, f"dylib with an extern failed to build: {rc}")
+
+    # The library must declare libSystem itself, or its bind stream's
+    # ordinal 1 names nothing.
+    otool = subprocess.run(["/usr/bin/otool", "-L", out],
+                          capture_output=True, text=True)
+    check("libSystem" in otool.stdout,
+          f"the library declares no libSystem dependency:\n{otool.stdout}")
+
+    # And it must run: printf from inside the library, then x + 1.
+    prog = os.path.join(tmpdir, "shouty_prog.mojo")
+    with open(prog, "w") as f:
+        f.write("def main():\n  return shout(41)\n")
+    exe = os.path.join(tmpdir, "shouty_prog.aout")
+    rc = run_fire(["build", "--formal", "--no-prove", "-o", exe,
+                   "--link-dylib", out, prog]).returncode
+    check(rc == 0, f"executable build failed: {rc}")
+    r = subprocess.run([exe], capture_output=True, text=True)
+    check("from the dylib" in r.stdout,
+          f"the library's printf did not run; stdout={r.stdout!r}")
+    check(r.returncode == 42, f"returned {r.returncode}, expected 42")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("exported functions execute", test_exported_functions_execute),
@@ -378,6 +518,8 @@ TESTS = [
     ("default path emits a checked proof", test_default_prove_emits_checked_proof),
     ("duplicate function names rejected", test_duplicate_function_names_rejected),
     ("module with no public functions rejected", test_private_only_module_rejected),
+    ("executable links a dylib and runs", test_executable_links_a_dylib),
+    ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
 ]
 
 
