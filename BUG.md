@@ -372,3 +372,52 @@ is consistent with an append running past its reservation.
 
 A single-generator comprehension is correct on both backends, so this is
 specific to the nesting, not to comprehensions.
+
+### Comprehension shape matrix (x86-64 side, characterisation for whoever picks it up)
+
+Measured on the real binaries under Rosetta, summing the result blob with a
+`for` loop and reading `len` off it. This narrows both backends' behaviour to
+shapes rather than "nested":
+
+| shape | arm64 | x86-64 |
+|---|---|---|
+| `len([i for i in range(4)])` | 4 | 4 |
+| `len([i+j for i in range(4) for j in range(4)])` | 16 | **4** |
+| sum, single generator | 6 | 6 |
+| sum, nested 2x2 | 4 | **225** |
+| sum, nested 3x2 | 9 | **1** |
+| sum, nested 4x4 | **48** | **-11 (SIGSEGV)** |
+| sum, nested `[j for i in range(3) for j in range(4)]` | 18 | **-11** |
+| sum, nested `[7 for i in range(3) for j in range(4)]` | 84 | **21** |
+
+Two things this adds to the write-up above.
+
+**x86-64's COUNT is wrong, not just its values.** `len` of the 4x4 nested is
+4 — the inner generator's count — where arm64 reads 16. So on x86-64 the blob
+header is being left holding the inner count, which is a different bug from
+arm64's earlier "the base register is destroyed by the index store": the
+appends are landing somewhere, but the count in the header is not what the
+append path read. That points at `_compr_append_elem` re-reading the count
+from `[R11]` while R11 no longer holds the result blob base at that point —
+i.e. the recursion is leaving the wrong value in R11 or R10 across the call,
+and `_emit_compr_gen`'s `label(start_label)` reload only protects the OUTER
+loop's own next iteration, not the append inside the inner one.
+
+**arm64 has a residual of its own, and it is a doubling.** The 4x4 case reads
+`len` = 16 (correct) and sum = 48 = exactly 2 x 24, while 2x2, 3x2, no-`i` and
+constant-element nestings are all exactly right. A correct count with a doubled
+sum is not a count bug and not a wrong-value bug: it is 16 elements whose values
+sum to twice the right total, or 8 iterations each appending twice. Whatever
+fixes the count bug should be checked against the 4x4 case specifically, since
+2x2/3x2 passing does not cover it.
+
+Reproduction used (each is `def f(n):` with `n` unused, called with 10):
+
+```python
+def f(n):
+    xs = [i + j for i in range(4) for j in range(4)]
+    t = 0
+    for x in xs:
+        t += x
+    return t                       # 24; arm64 gives 48, x86-64 segfaults
+```
