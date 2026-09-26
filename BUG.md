@@ -501,3 +501,65 @@ Also still uncovered and genuinely worth having, in the audit's order:
 `ccmp` (0.34%), `rev`, `ror`, `ubfx`/`ubfiz`, `madd`, and the float/convert
 family (`fmov`, `ucvtf`, `fcmp`) — none of which this one-word integer model
 has a use for yet.
+
+
+## Emitting the new instructions: what it actually bought (measured, not assumed)
+
+Wired up where it does NOT touch the proof-visible structure, since the
+proof-generator work is deliberately deferred:
+
+* **CSEL for a conditional expression** (`a if c else b`) and for
+  short-circuit **`and`/`or`** as a value.
+* **LDUR/STUR for spill slots** — a spill slot is a fixed displacement from
+  the frame pointer, which is exactly what the unscaled form is for.
+
+### The measurement, and the part that is not a win
+
+A benchmark mixing a ternary, `and`, `or` and fourteen spilled locals, built at
+818a851 and again after:
+
+    total   176 -> 174 instructions
+    sub     38 -> 33     ldr  3 -> 0     str  2 -> 0
+    ldur    0 ->  3      stur 0 -> 2
+    b        4 ->  1     cbz  3 -> 1     cbnz 1 -> 0
+    csel    0 ->  3
+    ldp     14 -> 18     stp 14 -> 18     <-- the cost
+
+Same result (253) before and after, so nothing changed semantically.
+
+**LDUR/STUR is the real win**: 10 instructions gone, because each spill access
+was `mov` + `sub` + access and is now one instruction.
+
+**CSEL is NOT an instruction-count win here, and the +8 stack pairs say why.**
+The three CSELs replace three branches (-6 branch/cbz/cbnz) but need four
+push/pop pairs to keep the operands live across the flag-setting compare,
+because arm evaluation clobbers the flags. For a ternary whose arms are pure
+and therefore *cheap* — which is exactly what the purity guard allows — two
+`stp`/`ldp` pairs cost more than the branch they remove. It buys:
+
+  * fewer BRANCHES, which is a pipeline argument, not a size one, and
+  * fewer basic blocks, which is what `arm64_proof_gen` has to filter around:
+    it picks a block ending in a recorded `cbz` as an entry condition, and a
+    short-circuit CBZ ends a block identically — the reason
+    `_cond_branches` exists as a filter at all. CSEL removes that ambiguity
+    rather than adding to it.
+
+So: keep both, but the honest summary is "10 instructions smaller and 6 fewer
+branches", not "CSEL made it smaller".
+
+The way to make CSEL a genuine size win is to stop needing the stack — keep
+the two arms in registers that expression evaluation does not clobber. X9/X10
+are not safe for that today (`_emit_list_base` alone uses X9), so it needs a
+reserved-scratch convention first. Worth doing; not done here.
+
+### Still blocked, and only on the deferred proof work
+
+`B.cond` is the biggest single instruction in the audit (~154k occurrences) and
+the codegen still does not emit it, because **all four** conditional sites
+(`if`/`elif`, `while`/`for`, the ternary, and a comprehension's generator
+conditions) call `_record_cond_branch()`, and `arm64_proof_gen` finds an entry
+condition by looking for a block whose terminator is a recorded `cbz` and
+reading the register that CBZ tests. A `B.cond` there is neither a `cbz` block
+nor a register, so the proof would silently lose the condition. That is the
+work being deferred, and it is the only thing standing between the current
+tree and the largest win available in the audit.

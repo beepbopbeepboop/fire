@@ -677,6 +677,9 @@ class ARM64Codegen:
             return
         if name in self._var_spills:
             off = self._spill_off(name)
+            if -256 <= off <= 255:
+                self.asm.emit(encode_ldur_xt_xn_imm(dst, 29, off))
+                return
             self.asm.emit(encode_mov_zr_xn(17, 29))
             _emit_sub_imm(self.asm, 17, 17, off)
             self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 0))
@@ -693,6 +696,14 @@ class ARM64Codegen:
             return
         if name in self._var_spills:
             off = self._spill_off(name)
+            if -256 <= off <= 255:
+                # One instruction instead of three. The unscaled form takes
+                # the displacement directly, which is exactly what a spill
+                # slot is: a fixed negative offset from the frame pointer.
+                # Nothing else in this backend needs X17 for a spill, which
+                # is why the saved-scratch dance existed only for this.
+                self.asm.emit(encode_stur_xt_xn_imm(src, 29, off))
+                return
             self.asm.emit(encode_mov_zr_xn(17, 29))
             _emit_sub_imm(self.asm, 17, 17, off)
             self.asm.emit(encode_str_xt_xn_imm(src, 17, 0))
@@ -1742,8 +1753,17 @@ class ARM64Codegen:
             return
 
         if isinstance(expr, F.TernaryExpr):
-            # x = a if c else b  →  same branch shape as if/else, both arms
-            # leave their value in X0, join at end.
+            # x = a if c else b. With nothing observable in c/a/b this is one
+            # CSEL instead of a branch: both arms are computed, one is chosen.
+            # That is the whole point of the instruction, and it is also why
+            # the arms must be pure — see _is_pure_expr.
+            if (self._is_pure_expr(expr.condition)
+                    and self._is_pure_expr(expr.then_val)
+                    and self._is_pure_expr(expr.else_val)):
+                self._emit_csel_ternary(expr)
+                return
+            # Otherwise: same branch shape as if/else, both arms leave their
+            # value in X0, join at end.
             self._if_counter += 1
             tid = self._if_counter
             fn = self.func_name
@@ -2411,6 +2431,28 @@ class ARM64Codegen:
         `and`: evaluate left; if zero keep it, else evaluate right.
         This is what `x or []` / `params or []` need — bitwise OR of a
         list pointer and an empty-list blob pointer is garbage."""
+        if self._is_pure_expr(left) and self._is_pure_expr(right):
+            # Branchless, and it also removes the block the proof generator
+            # used to mistake for an `if`'s entry condition: a short-circuit
+            # CBZ ends a basic block exactly like the real one does, which is
+            # why `_cond_branches` exists as a filter at all.
+            self._emit_expr(left)
+            self.asm.emit(encode_stp_sp_pre(0, 31))
+            self._emit_expr(right)
+            self.asm.emit(encode_mov_zr_xn(1, 0))       # X1 = right
+            self.asm.emit(encode_ldp_sp_post(0, 31))   # X0 = left
+            self.asm.emit(encode_cmp_xn_imm(0, 0))
+            # Same condition for both — "is the left truthy" — and only the
+            # OPERANDS differ, because that is the whole difference between
+            # them: `or` keeps the left when it is truthy, `and` keeps the
+            # right. Swapping the condition instead of the operands compiles
+            # and inverts the operator, which is exactly what it did first
+            # time: `5 and 9` returned 5.
+            if is_or:
+                self.asm.emit(encode_csel_xd_xm_cond(0, 0, 1, "ne"))
+            else:
+                self.asm.emit(encode_csel_xd_xm_cond(0, 1, 0, "ne"))
+            return
         self._if_counter += 1
         aid = self._if_counter
         fn = self.func_name
@@ -3724,6 +3766,67 @@ class ARM64Codegen:
         `comptime for` produce the same shape of code."""
         self._emit_stmt(F.AssignStmt(target=F.IdentExpr(name=target),
                                      value=value, line=0, col=0))
+
+    def _emit_csel_ternary(self, expr) -> None:
+        """`a if c else b` branchlessly: evaluate both arms, CSEL between them.
+
+        Ordering is forced by the fact that CSEL reads two registers at once:
+        the condition has to be computed before either arm, because an arm's
+        evaluation clobbers X0, and the arms have to be on the stack before
+        the condition is dropped back in, or the second arm's evaluation would
+        destroy the first.
+
+            X0 = c ;  push
+            X0 = a ;  push
+            X0 = b ;  X1 = b
+            X0 = a (pop)
+            X2 = c (pop)
+            cmp X2, #0 ; csel X0, X0, X1, ne
+
+        `ne` rather than `eq` because Python's ternary tests the condition for
+        TRUTHINESS, not equality with zero-by-identity: any non-zero value
+        takes the `then` arm.
+        """
+        self._emit_expr(expr.condition)
+        self.asm.emit(encode_stp_sp_pre(0, 31))
+        self._emit_expr(expr.then_val)
+        self.asm.emit(encode_stp_sp_pre(0, 31))
+        self._emit_expr(expr.else_val)
+        self.asm.emit(encode_mov_zr_xn(1, 0))            # X1 = else arm
+        self.asm.emit(encode_ldp_sp_post(0, 31))        # X0 = then arm
+        self.asm.emit(encode_ldp_sp_post(2, 31))        # X2 = condition
+        self.asm.emit(encode_cmp_xn_imm(2, 0))
+        self.asm.emit(encode_csel_xd_xm_cond(0, 0, 1, "ne"))
+
+    def _is_pure_expr(self, e) -> bool:
+        """True when evaluating `e` can be neither observed nor fatal.
+
+        Deliberately narrow, because CSEL evaluates BOTH arms. An arm holding
+        a call may print, mutate a blob, or hit a cap, and running it when its
+        value is thrown away is a behaviour change, not an optimisation. So the
+        allow-list is literals, locals, field reads, and arithmetic over them.
+
+        Container literals are excluded even though a list display is
+        side-effect-free in principle: a list arm reserves frame space for its
+        blob, and reserving both arms' worth at once is a frame-pressure
+        change for no benefit. Calls are excluded even for known-pure builtins,
+        because the builtin set is exactly what grows over time and a stale
+        allow-list here would silently change semantics when it does."""
+        if isinstance(e, (F.IntLiteral, F.StringLiteral, F.BoolLiteral,
+                          F.IdentExpr)):
+            return True
+        if isinstance(e, F.MemberExpr):
+            return self._is_pure_expr(e.obj)
+        if isinstance(e, F.UnaryOp):
+            return self._is_pure_expr(e.operand)
+        if isinstance(e, F.BinaryOp):
+            return (self._is_pure_expr(e.left)
+                    and self._is_pure_expr(e.right))
+        if isinstance(e, F.TernaryExpr):
+            return (self._is_pure_expr(e.condition)
+                    and self._is_pure_expr(e.then_val)
+                    and self._is_pure_expr(e.else_val))
+        return False
 
     def _is_container_expr(self, e) -> bool:
         """True when `e` is known to lower to a list/set/tuple blob."""
