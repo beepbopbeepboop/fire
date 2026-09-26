@@ -810,6 +810,57 @@ theorem x86_step_jmp_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat) (off 
     x86_step s code = some { s with rip := (Int.ofNat m + 5 + off).toNat } := by
   simp [x86_step, x86_step_plain, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_imm]
 
+/-! ## The prologue forms, and what closing a body still needs
+
+Every x86-64 function starts `push rbp ; mov rbp, rsp ; sub rsp, <frame>`, so
+those three are the forms any per-instruction argument meets first. The two
+that were missing are here.
+
+`x86_exec_exit`'s exit sentinel — address 0, reached because a `ret` in a
+function entered at its own label pops the zero the initial stack holds — also
+needs saying once.
+
+Closing a function's body outright is a further step, and the reason is worth
+recording because it is not obvious: chaining the step lemmas builds a state
+expression N structure updates deep, and the last `ret` reads
+`memReadBytes` of that whole nest at the initial stack pointer. Proving it is
+0 means proving that every push and spill in the nest wrote SOMEWHERE ELSE —
+a memory-separation lemma per write form (a write at A does not change a read
+at B, for the address ranges each form uses). ProofLib already has that
+family for arm64 (`mem_read_push_frame`, `mem_read_two_writes_adjacent_mod`,
+`mem_read_write_pair_below`); the x86-64 equivalents are what a full
+end-to-end proof of a straight-line function needs, and they are not written.
+Until they are, the generated proofs carry run tests (real `native_decide`
+evaluations, so the machine IS checked against the source semantics for
+concrete inputs) and a `sorry` end-to-end theorem. -/
+
+/-- `mov rbp, rsp` — the frame setup (REX.W 89 /r, ModRM 0xe5: mod=3, reg=4
+    RSP as the source, rm=5 RBP as the destination). -/
+theorem x86_step_mov_rbp_rsp (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = 0xe5) :
+    x86_step s code = some { s with rbp := s.rsp, rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, h_rip, h_b0, h_b1, h_b2]
+
+/-- `sub rsp, imm32` — the frame allocation (REX.W 81 /5 id, ModRM 0xec). -/
+theorem x86_step_sub_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (imm : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48)
+    (h_b1 : code (m + 1) = 0x81) (h_b2 : code (m + 2) = 0xec)
+    (h_imm : read_i32_le code (m + 3) = imm) :
+    x86_step s code = some { x86_flags_sub s s.rsp (UInt64.ofInt imm) (s.rsp - UInt64.ofInt imm) with rsp := s.rsp - UInt64.ofInt imm, rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_flags_sub, h_rip, h_b0, h_b1, h_b2, h_imm]
+
+/-- The initial state's memory reads as zero everywhere.  This is what makes
+    address 0 a usable exit sentinel rather than a lucky guess: the entry
+    function's own `ret` pops a zero from the initial stack, so the runner
+    stops at 0 with the result in RAX and no planted return address. -/
+theorem x86_init_mem_reads_zero (n : UInt64) (entry : Nat) (a : Nat) :
+    mem_read_bytes (X86State.init n entry).mem a 8 = 0 := by
+  simp [X86State.init, mem_read_bytes]
+
+
 /-! ### Running the model
 
 Two runners, because there are two questions.  `x86_exec` answers "run until
@@ -869,6 +920,12 @@ theorem x86_exec_eq_go (s : X86State) (code : Nat → UInt8) :
 /-- Run to the exit pc (see the note above on why 0 works), or fail. -/
 def x86_exec_exit (s : X86State) (code : Nat → UInt8) (exit : Nat) : Option X86State :=
   x86_exec_go_exit s code exit 100000
+
+/-- The equation behind `x86_exec_exit`, so a proof can unfold one step at a
+    time instead of through a definition that is `@[irreducible]`. -/
+theorem x86_exec_exit_eq_go (s : X86State) (code : Nat → UInt8) (exit : Nat) :
+    x86_exec_exit s code exit = x86_exec_go_exit s code exit 100000 := by
+  unfold x86_exec_exit; rfl
 
 /-- Already at the exit pc: the run is over, and the state is the answer. -/
 @[simp] theorem x86_exec_go_exit_at {st : X86State} {code : Nat → UInt8} {exit : Nat} {fuel : Nat}
