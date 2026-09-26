@@ -163,6 +163,129 @@ def compiler_fingerprint() -> str:
 _toolchain_fp_cache = {}
 
 
+# ── The self-host closure: a different, LARGER input set ────────────────────
+# `compiler_fingerprint()` above is the right key for a *stdlib module's*
+# codegen, and it is deliberately not a superset of everything: fire.py,
+# fire_main.py and myinterpreter.py are the compiler's own source, and no
+# stdlib module's generated C depends on them.
+#
+# Anything that COMPILES THE COMPILER is the other case. `fire.py --dump-full
+# fire.py`, `fire.py build fire.py`, and therefore `mojoc` and `stage2/mojo`,
+# all read those three files, so a key built only from _COMPILER_SOURCES would
+# be UNSOUND for them: edit myinterpreter.py, get a cache hit, and serve a
+# binary built from the old interpreter. That is the worst possible failure for
+# a build cache — wrong output, cached, and quiet — so the set is spelled out
+# explicitly and then CHECKED (see `selfhost_closure_is_complete`).
+#
+# The list is a superset-by-enumeration, not a live import walk, because a walk
+# would silently change meaning as the code moves. The check below is what
+# keeps the enumeration honest.
+_SELFHOST_EXTRA = [
+    'fire.py',            # the CLI/entry point everything is dumped through
+    'fire_main.py',
+    'myinterpreter.py',   # the interpreter the self-hosted closure embeds
+    'driver.py',          # link-mode's entry, read by fire.py build
+    'build_mojo_cli.py',
+    'elaborate.py',       # already in _COMPILER_SOURCES; named for clarity
+    # Reached by the import walk in `selfhost_closure_is_complete`, so named
+    # here for that check to stay silent. Whether each one can actually change
+    # the emitted code is not the question being asked — a build cache that is
+    # too narrow is wrong and a build cache that is too wide only costs a
+    # rebuild, so every module the closure touches is hashed and none is
+    # second-guessed. (cas.py is in its own closure: it is this file.)
+    'cas.py',
+    'determinism_trace.py',
+    'jit/arm64.py',
+]
+
+_selfhost_fp_cache = None
+
+
+def selfhost_inputs() -> list:
+    """Every file whose content can change what the compiler emits about
+    ITSELF — the input set for `mojoc`, `stage2/mojo`, and the
+    whole-closure `--dump-full` dumps."""
+    seen, out = set(), []
+    for name in list(_COMPILER_SOURCES) + _SELFHOST_EXTRA:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return sorted(out) + sorted(_RUNTIME_SOURCES)
+
+
+def selfhost_fingerprint() -> str:
+    """Hash of the self-host input set — 'which compiler compiled the
+    compiler'. Distinct from `compiler_fingerprint()`; see above for why, and
+    `selfhost_closure_is_complete` for what keeps the list honest."""
+    global _selfhost_fp_cache
+    if _selfhost_fp_cache is None:
+        h = hashlib.blake2b(digest_size=20)
+        for name in selfhost_inputs():
+            path = path if (path := os.path.join(HERE, name)) else path
+            try:
+                with open(path, 'rb') as f:
+                    h.update(name.encode())
+                    h.update(f.read())
+            except (FileNotFoundError, NotADirectoryError):
+                h.update(b'\0missing:' + name.encode())
+        try:
+            import version as _v
+            h.update(b'\0version:' + _v.version().encode())
+        except Exception:
+            pass
+        _selfhost_fp_cache = h.hexdigest()
+    return _selfhost_fp_cache
+
+
+def selfhost_closure_is_complete(entry: str = 'fire.py') -> tuple:
+    """Walk `entry`'s repo-local imports transitively; return (missing, seen).
+
+    `missing` is the set of files the walk reaches that
+    `selfhost_fingerprint()` does NOT hash. An empty set is the invariant that
+    makes the self-host cache keys sound; a non-empty one means a new module
+    was imported without being added to `_SELFHOST_EXTRA`, and every cached
+    self-host artifact is now suspect. Checked by test_suite.py, because the
+    failure it prevents is silent and catastrophic rather than loud.
+
+    Deliberately a syntactic walk of `import X` / `from X import` at module
+    level and inside `def`/`try` bodies — not a resolved one. A resolved walk
+    would need the import to actually succeed, which means executing the
+    compiler, which is not something a key-completeness check should do. The
+    over-approximation is the safe direction: a file reached only inside a
+    function is still hashed, so the key is never narrower than the truth.
+    """
+    import re
+    known = set(selfhost_inputs())
+    pat = re.compile(r'^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import|'
+                     r'import\s+([A-Za-z_][\w.]*))', re.M)
+    missing, seen = set(), set()
+    queue = [(None, entry)]               # (module, path) — the entry is a path
+    while queue:
+        mod, path = queue.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        if path not in known:
+            missing.add(path)
+        try:
+            with open(os.path.join(HERE, path), 'r', errors='replace') as f:
+                src = f.read()
+        except OSError:
+            continue
+        for line in src.splitlines():
+            m = pat.match(line)
+            for grp in (m.group(1), m.group(2)) if m else ():
+                if not grp:
+                    continue
+                dotted = grp.replace('.', os.sep)
+                for cand in (dotted + '.py',
+                             os.path.join(dotted, '__init__.py')):
+                    if os.path.isfile(os.path.join(HERE, cand)):
+                        queue.append((grp, cand))
+                        break
+    return missing, seen
+
+
 def toolchain_fingerprint(gcc: str, flags: tuple = ()) -> str:
     """Hash of the toolchain + target: gcc identity/version, platform, flags."""
     key = (gcc, flags)

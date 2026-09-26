@@ -75,12 +75,81 @@ anywhere else), these rules override any instinct to move on quickly:
   interim gate runs and interim check-ins were seen as wasted tokens/time
   when the intent was always to gate once at the end anyway.
 
+## Running the checks — one runner, named buckets
+`tools/suite.py` runs everything: the buckets, each test's driver, the memory
+ceilings, the ordering, and one pass/fail count. The Makefile's targets are
+one-line recipes that call it, so `make check-<x>` and
+`python3 tools/suite.py <x>` are the same thing.
+
+    make check              # the everyday gate, -j ncpu, one tally
+    make gate               # the full quality gate below, including the slow,
+                            # memory-hungry steps
+    make bootstrap          # the 3-stage self-host chain
+    gmake -j1 check         # strictly serial, every job's output streamed live
+    make check J=4          # 4 at a time (works with either make; Apple's 3.81
+                            # cannot express -j1 from inside a recipe)
+    make check-list         # the registry: bucket, driver, memclass, deps
+    make check-plan         # the plan and its ordering, run nothing
+    python3 tools/suite.py -j1 --list     # the same, without Make
+
+Reading a run: the screen shows only failures, skips, a resource breach, a
+30-second heartbeat, and the final tally. **Everything else — a PASS line per
+job with its full argv, exit code, duration and measured peak, the complete
+output of anything that failed, the reason for every skip, and the
+environment (git HEAD, dirty count, gcc, jobs, MEMLIMIT_GB) — goes to
+`build/suite.log`.** A RESOURCE verdict is reported separately from a failure
+on purpose: memcap killed the process for memory before it finished, so it
+says nothing about whether the output was right.
+
+Memory: every job that runs a `mojoc` binary, or a whole-closure compile
+standing in for one, is capped by `tools/memcap.py` at the ceiling its
+`memclass` names (`small` 8 GB, `module` 24, `program` 55, `stage` 96 — see
+the `MEMCLASS` table in `tools/suite.py` for which is which and the
+measurements behind them). `program` and `stage` are the ones known to pass
+10 GB, and they are exclusive: the runner gives them the machine to
+themselves and starts nothing else until they are done, so a 55 GB job is
+safe to leave running unattended. `MEMLIMIT_GB=96` raises every ceiling;
+`MEMLIMIT_GB=0` removes them all and says so loudly.
+
+Cached results, and what is deliberately **not** cached. Three caches, with
+different jobs:
+
+- A check whose inputs are unchanged replays its recorded PASS
+  (`checked_run.py`, content-addressed). A recorded FAILURE is re-run — the
+  key covers the files named in the test's `extra` list, not a stale
+  `build/`, a leftover module-cache dir, or the machine, and a cached red that
+  no fix can clear is worse than spending the time to find out.
+- A step whose artifact is a **binary** — `mojoc`, `stage2/mojo` — is cached
+  by the content of its real inputs (the closure, via
+  `cas.selfhost_fingerprint()`, plus the exact argv), which is what makes
+  `make native`/`make gate` cheap to re-run. A hit is announced on the screen
+  and the step does not run at all; `--no-cache` forces it and still
+  publishes. Note that `selfhost_fingerprint()` is a *different, larger*
+  input set than `compiler_fingerprint()`: the latter deliberately omits
+  `fire.py`/`fire_main.py`/`myinterpreter.py` because no stdlib module's
+  codegen reads them, which makes it UNSOUND as a key for anything that
+  compiles the compiler. `test_suite.py` walks `fire.py`'s import closure and
+  fails if anything reachable is unhashed, because that failure mode is a
+  wrong binary served from cache, silently.
+- The three stage trees are **never** cached. `verify`'s entire job is
+  comparing stage1 against stage2 against stage3, so caching two of the three
+  would make its comparison a fresh artifact against a copy of itself — the
+  gate would pass by construction and stop detecting the byte-identity
+  divergence it exists to detect. Do not "fix" this by adding a cache; if
+  bootstrap is too slow, fix the memory blowup
+  (`bugs/CODEGEN_bootstrap_resource_blowup.md`), which is the actual cause.
+  For scale: the 45-file per-stage sweeps measure **1.8 s** in total, so all
+  of bootstrap's ~32 minutes is the three whole-closure dumps plus the
+  `gcc -O0` compile between them. Per-file caching would buy nothing.
+
 ## Quality gate for gimple/codegen-affecting changes
 Before considering a change to `mojo_compiler.py` (the shared parser/AST),
 `gimple_codegen.py`, or `module_loader.py` (or anything else on the compiled
 path) done — including subagent work — run ALL of the following, not just
 `test_gimple.py`/`test_module_cache.py`. This is the full gate; nothing here
-is optional or "extra":
+is optional or "extra". **`make gate` runs all of it**, in parallel where that
+is safe, with the heavy steps serialised and memory-capped, and ends with one
+count. The individual steps, and why each one exists:
 
 0. `make check-linkmode` (or `python3 test_link_mode.py`) — the real
    `driver.compile_program` link-mode pipeline `fire.py build` uses by
