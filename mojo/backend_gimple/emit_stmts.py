@@ -3439,6 +3439,11 @@ def _gen_stmt_TryStmt(gen, node):
     cond_t = gen._new_temp('_Bool')
     bb_try   = gen._new_bb()
     bb_exc   = gen._new_bb()
+    # The "this exception is not handled here" path: run the `finally`, then
+    # let the exception keep propagating. Needed for BOTH shapes that reach
+    # it — a `try/except/finally` whose handlers all declined to match, and a
+    # `try/finally` with no `except` at all.
+    bb_exc_reraise = gen._new_bb()
     bb_else  = gen._new_bb() if node.else_body else None
     bb_after = gen._new_bb()
 
@@ -3590,6 +3595,15 @@ def _gen_stmt_TryStmt(gen, node):
     gen._emit("  mojo_exc_pop ();")
 
     handlers = node.handlers
+    if not handlers:
+        # `try: ... finally: ...` (no `except`): the exception was never
+        # going to be handled here, so it must keep propagating — but only
+        # AFTER the finally has run. Falling through instead (which is what
+        # this used to do, since the handler-dispatch code below emits
+        # nothing when there are no handlers) dropped the exception on the
+        # floor entirely: `try: raise ValueError("x") finally: print("c")`
+        # printed neither the cleanup nor anything else, and exited 0.
+        gen._emit(f"  goto {bb_exc_reraise};")
     # `except Exception`/`except BaseException` must catch *anything* —
     # in real Python every raised type is an Exception subclass, but the
     # tag-equality dispatch below has no notion of inheritance, so
@@ -3712,7 +3726,18 @@ def _gen_stmt_TryStmt(gen, node):
             gen._emit_except_handler(h, node, bb_after)
 
         gen._emit_label(bb_no_match)
-        gen._emit("  mojo_raise ();")
+        # No handler claimed it: run the finally (a caught exception runs
+        # it inline in _emit_except_handler, so without this hop an
+        # unhandled-by-any-handler exception skipped the cleanup entirely),
+        # then keep propagating.
+        gen._emit(f"  goto {bb_exc_reraise};")
+
+    # Finally-then-propagate block (see bb_exc_reraise's declaration).
+    gen._emit_label(bb_exc_reraise)
+    if node.finally_body:
+        for s in node.finally_body:
+            gen.gen_stmt(s)
+    gen._emit("  mojo_raise ();")
 
     if bb_else:
         gen._emit_label(bb_else)

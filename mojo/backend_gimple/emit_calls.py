@@ -1006,30 +1006,42 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'int64_t', t
 
     fname_raw = gen._ident_call_name(node.func)
-    # Mojo's CAPITALIZED type constructors are the same operations as the
-    # lowercase Python builtins of the same meaning, and the interpreter
-    # already treats them that way (`String(7)` -> '7', `Int("3")` -> 3,
-    # `Bool(1)` -> True — see myinterpreter's _setup_builtins). Normalize
-    # the name here, ONCE, so every `str`/`int`/`float`/`bool` special case
-    # below applies to the capitalized spelling too, instead of each needing
-    # its own duplicate.
+    # `String(x)` is the same operation as `str(x)`, and the interpreter
+    # already treats it that way (`String(7)` -> '7' — see
+    # myinterpreter's _setup_builtins). Normalize the name here, ONCE, so
+    # every `str` special case below applies to the capitalized spelling
+    # too, instead of each needing its own duplicate.
     #
-    # Without this, `String(i)` fell through to the generic call path and
-    # was emitted as a plain C cast of the argument — `"item" + String(i)`
+    # Without it, `String(i)` fell through to the generic call path and was
+    # emitted as a plain C cast of the argument — `"item" + String(i)`
     # became `mojo_str_cat("item", (char *)(int64_t)i)`, concatenating the
-    # raw pointer/integer bits as a string (real repro: a generator
-    # building 'item0'/'item1'/'item2' printed 'item' three times, then
-    # would have crashed on a real pointer value).
+    # raw pointer/integer bits as a string (real repro: a generator building
+    # 'item0'/'item1'/'item2' printed 'item' three times, then would have
+    # crashed on a real pointer value).
+    #
+    # ONE argument only. `String(a, b, c, ...)` is real Mojo's multi-part
+    # string builder (static_tuple.mojo's `return String("StaticTuple[",
+    # reflect[...].name(), ", ", ...)`), NOT a `str()` call — aliasing it
+    # routed those to `mojo_str` and produced "too many arguments to
+    # function 'mojo_str'; expected 1, have 6" across a dozen stdlib files.
+    # Those keep whatever lowering they had before.
+    #
+    # `Int`/`Float`/`Bool` are deliberately NOT aliased, even though the
+    # interpreter maps them to `int`/`float`/`bool`: this codegen's own
+    # generic call path already lowers them correctly, including for a
+    # STRUCT argument (`Int(BFloat16(3.0))` in
+    # test/builtin/test_bfloat16.mojo), where the `int` builtin's
+    # stringifying path instead emitted "cannot convert to a pointer type".
+    # Only `String` had a real wrong-answer bug to fix.
     #
     # Gated on the name not being locally bound, exactly like every
     # `str`/`int`/... special case below: a module may define its own
     # `def String(...)` (Lib/locale.py defines its own `str`), and the
     # alias must not steal that call.
-    _CTOR_ALIAS = {'String': 'str', 'Int': 'int', 'Float': 'float', 'Bool': 'bool'}
-    _aliased = _CTOR_ALIAS.get(fname_raw)
-    if _aliased is not None and not gen._locally_binds_name(fname_raw) \
-            and not gen._locally_binds_name(_aliased):
-        fname_raw = _aliased
+    if (fname_raw == 'String' and len(node.args) == 1
+            and not gen._locally_binds_name('String')
+            and not gen._locally_binds_name('str')):
+        fname_raw = 'str'
     if fname_raw.startswith('mojo_python_'):
         gen._python_api_needed = True
     # An async closure NESTED INSIDE THIS METHOD (device_context.mojo's
