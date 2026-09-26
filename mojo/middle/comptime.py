@@ -126,7 +126,10 @@ def eval_const(node, bindings: dict, platform: str = None):
     route into eval_const that arrives with no platform attached.
     """
     if platform is None:
-        platform = sys.platform
+        try:
+            platform = sys.platform
+        except AttributeError:
+            platform = None
     if isinstance(node, BoolLiteral): return node.value
     if isinstance(node, IntLiteral):  return node.value
     if isinstance(node, StringLiteral): return node.value

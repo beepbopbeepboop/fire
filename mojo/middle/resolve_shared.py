@@ -1261,8 +1261,7 @@ def _eval_const(gen, node):
     # compiling on macOS/Linux — found via Lib/importlib
     # /_bootstrap_external.py's `if _MS_WINDOWS: def _path_join(...): ...
     # else: def _path_join(...): ...`.
-    return comptime_eval.eval_const(node, gen._comptime_vals,
-                                      gimple_ctypes.sys.platform)
+    return comptime_eval.eval_const(node, gen._comptime_vals)
 
 
 # ---------------------------------------------------------------------------

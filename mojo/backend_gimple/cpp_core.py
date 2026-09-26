@@ -4207,6 +4207,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     out = [f"{indent}printf({fmt}, (long long){arg_expr});"]
                 elif arg_ctype == '_Bool':
                     out = [f'{indent}printf({fmt}, ({arg_expr}) ? "True" : "False");']
+                elif arg_ctype == 'double':
+                    out = [f'{indent}printf("%s{end_str}", mojo_repr_float((double)({arg_expr})));']
                 else:
                     out = [f"{indent}printf({fmt}, {arg_expr});"]
                 if flush:

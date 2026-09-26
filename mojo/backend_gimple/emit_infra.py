@@ -2775,6 +2775,10 @@ def _gen_print(gen, args: list, kwargs: list = None):
     for i, (atype, aval) in enumerate(parts):
         if atype == 'char *':
             gen._emit(f'  {print_fn} ({aval});')
+        elif atype in ('double', 'float', '__fp16'):
+            dv = aval if atype == 'double' else gen._new_val('double', f'(double){aval}')
+            rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
+            gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoList *':
             # print(a_list) previously fell to the generic numeric
             # sprintf path below via printf_fmt('MojoList *'), printing
@@ -2853,8 +2857,7 @@ def _eval_const_int(gen, node) -> int | None:
 def _eval_const_bool(gen, node) -> bool | None:
     """Evaluate an expression as a compile-time bool, or return None."""
     return comptime_eval.eval_const_bool(node, gen._comptime_vals,
-                                           _comptime_call_hook(gen),
-                                           gimple_ctypes.sys.platform)
+                                           _comptime_call_hook(gen))
 
 def _split_top_level_comma(s: str) -> list[str]:
     """Split s by top-level commas only (bracket-aware)."""

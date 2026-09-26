@@ -29,6 +29,8 @@ MOJO_MAIN    = fire.py
 
 GCC_MP15     = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
+BOOTSTRAP_OPT ?= -O0
+MOJO_OPT ?= -O2 -g0
 
 # 512MB main-thread stack (default 8MB). The self-hosted compiler's regex
 # engine and generic AST walkers are deeply CPS-recursive — a re.sub/findall
@@ -307,8 +309,8 @@ stage1: clean-bootstrap
 
 # ── mojoc: one-step self-host build (equivalent to stage2/mojo, no staging needed) ──
 mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
-	@echo "=== Building mojoc from fire.py ==="
-	python3 fire.py build fire.py -o mojoc
+	@echo "=== Building mojoc from fire.py ($(MOJO_OPT)) ==="
+	python3 fire.py build fire.py $(MOJO_OPT) -o mojoc
 	@echo "✓ mojoc ready"
 
 # ── stage2/mojo: compile stage1 output into a real binary ────────────────────
@@ -327,7 +329,7 @@ mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
 stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/fire.ci ==="
-	$(BOOTSTRAP_CC) -fgimple -ftrivial-auto-var-init=zero -I runtime \
+	$(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
 	    -x c stage1/fire.ci \
