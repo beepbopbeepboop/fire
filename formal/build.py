@@ -670,7 +670,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
     symbol does not exist.
     """
     from formal.imports import (build_module_dylib, dylib_chain,
-                                imported_modules, resolve_module_path)
+                                imported_modules, resolve_module_path,
+                                unresolvable_import_error)
     mods = imported_modules(stmts)
     if not mods:
         return []
@@ -680,21 +681,27 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         for mod in mods:
             path = resolve_module_path(mod, relative_to=source_path)
             if path is None:
-                # One wording for one condition: formal/imports.py raises the
-                # same error for an unresolvable import inside a DEPENDENCY,
-                # and two messages for one cause is how a real failure ends up
-                # filed under the wrong heading.
-                from formal.imports import _is_host_module
-                kind = ("a host module (CPython standard library), which has "
-                        "no Mojo source for this backend to compile"
-                        if _is_host_module(mod)
-                        else "not a stdlib or sibling module, and no such file "
-                             "exists")
+                # One wording for one condition, and it is BUILT next to the
+                # rules that decide which of the two reasons applies
+                # (formal/imports.py's `unresolvable_import_error`): the same
+                # error is raised there for an unresolvable import inside a
+                # DEPENDENCY, and two messages for one cause is how a real
+                # failure ends up filed under the wrong heading.
+                raise ImportBuildError(
+                    unresolvable_import_error(source_path, mod))
+            try:
+                dylib = build_module_dylib(mod, path, out_dir, arch,
+                                           project_root=source_path)
+            except ImportBuildError as e:
+                # The dependency's own error names the file that failed, which
+                # is rarely the file the user asked about — and now that a
+                # sibling `.py` resolves, reaching a DEPENDENCY is the common
+                # way to fail (`model.py` → `fire_compiler` → `re`). Say how
+                # we got there, or the message reads as being about a file that
+                # was never mentioned.
                 raise ImportBuildError(
                     f"{os.path.basename(source_path)} imports {mod!r}, which "
-                    f"is {kind}")
-            dylib = build_module_dylib(mod, path, out_dir, arch,
-                                       project_root=source_path)
+                    f"cannot be built either: {e}") from None
             if dylib:
                 chain.extend(dylib_chain(dylib))
         seen, out = set(), []
@@ -945,8 +952,31 @@ def _one_word_field_map(fn, structs_by_name: dict) -> dict:
         st = structs_by_name.get(value.func.name)
         if st is not None and M.struct_fits_one_word(st) \
                 and M.struct_field_count(st) == 1:
-            mapping[target] = M.struct_fields(st)[0].name
+            mapping[target] = _sole_field_name(st)
     return mapping
+
+
+def _sole_field_name(st) -> str:
+    """The name of a struct's only field — the word the whole struct is.
+
+    Refused rather than guessed when that field binds no name. This value is
+    used to rewrite `<local>.<field>` to the local itself, so a wrong name here
+    does not fail a build, it silently computes on the wrong storage — worse
+    than the crash this replaced, since a formal backend's whole value is that
+    its answer can be trusted.
+
+    The name comes from the DERIVED field set (formal.model), which is what
+    makes this work for a class that declares nothing and assigns its one field
+    in `__init__` — the shape most of this repo's own source uses, and the one
+    a reader of `StructDef.fields` would have measured as an empty struct."""
+    name = M.struct_sole_field_name(st)
+    if name is None:
+        raise CodegenError(
+            f"{st.name} has exactly one field but that field binds no name, "
+            f"so there is nothing for its one word to be called; a field must "
+            f"be declared as `name: Type` or `name = value` to be "
+            f"representable on this path")
+    return name
 
 
 def _iter_nodes(node):
@@ -1020,7 +1050,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         st = method_owners.get(fn.name)
         if st is not None and M.struct_fits_one_word(st) \
                 and M.struct_field_count(st) == 1:
-            mapping["self"] = M.struct_fields(st)[0].name
+            mapping["self"] = _sole_field_name(st)
         _rewrite_self_fields(fn.body, mapping)
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
@@ -1072,9 +1102,13 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None) -> None:
                 st = wide[owner]
                 raise CodegenError(
                     f"{owner}.{node.func.member}() cannot be lowered: its "
-                    f"receiver has {M.struct_field_count(st)} fields and a "
-                    f"formal value is one word, so `self.<field>` has no "
-                    f"representation on this path")
+                    f"receiver has {M.struct_field_summary(st)}, and a formal "
+                    f"value is one 64-bit word, so `self.<field>` has no "
+                    f"representation on this path. The receiver would have to "
+                    f"be a pointer to an out-of-line frame of fields, which is "
+                    f"a change to the value model the two backends AND the Lean "
+                    f"proof share, not to this one function. Concretely, "
+                    f"{M.struct_width_cost(st)}")
             receiver = node.func.obj
             node.func = F.IdentExpr(name=M.method_function_name(
                 owner, node.func.member))

@@ -19,7 +19,8 @@ Proof generation is intentionally NOT wired up yet.
 from formal.arm64 import *
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
-                          parse_type_name, _range_args)
+                          parse_type_name, _range_args, TYPE_NAMES,
+                          STRING_TYPE_NAMES)
 
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
@@ -37,9 +38,13 @@ _SCRATCH = 131072
 _SCRATCH_CHUNK = 4080
 
 
-class CodegenError(Exception):
-    pass
-
+# The ONE CodegenError both backends raise (formal/model.py), bound here under
+# the name this module has always used. It used to be a class defined right
+# here, and defining a second one with the same name is not a harmless
+# duplicate: every consumer catches the refusal by class identity, so the
+# x86-64 backend's copy was a class nobody caught and its refusals escaped
+# `fire.py` as raw tracebacks instead of diagnostics.
+CodegenError = M.CodegenError
 
 _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 
@@ -364,6 +369,72 @@ def _member_slot_key(expr) -> str | None:
     return None
 
 
+def _walk_ast(node):
+    """Every AST node reachable from `node`, not descending into a nested
+    function's body.
+
+    A nested `def` has its own locals, so a whole-function property (what a
+    name holds, how many times a list is appended to) must not pick up the
+    names inside one. The nested FunctionDef node itself IS yielded, so a
+    caller that cares about it still sees it."""
+    if isinstance(node, list):
+        for x in node:
+            yield from _walk_ast(x)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    if isinstance(node, F.FunctionDef):
+        yield node
+        return
+    yield node
+    for fname in node.__dataclass_fields__:
+        if fname in ("line", "col"):
+            continue
+        yield from _walk_ast(getattr(node, fname))
+
+
+def _walk_value_methods(fn):
+    """(node, receiver, method, args) for every `recv.method(...)` in `fn`.
+
+    The receiver is the MemberExpr's object as written, so a caller can tell a
+    plain local (`items` in `items.append(4)`) from a module path (`os` in
+    `os.path.join`) without having to re-derive the chain."""
+    for node in _walk_ast(getattr(fn, "body", None) or []):
+        if (isinstance(node, F.CallExpr)
+                and isinstance(node.func, F.MemberExpr)):
+            yield (node, node.func.obj, node.func.member, list(node.args))
+
+
+def _list_literals_bound_to(fn, name: str) -> list:
+    """Every ListExpr in `fn` that assigns to `name` (directly or by tuple)."""
+    out = []
+    for node in _walk_ast(getattr(fn, "body", None) or []):
+        if isinstance(node, F.AssignStmt) and _binds_name(node.target, name) \
+                and isinstance(node.value, F.ListExpr):
+            out.append(node.value)
+        elif isinstance(node, F.VarDecl) and node.name == name \
+                and isinstance(node.value, F.ListExpr):
+            out.append(node.value)
+    return out
+
+
+def _binds_name(target, name: str) -> bool:
+    """Whether an assignment target introduces the local `name`."""
+    if isinstance(target, F.IdentExpr):
+        return target.name == name
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return any(_binds_name(el, name) for el in target.elements)
+    if isinstance(target, str):
+        return name in _lbn_target_names(target)
+    return False
+
+
+def _dotted(func) -> str:
+    """`recv.method` as written, for a diagnostic that quotes the source."""
+    name = _callee_symbol(func)
+    return name if name else type(func).__name__
+
+
 def _emit_add_imm(asm, xd: int, xn: int, imm: int) -> None:
     """ADD Xd, Xn, #imm, using the shifted form where it fits."""
     if imm >= 0:
@@ -493,6 +564,10 @@ class ARM64Codegen:
         self._comptime_list_asts: dict = {}
         # Unique-label counter for subscript bounds-check exit paths.
         self._sub_counter = 0
+        # {function name: model.ValueKinds}, for the whole module. `_functions`
+        # is fixed for a compile, so a callee's answer is the same at every
+        # call site and there is no reason to re-derive it per function.
+        self._vkinds_cache: dict = {}
         # String literal interning: content → label (same bytes share one
         # ADRP/ADD site). Persists across compile() re-emits so labels stay
         # unique. Pointer equality on interned literals is then valid for
@@ -621,6 +696,15 @@ class ARM64Codegen:
         self._dict_vars = set()
         self._comptime_vals = {}
         self._comptime_list_asts = {}
+        # What each local holds (see model.ValueKinds) and how much room each
+        # list literal needs for `append`. Both are properties of the whole
+        # function, so they are computed once here rather than guessed at each
+        # use site: `_string_vars` above is the flow-sensitive half of the same
+        # question, and the two are combined (never contradicted) in
+        # _print_arg_kind.
+        self._vkinds = self._scan_value_kinds(f)
+        self._list_caps, self._list_caps_by_name = self._scan_list_caps(
+            f, self._vkinds)
 
         # Prologue: save FP/LR, set FP, save callee-saved var regs, move each
         # incoming argument into ITS OWN callee-saved home (always arg0 into
@@ -1928,6 +2012,91 @@ class ARM64Codegen:
         self._str_intern[s] = label
         return label
 
+    def _scan_value_kinds(self, fn) -> M.ValueKinds:
+        """What every local of `fn` holds, from its source alone.
+
+        The decision is model.ValueKinds' (it has to come out the same on both
+        backends); this only supplies the three hooks that are this backend's:
+        the annotation vocabularies from formal.types, a callee's kind from its
+        declared return type or its return statements, and the local-slot key
+        for a field chain."""
+        return self._vkinds_for(fn.name, fn, frozenset())
+
+    def _vkinds_for(self, name, fn, stack) -> M.ValueKinds:
+        """A ValueKinds for `fn`, memoized across the whole module.
+
+        `_functions` is fixed for a compile, so the answer for a callee does not
+        change between call sites and is worth keeping; the `stack` is what
+        stops `def a(): return b()` / `def b(): return a()` from recursing
+        forever (a cycle is a word, like every other undecidable answer)."""
+        if name in self._vkinds_cache:
+            return self._vkinds_cache[name]
+        vk = M.ValueKinds(
+            fn,
+            int_names=TYPE_NAMES,
+            string_names=STRING_TYPE_NAMES,
+            func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
+            slot_key=_member_slot_key)
+        self._vkinds_cache[name] = vk
+        return vk
+
+    def _callee_kind(self, name, stack):
+        """What a call to the local function `name` produces, or None."""
+        fn = self._functions.get(name)
+        if fn is None or name in stack or len(stack) >= 3:
+            return M.INT_KIND if fn is not None else None
+        vk = self._vkinds_for(name, fn, stack)
+        ann = getattr(fn, "return_type", None)
+        if ann in STRING_TYPE_NAMES:
+            return M.STR_KIND
+        if ann in TYPE_NAMES:
+            return M.INT_KIND
+        return vk.return_kind
+
+    def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
+        """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
+
+        A list blob is `[count:i64][elem0]…` carved out of the frame, so
+        `xs.append(v)` needs room the literal's own element count does not
+        promise — `xs = []` plus one append is the commonest shape there is and
+        starts with nothing. The number of `append` call sites on a name in
+        this function is a sound compile-time bound for STRAIGHT-LINE code, and
+        the store is bounds-checked against it at runtime, so the shape this
+        gets wrong (an append inside a loop) exits(1) loudly instead of writing
+        past the blob — the same bargain every other bounded container
+        operation on this path makes.
+
+        Two maps because the two ends of the operation are different places:
+        `_emit_list` allocates, and it has only the literal NODE (an expression
+        carries no name); `_emit_list_append` stores, and it has only the
+        receiver's NAME. Both must agree on the number, and they are computed
+        from one pass so they cannot. A name bound to more than one literal
+        takes the smallest of their capacities, so the bound holds whichever
+        blob is live."""
+        appends: dict = {}
+        for _node, recv, method, _args in _walk_value_methods(fn):
+            if method != "append" or not isinstance(recv, F.IdentExpr):
+                continue
+            appends[recv.name] = appends.get(recv.name, 0) + 1
+        by_node: dict = {}
+        by_name: dict = {}
+        for name, count in appends.items():
+            # A list the function appends to must also BE a list: if the name
+            # is bound to something else anywhere, the capacity would be a
+            # promise about the wrong blob, so the entry is dropped and the
+            # append site refuses instead.
+            if not M.is_list_kind(vkinds.name_kind(name)):
+                continue
+            literals = _list_literals_bound_to(fn, name)
+            if not literals:
+                continue
+            want = min(len(lit.elements) for lit in literals) + count
+            for literal in literals:
+                prev = by_node.get(id(literal))
+                by_node[id(literal)] = want if prev is None else min(prev, want)
+            by_name[name] = want
+        return by_node, by_name
+
     def _note_binding(self, name: str, value) -> None:
         """Track whether `name` holds a string pointer or a dict pair-blob.
 
@@ -2360,6 +2529,342 @@ class ARM64Codegen:
         # X0 holds the blob address; the count is its first 8 bytes.
         self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
 
+    # ── print ────────────────────────────────────────────────────────────
+
+    def _print_arg_kind(self, expr):
+        """What a `print` operand holds: "str", "int", or None if undecidable.
+
+        Two sources, and `_string_vars` WINS where they disagree. It is
+        flow-sensitive and tracks what the emission of this very function has
+        bound so far, so it is strictly better informed than the
+        whole-function `ValueKinds`; the whole-function map is what covers the
+        shapes `_note_binding` does not see (a parameter's annotation, a
+        function's return type, a subscript's element kind)."""
+        if isinstance(expr, F.MemberExpr):
+            key = _member_slot_key(expr)
+            if key is not None and key in self._string_vars:
+                return M.STR_KIND
+        elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
+            return M.STR_KIND
+        return self._vkinds.kind_of(expr)
+
+    def _print_call(self, args: list):
+        """`(format, operands)` for a `print` of `args`.
+
+        The two lists are the SAME length relation the language has: a literal
+        operand contributes a fragment to the format and NO operand to the
+        call, and a value contributes a conversion and one operand. Passing the
+        literals as well is the mistake this shape exists to prevent — the
+        format would then ask printf for fewer arguments than it was handed,
+        and everything after the first literal would be read one slot late."""
+        frags, operands = [], []
+        for a in args:
+            if isinstance(a, F.StringLiteral):
+                frags.append(M.print_literal(a.value))
+                continue
+            kind = self._print_arg_kind(a)
+            if kind == M.STR_KIND:
+                frags.append("%s")
+            elif kind == M.INT_KIND:
+                frags.append("%lld" if cmp_signed(self._ttype(a)) else "%llu")
+            else:
+                raise CodegenError(
+                    f"print() cannot tell whether {type(a).__name__} is a "
+                    f"string or a number on the formal arm64 path, and "
+                    f"guessing would print an address as if it were text (or "
+                    f"a number as if it were text). Annotate the name, or "
+                    f"print a literal, or bind it to a literal first")
+            operands.append(a)
+        return frags, operands
+
+    def _print_kwargs(self, e: F.CallExpr):
+        """`print`'s `sep=` / `end=` / `file=`, as (sep, end). Only literals.
+
+        `file=` is refused unless it is stdout, because this model has exactly
+        one stream and a `file=sys.stderr` that quietly went to stdout would be
+        a program whose diagnostics are missing rather than one that failed."""
+        sep, end = " ", "\n"
+        for k, v in e.kwargs:
+            if not isinstance(v, F.StringLiteral):
+                raise CodegenError(
+                    f"print({k}=...) must be a string literal on the formal "
+                    f"arm64 path (got {type(v).__name__}): the separator and "
+                    f"the line ending are baked into the format string, which "
+                    f"is built before the call is emitted")
+            if k == "sep":
+                sep = v.value
+            elif k == "end":
+                end = v.value
+            elif k == "file":
+                if not (isinstance(v, F.MemberExpr)
+                        and v.member == "stdout"):
+                    raise CodegenError(
+                        f"print(file=...) other than sys.stdout is not lowered "
+                        f"on the formal arm64 path: this model has one output "
+                        f"stream")
+            else:
+                raise CodegenError(
+                    f"print() has no keyword argument {k!r} on the formal "
+                    f"arm64 path (supports sep, end, file)")
+        return sep, end
+
+    def _emit_print(self, e: F.CallExpr) -> None:
+        """`print(...)` — a real call to the C library's `printf`.
+
+        Not a stub and not a dropped call: the format string is built here out
+        of what each operand statically is, and the operands themselves are
+        passed as `printf`'s varargs, so what lands on stdout is what the
+        source says. Left to the extern path this was `BL _print`, which is not
+        a C symbol: the image built and then aborted in the loader with
+        "Symbol not found: _print", which is how the most ordinary program in
+        the tree failed to run.
+
+        `print()` with no arguments still prints a blank line, and the call's
+        value is `None` — the format string's `%`-count is zero, so printf
+        reads no varargs and the register state afterwards is irrelevant."""
+        sep, end = self._print_kwargs(e)
+        frags, operands = self._print_call(list(e.args))
+        fmt = M.print_format(frags, sep, end)
+        self._emit_call(F.CallExpr(func=F.IdentExpr(name="printf"),
+                                   args=[F.StringLiteral(fmt)] + operands))
+
+    # ── methods on a value ───────────────────────────────────────────────
+
+    def _is_value_receiver(self, obj) -> bool:
+        """True when `obj` names a local, so `obj.m(...)` is a method call.
+
+        A module path (`os.path.join`) roots at a name too, so the test is
+        whether that name is one of this function's own. Register allocation
+        knows every local of the function being emitted, including its
+        parameters, so membership there is the whole answer."""
+        if isinstance(obj, F.IdentExpr):
+            return obj.name in self._var_regs or obj.name in self._var_spills
+        if isinstance(obj, F.MemberExpr):
+            key = _member_slot_key(obj)
+            return key is not None and (
+                key in self._var_regs or key in self._var_spills)
+        return False
+
+    def _emit_value_method(self, e: F.CallExpr, method: str) -> None:
+        """`recv.method(...)` where `recv` is a local value."""
+        how = M.builtin_value_method(method)
+        if how is None:
+            raise CodegenError(
+                f"{_dotted(e.func)}() is a method call on a value, and this "
+                f"backend lowers only {', '.join(sorted(M.BUILTIN_VALUE_METHODS))}"
+                f" — the receiver is a plain word on this path, so what "
+                f"{method!r} would mean depends on what the receiver holds. "
+                f"Refused rather than emitted as a call to a symbol spelled "
+                f"{_dotted(e.func)!r}, which is what this used to do: the image "
+                f"built and then died in the loader")
+        if e.kwargs:
+            raise CodegenError(
+                f"{_dotted(e.func)}() takes no keyword arguments on the formal "
+                f"arm64 path (got {[k for k, _v in e.kwargs]})")
+        if how == "list_append":
+            self._emit_list_append(e)
+        elif how == "file_write":
+            self._emit_file_write(e)
+        else:
+            self._emit_file_close(e)
+
+    def _emit_list_append(self, e: F.CallExpr) -> None:
+        """`xs.append(v)` — store v at the blob's count and bump the count.
+
+        The blob is `[count:i64][elem0]…` in the frame, so there is no room to
+        grow one: the capacity is a compile-time number (`_scan_list_caps`)
+        and the store is checked against it, exiting(1) rather than writing
+        past the blob. Appending more times than the scan found — inside a
+        loop — therefore stops the program instead of quietly corrupting the
+        frame, the same bargain `xs[i]` out of range makes.
+
+        Returns 0, which is this model's `None`: `list.append` returns None,
+        and nothing in the language can observe the difference between that and
+        a zero that a program then printed as a number, but returning the new
+        count would be a value Python does not have."""
+        args = list(e.args)
+        if len(args) != 1:
+            raise CodegenError(
+                f"list.append() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        recv = e.func.obj
+        cap = self._list_caps_by_name.get(
+            recv.name if isinstance(recv, F.IdentExpr) else None)
+        if cap is None:
+            raise CodegenError(
+                f"list.append() is not lowered on the formal arm64 path: a "
+                f"list blob lives in the frame, so the room an append needs "
+                f"has to be known when the list is built. This one is not "
+                f"(the receiver is not a list literal this function appends "
+                f"to, or it is also bound to something that is not a list)")
+        self._emit_expr(recv)
+        # [sp+0] = the blob base, [sp+8] = the value. The push stores the base
+        # and a junk word; the value goes in the second slot.
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._emit_expr(args[0])
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 0))       # X4 = base
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))       # X0 = value
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 4, 0))        # X1 = count
+        self._emit_mov_imm("X2", cap)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "cs"))        # X3 = count >= cap
+        self._while_counter += 1
+        oob = f"{self.func_name}_appoob{self._while_counter}"
+        ok = f"{self.func_name}_appok{self._while_counter}"
+        self.asm.emit(encode_cbnz_xn(0, 3))
+        self.asm.emit_label_rel(oob, here_offset=-4)
+        # value slot = base + 8 + 8*count
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 4, 1))
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 8))
+        self.asm.emit(encode_str_xt_xn_imm(0, 5, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 4, 0))       # count = n + 1
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self._emit_b_to(ok)
+        self.asm.label(oob)
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(ok)
+        self.asm.emit(encode_movz_xd_imm(0, 0))     # None
+
+    def _emit_file_write(self, e: F.CallExpr) -> None:
+        """`f.write(s)` — `write(fd, s, strlen(s))` through the C library.
+
+        `open(...)` on this path is already the C library's `open` (left to the
+        extern path, which is right for it: libSystem defines it), so the
+        receiver of a file method IS a descriptor and there is no file object
+        to take apart. The length has to be computed, because a `char *` here
+        has no header — the same reason `len()` of a string is refused."""
+        args = list(e.args)
+        if len(args) != 1:
+            raise CodegenError(
+                f"file.write() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        # Three values have to survive the strlen call and there is no callee-
+        # saved register free, so they go in a 32-byte window: [sp+0] the
+        # descriptor, [sp+8] the string, [sp+16] the length strlen returns.
+        # 32 rather than 24 so SP is still 16-byte aligned at the call, which
+        # is what the C library assumes.
+        _emit_sub_imm(self.asm, 31, 31, 32)
+        self._emit_expr(e.func.obj)               # X0 = fd
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))
+        self._emit_expr(args[0])
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+        self._emit_extern_call("strlen")
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 16))     # [sp+16] = length
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))      # X1 = string
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 31, 16))     # X2 = length
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))      # X0 = fd
+        self._emit_extern_call("write")
+        _emit_add_imm(self.asm, 31, 31, 32)
+
+    def _emit_file_close(self, e: F.CallExpr) -> None:
+        """`f.close()` — the C library's `close` on the descriptor."""
+        if e.args:
+            raise CodegenError(
+                f"file.close() takes no arguments on this path "
+                f"(got {len(e.args)})")
+        self._emit_expr(e.func.obj)
+        self._emit_extern_call("close")
+
+    def _emit_open(self, e: F.CallExpr) -> None:
+        """`open(path, mode)` — the C library's `open(2)`.
+
+        The mode is a Python spelling (`"w"`) and the C function wants a flag
+        word, so the translation happens here rather than at the call: passing
+        the mode STRING as the flags word is not a wrong answer, it is a wrong
+        SYSTEM CALL — the low bits of a pointer are O_RDONLY and a garbage
+        permission word, which is how `open(p, "w")` produced a file nobody
+        could read.
+
+        A descriptor is returned whatever happens, and a failure is NOT turned
+        into an exit: the language raises for it, and this model has no way to
+        raise from inside a call. A program that checks the descriptor sees -1,
+        exactly as the C library reports it."""
+        args = list(e.args)
+        if len(args) not in (1, 2) or e.kwargs:
+            raise CodegenError(
+                f"open() takes a path and an optional mode on this path "
+                f"(got {len(args) + len(e.kwargs)})")
+        mode = "r"
+        if len(args) == 2:
+            mode_arg = args[1]
+            if not isinstance(mode_arg, F.StringLiteral):
+                raise CodegenError(
+                    f"open()'s mode must be a string literal on the formal "
+                    f"arm64 path (got {type(mode_arg).__name__}): a string is "
+                    f"a bare char * and the flags word is built before the "
+                    f"call is emitted")
+            mode = mode_arg.value
+        flags = M.OPEN_FLAGS.get(mode)
+        if flags is None and mode.endswith("+"):
+            base = M.OPEN_FLAGS.get(mode[:-1])
+            flags = None if base is None else base | M.OPEN_READ_WRITE
+        if flags is None:
+            raise CodegenError(
+                f"open(): mode {mode!r} is not lowered on the formal arm64 "
+                f"path (supports {', '.join(sorted(set(M.OPEN_FLAGS)))}, each "
+                f"with an optional trailing '+')")
+        # [sp+0] = the path, [sp+8] = the flag word. The permission word goes in
+        # X2 AND through the variadic tail, because Apple's open(2) reads it
+        # from the area (see model.VARIADIC_LIBC); X2 is set as well so the
+        # register convention is not violated for anything that does read it
+        # there. The result has to be put back in the push slot BEFORE the pop,
+        # because the pop loads [sp+0] into X0 and would otherwise hand the
+        # caller the path back instead of the descriptor.
+        self._emit_expr(args[0])                   # X0 = path
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._emit_mov_imm("X0", flags)
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))      # X0 = path
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))      # X1 = flags
+        self._emit_mov_imm("X2", M.OPEN_CRE_MODE)          # X2 = mode
+        self._emit_extern_call("open", 3)
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))      # keep the result
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+
+    def _emit_extern_call(self, symbol: str, total: int = 0) -> None:
+        """Call a C library function by name (AAPCS: X0..X7, result in X0).
+
+        Goes through the same variadic convention as the generic extern path
+        (`_emit_call`), because the file builtins below are called by name
+        rather than through a CallExpr. `total` is how many arguments are in the
+        registers right now, which is what decides whether a variadic tail has
+        to be laid out; a name that is not variadic ignores it."""
+        area = self._emit_variadic_area(symbol, total)
+        self.asm.emit_extern_bl(self._dylib_syms.get(symbol, symbol))
+        if area:
+            self.asm.emit(encode_add_xd_xn_imm(31, 31, area))
+
+    def _emit_variadic_area(self, symbol: str, total: int) -> int:
+        """Build a variadic call's unnamed-argument area. Returns bytes to pop.
+
+        Apple arm64 does not pass a variadic function's `...` arguments in
+        registers: the caller reserves an area and the i-th unnamed argument
+        goes at offset 8*(i-1) from SP as it stands at the call, ascending. The
+        values are already in X1..X7 (the ordinary argument shuffle put them
+        there), so this copies them down and gives the space back afterwards.
+
+        Returns 0 for a non-variadic callee, and for a variadic one with no
+        unnamed arguments — so a call like `printf("hello")` emits exactly what
+        it always did."""
+        named = M.variadic_named_args(symbol)
+        if named is None or total <= named:
+            return 0
+        unnamed = total - named
+        if unnamed > M.VARIADIC_SLOTS:
+            raise CodegenError(
+                f"call {symbol.lstrip('_')}(): {unnamed} variadic arguments "
+                f"exceeds the {M.VARIADIC_SLOTS} the Apple arm64 variadic area "
+                f"holds")
+        size = 8 * M.VARIADIC_SLOTS
+        self.asm.emit(encode_sub_xd_xn_imm(31, 31, size))
+        for i in range(unnamed):
+            self.asm.emit(encode_str_xt_xn_imm(named + i, 31, 8 * i))
+        return size
+
     def _emit_list_base(self, offset: int) -> None:
         """X9 = address of the list blob at frame_bottom + offset.
 
@@ -2390,14 +2895,20 @@ class ARM64Codegen:
         are int64s or string/inner-list pointers. Cursor reserves the full
         blob before any element is evaluated so nested lists sit above it.
         Exits without moving SP — the blob lives until the function returns.
-        Star-unpack elements have no compile-time length and raise."""
+        Star-unpack elements have no compile-time length and raise.
+
+        The blob is allocated with CAPACITY slots, not `n` of them, when the
+        function appends to this literal (see `_scan_list_caps`): the count
+        field still starts at `n`, so every reader of the blob is unchanged,
+        and the slots past the count are the room `append` writes into."""
         has_star = any(isinstance(el, F.UnaryOp) and el.op == "*"
                        for el in expr.elements)
         if has_star:
             self._emit_list_star(expr)
             return
         n = len(expr.elements)
-        size = 8 * (1 + n)
+        cap = max(n, self._list_caps.get(id(expr), n))
+        size = 8 * (1 + cap)
         if self._list_cursor + size > self._blob_cap:
             raise CodegenError(
                 f"list literals exceed the formal frame "
@@ -2830,14 +3341,21 @@ class ARM64Codegen:
         width. They used to reach the extern path and produce that same
         unloadable image, so the honest limit has to be stated where the
         decision is made rather than discovered by dyld.
-        """
-        fields = list(getattr(st, "fields", None) or [])
-        if len(fields) > 1:
+
+        The width is the DERIVED one (formal.model.struct_field_count), not
+        `len(st.fields)`. A class that assigns its fields in `__init__` declares
+        none, so the declared count called it a zero-field marker, handed back
+        a zero word, and left the receiver with no representation for the
+        fields a method then went on read — while the sibling refusal in
+        formal/build.py, which reads the derived count, called the same class
+        wide. One struct, two widths, two backends: the count has to come from
+        the shared model or the two answers can disagree."""
+        if M.struct_field_count(st) > 1:
             raise CodegenError(
-                f"constructing {name} needs {len(fields)} words, and a formal "
-                f"value is one word — a multi-field struct has no "
-                f"representation on this path (previously this emitted a call "
-                f"to a symbol named {name!r} that nothing defines, so the "
+                f"constructing {name} needs {M.struct_field_summary(st)}, and a "
+                f"formal value is one 64-bit word — a multi-field struct has "
+                f"no representation on this path (previously this emitted a "
+                f"call to a symbol named {name!r} that nothing defines, so the "
                 f"image built and then failed to load)")
         if e.args or e.kwargs:
             # Positional/keyword construction is not Mojo's struct syntax, and
@@ -2847,7 +3365,34 @@ class ARM64Codegen:
                 f"default-initialized and its fields assigned, and a "
                 f"{len(e.args) + len(e.kwargs)}-argument construction is not a "
                 f"shape this backend can honour")
-        self.asm.emit(encode_movz_xn_imm(0, 0))   # X0 = 0: a fresh value
+        self._emit_fresh_one_word(name, st)
+
+    def _emit_fresh_one_word(self, name: str, st) -> None:
+        """`S()` for a struct of zero or one field — a value, not a call.
+
+        The one word a fresh struct holds is its sole field brought up at that
+        field's default (formal.model.struct_default_word), which is zero only
+        when there is no default to honour. Emitting a hard 0 regardless was
+        the same class of bug as emitting a call: a program that read the field
+        without writing it first got a value the source never said, and it built
+        and ran and was wrong.
+
+        A default that is not a literal is refused, naming the field. Substituting
+        0 for it is the bug; evaluating it at the call site would mean resolving
+        names in a scope the constructor does not have, and guessing there is
+        the same failure wearing a hat."""
+        kind, payload = M.struct_default_word(st)
+        if kind == M.DEFAULT_OPAQUE:
+            raise CodegenError(
+                f"constructing {name} cannot bring its field {payload!r} up at "
+                f"its default on this path: the default is not a literal, and "
+                f"this constructor has no scope to evaluate it in (assign the "
+                f"field explicitly after `S()` instead, which is the same "
+                f"program with a representation)")
+        if kind == M.DEFAULT_STRING:
+            self._emit_expr(F.StringLiteral(value=payload))
+            return
+        self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
 
     def _specialization_args(self, e: F.CallExpr, ct_params: list) -> list:
         """The argument expressions binding `ct_params` at this call site."""
@@ -2867,6 +3412,23 @@ class ARM64Codegen:
             return
         if name == "len":
             self._emit_len(e)
+            return
+        if name == "print":
+            self._emit_print(e)
+            return
+        if M.builtin_function(name) == "file_open":
+            self._emit_open(e)
+            return
+        # A method on a plain VALUE is not a call to a symbol spelled
+        # `recv.method`. `_callee_symbol` flattens both spellings to a dotted
+        # name, so the two are told apart by the receiver: a local is a value
+        # and the method is one of model.BUILTIN_VALUE_METHODS, anything else
+        # is a module path and the dotted name really is an extern. Before
+        # this, `items.append(4)` became `BL _items.append` — an image that
+        # built and then died in dyld.
+        if isinstance(e.func, F.MemberExpr) and \
+                self._is_value_receiver(e.func.obj):
+            self._emit_value_method(e, e.func.member)
             return
         # A type constructor is a conversion, not a call. Intercepted before the
         # extern path, because the extern path would emit a BL against a
@@ -2957,7 +3519,11 @@ class ARM64Codegen:
             # A linked library's export spelling wins over the bare name, so
             # the BL, the GOT slot and the bind stream all name the symbol the
             # library actually defines.
-            self.asm.emit_extern_bl(self._dylib_syms.get(name, name))
+            symbol = self._dylib_syms.get(name, name)
+            area = self._emit_variadic_area(symbol, len(args))
+            self.asm.emit_extern_bl(symbol)
+            if area:
+                self.asm.emit(encode_add_xd_xn_imm(31, 31, area))
         else:
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(name, here_offset=-4)

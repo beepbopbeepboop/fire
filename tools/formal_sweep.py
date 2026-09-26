@@ -2,9 +2,12 @@
 """Sweep every *.py / *.mojo under the repo through `build --formal` (arm64 Mach-O
 by default; `--arch x86_64` sweeps the x86-64 machine subset instead).
 
-Mojo is a Python superset, so .py files are valid inputs. Prints one
-FAIL: line per failure; PASS lines are counted but not printed.
-Summary (1-3 lines) at the end. Exit 1 if any FAIL.
+Mojo is a Python superset, so .py files are valid inputs. Every file that did
+not PASS gets one line, prefixed with the CLASS of its verdict; PASS lines are
+counted but not printed. Summary at the end: the per-class counts, the
+headline codegen-coverage rate over the files that could have answered, and
+the CAS accounting. Exit 0 only if nothing was wrong in a way that is a finding
+about the source; see EXIT STATUS below.
 
 Built with --no-prove, so what this measures is the arm64 CODEGEN's language
 coverage: which source constructs the model can lower. Proof generation and
@@ -15,13 +18,108 @@ exercised by test_formal.py / `make check-formal`, not by this sweep. With
 proofs on, a single unmodellable shape anywhere in a file fails the whole
 file and masks which codegen gaps are real.
 
-Verdicts are cached in the CAS (cas.formal_build_key: source bytes + the
-formal backend's own sources + the interpreter + the build flags), so a
-re-run with nothing changed reads a file per file instead of recompiling.
-Editing anything under formal/, the parser, or mojo/middle/ invalidates it.
+CLASSES — why the pass rate is not just PASS/total
+-------------------------------------------------
+A build either says something about the SOURCE or it does not, and a sweep
+that adds the two together is measuring the wrong thing. On the default repo
+sweep 212 of 279 files used to be reported as one undifferentiated FAIL, and
+about 170 of those were not codegen findings at all: they were one line,
+repeated —
 
-The default scope is this repo (the stdlib tree is excluded by name — it
-lives outside the repo and is far larger); pass it explicitly to sweep it:
+    build: fire.py imports 'os', which is a host module (CPython standard
+    library), which has no Mojo source for this backend to compile
+
+That is a fact about the TARGET, not about the backend's ability to lower a
+construct, and formal/imports.py says so in its own comment ("a statement about
+the target, not a module-resolution failure"). Folded into a single
+FAIL bucket it did two kinds of damage at once: it buried the real findings,
+and it made the headline a number whose denominator was mostly host-platform
+facts. So every verdict now carries a class:
+
+  pass                              built, loads, all imports dyld-resolvable
+  codegen                           the backend refused or crashed on a
+                                    construct — THE FINDING, the only class
+                                    whose count is a gap in the backend
+  not-answerable/host-import        imports a CPython host module that has no
+                                    Mojo source anywhere: provably outside
+                                    this backend's reach, and not fixable by
+                                    anyone
+  not-answerable/unresolved-import  imports a module that is neither host nor
+                                    present in this backend's module set
+                                    (a sibling module the resolver cannot see
+                                    from this file's directory, a third-party
+                                    package). Also unanswerable here, but the
+                                    reason is NOT provable from the file
+                                    alone, so it is reported separately with
+                                    the module named rather than merged into
+                                    the host class
+  not-answerable/unresolved-extern  builds, but dyld cannot resolve the
+                                    symbols it binds: this path compiles ONE
+                                    file and resolves no imports, so a
+                                    cross-module call lowers to a BL against
+                                    nothing. A limit of the path, not coverage
+  tool                              timeout, unreadable file, or an internal
+                                    exception in the sweep or the build
+                                    driver — no verdict about the source was
+                                    reached at all
+  unknown                           a message shape this tool does not
+                                    recognise. Deliberately its own bucket
+                                    rather than a fallback into `codegen`:
+                                    a new wording from formal/ must show up as
+                                    a visible hole in the classifier, never as
+                                    silent coverage
+
+Only `pass` and `codegen` are ANSWERABLE — the two classes where the backend
+actually got to look at the constructs. The headline is therefore the
+codegen-coverage rate over the answerable files, and the summary says in
+words which files those are. Nothing is hidden: the other classes keep their
+own counts, every one of their files keeps its own printed line, and the
+per-class counts sum to the total.
+
+SCOPE — why the not-answerable files are still swept
+----------------------------------------------------
+They stay. The alternative (prune them from the default scope) would shrink
+the denominator in exactly the way this tool's scope reporting exists to
+prevent — a run that quietly covered fewer files looks like a clean run — and
+it would delete data to improve a number, which is the one move that makes a
+coverage report worthless. The facts that put a file in that class are also
+permanent rather than per-run noise (`os` is not going to grow a Mojo source
+next week), so the class is stable, countable, and worth keeping in front of
+the reader. What changes is only that these files stop being counted as
+failures.
+
+VERDICT HISTORY
+---------------
+Each run publishes a ledger of path -> class and, when it finds one from an
+earlier run, prints how the verdicts moved: every file whose class changed is
+accounted for by name, in both directions, so a rule change can never quietly
+turn a reported failure into a differently-counted one.
+
+EXIT STATUS
+-----------
+  0  no `codegen` finding, no `tool` failure, no `unknown` verdict
+  1  at least one of those three (a real finding, or a file the sweep could
+     not answer for a reason that is its own problem)
+  2  the sweep did not run (no input files)
+
+`not-answerable` never affects the exit status in either direction: it is a
+permanent property of the source and the target, so failing a run over it (or
+passing one because of it) would both be wrong. This is a deliberate change
+from the older contract, where any FAIL at all meant exit 1 — with 170
+permanent facts in the FAIL bucket that contract could not distinguish "the
+backend regressed" from "this file imports os".
+
+Verdicts are cached in the CAS (cas.formal_build_key: source bytes + the
+formal backend's own sources + the interpreter + the build flags + this tool's
+own bytes — see _criteria_id), so a re-run with nothing changed reads a file
+per file instead of recompiling. Editing anything under formal/, the parser,
+or mojo/middle/ invalidates it. The cache stores the raw build verdict; the
+class is recomputed from it on every run, so a cached entry can never be
+reported under a class the current rules would not assign it.
+
+The default scope is this repo plus the stdlib's std/ (the stdlib tree lives
+outside the repo and is far larger); pass --no-stdlib for the repo alone, or
+name roots explicitly:
 
   python3 tools/formal_sweep.py -t 300 /path/to/mojo/stdlib
 
@@ -34,13 +132,18 @@ Usage:
   python3 tools/formal_sweep.py [-j N] [-t SECONDS] [--arch x86_64] [paths...]
 """
 import argparse
+import collections
 import concurrent.futures
 import ctypes
+import datetime
+import json
 import os
+import re
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cas
@@ -71,6 +174,269 @@ def _criteria_id() -> str:
     with open(os.path.abspath(__file__), "rb") as f:
         return cas.hash_parts(f.read())
 
+
+# ── Verdict classes ──────────────────────────────────────────────────────────
+# See the module docstring for why a verdict is not a boolean. The rule the
+# whole design turns on: only `pass` and `codegen` are classes in which the
+# backend actually got to look at the file's constructs, so only those two are
+# ANSWERABLE, and the headline rate is over exactly those.
+#
+# WHERE THESE RULES LIVE, AND WHY THAT IS THE CACHE KEY'S BUSINESS
+# ------------------------------------------------------------------
+# A classification rule is a tightening of what counts as coverage, which is
+# precisely the thing _criteria_id() exists for: it hashes this file's own
+# bytes into every key, so these rules are in the key AUTOMATICALLY — there is
+# no rule list anywhere that could be added to without being remembered, which
+# is the failure mode that mechanism was built to make impossible. Editing a
+# rule (or a comment) below invalidates every cached verdict, and that is the
+# intended behaviour, not a cost to work around.
+#
+# The second half is that the rules are applied AFTER the cache, never inside
+# it. The CAS entry is the raw build verdict (ok, detail); classify() re-derives
+# the class from it on every run, hits included. So the invalidation above is
+# belt-and-braces rather than the only thing standing between a stale rule and
+# a wrong report: a stale entry left over from older rules cannot be reported
+# under a class the current rules would not assign it, because the current
+# rules are what assign it.
+CLASS_PASS = "pass"
+CLASS_CODEGEN = "codegen"
+CLASS_HOST = "not-answerable/host-import"
+CLASS_UNRESOLVED = "not-answerable/unresolved-import"
+CLASS_EXTERN = "not-answerable/unresolved-extern"
+CLASS_TOOL = "tool"
+CLASS_UNKNOWN = "unknown"
+
+# Report order: the finding first, then the reasons there is no finding, then
+# the two buckets that mean the tool itself did not finish the job.
+CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_HOST, CLASS_UNRESOLVED,
+               CLASS_EXTERN, CLASS_UNKNOWN, CLASS_TOOL)
+ANSWERABLE = frozenset((CLASS_PASS, CLASS_CODEGEN))
+# Classes that are findings about the SOURCE. Only CLASS_CODEGEN is a gap in
+# the backend; CLASS_UNKNOWN is a gap in this file's rules (visible, because
+# absorbing it into `codegen` would invent coverage) and CLASS_TOOL is a gap
+# in the run (a file nobody answered for is not a file that passed).
+DIRTY = frozenset((CLASS_CODEGEN, CLASS_UNKNOWN, CLASS_TOOL))
+
+# `run_one` reports WHY an outcome is not one of the build's own diagnostics,
+# rather than this function trying to recognise a timeout or a traceback inside
+# a free-text string. The build's message shapes are the only thing classified
+# by matching.
+CAUSE_TIMEOUT = "timeout"
+CAUSE_UNREADABLE = "unreadable"
+CAUSE_TOOL_ERROR = "tool-error"
+# The build driver raised instead of refusing a construct. Which side of the
+# line that falls on is decided by the DEEPEST frame of the traceback, not by
+# the message: fire.py prints `build: {e}` for a FormalBuildError *and* for
+# any other exception, so the message shape cannot tell the two apart, but the
+# traceback can, and it is the difference between "the backend cannot lower
+# this" (a finding) and "the compiler's own plumbing broke" (not one).
+CAUSE_BACKEND_CRASH = "backend-crash"
+CAUSE_DRIVER_CRASH = "driver-crash"
+
+_TRACEBACK_MARK = "Traceback (most recent call last)"
+_FRAME_RE = re.compile(r'^\s+File "([^"]+)"', re.M)
+
+# Substrings of the messages formal/build.py and formal/imports.py raise for a
+# failed import. Both raise ImportBuildError with one wording for one
+# condition (build.py's own comment says two messages for one cause is how a
+# real failure ends up filed under the wrong heading), so these two markers
+# partition that error space between them. Matching the wording rather than
+# re-deriving the condition is deliberate: formal/ owns the condition, and a
+# second copy of HOST_MODULES here would be a list that silently rots.
+# Nothing keys off the exact template — an unrecognised shape falls into
+# CLASS_UNKNOWN below rather than being guessed at.
+_HOST_MARK = "host module (CPython standard library)"
+_UNRESOLVED_MARK = "not a stdlib or sibling module"
+_EXTERN_MARK = "import(s) dyld cannot resolve"
+_IMPORT_RE = re.compile(r"imports '([^']+)'")
+# A quoted dotted identifier, whatever the sentence around it says. Used only
+# as a CANDIDATE, confirmed against the file's own source below — a codegen
+# diagnostic quotes nothing of this shape (`self.<field>` is in backticks), and
+# guessing from a message template alone is how a reworded error silently
+# becomes coverage.
+_QUOTED_NAME_RE = re.compile(r"'([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'")
+_EXTERN_COUNT_RE = re.compile(r"(\d+) import\(s\) dyld cannot resolve")
+
+
+def _is_cpython_stdlib(name: str) -> bool:
+    """Whether `name` names a CPython standard-library module.
+
+    Used only to sharpen a verdict the build already reached: when the build
+    says an import does not resolve, it has already established that no Mojo
+    source for it exists anywhere, so the only open question is WHY, and for a
+    name this returns True for, the answer is "it is the host's own standard
+    library" — a fact about the target, not a gap in the backend.
+
+    Two authorities, in order, and no list of our own: formal.imports's
+    HOST_MODULES (the set the build itself consults, so the two agree by
+    construction) and then the running interpreter's own
+    sys.stdlib_module_names. The second one is not redundant: on this tree
+    `__future__`, `ctypes`, `asyncio` and `concurrent.futures` are all CPython
+    standard-library modules that HOST_MODULES does not list, so the build
+    words those failures "not a stdlib or sibling module" and 36 of them would
+    otherwise be filed as unresolved imports — implying a defect in the source
+    that does not exist. Reading the interpreter's own table keeps that
+    classification correct as CPython grows, with nothing to maintain here.
+    """
+    top = name.split(".")[0]
+    try:
+        from formal.imports import HOST_MODULES
+        if name in HOST_MODULES or top in HOST_MODULES:
+            return True
+    except Exception:
+        pass
+    names = getattr(sys, "stdlib_module_names", None)
+    return bool(names) and top in names
+
+
+def _short(detail: str, limit: int = 68) -> str:
+    """A one-line reason for the per-class breakdown."""
+    text = " ".join(detail.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _source_imports(source, name: str) -> bool:
+    """Whether `source` really does import module `name`.
+
+    The structural half of the import test, and the part that cannot rot: if a
+    message quotes a module this file imports, then whatever the sentence says
+    around it, the build refused on an IMPORT — which is never a codegen
+    finding. This is what lets classify() survive a reworded import error
+    without having to recognise the new wording.
+    """
+    if not source:
+        return False
+    top = re.escape(name.split(".")[0])
+    return re.search(rf"^[ \t]*(?:import|from)[ \t]+{top}\b", source,
+                     re.M) is not None
+
+
+def _declared_host() -> frozenset:
+    """formal.imports.HOST_MODULES — the set the build itself consults.
+
+    Read, never copied: a second list of host modules here is a list that
+    silently goes stale the next time formal/imports.py gains one.
+    """
+    try:
+        from formal.imports import HOST_MODULES
+        return HOST_MODULES
+    except Exception:
+        return frozenset()
+
+
+def _import_class(mod: str) -> tuple:
+    """The not-answerable class for an import the build refused to resolve."""
+    if _is_cpython_stdlib(mod):
+        declared = _declared_host()
+        # The suffix is not decoration: it says WHY this one needed the
+        # interpreter's table rather than the build's own, which is the
+        # actionable part (formal/imports.py's HOST_MODULES is missing it).
+        known = mod in declared or mod.split(".")[0] in declared
+        return CLASS_HOST, mod if known else f"{mod} (CPython stdlib)"
+    return CLASS_UNRESOLVED, mod
+
+
+def _crash_cause(err: str):
+    """CAUSE_* for a build that raised, or None if it refused cleanly.
+
+    A refused build (FormalBuildError) prints one `build: …` line and no
+    traceback; anything else that fails prints a traceback too. That is the
+    whole test — deliberately not the message's shape, because fire.py
+    prefixes both with `build:`.
+
+    The deepest frame decides which class this is. formal/build.py frames sit
+    between the driver and the emitter, so "some frame is in formal/" would
+    call every parser or driver bug a codegen finding; the frame the exception
+    actually came out of is what says whether the BACKEND raised.
+    """
+    if _TRACEBACK_MARK not in err:
+        return None
+    frames = _FRAME_RE.findall(err)
+    frame = os.path.normpath(frames[-1]) if frames else ""
+    parts = frame.split(os.sep)
+    return (CAUSE_BACKEND_CRASH
+            if frame.endswith(".py") and "formal" in parts
+            else CAUSE_DRIVER_CRASH)
+
+
+def classify(ok: bool, detail: str, cause=None, source=None) -> tuple:
+    """(class, reason) for one build outcome. Pure: no I/O, no globals read.
+
+    `cause` is run_one's own account of the outcome not being one of the
+    build's diagnostics (a timeout, an unreadable file, an internal exception)
+    and short-circuits the message matching: if the sweep never got the build's
+    own answer, there is nothing to read a class off, and no string matching
+    should be allowed to guess one. The one exception is a crash inside the
+    backend itself, which IS a finding about the source — see CAUSE_BACKEND_CRASH.
+
+    `source` is the file's own text, and it is what makes the import test
+    structural rather than a template match (see _source_imports). Without it
+    the function can only recognise the wordings it already knows, and the
+    first wording it does not know would be counted as codegen coverage.
+    """
+    if ok:
+        return CLASS_PASS, ""
+    if cause == CAUSE_BACKEND_CRASH:
+        return CLASS_CODEGEN, f"the backend raised: {_short(detail)}"
+    if cause:
+        return CLASS_TOOL, cause
+    if _EXTERN_MARK in detail:
+        m = _EXTERN_COUNT_RE.search(detail)
+        return CLASS_EXTERN, (f"{m.group(1)} unresolved extern(s)" if m
+                              else _short(detail))
+    mods = _IMPORT_RE.findall(detail)
+    if mods:
+        # The build's own two wordings, which partition the ImportBuildError
+        # space between them, and one message can carry several: formal/
+        # wraps a dependency's own error inside the importer's ("x.py imports
+        # 'fire_compiler', which cannot be built either: fire_compiler.py
+        # imports 're', which is a host module …"). The LAST `imports '…'` is
+        # the innermost one — the import that actually has no source — so it
+        # is the one to report; naming the outer module instead would blame a
+        # module that resolves perfectly well.
+        mod = mods[-1]
+        if _HOST_MARK in detail:
+            return CLASS_HOST, mod
+        if _UNRESOLVED_MARK in detail:
+            return _import_class(mod)
+        # Recognisably an import refusal, in a wording this tool does not
+        # know. Its own bucket, never `codegen`: the backend did not fail to
+        # lower a construct, it refused for a reason this tool has not learned
+        # to read, and counting that as coverage is the exact failure this
+        # whole classification exists to prevent.
+        return CLASS_UNKNOWN, f"import message not recognised: {_short(detail)}"
+    # No `imports '…'`. Before concluding this is about a construct, check
+    # whether the message names a module this file ACTUALLY imports — that
+    # makes it an import failure whatever the wording is, and the host table
+    # then says which kind. Matching templates alone is how a reworded import
+    # error silently starts counting as coverage, and templates are exactly
+    # what another agent editing formal/ will change.
+    for name in _QUOTED_NAME_RE.findall(detail):
+        if _source_imports(source, name):
+            return _import_class(name)
+    if _HOST_MARK in detail or _UNRESOLVED_MARK in detail:
+        # Recognisably about an import, but with no module named to classify
+        # by. Its own bucket rather than a guess.
+        return CLASS_UNKNOWN, (f"import message with no module named: "
+                               f"{_short(detail)}")
+    # The build spoke, and it spoke about a construct in the file. This is the
+    # signal, and it is the fallback precisely because a backend that refuses
+    # to lower something is exactly what this sweep exists to find.
+    return CLASS_CODEGEN, _short(detail)
+
+
+# cas.stats is a process-global dict and the sweep bumps it from every worker,
+# so `stats[k] += 1` here is a read-modify-write that can lose an update and
+# make hits+misses stop summing to the file count — which is the one property
+# the accounting line exists to show.
+_STATS_LOCK = threading.Lock()
+
+
+def _bump(kind: str) -> None:
+    with _STATS_LOCK:
+        cas.stats[kind] += 1
+
+
 SKIP_DIRS = {
     ".git", ".pixi", "output", "build", "__pycache__", ".mypy_cache",
     ".pytest_cache", "node_modules",
@@ -88,7 +454,17 @@ SKIP_DIRS = {
 # Mojo is a Python superset, so both extensions are valid inputs to the
 # compiler; the stdlib tree is almost entirely .mojo.
 SUFFIXES = (".py", ".mojo")
+# Same expression, and for the same reason, as test_formal.py's DEFAULT_JOBS:
+# these are CPU-bound subprocess builds, so more workers than cores only adds
+# contention, and an unbounded default on a 96-core box would launch 96
+# concurrent `fire.py` processes. Kept identical to that suite on purpose (two
+# sweeps of the same machine should not fight over it), not re-derived here.
 DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
+# A timeout is a property of this machine's load, so it is never cached and a
+# file that hits it lands in the `tool` class — counted, printed, and in no
+# rate. That is why this default can stay modest: the cost of being too small
+# is now visible instead of silent. It is still too small for the larger
+# stdlib modules, which is what the -t help text says.
 DEFAULT_TIMEOUT = 30
 
 
@@ -271,35 +647,77 @@ def _verdict_from_bytes(raw):
     return (ok == "ok"), detail.strip()
 
 
-def run_one(path, timeout, flags):
-    """Return (ok, detail). detail empty on success.
+# What run_one returns. Named rather than a tuple because it has five fields
+# and every reader of it has to know which is which: `ok` alone is the thing
+# this tool used to return, and the whole point of the record is that `ok` is
+# not enough to report on. `cls`/`reason` are filled in by classify() from the
+# other three plus the file's own source, so the classification happens where
+# the source is in hand — once per file, on cache hits as much as on misses.
+Verdict = collections.namedtuple(
+    "Verdict", "ok detail cause cached cls reason")
+
+
+def run_one(path, timeout, flags) -> Verdict:
+    """Build one file and classify the outcome. See Verdict.
+
+    `cause` is non-None when the outcome is not one of the build's own
+    diagnostics — a timeout, an unreadable file, an internal exception in the
+    sweep, or an exception the build raised instead of refusing a construct.
+    That distinction is the whole reason this returns more than a boolean:
+    "the build refused" and "I never got a usable answer" are different facts
+    about a file, and folding them into one `False` is what made a timeout
+    indistinguishable from a finding. `cached` says whether this verdict came
+    from (or went into) the CAS, so the accounting line can account for every
+    input file rather than only the ones that reached the cache.
 
     `flags` is the build flag tuple (see build_flags) — required, not defaulted,
     because it is simultaneously the cache key's input and the argv: a wrong
     default would publish one architecture's verdict under the other's key.
 
     Cached in the CAS under cas.formal_build_key (source bytes + the formal
-    backend's sources + the interpreter + BUILD_FLAGS), so a re-run with
-    nothing changed is a file read per file instead of a compile. A timeout is
-    a property of this machine's load, not of the source, so it is never
-    published — it would otherwise pin a file at "timeout" until the key
+    backend's sources + the interpreter + BUILD_FLAGS + _criteria_id()), so a
+    re-run with nothing changed is a file read per file instead of a compile.
+    The entry is the RAW build verdict (ok, detail); the class is derived from
+    it by classify() on every run, for hits as much as for misses, so no cached
+    entry can ever be reported under a class the current rules would not assign
+    it, and the classification rules cannot go stale in the store even in the
+    window before _criteria_id() invalidates the key. That double mechanism is
+    deliberate: _criteria_id() is what makes a rule change take effect (and
+    costs a rebuild), and re-deriving the class on every run is what makes a
+    stale entry harmless if it ever survives.
+    A timeout is a property of this machine's load, not of the source, so it is
+    never published — it would otherwise pin a file at "timeout" until the key
     changed.
     """
+    def verdict(ok, detail, cause, cached):
+        cls, reason = classify(ok, detail, cause, source)
+        return Verdict(ok, detail, cause, cached, cls, reason)
+
+    source = None
     try:
         with open(path, "rb") as f:
             source = f.read().decode("utf-8", "replace")
     except OSError as e:
-        return False, str(e)[:200]
-    key = cas.formal_build_key(source, path, flags, _criteria_id())
+        return verdict(False, str(e)[:200], CAUSE_UNREADABLE, False)
+    try:
+        criteria = _criteria_id()
+    except OSError as e:
+        # No criteria id means no trustworthy key. Better to say so for this
+        # one file than to publish a verdict under a key that cannot tell it
+        # apart from a differently-built one.
+        return verdict(False, f"cannot fingerprint this tool: {e}"[:200],
+                       CAUSE_TOOL_ERROR, False)
+    key = cas.formal_build_key(source, path, flags, criteria)
     hit = cas.lookup(key, ".result")
     if hit is not None:
-        cas.stats["hits"] += 1
+        _bump("hits")
         try:
             with open(hit, "rb") as f:
-                return _verdict_from_bytes(f.read())
+                ok, detail = _verdict_from_bytes(f.read())
+            return verdict(ok, detail, None, True)
         except OSError:
             pass    # unreadable cache entry: fall through and rebuild
-    cas.stats["misses"] += 1
+    _bump("misses")
     try:
         # -o into a temp dir so we don't scatter .aout across the tree
         with tempfile.TemporaryDirectory(prefix="formal_sweep_") as td:
@@ -313,6 +731,7 @@ def run_one(path, timeout, flags):
                     binary = f.read()
         if proc.returncode == 0:
             missing = _unresolved_imports(binary)
+            cause = None
             if missing:
                 ok, detail = False, (
                     f"builds, but {len(missing)} import(s) dyld cannot "
@@ -325,14 +744,141 @@ def run_one(path, timeout, flags):
             err = (proc.stderr or proc.stdout or "").strip()
             # keep the last non-empty line — that's the formal build's message
             lines = [ln for ln in err.splitlines() if ln.strip()]
+            # No message at all still counts as the build's own verdict: a
+            # backend that dies on a construct prints nothing useful, and
+            # "it crashed here" is a finding about that construct, not about
+            # this tool.
             detail = lines[-1] if lines else f"exit {proc.returncode}"
             ok = False
+            cause = _crash_cause(err)
+            if cause == CAUSE_BACKEND_CRASH:
+                # Say so in the printed line: the raw last line of a traceback
+                # reads as a Python error in the file, when what happened is
+                # the backend hitting an AST shape it has no case for.
+                detail = f"the backend raised: {detail}"
+            elif cause == CAUSE_DRIVER_CRASH:
+                detail = f"the build driver raised: {detail}"
+        # A crash is NOT published as if it were a verdict: the traceback that
+        # decides its class is not in the cached bytes, so a re-read of this
+        # entry would classify it as a plain build refusal. It stays a miss
+        # until the key changes, which is the honest outcome — this file's
+        # verdict depends on stderr this tool does not cache.
+        if cause:
+            return verdict(ok, detail, cause, False)
         cas.publish(key, ".result", _verdict_bytes(ok, detail))
-        return ok, detail
+        return verdict(ok, detail, None, True)
     except subprocess.TimeoutExpired:
-        return False, f"timeout (> {timeout}s)"
+        # Deliberately not published (see the docstring): it is a property of
+        # this machine's load, and caching it would pin the file here until
+        # the key changed. It is a named class, not a silent skip, so a
+        # too-small -t shows up in the report instead of shrinking coverage.
+        return verdict(False, f"timeout (> {timeout}s)", CAUSE_TIMEOUT, False)
     except Exception as e:
-        return False, str(e)[:200]
+        # An exception in the sweep or the build driver is not a verdict about
+        # the file, so it is CAUSE_TOOL_ERROR and lands in `tool`, not in the
+        # codegen count.
+        return verdict(False, str(e)[:200], CAUSE_TOOL_ERROR, False)
+
+
+# ── Verdict history ──────────────────────────────────────────────────────────
+# A ledger of path -> class, published once per complete run. Its only job is
+# to make a change of CLASS impossible to perform silently: if a rule change
+# turns 170 reported failures into a differently-named bucket, the next run
+# says so, by count and by file, instead of the reader inferring it from a
+# percentage that moved.
+#
+# Deliberately NOT keyed on _criteria_id(). The ledger is not a build artifact
+# — it is a record of what the last run REPORTED — and the run whose history
+# matters most is the first one after the rules change, which is exactly the
+# run whose _criteria_id() differs from every earlier run's. Keying it that way
+# would guarantee the ledger is empty exactly when it is needed. So the key is
+# the architecture and the file list: stable across rule changes, distinct per
+# arch, and it moves when the scope moves (so a narrowed sweep does not diff
+# itself against a wider one).
+LEDGER_EXT = ".ledger"
+LEDGER_MAGIC = b"formal-sweep-ledger-v1"
+
+
+def ledger_key(arch: str, files) -> str:
+    return cas.hash_parts(LEDGER_MAGIC, arch.encode("utf-8"), *sorted(
+        rel(f).encode("utf-8", "replace") for f in files))
+
+
+def load_ledger(arch: str, files):
+    """The previous run's ledger for this arch+scope, or None."""
+    path = cas.lookup(ledger_key(arch, files), LEDGER_EXT)
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("verdicts"), dict):
+        return None
+    return data
+
+
+def publish_ledger(arch: str, files, verdicts: dict) -> None:
+    body = json.dumps(
+        {"arch": arch, "total": len(verdicts),
+         "when": datetime.datetime.now().isoformat(timespec="seconds"),
+         "verdicts": verdicts},
+        sort_keys=True).encode("utf-8")
+    cas.publish(ledger_key(arch, files), LEDGER_EXT, body)
+
+
+def report_history(prev, verdicts: dict) -> None:
+    """Print how every verdict moved since the last run of this arch+scope.
+
+    Both directions are accounted for: a file that gained a class as well as
+    one that lost it. Without the second direction this is exactly the check
+    that would let a rule change quietly promote a real failure to `pass`.
+    """
+    if not prev:
+        print("verdict history: none for this arch+scope (first classified "
+              "run — nothing to compare against)")
+        return
+    old = prev.get("verdicts", {})
+    moved, added, gone, same = {}, [], [], 0
+    for path, cls in verdicts.items():
+        before = old.get(path)
+        if before is None:
+            added.append(path)
+        elif before != cls:
+            moved.setdefault((before, cls), []).append(path)
+        else:
+            same += 1
+    gone = sorted(set(old) - set(verdicts))
+    print(f"verdict history: previous report {prev.get('when', '?')} "
+          f"[{prev.get('arch', '?')}], {prev.get('total', len(old))} files")
+    for (before, after), paths in sorted(moved.items()):
+        print(f"  {before} -> {after}: {len(paths)}")
+    print(f"  unchanged: {same}")
+    if added:
+        print(f"  not in the previous report (new/renamed file): {len(added)}")
+    if gone:
+        print(f"  in the previous report, not swept this time: {len(gone)}")
+
+
+# What each class means, in the summary. Long on purpose: the class names are
+# the tool's contract with a reader who has not read this file, and a bare
+# count of 170 files called `not-answerable/host-import` is only honest if the
+# report also says what that is.
+CLASS_BLURB = {
+    CLASS_PASS: "built, loads, all imports dyld-resolvable",
+    CLASS_CODEGEN: "THE FINDING: the backend refused or crashed on a construct",
+    CLASS_HOST: "imports a CPython host module that has no Mojo source: "
+                "outside this backend's reach, not a gap, not fixable",
+    CLASS_UNRESOLVED: "imports a module that is neither host nor in this "
+                      "backend's module set (reason not provable from the file)",
+    CLASS_EXTERN: "builds, but dyld cannot resolve what it binds (this path "
+                  "compiles one file and resolves no imports)",
+    CLASS_UNKNOWN: "a build message this tool does not recognise — the "
+                   "classifier needs updating, not the backend",
+    CLASS_TOOL: "no verdict reached: timeout, unreadable file, or an internal "
+                "exception in the sweep or build driver",
+}
 
 
 def main():
@@ -342,7 +888,9 @@ def main():
     ap.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help="per-file build timeout in seconds "
                          f"(default {DEFAULT_TIMEOUT}; raise it for the "
-                         "much larger stdlib modules)")
+                         "much larger stdlib modules). A file that hits it is "
+                         "reported in the `tool` class — counted, printed, "
+                         "and in no rate — never as a pass or a finding")
     ap.add_argument("--arch", default="arm64",
                     choices=("arm64", "x86_64", "x86-64", "amd64"),
                     help="machine subset to sweep (default arm64; the "
@@ -397,11 +945,8 @@ def main():
     # because a root got pruned looks exactly like a clean run in the summary,
     # and the whole point of the sweep is that the denominator is trustworthy.
     print("Sweep roots:", file=sys.stderr)
-    per_root = []
     for r in roots:
-        n = len(find_source_files([r]))
-        per_root.append(n)
-        print(f"  {r}  ({n} files)", file=sys.stderr)
+        print(f"  {r}  ({len(find_source_files([r]))} files)", file=sys.stderr)
     for note in notes:
         print(f"  note: {note}", file=sys.stderr)
 
@@ -415,6 +960,8 @@ def main():
     print(f"Sweeping {len(files)} files through build --formal "
           f"[{arch}] ({jobs} workers, {args.timeout}s timeout)...",
           file=sys.stderr)
+    print("Every file is classified (pass / codegen / not-answerable / tool); "
+          "only the codegen class is a gap in the backend.", file=sys.stderr)
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
@@ -422,30 +969,115 @@ def main():
                 for p in files}
         for fut in concurrent.futures.as_completed(futs):
             path = futs[fut]
-            results[path] = fut.result()
+            try:
+                results[path] = fut.result()
+            except Exception as e:
+                # run_one catches its own failures; this is the belt to that
+                # braces, and a whole sweep must not die because one future
+                # did. It is reported as `tool`, never as a verdict.
+                results[path] = Verdict(
+                    False, f"sweep worker raised: {e}"[:200], CAUSE_TOOL_ERROR,
+                    False, CLASS_TOOL, CAUSE_TOOL_ERROR)
 
-    passed = failed = 0
-    fails = []
+    # Every file gets exactly one class, and the classes sum to the file count
+    # by construction: one entry per file, one class per entry. run_one has
+    # already classified (it is the only place the file's source is in hand).
+    rows = []           # (rel, class, reason, detail) for non-PASS, in order
+    verdicts = {}       # rel -> class, every file, for the ledger
+    counts = {c: 0 for c in CLASS_ORDER}
     for path in files:  # deterministic order
-        ok, detail = results[path]
-        if ok:
-            passed += 1
-        else:
-            failed += 1
-            fails.append((rel(path), detail))
+        v = results[path]
+        counts[v.cls] += 1
+        verdicts[rel(path)] = v.cls
+        if v.cls != CLASS_PASS:
+            rows.append((rel(path), v.cls, v.reason, v.detail))
+    total = len(files)
+    passed, codegen = counts[CLASS_PASS], counts[CLASS_CODEGEN]
+    answerable = passed + codegen
 
-    # FAIL lines only (PASS counted, not printed)
-    for r, detail in fails:
-        print(f"FAIL: {r}  ({detail})")
+    # Every file that did not pass is still printed, one line each, under its
+    # class. Nothing that used to print as `FAIL:` stops printing: a file
+    # reclassified out of FAIL is still here, with the class that says where
+    # it went, and report_history() below names the move in both directions.
+    for r, cls, _reason, detail in rows:
+        print(f"{cls.upper()}: {r}  ({detail})")
 
-    total = passed + failed
-    pct = (100.0 * passed / total) if total else 0.0
-    print(f"[{arch}] PASS={passed} FAIL={failed} total={total} "
-          f"({pct:.1f}% pass)")
-    print(f"cas: {cas.stats['hits']} hit / {cas.stats['misses']} miss")
-    if failed:
-        print(f"first failure: {fails[0][0]}")
-    sys.exit(0 if failed == 0 else 1)
+    print(f"[{arch}] {total} files: PASS={passed} not-pass={total - passed}")
+    for cls in CLASS_ORDER:
+        if not counts[cls]:
+            continue
+        mark = "  <-" if cls == CLASS_CODEGEN else "    "
+        print(f"  {mark} {cls:<28} {counts[cls]:>4}   {CLASS_BLURB[cls]}")
+    print(f"  (classes sum to {sum(counts.values())} = {total} files swept)")
+
+    # WHY each unanswerable file is unanswerable. "170 files" is a number
+    # without a cause; "170 files, 60 of them because of `os`" is the fact a
+    # reader can act on (and the shape of the stdlib-host dependency this repo
+    # has, which no amount of backend work will change).
+    for cls in (CLASS_HOST, CLASS_UNRESOLVED):
+        if not counts[cls]:
+            continue
+        tally = {}
+        for _r, c, reason, _d in rows:
+            if c == cls:
+                tally[reason] = tally.get(reason, 0) + 1
+        top = ", ".join(f"{k} x{v}" for k, v in
+                        sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
+        print(f"  {cls} by module: {top}")
+
+    # The headline, with its denominator stated in words so it cannot be read
+    # as a pass rate over the whole sweep. `codegen` is the only class that is
+    # a gap in the backend, so a rate over anything else is measuring the host
+    # platform rather than the codegen.
+    una = total - answerable
+    una_parts = ", ".join(f"{counts[c]} {c.split('/')[-1]}"
+                          for c in CLASS_ORDER
+                          if c not in ANSWERABLE and counts[c])
+    if answerable:
+        pct = 100.0 * passed / answerable
+        print(f"codegen coverage: {passed}/{answerable} = {pct:.1f}%")
+    else:
+        pct = 0.0
+        print("codegen coverage: no file could be answered by this backend")
+    print(f"  denominator: the {answerable} swept file(s) whose build could "
+          f"have answered")
+    print(f"  ({passed} pass + {codegen} codegen = {answerable}), i.e. every "
+          f"swept file EXCEPT the {una} in a not-answerable or tool class "
+          f"[{una_parts}].")
+    print("  A not-answerable file is a fact about the target, not a gap in "
+          "the backend, so it neither raises nor lowers this number.")
+
+    # CAS accounting, complete: every input file lands in exactly one bucket.
+    hits, misses = cas.stats["hits"], cas.stats["misses"]
+    uncached = total - hits - misses
+    print(f"cas: {hits} hit / {misses} miss / {uncached} not cached "
+          f"({total} files)")
+    if uncached < 0:
+        print("  WARNING: hits+misses exceeds the file count — the counters "
+              "lost an update; treat the cache line as unreliable")
+    if counts[CLASS_TOOL]:
+        print(f"  note: {counts[CLASS_TOOL]} file(s) got no verdict at all "
+              f"(timeout/unreadable/tool error) and are in NO rate; a "
+              f"too-small -t is the usual cause — this run used "
+              f"-t {args.timeout}")
+    if counts[CLASS_UNKNOWN]:
+        print(f"  note: {counts[CLASS_UNKNOWN]} verdict(s) this tool cannot "
+              f"classify; they are excluded from every rate rather than "
+              f"guessed into one, and the run is not clean")
+
+    # Verdict history, then the record of this run.
+    report_history(load_ledger(arch, files), verdicts)
+    publish_ledger(arch, files, verdicts)
+
+    dirty = [r for r, c, _rs, _d in rows if c in DIRTY]
+    if dirty:
+        print(f"first {sorted(DIRTY)[0]} finding: {dirty[0]}")
+    # Exit status: the not-answerable classes are permanent facts about the
+    # target and never gate the run; a codegen finding, an unclassifiable
+    # verdict, or a file nobody answered for all do. See EXIT STATUS in the
+    # module docstring — this is a deliberate change from "any FAIL means 1",
+    # which could not tell a backend regression from `import os`.
+    sys.exit(1 if dirty else 0)
 
 
 if __name__ == "__main__":

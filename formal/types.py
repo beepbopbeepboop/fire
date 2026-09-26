@@ -45,6 +45,20 @@ TYPE_NAMES = {
     "UInt64": IntType(64, False),
 }
 
+# Annotations that name a STRING. A formal string is a bare `char *` with no
+# header, so it has no IntType and `parse_type_name` deliberately returns None
+# for it — but "not an integer" is not the same claim as "is a string", and the
+# callers that have to tell (print()'s formatting, above all) need the second
+# one. Kept beside TYPE_NAMES so the two lists of "what does this annotation
+# mean" cannot drift apart.
+#
+# The pointer types are deliberately NOT here even though model.
+# IDENTITY_TYPE_CTORS lists them as identity conversions: a `Pointer[Int]` is a
+# word, not a string, and printing one as `%s` would hand printf an address to
+# dereference. An unclassifiable pointer is a refusal; a mislabeled one is a
+# segfault with a plausible-looking format.
+STRING_TYPE_NAMES = frozenset({"String", "str", "StringLiteral", "StringSlice"})
+
 
 def parse_type_name(s):
     """Parse a fire_compiler type-annotation string; None if unknown/None."""

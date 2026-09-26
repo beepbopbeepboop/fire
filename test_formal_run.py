@@ -179,6 +179,162 @@ CASES = [
     # (0) instead of its result.
     ("len_runtime_range", "def len_runtime_range(n):\n"
                           "    return len(range(n))\n", 10, None),
+    # A one-field struct whose field is written as a CLASS-LEVEL ASSIGNMENT,
+    # which the parser keeps in `StructDef.fields` as an `AssignStmt` rather
+    # than the `VarDecl` an annotation produces. Both spellings are one field,
+    # so both must collapse to the same one word: the field name is read out of
+    # the node to decide that, and reading `.name` off the `AssignStmt` shape
+    # aborted the whole build with a Python traceback (the field-name lookup
+    # now goes through formal.model.struct_field_name, which knows both
+    # shapes). Run rather than merely built, because the collapse is an
+    # identity the answer depends on: `c.count = n` then `c.get()` has to come
+    # back as n, which it only does if `self.count` really became `self`.
+    ("struct_field_assign_default", "struct Counter:\n"
+                                    "    count = 0\n\n"
+                                    "    def get(self):\n"
+                                    "        return self.count\n\n"
+                                    "def main(n):\n"
+                                    "    c = Counter()\n"
+                                    "    c.count = n\n"
+                                    "    return c.get()\n", 10, None),
+    # The same field declared with an annotation AND a default, which is the
+    # other node shape (an `AssignStmt` carrying `type_ann`) and the shape
+    # every dataclass-style field in this repo's own source takes.
+    ("struct_field_ann_default", "struct Counter:\n"
+                                 "    count: Int = 0\n\n"
+                                 "    def get(self):\n"
+                                 "        return self.count\n\n"
+                                 "def main(n):\n"
+                                 "    c = Counter()\n"
+                                 "    c.count = n\n"
+                                 "    return c.get()\n", 10, None),
+    # A PYTHON-STYLE class: it declares nothing, and its one field is whatever
+    # `__init__` assigns. The width has to be DERIVED from the methods for this
+    # to be the one-word case it plainly is. It was not: reading only
+    # `StructDef.fields` measured zero fields, so the struct looked like a
+    # marker, `c.n` and `self.n` became two unrelated words that merely shared
+    # a spelling, and every accessor returned an uninitialised register. This
+    # program returned 0.
+    #
+    # TWO instances, deliberately: it is the stronger half of the claim. The
+    # receiver IS the field, so the collapse has to keep them distinct — a
+    # lowering that got this right by making the field a single global would
+    # pass a one-instance version of this test.
+    ("pyclass_field_from_init", "class Counter:\n"
+                                "    def __init__(self):\n"
+                                "        self.n = 0\n\n"
+                                "    def get(self):\n"
+                                "        return self.n\n\n"
+                                "def main(n):\n"
+                                "    a = Counter()\n"
+                                "    a.n = n\n"
+                                "    b = Counter()\n"
+                                "    b.n = n + 1\n"
+                                "    return a.get() * 100 + b.get()\n", 243, None),
+    # The other half of the Python spelling: a class that only ever READS its
+    # field, because the CALLER writes it. Reading `self.n` declares a field
+    # exactly as much as assigning it does, and a census taken from the
+    # assignments alone called this a zero-field marker — after which the
+    # method read a slot nothing had ever written. This returned 0.
+    ("pyclass_field_read_only", "class Cell:\n"
+                                "    def get(self):\n"
+                                "        return self.n\n\n"
+                                "def main(n):\n"
+                                "    c = Cell()\n"
+                                "    c.n = n\n"
+                                "    return c.get()\n", 10, None),
+    # …and the same spelling with `__slots__`, which is a class-level
+    # assignment that NAMES fields rather than storing one. Counted as a field
+    # in its own right it made this class look two fields wide and the build
+    # was refused; counted for what it says it is, it is one field and one
+    # word. The refusal this replaces was at least honest, so this case is
+    # here to stop the honest limit from being wider than the truth.
+    ("pyclass_slots_field", "class Cell:\n"
+                            "    __slots__ = (\"n\",)\n\n"
+                            "    def get(self):\n"
+                            "        return self.n\n\n"
+                            "def main(n):\n"
+                            "    c = Cell()\n"
+                            "    c.n = n\n"
+                            "    return c.get()\n", 10, None),
+    # The other side of the same line: a class with fields assigned in
+    # `__init__` is honest ONLY while there is at most one. Two of them, and
+    # there is nothing in one word that both `c.a` and `c.b` can be, so the
+    # build must REFUSE — and name the fields it counted, so the reader can
+    # check the count rather than take it on faith. Before the width was
+    # derived, this built and returned 1: `self.a`/`self.b` were method-local
+    # slots, and the receiver word was never written by anything at all.
+    ("pyclass_two_fields",
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.a = 1\n"
+     "        self.b = 2\n\n"
+     "    def total(self):\n"
+     "        return self.a + self.b\n\n"
+     "def main(n):\n"
+     "    p = Pair()\n"
+     "    return p.total()\n", "refuse:2 field(s): a, b", None),
+    # The refusal above has to be the SAME refusal on both backends. They used
+    # to disagree about struct construction outright: arm64 refused a two-field
+    # `Point()` while x86-64 emitted a `call _Point` against a symbol nothing
+    # defines, built the image, and let dyld kill it at launch ("Symbol not
+    # found: _Point"). One source, two architectures, and only one of them said
+    # no — so the check is that both now refuse, with the same words.
+    ("struct_ctor_both_backends",
+     "struct Point:\n"
+     "    x: Int\n"
+     "    y: Int\n\n"
+     "def main(n):\n"
+     "    p = Point()\n"
+     "    return p.x + p.y\n",
+     "refuse:constructing Point needs 2 field(s): x, y", None),
+    ("struct_ctor_args_both_backends",
+     "class Resolver:\n"
+     "    def resolve(self, name):\n"
+     "        return len(name)\n\n"
+     "def main(n):\n"
+     "    r = Resolver(n, n, n)\n"
+     "    return r.resolve(\"a\")\n",
+     "refuse:takes no arguments on this path", None),
+    # `S()` is not a call — it brings every field up at its default — so for a
+    # one-field struct the default IS the whole value, and a constructor that
+    # always emitted 0 threw it away. Nothing in these two programs ever writes
+    # the field, so nothing else could supply it: `count = 7` read back as 0.
+    # Built and ran and was wrong, which is the one outcome this backend may
+    # not produce. Run rather than merely built, because the bug WAS a value.
+    ("struct_default_word_int", "struct Counter:\n"
+                                "    count = 7\n\n"
+                                "    def get(self):\n"
+                                "        return self.count\n\n"
+                                "def main(n):\n"
+                                "    c = Counter()\n"
+                                "    return c.get()\n", 7, None),
+    # The same default as a STRING, which is one word on this path (a bare
+    # `char *`), so the constructor materializes the literal's own address. The
+    # comparison is what proves the pointer is the RIGHT pointer and not merely
+    # some word: it has to be the bytes `hi`.
+    ("struct_default_word_string", "struct Name:\n"
+                                  "    text = \"hi\"\n\n"
+                                  "    def get(self):\n"
+                                  "        return self.text\n\n"
+                                  "def main(n):\n"
+                                  "    c = Name()\n"
+                                  "    if c.get() == \"hi\":\n"
+                                  "        return 1\n"
+                                  "    return 0\n", 1, None),
+    # …and a default this path genuinely cannot bring up: a container is not
+    # something a constructor can evaluate here, and the honest answer to that
+    # is to say so rather than hand back a zero the source never mentioned.
+    # Checked on both backends, because the failure it replaces was a wrong
+    # ANSWER on arm64 and a call to a symbol nothing defines on x86-64.
+    ("struct_default_word_opaque",
+     "struct Names:\n"
+     "    items = [1, 2, 3]\n\n"
+     "    def get(self):\n"
+     "        return self.items\n\n"
+     "def main(n):\n"
+     "    c = Names()\n"
+     "    return c.get()\n", "refuse:cannot bring its field 'items' up at its default", None),
     ("comptime_call", "def comptime_call(n):\n"
                       "    comptime var a = square(6)\n"
                       "    comptime var b = add(a, 1)\n"
@@ -194,16 +350,50 @@ CASES = [
 ]
 
 
+def build_formal(src, out, backend=None, tmpdir=None):
+    """`fire.py build --formal --no-prove`, as a (returncode, output) pair."""
+    cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove", "-o", out]
+    if backend:
+        cmd.append(f"--backend={backend}")
+    cmd.append(src)
+    p = subprocess.run(cmd, capture_output=True, text=True,
+                       timeout=BUILD_TIMEOUT, cwd=HERE)
+    return p.returncode, (p.stderr or p.stdout or "")
+
+
 def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
+
+    # A `refuse:` case is the other half of what this suite is for. Every other
+    # case here asks "does the binary compute the right answer"; these ask "does
+    # a construct with no representation BUILD AND LIE, or does it say no" — and
+    # the answer has to be the same on both backends, or the two architectures
+    # are not one language implementation. Checked on both here because the
+    # divergences were real in both directions: arm64 refusing what x86-64
+    # emitted, and x86-64 emitting a `call _Point` that dyld killed at launch.
+    if isinstance(want_exit, str) and want_exit.startswith("refuse:"):
+        needle = want_exit[len("refuse:"):]
+        for backend in ("arm64", "x86_64"):
+            rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.{backend}"),
+                                    backend=backend)
+            if rc == 0:
+                return False, (f"--backend={backend} BUILT a construct that has no "
+                               f"representation (expected a refusal naming "
+                               f"{needle!r}); the binary is the real answer here")
+            if needle not in text:
+                return False, (f"--backend={backend} refused, but not with the "
+                               f"expected words {needle!r}: "
+                               f"{text.strip()[-200:]}")
+        if verbose:
+            print(f"      refused identically on arm64 and x86-64: {needle!r}")
+        return True, ""
+
     out = os.path.join(tmpdir, name)
-    build = subprocess.run(
-        [sys.executable, FIRE, "build", "--formal", "--no-prove", "-o", out, src],
-        capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
-    if build.returncode != 0:
-        return False, (build.stderr or build.stdout or "build failed").strip()[-300:]
+    rc, text = build_formal(src, out)
+    if rc != 0:
+        return False, text.strip()[-300:]
     if not os.path.isfile(out):
         return False, "build reported success but wrote no binary"
 
@@ -250,7 +440,9 @@ def main():
                     traceback.print_exc()
             if ok:
                 passed += 1
-                print(f"  PASS  {name} (exit {want_exit})")
+                label = (want_exit[len("refuse:"):]
+                         if isinstance(want_exit, str) else want_exit)
+                print(f"  PASS  {name} ({label})")
             else:
                 failed += 1
                 print(f"  FAIL  {name}: {detail}")

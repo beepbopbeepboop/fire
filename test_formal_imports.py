@@ -18,7 +18,16 @@ with "Symbol not found". These tests pin the replacement behaviour:
   5. dependencies are linked before their dependents;
   6. a cycle terminates and both halves still work;
   7. an import that resolves to nothing is a clean compile error with a
-     non-zero exit, not a traceback and not a silently broken binary.
+     non-zero exit, not a traceback and not a silently broken binary;
+  8. an import that is semantically INERT is not a dependency at all
+     (`from __future__ import ...`, and the guarded spellings — a
+     `TYPE_CHECKING` block, an `if False:`/`if version_info` arm, a guarded
+     `try: import`);
+  9. the resolution ORDER is Mojo source > host module > repository `.py`
+     sibling > the stdlib loader, and each step of it is pinned by a test that
+     goes red if the order inverts — because the failure mode of getting it
+     wrong is a program that binds the wrong module and computes the wrong
+     answer with nothing to grep for.
 
 Invoked directly:
     python3 test_formal_imports.py [-v]
@@ -310,6 +319,176 @@ def test_no_import_needs_no_dylib(tmpdir, _shared):
           "a program with no imports built module dylibs anyway")
 
 
+# ── the resolution rules ─────────────────────────────────────────────────────
+# The four tests below pin ONE ordering (see formal/imports.py's
+# `resolve_module_path`): Mojo source > host module > repository `.py`
+# sibling > module_loader. Each of those is a decision that can be silently
+# got wrong, and "silently" is the failure that matters — a name that binds to
+# the wrong file builds and computes the wrong answer, with nothing to grep
+# for. So each test is written so that reordering the passes makes it RED, not
+# merely different.
+
+
+def test_future_import_is_inert(tmpdir, _shared):
+    """`from __future__ import annotations` is a declaration, not a dependency.
+
+    It binds no value and emits no code, so there is nothing for the link step
+    to provide and nothing to compile. Demanding a source file for it made 32
+    real files in this repo fail with "not a stdlib or sibling module, and no
+    such file exists" — a name nobody is looking for, reported in place of the
+    `import os` that is the actual reason those files cannot be built."""
+    root = os.path.join(tmpdir, "future")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo":
+                      "from __future__ import annotations\n"
+                      "def main():\n  return 11\n"})
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 11, f"returned {code}, expected 11; stderr: {err}")
+    check(not os.path.isdir(CAS_IMPORTS) or not os.listdir(CAS_IMPORTS),
+          "a __future__ import built a module dylib; it is inert and must not "
+          "produce a dependency")
+
+
+def test_guarded_imports_stay_inert(tmpdir, _shared):
+    """The rest of the inert family: a name that is not unconditionally
+    required is not a dependency.
+
+    `TYPE_CHECKING` blocks, `if False:` and `if sys.version_info` arms and
+    guarded `try: import x except ImportError:` are all inert for the same
+    reason `__future__` is. They need no list of their own because they are
+    all NESTED inside an `if`/`try` and `imported_modules` reads only the
+    module's top level. That is load-bearing rather than incidental — a
+    resolver that descended into a body would make every one of these a hard
+    dependency — so it is pinned here, both at the collector and end to end."""
+    from formal.imports import imported_modules
+    src = ("from __future__ import annotations\n"
+           "import os\n"
+           "if False:\n  import nonexistent_guard_false\n"
+           "if sys.version_info >= (3, 99):\n"
+           "  import nonexistent_guard_version\n"
+           "try:\n  import nonexistent_guard_try\n"
+           "except ImportError:\n  nonexistent_guard_try = None\n")
+    import fire_compiler as F
+    stmts = F.Parser(F.py_tokenize(src)).with_filename("g.py").parse_module()
+    got = imported_modules(stmts)
+    check(got == ["os"],
+          f"imported_modules returned {got}; a guarded import is inert, and "
+          f"so is the __future__ directive — only `os` is a dependency")
+    root = os.path.join(tmpdir, "guarded")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo":
+                      "if False:\n  import nonexistent_guard_false\n"
+                      "def main():\n  return 13\n"})
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 13, f"returned {code}, expected 13; stderr: {err}")
+
+
+def test_repository_sibling_resolves(tmpdir, _shared):
+    """This repository is the source the formal path compiles, so a program
+    importing a sibling has to be able to FIND it.
+
+    Every file in the repo that does `import fire_compiler` was reported as
+    importing "not a stdlib or sibling module, and no such file exists" — a
+    statement that is simply false about a file sitting in the same tree."""
+    root = os.path.join(tmpdir, "sibling")
+    os.makedirs(root)
+    write_tree(root, {
+        "sibmod.py": "def bump(x):\n  return x + 2\n",
+        "prog.mojo": "from sibmod import bump\ndef main():\n  return bump(40)\n",
+    })
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 42, f"returned {code}, expected 42; stderr: {err}")
+    dylib = os.path.join(CAS_IMPORTS, "sibmod.dylib")
+    check(os.path.isfile(dylib),
+          f"the sibling was found but no dylib was built for it at {dylib}")
+
+
+def test_package_relative_dotted_import_resolves(tmpdir, _shared):
+    """A dotted import of a sibling INSIDE the same package.
+
+    This is the shape `formal/x86_64_codegen.py`'s `import formal.types` has:
+    the project root is the file's own directory, so the full dotted path
+    spells to `formal/formal/types.py` and finds nothing, and the name
+    resolves through the leaf instead — `types.py`, in the very directory the
+    import was written in."""
+    root = os.path.join(tmpdir, "pkgrel")
+    os.makedirs(root)
+    write_tree(root, {
+        "sub/types.py": "def base(x):\n  return x * 2\n",
+        "sub/user.mojo": ("from sub.types import base\n"
+                          "def main():\n  return base(21)\n"),
+    })
+    fresh_cas()
+    _result, out = build(os.path.join(root, "sub"), "user.aout")
+    code, err = run(out)
+    check(code == 42, f"returned {code}, expected 42; stderr: {err}")
+
+
+def test_host_module_still_refused_despite_same_named_sibling(tmpdir, _shared):
+    """The precedence that must NOT be reordered: host module before `.py`.
+
+    This repository contains `formal/types.py` and `mojo/middle/types.py` —
+    sibling sources whose basename is a CPython standard-library module. If a
+    sibling were consulted first, an ordinary `from types import
+    SimpleNamespace` would silently rebind to a same-named local module: the
+    build would go on, using a module the file never meant, and nothing would
+    say so. Python's own absolute-import rule agrees — `import types` is the
+    standard library, never a neighbour.
+
+    `types.py` here DEFINES the symbol being imported, so if the ordering ever
+    inverts this test goes red instead of quietly passing."""
+    root = os.path.join(tmpdir, "shadow")
+    os.makedirs(root)
+    write_tree(root, {
+        "types.py": "def SimpleNamespace(x):\n  return x\n",
+        "prog.mojo": ("from types import SimpleNamespace\n"
+                      "def main():\n  return 1\n"),
+    })
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    check(result.returncode != 0,
+          "`import types` bound to the local types.py and the build SUCCEEDED "
+          "— a host module name was captured by a sibling, which is the "
+          "silently-wrong-module failure this precedence exists to prevent")
+    text = result.stderr + result.stdout
+    check("host module" in text,
+          f"the refusal must name the real reason (a CPython host module), "
+          f"not claim the file is missing: {text[-300:]}")
+    check("types.py" not in text.split("imports")[0],
+          f"the error should be about the `types` IMPORT, not types.py: "
+          f"{text[-300:]}")
+
+
+def test_mojo_source_beats_host_module(tmpdir, _shared):
+    """The other precedence: a real Mojo module beats the host-module list.
+
+    If the host check ran first, a `math.mojo` sitting beside the importer
+    would be refused in favour of CPython's `math` — binding the program to
+    the wrong module. A target's own source is a stronger statement than any
+    name in HOST_MODULES."""
+    root = os.path.join(tmpdir, "mojobeats")
+    os.makedirs(root)
+    write_tree(root, {
+        "math.mojo": "def sqrtish(x):\n  return x + 1\n",
+        "prog.mojo": "from math import sqrtish\ndef main():\n  return sqrtish(41)\n",
+    })
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 42,
+          f"returned {code}, expected 42 — the local math.mojo lost to the "
+          f"host-module list, so the program bound CPython's `math` instead: "
+          f"{err}")
+
+
 
 # A struct-only module, and a program that uses it across the import boundary.
 # Both halves matter: the module must be buildable at all (its API is methods,
@@ -424,6 +603,16 @@ TESTS = [
      test_one_word_struct_field_is_the_value),
     ("a struct too wide for one word is refused by name",
      test_wide_struct_is_refused_by_name),
+    ("a __future__ import is inert, not a dependency",
+     test_future_import_is_inert),
+    ("a guarded import is inert too", test_guarded_imports_stay_inert),
+    ("a repository sibling resolves", test_repository_sibling_resolves),
+    ("a package-relative dotted import resolves",
+     test_package_relative_dotted_import_resolves),
+    ("a host module is refused despite a same-named sibling",
+     test_host_module_still_refused_despite_same_named_sibling),
+    ("a local Mojo module beats the host-module list",
+     test_mojo_source_beats_host_module),
 ]
 
 

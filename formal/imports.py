@@ -38,6 +38,11 @@ from formal.build import ImportBuildError  # noqa: E402  (cycle-free: build
 # path, so a program importing the same module twice (or a cycle) reuses it.
 _BUILT: dict = {}
 
+# The root of this source tree — the directory holding fire_compiler.py. This
+# repository is itself the source the formal path compiles, so it is a
+# legitimate (and bounded) place to look for a module name.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 # CPython's standard library. These have no Mojo source and no symbol the
 # formal model could bind, so a file importing one cannot be built here — but
@@ -61,6 +66,33 @@ def _is_host_module(name: str) -> bool:
     return name in HOST_MODULES or name.split(".")[0] in HOST_MODULES
 
 
+# Modules whose import is a DECLARATION to the reader rather than a
+# dependency, so there is nothing for the link step to provide.
+#
+# `from __future__ import annotations` is the whole of it. `__future__` is not
+# a library: importing a name from it is a compiler directive (`annotations`
+# means "store string annotations"), it binds no value the program can use, and
+# it produces no code. Demanding a source file for it is the resolver asking a
+# file to exist that was never meant to, and it buries the real reason a file
+# cannot be built under a name nobody is looking for: it was the FIRST thing
+# wrong with 30+ real files in this repo, reported instead of the `import os`
+# that is what actually stops them.
+#
+# This is the general rule stated once: an import that cannot change what the
+# program computes is not a dependency. The rest of that family needs no list
+# because it is already excluded structurally — a `TYPE_CHECKING` block, an
+# `if False:`/`if sys.version_info >= ...` arm and a `try: import x except
+# ImportError:` are all NESTED inside an If/Try, and `imported_modules` reads
+# only the module's top level. That is load-bearing, not incidental: descending
+# into a body would make every one of those names a hard dependency, so
+# `test_guarded_imports_stay_inert` pins it.
+INERT_MODULES = frozenset(("__future__",))
+
+
+def _is_inert_module(name: str) -> bool:
+    return name in INERT_MODULES
+
+
 def _manifest_path(dylib_path: str) -> str:
     from formal.build import dylib_manifest_path
     return dylib_manifest_path(dylib_path)
@@ -72,6 +104,21 @@ def imported_modules(stmts) -> list:
     `import a.b`, `import a.b as c` and `from a.b import x, y` all name the
     module `a.b`; the alias and the imported names do not change which module
     has to be built. `extra` carries `import a, b, c`'s additional names.
+
+    Two kinds of import are deliberately NOT dependencies, and both exclusions
+    belong here rather than at each call site, because every consumer of this
+    list wants the same answer:
+
+      * a semantically inert import (`from __future__ import annotations` — see
+        `INERT_MODULES`), which binds nothing and emits nothing;
+      * anything nested inside an `if`/`try` body, which is not a top-level
+        statement and so is never seen. A `TYPE_CHECKING` block, an
+        `if sys.version_info` arm and a guarded `try: import x except
+        ImportError` are inert for the same underlying reason — the name is not
+        unconditionally required — and excluding them structurally means the
+        rule cannot go stale as new spellings appear.
+
+    What is left is exactly "what must be on the link line for this file".
     """
     out = []
     for st in stmts or []:
@@ -80,11 +127,13 @@ def imported_modules(stmts) -> list:
             for mod, _alias in (st.extra or []):
                 names.append(mod)
             for m in names:
-                if isinstance(m, str) and m and m not in out:
+                if (isinstance(m, str) and m and m not in out
+                        and not _is_inert_module(m)):
                     out.append(m)
         elif isinstance(st, F.FromImportStmt):
             m = st.module
-            if isinstance(m, str) and m and m not in out:
+            if (isinstance(m, str) and m and m not in out
+                    and not _is_inert_module(m)):
                 out.append(m)
     return out
 
@@ -133,6 +182,18 @@ def _search_roots(relative_to: str, project_root: str) -> list:
                 if unlimited <= 0:
                     break                          # no project root: bounded
             d = parent
+    # The repository root, last among the local roots. For the file being
+    # compiled the "project root" above IS that file's own directory, so the
+    # walk stops after one entry and a sibling of the REPO — `fire_compiler`,
+    # `gimple_codegen`, `type_system` — is out of reach even though the file
+    # importing it is in the same tree. That is the ordinary case for a
+    # multi-file project in this repository, and it produced the flatly false
+    # "not a stdlib or sibling module, and no such file exists" for a file
+    # that was sitting there. This root is fixed and specific (the tree this
+    # module lives in), NOT a walk to `/`: the whole point of stopping at the
+    # project root was to keep `import math` from binding to an unrelated
+    # ~/math.mojo, and a bounded root cannot do that.
+    roots.append(_REPO_ROOT)
     try:
         import module_loader
         stdlib = getattr(module_loader, "STDLIB_PATH", None)
@@ -150,25 +211,81 @@ def _search_roots(relative_to: str, project_root: str) -> list:
     return out
 
 
+def _candidates(module_name: str, base: str, ext: str) -> list:
+    """The file shapes a module name can take under `base`, for one extension.
+
+    `<name>.mojo`, `<name>/__init__.mojo` (a package), and the same two spelled
+    with the LEAF only. The leaf fallback is what makes a package-relative
+    dotted import of a sibling work: inside `formal/`, `import formal.types`
+    looks for `formal/formal/types.mojo` (the path spelled from the project
+    root, which is `formal/` itself here) and finds nothing, but the sibling
+    really is `types` in the very directory the import was written in.
+    module_loader resolves the same two shapes for the stdlib, so this is the
+    same rule, not a second one.
+    """
+    rel = module_name.replace(".", os.sep)
+    leaf = module_name.split(".")[-1]
+    return [os.path.join(base, rel + ext),
+            os.path.join(base, rel, "__init__" + ext),
+            os.path.join(base, leaf + ext),
+            os.path.join(base, leaf, "__init__" + ext)]
+
+
 def resolve_module_path(module_name: str, relative_to: str = None,
                         project_root: str = None) -> str:
     """The source file for `module_name`, or None if it cannot be resolved.
 
-    Delegates to module_loader for the stdlib (`std.memory` →
-    `.../stdlib/std/memory/__init__.mojo`) after looking beside the importing
-    file, so a local multi-file project works without being under the stdlib
-    root. A module is either `<name>.mojo` or a package directory
-    `<name>/__init__.mojo` — the same two shapes module_loader resolves."""
-    rel = module_name.replace(".", os.sep)
-    leaf = module_name.split(".")[-1]
-    for base in _search_roots(relative_to, project_root):
-        for cand in (os.path.join(base, rel + ".mojo"),
-                     os.path.join(base, rel, "__init__.mojo"),
-                     os.path.join(base, leaf + ".mojo"),
-                     os.path.join(base, leaf, "__init__.mojo")):
-            if os.path.isfile(cand):
-                return cand
-    try:
+    The search is four ordered passes, and the order is the contract — it is
+    what decides whether a name binds to the target's own module, to CPython's,
+    or to a source file in this repository:
+
+      1. MOJO SOURCE, any search root, nearest first. `<name>.mojo` or
+         `<name>/__init__.mojo`. This wins OUTRIGHT, including over the
+         host-module list below: a `.mojo` file sitting beside the importer is
+         the target's own module, and refusing it because a same-named CPython
+         module exists would bind the program to the wrong one. A real Mojo
+         module is a stronger statement than any name in `HOST_MODULES`.
+      2. HOST MODULE. If no Mojo source exists and the name is in
+         `HOST_MODULES` (or its first dotted component is), the answer is
+         "CPython standard library, nothing to compile" and no sibling is
+         consulted. This has to come BEFORE pass 3 rather than after it,
+         because this repository contains `formal/types.py` and
+         `mojo/middle/types.py` — a `.py` sibling whose basename is a host
+         module name. Looking at siblings first would silently rebind a file's
+         ordinary `from types import SimpleNamespace` to a same-named local
+         module, which is precisely the kind of quietly-narrower result that
+         turns into a bug nobody can see. Python's own absolute-import rule
+         agrees: `import types` is the standard library, never a neighbour.
+      3. REPOSITORY SIBLING, any search root, nearest first, `.py` and
+         `__init__.py`. This repository IS the source the formal path compiles
+         (that is what `fire_compiler.py`, `gimple_codegen.py` and
+         `type_system.py` are), so a program that imports a sibling has to be
+         able to find it. Without this pass those files were reported as
+         importing "not a stdlib or sibling module, and no such file exists" —
+         a statement that is simply false about a file that is sitting right
+         there. A `.py` loses to a `.mojo` of the same name in a further root
+         (pass 1 runs first, over every root): Mojo source is the target's own
+         vocabulary and outranks a host-language source file.
+      4. module_loader, for the stdlib, as the last resort.
+
+    Returns None when all four come up empty; the caller then distinguishes a
+    host module from a plain typo and says which (see
+    `unresolvable_import_error`, the single wording for that).
+    """
+    roots = _search_roots(relative_to, project_root)
+    for ext in (".mojo",):                       # pass 1
+        for base in roots:
+            for cand in _candidates(module_name, base, ext):
+                if os.path.isfile(cand):
+                    return cand
+    if _is_host_module(module_name):              # pass 2
+        return None
+    for ext in (".py",):                         # pass 3
+        for base in roots:
+            for cand in _candidates(module_name, base, ext):
+                if os.path.isfile(cand):
+                    return cand
+    try:                                         # pass 4
         from module_loader import ModuleLoader
         path = ModuleLoader().resolve_module_path(module_name)
         if path and os.path.isfile(path):
@@ -176,6 +293,24 @@ def resolve_module_path(module_name: str, relative_to: str = None,
     except Exception:
         pass
     return None
+
+
+def unresolvable_import_error(source_path: str, module_name: str) -> str:
+    """The one wording for "this import names nothing this backend can build".
+
+    Two call sites raise it — formal/build.py for the file being compiled and
+    `build_module_dylib` for a file reached through a dependency — and two
+    messages for one cause is how a real failure ends up filed under the wrong
+    heading. It lives here, next to the rules that decide which of the two
+    reasons applies, so the wording cannot drift from the resolution it
+    describes.
+    """
+    kind = ("a host module (CPython standard library), which has no Mojo "
+            "source for this backend to compile"
+            if _is_host_module(module_name)
+            else "not a stdlib or sibling module, and no such file exists")
+    return (f"{os.path.basename(source_path)} imports {module_name!r}, which "
+            f"is {kind}")
 
 
 def imported_struct_defs(source_path: str, stmts: list,
@@ -261,14 +396,9 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
             # error either way — the file genuinely cannot be built here — but
             # it is the file's use of the host stdlib, not a broken module
             # path, and lumping the two together buries the real failures.
-            kind = ("a host module (CPython standard library), which has no "
-                    "Mojo source for this backend to compile"
-                    if _is_host_module(mod)
-                    else "not a stdlib or sibling module, and no such file "
-                         "exists")
-            raise ImportBuildError(
-                f"{os.path.basename(source_path)} imports {mod!r}, which is "
-                f"{kind}")
+            # The wording is `unresolvable_import_error`'s, shared with
+            # formal/build.py so the two sites cannot drift.
+            raise ImportBuildError(unresolvable_import_error(source_path, mod))
         depends.append((mod, dep_path))
     # Build the dependencies first, and keep their dylibs: they go on THIS
     # library's link line, both so cross-module calls get the right exported
