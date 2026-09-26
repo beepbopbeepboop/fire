@@ -10,7 +10,9 @@ sliced:** the arm64 half is the other agent's work, the x86-64 half is ours,
 and the root cause below is the context for both. Cutting it in half would
 leave each part without the cause that explains it.
 
-Actively-WIP arm64 material stays in `BUG.md`; only this settled cluster moved.
+The arm64 material that used to stay in `BUG.md` has since been split into
+`FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md` and
+`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`.
 
 **Status: FIXED on arm64** (the default backend). The cause was not the
 register reuse described below, and it was not specific to nesting — a

@@ -1808,7 +1808,7 @@ def _cond_step_tactic(words: dict, pc: int) -> str:
         # asks for an X0 value the instruction no longer produces, and no
         # amount of `simp` reaches it. The fix is to parameterise that test --
         # which also closes the `loop_cond_flag` register half, same root
-        # cause. See BUG.md.
+        # cause. See bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
         return (f"by_cases hc : arm64_matches_condition {w & 0xf} s.nzcv = true "
                 f"<;> simp [hs, hc] <;> all_goals (first | done | sorry)")
     return "simp [hs] <;> all_goals (first | done | sorry)"

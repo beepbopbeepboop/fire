@@ -418,7 +418,8 @@ class X86_64Codegen:
         backends through one `_codegen_and_link`, and the struct map it passes
         is arm64's. Accepting it here is what keeps `--backend=x86_64` from
         dying with a TypeError on a keyword meant for the other backend (see
-        BUG.md). Nothing x86-64 emits needs it yet — a struct's fields are
+        bugs/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms").
+        Nothing x86-64 emits needs it yet — a struct's fields are
         reached through the same registers either way.
 
         `stmts` is Parser(...).parse_module()'s output — may contain imports,

@@ -444,8 +444,9 @@ turned out to need generalising (B7), so the rule is a heuristic, not a proof.
 
 ## Characterised, not fixed — nested comprehensions, both backends
 
-Two distinct x86-64 observables, both real, both handed to concurrent work in
-`BUG.md` (appended, not edited, since those entries are actively owned).
+Two distinct x86-64 observables, both real. The arm64 root cause and the shared
+comprehension shape matrix are in `CODEGEN_nested_comprehension.md`; the x86-64
+handoff below is what that doc's "x86-64 handoff" section tracks.
 
 **The sum is 2 short.** `test_x86_64_containers.py:229`, n = 5:
 `[i + j for i in range(n) for j in range(n)]`, summed, wants 100 and gets 98.

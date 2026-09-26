@@ -11,7 +11,8 @@ infrastructure* slice. It does not duplicate the per-bug evidence — every item
 below names the document that owns the detail.
 
 **Not here: the arm64 codegen and arm64 proof-generator work.** That is the
-other agent's active line and it stays in the root `BUG.md`, which is now the
+other agent's active line; it now lives in the `FORMAL_arm64_*` / `CODEGEN_arm64_*`
+documents, the root ledger having been split up and deleted, and it
 arm64-side ledger. Items below that touch arm64 are listed only where the
 x86-64 side has a mirror of the same defect, and are marked as such.
 
@@ -22,7 +23,7 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
 | `CODEGEN_nested_comprehension.md` | nested comprehension, both backends |
 | `FORMAL_x86_64_formal_backend_gaps.md` | the two backend gaps (both now fixed) |
-| root `BUG.md` | arm64 work — not duplicated here |
+| `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
 
 ---
 

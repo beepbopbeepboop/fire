@@ -1,10 +1,12 @@
 # CODEGEN_arm64_cmp_flags_and_loop_signedness: arm64 conditional/loop codegen, and the signedness of unannotated `int`
 
 Consolidated report for the arm64 formal backend's conditional and loop
-lowering, and for the signedness model underneath it. `BUG.md` in the repo root
-carries the running session log for this work; this document is the durable
-statement of what is **open**, so a reader does not have to reconstruct it from
-a diff.
+lowering, and for the signedness model underneath it. Part of a three-document split of what used to live in the root
+`BUG.md` (deleted 2026-09-26): this document owns what is **open** in the
+conditional/loop codegen and the signedness model;
+`FORMAL_arm64_known_proof_gaps.md` owns the three unproved examples; and
+`FORMAL_arm64_instruction_coverage.md` owns the encoder survey, the measured
+codegen wins, and two test-design lessons worth not relearning.
 
 ## Status (2026-09-26 — conditional/loop selection LANDED; signedness PARTIAL; proof work PARKED)
 
@@ -117,8 +119,9 @@ The wall: the closing arithmetic lemma is **per condition code**, not per shape.
 against a bound of 1 needs a `u64_lt_one` sibling of `u64_le_zero_iff`. So the
 remaining work is a small table beside `_COND_LEMMA` mapping each raw code to
 (flag lemma, arithmetic lemma). Suite went 40/3/0 → 38/3/2 while that was
-incomplete, which is why it was reverted rather than committed; the full writeup
-is in `BUG.md`.
+incomplete, which is why it was reverted rather than committed. The per-step recipe, including the two
+tactic orderings that each cost a cycle, is in the "Not open, but easy to
+re-break" section above.
 
 **After that:** `while_lt_exit_contract`, the counting generalisation at
 `ProofLib` ~3002, has the same register-shaped `hstep` and was not touched, so
@@ -141,5 +144,5 @@ the two will drift.
   test, and it needed >10 locals to show up at all.
 * **Every expected value in `test_formal_run.py` must fit in a byte.** A process
   exit status is 8 bits; comparing an 8-bit code against a wider sum produced a
-  convincing phantom "14+ spilled locals" bug that cost real time. See the
-  retraction in `BUG.md`.
+  convincing phantom "14+ spilled locals" bug that cost real time; that retraction is
+  summarised in `FORMAL_arm64_instruction_coverage.md`.
