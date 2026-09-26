@@ -697,3 +697,207 @@ class Assembler:
             idx = pos - self._org
             insn = 0x94000000 | (offset & 0x03ffffff)
             struct.pack_into('<I', self.sections["text"], idx, insn)
+
+
+# ── condition codes, shared by every flag-reading instruction ────────────
+# One map, used by CSET/CINC, B.cond, CSEL and friends. These were separate
+# literals before, which is how a B.cond ends up testing one code while a CSET
+# tests another: the aliases matter (cs/hs and cc/lo are the same bit), so the
+# canonical spellings are the primary keys and the aliases resolve to them.
+COND_CODES = {
+    'eq': 0, 'ne': 1, 'cs': 2, 'hs': 2, 'cc': 3, 'lo': 3,
+    'mi': 4, 'pl': 5, 'vs': 6, 'vc': 7, 'hi': 8, 'ls': 9,
+    'ge': 10, 'lt': 11, 'gt': 12, 'le': 13, 'al': 14, 'nv': 15,
+}
+
+
+def _cond(cond) -> int:
+    if isinstance(cond, int):
+        return cond
+    try:
+        return COND_CODES[cond]
+    except KeyError:
+        raise ValueError(f"Unknown condition: {cond!r}") from None
+
+
+def encode_b_cond(cond: str, offset: int) -> bytes:
+    """B.cond #offset — branch on a comparison's FLAGS.
+
+    The single highest-value instruction this backend was missing. Every
+    `if a < b` was lowered as `cmp` + `cset` + `cbz` + branch: three
+    instructions, one of which materialises the boolean into a register that
+    the branch then immediately reads back. B.cond is `cmp` + branch, and it
+    needs no flag-to-register round trip, so a comparison produces a
+    dependency on the flags rather than on a value.
+
+    Reach is imm19 (±1MB) against B's imm26, which is the one real constraint
+    to watch when a generated function is large.
+
+    `offset` is in BYTES, like encode_b/encode_cbz_xn.
+    """
+    c = _cond(cond)
+    assert c != 14, "B.cond with AL is not encodable; use B"
+    # imm19 counts INSTRUCTIONS, so the byte range is +-2^18*4 = +-1MB. Getting
+    # this wrong by a factor of two produces a branch that lands 1MB away from
+    # where the reloc intended, which no local test would notice.
+    assert -2**18 * 4 <= offset < 2**18 * 4, \
+        f"B.cond offset {offset} out of range (+-1MB)"
+    insn = 0x54000000 | (((offset // 4) & 0x7ffff) << 5) | c
+    return struct.pack('<I', insn)
+
+
+def encode_csel_xd_xm_cond(xd: int, xn: int, xm: int, cond: str) -> bytes:
+    """CSEL Xd, Xn, Xm, cond — pick one of two values, branchlessly.
+
+    The reason a conditional EXPRESSION should not become a branch. `a if c
+    else b` is two values and a choice, and emitting a branch for it costs a
+    label, two jumps and a pipeline flush to move one register. CSEL is one
+    instruction and no control flow.
+
+    With Rn = Rm = XZR this is exactly CSET, which is how the existing
+    encode_cset_* is expressed.
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    c = _cond(cond)
+    insn = (0x9A800000 | (xm << 16) | (c << 12) | (xn << 5) | xd)
+    return struct.pack('<I', insn)
+
+
+def encode_csinc_xd_xm_cond(xd: int, xn: int, xm: int, cond: str) -> bytes:
+    """CSINC Xd, Xn, Xm, cond — CSEL's incrementing sibling (X + 1)."""
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    c = _cond(cond)
+    return struct.pack('<I', 0x9A800400 | (xm << 16) | (c << 12) | (xn << 5) | xd)
+
+
+def encode_csinv_xd_xm_cond(xd: int, xn: int, xm: int, cond: str) -> bytes:
+    """CSINV Xd, Xn, Xm, cond — CSEL's inverting sibling (~X)."""
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    c = _cond(cond)
+    return struct.pack('<I', 0xDA800000 | (xm << 16) | (c << 12) | (xn << 5) | xd)
+
+
+def encode_csneg_xd_xm_cond(xd: int, xn: int, xm: int, cond: str) -> bytes:
+    """CSNEG Xd, Xn, Xm, cond — negate Xm when the condition holds."""
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    c = _cond(cond)
+    return struct.pack('<I', 0xDA800400 | (xm << 16) | (c << 12) | (xn << 5) | xd)
+
+
+def encode_tbz_xn_bit(bit: int, xn: int, offset: int) -> bytes:
+    """TBZ Xn, #bit, #offset — branch if bit is ZERO. Bits 0-31.
+
+    `if x & (1 << n):` is the shape this exists for, and it is a common one:
+    a TST plus a B.cond otherwise, with the mask materialised into a
+    register first.
+
+    Bits 0-31 only. The architectural b40 form (bits 32-63) moves imm14 to a
+    different field, and rather than encode that from memory of the spec this
+    refuses — a wrong branch target is worse than a clear error at emit time.
+    Callers with a bit >= 32 should compare against zero with a B.cond after a
+    shift."""
+    assert 0 <= xn <= 31
+    if not 0 <= bit <= 31:
+        raise ValueError(
+            f"TBZ/TBNZ on bit {bit} is not encodable here (bits 0-31 only); "
+            f"use a shift plus a compare, or a mask compare")
+    assert -2**13 * 4 <= offset < 2**13 * 4
+    insn = 0x36000000 | (((bit & 31) << 19)
+                         | (((offset // 4) & 0x3fff) << 5) | xn)
+    return struct.pack('<I', insn)
+
+
+def encode_tbnz_xn_bit(bit: int, xn: int, offset: int) -> bytes:
+    """TBNZ Xn, #bit, #offset — branch if bit is NON-ZERO. Bits 0-31."""
+    assert 0 <= xn <= 31
+    if not 0 <= bit <= 31:
+        raise ValueError(
+            f"TBZ/TBNZ on bit {bit} is not encodable here (bits 0-31 only); "
+            f"use a shift plus a compare, or a mask compare")
+    assert -2**13 * 4 <= offset < 2**13 * 4
+    insn = 0x36000000 | (1 << 24) | ((bit & 31) << 19) \
+        | (((offset // 4) & 0x3fff) << 5) | xn
+    return struct.pack('<I', insn)
+
+
+def encode_ldur_xt_xn_imm(xt: int, xn: int, imm: int) -> bytes:
+    """LDUR Xt, [Xn, #imm] — unscaled load, imm a signed 9-bit byte offset.
+
+    LDUR/STUR are how arm64 addresses a displacement that is not a multiple
+    of the access size, and in practice that means a NEGATIVE one: a field
+    below the frame pointer, or the second half of a pair. Real code emits
+    these tens of thousands of times; without them a struct access at a
+    negative offset has to be rewritten as an add-then-load.
+    """
+    assert 0 <= xt <= 30 and 0 <= xn <= 31
+    assert -256 <= imm <= 255
+    return struct.pack('<I', 0xF8400000 | ((imm & 0x1ff) << 12) | (xn << 5) | xt)
+
+
+def encode_stur_xt_xn_imm(xt: int, xn: int, imm: int) -> bytes:
+    """STUR Xt, [Xn, #imm] — unscaled store, signed 9-bit byte offset."""
+    assert 0 <= xt <= 30 and 0 <= xn <= 31
+    assert -256 <= imm <= 255
+    return struct.pack('<I', 0xF8000000 | ((imm & 0x1ff) << 12) | (xn << 5) | xt)
+
+
+def encode_ldrh_wt_wn_imm(wt: int, wn: int, imm: int = 0) -> bytes:
+    """LDRH Wt, [Xn, #imm] — load a 16-bit halfword, zero-extended."""
+    assert 0 <= wt <= 30 and 0 <= wn <= 31
+    assert 0 <= imm <= 16380 and imm % 2 == 0
+    return struct.pack('<I', 0x79400000 | ((imm >> 1) << 10) | (wn << 5) | wt)
+
+
+def encode_strh_wt_wn_imm(wt: int, wn: int, imm: int = 0) -> bytes:
+    """STRH Wt, [Xn, #imm] — store the low 16 bits."""
+    assert 0 <= wt <= 30 and 0 <= wn <= 31
+    assert 0 <= imm <= 16380 and imm % 2 == 0
+    return struct.pack('<I', 0x79000000 | ((imm >> 1) << 10) | (wn << 5) | wt)
+
+
+def encode_ldrsw_xt_xn_imm(xt: int, xn: int, imm: int = 0) -> bytes:
+    """LDRSW Xt, [Xn, #imm] — load 32 bits, sign-extend to 64."""
+    assert 0 <= xt <= 30 and 0 <= xn <= 31
+    assert 0 <= imm <= 16380 and imm % 4 == 0
+    return struct.pack('<I', 0xB9800000 | ((imm >> 2) << 10) | (xn << 5) | xt)
+
+
+def encode_ldrsb_xt_xn_imm(xt: int, xn: int, imm: int = 0) -> bytes:
+    """LDRSB Xt, [Xn, #imm] — load a signed byte."""
+    assert 0 <= xt <= 30 and 0 <= xn <= 31
+    assert 0 <= imm <= 16380
+    return struct.pack('<I', 0x39800000 | (imm << 10) | (xn << 5) | xt)
+
+
+def encode_ldrsh_xt_xn_imm(xt: int, xn: int, imm: int = 0) -> bytes:
+    """LDRSH Xt, [Xn, #imm] — load a sign-extended halfword."""
+    assert 0 <= xt <= 30 and 0 <= xn <= 31
+    assert 0 <= imm <= 16380 and imm % 2 == 0
+    return struct.pack('<I', 0x79800000 | ((imm >> 1) << 10) | (xn << 5) | xt)
+
+
+def encode_tst_xn_xm(xn: int, xm: int) -> bytes:
+    """TST Xn, Xm — AND with no destination; sets the flags.
+
+    The flag-setting form of AND, so `if x & mask:` costs a TST and a
+    B.cond rather than a full 64-bit AND whose result is then compared
+    against zero.
+    """
+    assert 0 <= xn <= 31 and 0 <= xm <= 31
+    return struct.pack('<I', 0xEA00001F | (xm << 16) | (xn << 5))
+
+
+def encode_cmn_xn_xm(xn: int, xm: int) -> bytes:
+    """CMN Xn, Xm — compare (negated); sets flags. The ADD-with-no-result."""
+    assert 0 <= xn <= 31 and 0 <= xm <= 31
+    return struct.pack('<I', 0xAB00001F | (xm << 16) | (xn << 5))
+
+
+def encode_subs_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
+    """SUBS Xd, Xn, Xm — subtract AND set the flags.
+
+    Saves the separate CMP a comparison would otherwise need, at the cost of
+    a dependency on the subtraction's result.
+    """
+    assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
+    return struct.pack('<I', 0xEB000000 | (xm << 16) | (xn << 5) | xd)

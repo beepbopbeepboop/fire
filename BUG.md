@@ -421,3 +421,83 @@ def f(n):
         t += x
     return t                       # 24; arm64 gives 48, x86-64 segfaults
 ```
+
+
+## arm64 instruction coverage: audited, and the highest-value gaps closed
+
+Not a bug — a survey, kept here because the answer is not guessable and the
+tooling to re-derive it should not have to be written twice.
+
+`tools/arm64_insn_audit.py` answers "what can the codegen not emit, weighted
+by how often a compiler actually emits it". Counting the encoder table is not
+the same question: this backend had 52 encoders and still could not express a
+single conditional branch on a comparison's flags.
+
+Method: take the encoder inventory from `formal/arm64.py`, take the real
+instruction mix by disassembling 200 system binaries (4.0M instructions, 420
+distinct mnemonics), and rank the difference. Pointer-authentication
+instructions (`pacibsp` and friends, ~92k) are excluded **by decision, and the
+exclusion is printed** — a backend with nothing to authenticate has no use for
+them, and hiding that in a filter would be dishonest accounting.
+
+| | before | after |
+|---|---|---|
+| encoders | 52 | 69 |
+| covered | 86.2% | **92.0%** |
+| genuinely uncovered | 11.5% | **5.7%** |
+
+Added, in the order the audit said they mattered:
+
+* **B.cond**, all 14 conditions — by far the biggest single gap (~154k
+  occurrences). `if a < b` was `cmp` + `cset` + `cbz` + branch: three
+  instructions, one materialising a boolean that the branch immediately reads
+  back.
+* **CSEL / CSINC / CSINV / CSNEG** (~40k) — a conditional *expression* should
+  not become a branch. With Rn = Rm = XZR, CSEL is exactly CSET, which is how
+  the existing `encode_cset_*` is now expressed.
+* **TBZ / TBNZ** (~75k) — `if x & (1 << n):` was a mask, a compare and a
+  branch. Bits 0-31 only: the architectural b40 form relocates imm14, and
+  encoding that from memory of the spec is how you get a branch to the wrong
+  address, so bits >= 32 raise instead.
+* **LDUR / STUR** (~45k) — unscaled access, which in practice means the
+  NEGATIVE displacement a scaled-offset load cannot express.
+* **LDRH / STRH / LDRSH / LDRSW / LDRSB** (~39k) — the remaining access widths.
+* **TST / CMN / SUBS** (~36k) — flag-setting ALU with no or minimal result.
+
+### `test_arm64_encoders.py`: every encoder against `as -arch arm64`
+
+209 instructions, each assembled by Apple's assembler and compared **byte for
+byte**. This is a real oracle rather than a hand-derived bit layout, and it
+immediately earned its keep — six of the new encoders were wrong on first
+write and the harness said exactly how:
+
+    csel family   CSNEG and CSINV have bit 31 SET (0xDA..), not clear
+    ldrh / strh   the immediate scales by /2, not /4
+    tst           no destination, so the Rn field is 31
+    cmn           64-bit base has bit 30 clear (0xAB..)
+    b.cond        imm19 counts INSTRUCTIONS, so the range is +-1MB — my first
+                  version allowed 2MB, which lands a branch 1MB from where the
+                  reloc intended and passes every value-level test
+
+That last one is why the test also asserts the bound is **enforced** rather
+than clamped: a silently truncated branch offset produces a program that runs
+and computes something else.
+
+One trap worth writing down: `otool -s __TEXT __text` prints each word in
+display order, so decoding it little-endian yields the byteswapped
+instruction and every comparison then fails for the same uninteresting reason.
+
+### Not yet wired up: using B.cond and CSEL in the codegen
+
+The encoders exist and are verified; the codegen does not emit them yet. It
+still materialises a boolean and branches, via the `_record_cond_branch()` +
+`encode_cbz_xn` pattern (66 `cset` sites). Wiring B.cond means giving the
+comparison-emitting path a way to say "branch on these flags" instead of
+"produce 0/1 and branch on it", which is a behaviour change on the hot path
+for every `if` — worth doing, worth doing with the full gate behind it, and
+not worth folding into a commit that also adds seventeen encoders.
+
+Also still uncovered and genuinely worth having, in the audit's order:
+`ccmp` (0.34%), `rev`, `ror`, `ubfx`/`ubfiz`, `madd`, and the float/convert
+family (`fmov`, `ucvtf`, `fcmp`) — none of which this one-word integer model
+has a use for yet.
