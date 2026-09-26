@@ -2717,21 +2717,19 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
             _a2 = f"(UInt64.ofNat {_op2} + UInt64.ofNat 0)"
             _C = (f"arm64_matches_condition {_cnd_code} (arm64_subs_flags "
                   f"{_a1} {_a2})")
-            # ASSUMED, not derived. The statement is "the condition register
-            # is zero exactly when the counter is zero", and the derivation
-            # used to run through the CSET that materialised the boolean.
-            # There is no such register any more: the lowering branches on the
-            # CMP's flags, so nothing writes the condition into X0 and
-            # `arm64_reg 0 ...` in the statement is not set by the test. The
-            # comparison half still holds and is still provable
-            # (`_source_cond_code` + `_COND_LEMMA`); what no longer follows is
-            # the register half, which is the actual content of the lemma.
+            # ASSUMED, and it has to be. The statement is about a REGISTER
+            # ("the condition register is zero exactly when the counter is"),
+            # and the CSET-based derivation below no longer applies: the
+            # lowering branches on the CMP's flags, so nothing writes the
+            # condition into X0, and `hstep1.trans hstep2` does not even
+            # typecheck against it (verified: restoring the derivation takes
+            # the suite from 40/3/0 to 37/3/3 with a type mismatch here).
             #
-            # This is the `sorry` pass working as intended: one hard fact
-            # assumed at its own granularity, so everything downstream still
-            # elaborates. `_COND_LEMMA` stays because attacking this sorry
-            # means re-deriving the register half, and the table is what says
-            # which comparison each code denotes.
+            # The comparison half still holds and is still provable -- that is
+            # what `_source_cond_code` and `_COND_LEMMA` are for. What has no
+            # proof is the register half, and that is the content of the
+            # lemma. Re-deriving it means relating the loop test to X0
+            # without the CSET, which is real work, not a naming change.
             A("  sorry")
         elif hname == f"{name}_loop_body_dec":
             _defs = ", ".join([f"{qb}_qS{k}" for k in range(mb0)]

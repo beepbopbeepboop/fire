@@ -1064,3 +1064,65 @@ thing to attack. `grep -n "sorry" output/*_proof.lean` enumerates them.
 half re-derived for the flag-based lowering, and the conditional step's
 value-flow goals need real proofs. Both are loop-condition semantics, which is
 where the `B.cond` change actually moved the difficulty.
+
+
+## Attacking the sorries: census, and what is actually left
+
+**Measure them properly first.** `grep sorry output/*_proof.lean` counts
+emitted *tactic lines*, not sorries: `all_goals (first | done | sorry)` only
+produces one when a goal survives, and most of them close. Worse, a plain
+`fire.py build` reports `verified from cache` and **never runs Lean**, so
+grepping its output for `declaration uses 'sorry'` returns 0 for everything --
+which is exactly the wrong answer. To count, run Lean on the generated file
+with the import path:
+
+```
+LEAN_PATH=lib $(python3 -c "import formal.lean as l; print(l.find_lean('.'))") \
+    output/countdown_proof.lean 2>&1 | grep "declaration uses"
+```
+
+**The real census at 40/3/0: 13 sorries across 9 of the 43 proofs.** So 34 of
+the 40 passing theorems are fully proved with no assumption anywhere -- which
+is a better position than the note above claims, and worth knowing before
+anyone assumes the whole suite rests on sorries.
+
+| site | files | what it is |
+|---|---|---|
+| `loop_cond_flag` | 4 (`countdown`, `sum_range`, `wdiff`, `wge`) | the register half of the loop test |
+| `cd_loop` value-flow goals | 9 (the above plus `count`, `fact`, `pow2`, `sqsum`, `sum`) | `arm64_reg 0 s = 0` on each side of the branch |
+
+**`loop_cond_flag` is not derivable, and that is checked, not assumed.** Its
+statement is about a *register* -- "the condition register is zero exactly when
+the counter is" -- and the CSET that used to write the boolean into X0 is gone.
+Restoring the old derivation was tried and it does not merely fail to close, it
+does not typecheck: `hstep1.trans hstep2` is a mismatch, because the
+hypotheses are about the flags and the goal is about `arm64_reg 0`. That takes
+the suite from 40/3/0 to 37/3/3. The comment in the generator records this.
+
+**The statement is still TRUE, so the sorry is not hiding a false claim.**
+Worth checking, because a `sorry` would happily paper over one. The emitted
+loop for `while n > 0: n = n - 1` is:
+
+```
+loop:  add x0, x19      ; x0 = n
+       stp x0, x2
+       mov w0, #0x0     ; the bound, re-materialised EVERY iteration
+       add x1, x0, #0
+       ldp x0, x2
+       cmp x0, x1       ; n vs 0
+       b.ls  exit
+       ...  n = n - 1 ...
+       b loop
+exit:  add x0, x19
+```
+
+Both operands are reloaded at the loop head, so the bound is never stale, and at
+the exit `X0 = x19 = n` with `n <= 0` unsigned meaning `n == 0`. Hence
+`X0 = 0 <-> x19 = 0` holds. (Reading the `cmp` as the loop head makes the bound
+look stale, and it is not -- the head is three instructions earlier.)
+
+**What closing these actually needs.** Not a tactic change: a statement about
+what X0 holds at a branch that no longer writes X0. That means relating the
+loop test to the value-flow chain by hand, per loop shape, which is the same
+class of work as the range and countdown contract generators already do for
+their *counted* facts. It is real proof work, and it is the natural next task.
