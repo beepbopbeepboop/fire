@@ -279,20 +279,60 @@ R10/R11/RDI.
 
 ### Two gaps found while fixing this, both still open
 
-**A dict comprehension computes the wrong value.**
+**A dict comprehension computes the wrong value. PARTIALLY FIXED, still
+broken.**
 
 ```python
-d = {i: i * i for i in range(3)}   # d[2] should be 4, returns 0
-d = {i: i for i in range(3)}       # d[1] == 1  — correct
-d = {i * i: i for i in range(3)}   # d[4] should be 2, returns 1
+d = {i: 100 + i for i in range(3)}
+d[0]        # 100 — correct
+d[1]        # 1, want 101
+d[2]        # 1, want 102
+len(d)      # 3  — correct
 ```
 
-A list comprehension with the same element expression is correct
-(`[i * 2 for i in range(3)][2] == 4`), and dict *literals* index correctly, so
-this is specific to the dict-comprehension path. It returns the loop index
-rather than the computed key/value. It was previously masked: the
-register-aliasing bug above killed every comprehension before the value could
-be observed.
+The right keys and the right count sit next to wrong values. It was masked
+until the register-aliasing fix above, which killed every comprehension before
+a value could be observed. A list comprehension with the same element
+expression is correct (`[i * 2 for i in range(3)][2] == 4`) and dict
+*literals* index correctly, so it is specific to `_compr_append_pair`.
+
+**Two of the three defects are fixed** (arm64, committed):
+
+1. The value never reached the pair append. The leaf case evaluated the VALUE
+   into X0, then `ldp_sp_post(0, 2)` restored BOTH X0 and X1 from the stack —
+   overwriting the value and leaving X1 holding whatever the loop last put
+   there. It now saves the key alone and moves the value into X1.
+2. The two pushes in `_compr_append_pair` are read back the wrong way round.
+   The second `stp` lands lower, so `[sp+0]` is the value and `[sp+8]` is the
+   key; the code loaded `[sp+0]` as the key and `[sp+8]` as the value, so
+   every pair stored its key in the value slot. Fixing this is what moved
+   `d[0]` from 0 to the correct 100.
+
+**What is left.** Only the FIRST pair is right; every later one is wrong, and
+its value reads as 1. So the cursor or the bound check is still off by
+something. The suspect is the out-of-bounds guard, which reads:
+
+```python
+self.asm.emit(encode_cmp_xn_xm(1, 2))      # count vs cap
+self.asm.emit(encode_cset_xd_cond(3, "cs"))  # X3 = count >= cap
+self.asm.emit(encode_cbnz_xn(0, 3))         # branches on X0 — the KEY
+self.asm.emit_label_rel(oob, here_offset=-4)
+```
+
+`emit_label_rel` only RECORDS a reloc (`formal/arm64.py:607`), and it patches
+the displacement of the instruction 4 bytes back — so the `3` is a placeholder
+and the real target is `oob`, taken when **X0** is non-zero. X0 is the key (or,
+in `_compr_append_elem`, the element), never the count; the flag computed into
+X3 is never tested. `_compr_append_elem` has the byte-identical sequence, so
+whatever the right form is, it wants fixing in both.
+
+Note this is NOT triggered by a zero element: `[0]`, `[5, 0]` and
+`[i * 0 for i in range(3)]` are all correct, because a list *literal* goes
+through `_emit_list`, which has no such guard. The comprehension path is where
+it bites. Fixing it means testing the bound flag and not the payload — e.g.
+branch when X3 is SET — and then re-checking both comprehensions, since the
+list one is on the same code path and has simply not been exercised at a
+non-zero element with a full count.
 
 **Subscripting a comprehension directly is unsupported.**
 

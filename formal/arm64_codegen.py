@@ -2875,10 +2875,18 @@ class ARM64Codegen:
         gens = expr.generators
         if gi >= len(gens):
             if is_dict:
-                self._emit_expr(expr.element)  # KEY
-                self.asm.emit(encode_stp_sp_pre(0, 2))
-                self._emit_expr(expr.key)      # VALUE
-                self.asm.emit(encode_ldp_sp_post(0, 2))  # X0=key, X1=val
+                self._emit_expr(expr.element)  # KEY -> X0
+                # Save the KEY ALONE. Saving X0 and X1 together and popping
+                # both looked right and was not: the value is evaluated into
+                # X0, so the pop that restored the key also overwrote the
+                # value, and X1 was left holding whatever the loop had last
+                # put there. Every dict comprehension therefore stored a
+                # stale value — `{i: 100 + i for i in range(3)}` had the right
+                # keys and len, and a wrong value behind each one.
+                self.asm.emit(encode_stp_sp_pre(0, 31))
+                self._emit_expr(expr.key)      # VALUE -> X0
+                self.asm.emit(encode_mov_zr_xn(1, 0))   # X1 = value
+                self.asm.emit(encode_ldp_sp_post(0, 31))  # X0 = key
                 self._compr_append_pair(res_offset, cap)
             else:
                 self._emit_expr(expr.element)
@@ -2997,9 +3005,14 @@ class ARM64Codegen:
 
     def _compr_append_pair(self, res_offset: int, cap: int) -> None:
         """Append (X0=key, X1=value) to dict result; exit(1) past cap."""
-        self.asm.emit(encode_stp_sp_pre(0, 1))  # push key; X1 still value?
-        # STP X0, XZR — X1 is untouched, still value. Push it next:
-        self.asm.emit(encode_stp_sp_pre(1, 31))  # push value
+        # Two pushes, and the offsets below depend on the order: the SECOND
+        # stp lands lower, so [sp+0] is the value pushed second and [sp+8] is
+        # the key. They were read the other way round, so every dict
+        # comprehension stored its key in the value slot and vice versa —
+        # which is why the right keys and the right len sat next to values
+        # that were somebody else's.
+        self.asm.emit(encode_stp_sp_pre(0, 1))  # push key, value
+        self.asm.emit(encode_stp_sp_pre(1, 31))  # push value again (lower)
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
         self._emit_mov_imm("X2", cap)
@@ -3012,9 +3025,9 @@ class ARM64Codegen:
         self.asm.emit_label_rel(oob, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 1))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = key
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = value
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 8))
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
