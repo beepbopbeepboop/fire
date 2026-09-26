@@ -907,6 +907,21 @@ theorem x86_step_mov_rbp_rsp (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, h_rip, h_b0, h_b1, h_b2]
 
+/-- `add rsp, imm32` (REX.W 81 /0 id, ModRM c4).  The counterpart of
+    `x86_step_sub_rsp_imm32` below, and the reason it exists: EVERY `alu_ri32:add`
+    the backend emits targets rsp, so wiring that form to the rax-only
+    `x86_step_add_rax_imm32` matches none of them.  A lemma named for one
+    register sitting under a general form name is the same failure as the
+    `mov_rm64_r64` -> `mov_rbp_rsp` one, and the only symptom is a proof that
+    does not apply. -/
+theorem x86_step_add_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (imm : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48)
+    (h_b1 : code (m + 1) = 0x81) (h_b2 : code (m + 2) = 0xc4)
+    (h_imm : read_i32_le code (m + 3) = imm) :
+    x86_step s code = some { x86_flags_add s s.rsp (UInt64.ofInt imm) (s.rsp + UInt64.ofInt imm) with rsp := s.rsp + UInt64.ofInt imm, rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_flags_add, h_rip, h_b0, h_b1, h_b2, h_imm]
+
 /-- `sub rsp, imm32` — the frame allocation (REX.W 81 /5 id, ModRM 0xec). -/
 theorem x86_step_sub_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
     (imm : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48)
@@ -1141,15 +1156,13 @@ theorem x86_step_mov_mem_disp8_r64 (s : X86State) (code : Nat → UInt8)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rr : x86_rex_r rex = 0) :
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
-        h_rr]
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg]
 
 /-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM 04, SIB 24: scale 0, index
     none, base rsp) -- the store counterpart of `mov rax, [rsp]` below, and

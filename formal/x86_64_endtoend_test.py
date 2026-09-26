@@ -116,11 +116,11 @@ LIB = os.path.join(ROOT, "lib")
 #: the argument order of each lemma.
 _FORMS = {
     "push_r64": ("x86_step_push_rbp", False, ["rip", "b0"]),
-    "alu_ri32:sub": ("x86_step_sub_rsp_imm32", True,
+    "alu_ri32:sub_rsp": ("x86_step_sub_rsp_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
     "mov_rm64_imm32": ("x86_step_mov_rax_imm32", True,
                        ["rip", "b0", "b1", "b2", "imm"]),
-    "alu_ri32:add": ("x86_step_add_rax_imm32", True,
+    "alu_ri32:add_rsp": ("x86_step_add_rsp_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
     "mov_r64_rm64_reg": ("x86_step_mov_rm64_r64_reg", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
@@ -136,9 +136,11 @@ _FORMS = {
     "mov_rm64_r64_reg": ("x86_step_mov_rm64_r64_reg_st", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
+    # No `rb`/`rr` here: the store direction is general over both REX bits,
+    # because the backend emits `4c` (R set) for an r8 source.
     "mov_rm64_r64_disp8": ("x86_step_mov_mem_disp8_r64", False,
                            ["rip", "b0", "b1", "b2", "disp", "rex", "w",
-                            "mod", "rm", "reg", "rb", "rr"]),
+                            "mod", "rm", "reg"]),
     # The only movzx the backend emits is `movzx rax, al` (48 0f b6 c0), all 33
     # of them, so this uses the existing concrete lemma rather than a
     # nibble- and register-parameterised one nothing would use.
@@ -173,38 +175,41 @@ _FORMS = {
 #: a mismatch between them is a proof failure rather than a silent gap.
 _SUCCS = {
     "push_r64":
-        "{ $s with rsp := $s.rsp - 8, rip := $m + 1, "
+        "{ $s with rsp := $s.rsp - 8, rip := $next, "
         "mem := mem_write_bytes $s.mem ($s.rsp - 8).toNat $s.rbp 8 }",
-    "alu_ri32:sub":
+    "alu_ri32:sub_rsp":
         "{ x86_flags_sub $s $s.rsp $imm ($s.rsp - $imm) with "
-        "rsp := $s.rsp - $imm, rip := $m + 7 }",
-    "mov_rm64_imm32": "{ $s with rax := $imm, rip := $m + 7 }",
+        "rsp := $s.rsp - $imm, rip := $next }",
+    "alu_ri32:add_rsp":
+        "{ x86_flags_add $s $s.rsp $imm ($s.rsp + $imm) with "
+        "rsp := $s.rsp + $imm, rip := $next }",
+    "mov_rm64_imm32": "{ $s with rax := $imm, rip := $next }",
     "alu_ri32:add":
         "{ x86_flags_add $s $s.rax $imm ($s.rax + $imm) with "
-        "rax := $s.rax + $imm, rip := $m + 7 }",
+        "rax := $s.rax + $imm, rip := $next }",
     "mov_r64_rm64_reg":
         "{ x86_set_reg $s ($reg + x86_rex_r $rex) "
-        "(x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $m + 3 }",
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next }",
     "mov_r64_rm64_sib":
-        "{ $s with rax := mem_read_bytes $s.mem $s.rsp.toNat 8, rip := $m + 4 }",
+        "{ $s with rax := mem_read_bytes $s.mem $s.rsp.toNat 8, rip := $next }",
     "mov_rm64_r64_sib":
         "{ $s with mem := mem_write_bytes $s.mem $s.rsp.toNat "
-        "(x86_get_reg $s ($reg + x86_rex_r 0x48)) 8, rip := $m + 4 }",
+        "(x86_get_reg $s ($reg + x86_rex_r 0x48)) 8, rip := $next }",
     "mov_r64_rm64_disp8":
         "{ x86_set_reg $s ($reg + x86_rex_r $rex) (mem_read_bytes $s.mem "
-        "(Int.ofNat $s.rbp.toNat + $disp).toNat 8) with rip := $m + 4 }",
+        "(Int.ofNat $s.rbp.toNat + $disp).toNat 8) with rip := $next }",
     "mov_rm64_r64_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
-        "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $m + 3 }",
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $next }",
     "mov_rm64_r64_disp8":
         "{ $s with mem := mem_write_bytes $s.mem "
-        "(Int.ofNat $s.rbp.toNat + $disp).toNat "
-        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $m + 4 }",
-    "movzx_r64_r8": "{ $s with rax := $s.rax, rip := $m + 4 }",
+        "(Int.ofNat (x86_get_reg $s (5 + x86_rex_b $rex)).toNat + $disp).toNat "
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
+    "movzx_r64_r8": "{ $s with rax := $s.rax, rip := $next }",
     "alu_rr:add":
-        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
     "alu_rr:sub":
-        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
     # `= true` explicitly.  The model's `if` is over a `Bool`, and the
     # `by_cases` hypothesis is an equation about a `Prop`; writing the condition
     # the same way on both sides is what lets the hypothesis rewrite it.  It is
@@ -215,16 +220,16 @@ _SUCCS = {
         "{ $s with rip := $tgt }",
     "setcc":
         "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
-        " rip := $m + 3 }",
+        " rip := $next }",
     "alu_rr:cmp":
-        "{ $s with rip := $m + 3, zf := ($fc).zf, sf := ($fc).sf, "
+        "{ $s with rip := $next, zf := ($fc).zf, sf := ($fc).sf, "
         "cf := ($fc).cf, of_ := ($fc).of_ }",
     "alu_rr:test":
-        "{ $s with rip := $m + 3, zf := ($fl).zf, sf := ($fl).sf, "
+        "{ $s with rip := $next, zf := ($fl).zf, sf := ($fl).sf, "
         "cf := ($fl).cf, of_ := ($fl).of_ }",
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
-        "rsp := $s.rbp + 8, rip := $m + 1 }",
+        "rsp := $s.rbp + 8, rip := $next }",
     "ret":
         "{ $s with rip := (mem_read_bytes $s.mem ($s.rsp.toNat) 8).toNat, "
         "rsp := $s.rsp + 8 }",
@@ -253,7 +258,8 @@ def _byte_facts(insns, code, base):
     return " ∧\n    ".join(facts)
 
 
-def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None):
+def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
+             length=1):
     """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
     the successor expression its conclusion has.
 
@@ -363,6 +369,12 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None):
     subs = dict(extra_succ)
     subs["$s"] = prev
     subs["$m"] = str(addr)
+    # The NEXT address as a literal, not `$m + length`.  `simp` does not reduce
+    # `4294967868 + 4` to `4294967872` -- large Nat literals are not folded by
+    # the simplifier -- so a successor stated as an addition leaves every
+    # subsequent `rip` comparison unprovable, and the failure reads as a bare
+    # `False` from the `simp` that was trying.
+    subs["$next"] = str(addr + length)
     subs["$imm"] = str(imm) if imm is not None else "0"
     if len(raw) > 2:
         modrm = raw[2]
@@ -394,6 +406,13 @@ def _shapes(code, insns):
         raw = code[i.offset:i.next_offset]
         form = i.form
         modrm = raw[2] if len(raw) > 2 else 0
+        if form in ("alu_ri32:add", "alu_ri32:sub") and len(raw) >= 3:
+            # `alu_ri32:add` is emitted ONLY as `add rsp, imm32` (ModRM c4);
+            # `alu_ri32:sub` only as `sub rsp, imm32` (ModRM ec).  Keying the
+            # form to an rax lemma matches zero of them, and the symptom is a
+            # proof that does not apply rather than a gap.
+            want = 0xc4 if form == "alu_ri32:add" else 0xec
+            form = form + ("_rsp" if raw[2] == want else "_other")
         if form in ("mov_r64_rm64", "mov_rm64_r64"):
             m, rm = modrm >> 6, modrm & 7
             if m == 3:
@@ -442,9 +461,12 @@ def _tree(code, info, shapes):
             off = (int.from_bytes(raw[2:6], "little", signed=True)
                    if form == "jcc_rel32"
                    else int.from_bytes(raw[1:2], "little", signed=True))
-            nxt = addr + (6 if form == "jcc_rel32" else 2)
+            # The displacement is relative to the END of the instruction, not
+            # to its first byte, so the length is part of the target address.
+            n = 6 if form == "jcc_rel32" else 2
+            nxt = addr + n
             node = _Node(insn, form, raw, addr, "jcc", state, nxt)
-            taken = build(addr + off, None, depth + 1)
+            taken = build(addr + n + off, None, depth + 1)
             fell = build(nxt, None, depth + 1)
             if taken is None or fell is None:
                 return None
@@ -494,7 +516,12 @@ def _byte_list(insns, code, base):
 
 def _header(code, insns, base):
     """The import, the code function, and every byte as a fact."""
+    # A heartbeat budget.  The `hrip` step at the end of each path is one `simp`
+    # over every successor equation on that path, and on the longer ones that
+    # is a real amount of work: the default budget reports "deterministic
+    # timeout at whnf, maximum number of heartbeats" and the theorem is fine.
     out = ["import X86\n",
+           "set_option maxHeartbeats 800000\n",
            "def rc (addr : Nat) : UInt8 :=",
            "  if addr < %d then 0 else" % base,
            "  ([%s].getD (addr - %d) 0)\n"
@@ -562,7 +589,7 @@ def emit(path, expected):
     chain = []
     for insn, form, raw in shapes:
         addr = base + insn.offset
-        call, succ = _resolve(form, raw, addr, prev, k)
+        call, succ = _resolve(form, raw, addr, prev, k, (), None, insn.length)
         nxt = "s%d" % (k + 1)
         a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
         a("    %s" % call)
@@ -644,7 +671,7 @@ def emit_terminates(path):
         k = counter[0]
         counter[0] = k + 1
         call, succ = _resolve(node.form, node.raw, node.addr, state, k,
-                              cases, hs_in)
+                              cases, hs_in, node.insn.length)
         nxt = "s%d" % (k + 1)
         pad = "  " * ind
         case_simp = (", " + ", ".join(cases)) if cases else ""
@@ -665,12 +692,15 @@ def emit_terminates(path):
         # PREVIOUS step's successor equation describes.  So this uses `hs_k`,
         # not `hs_{k+1}`; for the first step the predecessor is the initial
         # state, which `i0` names.
+        # `hs_in`, the same equation the step's own `rip` fact uses -- after a
+        # fork that is the BRANCH's successor equation, not this step's, and
+        # naming this step's instead cites an `hs` the other arm has not emitted.
         if k == 0:
             step_rule = ("x86_exec_go_exit_step (by decide) (by simp only "
                          "[i0, X86State.init] <;> decide) h0")
         else:
-            step_rule = ("x86_exec_go_exit_step (by decide) (by simp [hs%d%s]) h%d"
-                         % (k, case_simp, k))
+            step_rule = ("x86_exec_go_exit_step (by decide) (by simp [%s%s]) h%d"
+                         % (hs_in or ("hs%d" % k), case_simp, k))
 
         if node.kind == "jcc":
             # The condition is over the state the branch READS -- the one this
@@ -695,7 +725,12 @@ def emit_terminates(path):
             # arms of every fork, so a range over it names hypotheses the other
             # arm has not emitted yet, and the file dies on "Unknown identifier
             # hs18" inside a `simp` set that looks entirely reasonable.
-            hs = ", ".join(hs_path)
+            # Including THIS step's own successor equation: `hs_path` as handed
+            # in stops one short, because it is extended on the way down and
+            # the `ret` branch returns before recursing -- so the leaf's own
+            # `s` is the one state the `simp` cannot unfold, and it reports
+            # "made no progress" on a set that looks complete.
+            hs = ", ".join(hs_path + ("hs%d" % (k + 1),))
             emit("have hrip : %s.rip = 0 := by" % nxt)
             emit("  have key : \u2200 (m : Nat \u2192 UInt8) (a : Nat) (v : UInt64)"
                  " (b : Nat),")
