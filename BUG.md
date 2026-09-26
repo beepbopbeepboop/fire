@@ -606,24 +606,40 @@ compile-time constant and fits the shifted form in one.
 Two items remain, and both are recorded here with their real cost so the next
 person does not have to re-derive them.
 
-**`B.cond` — the biggest single item in the audit (~154k occurrences) — is
-blocked on the deferred proof work, and the block is wider than it looks.**
-Emitting it at a conditional site is easy; emitting it *correctly* is not. All
-four sites (`if`/`elif`, `while`/`for`, the ternary, a comprehension's generator
-conditions) call `_record_cond_branch()`, and `arm64_proof_gen` finds an entry
-condition by locating a block whose terminator is a recorded `cbz` and reading
-the register that CBZ tests. A `B.cond` is neither a `cbz` block nor a
-register, so the change is not one branch swap — it is:
+**`B.cond` (the biggest single item in the audit, ~154k occurrences) is now
+wired at every site that has flags to branch on**, and wiring it turned up two
+real bugs rather than just closing a gap.
 
-  1. `_step_branch_index` recognising the `0x54..` opcode,
-  2. the block scanner emitting a new terminator kind carrying the condition,
-  3. the entry-condition search walking back to the governing `CMP` instead of
-     reading a register, and
-  4. the Lean emitter proving a flag predicate rather than `reg != 0`.
+A comparison becomes `CMP` + `B.cond` — one branch, and no boolean round trip
+through a register. It fires at `if`/`elif`, `while`, the `for`-range test, the
+ternary's fallback, and a comprehension's generator conditions. It
+deliberately does *not* fire for a call condition, a truthiness test, or a
+short-circuit chain: those genuinely need a value, because there are no flags
+to read. Branching on the FALSE case keeps the block shape byte-identical to
+the old `cbz` lowering, so nothing downstream had to move.
 
-Steps 3 and 4 are the real work, and 4 is a proof about comparison semantics,
-not a naming change. That is exactly the work deferred, so `B.cond` is left
-unwired rather than wired and silently mis-proved.
+Two bugs, both found by the first thing that actually ran the code:
+
+  1. `Assembler.resolve()` had cases for `B`, `BL`, `CBZ` and `CBNZ` but none
+     for `B.cond`. The displacement was never written, `imm19` stayed 0, and
+     every conditional branch pointed at **itself**: `if a > b:` with a false
+     condition was a one-instruction infinite loop. The first fix was wrong in
+     a way worth recording — it identified the opcode with
+     `insn & 0xff00001f == 0x54000000`, masking off the cond field and then
+     comparing against a *zero* cond, which can never match. The top byte
+     alone identifies `B.cond`; both the encoder and the model hit this same
+     trap independently.
+
+  2. `test_arm64_encoders.py` compares four instruction *bytes* against `as`.
+     It therefore cannot see a missing *relocation*, which is why a perfectly
+     green encoder suite coexisted with a compiler that hung on any false
+     comparison. `test_arm64_emission.py` now checks that no branch resolves
+     to its own address; that check was verified to fail when the fix is
+     removed, so it is not vacuous.
+
+The proof side is deliberately unfinished — the generator is to be thinned and
+closed with `sorry` once the instruction work is done, and the `sorry`s
+attacked after that.
 
 **A reserved scratch-base register would take the frame base from two
 instructions to one**, worth ~5% on a container-heavy function
@@ -644,3 +660,95 @@ Two smaller things were checked and are already optimal:
     expression temporaries. Making them one needs registers that expression
     evaluation provably does not clobber; X9 alone is used by
     `_emit_list_base`.
+
+
+## `for i in range(a, b)` never terminated: the loop had no exit test at all
+
+Found while wiring `B.cond` into the for-range test. This is the worst-shaped
+bug in this file, because it is not a wrong answer — it is a hang, and it was
+sitting in a code path the test suite never entered.
+
+The for-range lowering called `_emit_cmp(...)` at the top of the loop and then
+**never branched on the CSET it left behind**. The emitted loop was:
+
+```
+loop:  cmp x0, x1          ; i vs end
+       cset x0, lo         ; x0 = (i < end)   <- and then?
+       add x0, x20, #0x0   ; x0 is overwritten here
+       ...body...
+       b loop
+```
+
+`cset` is flags-to-register; nothing consumed the register. There is no `cbz`
+anywhere in the loop and no other exit, so control reaches the end of the
+function's range only by running out of stack.
+
+Every `for i in range(...)` therefore hung. It survived because comprehensions
+use their own loop emitter, and the range cases in `test_formal_run.py` went
+through comprehensions rather than a `for` statement.
+
+Two bugs, both fixed:
+
+  * **The missing exit test.** Now `CMP` + `B.cond` on the flags, the same
+    shape as the `while` condition. Seven cases in `test_formal_run.py`
+    (ascending, empty, descending, stride 2, single-argument, nested, `break`).
+
+  * **Descending ranges exited immediately.** The test was hard-coded
+    `i < end`, so `range(4, 0, -1)` — whose *counter* already advanced
+    correctly, via `SUB` — compared `4 < 0` and did nothing. The comparison now
+    follows the step's direction. A step whose sign is only known at runtime
+    (`range(a, b, -step)`) is now **refused with a clear error** rather than
+    compiled to a loop bound that is the wrong way round: a wrong answer, not
+    a slow one.
+
+### Still open: comparisons involving negative values are unsigned
+
+Found in the same pass, and NOT fixed, because the root cause is a type bug
+that would invalidate the whole condition-code table.
+
+`range(-3, 2)` returns 0. So does `if -3 < 2: return 1`. Arithmetic is fine
+(`0 - 3 + 5` is 2); only *comparisons* are wrong, and only when a negative
+value is involved:
+
+`infer_expr` returns `None` for `UnaryOp('-', IntLiteral(3))` — the parser
+keeps `-3` as a negation, not a negative literal, and nothing gives it a type.
+`common_type` then returns `None`, and `cmp_signed(None)` is `False`
+(`formal/types.py:260`), so the comparison is emitted with the **unsigned**
+condition codes. `-3` is `0xFFFF...FD` as a `UInt64`, so `-3 < 2` is false.
+
+This is backend-wide, not a loop bug, which is why it is recorded here rather
+than papered over in the for-range path. The fix is in `formal/types.py`:
+give a negated literal a signed type. It has to be done there, because the
+`B.cond` lowering deliberately shares `_cmp_conds` and the
+`cmp_signed(common_type(...))` decision with the `CSET` value path — so
+fixing it in one place fixes both, and fixing it in only one place would make
+a comparison branch one way and evaluate the other. `formal/model.py`'s flag
+lemmas (`arm64_flag_lt` and friends) and the B.cond condition-code table would
+need re-checking against it.
+
+
+## CURRENTLY RED, DELIBERATELY: the arm64 proof generator is half-wired for B.cond
+
+`test_formal_dylib.py` is 8/1, not 9/9. The failure is
+`default path emits a checked proof` — a *proof* case, and the proof side of
+the `B.cond` work is deliberately unfinished.
+
+What is done and working: the codegen, the `B.cond` encoders, the
+`arm64_step` model case, and the Python-side block/step handling
+(`_STEP_CONDS` entry 51, block shape, `_branch_target`, `_cset_cond`,
+`_regs_written`, the run guard, and the two `step_ok` emitters).
+
+What is NOT done: the entry-condition theorem. The generator finds a block's
+entry condition by reading the register its terminator tests, and a `B.cond`
+terminator has no register — its low 5 bits are the condition code. Rather
+than state a theorem about the wrong register, such blocks currently take the
+existing "no source-level condition" path and no entry condition is stated at
+all, which is weaker but not unsound. The end-to-end CFG walk still rejects
+some shapes it used to accept.
+
+This is on purpose, and in this order: finish instruction selection, then thin
+the generator and close everything with `sorry`, then attack the `sorry`s.
+Anyone running the full gate in the meantime should expect this one case to
+fail, and should not read it as a codegen regression — every runtime suite is
+green (`test_formal_run.py` 26/26, `test_arm64_emission.py` 5/5,
+`test_formal_imports.py` 11/11).

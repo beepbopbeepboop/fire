@@ -145,6 +145,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_list_contains_int':     'int',
     'mojo_list_contains_double':  'int',
     'mojo_list_contains_str':     'int',
+    'mojo_list_contains_bytes':   'int',
     'mojo_list_set_int':          'void',
     'mojo_list_set_double':       'void',
     'mojo_list_set_str':          'void',
@@ -161,6 +162,15 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_setdefault_int':   'int64_t',
     'mojo_dict_setdefault_str':   'char *',
     'mojo_dict_contains':         'int',
+    'mojo_dict_set_bytes_int':    'void',
+    'mojo_dict_set_bytes_str':    'void',
+    'mojo_dict_set_bytes_double': 'void',
+    'mojo_dict_get_bytes_int':    'int64_t',
+    'mojo_dict_get_bytes_str':    'char *',
+    'mojo_dict_get_bytes_double': 'double',
+    'mojo_dict_contains_bytes':   'int',
+    'mojo_dict_setdefault_bytes_int': 'int64_t',
+    'mojo_dict_pop_bytes_int':    'int64_t',
     'mojo_dict_len':              'int64_t',
     'mojo_dict_iter_new':         'MojoDictIter *',
     'mojo_dict_iter_next':        'int',
@@ -173,6 +183,10 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_set_new':               'MojoSet *',
     'mojo_set_contains_int':      'int',
     'mojo_set_contains_str':      'int',
+    'mojo_set_add_bytes':         'void',
+    'mojo_set_contains_bytes':    'int',
+    'mojo_set_val_bytes':         'MojoBytes *',
+    'mojo_set_iter_pos':          'int64_t',
     'mojo_set_len':               'int64_t',
     'mojo_set_iter_new':          'MojoSetIter *',
     'mojo_set_iter_next':         'int',
@@ -212,24 +226,52 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_slice':           'MojoBytes *',
     'mojo_bytes_contains':        'int',
     'mojo_bytes_find':            'int64_t',
+    'mojo_bytes_rfind':           'int64_t',
+    'mojo_bytes_find_from':       'int64_t',
+    'mojo_bytes_rfind_from':      'int64_t',
+    'mojo_bytes_index_int':       'int64_t',
+    'mojo_bytes_rindex_int':      'int64_t',
+    'mojo_bytes_count_int':       'int64_t',
     'mojo_bytes_count':           'int64_t',
+    'mojo_bytes_count_from':      'int64_t',
     'mojo_bytes_startswith':      'int',
     'mojo_bytes_endswith':        'int',
     'mojo_bytes_decode':          'char *',
     'mojo_bytes_hex':             'char *',
+    'mojo_bytes_removeprefix':    'MojoBytes *',
+    'mojo_bytes_removesuffix':    'MojoBytes *',
+    'mojo_bytes_title':           'MojoBytes *',
+    'mojo_bytes_capitalize':      'MojoBytes *',
+    'mojo_bytes_swapcase':        'MojoBytes *',
+    'mojo_bytes_ljust':           'MojoBytes *',
+    'mojo_bytes_rjust':           'MojoBytes *',
+    'mojo_bytes_center':          'MojoBytes *',
+    'mojo_bytes_zfill':           'MojoBytes *',
+    'mojo_bytes_partition':       'MojoList *',
+    'mojo_bytes_rpartition':      'MojoList *',
+    'mojo_bytes_fromhex':         'MojoBytes *',
+    'mojo_bytes_cstr_key':        'char *',
+    'mojo_bytes_maketrans':       'MojoBytes *',
+    'mojo_bytes_translate':       'MojoBytes *',
+    'mojo_bytes_is':              'int',
     'mojo_bytes_replace':         'MojoBytes *',
+    'mojo_bytes_replace_n':       'MojoBytes *',
     'mojo_bytes_strip':           'MojoBytes *',
     'mojo_bytes_upper':           'MojoBytes *',
     'mojo_bytes_lower':           'MojoBytes *',
     'mojo_bytes_split':           'MojoList *',
     'mojo_bytes_rsplit':          'MojoList *',
+    'mojo_bytes_split_max':       'MojoList *',
     'mojo_bytes_splitlines':      'MojoList *',
+    'mojo_bytes_splitlines_keep': 'MojoList *',
     'mojo_bytes_join':            'MojoBytes *',
     'mojo_bytes_copy':            'MojoBytes *',
     'mojo_bytes_reverse':         'MojoBytes *',
     'mojo_bytearray_new':         'MojoBytes *',
     'mojo_bytearray_copy':        'MojoBytes *',
     'mojo_bytearray_pop':         'int64_t',
+    'mojo_bytearray_insert':      'void',
+    'mojo_bytearray_remove':      'void',
     'mojo_memoryview_new':        'MojoMemoryView *',
     'mojo_memoryview_from_bytes': 'MojoMemoryView *',
     'mojo_memoryview_len':        'int64_t',
@@ -240,6 +282,10 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_memoryview_hex':        'char *',
     'mojo_memoryview_cast':       'MojoMemoryView *',
     'mojo_memoryview_repr':       'char *',
+    'mojo_memoryview_nbytes':     'int64_t',
+    'mojo_memoryview_itemsize':   'int64_t',
+    'mojo_memoryview_format':     'char *',
+    'mojo_memoryview_obj':        'MojoBytes *',
     # struct module (binary pack/unpack)
     'mojo_struct_compile':        'MojoStructFmt *',
     'mojo_struct_new':            'MojoStructFmt *',
@@ -2014,6 +2060,17 @@ class GimpleGen:
         # extracting the qualifier already baked into the dylib's advertised
         # symbol string — there's no local source file to derive it from).
         self._imported_struct_home: dict = {}
+        # Imported module name -> the absolute path its source was actually
+        # read from. Populated by _compile_imported_module as each nested
+        # temp_gen is created (it already computes the canonical `_abspath`
+        # for its own `#line` directives), and shared into every temp_gen so
+        # any ancestor can name the right FILE for a statement that physically
+        # came from another module — see `_line_src_file` in gen_stmt
+        # (mojo/backend_gimple/emit_stmts.py) and its use around
+        # `_gen_struct_method` for the inheritance-merge case, where a base
+        # class's method body is emitted a second time as a SUBCLASS method
+        # and would otherwise be attributed to the subclass's file.
+        self._module_source_paths: dict = {}
         # Imported free-function bare name -> its home module's C-symbol
         # qualifier — the free-function analog of _imported_struct_home
         # above, added to fix SB-1 (doc/STDLIB-BUGS.md): two modules' same-
@@ -2409,6 +2466,7 @@ class GimpleGen:
         'mojo_set_add_str':      ('void',      ['MojoSet *', 'char *']),
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_contains_str': ('int',       ['MojoSet *', 'char *']),
+        'mojo_set_contains_bytes': ('int',      ['MojoSet *', 'MojoBytes *']),
         'mojo_set_clear':        ('void',      ['MojoSet *']),
         'mojo_set_contains_int': ('int',       ['MojoSet *', 'int64_t']),
         'mojo_hasattr':          ('int',        ['int', 'char *']),
@@ -3147,10 +3205,10 @@ class GimpleGen:
         return gmp._lower_file_method(self, ov, method, args)
     def _lower_str_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_str_method(self, ov, method, args)
-    def _lower_bytes_method(self, ov: str, method: str, args: list) -> tuple:
-        return gmp._lower_bytes_method(self, ov, method, args)
-    def _lower_memoryview_method(self, ov: str, method: str, args: list) -> tuple:
-        return gmp._lower_memoryview_method(self, ov, method, args)
+    def _lower_bytes_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:
+        return gmp._lower_bytes_method(self, ov, method, args, kwargs)
+    def _lower_memoryview_method(self, ov: str, method: str, args: list, kwargs=None) -> tuple:
+        return gmp._lower_memoryview_method(self, ov, method, args, kwargs)
     def _repack_method_call_spread_args(self, mangled: str, struct_name: str, method: str, call_args: list, arg_pairs: list) -> list:
         return gmp._repack_method_call_spread_args(self, mangled, struct_name, method, call_args, arg_pairs)
     def _lower_struct_method_call(self, ov: str, ot: str, method: str, node) -> tuple:

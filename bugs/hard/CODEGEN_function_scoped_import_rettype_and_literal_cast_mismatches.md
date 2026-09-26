@@ -1,5 +1,71 @@
 # HARD BUG (4 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls, (4) imported-class name mistaken for a zero-arg accessor function in `X.ATTR` member access
 
+## Status (2026-09-25 — Mechanism 4's CONSTRUCTOR-CALL residual no longer reproduces; the weakref.py `#line` misattribution is FIXED)
+
+Two things changed since the last re-verification entry.
+
+### Mechanism 4's `Parameter(...)` constructor-call residual: NOT REPRODUCIBLE
+
+The residual was: `Parameter('values', Parameter.VAR_POSITIONAL)` — a
+constructor CALL on an imported class name — colliding with the class's own
+later-registered `typedef`, because at the moment the call is lowered the
+class may not yet be in `struct_field_types` (an ordering race). A minimal
+two-file repro (`inspect.py` defining `class Parameter`/`class Signature`,
+plus a module doing a **function-scoped** `from inspect import Parameter,
+Signature` and then `Signature([Parameter('values',
+Parameter.VAR_POSITIONAL)])`) now compiles with **zero** `error:` lines, and
+the generated C contains a real `typedef struct Parameter {...} Parameter;`,
+a real `inspect_Parameter___init__`, the `_MOJO_STUB_Parameter` guard already
+defined, and no colliding weak stub.
+
+The whole-program inline path evidently no longer takes the
+"unresolved import → weak stub" route for a name that the closure genuinely
+defines as a class, so the ordering race the doc describes no longer has a
+live failure mode on this path. **Not re-attempted**: the doc's own prior
+assessment (a fix here means reordering class registration across the whole
+transitive closure, which this project's `CODEGEN_function_scoped_import_
+call_unresolved_at_link.md` records as having passed the entire quality gate
+and then being reverted after a corpus-wide regression) is unchanged, and
+with no reproduction to fix there is nothing to verify a change against.
+The genuinely-reachable path today — `Lib/enum.py` itself — is refused
+outright for a completely different, already-documented reason (its
+`_iter_member_`/`_iter_member_by_def_`/`_iter_member_by_value_` classmethod
+generators), so it cannot even reach this code.
+
+### `Lib/weakref.py`'s `#line` misattribution: FIXED
+
+"Not fixed" item 1's finding 1 was that errors in a mixin base class's
+method body, re-emitted inside a SUBCLASS's compiled unit, carried the
+SUBCLASS's `#line` filename with the BASE's line number — hence
+"weakref.py:962" in a 574-line file, whose real source is
+`_collections_abc.py:819-822`. **Reproduced and fixed.**
+
+Root cause: `_merge_struct_inheritance` copies a base class's
+`FunctionDef` node objects into the subclass's `.methods`; the struct
+method-body emission loop then emits each one again as `Sub___m`, and
+`gen_stmt` took its filename from `gen._current_filename` — which is the
+module being compiled — rather than from the node's real origin. Every
+statement node carries only a `line`, never a file.
+
+Fix, entirely additive (no emission ordering touched):
+- `GimpleGen._module_source_paths` (module name -> the absolute path its
+  source was read from), populated in `_compile_imported_module` next to
+  the `_abspath` it already computes for its own `#line` directives, and
+  shared into each nested `temp_gen` like its sibling shared dicts.
+- `module_gen` snapshots each struct's OWN method-node identities before
+  the merge, then afterwards maps every node the merge INJECTED back to the
+  module that originally declared it (`self._inherited_method_src`).
+- The method-body emission loop sets `self._line_src_file` for the duration
+  of an inherited method's emission, and `gen_stmt` prefers it over
+  `_current_filename`.
+
+The emitted C is byte-identical apart from the `#line` directives
+themselves (verified by diffing with all `#line` lines stripped), so this is
+a pure diagnostics fix with no codegen semantic surface. Regression test:
+`inherited_method_line_directive_names_its_own_module` in `test_gimple.py`,
+which builds a real two-file closure and asserts the `Sub___eq__` body
+carries the base module's `#line 3 "<base>.py"` and not the subclass's.
+
 ## Re-verified 2026-08-26, wtRest19b (fresh pass, no code change; full-corpus repro not completed due to heavy concurrent system load)
 
 Confirmed all four fix sites still present and unchanged in current

@@ -1805,8 +1805,23 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
 
 def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
-    """for x in set — iterates over int64_t values (int set assumed)."""
-    gen._declare_var(var, 'int64_t', force=(var == shadow_name))
+    """for x in set — iterates over the set's ELEMENT values.
+
+    The element C type comes from the set's recorded element type, because
+    the three domains really are stored differently: int slots hold a bare
+    int64_t, str slots a `char *` (tag 1), and bytes slots a
+    NUL-terminated content copy (tag 2) that only `mojo_set_val_bytes`
+    turns back into a real MojoBytes value. Reading every domain through
+    `mojo_set_iter_val_int` gives pointer bits for the two pointer
+    domains, which is what a set of strings/bytes used to iterate as."""
+    _se = gen._elem_of(it_val) or 'int64_t'
+    if _se == 'MojoBytes *':
+        _loop_ctype, _read = 'MojoBytes *', 'mojo_set_val_bytes'
+    elif _se == 'char *':
+        _loop_ctype, _read = 'char *', 'mojo_set_iter_val_str'
+    else:
+        _loop_ctype, _read = 'int64_t', 'mojo_set_iter_val_int'
+    gen._declare_var(var, _loop_ctype, force=(var == shadow_name))
     # If it_val is int64_t (boxed pointer), cast to MojoSet * (matches dict path)
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
         it_val = gen._coerce_to_type('int64_t', 'MojoSet *', it_val)
@@ -1824,7 +1839,12 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen._emit(f"  {gen._cname(var)} = mojo_set_iter_val_int ({iter_t});")
+    if _read == 'mojo_set_val_bytes':
+        _slot = gen._new_temp('int64_t')
+        gen._emit(f"  {_slot} = mojo_set_iter_pos ({iter_t});")
+        gen._emit(f"  {gen._cname(var)} = mojo_set_val_bytes ({it_val}, {_slot});")
+    else:
+        gen._emit(f"  {gen._cname(var)} = {_read} ({iter_t});")
     gen.loop_stack.append((bb_post, bb_after))
     for s in body:
         gen.gen_stmt(s)

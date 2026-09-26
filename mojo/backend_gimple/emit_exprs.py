@@ -1534,6 +1534,28 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             return 'int64_t', gen._call_expr('int64_t', 'mojo_struct_size', [('MojoStructFmt *', fp)])
         return 'char *', gen._call_expr('char *', 'mojo_struct_format', [('MojoStructFmt *', fp)])
 
+    # memoryview instance attributes. These are all zero-argument
+    # descriptors, so they read as plain members rather than calls.
+    if ot == 'MojoMemoryView *' and node.member in ('nbytes', 'itemsize', 'format',
+                                                     'obj', 'readonly',
+                                                     'c_contiguous', 'f_contiguous',
+                                                     'contiguous'):
+        mp = gen._ensure_local('MojoMemoryView *', ov)
+        if node.member in ('nbytes', 'itemsize'):
+            fn = ('mojo_memoryview_nbytes' if node.member == 'nbytes'
+                  else 'mojo_memoryview_itemsize')
+            return 'int64_t', gen._call_expr('int64_t', fn, [('MojoMemoryView *', mp)])
+        if node.member == 'format':
+            return 'char *', gen._call_expr('char *', 'mojo_memoryview_format',
+                                            [('MojoMemoryView *', mp), ('char *', '"B"')])
+        if node.member == 'obj':
+            return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
+                                                 [('MojoMemoryView *', mp)])
+        # This representation is always a writable 1-D byte window over
+        # contiguous memory, so these descriptors are constant-folded (the
+        # call form folds them identically — see _lower_memoryview_method).
+        return '_Bool', gen._new_val('_Bool', '0' if node.member == 'readonly' else '1')
+
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':
@@ -3705,16 +3727,40 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
         # garbage overload key (`Counter_inc_0_2`).
         if list_elem == 'int64_t' and xt == 'char *':
             list_elem = 'char *'
+        if list_elem == 'MojoBytes *' or xt == 'MojoBytes *':
+            # Elements are boxed `MojoBytes *` pointers, so the generic
+            # mojo_list_contains_int would compare POINTER identity — two
+            # separately-constructed `b'a'` values are different pointers, so
+            # `b'a' in [b'a']` was always False. Python defines `in` in terms
+            # of `==`, which for bytes is bytewise.
+            xv_b = gen._new_val('MojoBytes *', xv) if xt != 'MojoBytes *' else xv
+            gen._emit_call('int', ti, 'mojo_list_contains_bytes',
+                           [('MojoList *', rv), ('MojoBytes *', xv_b)])
+            return 'int', ti
         suf = gimple_ctypes.TypeLattice.list_suffix(list_elem)
         xv_cast = gen._cast_for_list(xt, xv, suf)
         gen._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")
     elif rt == 'MojoDict *':
+        # A bytes key gets its OWN key domain in the runtime (see
+        # _DictSlot.keykind) so `d[b'x']` and `d['x']` stay the two distinct
+        # entries Python says they are; routing it through the char* path
+        # made `d[b'x'] = 1; d[b'x']` read back 0 (two different literal
+        # objects -> two different char* key contents never matched... and
+        # even the same object aliased a str key of the same characters).
+        if xt == 'MojoBytes *':
+            gen._emit_call('int', ti, 'mojo_dict_contains_bytes',
+                           [('MojoDict *', rv), ('MojoBytes *', xv)])
+            return 'int', ti
         # Ensure key is char * for dict operations (all dict keys are strings in runtime)
         xt, xv = gen._char_to_cstr(xt, xv)
         gen._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
     elif rt == 'MojoSet *':
         # Route through _emit_call so global/_slit_ args are loaded into locals
         # first (GIMPLE: a call argument must be a local, not a global decl).
+        if xt == 'MojoBytes *':
+            gen._emit_call('int', ti, 'mojo_set_contains_bytes',
+                           [('MojoSet *', rv), ('MojoBytes *', xv)])
+            return 'int', ti
         if xt == 'char *':
             gen._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
         else:
@@ -4120,6 +4166,14 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
         # of C-casting the int to char* which produces NULL for 0.
         kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
+    elif kt == 'MojoBytes *':
+        # A bytes key is its OWN key domain in the runtime (see
+        # _DictSlot.keykind) and must keep the MojoBytes pointer — the
+        # generic non-scalar-key branch below would `_repr_value` it into
+        # the char* str domain, which both loses the bytes type and aliases
+        # a str key of the same characters.
+        if kv.startswith('_slit_'):
+            kv = gen._new_val('MojoBytes *', f"{kv}")
     elif kt != 'char *':
         # A non-scalar key (tuple, list, or other struct/pointer type
         # — e.g. `{('a', 'b'): ...}`, real Python code found in the
@@ -4143,13 +4197,17 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # buffer is the already-proven-safe, unchanged behavior for
         # by far the most common dict-key type.
         kv = gen._repr_value(kt, kv)
+    _bytes_key = kt == 'MojoBytes *'
+    if _bytes_key:
+        if vv.startswith('_slit_'):
+            vv = gen._new_val('MojoBytes *', f"{vv}")
     if vt in gimple_ctypes._FLOAT_TYPES:
-        gen._emit(f"  mojo_dict_set_double ({t}, {kv}, {vv});")
+        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}double ({t}, {kv}, {vv});")
     elif vt == 'char *':
         if vv.startswith('_slit_'):
             vv_tmp = gen._new_val('char *', f"{vv}")
             vv = vv_tmp
-        gen._emit(f"  mojo_dict_set_str ({t}, {kv}, {vv});")
+        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
         # _lower_BoolLiteral returns ctype 'int' (not '_Bool'), same
         # as any other int — vt alone can't distinguish a real bool
@@ -4157,7 +4215,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         if isinstance(val_expr, gimple_ctypes.BoolLiteral):
             gen._emit(f"  mojo_mark_dict_bool_values ({t});")
         vv64 = gen._to_int64(vt, vv)
-        gen._emit(f"  mojo_dict_set_int ({t}, {kv}, {vv64});")
+        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
@@ -4178,7 +4236,13 @@ def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
             gen._elem_types[t] = elem
     for el in node.elements:
         et, ev = gen.lower_expr(el)
-        if et == 'char *':
+        if et == 'MojoBytes *':
+            # A bytes element needs its own set slot domain (tag 2), not the
+            # int slot that stores raw pointers — otherwise `{b'a'}` and
+            # `{b'a'}` are two different sets and `b'a' in s` never matches.
+            gen._emit_call('void', '', 'mojo_set_add_bytes',
+                           [('MojoSet *', t), ('MojoBytes *', ev)])
+        elif et == 'char *':
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', t), ('char *', ev)])
         else:
             ev64 = gen._to_int64(et, ev)

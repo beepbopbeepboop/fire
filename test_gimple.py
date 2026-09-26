@@ -5687,6 +5687,227 @@ def root_cas_hash_call(parts) -> str:
 
     test_known_function_not_shadowed_by_global_fnptr()
 
+    def test_inherited_method_line_directive_names_its_own_module():
+        """The inheritance merge copies a base class's method node into the
+        subclass, which then emits that body a SECOND time as
+        `Sub___m`. Every `#line` in that copy used to name the SUBCLASS's
+        file with the base's line number — a diagnostics bug (the emitted C
+        was correct), originally found as Lib/weakref.py's error cluster
+        reporting lines up to ~962 in a file only 574 lines long, when the
+        real source was _collections_abc.py. See
+        bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+        mismatches.md's "Not fixed" item 1."""
+        global _PASS, _FAIL
+        name = "inherited_method_line_directive_names_its_own_module"
+        with tempfile.TemporaryDirectory() as wd:
+            base = ("class Mapping:\n"
+                    "    def __eq__(self, other):\n"
+                    "        return isinstance(other, Mapping)\n"
+                    "    def items(self):\n"
+                    "        return []\n")
+            sub = ("from base_mod_for_line_test import Mapping\n"
+                   "\n"
+                   "class Sub(Mapping):\n"
+                   "    def __init__(self):\n"
+                   "        self.data = 1\n"
+                   "\n"
+                   "def main():\n"
+                   "    s = Sub()\n"
+                   "    print(s.data)\n")
+            open(os.path.join(wd, 'base_mod_for_line_test.py'), 'w').write(base)
+            entry = os.path.join(wd, 'sub_mod_for_line_test.py')
+            open(entry, 'w').write(sub)
+            try:
+                c_src = compile_to_gimple(sub, do_imports=True, filename=entry)
+            except Exception as e:
+                print(f"FAIL  {name}: {e}")
+                _FAIL += 1
+                return
+        start = c_src.find("Sub___eq__ (")
+        if start < 0:
+            print(f"FAIL  {name}: Sub___eq__ was never emitted (inheritance merge did not run)")
+            _FAIL += 1
+            return
+        end = c_src.find("\n}", start)
+        body = c_src[start:end]
+        base_tag = f'#line 3 "{os.path.join(wd, "base_mod_for_line_test.py")}"'
+        sub_tag = f'#line 3 "{entry}"'
+        if base_tag not in body or sub_tag in body:
+            print(f"FAIL  {name}: inherited body not attributed to the base module; "
+                  f"tags={sorted({l.strip() for l in body.splitlines() if l.strip().startswith('#line')})}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_inherited_method_line_directive_names_its_own_module()
+
+    def test_conflicting_callsite_yield_kind_refused_not_miscompiled():
+        """A generator has ONE fixed C value-slot, so a generator that
+        YIELDS a parameter whose call sites pass provably different kinds
+        has no sound lowering. Both backends used to pick int64_t anyway and
+        silently print a truncated float or a string's ADDRESS. Now both
+        refuse, naming the parameter. See
+        bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md.
+        """
+        global _PASS, _FAIL
+        name = "conflicting_callsite_yield_kind_refused_not_miscompiled"
+        src = """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(3.5):
+        print(v)
+    for v in g("hi"):
+        print(v)
+"""
+        expect = "yields ['x'], whose call sites pass conflicting types"
+        # The refusal is a module-level compile error on the A3 stack-switch
+        # backend, and an _UnsupportedGeneratorShape the C++ backend
+        # surfaces the same way — so either way the message must name the
+        # parameter rather than the build succeeding with wrong output.
+        ok = False
+        detail = ""
+        for kwargs in ({}, {"do_imports": True}):
+            try:
+                compile_to_gimple(src, **kwargs)
+            except Exception as e:
+                if expect in str(e):
+                    ok = True
+                    break
+                detail = str(e)[:200]
+            else:
+                detail = "compiled successfully (would miscompile)"
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {detail}")
+            _FAIL += 1
+
+    test_conflicting_callsite_yield_kind_refused_not_miscompiled()
+
+    # The refusal must be narrow: a conflicting param that is NOT yielded
+    # still compiles, and a yielded param with UNANIMOUS call sites still
+    # resolves to the right type. Both are ordinary compiles, so assert on
+    # the generated C rather than on stdout.
+    def test_conflicting_callsite_gate_is_narrow():
+        global _PASS, _FAIL
+        name = "conflicting_callsite_gate_is_narrow"
+        # (a) param used only arithmetically, call sites disagree: the
+        #     yielded value is unaffected, so this must still lower.
+        n2 = compile_to_gimple("""\
+def g(x):
+    var t = 0
+    for i in range(x):
+        t = t + i
+    yield t
+
+def main():
+    for v in g(3):
+        print(v)
+    for v in g(5):
+        print(v)
+""")
+        # (b) yielded param, but every call site agrees: resolves normally.
+        c = compile_to_gimple("""\
+def g(x):
+    yield x
+
+def main():
+    for v in g(3.5):
+        print(v)
+    for v in g(1.5):
+        print(v)
+""")
+        if '__mgco_g_body' not in n2 and '__mgco_g_body' not in c:
+            print(f"FAIL  {name}: both shapes should lower a generator body")
+            _FAIL += 1
+            return
+        if 'double' not in c:
+            print(f"FAIL  {name}: unanimous float call sites should still "
+                  f"resolve the yield slot to double")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_conflicting_callsite_gate_is_narrow()
+
+    def test_nested_async_struct_capture_boxes_pointer():
+        """Increment E: a nested `async def` that mutates an enclosing
+        function's STRUCT-typed local. The capture cell is the ordinary
+        `i64` one (a pointer is pointer-sized); only the read/write boundary
+        needs the existing int<->pointer round trip
+        (`UnsafePointer[T](...)` / `.address`). Before this, a struct
+        capture was refused outright, so the async def fell through to the
+        C++ path and failed to compile at all.
+        See bugs/hard/CODEGEN_coro_nested_async_closure_capture.md.
+        """
+        global _PASS, _FAIL
+        name = "nested_async_struct_capture_boxes_pointer"
+        src = """\
+class Point:
+    def __init__(self, x):
+        self.x = x
+    def show(self):
+        return self.x
+
+def outer():
+    var p = Point(10)
+    async def bump():
+        p.x = p.x + 5
+    var t = create_task(bump())
+    t.wait()
+"""
+        try:
+            c_src = compile_to_gimple(src)
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        # The box must exist, the mutation must be driven through the
+        # recovered pointer, and the capture must NOT have been refused.
+        # (The source-level rewrite is `UnsafePointer[Point](box_get(...))`,
+        # which this codegen lowers to its usual int -> void* -> T* two-step
+        # — see _apply_async_struct_param_erasure's own note that GIMPLE
+        # rejects a direct int64_t -> T* cast — so assert on the emitted
+        # shape, not on the source-level spelling.)
+        need = ['__mojo_box_new_i64', '__mojo_box_get_i64']
+        missing = [t for t in need if t not in c_src]
+        if missing:
+            print(f"FAIL  {name}: struct capture did not lower as a boxed "
+                  f"pointer; missing {missing}")
+            _FAIL += 1
+            return
+        body = c_src[c_src.find('__mgco_outer_bump_body'):] or c_src
+        if '->x' not in body:
+            print(f"FAIL  {name}: captured struct was not re-typed to a "
+                  f"pointer (no `->x` field access in the async body)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_nested_async_struct_capture_boxes_pointer()
+
+    test_raises(
+        "nested_async_gen_capture_from_async_for_refused",
+        """\
+def outer():
+    var acc = 0
+    async def gen():
+        acc = acc + 1
+        yield 10
+    async def consume():
+        async for x in gen():
+            acc = acc + x
+    var t = create_task(consume())
+    t.wait()
+""",
+        "capture box cannot be threaded into a driven consumer")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

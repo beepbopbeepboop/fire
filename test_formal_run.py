@@ -36,6 +36,27 @@ RUN_TIMEOUT = 60
 # bind opcodes that fill the GOT slot the stub branches through.
 CASES = [
     ("ret42", "def ret42():\n    return 42\n", 42, None),
+    # for-range loops. The exit test is the whole loop: before it, the
+    # lowering computed a CSET and never branched on it, so EVERY one of these
+    # hung rather than returning a wrong number -- which is why they need to be
+    # here and not left to the range tests that only existed inside
+    # comprehensions.
+    ("for_range_sum", "def f(n):\n    s = 0\n    for i in range(3, 9):\n"
+                      "        s = s + i\n    return s\n", 33, None),
+    ("for_range_empty", "def f(n):\n    s = 0\n    for i in range(5, 5):\n"
+                        "        s = s + 1\n    return s\n", 0, None),
+    ("for_range_desc", "def f(n):\n    s = 0\n    for i in range(4, 0, -1):\n"
+                       "        s = s + i\n    return s\n", 10, None),
+    ("for_range_step2", "def f(n):\n    s = 0\n    for i in range(7, 1, -2):\n"
+                        "        s = s + i\n    return s\n", 15, None),
+    ("for_range_one_arg", "def f(n):\n    s = 0\n    for i in range(4):\n"
+                          "        s = s + i\n    return s\n", 6, None),
+    ("for_range_nested", "def f(n):\n    s = 0\n    for i in range(2):\n"
+                         "        for j in range(3):\n            s = s + 1\n"
+                         "    return s\n", 6, None),
+    ("for_range_break", "def f(n):\n    for i in range(0, 100):\n"
+                        "        if i > 3:\n            break\n"
+                        "    return i\n", 4, None),
     ("seven", "def seven():\n    return 7\n", 7, None),
     ("absval", "def absval(n):\n    if n > 0:\n        return n\n"
                "    else:\n        return 0 - n\n", 10, None),

@@ -1,5 +1,67 @@
 # HARD BUG (performance): `_walk_ast` re-scan blowup for large transitive-import graphs
 
+## Status (2026-09-25, Phase 6 — `_selfhost_extracted_fn_index` no longer built for non-selfhost compiles)
+
+A fresh cProfile of `Lib/contextlib.py` on the current tree (post-Phase-5,
+and post the generator/try-finally work landed since) found one new,
+self-contained, provably-safe win that is NOT any of the three candidates
+the "Remaining work" list had ruled out.
+
+**The defect.** `_selfhost_gen_self_param_ctype`
+(`mojo/middle/funcs_shared.py`) guards on two independent conditions: that
+the `gen`/`self` first param belongs to a function this compiler's own
+backend files actually define (answered by `_selfhost_extracted_fn_index`),
+and that this compile is a self-hosting one
+(`gen._selfhost_gimplegen_registered`). The second check is a single
+attribute read and the first is a full parse of every `gimple_*.py` /
+`mojo/middle` / `mojo/backend_gimple` file — but the EXPENSIVE one ran
+first. `_selfhost_gen_self_param_ctype` is asked about a `gen`/`self` first
+param on essentially every parameter of every function in every compile,
+while `_selfhost_gimplegen_registered` is only ever set for an entry point
+under this compiler's own source dir. So **every ordinary user/stdlib
+compile built the whole index and then discarded the answer.** That is
+`compile_stdlib.py`'s per-worker-process cost, every `fire.py build`, and
+every test-suite process, all for nothing.
+
+The fix is a pure reordering of two side-effect-free conditions (both must
+hold, so the result is unchanged): the registration check now runs first,
+so the index is simply never built when it cannot be used.
+
+**Measured.** cProfile attributed 21.1s of cumtime to
+`_selfhost_extracted_fn_index` (715 calls, with `py_tokenize` /
+`parse_module` / `_rewrite_node` underneath) — but cProfile inflates that
+heavily. Timing the build directly gives **~1.5s for 448 entries**, so the
+real win is ~1.5s once per process. Small in absolute terms and a rounding
+error against a whole-stdlib sweep, but a real fraction of a quick
+`fire.py build small.mojo`, and free. Confirmed the index genuinely is
+skipped now (its cache key stays absent after a complete `Lib/contextlib.py`
+compile) and still IS built when needed.
+
+**Equivalence evidence** (stronger than this doc's usual byte-identity
+bar, because the edit is to a file inside the compiled closure):
+`--dump-full`-equivalent `compile_to_gimple(fire_compiler.py,
+do_imports=True)` before and after is **byte-identical once every `#line`
+directive is removed** (`diff` of the two `#line`-stripped files: 0
+differing lines). The raw files differ only in `#line` numbers, which is
+expected and not a regression: the edit adds comment lines to
+`mojo/middle/funcs_shared.py`, and that file is itself in the compiled
+closure, so every subsequent function's recorded line number shifts. The
+self-hosting path still works — the index still builds for a self-host
+entry point, and the output still types 464 `gen`/`self` first params as
+`GimpleGen *`.
+
+**Still not attempted**, per "Remaining work" below: the three candidates
+already ruled out (`_class_attr_ctype`'s Pass 1.1 caller loop's entanglement
+with time-dependent `struct_field_types` state; the Pass 2c residual-scan
+cache, disproven by Phase 5's own write-invalidation analysis; and
+`_collect_self_assigns`/`_collect_self_reads` mutating struct ASTs, which
+rules out naive memoization). The profile's rank-1 consumer is still the
+`isinstance` builtin (283s / 7.6B calls), spread across every consumer's
+per-node type dispatch with no single attributable site. Two smaller
+candidates the profile surfaced but that are self-host-specific and did not
+clear the bar on this pass: `_infer_list_elem_type` (35.7s / 271M calls)
+and `_param_ctype` (22.1s / 375K calls).
+
 ## Status (re-verified 2026-08-26, worktree fix/rest-remainder19c — no new phase attempted; Phase 5's "Remaining work" list re-read, none newly safe)
 
 Re-read the "Remaining work" section fresh with today's assignment's

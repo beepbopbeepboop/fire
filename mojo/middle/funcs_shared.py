@@ -929,18 +929,41 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     ps = getattr(node, 'params', None) or []
     if not ps or ps[0][0].lstrip('*') != bare:
         return None
-    if getattr(node, 'name', None) not in _selfhost_extracted_fn_index():
-        return None
-    # Fires only once the GimpleGen registry pre-pass has run for this
-    # (shared) compile — see _selfhost_register_gimplegen in gimple_codegen
-    # .py, which parses `class GimpleGen`, unions in the fields the extracted
-    # backend helpers bind (`_selfhost_scan_gimplegen_extra_fields`), routes
-    # the synthetic StructDef through `_imported_typedef_structs`, and locks
-    # a frozen `GimpleGen_*` signature table via `_selfhost_locked_param_
-    # types`. Without that, typing `self` as a struct pointer just trades
-    # "silently stubbed" for hard arity / pointer-vs-int errors at every
-    # `self.<method>()` call site.
+    # The registration check is FIRST because it is the only CHEAP one, and
+    # because the next step is not: `_selfhost_extracted_fn_index()` builds
+    # its index by running the full parser + ast_rewriter over every
+    # `gimple_*.py` / `mojo/middle` / `mojo/backend_gimple` file. This
+    # function is asked about a `gen`/`self` first param on essentially every
+    # parameter of every function in EVERY compile, but
+    # `_selfhost_gimplegen_registered` is only ever set for an entry point
+    # under this compiler's own source dir (see gimple_codegen's own comment
+    # where it is set). So on every ordinary user/stdlib compile the old order
+    # built that index and then threw the answer away at the guard that used
+    # to sit below. Pure reordering of two independent, side-effect-free
+    # conditions: both must hold, so the result is unchanged, and the index is
+    # now simply never built when it cannot be used. Verified the index really
+    # is skipped now (its cache key stays absent after a whole
+    # Lib/contextlib.py compile) and that it still builds when it is needed.
+    # (Found by a cProfile of Lib/contextlib.py, which attributed 21s of
+    # cumtime to this index build — 715 calls with py_tokenize / parse_module
+    # / _rewrite_node underneath. cProfile inflates that heavily: timing the
+    # build directly gives ~1.5s for 448 entries, so the real win is ~1.5s
+    # per process, paid once. Small but free, and a larger fraction of a
+    # quick `fire.py build small.mojo` than of a whole-stdlib sweep. See
+    # bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md.)
+    #
+    # The flag itself: set once the GimpleGen registry pre-pass has run for
+    # this (shared) compile — see _selfhost_register_gimplegen in
+    # gimple_codegen.py, which parses `class GimpleGen`, unions in the fields
+    # the extracted backend helpers bind (`_selfhost_scan_gimplegen_extra_
+    # fields`), routes the synthetic StructDef through
+    # `_imported_typedef_structs`, and locks a frozen `GimpleGen_*` signature
+    # table via `_selfhost_locked_param_types`. Without that, typing `self` as
+    # a struct pointer just trades "silently stubbed" for hard arity /
+    # pointer-vs-int errors at every `self.<method>()` call site.
     if not getattr(gen, '_selfhost_gimplegen_registered', False):
+        return None
+    if getattr(node, 'name', None) not in _selfhost_extracted_fn_index():
         return None
     return 'GimpleGen *'
 

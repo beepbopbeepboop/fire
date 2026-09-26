@@ -1,6 +1,108 @@
 # CODEGEN (A3 stack-switch): `yield <identifier-or-member-expr>` always
 defaults to int64_t, silently truncating float/string values
 
+## Status (2026-09-25 — the non-unanimous residual is now an HONEST REFUSAL on both backends; the silent miscompile is gone)
+
+The last remaining item ("the fully-unannotated, non-unanimous case") no
+longer silently produces wrong values. This session also **corrected two
+factual claims this doc had been carrying**, both of which change what the
+right fix is.
+
+### Correction 1 — the ordinary-function path has no dynamic-value mechanism
+
+The 2026-08-06 analysis reasoned that the fully-unannotated case "needs
+per-call-site monomorphization or a boxed/tagged yield-value ABI", partly
+because "the ordinary function call path has SOME dynamic-value mechanism a
+generator's fixed single-C-type model doesn't share" — i.e. the implicit
+suggestion that generators could borrow it.
+
+**It does not exist.** `fn g(x): return x` called `g(3.5)` and `g("hi")`
+prints `3` and a pointer decimal, exactly like the generator. There is no
+shared mechanism to reuse, and no per-call monomorphization for ordinary
+functions either. This is therefore a **cross-cutting limitation of this
+codegen's one-C-type-per-slot model**, not a generator-specific gap — which
+is why the right move for the generator half is to refuse honestly rather
+than to go build a dynamic-value layer that would not fix the ordinary
+half anyway.
+
+### Correction 2 — `MOJO_CORO=cpp` was NOT a correct escape hatch here
+
+This doc stated (in four separate places, including its own "Impact"
+section) that `MOJO_CORO=cpp` "remains a fully correct escape hatch for any
+Mojo program hitting this shape today." **It is not.** The same program
+under `MOJO_CORO=cpp` prints the same `3` and the same raw pointer. The two
+backends fix one C value-slot type per generator *independently*, so
+falling back to cpp bought nothing here.
+
+### What landed
+
+`_scan_callsite_param_kinds` already computed each generator's per-param set
+of call-site kinds and silently discarded any set that wasn't a singleton.
+It now also records the genuinely-ambiguous ones in a new
+`_CALLSITE_PARAM_CONFLICTS` registry, and a new
+`_ambiguous_yielded_params(fn, struct_name)` answers the precise question:
+which of `fn`'s params are **both** yielded (directly or through an
+expression the static env cannot type) **and** carry conflicting call-site
+evidence. Both backends consult that one registry:
+
+- **A3 stack-switch** — `_eligible` refuses, so it no longer emits a
+  truncating `int64_t` slot.
+- **C++ coroutine** — `_gen_cpp_generator_unit` raises
+  `_UnsupportedGeneratorShape` for the same generators. Without this the
+  build still succeeded via the cpp path and the fix would have been
+  invisible end to end (verified: the C++ gate is what makes the
+  diagnostic actually reach the user).
+
+So `def g(x): yield x` called with both `3.5` and `"hi"` now **fails to
+build** with a message naming the parameter and the reason, instead of
+building, exiting 0, and printing `3` / `4366031504`.
+
+The gate is deliberately narrow, and both directions are regression-tested:
+
+- A conflicting param that is **not** yielded still compiles (its value
+  never crosses the yield ABI).
+- A yielded param whose call sites **agree** still resolves to the right
+  type — `g(3.5)`/`g(1.5)` still yields `double`.
+- Struct-method generators take the same path (`b.gen(1)` + `b.gen("s")`
+  is refused; `b.gen(3)` + `b.gen(5)` is not).
+
+Regression tests: `conflicting_callsite_yield_kind_refused_not_miscompiled`
+and `conflicting_callsite_gate_is_narrow` in `test_gimple.py`.
+
+Breadth check, because this changes an eligibility gate that real corpus
+code passes through: `python3 compile_stdlib.py` **664/664 passed, 0
+unexpected** — the new refusal fires on no stdlib generator (as expected;
+the ambiguity needs a yielded *unannotated* param with disagreeing call
+sites, and where that occurred the old behavior was already wrong output).
+`test_gimple.py` 314/314, `test_gimple_runner.py` 76/76,
+`test_gimple_generator_runner.py` 120/120, `test_generators.py` 29/29,
+`test_coro_bugs.py` LOWERED=3/RAISE=6 — identical to baseline.
+
+### What is still open
+
+The real fix — a tagged yield-value ABI (box the value with a
+`MOJO_TAG_*`-style tag, reusing the mechanism this runtime already has for
+nested-tuple slots) — is unchanged and still feature-sized, but it is now
+much better scoped than when this doc first called it that way:
+
+1. **Producer** is small: each yield site emits
+   `__mojo_gen_yield_boxed(g, tag, word)` instead of
+   `__mojo_gen_yield(g, value)`, reusing `tuple_box_tagged`'s existing
+   `[tag, word]` list layout and the `mojo_tagged_int/str/double` accessors.
+2. **Consumer** is the whole cost, and the reason it was deferred. The
+   consumer's own static type for the loop variable is exactly as unknown
+   as the producer's was — `for s in g("hi"): print(s)` gives no static
+   hint. So the consumer needs genuine runtime dispatch, at minimum for
+   `print`/`repr`, and for anything else (a method call on `s`, `len(s)`,
+   arithmetic) it needs a dynamic-value layer comparable to the one the
+   ordinary path is also missing (Correction 1). Landing only the producer
+   half would buy nothing observable.
+
+So the honest summary is: the silent miscompile is closed, and the
+underlying one-C-type-per-slot limitation is now **documented as
+cross-cutting** (it affects ordinary functions and generators alike)
+rather than recorded against generators alone.
+
 ## Status (2026-09-06 — repro 1's direct `yield <param>` case FIXED via call-site type propagation)
 
 `gimple_gen_coro.py` now runs a whole-module scan of a generator's CALL

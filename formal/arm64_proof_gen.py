@@ -20,6 +20,7 @@ The generated file contains:
      lemmas into a full execution trace is future work).
 """
 
+import os
 import re
 import struct
 
@@ -3234,14 +3235,31 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             entry_cond_needed = False
             terminal_handler_needed = False
         else:
-            A(f"theorem {name}_entry_cond (n : UInt64) :")
-            A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
-            A(f"  simp only [{', '.join(def0)}, arm64_reg, arm64_set_reg, Arm64State.init]")
-            A(f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
-              f"mem_read_two_writes_same, arm64_matches_condition, arm64_subs_flags, "
-              f"UInt64.zero_le{', ' + _tw_defs if _tw_defs else ''}]")
-            A(f"  all_goals bv_decide")
-            A("")
+            # Emitted only when the entry guard really does test a materialised
+            # flag REGISTER.  The claim is `arm64_reg r <exit> = 0 <-> not
+            # <predicate>`, which is only true when a `cset` wrote that register
+            # with the matching condition.  The backend now lowers comparisons
+            # to `cmp` + B.cond, which writes no register, so for those programs
+            # the theorem is not merely unprovable but FALSE -- and being dead
+            # (nothing references it) the only thing it does is fail the build
+            # with `bv_decide`'s counterexample.  `bv_decide` is doing its job
+            # here: the generator was asserting a fact about a register the
+            # compiler stopped writing.
+            _ent_idx = None
+            for _b in blocks:
+                if _b["kind"] == "cbz" and _b["instrs"]:
+                    _ent_idx = _step_branch_index(words[_b["instrs"][-1]])
+                    break
+            _emittable = _ent_idx in (16, 17)
+            if _emittable:
+                A(f"theorem {name}_entry_cond (n : UInt64) :")
+                A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
+                A(f"  simp only [{', '.join(def0)}, arm64_reg, arm64_set_reg, Arm64State.init]")
+                A(f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                  f"mem_read_two_writes_same, arm64_matches_condition, arm64_subs_flags, "
+                  f"UInt64.zero_le{', ' + _tw_defs if _tw_defs else ''}]")
+                A(f"  all_goals bv_decide")
+                A("")
 
     # block start -> index map; pc facts for rcases-bound exit states
     s_pc_facts = {}
@@ -5318,8 +5336,73 @@ theorem eval_eq_mojo (n : UInt64) :
     return prelude + body
 
 
+def _decoder_branch_conds(lean_src):
+    """The top-level branch tests of `arm64_step`, in source order.
+
+    Read out of the model rather than kept in a second list, so the two cannot
+    drift.  The generator has to name every branch it is NOT selecting in order
+    to select the one it is, and when it missed one the resulting `if` stayed
+    open inside a 20-field structure literal -- so the failure read "unsolved
+    goals" pointing at a register assignment, naming no branch at all.
+    """
+    i = lean_src.find("def arm64_step ")
+    if i < 0:
+        return None
+    j = lean_src.find("\ndef ", i + 10)
+    body = lean_src[i:j if j > 0 else len(lean_src)]
+    out = []
+    for line in body.split("\n"):
+        m = re.match(r"^  (?:else )?if (.+?) then\s*$", line)
+        if not m:
+            continue
+        t = m.group(1)
+        mm = re.match(r"^\(insn &&& (0x[0-9A-Fa-f]+)\) = (0x[0-9A-Fa-f]+)$", t)
+        if mm:
+            out.append((int(mm.group(1), 16), int(mm.group(2), 16)))
+        elif t == "insn = 0xd65f03c0":
+            out.append((None, int("0xd65f03c0", 16)))
+    return out
+
+
+def check_step_conds(lean_path=None):
+    """Fail loudly if `_STEP_CONDS` has drifted from `arm64_step`.
+
+    They agree today -- 52 entries each -- but nothing enforced it, and their
+    ORDERS differ too.  A branch added to the model breaks every `work_step_*`
+    lemma in ProofLib and, separately, leaves an `if` open in every generated
+    proof; this turns the second half into one message that names the branch
+    that is missing.  Membership is what is checked: the order deliberately does
+    not matter, because the exclusions are emitted for every entry.
+    """
+    if lean_path is None:
+        lean_path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "lib", "ProofLib.lean")
+    try:
+        src = open(lean_path).read()
+    except OSError:
+        return                              # model not present; not our problem
+    conds = _decoder_branch_conds(src)
+    if not conds:
+        return
+    want = {(m, b) for m, b in conds}
+    have = {(m, b) for m, b in _STEP_CONDS}
+    missing = sorted(want - have)
+    extra = sorted(have - want)
+    if missing or extra:
+        _fmt = lambda ps: ", ".join(                      # noqa: E731
+            ("None" if m is None else hex(m)) + "/" + hex(b) for m, b in ps)
+        raise AssertionError(
+            "_STEP_CONDS has drifted from arm64_step in lib/ProofLib.lean: "
+            "%d model branch(es) with no entry (%s); %d entry(ies) with no "
+            "model branch (%s).  Every *_step_ok lemma excludes the branches it "
+            "is NOT selecting, so a missing entry leaves an `if` open and the "
+            "generated proof fails with 'unsolved goals' that name no branch."
+            % (len(missing), _fmt(missing), len(extra), _fmt(extra)))
+
+
 def generate_arm64_proof(prog, code, info) -> str:
     """Generate a Lean 4 proof file for an ARM64-compiled program."""
+    check_step_conds()
     func_name = info.get("func_name") or (prog.functions[0].name if prog.functions else "unknown")
     base_addr = info["base_addr"]
     test_input = info.get("test_input", 10)

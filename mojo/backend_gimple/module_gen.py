@@ -2068,7 +2068,47 @@ def gen_module_impl(self, stmts):
         if _gmi_has_unresolved_base(_struct_bases_map, _all_struct_names,
                                    _unresolved_base_memo, _name, [])
     }
+    # Remember each struct's OWN method-node identities before the merge, so
+    # the ones the merge later injects can be recognised as INHERITED (the
+    # merge mutates `s.methods` in place and keeps no record of provenance).
+    # Their nodes belong to the base's module and are emitted a second time
+    # as `Sub___m`; `_inherited_method_src` below maps each such node to the
+    # module it actually came from, which the method-body emission loop uses
+    # to attribute `#line` directives to the right FILE.
+    _own_method_ids: dict = {}
+    for _omo in all_struct_defs:
+        if isinstance(_omo, StructDef):
+            _omo = _as_structdef_node(_omo)
+            _own_method_ids[id(_omo)] = {
+                id(_as_funcdef_node(_m)) for _m in _omo.methods}
     _merge_struct_inheritance(all_struct_defs)
+    # id(inherited method node) -> home module name, resolved by finding
+    # which struct ORIGINALLY declared it.
+    _inherited_method_src: dict = {}
+    if _own_method_ids:
+        _decl_home: dict = {}
+        for _dh in all_struct_defs:
+            if not isinstance(_dh, StructDef):
+                continue
+            _dh = _as_structdef_node(_dh)
+            _hm = self._imported_struct_home.get(_as_str(_dh.name))
+            if not _hm:
+                continue
+            for _hmeth in _dh.methods:
+                _decl_home.setdefault(id(_as_funcdef_node(_hmeth)), _hm)
+        for _is in all_struct_defs:
+            if not isinstance(_is, StructDef):
+                continue
+            _is = _as_structdef_node(_is)
+            _own = _own_method_ids.get(id(_is), ())
+            for _im in _is.methods:
+                _imid = id(_as_funcdef_node(_im))
+                if _imid in _own:
+                    continue
+                _hm2 = _decl_home.get(_imid)
+                if _hm2:
+                    _inherited_method_src[_imid] = _hm2
+    self._inherited_method_src = _inherited_method_src
     self._exc_descendants = _compute_exc_descendants(all_struct_defs)
     for _s in all_struct_defs:
         if isinstance(_s, StructDef):
@@ -3628,7 +3668,7 @@ def gen_module_impl(self, stmts):
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
 
     def _arg_scalar_type(caller_name, a, deep_str=False,
-                         prefer_refined_param=False):
+                         prefer_refined_param=False, caller_struct=None):
         """Observed scalar C type of one call argument, or None.
 
         Both extension flags are used ONLY by the struct-METHOD observation
@@ -3676,6 +3716,51 @@ def gen_module_impl(self, stmts):
                     return _pt
                 return t or _pt
             return t or self._inferred_param_types.get(_cn, {}).get(_an)
+        if isinstance(a, MemberExpr):
+            # `self.<field>` / `<local>.<field>` — the shape a constructor
+            # call most often forwards in real code (importlib/
+            # _bootstrap_external.py's `NamespaceReader(self._path)`).
+            # Without it the observation is None, the slot resolves to
+            # nothing, and the field keeps its int64_t default, so the
+            # compiled binary prints the string's POINTER VALUE.
+            # `caller_struct` is the owning StructDef when the call site is
+            # inside one of its methods; otherwise the receiver must be a
+            # local whose own inferred type is a `<Struct> *` pointer.
+            # Anything else (attribute chains, unknown receivers) is
+            # no-evidence, matching every sibling pass.
+            _own = caller_struct
+            _obj = a.obj
+            if isinstance(_obj, IdentExpr):
+                _on = _as_str(_obj.name)
+                if _on == 'self':
+                    if not _own:
+                        return None
+                else:
+                    _ot = self._inferred_var_types.get(_as_str(caller_name), {}).get(_on)
+                    if not (isinstance(_ot, str) and _ot.endswith(' *')):
+                        return None
+                    _own = _ot[:-2]
+            else:
+                return None
+            _ft = self.struct_field_types.get(_own, {}).get(_as_str(a.member))
+            return _ft if _ft in ('char *', 'double') else None
+        if isinstance(a, BinaryOp) and a.op == '+':
+            # `self._path + "!"` — a concat with a str literal on either
+            # side proves the whole expression is a `char *` (str.__add__
+            # rejects non-str operands, so a literal str on one side settles
+            # the other; the same disambiguation _gmi_expr_provably_str
+            # documents). Only reached when one side is otherwise
+            # unresolvable — a resolvable side is handled by the cases
+            # above, and this is what closes the last common gap.
+            for _side in (a.left, a.right):
+                if not isinstance(_side, MemberExpr):
+                    continue
+                if _arg_scalar_type(caller_name, _side,
+                                    deep_str, prefer_refined_param,
+                                    caller_struct) == 'char *':
+                    if isinstance(a.left, StringLiteral) or isinstance(a.right, StringLiteral):
+                        return 'char *'
+            return None
         return None
 
     _TOPLEVEL_CALLER = '<toplevel>'
@@ -4171,6 +4256,37 @@ def gen_module_impl(self, stmts):
 
     _ctor_scalar_obs: dict = {}          # "<struct>::<pname>" -> scalar type
     _ctor_scalar_conflict: dict = {}     # "<struct>::<pname>" -> True (mixed)
+    # Constructor call sites live in free functions, at toplevel, AND inside
+    # struct METHODS — and the method case is the one real code hits most
+    # (`NamespaceReader(self._path)` in
+    # importlib/_bootstrap_external.py). `_caller_bodies` covers only the
+    # first two, so a `S(...)` constructed from a method body contributed no
+    # observation at all and the slot stayed unresolved. `_method_caller_
+    # bodies` (built by the Pass 1.3e method contract just above) already
+    # carries the owning StructDef as its second element, which is exactly
+    # what `self.<field>` resolution needs.
+    for _cname, _cstruct, _cbody in _method_caller_bodies:
+        calls = []
+        self._calls_in_stmts(_cbody, calls)
+        for call in calls:
+            if not isinstance(call.func, IdentExpr):
+                continue
+            struct_name = _as_str(call.func.name)
+            pnames = _ctor_init_params.get(struct_name)
+            if not pnames:
+                continue
+            for i, a in enumerate(call.args):
+                if i >= len(pnames):
+                    break
+                st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
+                if not st:
+                    continue
+                _skey = struct_name + '::' + _as_str(pnames[i])
+                _sprev = _ctor_scalar_obs.get(_skey, '')
+                if not _sprev:
+                    _ctor_scalar_obs[_skey] = st
+                elif _sprev != st:
+                    _ctor_scalar_conflict[_skey] = True
     for caller_name, body in _caller_bodies:
         calls = []
         self._calls_in_stmts(body, calls)
@@ -5751,8 +5867,18 @@ def gen_module_impl(self, stmts):
                 for ci in self._all_closures.get(method_outer_name, {}).values():
                     _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
                 self._lambda_parts = []
+                # An INHERITED method body physically belongs to the base
+                # class's module (the merge copied the node), so its `#line`
+                # directives must name that file — see gen_stmt's
+                # `_line_src_file` and _inherited_method_src above.
+                _imh_src = getattr(self, '_inherited_method_src', {}).get(id(m))
+                _prev_line_src = getattr(self, '_line_src_file', None)
+                if _imh_src:
+                    self._line_src_file = (self._module_source_paths.get(_imh_src)
+                                           or self._current_filename)
                 func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                 func_parts.append('')
+                self._line_src_file = _prev_line_src
                 self._pop_import_scope()
                 if self._lambda_parts:
                     func_parts.extend(self._lambda_parts)

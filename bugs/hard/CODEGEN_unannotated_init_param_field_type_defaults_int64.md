@@ -1,5 +1,70 @@
 # HARD BUG: `self.field = param` with an unannotated, no-default `__init__` parameter always types the field `int64_t`, even for real string/list/etc. call-site arguments
 
+## Status (2026-09-25 — the `MemberExpr` ctor-argument limitation is FIXED; the deeper METHOD-BODY blind spot behind it too)
+
+The doc's long-standing "Remaining limitation" — "a constructor argument
+that is itself a `MemberExpr`/`CallExpr` ... is likewise still unresolved" —
+had **two** independent causes, and both are now closed for `MemberExpr`
+(and for a str-concatenating `BinaryOp` built on one).
+
+**Cause 1: the observation pass never looked inside struct METHODS.**
+`_caller_bodies` — the list the ctor-argument scan iterates — is built from
+`all_functions` (free functions) plus the toplevel statements. A method
+body is in neither. So the single most common real-world shape of this bug,
+`NamespaceReader(self._path)` in
+`importlib/_bootstrap_external.py`, contributed **no observation at all**:
+not because its argument shape was unresolvable, but because the call site
+was never scanned. The Pass 1.3e method-contract pass already builds
+`_method_caller_bodies`, a superset that additionally carries each body's
+owning `StructDef`; the ctor scan now walks that too.
+
+**Cause 2: `_arg_scalar_type` had no `MemberExpr` case.** It recognized
+`FloatLiteral`, `StringLiteral` and `IdentExpr` and returned `None` for
+everything else, so even a scanned `self.<field>` was invisible. It now
+resolves `self.<f>` through the owning struct's `struct_field_types` entry
+(using the owner the method pass supplies, or — outside a method — a
+receiver local whose own inferred type is a `<Struct> *` pointer), and
+resolves `<char *> + <str literal>` to `char *` via the same "a str literal
+on one side of `+` settles the other" disambiguation
+`_gmi_expr_provably_str` already documents. Anything else (attribute
+chains, unknown receivers) is still no-evidence, matching every sibling
+pass — the addition can only turn "no evidence" into evidence, never turn
+existing evidence into a different answer.
+
+Both additions are strictly additive to the evidence set and keep the
+doc's "not unanimous → leave unresolved" rule intact, which matters more
+now than before: `Reader::path` is resolved only because *every* call site
+(both the `self._p` and the `self._p + "!"` ones) agrees on `char *`.
+
+Verified end to end: `Reader(self._p)` and `Reader(self._p + "!")` inside a
+method previously printed raw pointer decimals (`4375009136` /
+`4393853440`) and now print `hello` / `hello!`; a mixed `char *`/`double`
+struct still correctly refuses to resolve (verified, and unchanged from
+baseline). Regression tests:
+`gimple_ctor_arg_from_method_self_field` and
+`gimple_ctor_arg_unanimous_str_and_int` in `test_gimple_runner.py`.
+
+**Two genuinely separate, still-open defects found while shaping the
+repro** (NOT this doc's bug, NOT fixed here, and confirmed identical on
+the unmodified tree):
+
+1. A method whose body is exactly `return self.<field>` (or
+   `return <local>.<field>`) does not get its return type inferred from the
+   field's type, so `print(obj.get())` prints a pointer decimal. This is a
+   return-type inference gap, entirely downstream of field typing — the
+   field itself is correctly `char *` in the generated struct.
+2. Two classes in one file that each have an `__init__` parameter of the
+   SAME NAME and a same-named field (`__init__(self, v): self.v = v`)
+   interact so that neither resolves — a one-class-per-name version of the
+   same program works. Reproduced identically before and after this fix.
+
+**`CallExpr` arguments are still unresolved** (e.g.
+`Reader(some_func())`), which is correct rather than a gap: a call's return
+type is not a positive type observation, and guessing it would be exactly
+the kind of "confident-looking change to shared type inference" this doc's
+history warns against. `len(self._p)` still contributes nothing, so a slot
+whose only evidence is an int-typed call keeps the `int64_t` default.
+
 ## Status (re-verified 2026-08-23 — no new work)
 
 Re-ran all three repro shapes via `fire.py build` + executing the binary:

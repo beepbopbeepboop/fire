@@ -617,7 +617,43 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     kind, why = _generator_value_kind(fn, _static_env(fn, struct_def))
     if kind is None:
         return False, why
+    _amb = _ambiguous_yielded_params(fn, struct_name)
+    if _amb:
+        return False, (f'yields {sorted(_amb)!r}, whose call sites pass '
+                       'conflicting types (a stack-switch generator has ONE '
+                       'fixed C value-slot, so this cannot be represented '
+                       'without silently truncating a float to int64_t or '
+                       'printing a string as its address)')
     return True, ''
+
+
+def _ambiguous_yielded_params(fn: N.FunctionDef,
+                              struct_name: str | None = None) -> set:
+    """Params of `fn` that are BOTH (a) yielded, directly or through an
+    expression the static env cannot type, and (b) recorded in
+    `_CALLSITE_PARAM_CONFLICTS` for this generator — i.e. the exact set for
+    which the single fixed `_KIND_TO_SLOT_CTYPE` slot has no sound answer.
+
+    Deliberately narrow: a param that is NOT yielded is irrelevant (its value
+    never crosses the yield ABI), and a yielded param with UNAMBIGUOUS call
+    sites was already resolved by `_scan_callsite_param_kinds` into
+    `_CALLSITE_PARAM_KINDS` and typed correctly by `_static_env`. Only the
+    genuinely ambiguous remainder is reported."""
+    bad = _CALLSITE_PARAM_CONFLICTS.get(getattr(fn, 'name', None)) or set()
+    if not bad:
+        return set()
+    params = fn.params
+    if struct_name is not None and params and params[0][0] in ('self', 'cls'):
+        params = params[1:]
+    names = {p[0] for p in params}
+    out = set()
+    for n in _walk(fn):
+        if not isinstance(n, N.YieldExpr):
+            continue
+        for ident in _walk(n.value):
+            if isinstance(ident, N.IdentExpr) and ident.name in bad and ident.name in names:
+                out.add(ident.name)
+    return out
 
 
 # ── async def / await ───────────────────────────────────────────────────
@@ -653,6 +689,16 @@ _PARAM_NAMES: dict[str, list[str]] = {}
 # kind_identifier_inference.md repro 1.
 _CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 
+# Generator/async-def name -> set of unannotated param names whose call-site
+# arguments DISAGREE (or include one the static scan could not type at all),
+# so `_CALLSITE_PARAM_KINDS` deliberately left them unresolved. A generator
+# that YIELDS such a param has no sound single-C-value-kind slot: the
+# stack-switch ABI fixes one C type per generator, so the default would
+# silently truncate a float to int64_t or print a `char *` as its address.
+# `_eligible` refuses those rather than emitting wrong code — see
+# bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md.
+_CALLSITE_PARAM_CONFLICTS: dict[str, set] = {}
+
 # Local/param names bound from create_task/create_raising_task in the async
 # def CURRENTLY being lowered -- set by _lower_one_async(_gen) before it
 # calls _rewrite_async_stmts, so _await_drive_stmts can tell an `await
@@ -676,6 +722,17 @@ _ASYNC_METHOD_NAMES: set = set()
 # a real typed `<T> *` C param, instead of collapsing to an opaque
 # int64_t. See bugs/COMPILE_FAIL_asyncio_queues.md gap 2.
 _STRUCT_NAMES: set = set()
+
+# Names (bare and `__mgco_<outer>_<name>`-qualified) of nested async
+# GENERATORS that capture enclosing-function locals in a shape the
+# capture-box threading cannot reach -- currently: driven from a
+# further-nested `async def` sibling's `async for`/await loop
+# (`_called_from_nested_async`). Populated during `_hoist_nested_async` and
+# consulted by the C++ generator emitter (`cpp_async._gen_cpp_generator_
+# unit`), which has no capture model of its own and would otherwise emit a
+# body referencing the captured name where it does not exist. See
+# bugs/hard/CODEGEN_coro_nested_async_closure_capture.md, Increment D.
+_UNTHREADABLE_NESTED_ASYNC_GENS: set = set()
 
 
 def _is_struct_param(pann) -> bool:
@@ -1849,6 +1906,7 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
     keyword) parameter to the unanimous static kind of the arguments passed
     for it across all call sites. See _CALLSITE_PARAM_KINDS' docstring."""
     _CALLSITE_PARAM_KINDS.clear()
+    _CALLSITE_PARAM_CONFLICTS.clear()
     # gen name -> [(pname, pann), ...] (receiver dropped for methods)
     gen_params: dict[str, list] = {}
 
@@ -1913,6 +1971,7 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
 
     for gname, slot in seen.items():
         resolved = {}
+        conflicted = set()
         for pname, kinds in slot.items():
             kinds = {k for k in kinds if k is not None} if None not in kinds else set()
             # avoid `next(iter(...))` -- a known self-host miscompile trigger
@@ -1920,8 +1979,17 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
             # "next(iter(...)) -> _next undefined-symbol regression")
             if len(kinds) == 1:
                 resolved[pname] = list(kinds)[0]
+            elif len(kinds) > 1:
+                # Genuinely ambiguous: two call sites pass provably different
+                # kinds for the same slot. Record it so `_eligible` can
+                # refuse a generator that YIELDS this param, rather than
+                # defaulting the yield slot to int64_t and silently
+                # truncating a float / printing a pointer as an address.
+                conflicted.add(pname)
         if resolved:
             _CALLSITE_PARAM_KINDS[gname] = resolved
+        if conflicted:
+            _CALLSITE_PARAM_CONFLICTS[gname] = conflicted
 
 
 def lower(stmts: list) -> tuple[list, list]:
@@ -1934,6 +2002,8 @@ def lower(stmts: list) -> tuple[list, list]:
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
     _STRUCT_NAMES.clear()
+    _BOX_STRUCT_OF.clear()
+    _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _detect_native_future_classes(stmts)
     stmts = _rewrite_native_future_refs(stmts)
     _scan_callsite_param_kinds(stmts)
@@ -2090,6 +2160,17 @@ def _strict_init_kind(value, env: dict) -> str | None:
         v = env.get(value.name)
         return v if v in ('i', 'd', 'p') else None
     if isinstance(value, N.CallExpr) and isinstance(value.func, N.IdentExpr):
+        # A same-module class constructor call: the result is a struct
+        # POINTER, which is pointer-sized, so it boxes through the EXISTING
+        # `i64` cell unchanged (Increment E). The handle stays an int64_t
+        # cell address and the cell holds the struct address, so nothing
+        # about the hidden-trailing-param threading changes — only which
+        # shim triple (here `_i`) is selected, and the read back is a
+        # `(T *)` cast at the use site. An UNANNOTATED call of a name that
+        # is not a known struct stays None, so this cannot start boxing
+        # arbitrary call results.
+        if value.func.name in _STRUCT_NAMES:
+            return 'i'
         _b = {'int': 'i', 'len': 'i', 'ord': 'i', 'hash': 'i',
               'float': 'd', 'str': 'p', 'String': 'p', 'repr': 'p'}.get(value.func.name)
         # a call to a same-module `def name(...) -> <scalar>` -- Increment A
@@ -2123,10 +2204,21 @@ def _outer_boxable_locals(outer: N.FunctionDef) -> dict:
         if not isinstance(s, N.VarDecl):
             continue
         k = _ann_kind(s.type_ann)
+        sname = None
         if k is None:
             k = _strict_init_kind(s.value, env)
+            # Increment E: a local initialised from a same-module class
+            # constructor holds a struct POINTER. It boxes through the
+            # existing `i64` cell (a pointer is pointer-sized); record the
+            # struct name so `_box_get_call`/`_box_set_args` can round-trip
+            # the cell back to a real `T *` at each use.
+            if k == 'i' and isinstance(s.value, N.CallExpr) \
+                    and isinstance(s.value.func, N.IdentExpr):
+                _cs = s.value.func.name
+                if _cs in _STRUCT_NAMES:
+                    sname = _cs
         if k in ('i', 'd', 'p'):
-            out[s.name] = (s, k)
+            out[s.name] = (s, k, sname)
     return out
 
 
@@ -2222,8 +2314,8 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
     plan: dict = {}
     for n in captured_names:
         if n in boxable:
-            decl, k = boxable[n]
-            plan[n] = (decl, k)
+            decl, k, sname = boxable[n]
+            plan[n] = (decl, k, sname)
             continue
         if n in outer_param_names:      # Increment B: a captured PARAMETER
             k = penv.get(n)
@@ -2232,6 +2324,48 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
                 continue
         return None                     # something v0 can't box -- refuse
     return plan
+
+
+# box handle C identifier -> the struct type it boxes a POINTER to
+# (Increment E). Keyed by the handle, not the source name, because the
+# handle is unique per scope while the same captured name is re-boxed once
+# per enclosing scope that captures it. The CELL is the ordinary `i64` one
+# (a pointer is pointer-sized) -- only the read/write BOUNDARY needs an
+# explicit round trip, and that round trip reuses machinery this codegen
+# already has for exactly this problem (see _apply_async_struct_param_erasure,
+# which erases a struct-typed param's pointer bit-pattern through
+# __mojo_gen_arg):
+#   read   int64_t cell -> `UnsafePointer[T](__mojo_box_get_i64(h))` -> `T *`
+#   write  `T *` value  -> `<value>.address`                       -> int64_t
+# A GIMPLE int64_t-returning box read used directly as `obj.field`'s
+# receiver would be "request for member in something not a structure", and a
+# `T *` passed to an int64_t setter is "makes integer from pointer without a
+# cast". Both are fixed by these, not by a new cell type.
+_BOX_STRUCT_OF: dict = {}
+
+
+def _box_get_call(cident: str, kind: str):
+    """The expression that READS a boxed value in this scope: the kind's
+    getter, round-tripped back to the boxed struct's pointer type when
+    there is one."""
+    call = _call(_BOX_SHIMS[kind][1], [_c_ident(cident)])
+    _sname = _BOX_STRUCT_OF.get(cident)
+    if _sname is None:
+        return call
+    return N.CallExpr(
+        func=N.SubscriptExpr(obj=N.IdentExpr(name='UnsafePointer'),
+                             index=N.IdentExpr(name=_sname)),
+        args=[call])
+
+
+def _box_set_args(cident: str, kind: str, val):
+    """The (handle, value) argument pair for a boxed WRITE, with the value
+    narrowed to the cell's element type when the cell holds a struct
+    pointer."""
+    _sname = _BOX_STRUCT_OF.get(cident)
+    if _sname is None:
+        return [_c_ident(cident), val]
+    return [_c_ident(cident), N.MemberExpr(obj=val, member='address')]
 
 
 def _cap_rewrite_expr(node, box_names: dict):
@@ -2245,7 +2379,7 @@ def _cap_rewrite_expr(node, box_names: dict):
         return node
     if isinstance(node, N.IdentExpr) and node.name in box_names:
         _ci, _k = box_names[node.name]
-        return _call(_BOX_SHIMS[_k][1], [_c_ident(_ci)])
+        return _box_get_call(_ci, _k)
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
@@ -2272,15 +2406,17 @@ def _cap_rewrite_stmts(stmts: list, box_names: dict) -> list:
                 and s.target.name in box_names):
             bname, bk = box_names[s.target.name]
             val = _cap_rewrite_expr(s.value, box_names)
-            out.append(N.ExprStmt(value=_call(_BOX_SHIMS[bk][2], [_c_ident(bname), val])))
+            out.append(N.ExprStmt(value=_call(_BOX_SHIMS[bk][2],
+                                             _box_set_args(bname, bk, val))))
             continue
         if (isinstance(s, N.AugAssignStmt) and isinstance(s.target, N.IdentExpr)
                 and s.target.name in box_names):
             bname, bk = box_names[s.target.name]
-            cur = _call(_BOX_SHIMS[bk][1], [_c_ident(bname)])
+            cur = _box_get_call(bname, bk)
             rhs = _cap_rewrite_expr(s.value, box_names)
             new_val = N.BinaryOp(op=s.op[:-1], left=cur, right=rhs)
-            out.append(N.ExprStmt(value=_call(_BOX_SHIMS[bk][2], [_c_ident(bname), new_val])))
+            out.append(N.ExprStmt(value=_call(_BOX_SHIMS[bk][2],
+                                             _box_set_args(bname, bk, new_val))))
             continue
         if isinstance(s, N.VarDecl) and s.name in box_names:
             # A captured name re-declared in the SAME scope that captures
@@ -2405,12 +2541,22 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     ordinary compiled path's own 2026-07-27 fix solved for plain
     `{mut}` closures, done here as a pure AST rewrite over the plain
     `int64_t` box handle."""
-    box_kind = {n: k for n, (_d, k) in cap_map.items()}
+    box_kind = {n: k for n, (_d, k, _s) in cap_map.items()}
     hidden = {n: (_hidden_box_name(n), box_kind[n]) for n in cap_map}
     outer_box = {n: (n, box_kind[n]) for n in cap_map}
+    # Increment E: register which box handle carries a struct POINTER, so
+    # each scope's read/write round-trips it through UnsafePointer[T](...)
+    # / `.address`. The handle name is scope-local and unique, so both the
+    # enclosing scope's box and the nested body's hidden param register
+    # under their own key.
+    for _n, (_d, _k, _s) in cap_map.items():
+        if _s is None:
+            continue
+        _BOX_STRUCT_OF[_n] = _s
+        _BOX_STRUCT_OF[_hidden_box_name(_n)] = _s
 
     prepend: list = []
-    for name, (decl, k) in cap_map.items():
+    for name, (decl, k, _sname) in cap_map.items():
         newshim = _BOX_SHIMS[k][0]
         if decl is not None:
             decl.value = _call(newshim, [decl.value])
@@ -2554,6 +2700,26 @@ def _hoist_nested_async(stmts: list, meta: list):
                         # falls through to the cpp path unchanged.
                         cap_map = _nested_async_capture_plan(inner, s)
                         if cap_map is None:
+                            # Increment D: the generator captures outer
+                            # locals, but the box handles cannot be threaded
+                            # to where it is actually driven from (a
+                            # further-nested `async def` sibling's
+                            # `async for`/await drive loop -- see
+                            # _called_from_nested_async). Falling through to
+                            # the C++ path is NOT a safe fallback here: that
+                            # emitter has no capture model at all, so it
+                            # emitted the generator body referencing the
+                            # captured name in a scope where it does not
+                            # exist -- `'acc' was not declared in this
+                            # scope` from the generated .cpp, a hard compile
+                            # error pointing at generated code rather than
+                            # at the program. Record the name so the C++
+                                    # emitter refuses it too (it consults
+                                    # this set), turning a confusing generated-C
+                                    # error into an honest one naming the
+                                    # construct.
+                            _UNTHREADABLE_NESTED_ASYNC_GENS.add(inner.name)
+                            _UNTHREADABLE_NESTED_ASYNC_GENS.add(base)
                             continue
                         if cap_map:
                             _apply_nested_async_capture(inner, s, cap_map)
