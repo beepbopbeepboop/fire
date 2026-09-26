@@ -310,6 +310,99 @@ def test_no_import_needs_no_dylib(tmpdir, _shared):
           "a program with no imports built module dylibs anyway")
 
 
+
+# A struct-only module, and a program that uses it across the import boundary.
+# Both halves matter: the module must be buildable at all (its API is methods,
+# not free functions), and the caller's `Counter()` / `c.get()` have to be
+# recognised as operations on an IMPORTED type rather than as calls to
+# unknown free functions.
+STRUCT_LIB = """\
+struct Counter:
+  var n: Int
+  fn get(self) -> Int:
+    return self.n
+  fn bumped(self) -> Int:
+    return self.n + 1
+"""
+
+STRUCT_USER = """\
+from slib import Counter
+
+def main() -> Int:
+  var c = Counter()
+  c.n = 10
+  return c.get() + c.bumped()
+"""
+
+
+def test_struct_method_across_modules(tmpdir, _shared):
+    root = os.path.join(tmpdir, "structmod")
+    os.makedirs(root)
+    write_tree(root, {"slib.mojo": STRUCT_LIB, "user.mojo": STRUCT_USER})
+    fresh_cas()
+    _result, out = build(root, "user.aout")
+    code, err = run(out)
+    check(code == 21, f"cross-module struct use returned {code}, expected 21 "
+                      f"(c.get() + c.bumped() with c.n = 10); stderr: {err}")
+    dylib = os.path.join(CAS_IMPORTS, "slib.dylib")
+    check(os.path.isfile(dylib), f"a struct-only module built no dylib at "
+                                 f"{dylib}")
+    names = sorted(e["name"] for e in manifest(dylib)["exports"])
+    check(names == ["Counter_bumped", "Counter_get"],
+          f"a struct-only module exported {names}; its methods ARE its API, "
+          f"so exporting nothing makes it unbuildable and unimportable")
+    with open(dylib, "rb") as f:
+        info = parse_macho(f.read())
+    for e in manifest(dylib)["exports"]:
+        check("_" + e["symbol"] in info["exports"],
+              f"the trie is missing the method export {e['symbol']}")
+
+
+def test_one_word_struct_field_is_the_value(tmpdir, _shared):
+    """`c.n` and `c` must be the SAME word for a one-field struct.
+
+    They are not by construction: a field write lands in a slot keyed by the
+    access path (`c.n`) while the method receives `c`. If those are two
+    different slots the method reads the constructor's zero and every
+    accessor returns a constant — a program that builds, runs, and computes
+    the wrong answer, with no diagnostic anywhere. So this asserts the value,
+    not merely that it runs."""
+    src = os.path.join(tmpdir, "field.mojo")
+    with open(src, "w") as f:
+        f.write("struct Box:\n  var v: Int\n"
+                "  fn get(self) -> Int:\n    return self.v\n"
+                "def main() -> Int:\n"
+                "  var b = Box()\n  b.v = 41\n  return b.get() + 1\n")
+    out = os.path.join(tmpdir, "field.aout")
+    rc = run_fire(["build", "--formal", "--no-prove", "-o", out, src]).returncode
+    check(rc == 0, f"build failed: {rc}")
+    r = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    check(r.returncode == 42,
+          f"returned {r.returncode}, expected 42 — if this is 1, the field "
+          f"and the receiver are different storage and the accessor is "
+          f"returning the constructor's zero")
+
+
+def test_wide_struct_is_refused_by_name(tmpdir, _shared):
+    """A struct too wide for one word must be refused where the decision is.
+
+    It used to reach the call path and become a BL against a symbol named
+    after the type, so the image built and then aborted in dyld with
+    "Symbol not found" — a loader failure pointing at a compile-time limit."""
+    src = os.path.join(tmpdir, "wide.mojo")
+    with open(src, "w") as f:
+        f.write("struct Pair:\n  var a: Int\n  var b: Int\n"
+                "def main() -> Int:\n  var p = Pair()\n  return 0\n")
+    out = os.path.join(tmpdir, "wide.aout")
+    result = run_fire(["build", "--formal", "--no-prove", "-o", out, src])
+    check(result.returncode != 0, "a two-field struct was accepted silently")
+    text = result.stderr + result.stdout
+    check("Pair" in text and "word" in text,
+          f"the refusal should name the struct and the limit: {text[-300:]}")
+    check("dyld" not in text and "Symbol not found" not in text,
+          f"this must fail at compile time, not in the loader: {text[-300:]}")
+
+
 TESTS = [
     ("an import links the module and the program runs",
      test_import_links_and_runs),
@@ -325,6 +418,12 @@ TESTS = [
      test_unresolvable_import_is_a_clean_error),
     ("a program with no imports builds no dylib",
      test_no_import_needs_no_dylib),
+    ("a struct method is callable across modules",
+     test_struct_method_across_modules),
+    ("a one-word struct's field IS its value",
+     test_one_word_struct_field_is_the_value),
+    ("a struct too wide for one word is refused by name",
+     test_wide_struct_is_refused_by_name),
 ]
 
 

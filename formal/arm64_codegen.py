@@ -376,6 +376,7 @@ class ARM64Codegen:
         self.test_input = test_input
         self.asm = Assembler()
         self._functions = {}
+        self._structs: dict = {}
         self._current_function = None
         self._if_counter = 0
         self._while_counter = 0
@@ -455,7 +456,7 @@ class ARM64Codegen:
         self._container_ctx = 0
 
     def compile(self, stmts: list, base_addr: int = 0x100000014,
-                emit_startup: bool = True) -> tuple:
+                emit_startup: bool = True, structs: list = None) -> tuple:
         """Compile a fire_compiler module statement list to ARM64 machine code.
 
         `stmts` is Parser(...).parse_module()'s output — may contain imports,
@@ -465,6 +466,14 @@ class ARM64Codegen:
         functions = [s for s in stmts if isinstance(s, F.FunctionDef)]
         if not functions:
             raise CodegenError("no function definitions to compile")
+        # Structs, indexed by name. They arrive as a separate list because the
+        # callers hand `compile()` a FUNCTION list (closures and lambdas have
+        # already been lifted out of it), so the StructDefs are not in `stmts`
+        # to be picked up here. This is what lets a `S(...)` constructor be
+        # recognised as a type rather than falling through the call path and
+        # becoming a BL against a symbol named `S` that nothing defines.
+        for st in (structs or []):
+            self._structs[st.name] = st
         if emit_startup:
             main = [f for f in functions if f.name == "main"]
             rest = [f for f in functions if f.name != "main"]
@@ -2560,6 +2569,41 @@ class ARM64Codegen:
         width, signed = info
         self._emit_extend(0, 0, IntType(width, signed))
 
+    def _emit_struct_constructor(self, e: F.CallExpr, name: str,
+                                 st: F.StructDef) -> None:
+        """`S()` — default-initialize a struct, not a call.
+
+        Mojo has no user-defined constructor: `S()` brings every field up at
+        its default and the fields are then assigned. On this path a value is
+        one 64-bit word, so that is exactly what a struct of zero or one field
+        IS — the word itself, zero for a fresh one. Both shapes therefore need
+        no call at all, and emitting one was the bug: it produced a BL against
+        a symbol named after the type, so the library built and then could not
+        be loaded ("Symbol not found: _Counter").
+
+        Wider structs have no representation here and are refused by name and
+        width. They used to reach the extern path and produce that same
+        unloadable image, so the honest limit has to be stated where the
+        decision is made rather than discovered by dyld.
+        """
+        fields = list(getattr(st, "fields", None) or [])
+        if len(fields) > 1:
+            raise CodegenError(
+                f"constructing {name} needs {len(fields)} words, and a formal "
+                f"value is one word — a multi-field struct has no "
+                f"representation on this path (previously this emitted a call "
+                f"to a symbol named {name!r} that nothing defines, so the "
+                f"image built and then failed to load)")
+        if e.args or e.kwargs:
+            # Positional/keyword construction is not Mojo's struct syntax, and
+            # silently ignoring a supplied value would lose data.
+            raise CodegenError(
+                f"{name}(...) takes no arguments on this path: a struct is "
+                f"default-initialized and its fields assigned, and a "
+                f"{len(e.args) + len(e.kwargs)}-argument construction is not a "
+                f"shape this backend can honour")
+        self.asm.emit(encode_movz_xn_imm(0, 0))   # X0 = 0: a fresh value
+
     def _specialization_args(self, e: F.CallExpr, ct_params: list) -> list:
         """The argument expressions binding `ct_params` at this call site."""
         try:
@@ -2586,6 +2630,9 @@ class ARM64Codegen:
             if tkind is not None:
                 self._emit_type_constructor(e, name, tkind)
                 return
+        if name in self._structs:
+            self._emit_struct_constructor(e, name, self._structs[name])
+            return
         is_extern = name not in self._functions
         if is_extern:
             # Unknown signature: AAPCS has no place for Python kwargs on a

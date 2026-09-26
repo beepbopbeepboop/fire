@@ -178,6 +178,42 @@ def resolve_module_path(module_name: str, relative_to: str = None,
     return None
 
 
+def imported_struct_defs(source_path: str, stmts: list,
+                         project_root: str = None) -> list:
+    """The StructDefs declared by the modules `source_path` imports.
+
+    An importer needs these for the same reason its own file's structs are
+    needed: a constructor call and a method call have to be recognised as
+    operations on a TYPE. `from lib1 import Counter` binds the name `Counter`
+    in this file, so `Counter()` here is a struct default-construction — but
+    with only this file's declarations in hand it looks like a call to an
+    unknown function, and lowered to a BL against a symbol named `Counter`
+    that nothing defines.
+
+    The declarations are read from the imported module's own source, which is
+    the same parse the module's dylib was built from, so the two cannot
+    disagree about a struct's shape."""
+    out, seen = [], set()
+    for mod in imported_modules(stmts):
+        path = resolve_module_path(mod, relative_to=source_path,
+                                   project_root=project_root or source_path)
+        if path is None:
+            continue
+        try:
+            with open(path) as f:
+                text = f.read()
+            mod_stmts = F.Parser(F.py_tokenize(text)).with_filename(path) \
+                            .parse_module()
+        except Exception:
+            continue
+        for st in mod_stmts:
+            name = getattr(st, "name", None)
+            if st.__class__.__name__ == "StructDef" and name not in seen:
+                seen.add(name)
+                out.append(st)
+    return out
+
+
 def build_module_dylib(module_name: str, source_path: str, out_dir: str,
                        arch: str = "arm64", project_root: str = None,
                        _stack=()) -> str:

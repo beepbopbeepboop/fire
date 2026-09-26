@@ -22,6 +22,7 @@ fire AST via aliases (no AST-to-AST translation), one generator per
 architecture: formal.arm64_proof_gen and formal.x86_64_proof_gen.
 """
 
+import copy
 import os
 import re
 import subprocess
@@ -29,6 +30,7 @@ import sys
 from types import SimpleNamespace
 
 import fire_compiler as F
+from formal import model as M
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
 from formal.macho_linker import (EXTERN_ENTRYOFF, NOEXTERN_ENTRYOFF, TEXT_BASE,
@@ -572,7 +574,8 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
 
 
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
-                      dylibs: list = None, comptime_hook=None):
+                      dylibs: list = None, comptime_hook=None,
+                      structs: list = None):
     """Compile `ordered` for `arch` and wrap it in its binary container.
 
     Returns (code, info, external_syms, binary). Mach-O needs two passes: the
@@ -596,7 +599,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                                  compute_got_addrs)
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
         try:
-            code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE)
+            code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE,
+                                         structs=structs)
         except CodegenError as e:
             raise FormalBuildError(str(e))
         external_syms = info.get("external_syms") or []
@@ -619,13 +623,15 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
     try:
-        code, info = codegen.compile(ordered, base_addr=base_noextern)
+        code, info = codegen.compile(ordered, base_addr=base_noextern,
+                                     structs=structs)
         external_syms = info.get("external_syms") or []
         if external_syms:
             # Re-emit at the extern entry base (the layout differs, and so do
             # every address the code computed off its own base).
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
-            code, info = codegen.compile(ordered, base_addr=base_extern)
+            code, info = codegen.compile(ordered, base_addr=base_extern,
+                                         structs=structs)
             external_syms = info.get("external_syms") or []
             # The stub addresses must be computed for the SAME entry offset
             # the code was emitted at, which a linked dylib moves.
@@ -642,6 +648,17 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                                   "symbols": set((d.get("map") or {}).values())}
                                  for d in dylibs] or None)
     return code, info, external_syms, binary
+
+
+def _imported_structs(source_path: str, stmts: list, arch: str) -> list:
+    """Struct declarations from the modules this file imports, or [].
+
+    A no-op for a target that has no module concept (an ELF image, or a
+    non-Mach-O format): there is nothing to import and nothing to bind."""
+    if not fmt_wants_macho(arch):
+        return []
+    from formal.imports import imported_struct_defs
+    return imported_struct_defs(source_path, stmts, project_root=source_path)
 
 
 def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
@@ -744,7 +761,22 @@ def compile_formal(source_path: str, output: str = None,
 
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
-    functions = _extract_functions(stmts)
+    # The modules this file imports contribute their struct declarations
+    # BEFORE the function pipeline runs, because a method call is rewritten to
+    # `<Struct>_<method>` and the rewrite needs to know which struct owns the
+    # name. Resolving this after would leave `c.get()` unrecognised in a file
+    # that imported the struct, which is the only way such a call occurs.
+    imported_structs = _imported_structs(source_path, stmts, arch)
+    try:
+        functions, structs = _prepare_functions(
+            stmts, synthetic=True, extra_structs=imported_structs)
+    except CodegenError as e:
+        # A clean compile error. The function pipeline runs before codegen
+        # proper, so a refusal raised there — a method whose receiver is wider
+        # than a word, say — used to reach the user as a raw traceback instead
+        # of the one-line diagnostic every other refusal produces.
+        raise FormalBuildError(str(e))
+    ordered = functions
 
     # The libraries this program links against, resolved before codegen: their
     # export spellings decide both the callee mangling and (via their load
@@ -769,23 +801,14 @@ def compile_formal(source_path: str, output: str = None,
         linked = linked + [d for d in load_dylib_manifests(import_dylibs)
                            if d["install_name"] not in have]
 
-    # Shared closure discovery (same scan GIMPLE uses), then flatten nested
-    # defs into top-level lifted functions with by-value capture params.
-    ctx = FormalClosureCtx()
-    discover_closures(ctx, stmts)
-    functions = _flatten_closures(functions, ctx._all_closures)
-    # Lift LambdaExprs into top-level FunctionDefs so assigned/IIFE lambdas
-    # lower as call targets (residual bare lambdas get `_lifted_name`).
-    functions = _lift_lambdas(functions)
-    ordered = functions
-
     # `comptime f(...)` is resolved by RUNNING f through this same backend
     # (formal/comptime_runner.py), so a folded constant and the emitted code
     # can never come from two different implementations.
     comptime_hook = make_call_hook(source)
     code, info, external_syms, binary = _codegen_and_link(
         arch, fmt, ordered, test_input, dylibs=linked,
-        comptime_hook=comptime_hook)
+        comptime_hook=comptime_hook,
+        structs=structs)
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"
@@ -858,14 +881,207 @@ def _formal_module_functions(source_path: str) -> tuple[str, list]:
     # (which finds nothing in binary_heap either, so it is refused a moment
     # later, by the check that can actually say why). Reporting the accurate
     # reason matters: "no top-level functions" reads like a codegen gap.
-    functions = _extract_functions(stmts, synthetic=False)
+    functions, structs = _prepare_functions(stmts, synthetic=False)
+    module = re.sub(r"[^A-Za-z0-9_]", "_",
+                    os.path.splitext(os.path.basename(source_path))[0])
+    return module, functions, source, structs
+
+
+def _struct_methods(stmts: list) -> list:
+    """A struct's methods, as ordinary functions named `<Struct>_<method>`.
+
+    They have to be lifted out because nothing else puts them in the compiled
+    set: `_extract_functions` takes only module-level FunctionDefs, so a
+    method was invisible to the codegen and `c.get()` fell through the call
+    path to a BL against a symbol literally spelled `c.get` — the receiver's
+    own name glued to the method's. Every such program built and then died in
+    dyld.
+
+    A one-word struct additionally needs `self.<field>` to mean `self`,
+    since the receiver IS the field. That rule is applied where member
+    accesses are lowered, not by rewriting the AST here: expressing it as an
+    empty-member MemberExpr sends every later AST pass into infinite
+    recursion, because a member access whose object is itself is a cycle.
+    """
+    out = []
+    for st in stmts:
+        if not isinstance(st, F.StructDef):
+            continue
+        for m in M.struct_methods(st):
+            if not M.struct_fits_one_word(st):
+                # Not compiled, and not exported — but NOT an error here. The
+                # body would read `self.<field>` as a field of an integer, so
+                # it cannot be lowered; refusing at DECLARATION though broke
+                # every module that merely mentions such a method, including
+                # ones that never call it and built and ran correctly before
+                # (the sweep lost five files to it). A method that is declared
+                # and never called costs nothing; the refusal belongs at the
+                # call site, which is where _rewrite_method_calls puts it.
+                continue
+            fn = copy.deepcopy(m)
+            fn.name = M.method_function_name(st.name, m.name)
+            out.append(fn)
+    return out
+
+
+def _one_word_field_map(fn, structs_by_name: dict) -> dict:
+    """{local name: its field name} for locals holding a one-word struct.
+
+    Found from the binding, not inferred: a local initialised from a one-word
+    struct's constructor holds that struct's only field, and nothing else on
+    this path can produce such a value."""
+    mapping = {}
+    for node in _iter_nodes(fn.body):
+        target = value = None
+        if isinstance(node, F.VarDecl):
+            target, value = node.name, node.value
+        elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                           F.IdentExpr):
+            target, value = node.target.name, node.value
+        if not target or not isinstance(value, F.CallExpr):
+            continue
+        if not isinstance(value.func, F.IdentExpr):
+            continue
+        st = structs_by_name.get(value.func.name)
+        if st is not None and M.struct_fits_one_word(st) \
+                and M.struct_field_count(st) == 1:
+            mapping[target] = M.struct_fields(st)[0].name
+    return mapping
+
+
+def _iter_nodes(node):
+    """Every dataclass node in a statement tree, parents before children."""
+    if isinstance(node, list):
+        for x in node:
+            yield from _iter_nodes(x)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    yield node
+    for name in node.__dataclass_fields__:
+        yield from _iter_nodes(getattr(node, name))
+
+
+def _rewrite_self_fields(node, mapping: dict):
+    """`x.f` -> `x` where `mapping[x] == f`, returning any replacement node.
+
+    This is what makes a one-word struct's field and its receiver the SAME
+    storage. Without it the two are separate: `c.n = x` wrote a `c.n` slot
+    while the method call passed `c`, so the method read the constructor's
+    zero and every accessor returned a constant — a program that builds, runs,
+    and computes the wrong answer. Rewriting the access is what keeps the
+    field and the value identical, rather than leaving the codegen to
+    reconcile two spellings of one word."""
+    if isinstance(node, list):
+        for i, x in enumerate(node):
+            node[i] = _rewrite_self_fields(x, mapping)
+        return node
+    if (isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr)
+            and mapping.get(node.obj.name) == node.member):
+        return F.IdentExpr(name=node.obj.name)
+    for name in getattr(node, "__dataclass_fields__", {}):
+        setattr(node, name, _rewrite_self_fields(getattr(node, name), mapping))
+    return node
+
+
+def _prepare_functions(stmts: list, synthetic: bool = True,
+                       extra_structs: list = None) -> tuple:
+    """Turn a parsed module into the function list the codegen compiles.
+
+    ONE pipeline for both entry points. It was two, and they had drifted:
+    the executable path skipped method lifting and call rewriting entirely,
+    so `c.get()` built an image that bound a symbol named `c.get` and died in
+    dyld, while the dylib path handled it. Anything that changes what gets
+    compiled has to happen here or the two front ends disagree about the same
+    source file.
+
+    Returns (functions, structs) — the structs are passed to the codegen so a
+    `S(...)` constructor and a `self.<field>` access can be recognised."""
+    functions = _extract_functions(stmts, synthetic=synthetic)
+    owners = _method_owners(stmts, extra_structs)
+    # This file's own declarations win over an imported one of the same name:
+    # a local definition shadows the import, and the local is what this file's
+    # code means.
+    structs, seen_struct = [], set()
+    for st in ([s for s in stmts if isinstance(s, F.StructDef)]
+               + list(extra_structs or [])):
+        if st.name not in seen_struct:
+            seen_struct.add(st.name)
+            structs.append(st)
+    structs_by_name = {st.name: st for st in structs}
+    method_owners = M.method_owner_names(structs)
+    functions = functions + _struct_methods(stmts)
+    wide = {st.name: st for st in structs if not M.struct_fits_one_word(st)}
+    for fn in functions:
+        _rewrite_method_calls(fn.body, owners, wide)
+        # A method's `self` IS the field; a local initialised from a one-word
+        # constructor holds that struct's only field directly.
+        mapping = _one_word_field_map(fn, structs_by_name)
+        st = method_owners.get(fn.name)
+        if st is not None and M.struct_fits_one_word(st) \
+                and M.struct_field_count(st) == 1:
+            mapping["self"] = M.struct_fields(st)[0].name
+        _rewrite_self_fields(fn.body, mapping)
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
     functions = _lift_lambdas(functions)
-    module = re.sub(r"[^A-Za-z0-9_]", "_",
-                    os.path.splitext(os.path.basename(source_path))[0])
-    return module, functions, source
+    return functions, structs
+
+
+def _method_owners(stmts: list, extra_structs: list = None) -> dict:
+    """{method_name: struct_name} for every method a module declares.
+
+    Dispatch is by name alone, because `recv.m(...)` carries no type
+    information on this path — the receiver's type is not inferred. So a method
+    name declared by two structs in one module is genuinely ambiguous, and it
+    is left out of this map rather than resolved arbitrarily: the call then
+    fails as the unresolvable symbol it is, instead of silently binding to one
+    struct's method."""
+    owners: dict = {}
+    ambiguous = set()
+    for st in list(stmts) + list(extra_structs or []):
+        if not isinstance(st, F.StructDef):
+            continue
+        for m in M.struct_methods(st):
+            if m.name in owners and owners[m.name] != st.name:
+                ambiguous.add(m.name)
+            owners[m.name] = st.name
+    for name in ambiguous:
+        owners.pop(name, None)
+    return owners
+
+
+def _rewrite_method_calls(node, owners: dict, wide: dict = None) -> None:
+    """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
+
+    Rewriting the CALL rather than special-casing a method call in the
+    codegen means the ordinary call path handles it: the method is already
+    compiled as a function taking `self` first, so the receiver simply
+    becomes its first argument and every existing rule about arguments,
+    registers and tail calls applies unchanged."""
+    if isinstance(node, list):
+        for x in node:
+            _rewrite_method_calls(x, owners, wide)
+        return
+    if (isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr)
+            and isinstance(node.func.obj, F.IdentExpr)):
+        owner = owners.get(node.func.member)
+        if owner is not None:
+            if (wide or {}).get(owner) is not None:
+                st = wide[owner]
+                raise CodegenError(
+                    f"{owner}.{node.func.member}() cannot be lowered: its "
+                    f"receiver has {M.struct_field_count(st)} fields and a "
+                    f"formal value is one word, so `self.<field>` has no "
+                    f"representation on this path")
+            receiver = node.func.obj
+            node.func = F.IdentExpr(name=M.method_function_name(
+                owner, node.func.member))
+            node.args = [receiver] + list(node.args)
+            return
+    for name in getattr(node, "__dataclass_fields__", {}):
+        _rewrite_method_calls(getattr(node, name), owners, wide)
 
 
 def dylib_manifest_path(dylib_path: str) -> str:
@@ -1020,8 +1236,30 @@ def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
     return exported
 
 
-def _formal_exports(source_paths: list, ordered: list,
-                    info: dict, prefixes: dict = None) -> list:
+def _method_exports(source_paths: list, structs_by_file: dict,
+                    prefixes: dict = None) -> dict:
+    """{compiled function name: (module, symbol, signature)} for methods.
+
+    Built here rather than inside _formal_exports because the module qualifier
+    is a property of the FILE a struct was declared in, and only the caller
+    knows which file that was. Naming is doc/ABI.md's: module-qualified, so
+    two modules' same-named structs cannot collide in one library."""
+    out = {}
+    for src_path, structs in (structs_by_file or {}).items():
+        prefix = (prefixes or {}).get(src_path) or _module_prefix(src_path)
+        for st in structs:
+            for m in M.struct_methods(st):
+                if not M.struct_fits_one_word(st):
+                    continue          # refused at lift time, never compiled
+                out[M.method_function_name(st.name, m.name)] = (
+                    prefix,
+                    M.abi_method_symbol(prefix, st.name, m.name),
+                    f"{st.name}.{m.name}")
+    return out
+
+
+def _formal_exports(source_paths: list, ordered: list, info: dict,
+                    prefixes: dict = None, methods: dict = None) -> list:
     """The library's export table, per doc/ABI.md's boundary contract.
 
     The export SET is decided by `reflect.collect_exports_src` — the same
@@ -1054,7 +1292,29 @@ def _formal_exports(source_paths: list, ordered: list,
         # invariant rather than relying on the rename: two trie entries with
         # one symbol is not a de-duplication problem, it is a corrupt export
         # table that dyld resolves to whichever it finds first.
-        if fn.name not in exported or fn.name in emitted:
+        if fn.name in emitted:
+            continue
+        if fn.name in (methods or {}):
+            # A struct method is part of the module's API even when the module
+            # has no free functions at all, which is the whole of a
+            # struct-only module like std/collections/binary_heap. Without
+            # this, such a module exports nothing, cannot be built as a
+            # dylib, and every importer of it fails.
+            emitted.add(fn.name)
+            module, symbol, signature = methods[fn.name]
+            out.append({
+                "module": module,
+                "name": fn.name,
+                "symbol": symbol,
+                "entry": info["labels"][fn.name],
+                # The receiver is the first parameter and an importer's call
+                # passes it, so the arity recorded is the whole signature.
+                "arity": len(fn.params),
+                "signature": signature,
+                "kind": "method",
+            })
+            continue
+        if fn.name not in exported:
             continue                      # private, generic, or overloaded
         emitted.add(fn.name)
         prefix, entry, symbol = exported[fn.name]
@@ -1106,8 +1366,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 for d in linked}
     ordered = []
     seen: dict = {}
+    structs_by_file: dict = {}
     for source_path in source_paths:
-        module, functions, module_source = _formal_module_functions(source_path)
+        module, functions, module_source, file_structs = \
+            _formal_module_functions(source_path)
+        structs_by_file[source_path] = file_structs
         for fn in functions:
             # A repeated name is an OVERLOAD, not a collision — and Mojo
             # overloads are ordinary (`def tile[...]` appears three times in
@@ -1214,7 +1477,9 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             f"this backend does not lower (a struct type, a method call on a "
             f"value, a compiler intrinsic), not exports that are missing.")
 
-    exports = _formal_exports(source_paths, ordered, info, module_prefixes)
+    exports = _formal_exports(source_paths, ordered, info, module_prefixes,
+                              _method_exports(source_paths, structs_by_file,
+                                              module_prefixes))
     if not exports:
         raise FormalBuildError("formal dylib has no public functions")
 
