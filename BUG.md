@@ -211,11 +211,71 @@ ldr  x1, [x9]          ; reads address 0 -> SIGSEGV
 The sibling `walk_for_temps` did not have this bug because it iterates
 `stmts or []` at its own top level.
 
-**x86-64 is NOT fixed by this** and still returns 98 for 100 on
-`test_x86_64_containers.py`. Its `walk_compr` is called per-statement rather
-than with the list, so its temps are allocated correctly and the bug there is
-the one described below: the inner generator reuses R10/R11/R8/RDI, which the
-outer generator's loop bookkeeping still holds.
+**x86-64 is NOT fixed by this** — still 98 for 100. Its own write-up follows.
+
+### x86-64 handoff: nested comprehension returns 98 for 100
+
+Exact reproduction (`test_x86_64_containers.py:229`, n = 5):
+
+```python
+def f(n):
+    xs = [i + j for i in range(n) for j in range(n)]
+    t = 0
+    for x in xs:
+        t += x
+    return t                      # want 100 (5*10 + 5*10), gets 98
+```
+
+It is 2 short, not a crash and not a wrong count, so elements ARE being
+appended — a couple carry the wrong VALUE. A single-generator comprehension is
+correct, and so is the same nesting on arm64, so it is specific to the
+recursion in `X86_64Codegen._emit_compr_gen` (`formal/x86_64_codegen.py:2529`).
+
+**Already ruled out**, so nobody re-checks these:
+
+* The control temps ARE allocated. `walk_compr` (line 224) is invoked per
+  statement — `for st in (f.body or []): walk_compr(st, 0, acc_c)` — so unlike
+  arm64 it is handed a statement, not the list, and `_ci{i}`/`_cb{i}` exist.
+  That was the arm64 bug; it does not apply here.
+* The append cursor is NOT register-held. `_compr_append_elem` re-reads the
+  count from the blob header (`R10 = [R11]`) and writes it back, so nested
+  generators accumulate into one shared blob correctly — which is why the
+  element COUNT is right and only values are wrong.
+* The outer loop is self-healing for R10/R11: `label(start_label)` reloads
+  both from `_cb{di}` on every iteration, so nothing needs to survive the
+  recursive call in those registers.
+
+**Where to look.** These four are live across the
+`self._emit_compr_gen(expr, gi + 1, ...)` call at line 2599, and the inner
+generator uses every one of them for the same purposes:
+
+    R10   element count        R11   blob base
+    R8    condition result     RDI   element address
+
+The outer's element address is computed into RDI at line 2578
+(`_emit_elem_addr(R11, RAX, RDI)`) and the value loaded from it at 2579, before
+the target is stored and before the recursion — so if anything between there
+and the recursive call needs RDI again, or if the target store is reordered
+against the element load, the outer's element is the thing that goes stale.
+`_emit_compr_append_elem` also takes RDI for the address it is about to write.
+
+The structural fix worth considering, and the one arm64 gets for free: arm64
+re-derives every value from memory *inside* the loop body — it re-loads
+`_cb{di}` into X9 and the index at the top of each iteration, and the cursor
+lives in the blob header. Nothing is carried in a register across the
+recursion there, so the nesting simply works. Making the x86 body do the same
+(re-derive the element address from `_cb{di}` + the index var after the
+target is bound, rather than keeping RDI) removes the whole class rather than
+one instance of it. A `push`/`pop` pair around the recursive call is the
+smaller change if you would rather not restructure.
+
+Suggested first experiment, cheapest thing that discriminates: make the
+element expression `i` alone (so the element IS the bound variable, loaded
+straight out of `_cb{di}`) and see whether 98 becomes 100. If it does, the
+fault is in carrying the element across the recursion. If it does not, the
+fault is in the target store or the shared blob, and the next thing to try is
+giving each generator depth its own append scratch instead of sharing
+R10/R11/RDI.
 
 ### Two gaps found while fixing this, both still open
 
