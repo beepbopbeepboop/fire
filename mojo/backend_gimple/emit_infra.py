@@ -1973,6 +1973,19 @@ def _list_repr_fn(gen, rav: str) -> str:
     no None-sentinel check) whenever the element type is known to be
     int64_t.
     """
+    # A list of 2-element PAIR lists (what `enumerate(x)` and `zip(a, b)`
+    # build): the generic repr reads each inner slot through the
+    # None-sentinel heuristic, so the index 0 of the first pair printed as
+    # `None` instead of `0`. Route to the pair-aware helpers, choosing the
+    # one for the SECOND slot's statically known type (a double and an int
+    # are indistinguishable in the raw slot).
+    nested = gen._nested_elem_types.get(rav)
+    if isinstance(nested, list) and len(nested) == 2 and nested[0] == 'int64_t':
+        if nested[1] == 'double':
+            return 'mojo_repr_list_pairs_d'
+        if nested[1] in ('char *', 'MojoStr *'):
+            return 'mojo_repr_list_pairs_s'
+        return 'mojo_repr_list_pairs'
     et = gen._elem_types.get(rav)
     if et == 'double':
         return 'mojo_repr_list_doubles'

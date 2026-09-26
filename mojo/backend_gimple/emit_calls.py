@@ -1702,6 +1702,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _missed = gen._new_val('int', '_mojo_getattr_missed')
         return '_Bool', gen._new_val('_Bool', f'{_missed} == 0')
 
+    # `enumerate(x)` in VALUE position — the runtime's identity-passthrough
+    # helper cannot answer this (see _lower_builtin_enumerate_value). The
+    # `for i, v in enumerate(x)` form has its own lowering in emit_loops and
+    # never reaches here.
+    if (fname_raw == 'enumerate' and node.args
+            and not gen._locally_binds_name('enumerate')):
+        return _lower_builtin_enumerate_value(gen, node)
+
     # Trivial builtins: lower_expr all args, call runtime fn
     _SIMPLE_BUILTINS = {
         'str':       ('char *',  'mojo_str'),
@@ -2566,6 +2574,92 @@ def _lower_builtin_import(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return 'int', gen._new_val('int', '0  /* __import__ stubbed */')
 
 
+def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`enumerate(x)` (and `list(enumerate(x))`) — a real list of
+    (index, value) PAIR lists, the shape `mojo_zip` produces.
+
+    The runtime's `mojo_enumerate` is an identity passthrough
+    (`return iterable`), so a value-position `enumerate(...)` used to hand
+    the caller its own argument back: `list(enumerate([7, 8]))` returned
+    `[7, 8]` — the values with no indices at all — and over a GENERATOR,
+    whose "unchanged" value is a coroutine handle, the consuming `list()`
+    found nothing iterable in it and produced an EMPTY list, silently.
+
+    Routed through a comprehension instead (which is what `list(x)` does),
+    which cannot work here: that path synthesizes a SINGLE-slot target, so
+    the enumerate loop bound the INDEX to it and dropped the value —
+    `list(enumerate([7, 8]))` came out as `[0, 1]`. Built directly instead.
+
+    `for i, v in enumerate(x)` is unaffected: it has its own lowering in
+    emit_loops, with correct index/element typing."""
+    if not node.args:
+        raise RuntimeError("enumerate() requires an argument")
+    at, av = gen.lower_expr(node.args[0])
+    # Start value: enumerate(x, start) counts from there.
+    start = '0'
+    if len(node.args) > 1:
+        st, sv = gen.lower_expr(node.args[1])
+        start = gen._to_int64(st, sv)
+    elif getattr(node, 'kwargs', None):
+        # enumerate(x, start=...) — the keyword form real callers use.
+        for k, v in node.kwargs:
+            if k == 'start':
+                st, sv = gen.lower_expr(v)
+                start = gen._to_int64(st, sv)
+    av = gen._materialize_as_list(at, av)
+    elem = gen._elem_of(av)
+    res = gen._new_temp('MojoList *')
+    gen._emit(f"  {res} = mojo_list_new ();")
+    len64 = gen._new_val('int64_t', f'mojo_list_len ({av})')
+    # POSITION counter, kept separate from the index actually stored in each
+    # pair: `enumerate(x, start)` starts counting at `start`, so the loop
+    # bound has to be the position (0..len) or the first `start` iterations
+    # are skipped.
+    pos = gen._new_val('int64_t', '(int64_t)0')
+    idx = gen._new_val('int64_t', start)
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond = gen._new_val('_Bool', f'{pos} < {len64}')
+    gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
+    gen._emit_label(bb_body)
+    pair = gen._new_temp('MojoList *')
+    gen._emit(f"  {pair} = mojo_list_new ();")
+    gen._void_call('mojo_list_append_int', [('MojoList *', pair), ('int64_t', idx)])
+    raw = gen._new_val('int64_t', f'mojo_list_get_int ({av}, {pos})')
+    boxed = gen._new_val('int64_t', f'(int64_t)(intptr_t){raw}')
+    gen._void_call('mojo_list_append_int', [('MojoList *', pair), ('int64_t', boxed)])
+    # The pair's SECOND slot holds the element, so record its type or a
+    # consumer reads a string back as a raw integer.
+    if elem and elem != 'int64_t':
+        gen._elem_types[pair] = elem
+    gen._void_call('mojo_list_append_int',
+                   [('MojoList *', res), ('int64_t', f'(int64_t)(intptr_t){pair}')])
+    # The increment is computed INSIDE the loop body on purpose: hoisting it
+    # (what `gen._new_val` does at the point of writing) evaluates
+    # `pos + 1` once before the loop, so `pos = <that pre-loop value>`
+    # re-assigns the same number every iteration and the loop never
+    # terminates.
+    one = gen._new_val('int64_t', '(int64_t)1')
+    npos = gen._new_val('int64_t', f'{pos} + {one}')
+    gen._emit(f"  {pos} = {npos};")
+    if start == '0':
+        gen._emit(f"  {idx} = {pos};")
+    else:
+        nidx = gen._new_val('int64_t', f'{pos} + {start}')
+        gen._emit(f"  {idx} = {nidx};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+    gen._nested_elem_types[res] = ['int64_t', elem or 'int64_t']
+    # Also record the plain element type: the assignment sites propagate
+    # `_elem_types`/`_nested_elem_types` from a value to the variable it is
+    # bound to under an `_elem_types` guard, so without this entry a
+    # `z = enumerate(x); print(z)` lost the pair typing and fell back to
+    # the generic repr (which printed the first index as `None`).
+    gen._elem_types[res] = 'MojoList *'
+    return 'MojoList *', res
+
+
 def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Shared `set(iterable)` / `list(iterable)` lowering: build a
     synthetic `{x for x in <arg>}` / `[x for x in <arg>]` Comprehension
@@ -2661,6 +2755,14 @@ def _lower_builtin_dict(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lower_builtin_list(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    # `list(enumerate(x))` is already the pair list enumerate builds — the
+    # comprehension route below cannot express it (single-slot target, see
+    # _lower_builtin_enumerate_value).
+    if (node.args and isinstance(node.args[0], gimple_ctypes.CallExpr)
+            and isinstance(node.args[0].func, gimple_ctypes.IdentExpr)
+            and node.args[0].func.name == 'enumerate'
+            and not gen._locally_binds_name('enumerate')):
+        return _lower_builtin_enumerate_value(gen, node.args[0])
     return gen._lower_ctor_from_iterable('list', node)
 
 

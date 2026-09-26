@@ -3803,6 +3803,48 @@ char *mojo_repr_list_ints(MojoList *l) {
     return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
+/* Pair-list reprs: a list whose ELEMENTS are 2-element lists — what
+   `enumerate(x)` and `zip(a, b)` produce. The generic codegen-emitted
+   `_mojo_repr_list` cannot render one: it reads each inner slot through the
+   None-sentinel heuristic, so the index 0 of the first pair printed as
+   `None` (`[[None, 7], [1, 8]]`), and a real Python `(0, 7)` is wanted
+   anyway. `_kind` is the statically known type of the SECOND slot (0 int,
+   1 str, 2 double) — passed in rather than sniffed, because a double and an
+   int are indistinguishable in the raw slot. */
+static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
+    if (!l) return "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup("[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        int64_t _p = mojo_list_get_int(l, _i);
+        if (!mojo_is_registered_list(_p)) {
+            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
+            continue;
+        }
+        MojoList *_pair = (MojoList *)(intptr_t)_p;
+        _buf = mojo_str_cat(_buf, "(");
+        _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_pair, 0)));
+        _buf = mojo_str_cat(_buf, ", ");
+        int64_t _v = mojo_list_get_int(_pair, 1);
+        if (_kind == 1) {
+            _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)_v));
+        } else if (_kind == 2) {
+            _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(_pair, 1)));
+        } else if (mojo_boxed_is_str(_v)) {
+            _buf = mojo_str_cat(_buf, mojo_repr_str((char *)(intptr_t)_v));
+        } else {
+            _buf = mojo_str_cat(_buf, mojo_repr_int(_v));
+        }
+        _buf = mojo_str_cat(_buf, ")");
+    }
+    return mojo_str_cat(_buf, "]");
+}
+
+char *mojo_repr_list_pairs(MojoList *l) { return _mojo_repr_pairlist(l, 0); }
+char *mojo_repr_list_pairs_s(MojoList *l) { return _mojo_repr_pairlist(l, 1); }
+char *mojo_repr_list_pairs_d(MojoList *l) { return _mojo_repr_pairlist(l, 2); }
+
 char *mojo_repr_list_bytes(MojoList *l) {
     /* repr for a MojoList * whose element type is statically known to be
      * `MojoBytes *` (e.g. b.split(sep)). Each int64_t slot holds a

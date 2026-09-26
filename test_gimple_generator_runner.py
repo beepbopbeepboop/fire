@@ -2499,6 +2499,20 @@ def main():
 main()
 """, "[0, 1, 4]\n3\n")
 
+    # A generator consumed by enumerate(): the pair list is built from the
+    # materialized generator, so the indices are real (and the generator
+    # expression path underneath is lazy).
+    test_generator_stdout("enumerate_over_generator", """\
+def nums():
+    yield 7
+    yield 8
+
+def main():
+    print(list(enumerate(nums())))
+
+main()
+""", "[(0, 7), (1, 8)]\n")
+
     # ── The rest of the protocol: throw() / close() ─────────────────────
     # Both inject an exception INTO the suspended body. This only became
     # expressible once `try/finally` ran its finally on the EXCEPTION path

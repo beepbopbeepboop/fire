@@ -719,6 +719,12 @@ char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);
 char *mojo_repr_list_ints(MojoList *l);
 char *mojo_repr_list_bytes(MojoList *l);
+/* Lists of 2-element PAIR lists (enumerate/zip): `[(0, 7), (1, 8)]`. The
+   second slot's type is fixed at codegen time, hence one wrapper per
+   kind — the raw slot cannot tell an int from a double. */
+char *mojo_repr_list_pairs(MojoList *l);
+char *mojo_repr_list_pairs_s(MojoList *l);
+char *mojo_repr_list_pairs_d(MojoList *l);
 char *mojo_bool_to_str(int b);
 int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);

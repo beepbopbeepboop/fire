@@ -454,6 +454,47 @@ print(out)
 print(c.n)
 """, "[0, 1, 4, 9]\n4\n")
 
+    # enumerate() in VALUE position. The runtime's mojo_enumerate is an
+    # identity passthrough, so `list(enumerate([7, 8]))` returned the VALUES
+    # with no indices at all, and over a generator the consuming list() found
+    # nothing iterable in the coroutine handle and produced an empty list —
+    # silently. Routed through a comprehension instead (what list(x) does)
+    # it produced `[0, 1]`, because that path's synthetic target has ONE
+    # slot and the enumerate loop bound the INDEX to it, dropping the value.
+    # Built directly now, and repr'd by the pair-aware runtime helpers so
+    # the index prints as 0 rather than the None sentinel.
+    test_gimple_stdout("gimple_list_of_enumerate", """\
+print(list(enumerate([7, 8])))
+""", "[(0, 7), (1, 8)]\n")
+
+    # (Function scope, not module scope: a module-level list-valued global
+    # loses its element typing entirely in this codegen — a hand-written
+    # `z = [[0, 7], [1, 8]]` at module level prints `[[None, 7], [1, 8]]`
+    # too — so that pre-existing global gap is not what this test is about.)
+    test_gimple_stdout("gimple_enumerate_value_printed", """\
+def main():
+    z = enumerate([7, 8])
+    print(len(z))
+    print(z)
+
+main()
+""", "2\n[(0, 7), (1, 8)]\n")
+
+    test_gimple_stdout("gimple_enumerate_start_and_strings", """\
+print(list(enumerate([7, 8], 1)))
+print(list(enumerate(["a", "b"])))
+print(list(enumerate(["a", "b"], start=5)))
+""", "[(1, 7), (2, 8)]\n[(0, 'a'), (1, 'b')]\n[(5, 'a'), (6, 'b')]\n")
+
+    # The `for` and comprehension forms were already right — pinned so the
+    # value-position work cannot regress them.
+    test_gimple_stdout("gimple_enumerate_for_and_comprehension_unchanged", """\
+for i, v in enumerate([7, 8]):
+    print(i, v)
+print([i for i, v in enumerate([7, 8])])
+print([v for i, v in enumerate([7, 8], 3)])
+""", "0 7\n1 8\n[0, 1]\n[7, 8]\n")
+
     # 15c. ... and a module's OWN `def String(...)` still wins over the
     # builtin alias (the same shadowing guarantee `str`/`enumerate`/
     # `hasattr` already have).
