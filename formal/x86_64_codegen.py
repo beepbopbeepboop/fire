@@ -36,6 +36,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
 import fire_compiler as F
+from formal.model import IDENTITY_TYPE_CTORS
 from mojo.middle.boundnames import bound_names_in_order
 
 # Bytes of stack the frame always reserves BELOW the spill slots: expression
@@ -1240,6 +1241,39 @@ class X86_64Codegen:
             self._emit_blob_base(offset, Reg.R11)
             self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * (i + 1), Reg.RAX))
         self._emit_blob_base(offset, Reg.RAX)
+
+    def _emit_len(self, e) -> None:
+        """`len(x)` — the count field of a list/tuple blob.
+
+        A builtin, intercepted here for the same reason `range` is. Left to the
+        extern path it became a call to a symbol `len` that libSystem does not
+        define, so the image built and then aborted in the loader with
+        "Symbol not found: _len" — the same defect the arm64 backend had.
+
+        A list is `[count][elements]` and a list value IS its blob address in
+        RAX, so this is one load from offset 0 (the same read the comprehension
+        generator already does for its own count).
+
+        A string is refused by name: a string here is a bare char * with no
+        length prefix, so there is no count at offset 0, and returning the
+        pointer would be a plausible-looking wrong answer."""
+        args = list(e.args)
+        if len(args) != 1 or e.kwargs:
+            raise CodegenError(
+                f"len() takes exactly one argument on this path "
+                f"(got {len(args) + len(e.kwargs)})")
+        operand = args[0]
+        if isinstance(operand, F.StringLiteral) or (
+                isinstance(operand, F.CallExpr)
+                and _callee_symbol(operand.func) in IDENTITY_TYPE_CTORS):
+            raise CodegenError(
+                f"len() of a string is not lowered on this path: a string is "
+                f"a bare char * with no length prefix, so its length cannot be "
+                f"read (len of a list or tuple is the blob's count field and "
+                f"is supported)")
+        self._emit_expr(operand)
+        # RAX holds the blob address; the count is its first 8 bytes.
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
 
     def _emit_range_list(self, rargs: list) -> None:
         """`range(a[,b[,step]])` as a VALUE → a list blob in RAX.
@@ -2691,6 +2725,9 @@ class X86_64Codegen:
             # materialize it as a list blob, which is what makes
             # `[i for i in range(n)]` and `for i in list(range(n))` work.
             self._emit_range_list(list(e.args))
+            return
+        if name == "len":
+            self._emit_len(e)
             return
         is_extern = name not in self._functions
         # A callee that a linked formal dylib provides is emitted against the
