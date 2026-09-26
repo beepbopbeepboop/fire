@@ -52,6 +52,10 @@ mojoc.dbg
 # `pixi run prooflib` / `tools/proof.sh <stem>` / `fire.py formalbuild`)
 *.olean
 *.olean.srcsha256
+# The flock file `formal.lean.ensure_library` takes while building an .olean.
+# Never meaningful between runs, and it must NOT be gitignored as a pattern
+# that would also swallow a real build product — hence the explicit name.
+*.olean.buildlock
 /output/
 # `fire.py build --formal` writes <stem>_proof.lean next to the source, the
 # same place it writes <stem>.aout (gitignored above). test_formal.py instead

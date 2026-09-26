@@ -2,6 +2,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import time
 
 # Dependency order: X86 needs ProofLib, and work.lean re-exports it so the
 # generated proof files (which import ProofLib + work + Refine) get the x86-64
@@ -110,7 +111,69 @@ def _write_stamp(stamp: str, source: str, olean: str) -> None:
     os.replace(tmp, stamp)
 
 
+def _acquire_build_lock(olean: str, timeout: float) -> int:
+    """Exclusive, crash-safe lock for the build of ONE .olean.
+
+    `flock`, not an O_EXCL lock file: the kernel drops the lock when the
+    holder dies, so a process killed mid-build (a cancelled suite run, an
+    OOM kill, Ctrl-C) cannot leave a lock file behind that wedges every
+    later run forever. An O_EXCL marker would need a staleness heuristic to
+    recover from exactly that, and a wrong staleness heuristic either hangs
+    forever or lets two builds through.
+
+    Returns the open fd; the caller releases with `_release_build_lock`.
+    """
+    import fcntl
+    fd = os.open(olean + ".buildlock", os.O_CREAT | os.O_RDWR, 0o644)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            if time.monotonic() > deadline:
+                os.close(fd)
+                raise RuntimeError(
+                    f"timed out after {timeout:.0f}s waiting for another "
+                    f"process to build {os.path.basename(olean)}")
+            time.sleep(0.25)
+
+
+def _release_build_lock(fd: int) -> None:
+    import fcntl
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
+    """Make every library .olean current, building at most ONE of each.
+
+    The check-build step is a check-then-act on a shared filesystem, and the
+    proof suite runs ~16 of these concurrently, so without the lock below
+    every one of them misses the stamp at the same instant, misses the cas
+    on a cold store, and starts its own `lean -o <same path>` — N
+    simultaneous ~80s builds of a 27MB artifact, all writing the SAME output
+    file. Measured on a cold cas with 3 concurrent callers: 3 builds, peak 3
+    concurrent `lean`, all finishing at ~81s. That is a correctness hazard
+    as much as a waste — concurrent unsynchronised writes to one output path
+    can interleave into a truncated or mixed .olean, and every later
+    typecheck then reads it.
+
+    Two things fix it, and both are here: the build happens under an
+    exclusive lock with the currency check REPEATED inside it (a peer may
+    have built it while we queued), and the build writes to a private temp
+    path that is `os.replace`d into place, so even a lock that did not hold
+    could not leave a partial file where a valid one belongs.
+
+    This makes concurrent callers cheap but does not make them FREE: the
+    lock is per-.olean and serialised, so 16 processes still queue. The
+    suite therefore also registers the library build as its own test
+    (`prooflib` in tools/suite.py) and every proof-checking test depends on
+    it, so the one build happens once, alone, before the fan-out starts and
+    the other 15 find the stamp valid and return immediately.
+    """
     import cas
     env = os.environ.copy()
     env["LEAN_PATH"] = lib_dir
@@ -125,26 +188,43 @@ def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
             continue
         # Pre-stamp trees (fresh clone, or an olean built by the Makefile):
         # accept it if it is newer than the source, then record its digests so
-        # later touches are free.
+        # later touches are free. Stamp-only, so no lock needed — and
+        # _write_stamp is itself atomic.
         if (not os.path.isfile(stamp) and os.path.isfile(olean)
                 and os.path.getmtime(olean) >= os.path.getmtime(source)):
             _write_stamp(stamp, source, olean)
             continue
         key = _olean_key(stem, source, lean)
-        hit = cas.lookup(key, ".olean")
-        if hit:
-            shutil.copyfile(hit, olean)
-        else:
-            result = subprocess.run(
-                [lean, "-o", olean, source],
-                capture_output=True, text=True, timeout=timeout, env=env,
-            )
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or result.stdout
-                                    or "lean failed").strip())
-            with open(olean, "rb") as f:
-                cas.publish(key, ".olean", f.read())
-        _write_stamp(stamp, source, olean)
+        fd = _acquire_build_lock(olean, timeout)
+        try:
+            # DOUBLE-CHECK under the lock. Everyone else in the fan-out is
+            # doing the same thing, and the whole point of the lock is that
+            # exactly one of them proceeds past here.
+            if _library_is_current(source, olean, stamp, digest):
+                continue
+            hit = cas.lookup(key, ".olean")
+            if hit:
+                shutil.copyfile(hit, olean)
+            else:
+                tmp = f"{olean}.tmp.{os.getpid()}"
+                try:
+                    result = subprocess.run(
+                        [lean, "-o", tmp, source],
+                        capture_output=True, text=True, timeout=timeout,
+                        env=env,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError((result.stderr or result.stdout
+                                            or "lean failed").strip())
+                    os.replace(tmp, olean)
+                finally:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                with open(olean, "rb") as f:
+                    cas.publish(key, ".olean", f.read())
+            _write_stamp(stamp, source, olean)
+        finally:
+            _release_build_lock(fd)
 
 
 # ── verdict cache ───────────────────────────────────────────────────────────
