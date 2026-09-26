@@ -2863,6 +2863,11 @@ def register(gen, meta: list) -> None:
     # as `double` rather than the int64_t default.
     gen.func_param_types.setdefault('__mojo_gen_send_d', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_send_d', 'double')
+    gen.func_param_types.setdefault(
+        '__mojo_gen_throw', ['int64_t', 'int64_t', 'int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_throw', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_gen_close', ['int64_t', 'int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_close', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_destroy', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_destroy', 'void')
     # "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md)
