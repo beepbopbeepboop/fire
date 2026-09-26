@@ -410,8 +410,15 @@ class X86_64Codegen:
     # ── entry point ──────────────────────────────────────────────────
 
     def compile(self, stmts: list, base_addr: int = 0x100001000,
-                emit_startup: bool = True) -> tuple:
+                emit_startup: bool = True, structs: list = None) -> tuple:
         """Compile a fire_compiler module statement list to x86-64 code.
+
+        `structs` is accepted and ignored: `formal/build.py` calls both
+        backends through one `_codegen_and_link`, and the struct map it passes
+        is arm64's. Accepting it here is what keeps `--backend=x86_64` from
+        dying with a TypeError on a keyword meant for the other backend (see
+        BUG.md). Nothing x86-64 emits needs it yet — a struct's fields are
+        reached through the same registers either way.
 
         `stmts` is Parser(...).parse_module()'s output — may contain imports,
         module-level assigns, etc.; only FunctionDefs are lowered. If a `main`

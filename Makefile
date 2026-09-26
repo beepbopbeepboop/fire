@@ -182,13 +182,14 @@ FORMAL_EXAMPLES := $(wildcard formal/examples/*.mojo)
 FORMAL_LEAN     := $(shell python3 -c "import formal.lean as l; print(l.find_lean('.') or '')")
 
 check-formal: $(FORMAL_SOURCES) $(FORMAL_EXAMPLES) test_formal.py fire.py \
-              fire_compiler.py lib/ProofLib.olean lib/work.olean lib/Refine.olean
+              fire_compiler.py lib/ProofLib.olean lib/X86.olean \
+              lib/work.olean lib/Refine.olean
 	python3 checked_run.py check-formal \
 		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
 		$(foreach s,$(FORMAL_EXAMPLES),--extra $(s)) \
 		--extra test_formal.py --extra fire.py --extra fire_compiler.py \
-		--extra lib/ProofLib.olean --extra lib/work.olean \
-		--extra lib/Refine.olean \
+		--extra lib/ProofLib.olean --extra lib/X86.olean \
+		--extra lib/work.olean --extra lib/Refine.olean \
 		-- python3 test_formal.py
 
 # One implementation for building lib/*.olean, not two: formal/lean.py's
@@ -198,8 +199,8 @@ check-formal: $(FORMAL_SOURCES) $(FORMAL_EXAMPLES) test_formal.py fire.py \
 # built. Duplicating the lean invocation here instead meant a `touch` of
 # lib/*.lean cost a ~90s ProofLib.olean rebuild inside make and then another one
 # inside the first fire.py that ran afterwards.
-lib/ProofLib.olean lib/work.olean lib/Refine.olean: $(wildcard lib/*.lean) \
-              formal/lean.py
+lib/ProofLib.olean lib/X86.olean lib/work.olean lib/Refine.olean: \
+              $(wildcard lib/*.lean) formal/lean.py
 	@test -n "$(FORMAL_LEAN)" || (echo "lean not found (see ./lean-toolchain)"; exit 1)
 	LEAN_PATH=lib python3 -c "import formal.lean as l; l.ensure_library('$(FORMAL_LEAN)', 'lib')"
 
@@ -225,12 +226,13 @@ check-formal-run: $(FORMAL_SOURCES) test_formal_run.py fire.py fire_compiler.py
 # dylib path has its own linker, its own export naming, and its own proof
 # entry point. Same lean dependency as check-formal; not gated into `check`.
 check-formal-dylib: $(FORMAL_SOURCES) test_formal_dylib.py fire.py \
-              fire_compiler.py lib/ProofLib.olean lib/work.olean lib/Refine.olean
+              fire_compiler.py lib/ProofLib.olean lib/X86.olean \
+              lib/work.olean lib/Refine.olean
 	python3 checked_run.py check-formal-dylib \
 		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
 		--extra test_formal_dylib.py --extra fire.py --extra fire_compiler.py \
-		--extra lib/ProofLib.olean --extra lib/work.olean \
-		--extra lib/Refine.olean \
+		--extra lib/ProofLib.olean --extra lib/X86.olean \
+		--extra lib/work.olean --extra lib/Refine.olean \
 		-- python3 test_formal_dylib.py
 
 # Parse and validate entire stdlib (all .mojo files)

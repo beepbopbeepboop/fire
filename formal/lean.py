@@ -3,7 +3,10 @@ import os
 import shutil
 import subprocess
 
-LIBRARY_MODULES = ("ProofLib", "work", "Refine")
+# Dependency order: X86 needs ProofLib, and work.lean re-exports it so the
+# generated proof files (which import ProofLib + work + Refine) get the x86-64
+# model without naming a fourth module.
+LIBRARY_MODULES = ("ProofLib", "X86", "work", "Refine")
 VERDICT_EXT = ".leanverdict"
 _OLEAN_DIGESTS: dict = {}
 

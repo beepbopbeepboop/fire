@@ -18,7 +18,7 @@ program means, which is the one thing a two-backend compiler must not have.
 
 The MACHINE half is per-architecture, and that is what lives here: the compiled
 bytes as a `Nat → UInt8` code function, the certificates relating execution to
-the source, and the end-to-end theorem over `X86State` / `x86_exec` — the model
+the source, and the end-to-end theorem over `X86State` / `x86_exec_exit` — the model
 `lib/ProofLib.lean` already carries for x86-64.
 
 ## Honesty about what is proved
@@ -85,15 +85,22 @@ def _code_function(name: str, base: int) -> str:
 
 
 def _generate_model(fn, tc):
-    """The `<fn>_go` model plus its simp lemmas, from the shared generator.
+    """The `<fn>_go` model plus the NAMES of its simp lemmas, from the shared
+    generator.
 
-    Returns (go_defs_text, simp_lemmas_text). Raises whatever the shared
-    generator raises for a shape it does not model; the caller degrades to a
-    `sorry` rather than failing the build."""
+    `_gen_go` returns a list of chunks — the model definition and the
+    unfolding/recursion lemmas that go with it — which are emitted verbatim.
+    `_go_simp_lemmas` returns only the names of the ones safe to add to a
+    value-flow simp set, so they are returned separately rather than as text:
+    emitting the names as statements produces a file that does not parse, and
+    emitting the lemmas twice produces duplicate declarations.  Names go into
+    the `eval_eq_mojo` simp set instead, which is where they are wanted.
+
+    Raises whatever the shared generator raises for a shape it does not model;
+    the caller degrades to a documented gap rather than failing the build."""
     from formal import arm64_proof_gen as AP
     go_defs = "\n\n".join(AP._gen_go(fn, tc))
-    simp = "\n".join(AP._go_simp_lemmas(fn))
-    return go_defs, simp
+    return go_defs, list(AP._go_simp_lemmas(fn))
 
 
 def _ast_value(fn, func_name: str) -> str:
@@ -109,7 +116,8 @@ def _ast_value(fn, func_name: str) -> str:
     return f'MojoFunc.mk "{func_name}" "{param}" ({body})'
 
 
-def _eval_eq_mojo_section(func_name: str, fn, typed: bool) -> str:
+def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
+                          go_lemmas: list = None) -> str:
     """`eval_eq_mojo`: the AST interpreter agrees with the source model.
 
     Proved for the shapes the shared generator can close by `simp` (a
@@ -129,8 +137,9 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool) -> str:
     param = fn.params[0][0] if fn.params else "n"
     env = {param: param} if fn.params else {}
     conds = AP._collect_conds(fn, param, env)
-    simp_lems = ("mojo, {0}_go, ast, evalFunc, evalBody, evalBodyEnv, "
-                 "evalExpr, u64pow, u64powGo").format(func_name)
+    simp_lems = ", ".join(["mojo", "%s_go" % func_name, "ast", "evalFunc",
+                           "evalBody", "evalBodyEnv", "evalExpr", "u64pow",
+                           "u64powGo"] + list(go_lemmas or []))
     if not conds:
         proof = f"simp +decide [{simp_lems}]"
     else:
@@ -206,33 +215,41 @@ def _step_certificate_section(func_name: str, code_len: int) -> str:
 def _run_tests_section(func_name: str, test_input: int) -> str:
     """Concrete run tests: the machine model on the real bytes, by evaluation.
 
-    These are not `sorry` and not assertions — `native_decide` actually
-    executes the emitted byte list through `X86State`/`x86_exec` inside Lean's
-    interpreter. They are the x86-64 counterpart of arm64_proof_gen's `_runs_*`
-    theorems, and they are the one part of this file that is genuine evidence
-    about the machine: if the code function's base address, the entry offset or
-    the model itself were wrong, these fail to typecheck.
+    These are not `sorry` and not assertions — `native_decide` executes the
+    emitted byte list through `X86State`/`x86_exec_exit` inside Lean's own
+    interpreter and checks the value in RAX against the source model.  They
+    are the x86-64 counterpart of arm64_proof_gen's `_runs_*` theorems, and
+    they are the one part of this file that is genuine evidence about the
+    machine: if the code function's base address, the entry offset or the
+    model itself were wrong, these would fail to typecheck.
 
-    Each input gets two obligations, and both are needed. `_terminates_n`
-    says the model actually ran the program to a `ret`; `_runs_n` says the
-    value in rax is the source model's. Reporting the result through a helper
-    that maps a failed run to 0 (as arm64's `run_result_exit` does) keeps the
-    statement a decidable equality; without the separate termination fact a
-    model that could not execute the program at all would read as "result 0"
-    and quietly agree with any model whose answer is 0. Together they fail
-    loudly on an opcode `x86_step` does not yet decode — a real gap in
-    `lib/ProofLib.lean`'s x86 coverage, reported rather than papered over."""
+    The exit pc is 0, which works because `X86State.init` leaves the stack
+    zeroed: the entry function's own `ret` pops address 0 and `x86_exec_exit`
+    stops there.  That is what lets a proof about "what this function
+    computes" start at the function's entry and still reach a definite answer,
+    with no startup stub and no planted return address.
+
+    Each input gets two obligations and both are needed.  `_terminates_n`
+    says the model actually ran the program to its `ret`; `_runs_n` says the
+    result is the source model's.  Reporting the value through a helper that
+    maps a failed run to 0 (as arm64's `run_result_exit` does) keeps the
+    statement a decidable equality — but without the separate termination
+    fact, a model that could not execute the program at all would read as
+    "result 0" and quietly agree with any model whose answer is 0.  Together
+    they fail loudly on an opcode `x86_step` does not decode, which is a real
+    gap in `lib/X86.lean` rather than something to paper over."""
     helper = (
         f"/-- Result register after running the image from the entry (0 if the\n"
         f"    model could not run it to completion). -/\n"
         f"def {func_name}_result (n : UInt64) : UInt64 :=\n"
-        f"  match x86_exec (X86State.init n {func_name}_offset) {func_name}_code with\n"
+        f"  match x86_exec_exit (X86State.init n {func_name}_offset) "
+        f"{func_name}_code 0 with\n"
         f"  | some s => s.rax\n"
         f"  | none => 0\n")
     out = [helper]
     for n in dict.fromkeys([test_input, 0, 1, 2, 5]):
-        run = (f"x86_exec (X86State.init {n} {func_name}_offset) "
-               f"{func_name}_code")
+        run = (f"x86_exec_exit (X86State.init {n} {func_name}_offset) "
+               f"{func_name}_code 0")
         out.append(
             f"/-- The model runs the image to completion for input {n}. -/\n"
             f"theorem {func_name}_terminates_{n} :\n"
@@ -279,7 +296,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
 
     # ── source semantics ────────────────────────────────────────────
     try:
-        go_defs, simp_lems = _generate_model(fn, tc)
+        go_defs, go_lemma_names = _generate_model(fn, tc)
         model_note = ""
     except Exception as e:                          # noqa: BLE001
         # The shared model generator does not cover every shape. Rather than
@@ -288,7 +305,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # theorem is `sorry` regardless, so nothing false is claimed.
         go_defs = (f"def {func_name}_go (n : Nat) : UInt64 :=\n"
                    f"  (n : UInt64)\n")
-        simp_lems = ""
+        go_lemma_names = []
         model_note = (f"/- NOTE: the shared model generator does not cover "
                       f"this function's shape ({type(e).__name__}: {e}), so "
                       f"the semantic model below is the identity and nothing "
@@ -296,8 +313,6 @@ def generate_x86_64_proof(prog, code, info) -> str:
 
     parts.append("/-- Mojo semantics: direct Lean model of the source code. -/\n"
                  + model_note + go_defs + "\n")
-    if simp_lems:
-        parts.append(simp_lems + "\n")
 
     # How the model is applied depends on which model shape the shared
     # generator produced: the tree-recursive and countdown models are defined
@@ -315,7 +330,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
 
     # ── AST bridge ───────────────────────────────────────────────────
     try:
-        section = _eval_eq_mojo_section(func_name, fn, typed)
+        section = _eval_eq_mojo_section(func_name, fn, typed, go_lemma_names)
     except Exception:                               # noqa: BLE001
         section = None
     if section is None:
@@ -358,8 +373,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
         f"/-- END-TO-END: executing the compiled x86-64 image computes the\n"
         f"    same value as the source semantics, for every input. -/\n"
         f"theorem {func_name}_compiles_correctly (n : UInt64) :\n"
-        f"  match x86_exec (X86State.init n {func_name}_offset) "
-        f"{func_name}_code with\n"
+        f"  match x86_exec_exit (X86State.init n {func_name}_offset) "
+        f"{func_name}_code 0 with\n"
         f"  | some s => s.rax = mojo n\n"
         f"  | none => False := by\n"
         f"  sorry\n")
