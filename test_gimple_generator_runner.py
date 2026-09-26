@@ -2448,6 +2448,57 @@ def main():
 main()
 """, "stopped\n")
 
+    # A generator expression over a PARAMETER of the enclosing function is
+    # desugared into a generator function whose own parameter carries that
+    # parameter's declared annotation — the declaration is authoritative, so
+    # the body types its loop variable from it instead of guessing from a
+    # runtime tag (which is what made the untyped-parameter form degrade to
+    # `char *` string arithmetic on a list of ints).
+    test_generator_stdout("genexp_over_annotated_param_with_capture", """\
+def scaled(items: List[Int], k: Int):
+    return list(x * k for x in items)
+
+def main():
+    print(scaled([1, 2, 3], 10))
+
+main()
+""", "[10, 20, 30]\n")
+
+    test_generator_stdout("genexp_over_annotated_param_with_condition", """\
+def evens(items: List[Int]):
+    return list(x * 2 for x in items if x % 2 == 0)
+
+def main():
+    print(evens([1, 2, 3, 4]))
+
+main()
+""", "[4, 8]\n")
+
+    # ... and it is a REAL lazy generator, not a materialized list: the
+    # element expression's side effect runs once per item actually
+    # consumed, so an early `break` leaves the rest unevaluated.
+    # (A struct RECEIVER inside the expression — `(c.note(i) for i in ...)`
+    # — is deliberately NOT desugared: the coroutine body has no working
+    # model for it and lowered to garbage. Pinned as a refusal below.)
+    test_generator_stdout("genexp_is_lazy_not_materialized", """\
+SEEN = []
+
+def note(v: Int) -> Int:
+    SEEN.append(v)
+    return v * v
+
+def main():
+    out = []
+    for x in (note(i) for i in range(1000)):
+        out.append(x)
+        if len(out) == 3:
+            break
+    print(out)
+    print(len(SEEN))
+
+main()
+""", "[0, 1, 4]\n3\n")
+
     # ── The rest of the protocol: throw() / close() ─────────────────────
     # Both inject an exception INTO the suspended body. This only became
     # expressible once `try/finally` ran its finally on the EXCEPTION path

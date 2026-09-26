@@ -432,6 +432,28 @@ print(Int(41) + 1)
 print(int(Bool(1)))
 """, "42\n1\n")
 
+    # 15b2. A generator expression whose element uses a STRUCT/method
+    # receiver is deliberately left on the eager (but CORRECT) lowering by
+    # fire_compiler's genexp desugar: the compiled coroutine body has no
+    # working model for a captured receiver, and lowering it anyway printed
+    # raw pointer garbage. The answer must still be right — just not lazy.
+    test_gimple_stdout("gimple_genexp_struct_receiver_still_correct", """\
+struct Counter:
+    var n: Int
+    def __init__(out self):
+        self.n = 0
+    def note(self, v: Int) -> Int:
+        self.n = self.n + 1
+        return v * v
+
+c = Counter()
+out = []
+for x in (c.note(i) for i in range(4)):
+    out.append(x)
+print(out)
+print(c.n)
+""", "[0, 1, 4, 9]\n4\n")
+
     # 15c. ... and a module's OWN `def String(...)` still wins over the
     # builtin alias (the same shadowing guarantee `str`/`enumerate`/
     # `hasattr` already have).

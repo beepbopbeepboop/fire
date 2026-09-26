@@ -1499,6 +1499,46 @@ _PURE_ITER_CALLS = frozenset({
 })
 
 
+# Annotations that make a parameter a usable ITERABLE type for a synthesized
+# generator function: the hoisted function's parameter then carries a real
+# container type, so the compiled body types its loop variable from the
+# annotation instead of guessing from a runtime tag (an untyped parameter
+# degrades to a boxed int64_t, and the arithmetic on the loop variable is
+# then emitted for whichever branch the guess picked — a list of ints
+# silently becoming `char *` string repetition).
+#
+# Deliberately NOT `Set` or `String`, both measured on a HAND-WRITTEN
+# generator with that annotation (so this is the generator body's own
+# limitation, not the desugar's):
+#   - `Set[Int]`: iterating it inside a generator body reads the set's
+#     internal layout as a list — `for x in items: yield x` printed
+#     `[3, 4390443264, 0]` for `{1, 2, 3}`.
+#   - `String`: `for s in items` has no lowering there at all
+#     ("mojo_unsupported_iter: 'for' loop over unsupported iterable type
+#     int64"), producing an empty result.
+# Both keep the existing (eager but CORRECT) lowering rather than being
+# compiled into a wrong answer.
+_CONTAINER_ANNOTATIONS = ('List', 'Dict', 'Slice',
+                          'ListLiteral', 'DictLiteral')
+
+
+def _container_annotation(ann) -> str:
+    """The annotation string if it names a container type, else ''.
+
+    Used to decide whether a generator expression over a PARAMETER can be
+    desugared into a typed generator function: the parameter's own
+    declaration is authoritative, so passing it through is exact — no
+    inference, no guesswork. An unannotated parameter (or a scalar
+    annotation) gives nothing to carry, and that case stays on the eager
+    path rather than being compiled from a guess."""
+    if not ann or not isinstance(ann, str):
+        return ''
+    base = ann.split('[', 1)[0].strip()
+    if base in _CONTAINER_ANNOTATIONS:
+        return ann
+    return ''
+
+
 def _inline_safe_outer_iterable(node, module_names: set, rebound_module: set) -> bool:
     """True iff the compiled genexp desugar may place this outermost
     iterable expression INSIDE the synthesized generator function instead
@@ -1592,6 +1632,45 @@ def _target_names(target, out: set):
         _target_names(target.operand, out)
 
 
+def _count_binding_names(node, counts: dict, stop_at_functions: bool):
+    """Count how many times each name is BOUND under `node` (same targets
+    as `_collect_assigned_names`, but counted rather than merely recorded).
+    Used to tell an initialization from a rebind."""
+    if node is None:
+        return
+    if isinstance(node, list):
+        for item in node:
+            _count_binding_names(item, counts, stop_at_functions)
+        return
+    if stop_at_functions and isinstance(node, (FunctionDef, LambdaExpr)):
+        return
+    if isinstance(node, (AssignStmt, AugAssignStmt, ForStmt)):
+        names: set = set()
+        _target_names(node.target, names)
+        for n in names:
+            counts[n] = counts.get(n, 0) + 1
+    elif isinstance(node, VarDecl):
+        names = set()
+        _target_names(node.name, names)
+        for n in names:
+            counts[n] = counts.get(n, 0) + 1
+    elif isinstance(node, MultiAssignStmt):
+        for t in node.targets or []:
+            names = set()
+            _target_names(t, names)
+            for n in names:
+                counts[n] = counts.get(n, 0) + 1
+    if isinstance(node, Comprehension):
+        for gen in node.generators:
+            names = set()
+            _target_names(gen.target, names)
+            for n in names:
+                counts[n] = counts.get(n, 0) + 1
+    if dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            _count_binding_names(getattr(node, f.name), counts, stop_at_functions)
+
+
 def _collect_assigned_names(node, out: set, stop_at_functions: bool):
     """Names BOUND anywhere under `node` (assignments, declarations,
     augmented assignments, `for` targets, `global` declarations). Used to
@@ -1627,6 +1706,35 @@ def _collect_assigned_names(node, out: set, stop_at_functions: bool):
     if dataclasses.is_dataclass(node):
         for f in dataclasses.fields(node):
             _collect_assigned_names(getattr(node, f.name), out, stop_at_functions)
+
+
+def _collect_receiver_names(node, out: set):
+    """Names used as the RECEIVER of an attribute access (`x` in `x.f` /
+    `x.m()`) anywhere under `node`.
+
+    A generator expression that reads a field or calls a method on a local
+    captures that local and uses it as an object inside the hoisted
+    generator. The compiled coroutine body has no working model for that —
+    measured: `(c.note(i) for i in range(1000))` lowered fine and then
+    printed `[4310292864, 4310292864, 4310292864]` with the counter still
+    at 0, i.e. the receiver arrived as a bare integer and every field
+    access read garbage. A silent wrong answer, so the desugar declines
+    these rather than compiling them; the expression keeps its correct
+    (eager) lowering."""
+    if node is None:
+        return
+    if isinstance(node, MemberExpr):
+        if isinstance(node.obj, IdentExpr):
+            out.add(node.obj.name)
+        _collect_receiver_names(node.obj, out)
+        return
+    if isinstance(node, list):
+        for item in node:
+            _collect_receiver_names(item, out)
+        return
+    if dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            _collect_receiver_names(getattr(node, f.name), out)
 
 
 def _collect_free_names(node, bound: set, out: list):
@@ -1716,25 +1824,45 @@ class _GenexpDesugarer:
                 self.module_names.add(name)
                 return name
 
-    def _assigned_in(self, fn_body):
-        """Names bound anywhere in an enclosing function's own body, cached
-        per body list."""
+    def _rebound_in(self, fn_body):
+        """Names bound MORE THAN ONCE in an enclosing function's own body,
+        cached per body list — the ones a pass-by-value capture cannot
+        model.
+
+        A single assignment is that name's INITIALIZATION (`items = []`,
+        `c = Counter()`), and capturing its value is exact. Two or more is a
+        genuine rebind, where real Python's generator expression would see
+        whichever object is current at each iteration rather than the one
+        that was current when the expression was written."""
         if fn_body is None:
             return set()
         key = id(fn_body)
         cached = self._assigned_cache.get(key)
         if cached is None:
-            cached = set()
-            _collect_assigned_names(fn_body, cached, True)
+            counts: dict = {}
+            _count_binding_names(fn_body, counts, True)
+            cached = {n for n, c in counts.items() if c > 1}
             self._assigned_cache[key] = cached
         return cached
 
-    def desugar(self, node, fn_body):
+    def desugar(self, node, fn_body, fn_params=None):
         """Return the replacement expression for one generator expression,
-        or `node` itself when it must be left alone."""
+        or `node` itself when it must be left alone.
+
+        The outermost iterable decides HOW the hoisted function receives it:
+        inlined into its body when re-evaluating it later is unobservable
+        (a literal, a pure call, a never-rebound module-level name), or
+        passed as a TYPED PARAMETER when it is a parameter of the enclosing
+        function carrying a container annotation — the declaration is
+        authoritative, so the synthesized generator types its loop variable
+        exactly. Anything else is left alone."""
         gens = node.generators
-        if not _inline_safe_outer_iterable(gens[0].iterable, self.module_names,
-                                          self.rebound_module):
+        outer = gens[0].iterable
+        typed_param = ''
+        if isinstance(outer, IdentExpr) and fn_params:
+            typed_param = _container_annotation(fn_params.get(outer.name))
+        if not typed_param and not _inline_safe_outer_iterable(
+                outer, self.module_names, self.rebound_module):
             return node
 
         bound: set = set()
@@ -1756,24 +1884,44 @@ class _GenexpDesugarer:
 
         captures: list = []
         rebound: list = []
-        assigned = self._assigned_in(fn_body)
+        rebound_names = self._rebound_in(fn_body)
         for name in free:
             if name in _BUILTIN_NAMES or name in self.module_names:
                 continue
-            if name in assigned:
+            if name in rebound_names:
                 rebound.append(name)
                 continue
             captures.append(name)
 
-        if rebound or 'self' in free:
+        receivers: set = set()
+        if node.kind == 'dict':
+            _collect_receiver_names(node.element, receivers)
+            _collect_receiver_names(node.key, receivers)
+        else:
+            _collect_receiver_names(node.element, receivers)
+        for i, gen in enumerate(gens):
+            if i > 0:
+                _collect_receiver_names(gen.iterable, receivers)
+            for cond in gen.conditions:
+                _collect_receiver_names(cond, receivers)
+
+        if rebound or 'self' in free or (receivers & set(captures)):
             # Left exactly as the parser produced it — see the class
-            # docstring for why these captures are not approximable.
+            # docstring, and _collect_receiver_names, for why each of
+            # these captures is not approximable.
             return node
 
         fn_name = self._unique_name()
-        body = genexp_body(node, gens[0].iterable)
+        if typed_param:
+            # The iterable rides in as the generator's FIRST parameter,
+            # carrying the enclosing parameter's own annotation.
+            outer_iter = IdentExpr(name=outer.name, line=node.line, col=node.col)
+            params = [(outer.name, typed_param)]
+        else:
+            outer_iter = outer
+            params = []
+        body = genexp_body(node, outer_iter)
         is_gen, yield_ids = _detect_generator(body)
-        params = []
         for cap in captures:
             params.append((cap, None))
         self.hoisted.append(FunctionDef(
@@ -1782,6 +1930,8 @@ class _GenexpDesugarer:
             line=node.line, col=node.col))
 
         args = []
+        if typed_param:
+            args.append(IdentExpr(name=outer.name, line=node.line, col=node.col))
         for cap in captures:
             args.append(IdentExpr(name=cap, line=node.line, col=node.col))
         return CallExpr(func=IdentExpr(name=fn_name, line=node.line, col=node.col),
@@ -1789,47 +1939,56 @@ class _GenexpDesugarer:
 
     # ── generic walk ──────────────────────────────────────────────────────
 
-    def walk_list(self, seq: list, fn_body):
+    def walk_list(self, seq: list, fn_body, fn_params=None):
         i = 0
         while i < len(seq):
             item = seq[i]
             if isinstance(item, Comprehension) and item.kind == 'generator' and item.generators:
-                seq[i] = self.desugar(item, fn_body)
+                seq[i] = self.desugar(item, fn_body, fn_params)
             elif isinstance(item, list):
-                self.walk_list(item, fn_body)
+                self.walk_list(item, fn_body, fn_params)
             elif dataclasses.is_dataclass(item):
-                self.walk_node(item, fn_body)
+                self.walk_node(item, fn_body, fn_params)
             i = i + 1
 
-    def walk_node(self, node, fn_body):
+    def walk_node(self, node, fn_body, fn_params=None):
         """Recurse into one non-generator-expression dataclass node."""
         if isinstance(node, FunctionDef):
             # Parameter defaults and decorators are evaluated in the
-            # ENCLOSING scope, so they keep the outer `fn_body`; the body
-            # itself becomes the new enclosing function scope.
+            # ENCLOSING scope, so they keep the outer `fn_body`/`fn_params`;
+            # the body itself becomes the new enclosing function scope, with
+            # THIS function's own parameters visible to a genexp inside it
+            # (their declared annotations are what a typed-parameter
+            # desugar carries into the synthesized generator).
             for f in dataclasses.fields(node):
                 if f.name == 'body':
                     continue
-                self.walk_field(node, f.name, fn_body)
-            self.walk_list(node.body, node.body)
+                self.walk_field(node, f.name, fn_body, fn_params)
+            own = {}
+            for p in node.params or []:
+                if isinstance(p, tuple) and len(p) >= 2:
+                    own[p[0]] = p[1]
+                elif isinstance(p, str):
+                    own[p] = None
+            self.walk_list(node.body, node.body, own)
             return
         if isinstance(node, LambdaExpr):
             # A lambda's `body` is a single EXPRESSION (not a statement
             # list, unlike FunctionDef.body), and it is evaluated in the
             # enclosing scope.
-            self.walk_field(node, 'body', fn_body)
+            self.walk_field(node, 'body', fn_body, fn_params)
             return
         for f in dataclasses.fields(node):
-            self.walk_field(node, f.name, fn_body)
+            self.walk_field(node, f.name, fn_body, fn_params)
 
-    def walk_field(self, obj, name: str, fn_body):
+    def walk_field(self, obj, name: str, fn_body, fn_params=None):
         value = getattr(obj, name)
         if isinstance(value, list):
-            self.walk_list(value, fn_body)
+            self.walk_list(value, fn_body, fn_params)
         elif isinstance(value, Comprehension) and value.kind == 'generator' and value.generators:
-            setattr(obj, name, self.desugar(value, fn_body))
+            setattr(obj, name, self.desugar(value, fn_body, fn_params))
         elif dataclasses.is_dataclass(value):
-            self.walk_node(value, fn_body)
+            self.walk_node(value, fn_body, fn_params)
 
 
 def desugar_genexps(stmts: list) -> list:
@@ -1838,12 +1997,27 @@ def desugar_genexps(stmts: list) -> list:
     returning the same list with those definitions inserted at the front.
 
     A no-op for a module with no generator expressions, and for any single
-    expression whose capture cannot be modeled (see `_GenexpDesugarer`)."""
+    expression whose capture cannot be modeled (see `_GenexpDesugarer`).
+
+    The names of the functions it synthesized are recorded in
+    `DESUGARED_GENEXP_NAMES` (cleared and repopulated on every call) so the
+    compiled pipeline can verify afterwards that each one really was lowered
+    — a synthesized generator that NO path claims used to become a silent
+    stub at its call site."""
+    global DESUGARED_GENEXP_NAMES
     d = _GenexpDesugarer(_module_level_names(stmts), _rebound_names(stmts))
     d.walk_list(stmts, None)
     if d.hoisted:
         stmts[0:0] = d.hoisted
+    DESUGARED_GENEXP_NAMES = [fn.name for fn in d.hoisted]
     return stmts
+
+
+# Names synthesized by the most recent `desugar_genexps` call. Read (and
+# cleared) by gimple_codegen's compile choke point, which is the only
+# caller; a plain module-level list rather than a return value so the
+# desugar keeps the single-argument shape every other AST pass here has.
+DESUGARED_GENEXP_NAMES: list = []
 
 
 def _rebound_names(stmts: list) -> set:

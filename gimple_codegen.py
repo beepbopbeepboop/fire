@@ -29,7 +29,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node,
-    desugar_genexps,
+    desugar_genexps, DESUGARED_GENEXP_NAMES,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -4453,6 +4453,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # (a name rebound later in the enclosing function, or `self`) it
     # deliberately leaves alone.
     stmts = desugar_genexps(stmts)
+    _desugared_names = list(DESUGARED_GENEXP_NAMES)
     # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
@@ -4562,7 +4563,42 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     if do_imports or link_mode:
         code = _dedup_guarded_blocks(code)
         code = _relocate_module_instance_defs(code)
+    _verify_desugared_genexps(code, gen, _desugared_names)
     return code, gen
+
+
+def _verify_desugared_genexps(code: str, gen, names: list) -> None:
+    """Every generator expression `desugar_genexps` rewrote must have
+    REALLY become a generator.
+
+    The synthesized function is handed to the same two lowering paths a
+    hand-written generator uses — the A3 stack-switch path (whose per-
+    generator symbols are `__mgco_<name>_*`) or the C++20 companion unit
+    (`__mojogen_<name>_*`). If neither claims it, the call site kept a
+    reference to a function nothing defined: the program built, linked and
+    ran, and the generator expression silently produced nothing. Measured
+    with a struct-typed capture (`(c.note(i) for i in range(...))`), which
+    neither path accepts.
+
+    Refuse instead, naming the expression's source line, so the failure is
+    a compile error rather than a silently empty result. The expression's
+    own lowering (the pre-desugar eager list) is the correct-but-slow
+    answer, and `desugar_genexps` declines shapes it cannot model — this
+    check is the backstop for the shapes that pass its static analysis but
+    that the generator backends still reject."""
+    if not names:
+        return
+    cpp = getattr(gen, 'generated_cpp', '') or ''
+    missing = [n for n in names
+               if f'__mgco_{n}_' not in code and f'__mojogen_{n}_' not in cpp]
+    if missing:
+        raise RuntimeError(
+            f"generator expression could not be compiled into a generator: "
+            f"{', '.join(missing)} — neither the stack-switch nor the C++20 "
+            f"coroutine path supports this shape (a captured value the "
+            f"synthesized generator cannot take, most often a struct or a "
+            f"container). Run this module through the interpreter, or "
+            f"rewrite the expression as an explicit generator function.")
 
 
 def compile_to_c(mojo_src: str) -> str:
