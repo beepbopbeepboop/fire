@@ -5953,6 +5953,13 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_gen_resume (int64_t, int64_t);',
             'extern int64_t __mojo_gen_value (int64_t);',
             'extern double  __mojo_gen_send_d (int64_t);',
+            # The rest of the generator protocol, driven from ordinary
+            # (non-coroutine) code: `g.throw(Exc)` injects an exception at
+            # the suspend point, `g.close()` throws GeneratorExit so the
+            # body's `finally` still runs. See _lower_generator_throw /
+            # _lower_generator_close in emit_calls.py.
+            'extern int64_t __mojo_gen_throw (int64_t, int64_t, int64_t, int64_t);',
+            'extern int64_t __mojo_gen_close (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_2 (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_3 (int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_4 (int64_t, int64_t, int64_t, int64_t);',

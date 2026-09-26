@@ -165,6 +165,12 @@ def _reset_func(gen, body: list = None, params: list = None):
     # closure interception that used to do this was not run by the
     # self-hosted backend.
     gen._try_loop_protect: list = []
+    # The `finally` BODY list of each currently-open `try`, in the same
+    # order as `_try_loop_protect` (None for a try with no finally). A
+    # `break`/`continue` that jumps out of a try-with-finally has to RUN
+    # that finally before the jump — see
+    # `_emit_try_loop_exit_exc_pops`.
+    gen._try_finally_bodies: list = []
     # Set True by _gen_stmt_TryStmt / the with-__exit__ path in
     # _gen_stmt_WithStmt whenever THIS function's own body (not a
     # nested closure's — those get their own _reset_func/flag) emits a

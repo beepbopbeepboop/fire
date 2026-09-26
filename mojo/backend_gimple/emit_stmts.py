@@ -2676,22 +2676,44 @@ def _loop_break_bb(gen) -> str:
 
 
 def _emit_try_loop_exit_exc_pops(gen) -> None:
-    """Emit one `mojo_exc_pop()` per open `try` protected region a
-    `break`/`continue` jumps out of. A `try` counts when its entry
-    `len(loop_stack)` is >= the current depth (the loop it jumps out of
-    was already open at try-entry; a loop opened INSIDE the try stays put
-    and needs no pop). Replaces the `gen._emit = intercepted_emit` nested
-    closure in `_gen_stmt_TryStmt`, which the self-hosted backend did not
-    run — `mojo.mojo`'s REPL loop silently lost the `mojo_exc_pop()`
-    before a `break`/`continue` inside a `try`."""
+    """Everything a `break`/`continue` owes the `try` regions it jumps out
+    of: one `mojo_exc_pop()` per exited protected region, plus that region's
+    `finally` body when it has one.
+
+    A `try` counts when its entry `len(loop_stack)` is >= the current depth
+    (the loop it jumps out of was already open at try-entry; a loop opened
+    INSIDE the try stays put and needs no pop). Replaces the
+    `gen._emit = intercepted_emit` nested closure in `_gen_stmt_TryStmt`,
+    which the self-hosted backend did not run — `mojo.mojo`'s REPL loop
+    silently lost the `mojo_exc_pop()` before a `break`/`continue` inside a
+    `try`.
+
+    The `finally` hop is the other half of real Python's rule that a
+    `finally` runs on EVERY way out of the `try` — including `break` and
+    `continue`. It was missing: `for i in ...: try: ... break ...
+    finally: release()` skipped the release entirely, and the pop-only
+    behavior is why `g.close()`-style cleanup vanished on that path too.
+    Emitted AFTER all the pops (so an exception raised by a `finally` body
+    propagates outward rather than being caught by the `try` it is leaving,
+    matching CPython) and innermost-region-first (nested `try`/`finally`
+    blocks unwind inside-out)."""
     if not gen.loop_stack:
         return
     _npops = 0
-    for _d in gen._try_loop_protect:
-        if len(gen.loop_stack) <= _d:
+    _exited: list = []
+    _depth = len(gen.loop_stack)
+    for _i, _d in enumerate(gen._try_loop_protect):
+        if _depth <= _d:
             _npops += 1
+            _exited.append(_i)
     for _i in range(_npops):
         gen._emit("  mojo_exc_pop ();")
+    # Innermost first: the regions are recorded outermost-first.
+    _bodies = getattr(gen, '_try_finally_bodies', None) or []
+    for _i in reversed(_exited):
+        if _i < len(_bodies) and _bodies[_i]:
+            for _s in _bodies[_i]:
+                gen.gen_stmt(_s)
 
 
 def _gen_stmt_BreakStmt(gen, node):
@@ -3483,7 +3505,9 @@ def _gen_stmt_TryStmt(gen, node):
     # this try returns, which made the bare `pop()` raise
     # `IndexError: pop from empty list` and abort the whole module compile.
     _saved_tlp = list(gen._try_loop_protect)
+    _saved_tfb = list(gen._try_finally_bodies)
     gen._try_loop_protect.append(_entry_loop_depth)
+    gen._try_finally_bodies.append(node.finally_body if node.finally_body else None)
     for s in node.body:
         # Temporarily override _emit to intercept return statements
         original_emit = gen._emit
@@ -3535,6 +3559,7 @@ def _gen_stmt_TryStmt(gen, node):
             break
 
     gen._try_loop_protect = _saved_tlp
+    gen._try_finally_bodies = _saved_tfb
 
     # Normal fall-through out of the try body: no exception, no early
     # return. `finally` must run EXACTLY ONCE here, then control continues

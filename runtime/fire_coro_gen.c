@@ -25,6 +25,17 @@
 #include <string.h>
 #include <unistd.h>
 
+/* The generated-code exception frame stack (runtime/fire_runtime.h), needed
+   by __mojo_gen_close's local landing pad below. fire_coro.h declares neither,
+   and this translation unit deliberately does not include fire_runtime.h (it
+   would drag the whole runtime's declarations into a file that only needs a
+   handful), so mirror just what is used. MOJO_EXC_STACK_MAX must match
+   fire_runtime.h's value. */
+#include <setjmp.h>
+#define MOJO_EXC_STACK_MAX 64
+extern jmp_buf _mojo_exc_stack[MOJO_EXC_STACK_MAX];
+extern int     _mojo_exc_top;
+
 /* Layer 2 also needs a way to hand a body its stashed args: */
 extern void *__mojo_coro_env(MojoCoro *c);   /* defined in mojo_coro.c (added) */
 
@@ -361,6 +372,59 @@ __mojo_gen_destroy(int64_t gen)
     if (!g) return;
     __mojo_coro_destroy(g->coro);
     free(g);
+}
+
+/* close(): throw GeneratorExit into the generator at its suspend point so a
+   `try`/`finally` holding a resource in the body runs its cleanup even when
+   the generator is abandoned part-way (real Python's `gen.close()`), then
+   mark it finished. The GeneratorExit tag is passed in rather than computed
+   here because this runtime does not own the exception-tag scheme — the
+   codegen does (`_exc_type_id`, a CRC of the class name, so parallel module
+   compiles agree; see its own docstring). Using the codegen's tag (rather
+   than this file's own MOJO_TAG_GENERATOREXIT) is what lets a compiled
+   `except GeneratorExit:` handler actually match it.
+   Returns 1 if the body yielded AGAIN instead of exiting, which real Python
+   reports as "RuntimeError: generator ignored GeneratorExit"; the caller
+   decides what to do about it. The handle itself is NOT freed: close() ends
+   the generator, it does not invalidate the caller's reference to it — the
+   same distinction __mojo_gen_destroy (a real free) draws. */
+extern void mojo_exc_type_set(int64_t);
+extern void mojo_exc_msg_set(char *);
+extern void mojo_exc_obj_set(void *);
+extern void mojo_exc_pending_set(int);
+
+int64_t
+__mojo_gen_close(int64_t gen, int64_t ge_type)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)gen;
+    if (!g || g->done) return 0;
+    /* A LOCAL landing pad around the injection. close() is an ordinary,
+       non-exceptional way to end a generator: real Python swallows the
+       GeneratorExit it throws in, and so must this. Without the pad the
+       body's unwind longjmps straight past the caller and a program with
+       no `except GeneratorExit` dies with an unhandled-exception abort
+       (verified: the cleanup ran, then "Unhandled exception:" and a
+       non-zero exit). The frame is pushed exactly the way generated
+       try/except code pushes one (`_mojo_exc_top` bump + setjmp), and
+       popped again on both the normal and the unwind path. */
+    int saved_top = _mojo_exc_top;
+    if (saved_top + 1 >= MOJO_EXC_STACK_MAX) return 0;
+    _mojo_exc_top = saved_top + 1;
+    volatile int64_t ignored = 0;
+    if (setjmp(_mojo_exc_stack[_mojo_exc_top]) == 0) {
+        int64_t out = 0;
+        int r = __mojo_coro_throw(g->coro, ge_type, (char *)0, (void *)0, &out);
+        ignored = (r == 1) ? 1 : 0;
+    }
+    _mojo_exc_top = saved_top;
+    /* The unwind left the GeneratorExit in the global exception state;
+     * clear it so nothing downstream mistakes it for a live exception. */
+    mojo_exc_type_set(0);
+    mojo_exc_msg_set(0);
+    mojo_exc_obj_set(0);
+    mojo_exc_pending_set(0);
+    g->done = 1;
+    return ignored;
 }
 
 /* "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md):

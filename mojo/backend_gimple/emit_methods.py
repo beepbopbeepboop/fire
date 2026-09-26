@@ -760,34 +760,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"(g = gen(); g.send(v))")
             return ggc._lower_generator_send(gen, node, av, api)
 
-    # `g.throw(Exc)` / `g.close()` — REFUSED, honestly, rather than
-    # compiled into something that quietly misbehaves. Both are the one
-    # shape this backend's coroutine runtime cannot yet express: they
-    # inject an exception INTO a suspended generator body, and the A3
-    # stack-switch body's own try/except/finally does not survive that.
-    # Measured, not assumed: `g.throw(ValueError)` inside a body that
-    # CATCHES it works today, but when the exception instead propagates
-    # out of the generator it lands outside the CALLER's `except` (the
-    # body's exception-frame slice is restored over the caller's live
-    # frame), and `g.close()` on a body with `try: ... finally: cleanup`
-    # runs the body to completion WITHOUT running `cleanup` — silently
-    # skipping exactly the resource release close() exists to perform.
-    # Both need the coroutine-body exception-injection work tracked as the
-    # next generator-protocol item; until then, refusing at compile time
-    # is the honest answer (the alternative this replaced was a link error
-    # for a struct field that does not exist).
-    if func.member in ('throw', 'close'):
+    if func.member in ('send', 'throw', 'close'):
         at, av = gen.lower_expr(func.obj)
         at = gen._get_actual_type(at, av)
         if at == 'MojoGenerator *':
-            raise RuntimeError(
-                f"generator .{func.member}() is not supported by the "
-                f"compiled path yet: injecting an exception into a suspended "
-                f"generator body is not expressible in the stack-switch "
-                f"coroutine lowering (a propagating .throw() escapes the "
-                f"caller's except, and .close() skips the body's finally "
-                f"cleanup). Use next(g)/g.send(v), or drive the generator "
-                f"from the interpreter.")
+            api = gen._generator_var_api.get(av)
+            if api is None:
+                raise RuntimeError(
+                    f"generator .{func.member}() on a value with no known "
+                    f"generator API ({av!r}) — bind the generator to a "
+                    f"variable first (g = gen(); g.{func.member}(...))")
+            if func.member == 'send':
+                return ggc._lower_generator_send(gen, node, av, api)
+            if func.member == 'throw':
+                return ggc._lower_generator_throw(gen, node, av, api)
+            return ggc._lower_generator_close(gen, node, av, api)
 
     # `UnsafePointer[T].alloc(n)` / `OwnedPointer[T].alloc(n)` etc. — the
     # static heap-allocation constructor, whose receiver is the type

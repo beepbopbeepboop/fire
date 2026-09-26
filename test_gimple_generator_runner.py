@@ -2448,11 +2448,22 @@ def main():
 main()
 """, "stopped\n")
 
-    # .throw()/.close() inject an exception INTO the suspended body, which
-    # the stack-switch coroutine lowering cannot yet express (a propagating
-    # .throw() escapes the caller's `except`; .close() skips the body's
-    # `finally` cleanup). Refused at compile time, honestly.
-    test_generator_refused("generator_throw_refused_honestly", """\
+    # ── The rest of the protocol: throw() / close() ─────────────────────
+    # Both inject an exception INTO the suspended body. This only became
+    # expressible once `try/finally` ran its finally on the EXCEPTION path
+    # too (previously a `finally` in a generator body was skipped on every
+    # non-normal exit, so there was no cleanup for close() to run) and once
+    # the runtime's close helper swallowed the GeneratorExit it throws
+    # instead of letting it escape past the caller.
+    #
+    # NOTE: every generator here yields ONE value kind. A generator that
+    # yields two different kinds (e.g. an int then a string) is a
+    # pre-existing limitation of the compiled value model — its slot is
+    # typed from the yields as a whole, and the mismatch crashes. It is
+    # unrelated to throw/close (such a generator is unreachable without
+    # them) and is not what these tests are about.
+
+    test_generator_stdout("generator_throw_caught_inside_generator", """\
 def gen():
     try:
         yield 1
@@ -2465,12 +2476,37 @@ def main():
     print(g.throw(ValueError("x")))
 
 main()
-""", "not supported by the compiled path yet")
+""", "1\n99\n")
 
-    test_generator_refused("generator_close_refused_honestly", """\
+    # An exception the generator does NOT catch propagates to the CALLER,
+    # where an enclosing `except` sees it — and the generator's `finally`
+    # still runs on the way out.
+    test_generator_stdout("generator_throw_propagates_to_caller", """\
 def gen():
     try:
         yield 1
+        yield 2
+    finally:
+        print("cleanup")
+
+def main():
+    g = gen()
+    print(next(g))
+    try:
+        g.throw(ValueError("x"))
+        print("not reached")
+    except ValueError:
+        print("caught")
+    print("after")
+
+main()
+""", "1\ncleanup\ncaught\nafter\n")
+
+    test_generator_stdout("generator_close_runs_finally_cleanup", """\
+def gen():
+    try:
+        yield 1
+        yield 2
     finally:
         print("cleanup")
 
@@ -2478,9 +2514,63 @@ def main():
     g = gen()
     print(next(g))
     g.close()
+    print("after")
 
 main()
-""", "not supported by the compiled path yet")
+""", "1\ncleanup\nafter\n")
+
+    # close() on an already-exhausted generator is a no-op, and afterwards
+    # the generator really is finished (next() raises StopIteration).
+    test_generator_stdout("generator_close_on_exhausted_is_noop", """\
+def gen():
+    yield 1
+
+def main():
+    g = gen()
+    print(next(g))
+    g.close()
+    g.close()
+    try:
+        next(g)
+        print("no stop")
+    except StopIteration:
+        print("stopped")
+
+main()
+""", "1\nstopped\n")
+
+    # `g.throw(ValueError)` with no instance is `ValueError()` — real
+    # Python's own normalization — and propagates like any other.
+    test_generator_stdout("generator_throw_bare_exception_class", """\
+def gen():
+    while True:
+        yield 1
+
+def main():
+    g = gen()
+    print(next(g))
+    try:
+        g.throw(ValueError)
+        print("not reached")
+    except ValueError:
+        print("caught")
+
+main()
+""", "1\ncaught\n")
+
+    # An argument that is not an exception class is refused honestly rather
+    # than guessed at.
+    test_generator_refused("generator_throw_non_exception_refused", """\
+def gen():
+    yield 1
+
+def main():
+    g = gen()
+    print(next(g))
+    g.throw(42)
+
+main()
+""", "expected an exception class name")
 
     # ── Standard consumers of a generator ────────────────────────────────
     # `sorted()` / `zip()` used to hand their runtime helpers the generator

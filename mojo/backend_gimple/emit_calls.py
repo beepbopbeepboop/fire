@@ -201,6 +201,88 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     return vct, result
 
 
+def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
+    """`g.throw(Exc[, exc[, tb]])` — raise `Exc` inside the generator at its
+    suspend point, exactly as if its body had raised it there. If the body
+    catches it and yields again, that value is returned; if the exception
+    propagates out of the generator or the generator ends, it is re-raised
+    on the CALLER's frame through the same pending-exception mechanism
+    `next()` uses, so an `except ValueError:` around the `.throw()` call
+    matches exactly as it would in real Python.
+
+    The exception is identified by the same CRC tag scheme
+    `_exc_type_id`/`mojo_exc_type_set` use for every other raise/except in
+    this backend. `g.throw(ValueError)` with no instance is treated as
+    `ValueError()` — real Python's own normalization."""
+    if not node.args:
+        return _lower_generator_next(gen, av, api)
+    exc_node = node.args[0]
+    exc_name = None
+    if isinstance(exc_node, gimple_ctypes.IdentExpr):
+        exc_name = exc_node.name
+    elif isinstance(exc_node, gimple_ctypes.CallExpr) and \
+            isinstance(exc_node.func, gimple_ctypes.IdentExpr):
+        exc_name = exc_node.func.name
+    if exc_name is None or exc_name not in gen._KNOWN_EXCEPTION_NAMES:
+        raise RuntimeError(
+            f"generator .throw(): expected an exception class name "
+            f"(e.g. g.throw(ValueError)), got {type(exc_node).__name__}")
+    handle = gen._to_int64('MojoGenerator *', av)
+    # `g.throw(ValueError("boom"))`: the message rides in the same exc_msg
+    # slot a `raise ValueError("boom")` uses, so an `except ValueError as
+    # e:` body reads the same text.
+    msg = '0'
+    if isinstance(exc_node, gimple_ctypes.CallExpr) and exc_node.args:
+        mt, mv = gen.lower_expr(exc_node.args[0])
+        msg = gen._to_int64(mt, mv)
+    vct = api['value_ctype']
+    thrown = gen._new_val(
+        '_Bool',
+        f"__mojo_gen_throw ({handle}, {gen._exc_type_id(exc_name)}, {msg}, 0)")
+    bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
+    bb_stopiter = gen._new_bb()
+    gen._emit(f"  if ({thrown}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._emit_label(bb_exhausted)
+    # The body propagated something (or ended): re-raise it HERE, on the
+    # consumer's own frame, exactly as _lower_generator_next does. The
+    # runtime call itself does not longjmp — the injected exception is
+    # caught by the body's own trampoline and handed back as the pending
+    # flag, which is what makes the caller's `except` see it.
+    gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
+    gen._emit_label(bb_stopiter)
+    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    gen._emit("  mojo_raise ();")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_ok)
+    result = gen._new_val(vct, f"{api['base']}_value ({av})")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_merge)
+    return vct, result
+
+
+def _lower_generator_close(gen, node, av: str, api: dict):
+    """`g.close()` — throw GeneratorExit into the generator so a
+    `try`/`finally` in its body still runs its cleanup, then mark it
+    finished. Real Python makes this a no-op on an already-exhausted
+    generator, and raises RuntimeError if the body yields again instead of
+    exiting (which is what `__mojo_gen_close`'s return value reports).
+    Consuming a generator does not free it, so this deliberately does not
+    destroy the handle either."""
+    handle = gen._to_int64('MojoGenerator *', av)
+    ignored = gen._new_val(
+        '_Bool',
+        f"__mojo_gen_close ({handle}, {gen._exc_type_id('GeneratorExit')})")
+    bb_ok = gen._new_bb(); bb_ignored = gen._new_bb()
+    gen._emit(f"  if ({ignored}) goto {bb_ignored}; else goto {bb_ok};")
+    gen._emit_label(bb_ignored)
+    # Real Python: "RuntimeError: generator ignored GeneratorExit" when a
+    # close()d generator yields again instead of unwinding.
+    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('RuntimeError')});")
+    gen._emit("  mojo_raise ();")
+    gen._emit_label(bb_ok)
+    return 'void', None
+
+
 def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """BUG-2026-027: `UnsafePointer[T](x)` / `OwnedPointer[T](x)` /
     `ArcPointer[T](x)` / `Pointer[T](x)` — the generic pointer-wrapper
