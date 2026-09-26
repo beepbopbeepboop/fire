@@ -544,6 +544,15 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # `lst = [3.5, 2.5]; print(lst)` printing garbage/segfaulting.
         if name in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[name]
+            # ... and the NESTED element typing with it. A module-level
+            # `pairs = [[0, 7], [1, 8]]` records both on the global name
+            # (see _gen_stmt_AssignStmt's store side), but only the flat
+            # entry was carried to the read-back temp, so _list_repr_fn
+            # missed the pair shape and the generic repr printed the first
+            # index through the None-sentinel heuristic: `[[None, 7],
+            # [1, 8]]`. Mirrors the _dict_nested_val_types copy just above.
+            if name in gen._nested_elem_types:
+                gen._nested_elem_types[t] = gen._nested_elem_types[name]
         # Resolve the C decl type through the same own-overlay helper the
         # module-globals struct field freeze (gen_module_impl's
         # `_declared_globals` loop) and the assignment-site coercion

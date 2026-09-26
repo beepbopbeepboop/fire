@@ -790,6 +790,7 @@ char *mojo_repr_list_bytes(MojoList *l);
 /* Lists of 2-element PAIR lists (enumerate/zip): `[(0, 7), (1, 8)]`. The
    second slot's type is fixed at codegen time, hence one wrapper per
    kind — the raw slot cannot tell an int from a double. */
+char *mojo_repr_list_intlists(MojoList *l);
 char *mojo_repr_list_pairs(MojoList *l);
 char *mojo_repr_list_pairs_s(MojoList *l);
 char *mojo_repr_list_pairs_d(MojoList *l);
@@ -836,6 +837,10 @@ double  mojo_max_double(void *args);
 double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
 void *mojo_sorted(void *iterable);
+/* sorted(x, key=f[, reverse]) — `keys` is the caller's per-element key list. */
+MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse);
+/* Reverse in place — used for sorted(x, reverse=True) with no key. */
+MojoList *mojo_list_reversed(MojoList *l);
 void *mojo_reversed(void *iterable);
 MojoList *mojo_list_sorted_str(MojoList *src);
 MojoList *mojo_set_sorted(MojoSet *s);

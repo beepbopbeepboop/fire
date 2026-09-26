@@ -899,7 +899,21 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 if 'MojoList *' in (ctype, t) and 'char *' in (ctype, t):
                     return None
                 if ctype == 'char *' or t == 'char *':
-                    ctype = 'char *'
+                    # Widen to the common `char *` representation ONLY when
+                    # both sides are pointer-shaped — which is all the
+                    # coroutine's single promise slot can hold (a struct
+                    # pointer and a string are both pointers; an int and a
+                    # string are not). The scalar/pointer mismatch widened
+                    # here too, and the int side then failed to convert at
+                    # `co_yield`, so the shape died as a C++ error naming
+                    # an internal type instead of as this generator's own
+                    # refusal. Mirrors the mixed int/string check in
+                    # coro.py's _generator_value_kind, which is what routes
+                    # such a generator here in the first place.
+                    if ctype.endswith(' *') and t.endswith(' *'):
+                        ctype = 'char *'
+                    else:
+                        return None
                 else:
                     return None
         elif isinstance(n, YieldFromExpr):
@@ -914,7 +928,21 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 if 'MojoList *' in (ctype, t) and 'char *' in (ctype, t):
                     return None
                 if ctype == 'char *' or t == 'char *':
-                    ctype = 'char *'
+                    # Widen to the common `char *` representation ONLY when
+                    # both sides are pointer-shaped — which is all the
+                    # coroutine's single promise slot can hold (a struct
+                    # pointer and a string are both pointers; an int and a
+                    # string are not). The scalar/pointer mismatch widened
+                    # here too, and the int side then failed to convert at
+                    # `co_yield`, so the shape died as a C++ error naming
+                    # an internal type instead of as this generator's own
+                    # refusal. Mirrors the mixed int/string check in
+                    # coro.py's _generator_value_kind, which is what routes
+                    # such a generator here in the first place.
+                    if ctype.endswith(' *') and t.endswith(' *'):
+                        ctype = 'char *'
+                    else:
+                        return None
                 else:
                     return None
         elif isinstance(n, ReturnStmt):

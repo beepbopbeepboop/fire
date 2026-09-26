@@ -440,7 +440,8 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
 
 
 def _generator_value_kind(fn: N.FunctionDef,
-                          env: dict | None = None) -> tuple[str | None, str]:
+                          env: dict | None = None,
+                          delegated=None) -> tuple[str | None, str]:
     kinds = set()
     has_tuple = has_nontuple = False
     for n in _walk(fn):
@@ -452,8 +453,20 @@ def _generator_value_kind(fn: N.FunctionDef,
             else:
                 has_nontuple = True
         elif isinstance(n, N.YieldFromExpr):
-            kinds.add(None)
-            has_nontuple = True
+            # A `yield from sub()` re-yields everything `sub` yields, so
+            # sub's value kind lands in THIS generator's single value slot
+            # exactly as if it had been written out. `delegated` (installed
+            # by `_register_generator_value_kinds`) reports that kind when it
+            # can be resolved; without it the delegation contributes None,
+            # which is what left `yield from <int sub>` + `yield "a"`
+            # SEGFAULTING and `yield from <str sub>` + `yield 1` printing a
+            # raw address.
+            dk = delegated(n.value) if delegated is not None else None
+            kinds.add(dk)
+            if dk == 'tuple':
+                has_tuple = True
+            else:
+                has_nontuple = True
     if has_tuple and has_nontuple:
         return None, 'mixed tuple / non-tuple yields (v0)'
     if has_tuple:
@@ -463,6 +476,15 @@ def _generator_value_kind(fn: N.FunctionDef,
         return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:
         return 'd', ''
+    # The int/string sibling of the two checks above. The value slot carries
+    # ONE kind and `<base>_value`'s accessor is chosen from it, so a
+    # generator that yields an int on one path and a string on another sends
+    # one of them through the wrong accessor. Declaring such a generator 'p'
+    # (as this fell through to) is not a safe default: measured, it
+    # SEGFAULTs — `try: yield 1 except ValueError: yield "caught"`, then
+    # `g.throw(ValueError)`, crashed after printing the int.
+    if 'i' in kinds and 'p' in kinds:
+        return None, 'mixed int / string yields (v0)'
     if 'p' in kinds:
         return 'p', ''
     return 'i', ''
@@ -559,6 +581,67 @@ def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def,
     return True
 
 
+_GEN_VALUE_KINDS: dict[str, tuple[str | None, str]] = {}
+
+
+def _register_generator_value_kinds(stmts) -> None:
+    """Value kind of every MODULE-LEVEL generator function in `stmts`,
+    resolved through `yield from` delegation, memoized in
+    `_GEN_VALUE_KINDS` for `_generator_value_kind` to consult.
+
+    Delegation is what makes this a separate pass: a generator's kind
+    depends on the kinds of the generators it yields FROM, so the answers
+    have to be computed as a set rather than one function at a time. A
+    delegation CYCLE (`a` yields from `b`, `b` from `a`) has no fixed point
+    here, so it resolves to None (unknown) and keeps the pre-existing
+    behavior rather than refusing on a guess.
+    """
+    defs = {s.name: s for s in stmts
+            if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False)}
+
+    in_progress: set[str] = set()
+    # Per-MODULE, not per-process: the driver compiles many modules in one
+    # process, and these keys are bare function NAMES. Left populated, a
+    # module B whose `gen` yields ints would inherit module A's `gen` kind
+    # (a string one) and refuse a generator that is perfectly consistent.
+    _GEN_VALUE_KINDS.clear()
+
+    def resolve(name):
+        if name in _GEN_VALUE_KINDS:
+            return _GEN_VALUE_KINDS[name]
+        fn = defs.get(name)
+        if fn is None or name in in_progress:
+            return (None, '')
+        in_progress.add(name)
+        try:
+            r = _generator_value_kind(fn, _static_env(fn, None), _delegated)
+        finally:
+            in_progress.discard(name)
+        _GEN_VALUE_KINDS[name] = r
+        return r
+
+    def _delegated(value):
+        # `yield from sub` / `yield from sub(...)` where `sub` is a
+        # module-level generator in this module. Anything else (a method
+        # call, an attribute, a computed callable) stays unknown, as before.
+        target = value.func if isinstance(value, N.CallExpr) else value
+        if isinstance(target, N.IdentExpr) and target.name in defs:
+            return resolve(target.name)[0]
+        return None
+
+    for _n in defs:
+        resolve(_n)
+
+
+def _delegated_yield_kind(value):
+    """`_generator_value_kind`'s `delegated` hook, backed by
+    `_GEN_VALUE_KINDS` (see `_register_generator_value_kinds`)."""
+    target = value.func if isinstance(value, N.CallExpr) else value
+    if isinstance(target, N.IdentExpr):
+        return _GEN_VALUE_KINDS.get(target.name, (None, ''))[0]
+    return None
+
+
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
@@ -614,7 +697,8 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
         return False, 'kwonly params (v0)'
-    kind, why = _generator_value_kind(fn, _static_env(fn, struct_def))
+    kind, why = _generator_value_kind(fn, _static_env(fn, struct_def),
+                                   _delegated_yield_kind)
     if kind is None:
         return False, why
     _amb = _ambiguous_yielded_params(fn, struct_name)
@@ -2037,6 +2121,10 @@ def lower(stmts: list) -> tuple[list, list]:
     out = []
     meta = []
     method_bodies = []
+    # Kind answers for `yield from` delegation have to exist before ANY
+    # generator is lowered, since a generator's kind depends on the kinds of
+    # the generators it yields from.
+    _register_generator_value_kinds(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             ok, _why = _eligible(s, prop_names=_prop_names)
@@ -2778,7 +2866,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
             else f'__mgco_{_cm_as_str(fn.name)}')
     body_name = f'{base}_body'
     env = _static_env(fn, struct_def)
-    kind, _ = _generator_value_kind(fn, env)
+    kind, _ = _generator_value_kind(fn, env, _delegated_yield_kind)
     kind = kind or 'i'
 
     real_params = fn.params[1:] if is_method else fn.params

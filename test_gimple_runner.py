@@ -467,10 +467,12 @@ print(c.n)
 print(list(enumerate([7, 8])))
 """, "[(0, 7), (1, 8)]\n")
 
-    # (Function scope, not module scope: a module-level list-valued global
-    # loses its element typing entirely in this codegen — a hand-written
-    # `z = [[0, 7], [1, 8]]` at module level prints `[[None, 7], [1, 8]]`
-    # too — so that pre-existing global gap is not what this test is about.)
+    # (Function scope deliberately: a module-level global assigned a CALL's
+    # result — `z = sorted([3, 1])` — still loses its container typing and
+    # prints a raw pointer. That is a separate pre-existing gap in how a
+    # module-level global's type is derived from a call result, and is not
+    # what this test is about; the module-level NESTED LITERAL form below is
+    # fixed and covered separately.)
     test_gimple_stdout("gimple_enumerate_value_printed", """\
 def main():
     z = enumerate([7, 8])
@@ -479,6 +481,81 @@ def main():
 
 main()
 """, "2\n[(0, 7), (1, 8)]\n")
+
+    # A module-level nested list literal: the store side records the inner
+    # lists' element type, but the READ of the global dropped it, so the repr
+    # fell back to the generic list walker — whose int-vs-pointer heuristic
+    # saw a boxed 0 and printed the None sentinel, giving
+    # `[[None, 7], [1, 8]]` for `[[0, 7], [1, 8]]`.
+    test_gimple_stdout("gimple_global_nested_list_literal", """\
+z = [[0, 7], [1, 8]]
+print(z)
+""", "[[0, 7], [1, 8]]\n")
+
+    # sorted(key=...) / reverse=. The ordinary GIMPLE path dropped both, so
+    # `sorted([1, 3, 2], key=lambda v: -v)` sorted ASCENDING and
+    # `reverse=True` did nothing — silently, and differently from the C++20
+    # companion path, which implements both (so the same source sorted
+    # differently depending on which backend handled it).
+    test_gimple_stdout("gimple_sorted_key_lambda", """\
+print(sorted([1, 3, 2], key=lambda v: -v))
+""", "[3, 2, 1]\n")
+
+    # A builtin as the key: `key=len` is the single most common form, and
+    # going through the ordinary call path is what makes it work (a lambda
+    # lowers to a function-pointer VARIABLE, not a callable symbol). The
+    # element keeps its real `char *` type, so `len` sees the string rather
+    # than its address.
+    test_gimple_stdout("gimple_sorted_key_builtin_len", """\
+print(sorted(["ccc", "a", "bb"], key=len))
+""", "['a', 'bb', 'ccc']\n")
+
+    test_gimple_stdout("gimple_sorted_reverse", """\
+print(sorted([1, 3, 2], reverse=True))
+print(sorted(["b", "a", "c"], reverse=True))
+""", "[3, 2, 1]\n['c', 'b', 'a']\n")
+
+    # reverse=True composes with key= (the sort is by key, then flipped) —
+    # sorting by -v descending puts the original order back.
+    test_gimple_stdout("gimple_sorted_key_and_reverse", """\
+print(sorted([1, 3, 2], key=lambda v: -v, reverse=True))
+""", "[1, 2, 3]\n")
+
+    # A named function as the key. Deliberately an INT element: with a
+    # string element an unannotated named function's `int64_t` parameter
+    # receives the string bits and `len` misreads them
+    # (`sorted(["ccc","a","bb"], key=bylen)` -> ['bb','ccc','a']) — a
+    # pre-existing compiled-path string-argument typing gap, independent of
+    # sorted (the same function called directly is correct), so it is not
+    # pinned here as if it worked. A LAMBDA and a BUILTIN key both handle
+    # string elements correctly, and both are covered above.
+    test_gimple_stdout("gimple_sorted_key_function", """\
+def negate(x):
+    return -x
+
+print(sorted([1, 3, 2], key=negate))
+""", "[3, 2, 1]\n")
+
+    # A string key is compared as a string, not as the address in its int64_t
+    # slot (which would order by ADDRESS): the runtime picks the comparison
+    # with mojo_boxed_is_str, since a lambda's declared return type is
+    # int64_t whatever it returns and the codegen cannot tell.
+    test_gimple_stdout("gimple_sorted_string_key", """\
+print(sorted(["bb", "a", "ccc"], key=lambda s: s))
+""", "['a', 'bb', 'ccc']\n")
+
+    # A container element keeps its real type for the key, so `t[0]` works —
+    # binding it as int64_t emitted "conflicting types" from the lambda's
+    # forward declaration.
+    test_gimple_stdout("gimple_sorted_key_tuple_element", """\
+print(sorted([(2, "b"), (1, "a")], key=lambda t: t[0]))
+""", "[(1, 'a'), (2, 'b')]\n")
+
+    # Keyless sorted is unchanged by all of the above.
+    test_gimple_stdout("gimple_sorted_plain_unchanged", """\
+print(sorted([3, 1, 2]))
+print(sorted(["b", "a"]))
+""", "[1, 2, 3]\n['a', 'b']\n")
 
     test_gimple_stdout("gimple_enumerate_start_and_strings", """\
 print(list(enumerate([7, 8], 1)))

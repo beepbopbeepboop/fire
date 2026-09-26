@@ -4481,6 +4481,35 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
     return mojo_str_cat(_buf, "]");
 }
 
+/* A list whose elements are LISTS OF INTS (`[[0, 7], [1, 8]]`) — what a
+   nested list literal produces. The generic `_mojo_repr_list` recurses into
+   the inner lists through the None-sentinel heuristic, so an inner 0 printed
+   as `None` (`[[None, 7], [1, 8]]`). The codegen knows statically that the
+   inner lists hold plain ints (that is exactly what routes this helper), so
+   read every inner slot as an int. */
+char *mojo_repr_list_intlists(MojoList *l) {
+    if (!l) return "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup("[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        int64_t _p = mojo_list_get_int(l, _i);
+        if (!mojo_is_registered_list(_p)) {
+            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
+            continue;
+        }
+        MojoList *_in = (MojoList *)(intptr_t)_p;
+        int64_t _m = mojo_list_len(_in);
+        _buf = mojo_str_cat(_buf, "[");
+        for (int64_t _j = 0; _j < _m; _j++) {
+            if (_j > 0) _buf = mojo_str_cat(_buf, ", ");
+            _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_in, _j)));
+        }
+        _buf = mojo_str_cat(_buf, "]");
+    }
+    return mojo_str_cat(_buf, "]");
+}
+
 char *mojo_repr_list_pairs(MojoList *l) { return _mojo_repr_pairlist(l, 0); }
 char *mojo_repr_list_pairs_s(MojoList *l) { return _mojo_repr_pairlist(l, 1); }
 char *mojo_repr_list_pairs_d(MojoList *l) { return _mojo_repr_pairlist(l, 2); }
@@ -6125,6 +6154,72 @@ void *mojo_reversed(void *iterable) {
     MojoList *src = (MojoList *)iterable;
     MojoList *dst = mojo_list_copy(src);
     mojo_list_reverse(dst);
+    return dst;
+}
+
+/* Reverse a list in place and return it — `sorted(x, reverse=True)` with no
+   key is the type-aware sort followed by this, NOT a reverse-then-sort in
+   the caller: the element-wise sorts are type-dispatched (mojo_sorted for
+   ints, mojo_list_sorted_str for strings, ...), so ordering by the raw
+   int64_t slots here would sort strings by ADDRESS instead of
+   lexicographically. */
+MojoList *mojo_list_reversed(MojoList *l) {
+    if (!l) return l;
+    for (int64_t i = 0, j = l->len - 1; i < j; i++, j--) {
+        int64_t t = l->data[i]; l->data[i] = l->data[j]; l->data[j] = t;
+    }
+    return l;
+}
+
+/* `sorted(x, key=f)`: order `items` by the key each element maps to.
+   `keys` is a parallel list the caller built by calling `f` per element (the
+   compiled path has no per-element callback in the runtime, so it lowers the
+   key call itself — see _lower_builtin_sorted), and `reverse` selects
+   descending order, matching `sorted(..., reverse=True)`.
+
+   `keys` is never NULL: the keyless `sorted(x, reverse=True)` reverses the
+   result of the ordinary type-aware sort instead (see _lower_builtin_sorted),
+   which is what keeps `sorted(["b","a"], reverse=True)` lexicographic rather
+   than ordered by the string addresses in its int64_t slots.
+
+   String keys are compared with strcmp, not as int64_t slots. The key
+   function's return type cannot settle that at compile time — a lambda's is
+   declared int64_t whatever it returns — so the runtime uses the model's own
+   discriminator (mojo_boxed_is_str: pointer-shaped and not a live registered
+   list), decided ONCE for the whole sort so the ordering stays consistent. */
+MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse) {
+    MojoList *dst = mojo_list_copy(items);
+    if (!keys) return dst;
+    int64_t n = dst->len;
+    if (keys->len < n) n = keys->len;
+    int use_str = 0;
+    if (keys->len > 0) {
+        use_str = mojo_boxed_is_str(mojo_list_get_int(keys, 0));
+        if (keys->len > 1 && !use_str) {
+            use_str = mojo_boxed_is_str(mojo_list_get_int(keys, 1));
+        }
+    }
+    for (int64_t i = 0; i < n; i++) {
+        for (int64_t j = i + 1; j < n; j++) {
+            int64_t ki = mojo_list_get_int(keys, i);
+            int64_t kj = mojo_list_get_int(keys, j);
+            int swap;
+            if (use_str) {
+                const char *si = (const char *)(intptr_t)ki;
+                const char *sj = (const char *)(intptr_t)kj;
+                int c = strcmp(si ? si : "", sj ? sj : "");
+                swap = reverse ? (c < 0) : (c > 0);
+            } else {
+                swap = reverse ? (ki < kj) : (ki > kj);
+            }
+            if (swap) {
+                int64_t t = dst->data[i]; dst->data[i] = dst->data[j]; dst->data[j] = t;
+                int64_t tk = mojo_list_get_int(keys, i);
+                mojo_list_set_int(keys, i, mojo_list_get_int(keys, j));
+                mojo_list_set_int(keys, j, tk);
+            }
+        }
+    }
     return dst;
 }
 

@@ -276,7 +276,141 @@ def main():
 """, "argument\nresumed\n42\n")
 
 
+def run_mixed_yield_kind_tests():
+    # ── Mixed `yield` value kinds ──────────────────────────────────────
+    # A generator whose yields disagree on the scalar type (int then str,
+    # int then double, bool then int) has ONE value slot in the compiled
+    # model, typed from the yields as a whole. The two type-inference passes
+    # (the mojo-side walker and the C++ generator header builder) each
+    # widened silently — one said int64_t, the other double/_Bool — and the
+    # disagreement SEGFAULTED the compiler. Each pass now checks that all
+    # yields agree, so the shape is REFUSED with a message naming the rule
+    # and the module falls back to interpreting from source, which produces
+    # the correct answer (see the note above these throw/close tests).
+    test_generator_refused("generator_mixed_yield_kinds_int_str", """\
+def gen():
+    yield 1
+    yield "a"
+""", "all values must agree on one scalar type")
+
+    # The same rule, in the other order and across the other two kinds: the
+    # check is on the SET of kinds, not on a particular pair.
+    test_generator_refused("generator_mixed_yield_kinds_str_int", """\
+def gen():
+    yield "a"
+    yield 1
+""", "all values must agree on one scalar type")
+
+    test_generator_refused("generator_mixed_yield_kinds_int_double", """\
+def gen():
+    yield 1
+    yield 2.5
+""", "all values must agree on one scalar type")
+
+    # `_Bool` and int64_t share one 64-bit slot, so this one is NOT a
+    # disagreement and must keep compiling: the check is on genuinely
+    # incompatible kinds, not on "more than one kind". (It prints `1` for the
+    # `True` — a pre-existing repr nuance of the shared slot, and no crash;
+    # not what this group is about.)
+    test_generator_c_compiles("generator_yield_kinds_bool_int_share_slot", """\
+def gen():
+    yield True
+    yield 7
+""")
+
+    # A single kind is untouched by the check — including all three kinds on
+    # their own, so the refusal cannot be satisfied by refusing everything.
+    test_generator_c_compiles("generator_single_yield_kind_int", """\
+def gen():
+    yield 1
+    yield 2
+""")
+    test_generator_c_compiles("generator_single_yield_kind_str", """\
+def gen():
+    yield "a"
+    yield "b"
+""")
+    test_generator_c_compiles("generator_single_yield_kind_double", """\
+def gen():
+    yield 1.5
+    yield 2.5
+""")
+    test_generator_c_compiles("generator_single_yield_kind_bool", """\
+def gen():
+    yield True
+    yield False
+""")
+
+    # Mixed kinds reached through `yield from` are caught by the same check.
+    # A `yield from` re-yields everything the sub-generator yields, so the
+    # sub-generator's kind lands in the OUTER generator's single value slot
+    # exactly as if it had been written out. That kind is resolved per module
+    # (`_register_generator_value_kinds`) and folded into the agreement check:
+    # without it, `yield from <int sub>` + `yield "a"` SEGFAULTED and
+    # `yield from <str sub>` + `yield 1` printed a raw address.
+    test_generator_refused("generator_mixed_yield_kinds_yield_from_int_str", """\
+def sub():
+    yield 1
+
+def gen():
+    yield from sub()
+    yield "a"
+""", "all values must agree on one scalar type")
+
+    test_generator_refused("generator_mixed_yield_kinds_yield_from_str_int", """\
+def sub():
+    yield "s"
+
+def gen():
+    yield from sub()
+    yield 1
+""", "all values must agree on one scalar type")
+
+    # …and a delegation whose kind AGREES must still compile in both
+    # directions, so the check cannot be satisfied by refusing every
+    # `yield from`.
+    test_generator_stdout("generator_yield_from_same_kind_int", """\
+def sub():
+    yield 1
+    yield 2
+
+def gen():
+    yield from sub()
+    yield 3
+
+def main():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    print(next(g))
+
+main()
+""", "1\n2\n3\n")
+
+    # A string-delegating generator used to be typed 'i' (the delegation
+    # contributed no kind, so the default won) and printed its values as raw
+    # addresses; it now takes the sub-generator's kind.
+    test_generator_stdout("generator_yield_from_same_kind_string", """\
+def sub():
+    yield "a"
+    yield "b"
+
+def gen():
+    yield from sub()
+    yield "c"
+
+def main():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    print(next(g))
+
+main()
+""", "a\nb\nc\n")
+
+
 def run_tests():
+    run_mixed_yield_kind_tests()
     run_next_method_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
@@ -2522,11 +2656,12 @@ main()
     # instead of letting it escape past the caller.
     #
     # NOTE: every generator here yields ONE value kind. A generator that
-    # yields two different kinds (e.g. an int then a string) is a
-    # pre-existing limitation of the compiled value model — its slot is
-    # typed from the yields as a whole, and the mismatch crashes. It is
-    # unrelated to throw/close (such a generator is unreachable without
-    # them) and is not what these tests are about.
+    # yields two DIFFERENT kinds (e.g. an int then a string) is refused by
+    # the compiled value model — its slot is typed from the yields as a
+    # whole, so the mismatch used to SEGFAULT the compiler. It is unrelated
+    # to throw/close (such a generator is unreachable without them), and
+    # these tests are about a single kind. See
+    # `generator_mixed_yield_kinds_*` below for the mixed-kind shape.
 
     test_generator_stdout("generator_throw_caught_inside_generator", """\
 def gen():

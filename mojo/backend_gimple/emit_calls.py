@@ -2439,7 +2439,139 @@ def _lower_builtin_dir(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return 'MojoList *', gen._new_val('MojoList *', 'mojo_list_new ()  /* dir() stubbed */')
 
 
-def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
+    """`sorted(x, key=f)` / `sorted(x, reverse=True)` / both.
+
+    The compiled path has no per-element callback in the runtime, so the key
+    LIST is built here: `f` is called once per element and each result
+    appended, then `mojo_sorted_by_keys` orders the original list by it.
+
+    The key callable is invoked through the ordinary call path (see below),
+    so it may be a lambda, a function name, or a bound method — whatever
+    this backend can already call.
+
+    What this does NOT fix: key functions that are themselves already broken
+    in the compiled path. Two measured, independent of sorted:
+      * a dict-subscripted global read from inside a lifted lambda returns 0
+        (`d = {...}` then `key=lambda k: d[k]`);
+      * an UNANNOTATED named function taking a string element gets the
+        string bits in an `int64_t` param and mismeasures it
+        (`key=bylen` where `def bylen(s): return len(s)`).
+    A lambda key and a builtin key both handle string elements correctly."""
+    at, av = gen.lower_expr(arg0)
+    if at != 'MojoList *':
+        av = gen._materialize_as_list(at, av)
+        at = 'MojoList *'
+    elem = gen._elem_of(av)
+
+    keys_val = 'NULL'
+    if key_expr is not None:
+        # Bind each element to a real local and lower a synthesized
+        # `key(<element>)` CALL through the ordinary call path, rather than
+        # resolving the callee to a C symbol here: a lambda lowers to a
+        # function-POINTER VARIABLE (`_funcptr_main_lambda_1`), not to its
+        # function's name, so calling it by name emitted "called object
+        # `_t5` is not a function or function pointer". Going through the
+        # call path handles a lambda, a plain function, and a bound method
+        # uniformly — whatever this backend can call, it can call as a key.
+        # Unique per call: `_declare_var` is first-decl-wins, so two
+        # `sorted(..., key=...)` calls in one function would otherwise share
+        # the first one's element type and emit a conflicting-types error.
+        _kvar = f'_sorted_key_elem_{gen.temp_counter}'
+        gen.temp_counter += 1
+        # The element keeps its REAL type. A scalar key is read straight, but
+        # a list/tuple element must be bound as `MojoList *` (the accessor
+        # always hands back an int64_t slot, so it needs the same coercion
+        # the `for`-loop tuple path uses) — binding it as int64_t made
+        # `sorted([(2, "b"), (1, "a")], key=lambda t: t[0])` emit
+        # "conflicting types" instead of sorting.
+        _kelem_t = 'int64_t'
+        if elem == 'double':
+            _kelem_t = 'double'
+        elif elem and elem.endswith(' *'):
+            _kelem_t = elem
+        keys = gen._new_temp('MojoList *')
+        gen._emit(f"  {keys} = mojo_list_new ();")
+        klen = gen._new_val('int64_t', f'mojo_list_len ({av})')
+        kidx = gen._new_val('int64_t', '(int64_t)0')
+        bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+        gen._emit(f"  goto {bb_cond};")
+        gen._emit_label(bb_cond)
+        kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
+        gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
+        gen._emit_label(bb_body)
+        _read64 = gen._new_val('int64_t', f'mojo_list_get_int ({av}, {kidx})')
+        if _kelem_t == 'double':
+            _read = gen._new_val('double', f'mojo_list_get_double ({av}, {kidx})')
+        elif _kelem_t == 'int64_t':
+            _read = _read64
+        else:
+            _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
+        gen._declare_var(_kvar, _kelem_t)
+        gen._emit(f"  {gen._cname(_kvar)} = {_read};")
+        # A lambda key's FORWARD DECLARATION types its params from
+        # `var_types[<param name>]`, while the definition picks up the type
+        # of the argument at this call site. Bind the element to the
+        # lambda's own param name for the duration of the call so a
+        # container-typed param (`key=lambda t: t[0]`) declares
+        # `int64_t f(MojoList *)` in both places — otherwise the definition
+        # said `MojoList *` and the declaration `int64_t`, which GCC rejects
+        # as "conflicting types".
+        _saved_param_types = {}
+        if isinstance(key_expr, gimple_ctypes.LambdaExpr):
+            for _pn, _pd in key_expr.params:
+                _saved_param_types[_pn] = gen.var_types.get(_pn, None)
+                gen.var_types[_pn] = _kelem_t
+        try:
+            kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
+                func=key_expr, args=[gimple_ctypes.IdentExpr(_kvar)],
+                line=getattr(key_expr, 'line', 0), col=getattr(key_expr, 'col', 0)))
+        finally:
+            for _pn, _old_t in _saved_param_types.items():
+                if _old_t is None:
+                    gen.var_types.pop(_pn, None)
+                else:
+                    gen.var_types[_pn] = _old_t
+        # A `char *` key is a STRING to compare (strcmp), not an address to
+        # compare as an int64_t slot — `sorted(words, key=lambda w: w)` with
+        # the int path ordered by address. The key's own lowered return type
+        # is what decides which.
+        if kret_t == 'char *':
+            gen._void_call('mojo_list_append_str', [('MojoList *', keys), ('char *', kret_v)])
+        else:
+            kret = gen._to_int64(kret_t, kret_v)
+            gen._void_call('mojo_list_append_int', [('MojoList *', keys), ('int64_t', kret)])
+        kone = gen._new_val('int64_t', '(int64_t)1')
+        knew = gen._new_val('int64_t', f'{kidx} + {kone}')
+        gen._emit(f"  {kidx} = {knew};")
+        gen._emit(f"  goto {bb_cond};")
+        gen._emit_label(bb_after)
+        keys_val = keys
+
+    if keys_val == 'NULL':
+        # No key: keep the type-aware sort the keyless path already picks
+        # (mojo_list_sorted_str for strings, mojo_sorted for ints, ...) and
+        # reverse its RESULT. Sorting by the raw int64_t slots here instead
+        # would order strings by address, not lexicographically.
+        res = _lower_builtin_sorted(gen, node, keyed=False)
+        if not reverse:
+            return res
+        res_t, res_v = res
+        out = gen._call_expr('MojoList *', 'mojo_list_reversed', [(res_t, res_v)])
+        if elem and elem != 'int64_t':
+            gen._elem_types[out] = elem
+        return 'MojoList *', out
+
+    res = gen._call_expr('MojoList *', 'mojo_sorted_by_keys',
+                         [('MojoList *', av), ('MojoList *', keys_val),
+                          ('int', '1' if reverse else '0')])
+    if elem and elem != 'int64_t':
+        gen._elem_types[res] = elem
+    return 'MojoList *', res
+
+
+def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
+                        keyed: bool = True) -> tuple[str, str]:
     arg0 = node.args[0]
     # sorted(dict.items()) — a list of (key, value) tuples sorted by key.
     # Without this, mojo_sorted's int64-payload sort orders the tuple
@@ -2468,6 +2600,30 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _siv = gen._field_dict_val_types.get(_fsn, {}).get(arg0.func.obj.member)
         gen._dict_items_val_elems[t] = _siv or 'int64_t'
         return 'MojoList *', t
+    # `key=` / `reverse=` — real Python ordering options this lowering used
+    # to drop on the floor: `sorted([1, 3, 2], key=lambda v: -v)` sorted
+    # ASCENDING (silently wrong) and `reverse=True` did nothing. The C++20
+    # companion path implements both, so the same source also sorted
+    # differently depending on which backend handled it.
+    kwargs = getattr(node, 'kwargs', []) or []
+    key_expr = None
+    reverse = False
+    for _k, _v in kwargs:
+        if _k == 'key':
+            key_expr = _v
+        elif _k == 'reverse':
+            # `reverse=<anything truthy>`; only a literal False/0 is
+            # statically decidable, and anything else is treated as True
+            # (the Python truthiness rule for a flag argument).
+            if isinstance(_v, gimple_ctypes.BoolLiteral) and not _v.value:
+                reverse = False
+            elif isinstance(_v, gimple_ctypes.IntLiteral) and _v.value == 0:
+                reverse = False
+            else:
+                reverse = True
+    if keyed and (key_expr is not None or reverse):
+        return _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse)
+
     at, av = gen.lower_expr(arg0)
     for a in node.args[1:]: gen.lower_expr(a)
     # Dispatch on the container type so `sorted(...)` matches Python's

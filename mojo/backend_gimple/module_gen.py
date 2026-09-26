@@ -5997,9 +5997,22 @@ def gen_module_impl(self, stmts):
                     # global-assignment emission site.
                     self._own_global_var_types[_gn] = _crt
     if has_toplevel_code:
+        self._lambda_parts = []
         toplevel_func = self._gen_toplevel(toplevel_stmts)
         func_parts.append(toplevel_func)
         func_parts.append('')
+        # Flush the lambdas lifted by the TOP-LEVEL body. The function and
+        # struct-method paths above each reset-then-flush `_lambda_parts`
+        # after emitting their body; the top-level path had no flush at all,
+        # so a lambda written at module scope was lowered and registered but
+        # its lifted definition never made it into the output — the call site
+        # then linked against a symbol nothing defined and the link failed
+        # with "Undefined symbols ... main_lambda_1". Reachable before this
+        # only through a module-level `sorted(xs, key=lambda v: -v)`, whose
+        # key call lowers the lambda while emitting the top-level body.
+        if self._lambda_parts:
+            func_parts.extend(self._lambda_parts)
+            self._lambda_parts = []
         if not self.emit_entry_points:
             sub_fn = _module_toplevel_name(self.module_name)
             if sub_fn not in self._sub_toplevels:

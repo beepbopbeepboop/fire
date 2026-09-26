@@ -1986,6 +1986,13 @@ def _list_repr_fn(gen, rav: str) -> str:
         if nested[1] in ('char *', 'MojoStr *'):
             return 'mojo_repr_list_pairs_s'
         return 'mojo_repr_list_pairs'
+    # A list of int-holding LISTS (a nested list literal): the inner 0 of
+    # `[[0, 7], [1, 8]]` printed as `None` through the generic repr's
+    # sentinel heuristic. The nested entry here is the inner list's ELEMENT
+    # type (a bare 'int64_t'), not a per-slot pair spec, so it is a
+    # different shape from the enumerate/zip pairs handled above.
+    if gen._elem_types.get(rav) == 'MojoList *' and nested == 'int64_t':
+        return 'mojo_repr_list_intlists'
     et = gen._elem_types.get(rav)
     if et == 'double':
         return 'mojo_repr_list_doubles'
