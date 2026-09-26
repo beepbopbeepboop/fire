@@ -73,13 +73,73 @@ def _criteria_id() -> str:
 
 SKIP_DIRS = {
     ".git", ".pixi", "output", "build", "__pycache__", ".mypy_cache",
-    ".pytest_cache", "node_modules", "stdlib",  # external stdlib tree
+    ".pytest_cache", "node_modules",
 }
+# NOTE: "stdlib" is deliberately NOT pruned by name, and that is load-bearing
+# rather than tidiness. It used to be in this set, to keep the default walk
+# from wandering into the external stdlib tree — but the set is applied to
+# EXPLICIT roots too, so naming a root whose own subtree is called `stdlib`
+# (or whose parent contains one) silently dropped every file under it and
+# reported a smaller sweep as if it had run. `stdlib <…/mojo/stdlib>` gave
+# 669 files and `stdlib <…/mojo>` gave 263, with no warning either way. The
+# external tree lives outside this repo, so the default walk never reached it
+# anyway; the stdlib is now a first-class default ROOT (see default_roots),
+# which is the honest way to include it.
 # Mojo is a Python superset, so both extensions are valid inputs to the
 # compiler; the stdlib tree is almost entirely .mojo.
 SUFFIXES = (".py", ".mojo")
 DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
 DEFAULT_TIMEOUT = 30
+
+
+# The stdlib subtrees swept when no paths are given. `std/` is the library
+# itself — the code a real program links against. The stdlib's own `test/`
+# (350 files, larger than everything else combined) and `benchmarks/` are left
+# out of the default on purpose: they exercise the stdlib rather than measuring
+# what the formal backend can lower, and including them would more than double
+# the default sweep for very little extra signal. Ask for them by name
+# (`--stdlib-subtrees std,test`) or pass roots.
+DEFAULT_STDLIB_SUBTREES = ("std",)
+
+
+def find_stdlib_path():
+    """The external stdlib root, or None if it cannot be found.
+
+    module_loader owns the discovery strategy (MOJO_STDLIB, then the known
+    checkout, then an upward search), so the sweep does not grow a fourth,
+    slightly different copy of it."""
+    try:
+        from module_loader import STDLIB_PATH
+        if STDLIB_PATH and os.path.isdir(STDLIB_PATH):
+            return os.path.abspath(STDLIB_PATH)
+    except Exception:
+        pass
+    return None
+
+
+def default_roots(stdlib_subtrees=DEFAULT_STDLIB_SUBTREES,
+                  stdlib_path=None) -> tuple:
+    """(roots, notes) for a no-argument sweep: this repo, plus the stdlib.
+
+    `notes` carries anything the caller should print rather than swallow — a
+    stdlib that could not be found, or a requested subtree that is not there.
+    A silently narrower sweep is the failure mode that matters here: it looks
+    like a clean run."""
+    roots, notes = [REPO], []
+    if not stdlib_subtrees:
+        return tuple(roots), notes
+    base = stdlib_path or find_stdlib_path()
+    if not base:
+        notes.append("stdlib not found (set MOJO_STDLIB or pass paths "
+                     "explicitly) - swept the repo only")
+        return tuple(roots), notes
+    for sub in stdlib_subtrees:
+        path = os.path.join(base, sub)
+        if os.path.isdir(path):
+            roots.append(path)
+        else:
+            notes.append(f"stdlib subtree {sub!r} not found under {base}")
+    return tuple(roots), notes
 
 
 def find_source_files(roots):
@@ -287,16 +347,69 @@ def main():
                     choices=("arm64", "x86_64", "x86-64", "amd64"),
                     help="machine subset to sweep (default arm64; the "
                          "x86-64 spellings are accepted as aliases)")
+    ap.add_argument("--stdlib", default=None, metavar="PATH",
+                    help="stdlib root to sweep (default: discovered via "
+                         "module_loader, i.e. MOJO_STDLIB or the known "
+                         "checkout)")
+    ap.add_argument("--stdlib-subtrees", default=None, metavar="A,B,C",
+                    help="stdlib subtrees to sweep by default "
+                         f"(default: {','.join(DEFAULT_STDLIB_SUBTREES)}; "
+                         "use 'all' for every subtree under the stdlib root, "
+                         "or pass paths positionally to choose exactly)")
+    ap.add_argument("--no-stdlib", action="store_true",
+                    help="sweep this repo only (the pre-stdlib default)")
     ap.add_argument("paths", nargs="*",
-                    help="files or dirs (default: all *.py/*.mojo under repo)")
+                    help="files or dirs (default: this repo plus the stdlib's "
+                         f"{','.join(DEFAULT_STDLIB_SUBTREES)}/ — the roots "
+                         "are printed before the sweep starts)")
     args = ap.parse_args()
     arch = "x86_64" if args.arch in ("x86-64", "amd64") else args.arch
     flags = build_flags(arch)
 
-    files = find_source_files(args.paths or None)
+    # Roots: explicit paths win outright, otherwise repo + stdlib subtrees.
+    notes = []
+    if args.paths:
+        roots = tuple(args.paths)
+    elif args.no_stdlib:
+        roots, notes = default_roots(())
+    else:
+        subs = args.stdlib_subtrees
+        if subs == "all":
+            base = args.stdlib or find_stdlib_path()
+            subs = None                      # None => every subtree
+        elif subs:
+            subs = tuple(x.strip() for x in subs.split(",") if x.strip())
+        else:
+            subs = DEFAULT_STDLIB_SUBTREES
+        if subs is None:
+            if not base:
+                notes.append("stdlib not found - swept the repo only")
+            else:
+                roots, extra = (REPO,), []
+                for name in sorted(os.listdir(base)):
+                    if os.path.isdir(os.path.join(base, name)):
+                        roots += (os.path.join(base, name),)
+                notes += extra
+        else:
+            roots, notes = default_roots(subs, args.stdlib)
+
+    # Report the scope BEFORE sweeping. A run that quietly covered 263 files
+    # because a root got pruned looks exactly like a clean run in the summary,
+    # and the whole point of the sweep is that the denominator is trustworthy.
+    print("Sweep roots:", file=sys.stderr)
+    per_root = []
+    for r in roots:
+        n = len(find_source_files([r]))
+        per_root.append(n)
+        print(f"  {r}  ({n} files)", file=sys.stderr)
+    for note in notes:
+        print(f"  note: {note}", file=sys.stderr)
+
+    files = find_source_files(list(roots))
     if not files:
         print("no .py/.mojo files found", file=sys.stderr)
         sys.exit(2)
+    print(f"Total: {len(files)} files", file=sys.stderr)
 
     jobs = max(1, args.jobs)
     print(f"Sweeping {len(files)} files through build --formal "

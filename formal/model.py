@@ -222,3 +222,77 @@ def type_constructor_kind(callee_name: str):
 AUG_OPS = ("+", "-", "*", "/", "//", "%", "&", "|", "^", "<<", ">>", "**")
 AUG_SHIFT_OPS = ("<<", ">>")
 AUG_DIV_OPS = ("/", "//", "%")     # need the divide-by-zero exit, not a plain ALU
+
+
+# ── structs ──────────────────────────────────────────────────────────────
+# A formal value is ONE 64-bit word. A struct is representable exactly when
+# its fields fit that word, which makes the field count the whole of the
+# decision — there is no partial layout to attempt, and a struct that does not
+# fit is refused by name and width rather than miscompiled. These predicates
+# are shared because the answer must not differ between the backends that
+# share this model.
+
+def struct_fields(struct_def) -> list:
+    return list(getattr(struct_def, "fields", None) or [])
+
+
+def struct_field_count(struct_def) -> int:
+    return len(struct_fields(struct_def))
+
+
+def struct_fits_one_word(struct_def) -> bool:
+    """True when the struct's whole state is a single word.
+
+    Zero fields (a marker) and one scalar field are both exactly one word: for
+    the single-field case the receiver IS the field, so `self.n` is `self` and
+    no indirection is needed anywhere."""
+    return struct_field_count(struct_def) <= 1
+
+
+def method_function_name(struct_name: str, method_name: str) -> str:
+    """The internal symbol a struct's method compiles to.
+
+    Flat and module-agnostic, because it has to be callable from a direct BL
+    within one image; the module-qualified ABI spelling is applied at the
+    export boundary (see abi_method_symbol) where it is actually needed."""
+    return f"{struct_name}_{method_name}"
+
+
+def abi_method_symbol(module_prefix: str, struct_name: str,
+                      method_name: str) -> str:
+    """The boundary symbol for a struct method, per doc/ABI.md.
+
+    Module-qualified, so two modules' same-named structs never collide in one
+    library — the same reason a free function's export is qualified."""
+    return f"{module_prefix}_{struct_name}_{method_name}"
+
+
+def struct_methods(struct_def) -> list:
+    return list(getattr(struct_def, "methods", None) or [])
+
+
+def find_method_owner(structs: dict, method_name: str):
+    """The struct that declares `method_name`, or None.
+
+    Dispatch here is by name alone because that is all a `recv.m()` call site
+    carries: the receiver's type is not inferred on this path. A method name
+    declared by two structs in one module is therefore ambiguous, and the
+    caller is expected to refuse it rather than pick one."""
+    owners = [st for st in structs.values()
+              if any(m.name == method_name for m in struct_methods(st))]
+    if len(owners) == 1:
+        return owners[0]
+    return None
+
+
+def method_owner_names(structs: list) -> dict:
+    """{`<Struct>_<method>` function name: struct} for every declared method.
+
+    The reverse of find_method_owner, for the compiler side: after a method is
+    lifted to a function, this is what identifies which struct's layout the
+    body is written against."""
+    out = {}
+    for st in structs:
+        for m in struct_methods(st):
+            out[method_function_name(st.name, m.name)] = st
+    return out

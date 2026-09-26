@@ -25,6 +25,7 @@ Invoked via `make check-formal-dylib` or directly:
 """
 import argparse
 import ctypes
+import json
 import os
 import platform
 import struct
@@ -385,20 +386,81 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
           "triple(14) did not return 42")
 
 
-def test_duplicate_function_names_rejected(tmpdir, shared):
-    one = os.path.join(tmpdir, "one.mojo")
-    two = os.path.join(tmpdir, "two.mojo")
+def test_overloads_do_not_collide(tmpdir, shared):
+    """A repeated function name is an overload, and it must BUILD.
+
+    It used to be refused outright, with a message that named the same file
+    on both sides — `duplicate function 'same' in one.mojo and one.mojo` —
+    because the check treated a second definition as a cross-module
+    collision. doc/ABI.md excludes an overloaded name from the export set
+    precisely because no single symbol denotes it, so there is nothing at the
+    boundary that needs disambiguating; refusing only threw away modules that
+    are fine. `std/algorithm/backend/tile.mojo` defines `tile` three times.
+
+    What still has to hold, and is the part worth a test:
+
+      * BOTH definitions are compiled. Silently keeping the first and
+        dropping the second would lose code with no diagnostic at all.
+      * The export table carries the name ONCE. Two trie entries sharing one
+        symbol is not a de-duplication nuisance, it is a corrupt table that
+        dyld resolves to whichever it finds first.
+    """
+    one = os.path.join(tmpdir, "ovl.mojo")
     with open(one, "w") as f:
-        f.write("def same(n):\n  return n\n")
+        f.write("def same(n):\n  return n + 1\n"
+                "\n"
+                "def same(n, m):\n  return n + m\n"
+                "\n"
+                "def other(n):\n  return n * 2\n")
+    out = os.path.join(tmpdir, "ovl.dylib")
+    result = run_fire(["dylib", "--formal", "--no-prove", "-o", out, one])
+    check(result.returncode == 0,
+          f"a module with overloads failed to build: "
+          f"{(result.stderr or result.stdout).strip()[-300:]}")
+    check(os.path.isfile(out), "no dylib written for a module with overloads")
+
+    with open(out + ".manifest.json") as f:
+        exports = json.load(f)["exports"]
+    names = [e["name"] for e in exports]
+    check(len(names) == len(set(names)),
+          f"the export table repeats a name: {names} — one trie entry per "
+          f"symbol is required or dyld picks arbitrarily")
+    check("other" in names,
+          f"an unrelated function was lost to the overload: {names}")
+
+    # The trie must agree, and must not carry a symbol twice either.
+    with open(out, "rb") as f:
+        info = parse_macho(f.read())
+    for e in exports:
+        check("_" + e["symbol"] in info["exports"],
+              f"the trie is missing the manifest's export {e['symbol']}")
+
+
+def test_same_name_in_two_modules(tmpdir, shared):
+    """Two modules contributing the same name is the case the old check was
+    reaching for, and it is also fine: the first definition keeps the name and
+    the rest are renamed apart internally, so the codegen's per-name registry
+    cannot let one displace the other. The export table still names it once."""
+    one = os.path.join(tmpdir, "m_one.mojo")
+    two = os.path.join(tmpdir, "m_two.mojo")
+    with open(one, "w") as f:
+        f.write("def shared(n):\n  return n + 1\n")
     with open(two, "w") as f:
-        f.write("def same(n):\n  return n\n")
-    out = os.path.join(tmpdir, "dup.dylib")
+        f.write("def shared(n):\n  return n * 3\n"
+                "\n"
+                "def only_two(n):\n  return n - 1\n")
+    out = os.path.join(tmpdir, "shared.dylib")
     result = run_fire(["dylib", "--formal", "--no-prove", "-o", out, one, two])
-    check(result.returncode != 0,
-          "two modules defining the same function name built successfully")
-    check("duplicate" in (result.stderr + result.stdout).lower(),
-          f"duplicate function name was not reported clearly: "
-          f"{(result.stderr or result.stdout).strip()[-200:]}")
+    check(result.returncode == 0,
+          f"two modules sharing a function name failed to build: "
+          f"{(result.stderr or result.stdout).strip()[-300:]}")
+    with open(out + ".manifest.json") as f:
+        exports = json.load(f)["exports"]
+    names = sorted(e["name"] for e in exports)
+    check("only_two" in names,
+          f"the second module's own function was lost: {names}")
+    check(len(names) == len(set(names)),
+          f"the export table repeats a name: {names}")
 
 
 def test_private_only_module_rejected(tmpdir, shared):
@@ -516,7 +578,8 @@ TESTS = [
     ("exported functions execute", test_exported_functions_execute),
     ("--no-prove skips proof generation", test_no_prove_skips_proof),
     ("default path emits a checked proof", test_default_prove_emits_checked_proof),
-    ("duplicate function names rejected", test_duplicate_function_names_rejected),
+    ("overloads build and export once", test_overloads_do_not_collide),
+    ("same name in two modules", test_same_name_in_two_modules),
     ("module with no public functions rejected", test_private_only_module_rejected),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
