@@ -3225,8 +3225,14 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # from it instead of the int64_t default — without this a
         # `for sd in track_best.values()` over a dict of `StructDef *`
         # left `sd` boxed and every `sd.name` read a pointer-decimal.
+        # Record int64_t EXPLICITLY too, not just the pointer-ish cases.
+        # Leaving an int-valued dict's element type unset is what made
+        # `z = {"a": 0}.values()` print `[None]`: with nothing recorded, the
+        # repr walker hit its int-vs-pointer heuristic on the boxed 0. An
+        # int list is an int list, and saying so is what every other
+        # container lowering here does.
         _vt = gen._dict_val_of(ov)
-        if _vt and _vt != 'int64_t':
+        if _vt:
             gen._elem_types[t] = _vt
         return 'MojoList *', t
     if method == 'items':

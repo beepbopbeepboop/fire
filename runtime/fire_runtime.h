@@ -65,22 +65,15 @@ typedef void* mojo_generic_func;
  * we call through these small non-GIMPLE helpers that do the cast.
  * All args/returns are widened to int64_t; callers cast as needed.
  * Declared static inline so they generate no external symbol.           */
-static inline int64_t mojo_fnptr_call_0(void *fp) {
-    return ((int64_t (*)(void))fp)();
-}
-static inline int64_t mojo_fnptr_call_1(void *fp, int64_t a) {
-    return ((int64_t (*)(int64_t))fp)(a);
-}
-static inline int64_t mojo_fnptr_call_2(void *fp, int64_t a, int64_t b) {
-    return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
-}
-static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t c) {
-    return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
-}
-static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
-    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
-}
-
+/* A CLOSING lambda is materialized as a MojoBoundMethod (fn + a heap env)
+   rather than a bare function pointer, because the values it reads from the
+   enclosing function have nowhere to live in a plain code address. So every
+   one of these dispatches on the callee first: a registered bound method
+   re-supplies its env as the leading argument, anything else is the bare
+   function pointer it has always been. Doing the check HERE rather than at
+   each call site is what lets a closing lambda work everywhere an ordinary
+   one does — map/filter/sorted keys, a call straight through
+   `_funcptr_*`, and a lambda handed to code this compiler never saw. */
 /* ── Bound method values ──────────────────────────────────────────────────
  * A method referenced as a plain VALUE (not called immediately) — `f =
  * self.b`, `readline.set_completer(self.complete)` — needs to carry both
@@ -119,6 +112,28 @@ static inline int64_t mojo_bound_method_call_4(MojoBoundMethod *bm, int64_t a, i
     return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
 }
 
+
+static inline int64_t mojo_fnptr_call_0(void *fp) {
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    return ((int64_t (*)(void))fp)();
+}
+static inline int64_t mojo_fnptr_call_1(void *fp, int64_t a) {
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    return ((int64_t (*)(int64_t))fp)(a);
+}
+static inline int64_t mojo_fnptr_call_2(void *fp, int64_t a, int64_t b) {
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
+}
+static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
+}
+static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
 /* Dynamic dispatch through a value that may be EITHER a MojoBoundMethod*
  * or a plain function pointer — the callee identity isn't known
  * statically (a local branch-joined from `lambda`/free-function and a
@@ -144,6 +159,7 @@ static inline int64_t mojo_maybe_bound_call_4(void *f, int64_t a, int64_t b, int
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_4((MojoBoundMethod *)f, a, b, c, d);
     return mojo_fnptr_call_4(f, a, b, c, d);
 }
+
 
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
  * setjmp is emitted directly in generated functions (see gimple_codegen).
@@ -836,6 +852,11 @@ int64_t mojo_sum(void *args);
 double  mojo_max_double(void *args);
 double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
+/* Python bool repr: "True"/"False", not 1/0. */
+char *mojo_repr_bool(int b);
+/* An int64_t used as a C string: itself when it is a boxed char*, else its
+   decimal string (see mojo_cstr_or_int_str's comment in the .c). */
+char *mojo_cstr_or_int_str(int64_t v);
 void *mojo_sorted(void *iterable);
 /* sorted(x, key=f[, reverse]) — `keys` is the caller's per-element key list. */
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse);

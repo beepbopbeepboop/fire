@@ -267,6 +267,31 @@ def _maybe_narrow_genexp_local(gen, name, value) -> bool:
     return True
 
 
+def _record_bool_valued(gen, name: str, value) -> None:
+    """Remember that `name` holds a bool, so `print` can format it as
+    True/False.
+
+    A bool's C type is a plain `int` here (BoolLiteral lowers to int, and
+    any/all/isinstance return a C int on purpose), so the print dispatch's
+    static-type check cannot see it and `print(True)`, `print(b)` for
+    `b = True`, `print(any(xs))` all printed `1`/`0`. Keyed by NAME and
+    consulted only by the print dispatch, so this adds no claim to the type
+    lattice itself."""
+    if not hasattr(gen, '_bool_valued'):
+        gen._bool_valued = set()
+    try:
+        if isinstance(value, gimple_ctypes.BoolLiteral):
+            gen._bool_valued.add(name)
+        elif gen._quick_type(value) == '_Bool':
+            gen._bool_valued.add(name)
+        else:
+            gen._bool_valued.discard(name)
+    except Exception:
+        # _quick_type is best-effort by contract; a node it cannot type
+        # simply leaves the name unmarked (the old behaviour).
+        pass
+
+
 def _gen_stmt_VarDecl(gen, node):
     if node.value is not None and _try_bind_list_iter(gen, node.name, node.value):
         return
@@ -343,6 +368,7 @@ def _gen_stmt_VarDecl(gen, node):
         if ((gen._in_toplevel_gen or node.name in getattr(gen, '_func_declared_globals', ()))
                 and node.name in gen._global_var_types):
             actual_dst = gen._global_dst_ctype(node.name)
+        _record_bool_valued(gen, node.name, node.value)
         if ctype in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
             gen._elem_types[node.name] = gen._elem_types[v]
             if v in gen._nested_elem_types:
@@ -603,6 +629,9 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
 
 
 def _gen_stmt_AssignStmt(gen, node):
+    if isinstance(node.target, gimple_ctypes.IdentExpr) \
+            and getattr(node, 'value', None) is not None:
+        _record_bool_valued(gen, node.target.name, node.value)
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None
             and _try_bind_list_iter(gen, node.target.name, node.value)):

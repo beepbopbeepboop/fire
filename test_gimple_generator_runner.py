@@ -409,7 +409,33 @@ main()
 """, "a\nb\nc\n")
 
 
+def run_lambda_capture_tests():
+    # Lambdas that CLOSE over the enclosing function are exercised in
+    # test_gimple_runner.py (gimple_lambda_capture_*): they need no generator,
+    # so this suite's generator-only harness cannot build them. What matters
+    # here is that the shapes WITHOUT an enclosing-local read are untouched by
+    # the env-based capture work.
+    #
+    # A module global is not a capture — a lifted lambda reads those through
+    # `_root_globals` — so it stays a bare function pointer.
+    test_generator_c_compiles("lambda_reading_module_global", """\
+d = {"a": 1}
+f = lambda k: d[k]
+print(f("a"))
+""")
+
+    # A lambda touching only its own parameters and locals.
+    test_generator_c_compiles("lambda_without_capture", """\
+def main():
+    f = lambda v: v * 2
+    print(f(3))
+
+main()
+""")
+
+
 def run_tests():
+    run_lambda_capture_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a

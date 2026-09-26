@@ -1748,13 +1748,21 @@ def main():
     # `map(str, args)` sub-expression was silently lowered/emitted twice
     # (once into a dead, unused temp) by a `_lower_str_method` bug that called
     # `self.lower_expr(a)` twice per join() argument. Assert both: it compiles
-    # AND mojo_map appears exactly once in the generated C.
+    # AND the map sub-expression is emitted exactly once in the generated C.
     _map_src = """\
 def join_strs(args) -> String:
     return ", ".join(map(str, args))
 """
     _map_ok, _map_c_src, _map_stderr = gimple_compiles(_map_src)
-    _map_call_count = _map_c_src.count('mojo_map (')
+    # The marker changed with map()'s implementation, not with this test's
+    # intent. `mojo_map` used to be an IDENTITY STUB in the runtime (a char*
+    # function pointer cannot call back into a GIMPLE-compiled body), so the
+    # per-element calls are now lowered by the CODEGEN, which appends each
+    # result itself. The property worth asserting is unchanged — the
+    # `map(str, args)` sub-expression is emitted exactly ONCE, not twice by
+    # the old double-`lower_expr` bug — and the per-element append is now
+    # what that looks like in the generated C.
+    _map_call_count = _map_c_src.count('mojo_list_append_str (')
     if _map_ok and _map_call_count == 1:
         print("PASS  map_over_untyped_param_arg"); _PASS += 1
     else:

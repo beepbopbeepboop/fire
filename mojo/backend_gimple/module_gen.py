@@ -457,6 +457,7 @@ def _emit_reflection_dispatch(self, parts):
     parts.append("static char * _mojo_repr_list (MojoList *);")
     parts.append("static char * _mojo_repr_dict (MojoDict *);")
     parts.append("static char * _mojo_generic_elem_repr (int64_t);")
+    parts.append("static char * _mojo_repr_pair (MojoList *);")
     if repr_fwd_decls:
         parts.append("/* Forward decls for generic repr() (mutual struct references) */")
         parts.append("\n".join(repr_fwd_decls))
@@ -552,10 +553,46 @@ def _emit_reflection_dispatch(self, parts):
                "  char *_buf = strdup(_is_tup ? \"(\" : \"[\");\n"
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
                "    if (_i > 0) _buf = mojo_str_cat(_buf, \", \");\n"
-               "    _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(mojo_list_get_int(lst, _i)));\n"
+               "    int64_t _e = mojo_list_get_int(lst, _i);\n"
+               "    /* A registered 2-element element is a runtime-built PAIR\n"
+               "       (zip / dict.items() / enumerate) and prints through the\n"
+               "       pair walker, which gets slot 0 right where the generic\n"
+               "       element repr cannot (see _mojo_repr_pair's own comment). */\n"
+               "    _buf = mojo_str_cat(_buf,\n"
+               "      (_e > 65536 && mojo_is_registered_list(_e)\n"
+               "       && mojo_list_len((MojoList *)(intptr_t)_e) == 2)\n"
+               "        ? _mojo_repr_pair((MojoList *)(intptr_t)_e)\n"
+               "        : _mojo_generic_elem_repr(_e));\n"
                "  }\n"
                "  if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, \",\");\n"
                "  return mojo_str_cat(_buf, _is_tup ? \")\" : \"]\");\n"
+               "}\n"
+               "/* One 2-slot pair-list as `(a, b)`. Lives HERE, beside\n"
+               "   _mojo_generic_elem_repr, because it reuses that function's\n"
+               "   value reading (string / list / dict / tagged struct / int)\n"
+               "   rather than keeping a second, drifting copy of it in the\n"
+               "   runtime. The one thing it overrides is slot 0 when the value\n"
+               "   is small: _mojo_generic_elem_repr answers \"None\" for a 0\n"
+               "   slot, which is right for a genuinely dynamic list (0 can be a\n"
+               "   boxed null there) and wrong for a pair, whose first slot is a\n"
+               "   real value — the 0 INDEX of the first zip/enumerate pair, or a\n"
+               "   small-int dict key. Without this, `zip([0, 1], [2, 3])` printed\n"
+               "   `[(None, 2), (1, 3)]`. A first slot that IS a string (a dict\n"
+               "   key) or a container still goes through the generic reader. */\n"
+               "static char * _mojo_repr_pair (MojoList *p) {\n"
+               "  if (!p) return \"()\";\n"
+               "  int64_t _n = mojo_list_len(p);\n"
+               "  char *_b = strdup(\"(\" );\n"
+               "  for (int64_t _i = 0; _i < _n; _i++) {\n"
+               "    if (_i > 0) _b = mojo_str_cat(_b, \", \");\n"
+               "    int64_t _v = mojo_list_get_int(p, _i);\n"
+               "    if (_i == 0 && !(_v > 65536))\n"
+               "      _b = mojo_str_cat(_b, mojo_repr_int(_v));\n"
+               "    else\n"
+               "      _b = mojo_str_cat(_b, _mojo_generic_elem_repr(_v));\n"
+               "  }\n"
+               "  if (_n == 1) _b = mojo_str_cat(_b, \",\");\n"
+               "  return mojo_str_cat(_b, \")\");\n"
                "}\n"
                "static char * _mojo_repr_dict (MojoDict *d) {\n"
                "  if (!d) return \"{}\";\n"
@@ -5318,10 +5355,18 @@ def gen_module_impl(self, stmts):
                     # row for — notably the one-char*-arg opaque-constructor
                     # passthrough (`X = Path(some_str)` → the value IS its
                     # char* argument at runtime, see _lower_opaque_ctor).
-                    # Everything else quick-types to int64_t here, matching
+                    # Its container-builtin rows (`_BUILTIN_CTORS`) are the
+                    # same kind of fact. Honor every POINTER result, not just
+                    # `char *`: keeping only char* and defaulting every
+                    # other pointer to int64_t declared the global as an
+                    # integer, so a module-level `z = sorted([3, 1])` /
+                    # `enumerate(...)` / `reversed(...)` / `zip(...)` /
+                    # `d.keys()` printed the list's ADDRESS — the value was
+                    # correct, the global's type was not. Non-pointers
+                    # (int64_t/double/_Bool) still land on int64_t, matching
                     # this branch's old unconditional default.
                     qt2 = self._quick_type(_value)
-                    return qt2 if qt2 == 'char *' else 'int64_t'
+                    return qt2 if (qt2 == 'char *' or qt2.endswith(' *')) else 'int64_t'
             elif (isinstance(_value.func, MemberExpr)
                     and _value.func.member in ('read', 'readline')
                     and not _value.args):
@@ -5344,7 +5389,16 @@ def gen_module_impl(self, stmts):
                 # e.g. `len(linesep)`) where coercion happened silently.
                 return 'char *'
             else:
-                return 'int64_t'
+                # Any other method call: delegate to _quick_type, the single
+                # source of truth for method-result shapes, and honor its
+                # POINTER results. Hardcoding int64_t here (the old
+                # behaviour) is what made a module-level
+                # `z = d.keys()` / `z = s.split(",")` declare the global as
+                # an integer and print the list's ADDRESS — the same
+                # discarded-pointer bug as the unknown-callee case above,
+                # and with the same fix. Non-pointers still land on int64_t.
+                qt4 = self._quick_type(_value)
+                return qt4 if (qt4 == 'char *' or qt4.endswith(' *')) else 'int64_t'
         elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
                 and _value.obj.name in self.imported_symbols):
             _mx_mod = self.imported_symbols[_value.obj.name].get('module')

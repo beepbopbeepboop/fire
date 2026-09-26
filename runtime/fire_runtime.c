@@ -5374,6 +5374,10 @@ MojoList *mojo_dict_items(MojoDict *d) {
         MojoList *pair = mojo_list_new();
         mojo_list_append_str(pair, d->slots[i].key);
         mojo_list_append_int(pair, d->slots[i].val);
+        /* Same reason as mojo_zip's: `dict.items()` yields (key, value)
+         * TUPLES, so mark them — `print({"a": 1}.items())` printed
+         * `[['a', 1]]` without this. */
+        mojo_mark_as_tuple(pair);
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     free(order);
@@ -6131,6 +6135,36 @@ int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
 
 /* ── Additional Python builtins (stubs for bootstrap) ──────────────── */
 
+/* Python's bool repr. Every `print` of a boolean used to fall through to the
+   generic numeric path (printf_fmt('_Bool') -> "%d"), so `print(True)` printed
+   `1` and `print(1 == 1)` printed `1` — wrong for every boolean in every
+   compiled program, not just the builtin-returning ones.
+
+   The parameter is `int`, not `_Bool`: this header is included from C++
+   translation units (the C++20 companion backend) where `_Bool` does not
+   exist, and a bool argument arrives as 0/1 anyway. */
+char *mojo_repr_bool(int b) { return b ? "True" : "False"; }
+
+/* An int64_t being used where a C string is needed (a dict key, an f-string
+   field, ...): return it AS itself when it is really a boxed `char *`, else
+   its decimal string.
+
+   The codegen's own test for "is this boxed pointer?" is `_actual_types`,
+   which only knows about values it saw TYPE-ERASED at some earlier point.
+   An untracked int64_t is overwhelmingly a real Int (so the codegen
+   correctly stringifies it), but not always: a lambda parameter has no
+   annotation and is typed `int64_t`, so a string passed to it arrives with
+   its pointer bits in an int64_t with nothing recorded anywhere. Measured:
+   `d = {"a": 1}; f = lambda k: d[k]; f("a")` looked up the key "97" (the
+   decimal of the address) and returned 0. mojo_boxed_is_str is the model's
+   own discriminator — pointer-shaped and not a live registered list — so
+   ask it here rather than guessing a direction. */
+char *mojo_cstr_or_int_str(int64_t v) {
+    if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
+    return mojo_str_from_int(v);
+}
+
+
 void *mojo_range(int64_t start, int64_t stop) {
     MojoList *l = mojo_list_new();
     for (int64_t i = start; i < stop; i++)
@@ -6385,6 +6419,11 @@ void *mojo_zip(void *a, void *b) {
         MojoList *pair = mojo_list_new();
         mojo_list_append_int(pair, mojo_list_get_int(la, i));
         mojo_list_append_int(pair, mojo_list_get_int(lb, i));
+        /* zip() yields TUPLES in Python, and this model's tuple marker is
+         * what the repr reads to choose `(...)` over `[...]` (see
+         * mojo_mark_as_tuple). Unmarked, `print(zip([1,2],[3,4]))` printed
+         * `[[1, 3], [2, 4]]` and `isinstance(pair, tuple)` was False. */
+        mojo_mark_as_tuple(pair);
         mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
     return out;

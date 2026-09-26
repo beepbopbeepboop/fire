@@ -557,6 +557,219 @@ print(sorted([3, 1, 2]))
 print(sorted(["b", "a"]))
 """, "[1, 2, 3]\n['a', 'b']\n")
 
+    # ── Module-level globals assigned a CALL's result ──────────────────
+    # The global's C type is inferred by a pre-pass that honored only
+    # `char *` from the type estimator and defaulted every OTHER pointer to
+    # int64_t, so the global was declared an integer and printing it showed
+    # the container's ADDRESS. The value was always right; the declaration
+    # was not. Three separate sites discarded the pointer, so all three
+    # shapes are covered.
+    test_gimple_stdout("gimple_global_from_builtin_call", """\
+z = sorted([3, 1])
+print(z)
+""", "[1, 3]\n")
+
+    test_gimple_stdout("gimple_global_from_enumerate_call", """\
+z = enumerate([7, 8])
+print(z)
+""", "[(0, 7), (1, 8)]\n")
+
+    # `range()` returned `void *`, so nothing downstream could attach an
+    # element type and the leading 0 hit the repr's int-vs-pointer
+    # heuristic and printed the None sentinel: `[None, 1, 2]`.
+    test_gimple_stdout("gimple_global_from_range_call", """\
+z = range(3)
+print(z)
+""", "[0, 1, 2]\n")
+
+    # Container-returning METHODS took a third path, which hardcoded
+    # int64_t instead of consulting the estimator at all.
+    test_gimple_stdout("gimple_global_from_dict_method_call", """\
+z = {"a": 1}.keys()
+w = {"a": 1}.values()
+print(z)
+print(w)
+""", "['a']\n[1]\n")
+
+    test_gimple_stdout("gimple_global_from_str_method_call", """\
+z = "a,b".split(",")
+print(z)
+""", "['a', 'b']\n")
+
+    # ── map() / filter() ───────────────────────────────────────────────
+    # The runtime's mojo_map/mojo_filter are IDENTITY STUBS (a char*
+    # function pointer cannot call back into a GIMPLE-compiled body), so
+    # `map` handed back the input list unchanged, `list(map(f, xs))` printed
+    # the INPUT rather than the mapped values, and `for v in map(f, xs):`
+    # iterated the wrong values. The per-element calls are now lowered in
+    # the codegen, which is also what lets the result's element type be
+    # known.
+    test_gimple_stdout("gimple_map_value", """\
+print(list(map(lambda v: v * 2, [1, 2])))
+""", "[2, 4]\n")
+
+    test_gimple_stdout("gimple_map_for_loop", """\
+for v in map(lambda v: v + 1, [1, 2, 3]):
+    print(v)
+""", "2\n3\n4\n")
+
+    # A builtin callee: the result elements are strings, and recording them
+    # as int64_t printed the two string ADDRESSES as decimals.
+    test_gimple_stdout("gimple_map_builtin_str", """\
+print(list(map(str, [1, 2])))
+""", "['1', '2']\n")
+
+    test_gimple_stdout("gimple_filter_value", """\
+print(list(filter(lambda v: v > 1, [1, 2, 3])))
+""", "[2, 3]\n")
+
+    # filter keeps the INPUT's elements: appending the predicate's verdict
+    # instead made this `[1, 1]` (two truthy verdicts, both the value 1).
+    test_gimple_stdout("gimple_filter_for_loop", """\
+for v in filter(lambda v: v > 1, [1, 2, 3]):
+    print(v)
+""", "2\n3\n")
+
+    # ── Booleans print as True/False ───────────────────────────────────
+    # Every printed boolean went through the generic numeric path
+    # (printf_fmt('_Bool') -> "%d"), so `print(True)` printed `1`. This is
+    # not about any/all: a bare literal was wrong too.
+    test_gimple_stdout("gimple_bool_literal_prints", """\
+print(True)
+print(False)
+""", "True\nFalse\n")
+
+    test_gimple_stdout("gimple_bool_comparison_prints", """\
+print(1 == 1)
+print(1 == 2)
+""", "True\nFalse\n")
+
+    # A bool local: its C type is the plain int a BoolLiteral lowers to, so
+    # the static type alone cannot see it — the name is recorded instead.
+    test_gimple_stdout("gimple_bool_local_prints", """\
+b = True
+print(b)
+""", "True\n")
+
+    # any/all/isinstance are C ints by design; only the static type knows
+    # the value is a bool.
+    test_gimple_stdout("gimple_bool_builtin_prints", """\
+print(any([0, 1]))
+print(all([1, 1]))
+print(isinstance(1, int))
+print(1 in [1, 2])
+""", "True\nTrue\nTrue\nTrue\n")
+
+    # ── round() ────────────────────────────────────────────────────────
+    # The one-argument form had no lowering at all and returned a float, so
+    # `round(2.6)` printed `3.0`; Python returns an int. Python also rounds
+    # half to even, which C's `round()` does NOT (it gives 3 for 2.5), so
+    # `rint` is the correct libm call.
+    test_gimple_stdout("gimple_round_one_arg_returns_int", """\
+print(round(2.6))
+print(round(2.5))
+print(round(-2.5))
+""", "3\n2\n-2\n")
+
+    # The two-argument form was DEAD CODE: it sat below the arity fixup that
+    # clamps arguments to the callee's known C signature, and `round`'s is
+    # libc's `double round(double)` — one parameter — so the ndigits
+    # argument was dropped and `round(2.567, 2)` computed `round(2.567)`.
+    test_gimple_stdout("gimple_round_two_args_keeps_ndigits", """\
+print(round(2.567, 2))
+""", "2.57\n")
+
+    # ── dict keys held in an untyped int64 slot ────────────────────────
+    # A lambda parameter is typed int64_t whatever it is handed, so a string
+    # key arrives as its pointer bits with nothing recorded anywhere. The
+    # codegen stringified that by address and looked up "97", so
+    # `d[k]` returned 0.
+    test_gimple_stdout("gimple_dict_key_from_untyped_slot", """\
+d = {"a": 1}
+f = lambda k: d[k]
+print(f("a"))
+""", "1\n")
+
+    # ── Lambdas that close over the enclosing function ──────────────────
+    # A lambda is lifted to a top-level C function, so a value it reads from
+    # the function it was written in has nowhere to live in a plain code
+    # address. Those reads used to be emitted as a hard 0:
+    #     d = {"a": 1}
+    #     f = lambda k: d[k]
+    #     print(f("a"))          ->  0
+    # silently wrong — latent in the compiler's own source only because the
+    # self-hosted binary compiles uncached and never calls the builder. A
+    # closing lambda is now a MojoBoundMethod: the lifted function takes a
+    # heap env as its first parameter and the value materialized at the
+    # reference site is `mojo_bound_method_new(fn, env)`. It works at every
+    # call site because mojo_fnptr_call_N dispatches on the callee.
+    test_gimple_stdout("gimple_lambda_captures_enclosing_local", """\
+def main():
+    d = {"a": 1}
+    f = lambda k: d[k]
+    print(f("a"))
+
+main()
+""", "1\n")
+
+    # …as a sorted() key, the shape that also required the forward
+    # declaration to mirror the definition's own parameter resolution (the
+    # call site binds the dict's `char *` key element to the lambda's
+    # parameter, so an independently computed declaration said `char *` where
+    # the definition inferred `int64_t`).
+    test_gimple_stdout("gimple_lambda_capture_as_sorted_key", """\
+def main():
+    d = {"b": 2, "a": 1}
+    print(sorted(d, key=lambda k: d[k]))
+
+main()
+""", "['a', 'b']\n")
+
+    # …as a map() callable, whose per-element calls the codegen lowers itself.
+    test_gimple_stdout("gimple_lambda_capture_in_map", """\
+def main():
+    n = 3
+    print(list(map(lambda v: v + n, [1, 2])))
+
+main()
+""", "[4, 5]\n")
+
+    test_gimple_stdout("gimple_lambda_capture_scalar", """\
+def main():
+    n = 10
+    f = lambda v: v + n
+    print(f(5))
+
+main()
+""", "15\n")
+
+    # The default-argument capture form still works, and a parameter must NOT
+    # be treated as capturing without a real default: the old
+    # `default is None and pname in var_types` fallback gave every parameter
+    # an env field it never read, and the body emitted `_env->v` against a
+    # struct with no such member.
+    test_gimple_stdout("gimple_lambda_captures_via_default_arg", """\
+def main():
+    d = {"a": 1}
+    f = lambda k, d=d: d[k]
+    print(f("a"))
+
+main()
+""", "1\n")
+
+    # ── zip() / dict.items() pair shapes ───────────────────────────────
+    # zip and dict.items() yield TUPLES. Unmarked, they printed as
+    # `[[1, 3], [2, 4]]`; and a pair's first slot is a real value (the 0
+    # INDEX of the first pair), which the generic element repr answers
+    # "None" for, giving `[(None, 2), (1, 3)]`.
+    test_gimple_stdout("gimple_zip_value_pairs_are_tuples", """\
+print(zip([0, 1], [2, 3]))
+""", "[(0, 2), (1, 3)]\n")
+
+    test_gimple_stdout("gimple_dict_items_pairs_are_tuples", """\
+print({"a": 1}.items())
+""", "[('a', 1)]\n")
+
     test_gimple_stdout("gimple_enumerate_start_and_strings", """\
 print(list(enumerate([7, 8], 1)))
 print(list(enumerate(["a", "b"])))
@@ -808,6 +1021,11 @@ def main():
     # `.split` route to it; extra `self.<attr>` fields sit alongside;
     # `isinstance(_, bytes)` is true; a method override wins. A
     # compile-only gate can't catch a wrong runtime value here.
+    # NOTE on the bool expectations in the bytes/memoryview tests below
+    # (`True`/`False`, where they previously read `1`/`0`): every printed
+    # boolean used to take the generic numeric path and print its int form.
+    # Python prints True/False, so those expectations were wrong and are
+    # corrected here rather than preserved.
     test_gimple_stdout("gimple_bytes_subclass_shape", """\
 class Extra(bytes):
     def __new__(cls, v, id=0):
@@ -837,7 +1055,7 @@ def main():
         print("is bytes")
     c2 = e + b"!"
     print(c2.decode())
-""", "11\n101\n42\nhello\neq\ncontains\n1116\n68656c6c6f20776f726c64\n1\n2\nis bytes\nhello world!\n")
+""", "11\n101\n42\nhello\neq\ncontains\n1116\n68656c6c6f20776f726c64\nTrue\n2\nis bytes\nhello world!\n")
 
     test_gimple_stdout("gimple_bytes_subclass_method_override", """\
 class B(bytes):
@@ -1002,7 +1220,7 @@ fn main():
     print(b'DEADBEEF'.hex())
     print(b'hello'.decode('utf-8'))
     print(b','.join(b'x,y'.split(b',')))
-""", "1\n1\n[b'a', b'b', b'c']\nb'a_b_c'\nb'hi'\nb'ABC'\n2\n2\n4445414442454546\nhello\nb'x,y'\n")
+""", "True\nTrue\n[b'a', b'b', b'c']\nb'a_b_c'\nb'hi'\nb'ABC'\n2\n2\n4445414442454546\nhello\nb'x,y'\n")
 
     test_gimple_stdout("gimple_bytes_isinstance", """\
 fn main():
@@ -1022,7 +1240,7 @@ fn main():
     print(b'%02x' % 15 == b'0f')
     print(b'%s=%d;' % (b'k', 7) == b'k=7;')
     print(b'%5d|' % 3 == b'    3|')
-""", "1\n1\n1\n1\n1\n")
+""", "True\nTrue\nTrue\nTrue\nTrue\n")
 
     test_gimple_stdout("gimple_bytes_param_inferred_from_body", """\
 fn dec(data) -> String:
@@ -1125,7 +1343,7 @@ fn main():
     print(b'Hello World'.istitle(), b'hi'.isascii(), b'a b'.isprintable())
     print(b'ab1'.isalpha(), b'ab'.isupper(), b'Hello world'.istitle())
     print(b''.isalpha(), b''.isdigit())
-""", "1 1 1\n1 1 1\n1 1 1\n0 0 0\n1 1\n")
+""", "True True True\nTrue True True\nTrue True True\nFalse False False\nTrue True\n")
 
     test_gimple_stdout("gimple_bytes_partition_split_limits", """\
 fn main():
@@ -1204,7 +1422,7 @@ fn main():
     print(mv.obj)
     print(mv.readonly, mv.c_contiguous)
     print(len(mv.cast('B')))
-""", "4 1 B\nb'abcd'\n0 1\n4\n")
+""", "4 1 B\nb'abcd'\nFalse True\n4\n")
 
     # ── constructor-call-site inference reaches METHOD bodies and
     # MemberExpr/BinaryOp arguments ───────────────────────────────────────

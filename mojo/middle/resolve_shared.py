@@ -142,10 +142,37 @@ def _quick_type(gen, node) -> str:
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.IdentExpr):
         fname: str
         fname = node.func.name
+        # Builtins whose VALUE is a real container. Every one of these
+        # materialises a MojoList*/MojoSet*/MojoDict* at runtime, which is
+        # what makes a module-level `z = sorted(...)` / `enumerate(...)` /
+        # `reversed(...)` / `zip(...)` / `range(...)` / `tuple(...)` need the
+        # row: the global's C type comes from here, and with no row it
+        # defaulted to int64_t and the list printed as its ADDRESS (the value
+        # was right, the declaration was not).
+        #
         _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *',
                           # sorted()/reversed() both materialise a MojoList*
                           # (see _lower_builtin_sorted / _lower_builtin_reversed).
-                          'sorted': 'MojoList *'}
+                          'sorted': 'MojoList *', 'reversed': 'MojoList *',
+                          # enumerate() in VALUE position builds a list of
+                          # (index, value) pair-lists; as a `for` target it is
+                          # an iterator instead, but that path dispatches on
+                          # the call's own shape, not on this type.
+                          'enumerate': 'MojoList *',
+                          # zip() chains mojo_zip, which walks MojoLists and
+                          # returns a new one of pair-lists.
+                          'zip': 'MojoList *',
+                          # mojo_range/mojo_range3 return a MojoList*.
+                          'range': 'MojoList *',
+                          # tuple(x) lowers to the same MojoList as list(x).
+                          'tuple': 'MojoList *',
+                          # map(f, xs) / filter(f, xs) build their result in
+                          # the CODEGEN (_build_per_element_list), not in the
+                          # runtime: mojo_map/mojo_filter are identity stubs
+                          # because a char* function pointer cannot call back
+                          # into a GIMPLE-compiled body. Both really do
+                          # produce a MojoList of results / kept elements.
+                          'map': 'MojoList *', 'filter': 'MojoList *'}
         # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
         # below — `set`/`dict`/`list` are ordinary identifiers a module
         # could shadow with its own top-level def/import.
@@ -257,6 +284,24 @@ def _quick_type(gen, node) -> str:
         if node.func.member in ('read', 'readline') and not node.args:
             return 'char *'
         if node.func.member == 'readlines':
+            return 'MojoList *'
+        # Container-returning METHODS, receiver-shape-agnostic for the same
+        # reason as read/readline/readlines above: the receiver may be a
+        # MemberExpr (`cfg.keys()`) or a CallExpr (`open(p).read()` /
+        # `dict(a=b).items()`), and an IdentExpr-only check misses both.
+        # Each of these lowers to a runtime helper that returns a real
+        # MojoList*: mojo_dict_keys / mojo_dict_values / mojo_dict_items and
+        # mojo_str_split / mojo_str_rsplit / mojo_str_splitlines. Without a
+        # row the estimator said int64_t, so a module-level
+        # `z = d.keys()` or `z = s.split(",")` declared the global as an
+        # integer and printed the list's ADDRESS — the same shape of gap as
+        # the builtin rows above, and the value was right either way.
+        #
+        # `copy` is deliberately absent: its result type depends on the
+        # receiver (list.copy -> MojoList, dict.copy -> MojoDict, set.copy ->
+        # MojoSet), so a single row would be wrong for two of the three.
+        if node.func.member in ('keys', 'values', 'items', 'split', 'rsplit',
+                                'splitlines', 'rsplitlines'):
             return 'MojoList *'
         # `Path(x).resolve()` (no-arg) on a path-shaped char* receiver —
         # real char* result (POSIX realpath via int64_t_realpath, see

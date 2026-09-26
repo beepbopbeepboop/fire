@@ -1436,7 +1436,14 @@ def _char_to_cstr(gen, typ: str, val: str) -> tuple[str, str]:
         # crashed with `strdup(NULL)` inside `_dict_set_raw_seq` on the
         # very first `_fuel_burn_times[item_id] = ...` (item_id was a
         # genuine, tracked-nowhere `Int` value of 0).
-        return 'char *', gen._new_val('char *', f'mojo_str_from_int({val})')
+        # Runtime discriminator rather than a flat stringify: an UNTRACKED
+        # int64_t is usually a real Int, but a lambda parameter is typed
+        # int64_t whatever it is given, so a string passed to one arrives
+        # with its pointer bits here and nothing recorded — and stringifying
+        # that looked the key up by decimal address (`lambda k: d[k]` called
+        # with "a" searched for "97" and returned 0).
+        return 'char *', gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                        [('int64_t', val)])
     if typ != 'char *':
         return 'char *', gen._new_val('char *', f'(char *){val}')
     return typ, val
@@ -2802,6 +2809,20 @@ def _gen_print(gen, args: list, kwargs: list = None):
         _emit_literal_print('', print_fn)
         return
     parts = [gen.lower_expr(a) for a in args]
+    # The STATIC type of each printed expression, for the dispatch below.
+    # Needed because a boolean's C type is often a plain `int`: a BoolLiteral
+    # lowers to int, and any/all/isinstance lower to `int` on purpose (they
+    # are C ints). Only the static type knows the value is a bool, and
+    # without it every `print(True)`, `print(b)` (b = True),
+    # `print(any(xs))` and `print(isinstance(v, T))` printed `1`/`0`.
+    # `_quick_type` is best-effort by contract, so a node it cannot type
+    # falls back to the lowered C type rather than failing the print.
+    arg_static = []
+    for _a in args:
+        try:
+            arg_static.append(gen._quick_type(_a))
+        except Exception:
+            arg_static.append('')
     # A dict/list-get result stored in a plain local is boxed generically
     # as int64_t at the C level even when the real value is a string —
     # _lower_IdentExpr's plain-local-read path returns the *declared*
@@ -2880,6 +2901,15 @@ def _gen_print(gen, args: list, kwargs: list = None):
         resolved_parts.append((atype, aval))
     parts = resolved_parts
     for i, (atype, aval) in enumerate(parts):
+        _stat = arg_static[i] if i < len(arg_static) else ''
+        # A name recorded as holding a bool (`b = True`): its own static type
+        # is the `int` that BoolLiteral lowers to, so the check above cannot
+        # see it. Only `print` consults this set.
+        if _stat != '_Bool' and args and i < len(args):
+            _an = args[i]
+            if (isinstance(_an, gimple_ctypes.IdentExpr)
+                    and _an.name in getattr(gen, '_bool_valued', ())):
+                _stat = '_Bool'
         if atype == 'char *':
             gen._emit(f'  {print_fn} ({aval});')
         elif atype in ('double', 'float', '__fp16'):
@@ -2899,6 +2929,31 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoBytes *':
             rv = gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', aval)])
+            gen._emit(f'  {print_fn} ({rv});')
+        elif _stat in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *') \
+                and atype not in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *', 'char *'):
+            # A container-typed call result whose LOWERED type is `void *`:
+            # `zip(...)` returns void* on purpose (see _lower_builtin_zip_n's
+            # comment on why it must not claim a pair element type), so print
+            # had no container branch to take and fell to the numeric path,
+            # printing the list's ADDRESS. The static type knows what it is,
+            # so route on that.
+            if _stat == 'MojoDict *':
+                _dp = gen._coerce_to_type(atype if atype in ('int64_t', 'int', 'void *') else 'int64_t',
+                                          'MojoDict *', aval)
+                rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', _dp)])
+            else:
+                _lp = gen._coerce_to_type(atype if atype in ('int64_t', 'int', 'void *') else 'int64_t',
+                                          _stat, aval)
+                _fn = gen._list_repr_fn(aval) if _stat == 'MojoList *' else '_mojo_repr_set'
+                rv = gen._call_expr('char *', _fn, [(_stat, _lp)])
+            gen._emit(f'  {print_fn} ({rv});')
+        elif atype == '_Bool' or (_stat == '_Bool' and atype in ('int', 'int64_t', 'char *', 'long')):
+            # Python prints True/False; the generic numeric path below would
+            # sprintf a _Bool with "%d" and print 1. Also reached for
+            # `_Bool`-typed locals, which is how a comparison or a
+            # builtin-returning bool (any/all/isinstance/in) reaches here.
+            rv = gen._call_expr('char *', 'mojo_repr_bool', [('_Bool', aval)])
             gen._emit(f'  {print_fn} ({rv});')
         else:
             t = gen._new_temp('char *')

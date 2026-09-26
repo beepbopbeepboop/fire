@@ -1456,6 +1456,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'zip' and len(node.args) >= 2
             and not gen._locally_binds_name('zip')):
         return _lower_builtin_zip_n(gen, node)
+    # map(f, xs) / filter(f, xs) in VALUE position. Intercepted only when the
+    # name does NOT resolve to a real user/stdlib function, mirroring the
+    # `reversed` gate below, and only for the one-iterable forms the lowering
+    # implements (both refuse anything else honestly).
+    if (fname_raw in ('map', 'filter') and len(node.args) == 2
+            and not gen._locally_binds_name(fname_raw)
+            and fname_raw not in gen.func_return_types
+            and fname_raw not in getattr(gen, '_imported_func_home', ())
+            and fname_raw not in getattr(gen, '_own_imported_func_home', ())):
+        if fname_raw == 'map':
+            return _lower_builtin_map(gen, node)
+        return _lower_builtin_filter(gen, node)
     if (fname_raw == 'reversed' and len(node.args) == 1
             and not gen._locally_binds_name('reversed')
             and 'reversed' not in gen.func_return_types
@@ -2439,6 +2451,193 @@ def _lower_builtin_dir(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return 'MojoList *', gen._new_val('MojoList *', 'mojo_list_new ()  /* dir() stubbed */')
 
 
+def _callable_return_elem_type(gen, fn_expr) -> str:
+    """Element type a `map`/key callable's results should be recorded as.
+
+    `char *` only when the callee is known to produce a string. A lambda's
+    results always come back through `mojo_fnptr_call_N`, which widens every
+    return to int64_t, so a string-returning lambda is indistinguishable from
+    an int one HERE — recording int64_t for it is not a lie that misprints
+    (the repr's own discriminator recognises a boxed `char *` on sight), it
+    just declines the extra precision. Guessing `char *` instead would send
+    an int result through `mojo_list_append_str`."""
+    if isinstance(fn_expr, gimple_ctypes.IdentExpr):
+        _rt = gen.func_return_types.get(fn_expr.name, '')
+        if _rt == 'char *':
+            return 'char *'
+    # Ask the estimator about the CALL, with a placeholder argument, so a
+    # builtin callee is answered from the same tables the rest of the
+    # compiler uses — `map(str, xs)` yields strings, and without this the
+    # result was recorded int64_t, so `list(map(str, [1, 2]))` printed the
+    # two string ADDRESSES as decimals. Reading `func_return_types` alone
+    # cannot answer it: `str` is a builtin, not a compiled function, so it
+    # has no entry there. The placeholder's own type does not matter — every
+    # row consulted here (the scalar ctors, the container builtins, the
+    # opaque-ctor passthrough) is callee-driven, and a callee whose answer
+    # DOES depend on the argument falls through to the same int64_t default.
+    try:
+        _probe = gimple_ctypes.CallExpr(
+            func=fn_expr, args=[gimple_ctypes.IdentExpr('_fc_arg')],
+            line=getattr(fn_expr, 'line', 0), col=getattr(fn_expr, 'col', 0))
+        _qt = gen._quick_type(_probe)
+    except Exception:
+        _qt = 'int64_t'
+    if _qt == 'char *':
+        return 'char *'
+    return 'int64_t'
+
+
+def _build_per_element_list(gen, fn_expr, it_val: str, elem: str | None,
+                            only_truthy: bool = False,
+                            var_prefix: str = '_fcall_elem'):
+    """New MojoList holding `fn_expr(<element>)` for each element of `it_val`
+    — the shared body of `map(f, xs)` (only_truthy=False), `filter(f, xs)`
+    (only_truthy=True) and `sorted(xs, key=f)`'s key list.
+
+    The runtime CANNOT do this itself: `mojo_map`/`mojo_filter` are identity
+    stubs (fire_runtime.c) because a `char *` function pointer cannot call
+    back into a GIMPLE-compiled body. `map(...)` therefore produced the input
+    list UNCHANGED (so `list(map(f, xs))` printed the input, and
+    `for v in map(f, xs):` ran over the wrong values), and `filter(...)` was
+    the same. Building the list here also means the result's element type is
+    known, so a leading 0 prints as `0` and not as the None sentinel.
+
+    `elem` is the input list's element type; it decides how the loop variable
+    is read (and typed), so a container element stays a `MojoList *` and a
+    lambda key can index it. `only_truthy` filters on the call's result, which
+    is how `filter`'s predicate is applied.
+    """
+    # Unique per call: `_declare_var` is first-decl-wins, so two `map`/`filter`
+    # calls in one function would otherwise share the first one's element type
+    # and emit a conflicting-types error.
+    _kvar = f'{var_prefix}_{gen.temp_counter}'
+    gen.temp_counter += 1
+    _kelem_t = 'int64_t'
+    if elem == 'double':
+        _kelem_t = 'double'
+    elif elem and elem.endswith(' *'):
+        _kelem_t = elem
+    res = gen._new_temp('MojoList *')
+    gen._emit(f"  {res} = mojo_list_new ();")
+    klen = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
+    kidx = gen._new_val('int64_t', '(int64_t)0')
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
+    gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
+    gen._emit_label(bb_body)
+    _read64 = gen._new_val('int64_t', f'mojo_list_get_int ({it_val}, {kidx})')
+    if _kelem_t == 'double':
+        _read = gen._new_val('double', f'mojo_list_get_double ({it_val}, {kidx})')
+    elif _kelem_t == 'int64_t':
+        _read = _read64
+    else:
+        _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
+    gen._declare_var(_kvar, _kelem_t)
+    gen._emit(f"  {gen._cname(_kvar)} = {_read};")
+    # A lambda's FORWARD DECLARATION types its params from
+    # `var_types[<param name>]` while the definition takes the call site's
+    # argument type, so bind the element to the lambda's own param name for
+    # the duration of the call — otherwise a container-typed param declares
+    # `int64_t f(int64_t)` in one place and `int64_t f(MojoList *)` in the
+    # other, which GCC rejects as "conflicting types".
+    _saved_param_types = {}
+    if isinstance(fn_expr, gimple_ctypes.LambdaExpr):
+        for _pn, _pd in fn_expr.params:
+            _saved_param_types[_pn] = gen.var_types.get(_pn, None)
+            gen.var_types[_pn] = _kelem_t
+    try:
+        kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
+            func=fn_expr, args=[gimple_ctypes.IdentExpr(_kvar)],
+            line=getattr(fn_expr, 'line', 0), col=getattr(fn_expr, 'col', 0)))
+    finally:
+        for _pn, _old_t in _saved_param_types.items():
+            if _old_t is None:
+                gen.var_types.pop(_pn, None)
+            else:
+                gen.var_types[_pn] = _old_t
+    if only_truthy:
+        # filter's predicate: append only when the call's result is truthy.
+        bb_yes = gen._new_bb(); bb_no = gen._new_bb()
+        _t = gen._new_val('_Bool', f'({kret_v}) != 0')
+        gen._emit(f"  if ({_t}) goto {bb_yes}; else goto {bb_no};")
+        gen._emit_label(bb_yes)
+    if only_truthy:
+        # filter keeps the INPUT's element — the call's result is only the
+        # predicate verdict. Appending the verdict instead (as map does with
+        # its result) made `filter(lambda v: v > 1, [1, 2, 3])` produce
+        # `[1, 1]`: two truthy verdicts, both the value 1.
+        if _kelem_t == 'double':
+            gen._void_call('mojo_list_append_double',
+                           [('MojoList *', res), ('double', gen._cname(_kvar))])
+        elif _kelem_t == 'int64_t':
+            gen._void_call('mojo_list_append_int',
+                           [('MojoList *', res), ('int64_t', gen._cname(_kvar))])
+        else:
+            # A container element keeps its pointer: the accessor hands back
+            # an int64_t slot, which is exactly what the append takes.
+            gen._void_call('mojo_list_append_int',
+                           [('MojoList *', res), ('int64_t', _read64)])
+        gen._emit_label(bb_no)
+    elif kret_t == 'char *':
+        gen._void_call('mojo_list_append_str', [('MojoList *', res), ('char *', kret_v)])
+    else:
+        _kret = gen._to_int64(kret_t, kret_v)
+        gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', _kret)])
+    kone = gen._new_val('int64_t', '(int64_t)1')
+    knew = gen._new_val('int64_t', f'{kidx} + {kone}')
+    gen._emit(f"  {kidx} = {knew};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+    return res
+
+
+def _lower_builtin_map(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`map(f, xs)` as a value: materialize the per-element calls here (see
+    `_build_per_element_list` for why the runtime cannot). Eagerly, which is
+    what every call site in this codebase consumes — the same trade
+    `_lower_builtin_reversed` documents for `reversed`.
+
+    Python allows several iterables (`map(f, xs, ys)`); only the one-iterable
+    form is lowered, and the rest is an honest refusal rather than a silent
+    wrong answer.
+    """
+    if len(node.args) != 2:
+        raise RuntimeError(
+            f"map() with {len(node.args)} iterables is not supported yet "
+            f"(only map(f, xs))")
+    fn_expr = node.args[0]
+    at, av = gen.lower_expr(node.args[1])
+    if at != 'MojoList *':
+        av = gen._materialize_as_list(at, av)
+    elem = gen._elem_of(av)
+    res = _build_per_element_list(gen, fn_expr, av, elem, var_prefix='_map_elem')
+    gen._elem_types[res] = _callable_return_elem_type(gen, fn_expr)
+    return 'MojoList *', res
+
+
+def _lower_builtin_filter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`filter(f, xs)` as a value: the same per-element build, keeping only
+    the elements whose predicate call is truthy. The result holds the INPUT's
+    elements, so its element type is the input's.
+    """
+    if len(node.args) != 2:
+        raise RuntimeError(
+            f"filter() with {len(node.args)} iterables is not supported yet "
+            f"(only filter(f, xs))")
+    fn_expr = node.args[0]
+    at, av = gen.lower_expr(node.args[1])
+    if at != 'MojoList *':
+        av = gen._materialize_as_list(at, av)
+    elem = gen._elem_of(av)
+    res = _build_per_element_list(gen, fn_expr, av, elem, only_truthy=True,
+                                  var_prefix='_filter_elem')
+    if elem and elem != 'int64_t':
+        gen._elem_types[res] = elem
+    return 'MojoList *', res
+
+
 def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
     """`sorted(x, key=f)` / `sorted(x, reverse=True)` / both.
 
@@ -3210,6 +3409,48 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
     return ret_type, gen._call_expr(ret_type, fname_c, full_arg_pairs)
 
 
+def _ast_walk(body):
+    """Yield every AST node under `body`. A local, structural walk: the
+    lambda-capture check below only needs IdentExpr/AssignStmt/ForStmt/
+    VarDecl/NamedExpr shapes, and reuses this file's existing node imports
+    rather than the middle-tier walkers (whose results are self-hosted-boxed
+    and would cost more than they explain here)."""
+    # A lambda's `body` is a single EXPRESSION, not a statement list, so
+    # normalize before walking.
+    if body is None:
+        return
+    stack = list(body) if isinstance(body, list) else [body]
+    while stack:
+        n = stack.pop()
+        yield n
+        for _attr in ('body', 'value', 'target', 'args', 'func', 'obj',
+                      'left', 'right', 'then_val', 'else_val', 'operand',
+                      'key', 'val', 'elements', 'params', 'handler', 'finalbody'):
+            _v = getattr(n, _attr, None)
+            if _v is None:
+                continue
+            if isinstance(_v, list):
+                stack.extend(x for x in _v if hasattr(x, '__class__') and not isinstance(x, (str, bytes, int, float)))
+            elif hasattr(_v, '__class__') and not isinstance(_v, (str, bytes, int, float)):
+                stack.append(_v)
+
+
+def _bound_names(gen) -> set:
+    """Names that are NOT enclosing locals: module globals, plus everything
+    reachable as a builtin/attribute rather than a bare identifier."""
+    out = set(getattr(gen, '_global_var_types', {}) or {})
+    out |= set(getattr(gen, 'func_return_types', {}) or {})
+    out |= set(getattr(gen, 'struct_field_types', {}) or {})
+    out |= set(getattr(gen, 'imported_symbols', {}) or {})
+    out |= set(getattr(gen, '_class_attrs', {}) or {})
+    return out
+
+
+def _lambda_site(node) -> str:
+    _l = getattr(node, 'line', None)
+    return f"line {_l}" if _l else "an unknown line"
+
+
 def _lower_LambdaExpr(gen, node) -> tuple:
     """Lift a lambda expression to a top-level C function.
 
@@ -3259,17 +3500,103 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # error (real repro: Tools/unittestgui/unittestgui.py's
     # `errorListbox.bind("<Double-1>", lambda e, self=self: self.
     # showSelectedError())`).
+    # Only an EXPLICIT default binds an outer value (`lambda e, self=self: ...`,
+    # the tkinter idiom). The old `default is None and pname in var_types`
+    # fallback treated ANY parameter that happened to share a name with a
+    # visible variable as a capture — and a call site that types the callee's
+    # parameters before lowering the call (map/filter/sorted keys bind the
+    # element variable to the lambda's param name) makes that true for every
+    # parameter. With the env-based capture below, such a param also got an
+    # env FIELD it never read, and the body then emitted `_env->v` against a
+    # struct with no such member ("'main_lambda_1_env' has no member named
+    # 'v'"). A real default is the only thing that can capture here.
     captures = []
     for pname, default in node.params:
         if isinstance(default, gimple_ctypes.IdentExpr) and default.name in gen.var_types:
             captures.append((pname, gen.var_types[default.name]))
-        elif default is None and pname in gen.var_types:
-            captures.append((pname, gen.var_types[pname]))
+
+    # A lambda that reads an ENCLOSING FUNCTION'S LOCAL cannot be lifted to a
+    # top-level C function as-is: there is no env to read it from, and the
+    # bare-function-pointer calling convention (`mojo_fnptr_call_N`, which is
+    # also what `map`/`filter`/`sorted(key=)` use) has nowhere to put one.
+    # It used to be emitted anyway, with the local read as a hard 0:
+    #     d = {"a": 1}
+    #     f = lambda k: d[k]
+    #     print(f("a"))          ->  0
+    # so the program ran and produced a WRONG answer. Refuse instead, so the
+    # module falls back to interpreting from source and the answer is right
+    # (the same trade every other unsupported shape makes here).
+    #
+    # Module GLOBALS are not a capture — a lifted lambda reads those through
+    # `_root_globals` and works — so they are excluded, as are the lambda's
+    # own params/bindings and anything reachable only through a default
+    # argument (`lambda e, self=self: ...`, the existing capture form).
+    _bound = set()
+    for _pn, _pd in node.params:
+        _bound.add(_pn)
+    for _n2 in _ast_walk(node.body):
+        if isinstance(_n2, gimple_ctypes.AssignStmt) and isinstance(_n2.target, gimple_ctypes.IdentExpr):
+            _bound.add(_n2.target.name)
+        elif type(_n2).__name__ == 'ForStmt':
+            _tg = getattr(_n2, 'target', None)
+            for _tv in (_tg if isinstance(_tg, list) else [_tg]):
+                if isinstance(_tv, gimple_ctypes.IdentExpr):
+                    _bound.add(_tv.name)
+        elif isinstance(_n2, gimple_ctypes.VarDecl):
+            _bound.add(_n2.name)
+        elif type(_n2).__name__ == 'NamedExpr':
+            _bound.add(_n2.target.name)
+    _captured = []
+    for _n2 in _ast_walk(node.body):
+        if isinstance(_n2, gimple_ctypes.IdentExpr):
+            _nm = _n2.name
+            if _nm in _bound or _nm in _bound_names(gen):
+                continue
+            if _nm in gen.var_types and _nm not in gen._global_var_types:
+                if _nm not in _captured:
+                    _captured.append(_nm)
+    # Real captures. A lambda that reads the enclosing function's locals
+    # cannot be a bare function pointer — the values have nowhere to live in
+    # a code address — so it becomes a MojoBoundMethod: the lifted function
+    # takes a heap env as its FIRST parameter (the same "self, then N
+    # ordinary args" shape every compiled struct method and
+    # mojo_bound_method_call_N already use) and the value materialized at the
+    # reference site is `mojo_bound_method_new(fn, env)`. Every call site
+    # already routes through mojo_fnptr_call_N, which dispatches on the
+    # callee, so a closing lambda works anywhere a plain one does — as a
+    # map/filter/sorted callable, called directly, or handed to code this
+    # compiler never saw.
+    #
+    # It used to be emitted with every capture read as a hard 0:
+    #     def cached(...):
+    #         return cas.get_or_build_text(key, ext,
+    #             lambda: compile_to_gimple(mojo_src, do_imports, filename), cache)
+    # built the WRONG artifact from a null source. That stayed latent only
+    # because the self-hosted binary compiles uncached and never calls the
+    # builder.
+    _capture_types = []
+    for _cn in _captured:
+        _ct = gen.var_types.get(_cn, 'int64_t')
+        if _ct in ('int', 'int64_t', '_Bool', 'char', 'double') or _ct.endswith(' *'):
+            _capture_types.append((_cn, _ct))
+        else:
+            _capture_types.append((_cn, 'int64_t'))
+    # The env must have a field for EVERY name the body reads through it, and
+    # `_gen_lifted_closure` sets `gen._captures` from the whole `ci.captures`
+    # — which includes the default-argument captures (`lambda k, d=d: d[k]`).
+    # Emitting fields for the implicit captures alone left the body reading
+    # `_env->d` against a struct without one. So the env covers both, and the
+    # materialization site fills both (a default's value is its own default
+    # expression, evaluated where the lambda is referenced).
+    _env_fields = [(pn, ct) for pn, ct in captures] + _capture_types
+    _seen_f = set()
+    _env_fields = [(n, c) for n, c in _env_fields if not (n in _seen_f or _seen_f.add(n))]
+    _env_struct = f'{lifted_name}_env' if _env_fields else ''
 
     ci = gimple_solvers.ClosureInfo(
         lifted_name=lifted_name,
-        env_struct='',
-        captures=captures,
+        env_struct=_env_struct,
+        captures=_env_fields,
         inner_def=syn_def,
     )
     # Register return type and param types now so call sites resolve correctly
@@ -3337,6 +3664,58 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     body_code = gen._gen_lifted_closure(ci)
     gen._lambda_outer_closures = {}
 
+    if _env_struct:
+        # Built from `ci.captures` AFTER the body was generated, not from the
+        # list computed up front: `_gen_lifted_closure` adds to it — the
+        # genexp induction variables (`_IL`) and the enclosing names the C++
+        # paths resolve for themselves (`p`, `gen`) all land there, and it is
+        # `ci.captures` that becomes `gen._captures`, i.e. what the body
+        # actually reads as `_env-><name>`. A struct built from the earlier,
+        # shorter list compiled fine until the body referenced a member the
+        # struct did not have ("'_gen_for_zip_longest_lambda_2_env' has no
+        # member named 'p'"). The definition is emitted ahead of the forward
+        # declaration, so the typedef still precedes both in the output.
+        # The definitive read set is the generated body itself: with an env
+        # present, `_lower_IdentExpr` emits `_env-><name>` for every name it
+        # could not resolve locally, so the body names exactly the fields the
+        # struct must have. Deriving them from the emitted text (rather than
+        # from ci.captures or gen._captures, which are the SEED and neither
+        # covers what the lowering went on to read) is what keeps the struct
+        # and the body in agreement — a struct missing a field the body reads
+        # is a hard "'X_env' has no member named 'Y'", and the names involved
+        # are ordinary enclosing locals (`gcc`, `workdir`, `module_name`) plus
+        # the genexp induction variables and whatever the C++ paths resolve
+        # for themselves.
+        import re as _re
+        _read = set(_re.findall(r'_env->([A-Za-z_][A-Za-z_0-9]*)', body_code or ''))
+        _final = []
+        _seen_c = set()
+        # …unioned with the two seeding sources, because not every lifted
+        # lambda's body lands in `body_code`: the C++ emitters (async units,
+        # for/zip-longest) emit theirs into their own text, and for those the
+        # body scan sees nothing while `gen._captures`/`ci.captures` do.
+        for _src in (getattr(gen, '_captures', None) or {},
+                     getattr(ci, 'captures', None) or []):
+            # `gen._captures` is a dict, `ci.captures` a list of pairs.
+            _read |= set(_src.keys()) if isinstance(_src, dict) else {n for n, _c in _src}
+        _known = {n: c for n, c in _env_fields}
+        _known.update({n: c for n, c in (getattr(ci, 'captures', None) or [])})
+        _known.update(dict(getattr(gen, '_captures', None) or {}))
+        for _cn in sorted(_read):
+            if _cn in _seen_c:
+                continue
+            _seen_c.add(_cn)
+            _ct = _known.get(_cn)
+            if not (_ct in ('int', 'int64_t', '_Bool', 'char', 'double') or
+                    (_ct or '').endswith(' *')):
+                _ct = 'int64_t'
+            _final.append((_cn, _ct))
+        for _line in ([f'typedef struct {_env_struct} {{']
+                      + [f'  {_ct} {_cn};' for _cn, _ct in _final]
+                      + [f'}} {_env_struct};']):
+            if _line not in gen._elaborated_externs:
+                gen._elaborated_externs.append(_line)
+
     gen.decls                   = saved_decls
     gen.body_lines              = saved_body
     gen.var_types               = saved_var_types
@@ -3366,6 +3745,33 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     params_str = ', '.join(
         f'{ct} {pn.lstrip("*")}' for ct, (pn, _) in zip(param_ctypes, node.params)
     ) or 'void'
+    if _env_struct:
+        # The env leads, matching both `_gen_lifted_closure`'s real
+        # definition and the "self, then N ordinary args" convention
+        # mojo_bound_method_call_N calls through.
+        params_str = f'{_env_struct} * _env' + (', ' + params_str if params_str != 'void' else '')
+    # Mirror the DEFINITION's own parameter resolution, which
+    # `_gen_lifted_closure` caches in `ci.inferred_params` for precisely this
+    # purpose. `param_ctypes` above is an INDEPENDENT computation, and the two
+    # can disagree whenever a call site has typed the callee's parameters
+    # before lowering the call — `sorted(d, key=lambda k: d[k])` binds the
+    # dict's `char *` key element to the lambda's parameter, so the
+    # declaration said `char * k` while the definition inferred `int64_t`,
+    # and GCC rejected the pair as conflicting types.
+    _inferred = getattr(ci, 'inferred_params', None)
+    if _inferred:
+        _mirrored = []
+        for _pn, _ in node.params:
+            if _pn.startswith('*'):
+                continue
+            _bare = _pn.lstrip('*')
+            _ct = _inferred.get(_pn) or _inferred.get(_bare)
+            if _ct:
+                _mirrored.append(f'{_ct} {gen._param_safe_name(_bare)}')
+        if _mirrored:
+            params_str = ', '.join(_mirrored)
+            if _env_struct:
+                params_str = f'{_env_struct} * _env, ' + params_str
     # Re-read the return type from func_return_types instead of the
     # `ret_type` local computed above (BEFORE the body was generated):
     # `_gen_lifted_closure` (just above) independently re-infers the
@@ -3390,11 +3796,42 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         gen._elaborated_externs.append(fwd_decl)
     if lifted_name not in gen.func_return_types:
         gen.func_return_types[lifted_name] = ret_type
-    gen._funcptr_builtins_needed.add(lifted_name)
+    if not _env_struct:
+        gen._funcptr_builtins_needed.add(lifted_name)
+        static_name = f'_funcptr_{lifted_name}'
+        t = gen._new_val('void *', static_name)
+        return 'void *', t
 
-    static_name = f'_funcptr_{lifted_name}'
-    t = gen._new_val('void *', static_name)
-    return 'void *', t
+    # A closing lambda's value: a heap env holding the captured values,
+    # wrapped in the bound method that re-supplies it as the leading
+    # argument. NOT registered in `_funcptr_builtins_needed` — the bare
+    # static function-pointer form is wrong for this shape (its signature
+    # now leads with the env), and nothing needs it.
+    _vp = gen._new_temp('void *')
+    _envp = gen._new_temp(f'{_env_struct} *')
+    gen._emit(f'  {_vp} = malloc (sizeof({_env_struct}));')
+    gen._emit(f'  {_envp} = ({_env_struct} *) {_vp};')
+    # Which names come from a default argument (value = that expression at
+    # this reference site) rather than from an enclosing local (value = the
+    # variable).
+    _default_src = {pn: dv for pn, dv in node.params if dv is not None}
+    for _cn, _ct in _env_fields:
+        _src = _default_src.get(_cn)
+        if _src is not None:
+            _st, _sv = gen.lower_expr(_src)
+            _cv = (gen._coerce_to_type(_st, _ct, _sv) if _ct.endswith(' *')
+                   else gen._new_val('int64_t', f'(int64_t){_sv}'))
+        elif _ct.endswith(' *'):
+            _cv = gen._coerce_to_type(gen.var_types.get(_cn, 'int64_t'), _ct, _cn)
+        elif _ct == 'double':
+            _cv = gen._new_val('double', f'(double){_cn}')
+        else:
+            _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
+        gen._emit(f'  {_envp}->{_cn} = {_cv};')
+    _fnv = gen._new_val('void *', f'(void *){lifted_name}')
+    _bm = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
+                         [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
+    return 'void *', gen._new_val('void *', f'(void *){_bm}')
 
 
 def _lower_async_closure_construct(gen, key: tuple, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -4145,6 +4582,36 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # returns 10; minimal repro confirmed). The compiled path forwarded
     # every lowered arg into the C call instead, tripping GCC's "too many
     # arguments to function" against the callee's real prototype. Drop the
+    # round() — handled HERE, above the arity truncation below, because that
+    # truncation clamps the argument list to the callee's known C signature
+    # and `round`'s is libc's `double round(double)` — ONE parameter. So
+    # `round(x, ndigits)` lost its second argument before the old
+    # two-argument branch could ever run (it sat below the truncation, i.e.
+    # dead code), and `round(2.567, 2)` silently computed `round(2.567)` and
+    # printed `3`. Dispatch on the AST's arg count, not the (already
+    # truncated) arg_pairs.
+    # round(x) — the one-argument form, which Python answers with an INT
+    # (round-half-to-even), not a float. It had no case at all and fell
+    # through to the generic path, so `print(round(2.6))` printed `3.0`.
+    # `rint` is the C half-to-even rounding (the default FP mode), matching
+    # Python exactly: round(2.5) == 2 and round(-2.5) == -2, where C's
+    # `round()` would give 3 and -3.
+    if fname_raw == 'round' and len(node.args) == 1:
+        (xt, xv), = arg_pairs
+        xd = xv if xt == 'double' else gen._new_val('double', f'(double){xv}')
+        _r = gen._new_val('double', f'rint ({xd})')
+        return 'int64_t', gen._new_val('int64_t', f'(int64_t){_r}')
+
+    # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)
+    if fname_raw == 'round' and len(node.args) == 2:
+        (xt, xv), (nt, nv) = arg_pairs
+        xd = xv if xt == 'double' else gen._new_val('double', f'(double){xv}')
+        nd = nv if nt == 'double' else gen._new_val('double', f'(double){nv}')
+        p  = gen._new_val('double', f'pow (10.0, {nd})')
+        scaled = gen._new_val('double', f'{xd} * {p}')
+        r = gen._new_val('double', f'round ({scaled})')
+        return 'double', gen._new_val('double', f'{r} / {p}')
+
     # surplus pairs here — each dropped arg's lower_expr already ran while
     # building arg_pairs, so its side effects still happen exactly once,
     # matching the interpreter's evaluate-then-ignore order. Never applied
@@ -4210,7 +4677,15 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             arg_pairs = [('int64_t', _zero), arg_pairs[0]]
         elif len(arg_pairs) == 3:
             fname = 'mojo_range3'
-        return 'void *', gen._call_expr('void *', fname, arg_pairs)
+        # `MojoList *`, not `void *`: mojo_range/mojo_range3 build a real
+        # MojoList of int slots, and declaring the result `void *` left every
+        # consumer with no type to work from — `z = range(3)` printed
+        # `[None, 1, 2]`, because with no recorded element type the repr
+        # walker hit its int-vs-pointer heuristic on the boxed 0 and printed
+        # the None sentinel.
+        _rng = gen._call_expr('MojoList *', fname, arg_pairs)
+        gen._elem_types[_rng] = 'int64_t'
+        return 'MojoList *', _rng
 
     # Single-arg min()/max() is ALWAYS the "reduce over an iterable" form in
     # Python — the scalar form needs >= 2 positional args. Route it to the
@@ -4307,16 +4782,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             cond = gen._new_val('_Bool', f'{cmp64} {replace_op} {zero}')
             acc = gen._new_val('char *', f'{cond} ? {cv} : {_as_str(acc)}')
         return 'char *', acc
-
-    # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)
-    if fname_raw == 'round' and len(arg_pairs) == 2:
-        (xt, xv), (nt, nv) = arg_pairs
-        xd = xv if xt == 'double' else gen._new_val('double', f'(double){xv}')
-        nd = nv if nt == 'double' else gen._new_val('double', f'(double){nv}')
-        p  = gen._new_val('double', f'pow (10.0, {nd})')
-        scaled = gen._new_val('double', f'{xd} * {p}')
-        r = gen._new_val('double', f'round ({scaled})')
-        return 'double', gen._new_val('double', f'{r} / {p}')
 
     # int(x) — direct cast for already-numeric types. Only a STRING
     # argument (`int("42")`) should route through the mojo_make_int
