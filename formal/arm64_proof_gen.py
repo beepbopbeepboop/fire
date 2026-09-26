@@ -3234,14 +3234,31 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             entry_cond_needed = False
             terminal_handler_needed = False
         else:
-            A(f"theorem {name}_entry_cond (n : UInt64) :")
-            A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
-            A(f"  simp only [{', '.join(def0)}, arm64_reg, arm64_set_reg, Arm64State.init]")
-            A(f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
-              f"mem_read_two_writes_same, arm64_matches_condition, arm64_subs_flags, "
-              f"UInt64.zero_le{', ' + _tw_defs if _tw_defs else ''}]")
-            A(f"  all_goals bv_decide")
-            A("")
+            # Emitted only when the entry guard really does test a materialised
+            # flag REGISTER.  The claim is `arm64_reg r <exit> = 0 <-> not
+            # <predicate>`, which is only true when a `cset` wrote that register
+            # with the matching condition.  The backend now lowers comparisons
+            # to `cmp` + B.cond, which writes no register, so for those programs
+            # the theorem is not merely unprovable but FALSE -- and being dead
+            # (nothing references it) the only thing it does is fail the build
+            # with `bv_decide`'s counterexample.  `bv_decide` is doing its job
+            # here: the generator was asserting a fact about a register the
+            # compiler stopped writing.
+            _ent_idx = None
+            for _b in blocks:
+                if _b["kind"] == "cbz" and _b["instrs"]:
+                    _ent_idx = _step_branch_index(words[_b["instrs"][-1]])
+                    break
+            _emittable = _ent_idx in (16, 17)
+            if _emittable:
+                A(f"theorem {name}_entry_cond (n : UInt64) :")
+                A(f"    arm64_reg {entry_reg} ({entry_exit}) = 0 ↔ ¬({entry_condition}) := by")
+                A(f"  simp only [{', '.join(def0)}, arm64_reg, arm64_set_reg, Arm64State.init]")
+                A(f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                  f"mem_read_two_writes_same, arm64_matches_condition, arm64_subs_flags, "
+                  f"UInt64.zero_le{', ' + _tw_defs if _tw_defs else ''}]")
+                A(f"  all_goals bv_decide")
+                A("")
 
     # block start -> index map; pc facts for rcases-bound exit states
     s_pc_facts = {}
