@@ -1796,11 +1796,19 @@ def _cond_step_tactic(words: dict, pc: int) -> str:
         # branch is the value-flow fact about the successor's X0 -- the same
         # content as `loop_cond_flag`, and just as hard. Close-if-provable,
         # assume otherwise, per the `sorry` pass.
-        # Tried and rejected: adding `arm64_flag_le, u64_le_zero_iff,
-        # u64_ofNat_zero` to the `simp` set, to hop from the flag predicate to
+        # Tried and rejected: adding `arm64_flag_le, `u64_le_zero_iff`,
+        # `u64_ofNat_zero` to the `simp` set, to hop from the flag predicate to
         # `a = 0`. It closes nothing here and costs four proofs elsewhere
-        # (40/3/0 -> 36/3/4) by over-simplifying. The goal is not an arithmetic
-        # hop at all -- see the note on the contract invariant below.
+        # (40/3/0 -> 36/3/4) by over-simplifying.
+        #
+        # The goal is not an arithmetic hop at all. `while_dec_exit_contract`'s
+        # `hstep` obligation is stated over `arm64_reg cr st = 0` (the
+        # generator passes cr = 0), because the contract was written for the
+        # CSET lowering; the real B.cond step branches on nzcv. So the goal
+        # asks for an X0 value the instruction no longer produces, and no
+        # amount of `simp` reaches it. The fix is to parameterise that test --
+        # which also closes the `loop_cond_flag` register half, same root
+        # cause. See BUG.md.
         return (f"by_cases hc : arm64_matches_condition {w & 0xf} s.nzcv = true "
                 f"<;> simp [hs, hc] <;> all_goals (first | done | sorry)")
     return "simp [hs] <;> all_goals (first | done | sorry)"

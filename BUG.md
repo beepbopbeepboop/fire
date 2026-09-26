@@ -1130,42 +1130,63 @@ their *counted* facts. It is real proof work, and it is the natural next task.
 
 ## Why the `cd_loop` value-flow goals are not closable by tactics
 
-The 9-file sorry site. The residual goal, with the fallback removed so Lean
-reports it:
+**Correction first.** The note this replaces concluded that the goal needed an
+extra *invariant* tying X0 to `nzcv` at the loop head. That is wrong, and it
+sent me looking for a `simp` lemma that could not exist. The goal is
+unreachable because **`while_dec_exit_contract` is itself written for the CSET
+lowering.**
+
+The residual goal, with the fallback removed so Lean reports it:
 
 ```
 s : Arm64State
 hs : s.pc = 4294967872
 hc : arm64_matches_condition 9 s.nzcv = true
-\u22a2 arm64_reg 0 s = 0
+|- arm64_reg 0 s = 0
 ```
 
-`s` is **arbitrary**, subject only to `s.pc` being the loop head. Nothing in
-the context says what X0 holds, and two states at the same pc may hold
-different X0 -- so the goal is not derivable from these hypotheses at all, and
-no choice of `simp`/`grind`/`omega` will reach it.
+`s` is arbitrary, subject only to its pc being the loop head, so no X0 value
+follows. But the reason the goal is *asked for* is the contract. Its `hstep`
+obligation is
 
-**This is the substantive consequence of the flag-based lowering.** The CSET
-lowering *wrote* the boolean into X0, so `X0 = 0` on the false branch followed
-from the CSET's own semantics -- the register was itself the record of the
-test. `B.cond` reads `nzcv` instead and writes no register, so the loop
-contract now has to carry an invariant tying X0 to `nzcv` at the loop head:
+```
+(hstep : \u2200 st, st.pc = cbzPc \u2192
+  arm64_step st code = some (if arm64_reg cr st = 0 then
+    ({ st with pc := exitBpc } : Arm64State) else ({ st with pc := bodyPc } : Arm64State)))
+```
 
-> at the loop head, `x0` holds the counter and `nzcv = subs_flags x0 0`
+and the generator passes `cr = 0`. The real `B.cond` step branches on
+`arm64_matches_condition 9 st.nzcv`, not on a register. So the contract asks
+for a fact about X0 that the instruction no longer produces, and the
+`loop_cond_flag` register half is the same defect seen from the other side.
 
-The current contract carries neither. Until it does, the exit obligation has
-nothing to stand on and `sorry` is the honest outcome.
+**The fix is one change, and it closes both sorry sites.** Parameterise the
+test in `while_dec_exit_contract` instead of hard-coding a register:
 
-Note the shape of the fix, because it is not a tactic change: the range and
-countdown *contract generators* would each need an extra conjunct (or an extra
-hypothesis argument) at the head state, and `while_dec_exit_contract` in
-`ProofLib` would need to accept and use it. That is a change to the model --
-the same category of work as the `shiftlr` decision, and for the same reason it
-is not something to slip in at the end of a pass.
+* replace `arm64_reg cr st = 0` with a predicate `q : Arm64State \u2192 Bool`
+  supplied by the caller, in `hstep` (line ~2864), in `hcondFlag` (~2870), and
+  at the three internal uses (~2904, ~2909, ~2941, ~2947);
+* `hcondFlag` becomes `q (cond st) = true \u2194 <the source condition>`, which
+  for a countdown header is `st.x19 = 0`.
+
+The generator then discharges both obligations, and neither is a sorry:
+
+* `hstep` is `by rw [sr]; by_cases hc : q s; simp [hs, hc]` -- the case split
+  already exists in `_cond_step_tactic`, and it is exactly what closes this
+  once the goal mentions `q` rather than `arm64_reg 0`;
+* `hcondFlag` needs the flag predicate tied to the counter, which is
+  `arm64_flag_le st.x19 0` plus `u64_le_zero_iff (st.x19) : st.x19 \u2264 0 \u2194 st.x19 = 0`
+  -- a real proof, and no invariant about X0 is involved.
+
+So the honest summary of the remaining sorry work: **13 sorries, 9 of them one
+parameterisation of one theorem.** The two sites are not two problems.
 
 **Rejected along the way:** adding `arm64_flag_le`, `u64_le_zero_iff` and
 `u64_ofNat_zero` to the closing `simp` set, to hop from the flag predicate to
-`a = 0`. It closes nothing (the missing step is the X0 invariant, not
-arithmetic) and over-simplifies four other proofs: 40/3/0 -> 36/3/4. The two
-`ProofLib` lemmas were verified to compile in isolation and were dropped again
-rather than left unused in a file shared with the x86-64 work.
+`a = 0`. It closes nothing (the goal is about X0, not arithmetic) and
+over-simplifies four other proofs: 40/3/0 -> 36/3/4. The two `ProofLib`
+lemmas were verified to compile in isolation and then dropped rather than left
+unused in a file shared with the x86-64 work.
+
+This is a change to the model, so -- like the `shiftlr` decision -- it wants to
+be its own piece of work rather than the last thing done in a pass.
