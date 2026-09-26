@@ -1194,60 +1194,57 @@ be its own piece of work rather than the last thing done in a pass.
 
 ## WIP (reverted, tree left green): parameterising `while_dec_exit_contract`'s test
 
-Started, got most of the way, ran out of road, and reverted rather than leave the
-tree failing. Recorded here so the next attempt starts from the reached position
-instead of from scratch. Nothing was committed; the working copies are in
-`/tmp/wip/` for this session only.
+Started, got the countdown shape fully proved, hit a per-condition-code wall,
+and reverted rather than commit a regression. Recorded so the next attempt
+starts from the reached position.
 
-**Landed and verified before the revert:**
+**What is done and was verified before reverting:**
 
-1. `while_dec_exit_contract`'s loop test is now a caller-supplied predicate
-   `q : Arm64State -> Bool` instead of a hard-coded register. `cr` is gone;
-   `hstep` (~2864), `hcondFlag` (~2870) and the three internal uses (~2904,
-   ~2909, ~2941, ~2947) all use `q st = true`. **`lib/ProofLib.lean` compiles
-   with 0 errors.** One gotcha: a second `/-- ... -/` immediately after another
-   is a parse error ("unexpected token '/--', expected ... declaration"), so the
-   explanatory note has to be merged into the existing docstring.
-2. `u64_le_zero_iff (a : UInt64) : a <= 0 <-> a = 0 := by simp` added (checked in
-   isolation against a bare `import Lean` first, since a `ProofLib` lemma that
-   does not compile takes both formal suites down).
+1. `while_dec_exit_contract`'s test is a caller-supplied `q : Arm64State -> Bool`
+   instead of a hard-coded register: `cr` removed, `hstep` (~2864), `hcondFlag`
+   (~2870) and the three internal uses (~2904, ~2909, ~2941, ~2947) all use
+   `q st = true`. **`lib/ProofLib.lean` compiles with 0 errors.** Gotcha: a
+   second `/-- ... -/` immediately after another is a parse error, so the note
+   must be merged into the existing docstring.
+2. `u64_le_zero_iff (a : UInt64) : a <= 0 <-> a = 0 := by simp` (check such a
+   lemma against a bare `import Lean` first -- one that does not compile takes
+   both formal suites down).
 3. The generator's single call site passes
    `(fun s => arm64_matches_condition 9 s.nzcv)`, via a new `_cond_code_raw`
-   helper for the RAW hardware code -- distinct from `_source_cond_code` on
-   purpose: the step obligation wants the test as emitted, the value obligations
-   want the source condition's complement.
+   for the RAW hardware code, distinct from `_source_cond_code` on purpose.
 4. `loop_cond_flag` restated as a flag predicate,
-   `arm64_matches_condition 9 (b1_qT5 s).nzcv = true <-> s.x19 = 0`, replacing
-   `arm64_reg 0 (...) = 0 <-> s.x19 = 0` -- the register form was the shape the
-   old contract demanded and the thing the new one rejects.
+   `arm64_matches_condition 9 (b1_qT5 s).nzcv = true <-> s.x19 = 0`, and
+   **proved**, with no assumption:
 
-**Where it stopped.** The `loop_cond_flag` proof, which is the last piece before
-the census. `rw [arm64_flag_le]` works, and the goal reduces as expected, but the
-comparison is on the value the block **spilled and read back**, not on `s.x19`:
+   ```
+   simp only [<block defs>, arm64_reg, arm64_set_reg]
+   rw [mem_read_push_low s.mem s.sp]      -- resolve the STP/LDP pair FIRST
+   rw [arm64_flag_le]                      -- the condition becomes `a <= 0`
+   simp (disch := decide) [mem_read_after_write_u64, ..., u64_ofNat_add]
+   all_goals grind
+   ```
 
-```
-mem_read_u64
-  (mem_write_u64 (mem_write_u64 s.mem (s.sp - 16).toNat (s.x19 + 0))
-                 ((s.sp - 16).toNat + 8) s.x2)
-  (s.sp - 16).toNat  <=  0 + 0   <->  s.x19 = 0
-```
+   Two things that cost a cycle each, both now written down: the
+   `mem_read_push_low` rewrite must come first (without it the comparison is
+   still a `mem_read_u64` of a slot the block wrote, `arm64_flag_le` cannot
+   match, and simp unfolds the condition into a raw Bool test); and the
+   side condition on `mem_read_two_writes_same` needs `simp (disch := decide)`,
+   the same discharger the block-body sites already use.
 
-`mem_read_after_write_u64` is `[simp]`, but the outer write is to a *different*
-address, so it needs `mem_read_two_writes_same`, which is not `[simp]` and carries
-a side condition (`a + 8 <= b \/ b + 8 <= a`). `simp only [...]` therefore cannot
-fire it; plain `simp [...]` gets most of the way (it normalises the addresses and
-the add-zeros) but leaves a residual goal that `grind` does not close. The next
-step is to discharge that side condition explicitly -- `u64_slot_wrap` /
-`u64_slot_nowrap` and `u64_add_reindex` are the lemmas this file already uses for
-exactly these frame offsets -- and then `exact u64_le_zero_iff s.x19`.
+**The wall: the closing lemma is per-condition-code, not per-shape.** With
+`arm64_flag_le` + `u64_le_zero_iff` hard-coded, `countdown` builds, but
+`wdiff` and `wge` do not: their headers are `b.eq` (raw code 0) and `b.lo`
+(raw code 3), needing `arm64_flag_eq` (goal `x19 = 0 <-> x19 = 0`, so
+`Iff.rfl`) and `arm64_flag_lt` against a bound of 1 (goal `x19 < 1 <-> x19 = 0`,
+needing a `u64_lt_one` sibling of `u64_le_zero_iff`). The suite went 40/3/0 ->
+38/3/2, which is why it was reverted rather than committed.
 
-**Expected payoff, not yet measured:** the 9 `cd_loop` value-flow sorries should
-collapse, because their goal becomes a case split on `q` (which
-`_cond_step_tactic` already emits) instead of an unprovable `arm64_reg 0 s = 0`.
-That would take the census from 13 sorries in 9 files to 4 in 4. It needs
-measuring, not assuming -- that is exactly the mistake of trusting the predicted
-counts earlier in this file.
+So the remaining work is a small table alongside `_COND_LEMMA`: for each raw
+condition code, the flag lemma plus the arithmetic lemma that takes the
+comparison to `= 0`. That is mechanical once the shape is right, and it is
+proof work, so it is parked here rather than in flight.
 
-**Still to do after that:** `while_lt_exit_contract`, the counting generalisation
-at ~3002, has the same register-shaped `hstep` and the same internal uses. It was
-not touched, so once the countdown contract is migrated the two will disagree.
+**After that:** `while_lt_exit_contract`, the counting generalisation at ~3002,
+has the same register-shaped `hstep` and the same internal uses. Untouched, so
+it will drift once the countdown contract is migrated.
+
