@@ -1738,7 +1738,15 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
             return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
                else N.IntLiteral(value=0))
-        return _call(_yield_shim(kind), [_c_ident(cvar), val])
+        call = _call(_yield_shim(kind), [_c_ident(cvar), val])
+        if kind == 'd':
+            # `x = yield <double>`: the shim returns the raw int64_t slot
+            # (that IS the channel), so the sent value has to be
+            # reinterpreted as the double it was bit-cast into on the way
+            # in. Without this the local bound the raw bits — observed as
+            # `g.send(3.0)` making the body compute on 9.2e+18.
+            return _call('__mojo_gen_send_d', [call])
+        return call
     for k, v in list(vars(node).items()):
         if k in ('line', 'col'):
             continue
@@ -2849,6 +2857,12 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_resume', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_value', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_value', 'int64_t')
+    # The `x = yield <double>` send-value unbox (see _rewrite_expr's kind
+    # == 'd' case): one int64_t slot in, a double out — declared so the
+    # ordinary body lowering types both the call and the local bound to it
+    # as `double` rather than the int64_t default.
+    gen.func_param_types.setdefault('__mojo_gen_send_d', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_send_d', 'double')
     gen.func_param_types.setdefault('__mojo_gen_destroy', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_destroy', 'void')
     # "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md)

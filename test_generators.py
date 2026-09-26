@@ -245,6 +245,90 @@ def test_stopiteration_after_exhaustion():
         check("stopiteration_after_exhaustion", True)
 
 
+def test_generator_expression_values_and_filters():
+    interp = _run(
+        "def main():\n"
+        "    return list(x * 2 for x in range(4) if x % 2 == 0)\n"
+    )
+    result = _call_main(interp)
+    check("genexp_values_with_condition", result == [0, 4], result)
+
+
+def test_generator_expression_is_lazy():
+    interp = _run(
+        "log = []\n"
+        "def note(v):\n"
+        "    global log\n"
+        "    log.append(v)\n"
+        "    return v * 2\n"
+        "g = (note(x) for x in [1, 2, 3])\n"
+    )
+    check("genexp_outer_iterable_is_eager", interp.scope.get('log') == [],
+          interp.scope.get('log'))
+    g = interp.scope.get('g')
+    check("genexp_returns_generator_object", type(g).__name__ == 'MojoGeneratorObject',
+          type(g).__name__)
+    check("genexp_computes_nothing_before_first_next",
+          interp.scope.get('log') == [], interp.scope.get('log'))
+    check("genexp_first_item", next(g) == 2, None)
+    check("genexp_computes_one_item_per_resume", interp.scope.get('log') == [1],
+          interp.scope.get('log'))
+    check("genexp_rest", list(g) == [4, 6], list(g))
+    check("genexp_computed_everything", interp.scope.get('log') == [1, 2, 3],
+          interp.scope.get('log'))
+
+
+def test_generator_expression_over_infinite_source():
+    interp = _run(
+        "def naturals():\n"
+        "    i = 0\n"
+        "    while True:\n"
+        "        yield i\n"
+        "        i = i + 1\n"
+        "\n"
+        "def main():\n"
+        "    out = []\n"
+        "    for x in (n * n for n in naturals()):\n"
+        "        out.append(x)\n"
+        "        if len(out) == 4:\n"
+        "            break\n"
+        "    return out\n"
+    )
+    result = _call_main(interp)
+    check("genexp_over_infinite_source", result == [0, 1, 4, 9], result)
+
+
+def test_generator_expression_multiple_for_clauses():
+    interp = _run(
+        "def main():\n"
+        "    return list(a * 10 + b for a in [1, 2] for b in [3, 4] if b != 3)\n"
+    )
+    result = _call_main(interp)
+    check("genexp_nested_for_clauses", result == [14, 24], result)
+
+
+def test_generator_expression_does_not_leak_loop_variable():
+    interp = _run(
+        "x = 'outer'\n"
+        "g = (x for x in [1, 2, 3])\n"
+        "list(g)\n"
+    )
+    check("genexp_loop_var_does_not_leak", interp.scope.get('x') == 'outer',
+          interp.scope.get('x'))
+
+
+def test_generator_expression_consumed_by_builtins():
+    interp = _run(
+        "def main():\n"
+        "    return [sum(i for i in [1, 2, 3]),\n"
+        "            any(i > 2 for i in [1, 2, 3]),\n"
+        "            all(i > 0 for i in [1, 2, 3]),\n"
+        "            max(i for i in [3, 1, 2])]\n"
+    )
+    result = _call_main(interp)
+    check("genexp_consumed_by_builtins", result == [6, True, True, 3], result)
+
+
 def run_tests():
     for fn in [
         test_call_does_not_run_body,
@@ -259,6 +343,12 @@ def run_tests():
         test_interleaved_generators_dont_share_scope,
         test_generator_method_on_struct,
         test_stopiteration_after_exhaustion,
+        test_generator_expression_values_and_filters,
+        test_generator_expression_is_lazy,
+        test_generator_expression_over_infinite_source,
+        test_generator_expression_multiple_for_clauses,
+        test_generator_expression_does_not_leak_loop_variable,
+        test_generator_expression_consumed_by_builtins,
     ]:
         try:
             fn()

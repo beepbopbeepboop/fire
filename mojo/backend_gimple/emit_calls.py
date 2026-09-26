@@ -151,6 +151,54 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     return vct, result
 
 
+def _gen_slot_box(gen, st: str, sv: str, vct: str) -> str:
+    """Box a value into a generator's int64_t value/argument slot.
+
+    The slot carries integers and pointers directly; a `double`-valued
+    generator bit-casts (its `<base>_value`/`__mojo_gen_arg_d` counterparts
+    memcpy the bits back out, exactly as the start-call site does for a
+    double PARAMETER — see gimple_gen_coro's arg_fwd)."""
+    if vct == 'double' and st in ('double', 'float'):
+        box = gen._new_temp('int64_t')
+        raw = gen._new_val('double', sv)
+        gen._emit(f"  __builtin_memcpy (&{box}, &{raw}, 8);")
+        return box
+    return gen._to_int64(st, sv)
+
+
+def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
+    """`g.send(v)` — resume the generator, handing it `v` as the value of
+    the `yield` expression it is suspended on. Real Python's semantics,
+    including the StopIteration on exhaustion (the generator protocol's
+    uniform "ran out of values" signal, not a silent end).
+
+    This is the SAME resume the `<base>_resume` trampoline performs, with a
+    non-zero send payload: `__mojo_gen_resume(gen, send)` is the runtime
+    entry both funnel into, so no new ABI is involved. The per-generator
+    `<base>_resume(g)` wrapper hardcodes a 0 send, which is why this calls
+    the runtime function directly rather than through the trampoline."""
+    vct = api['value_ctype']
+    if len(node.args) == 1:
+        st, sv = gen.lower_expr(node.args[0])
+        send = _gen_slot_box(gen, st, sv, vct)
+    else:
+        send = '0'
+    handle = gen._to_int64('MojoGenerator *', av)
+    resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
+    bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
+    bb_stopiter = gen._new_bb()
+    gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+    gen._emit_label(bb_exhausted)
+    gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
+    gen._emit_label(bb_stopiter)
+    gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    gen._emit("  mojo_raise ();")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_ok)
+    result = gen._new_val(vct, f"{api['base']}_value ({av})")
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_merge)
+    return vct, result
 
 
 def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -958,6 +1006,30 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'int64_t', t
 
     fname_raw = gen._ident_call_name(node.func)
+    # Mojo's CAPITALIZED type constructors are the same operations as the
+    # lowercase Python builtins of the same meaning, and the interpreter
+    # already treats them that way (`String(7)` -> '7', `Int("3")` -> 3,
+    # `Bool(1)` -> True — see myinterpreter's _setup_builtins). Normalize
+    # the name here, ONCE, so every `str`/`int`/`float`/`bool` special case
+    # below applies to the capitalized spelling too, instead of each needing
+    # its own duplicate.
+    #
+    # Without this, `String(i)` fell through to the generic call path and
+    # was emitted as a plain C cast of the argument — `"item" + String(i)`
+    # became `mojo_str_cat("item", (char *)(int64_t)i)`, concatenating the
+    # raw pointer/integer bits as a string (real repro: a generator
+    # building 'item0'/'item1'/'item2' printed 'item' three times, then
+    # would have crashed on a real pointer value).
+    #
+    # Gated on the name not being locally bound, exactly like every
+    # `str`/`int`/... special case below: a module may define its own
+    # `def String(...)` (Lib/locale.py defines its own `str`), and the
+    # alias must not steal that call.
+    _CTOR_ALIAS = {'String': 'str', 'Int': 'int', 'Float': 'float', 'Bool': 'bool'}
+    _aliased = _CTOR_ALIAS.get(fname_raw)
+    if _aliased is not None and not gen._locally_binds_name(fname_raw) \
+            and not gen._locally_binds_name(_aliased):
+        fname_raw = _aliased
     if fname_raw.startswith('mojo_python_'):
         gen._python_api_needed = True
     # An async closure NESTED INSIDE THIS METHOD (device_context.mojo's
@@ -1247,9 +1319,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'sorted' and node.args
             and not gen._locally_binds_name('sorted')):
         return gen._lower_builtin_sorted(node)
-    if (fname_raw == 'zip' and len(node.args) > 2
+    # `zip(...)` as a VALUE (not as a `for` iterable — that has its own
+    # tuple-target lowering in emit_loops). The threshold is 2, not >2: the
+    # 2-argument form used to fall through to BUILTIN_VALUE_MAP's `mojo_zip`
+    # with its arguments UNMATERIALIZED, so a generator argument was walked
+    # as if it were a list header (a hard crash).
+    if (fname_raw == 'zip' and len(node.args) >= 2
             and not gen._locally_binds_name('zip')):
-        return gen._lower_builtin_zip_n(node)
+        return _lower_builtin_zip_n(gen, node)
     if (fname_raw == 'reversed' and len(node.args) == 1
             and not gen._locally_binds_name('reversed')
             and 'reversed' not in gen.func_return_types
@@ -2281,6 +2358,15 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if at == 'MojoList *' and gen._elem_of(av) == 'char *':
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:
+        if at != 'MojoList *':
+            # Any other iterable — a generator (a generator call or a
+            # compiled generator expression) above all. Every runtime
+            # sorter here walks a MojoList, so a MojoGenerator* argument
+            # was sorted by reinterpreting a coroutine object as a list
+            # header (a hard crash). Drain it through the shared
+            # chokepoint first, exactly as sum()/any()/max() now do.
+            av = gen._materialize_as_list(at, av)
+            at = 'MojoList *'
         t = gen._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
     # sorted() only reorders — the result keeps the input's element /
     # nested-element (tuple-pair) types, so a later `for x, y in
@@ -2293,12 +2379,34 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
 
 def _lower_builtin_zip_n(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    """zip(a, b, c, ...) with >2 args — chain as mojo_zip(mojo_zip(a, b), c, ...)."""
-    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    """zip(a, b, ...) as a value — chain as mojo_zip(mojo_zip(a, b), c, ...).
+    Every argument is materialized to a MojoList first (see the loop body),
+    so a generator or any other non-list iterable zips correctly."""
+    arg_pairs = []
+    for a in node.args:
+        at, av = gen.lower_expr(a)
+        if at != 'MojoList *':
+            # mojo_zip walks MojoList*; a generator argument (or any other
+            # non-list iterable) was reinterpreted as a list header and
+            # crashed. Materialize first — same chokepoint as above.
+            av = gen._materialize_as_list(at, av)
+            at = 'MojoList *'
+        arg_pairs.append((at, av))
     # Fold left: mojo_zip(mojo_zip(a,b), c)
-    acc_t, acc_v = 'void *', gen._call_expr('void *', 'mojo_zip', [arg_pairs[0], arg_pairs[1]])
+    acc_v = gen._call_expr('void *', 'mojo_zip', [arg_pairs[0], arg_pairs[1]])
     for ap in arg_pairs[2:]:
         acc_v = gen._call_expr('void *', 'mojo_zip', [('void *', acc_v), ap])
+    # Deliberately the SAME `void *` result type the BUILTIN_VALUE_MAP path
+    # returned, with no nested-element typing attached. Typing it as a
+    # MojoList* of 2-slot pairs looks like an improvement (`len(z)`/`print(z)`
+    # would work) but it breaks a real self-host shape: a comprehension with
+    # a NESTED tuple target over `zip`, e.g. funcs_shared.py's own
+    #   [ct + ' ' + pn.lstrip('*') for ct, (pn, pt) in zip(pts, fn.params)]
+    # whose 3-slot target read a 2-slot pair spec and indexed a list where a
+    # string was expected ("cannot use 'list' as a dict key" inside
+    # TypeLattice.list_suffix, which then failed the whole self-host
+    # compile). The for-loop zip form (`for x, y in zip(...)`) has its own
+    # dedicated lowering with correct pair typing and is unaffected.
     return 'void *', acc_v
 
 
@@ -3728,7 +3836,14 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and not gen._locally_binds_name(fname_raw)
             and 'key' not in {k for k, _ in getattr(node, 'kwargs', []) or []}):
         at, av = arg_pairs[0]
+        # `MojoGenerator *` is in this list for the same reason the other
+        # containers are: `max(x for x in xs)` / `max(some_generator())` is
+        # real Python, and _materialize_as_list drains it. Without the case
+        # it fell through to the scalar ternary-fold below, which returned
+        # the coroutine handle itself as the "maximum" (a hard crash on the
+        # next use).
         if at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *' \
+                or at == 'MojoGenerator *' \
                 or at in ('int', 'int64_t', 'void *'):
             # `min(a_dict)`/`max(a_set)` is real Python (min/max KEY, or
             # element) — DESIGN.html R1/R5, shares _materialize_as_list.

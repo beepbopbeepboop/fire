@@ -109,7 +109,7 @@ def _build_generator_program(mojo_src: str) -> str:
     if r.returncode != 0:
         raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
     import fire
-    r = mojo.link_executable(
+    r = fire.link_executable(
         [os.path.join(wd, 'prog.o'), os.path.join(wd, 'prog_gen.o'), runtime_o],
         exe, cxx=True)
     if r.returncode != 0:
@@ -158,6 +158,25 @@ def test_generator_c_compiles(name: str, mojo_src: str):
     except Exception as e:
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
+
+
+def test_generator_refused(name: str, mojo_src: str, expected_substr: str):
+    """Assert this generator shape is honestly REFUSED at compile time
+    (raises with a message containing `expected_substr`) rather than
+    emitting C that links against a symbol that does not exist, miscompiles,
+    or silently skips work."""
+    global _PASS, _FAIL
+    try:
+        gimple_codegen.compile_to_gimple_with_cpp(mojo_src, do_imports=False)
+        print(f"FAIL  {name}: expected a refusal, but it compiled")
+        _FAIL += 1
+    except Exception as e:
+        if expected_substr in str(e):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: refused with the wrong reason: {e}")
+            _FAIL += 1
 
 
 def run_next_method_tests():
@@ -2253,6 +2272,257 @@ def main():
     for a, b, c, d in pairs(False):
         print(a, b, c, d)
 """, "3\n1 2 3\n4 5 6 7\n")
+
+    # ── Generator EXPRESSIONS ────────────────────────────────────────────
+    # `(x * 2 for x in xs)` is a real lazy generator on BOTH paths now:
+    # fire_compiler.desugar_genexps rewrites it into a call to a
+    # synthesized module-level generator FUNCTION (sharing
+    # fire_compiler.genexp_body with the interpreter's own
+    # MojoGeneratorObject path), instead of the eager list this used to
+    # materialize. Laziness is observable: an unbounded source consumed
+    # with an early `break` must terminate and produce only what was read.
+
+    test_generator_stdout("genexp_values_and_condition", """\
+def main():
+    print(list(x * 2 for x in range(5) if x % 2 == 0))
+
+main()
+""", "[0, 4, 8]\n")
+
+    test_generator_stdout("genexp_is_lazy_early_break_over_unbounded_source", """\
+def main():
+    out = []
+    for x in (i * i for i in range(1000000)):
+        out.append(x)
+        if len(out) == 3:
+            break
+    print(out)
+
+main()
+""", "[0, 1, 4]\n")
+
+    test_generator_stdout("genexp_nested_for_clauses", """\
+def main():
+    print(list(a * 10 + b for a in [1, 2] for b in [3, 4] if b != 3))
+
+main()
+""", "[14, 24]\n")
+
+    # A name the enclosing function reads is CAPTURED as a parameter of the
+    # synthesized generator, so the arithmetic in the body still sees a
+    # real typed value (not an erased box).
+    test_generator_stdout("genexp_captures_enclosing_local", """\
+def scaled(k):
+    out = []
+    for v in (x * k for x in [1, 2, 3]):
+        out.append(v)
+    return out
+
+def main():
+    print(scaled(10))
+
+main()
+""", "[10, 20, 30]\n")
+
+    # ... and a MODULE-level name is read directly by the hoisted function
+    # (no parameter, so no type is lost through one).
+    test_generator_stdout("genexp_over_module_level_iterable", """\
+DATA = [5, 6, 7]
+
+def main():
+    print(list(x + 1 for x in DATA))
+
+main()
+""", "[6, 7, 8]\n")
+
+    test_generator_stdout("genexp_string_elements", """\
+def main():
+    print(list(s + "!" for s in ["a", "b"]))
+
+main()
+""", "['a!', 'b!']\n")
+
+    # The unparenthesized sole-argument form (`sum(x for x in ...)`), whose
+    # argument is a generator: consumes it through the shared
+    # `_materialize_as_list` chokepoint's new MojoGenerator* case, which
+    # drains it via its own resume/value/destroy API.
+    test_generator_stdout("genexp_passed_to_sum_builtin", """\
+def main():
+    print(sum(x * 2 for x in [1, 2, 3]))
+
+main()
+""", "12\n")
+
+    # `any`/`all`/`max` route through the same chokepoint. (Printed via
+    # int(...) because this path's `print` renders a bool as 1/0 — the same
+    # for a plain list, so what is under test is the genexp being consumed
+    # at all, not bool formatting.)
+    test_generator_stdout("genexp_passed_to_any_all_max", """\
+def main():
+    print(int(any(x > 2 for x in [1, 2, 3])))
+    print(int(all(x > 0 for x in [1, 2, 3])))
+    print(max(x for x in [3, 1, 2]))
+
+main()
+""", "1\n1\n3\n")
+
+    # A generator expression nested inside another one: the inner one is
+    # desugared first (bottom-up) and the outer hoisted function calls it.
+    # The outer's ELEMENT must be a scalar — a compiled generator's value
+    # slot carries scalars only, so a generator that yields a container
+    # (including a nested genexp's list) is a pre-existing limitation of
+    # the generator value model, not of this desugaring.
+    test_generator_stdout("genexp_nested_inside_genexp", """\
+def main():
+    print(list(sum(y for y in range(x)) for x in [2, 3]))
+
+main()
+""", "[1, 3]\n")
+
+    # ── The generator protocol: send() ───────────────────────────────────
+    # `g.send(v)` resumes the generator, handing it `v` as the value of the
+    # `yield` it is suspended on. Before this it was read as a FIELD access
+    # on the generator object and emitted a call to an undefined
+    # `_MojoGenerator_send` symbol, so any use of it failed to link.
+
+    test_generator_stdout("generator_send_resumes_with_value", """\
+def echo():
+    x = yield 1
+    yield x * 2
+
+def main():
+    g = echo()
+    print(next(g))
+    print(g.send(21))
+
+main()
+""", "1\n42\n")
+
+    # send() into a string-valued (`value_kind` 'p') generator.
+    test_generator_stdout("generator_send_string_value", """\
+def gen():
+    who = yield "ready"
+    yield "hello " + who
+
+def main():
+    g = gen()
+    print(next(g))
+    print(g.send("world"))
+
+main()
+""", "ready\nhello world\n")
+
+    # ... and into a double-valued ('d') one, whose value slot carries the
+    # raw 64 bits (bit-cast, exactly like a yielded double).
+    test_generator_stdout("generator_send_double_value", """\
+def gen():
+    got = yield 1.5
+    yield got * 2.0
+
+def main():
+    g = gen()
+    print(next(g))
+    print(g.send(3.0))
+
+main()
+""", "1.5\n6.0\n")
+
+    # A bare `next(g)` statement — the value-discarding form. The
+    # statement-level dispatch skipped the generator `next` entirely and
+    # emitted a call to a `next` function that exists nowhere.
+    test_generator_stdout("generator_bare_next_statement", """\
+def gen():
+    yield 1
+    yield 2
+
+def main():
+    g = gen()
+    next(g)
+    next(g)
+    try:
+        next(g)
+        print("no stop")
+    except StopIteration:
+        print("stopped")
+
+main()
+""", "stopped\n")
+
+    # .throw()/.close() inject an exception INTO the suspended body, which
+    # the stack-switch coroutine lowering cannot yet express (a propagating
+    # .throw() escapes the caller's `except`; .close() skips the body's
+    # `finally` cleanup). Refused at compile time, honestly.
+    test_generator_refused("generator_throw_refused_honestly", """\
+def gen():
+    try:
+        yield 1
+    except ValueError:
+        yield 99
+
+def main():
+    g = gen()
+    print(next(g))
+    print(g.throw(ValueError("x")))
+
+main()
+""", "not supported by the compiled path yet")
+
+    test_generator_refused("generator_close_refused_honestly", """\
+def gen():
+    try:
+        yield 1
+    finally:
+        print("cleanup")
+
+def main():
+    g = gen()
+    print(next(g))
+    g.close()
+
+main()
+""", "not supported by the compiled path yet")
+
+    # ── Standard consumers of a generator ────────────────────────────────
+    # `sorted()` / `zip()` used to hand their runtime helpers the generator
+    # handle itself (every one of those helpers walks a MojoList), which
+    # read a coroutine object as a list header — a hard crash. Both now go
+    # through the shared `_materialize_as_list` chokepoint, and `zip`'s
+    # result is a real MojoList* of pair-lists rather than an opaque void*.
+
+    # (No `key=` here: the compiled `sorted` ignores a key function for
+    # EVERY input type, lists included — a pre-existing, non-generator gap.
+    # This test is about the generator being consumable at all.)
+    test_generator_stdout("sorted_over_generator", """\
+def nums():
+    yield 3
+    yield 1
+    yield 2
+
+def main():
+    print(sorted(nums()))
+
+main()
+""", "[1, 2, 3]\n")
+
+    test_generator_stdout("sorted_generator_expression", """\
+def main():
+    print(sorted(x * 2 for x in [3, 1, 2]))
+
+main()
+""", "[2, 4, 6]\n")
+
+
+    test_generator_stdout("zip_over_generator_for_loop", """\
+def left():
+    yield 1
+    yield 2
+
+def main():
+    for x, y in zip(left(), [3, 4]):
+        print(x, y)
+
+main()
+""", "1 3\n2 4\n")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

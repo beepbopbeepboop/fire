@@ -32,11 +32,28 @@ def compile_mojo_to_gimple_exe(mojo_src: str) -> str:
     try:
         # Compile GIMPLE C to executable using gcc -fgimple
         runtime_dir = os.path.join(HERE, 'runtime')
+        sources = [c_file, os.path.join(runtime_dir, 'fire_runtime.c')]
+        # A3 stack-switch coroutine runtime (doc/COROUTINE.html): the
+        # generated C calls __mgco_* / __mojo_gen_* whenever gimple_gen_coro
+        # lowered a generator — which now includes every compiled generator
+        # EXPRESSION, since fire_compiler.desugar_genexps rewrites those
+        # into real generator functions. fire.py's own build_executable
+        # decides this with the identical textual check on the generated C
+        # (see its `if '__mgco_' in c_code ...` block); mirror it here so
+        # this runner can execute generator programs at all, instead of
+        # failing to link with undefined __mojo_gen_new_* symbols.
+        if '__mgco_' in c_code or '__mojo_coro_yield_i' in c_code:
+            import platform as _plat
+            _arch_src = ('fire_coro_ctx_aarch64.S'
+                         if _plat.machine().lower() in ('arm64', 'aarch64')
+                         else 'fire_coro_ctx_generic.c')
+            for _cs in ('fire_coro_gen.c', 'fire_coro.c', 'fire_async_sched.c',
+                        _arch_src):
+                sources.append(os.path.join(runtime_dir, _cs))
         result = subprocess.run(
             [find_gcc(), '-fgimple',
              f'-I{runtime_dir}',
-             '-o', exe_file, c_file,
-             os.path.join(runtime_dir, 'fire_runtime.c')],
+             '-o', exe_file, *sources],
             capture_output=True,
             text=True,
             timeout=30
@@ -391,6 +408,33 @@ def g(a, b):
 y = g("a", "b")
 print(f"result: {y}")
 """, "result: ab\n")
+
+    # 15b. Mojo's CAPITALIZED type constructors are the same operations as
+    # the lowercase builtins (and the interpreter already treats them that
+    # way). `String(i)` used to fall through to the generic call path and be
+    # emitted as a bare C cast of the argument, so `"item" + String(i)`
+    # concatenated the integer's raw bits as a pointer — a silent wrong
+    # answer (and a crash for a real pointer value), invisible to a
+    # compile-only or exit-code check.
+    test_gimple_stdout("gimple_capitalized_String_constructor", """\
+print("item" + String(7))
+print(String(1.5))
+""", "item7\n1.5\n")
+
+    test_gimple_stdout("gimple_capitalized_Int_and_Bool_constructors", """\
+print(Int("42") + 1)
+print(int(Bool(1)))
+""", "43\n1\n")
+
+    # 15c. ... and a module's OWN `def String(...)` still wins over the
+    # builtin alias (the same shadowing guarantee `str`/`enumerate`/
+    # `hasattr` already have).
+    test_gimple_stdout("gimple_capitalized_constructor_shadowing", """\
+def String(v):
+    return "shadowed"
+
+print(String(7))
+""", "shadowed\n")
 
     # 16. Same two-param concat shape, but called DIRECTLY inline inside the
     # f-string's `{...}` interpolation — no intermediate variable at all.
@@ -1029,9 +1073,11 @@ fn main():
 """, "0 5 6\n")
 
     # Generator expression bound to a local, then consumed exactly once by
-    # a forward iteration -> materialised as a list (see
-    # _seed_genexp_list_narrowing). bugs/COMPILE_FAIL_zipfile___init__.md
-    # blocker 3.
+    # a forward iteration. It is a REAL lazy generator now
+    # (fire_compiler.desugar_genexps rewrites it into a call to a
+    # synthesized module-level generator function), so this also pins the
+    # value-typing of what flows through it.
+    # bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
     test_gimple_stdout("gimple_genexp_local_sum_once", """\
 fn main():
     g = (x * 2 for x in [1, 2, 3])
@@ -1058,15 +1104,19 @@ fn main():
     print(clean("a. /b .// c", "/"))
 """, "a/b/ c\n")
 
-    # Genexp local consumed TWICE: narrowing must NOT fire; the existing
-    # materialise-unconditionally behaviour still applies (both reads see
-    # the same list), never a silent-wrong lazy/empty second pass.
+    # A genexp local consumed TWICE. It used to be an eagerly materialized
+    # list, so the second read saw the same values again (and the consumer
+    # paths destroyed the generator handle after the first pass — a
+    # use-after-free once genexps became real lazy generators). Generator
+    # expressions are now REAL generators (fire_compiler.desugar_genexps),
+    # so this asserts CPython's actual semantics: the first pass drains it,
+    # the second sees an exhausted generator and sums nothing.
     test_gimple_stdout("gimple_genexp_local_consumed_twice", """\
-fn main():
+def main():
     g = (x * 2 for x in [1, 2, 3])
     print(sum(x for x in g))
     print(sum(x for x in g))
-""", "12\n12\n")
+""", "12\n0\n")
 
     # os.path.splitdrive / splitroot — POSIX (see
     # bugs/COMPILE_FAIL_zipfile___init__.md). splitdrive is always

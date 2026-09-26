@@ -1452,6 +1452,499 @@ def _detect_generator(body: list):
     return True, frozenset(out_ids)
 
 
+# ─── Generator expressions: one shared lowering, two front ends ────────────
+#
+# A parenthesized generator expression (`(x * 2 for x in xs if x > 1)`) is
+# represented by the parser as a `Comprehension` with kind == 'generator' —
+# structurally identical to a list comprehension apart from that kind tag.
+# `genexp_body` below is the SINGLE definition of what such an expression
+# means as statements: the nested `for`/`if` chain of its `generators`,
+# innermost one a single `yield` of the element expression. Both front ends
+# build exactly that, and neither invents its own idea of the semantics:
+#
+# - The interpreter (myinterpreter.py `_generator_expression`) hands the
+#   statement list straight to the same `MojoGeneratorObject` a real `def`
+#   generator function uses, so it gets real laziness, `.send()`/`.close()`,
+#   and correct closure capture over the enclosing function's live scope for
+#   free.
+# - The compiled path (`desugar_genexps` below) hoists the same statement
+#   list into a synthesized module-level generator FUNCTION and replaces the
+#   expression with a call to it, which is a shape the generator codegen
+#   already supports natively.
+#
+# The one semantic detail the parameter-passing strategy buys for free:
+# real Python evaluates a generator expression's OUTERMOST iterable eagerly,
+# at construction time. The desugared call site's own argument evaluation
+# does exactly that, so the outermost iterable stays eager without any
+# statement-level bookkeeping at the call site.
+
+# Names the genexp desugar must never treat as a captured local: they are
+# bound by the runtime in every scope, so passing one as an argument would
+# mean passing a builtin/constant as a value (a shape the compiled path
+# cannot call).
+_BUILTIN_NAMES = frozenset({
+    'None', 'True', 'False', 'len', 'print', 'range', 'str', 'int', 'float',
+    'bool', 'list', 'dict', 'set', 'tuple', 'enumerate', 'zip', 'sum', 'min',
+    'max', 'any', 'all', 'sorted', 'reversed', 'abs', 'map', 'filter',
+    'isinstance', 'hasattr', 'getattr', 'setattr', 'type', 'open', 'input',
+    'self', 'super',
+})
+
+
+# Calls whose result is a fresh, side-effect-free iterable — the ones the
+# compiled genexp desugar may inline into a hoisted generator function
+# (see `_inline_safe_outer_iterable`).
+_PURE_ITER_CALLS = frozenset({
+    'range', 'enumerate', 'zip', 'reversed', 'sorted',
+})
+
+
+def _inline_safe_outer_iterable(node, module_names: set, rebound_module: set) -> bool:
+    """True iff the compiled genexp desugar may place this outermost
+    iterable expression INSIDE the synthesized generator function instead
+    of passing it in.
+
+    Inlining is what gives the compiled body a real, inferred iterable (see
+    `_GenexpDesugarer`), at the cost of evaluating it on the generator's
+    first resume rather than at construction. That is unobservable exactly
+    when re-evaluating it later cannot differ from evaluating it now:
+
+    - a literal container/sequence (nothing to defer at all),
+    - a MODULE-LEVEL name that is never rebound: the hoisted function reads
+      the same global directly, with no parameter to lose the type through.
+      A local or parameter name is NOT safe this way — naming it in the
+      hoisted body would just turn it into an untyped parameter of that
+      function, the very shape inlining exists to avoid,
+    - a call to one of `_PURE_ITER_CALLS`, which builds a fresh iterable
+      from arguments that are themselves re-evaluated identically.
+
+    Anything else (an arbitrary call, an attribute, a subscript) could
+    observe or produce something different on the second evaluation, so it
+    is left alone."""
+    if isinstance(node, (ListExpr, TupleExpr, DictExpr, SetExpr,
+                         StringLiteral, TstringLiteral)):
+        return True
+    if isinstance(node, IdentExpr):
+        return node.name in module_names and node.name not in rebound_module
+    if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
+        return node.func.name in _PURE_ITER_CALLS
+    return False
+
+
+def genexp_body(expr, outer_iterable) -> list:
+    """Statement list equivalent to the generator expression `expr` (a
+    `Comprehension` with kind == 'generator'): its `generators` clauses as
+    nested `for` loops, each clause's `if` conditions as nested `if`s inside
+    that clause's own loop body (so a condition is tested after its target
+    is bound, per item, exactly where Python evaluates it), and a single
+    `yield` of the element expression at the center.
+
+    `outer_iterable` is the expression node the OUTERMOST loop iterates —
+    the interpreter passes an `IdentExpr` naming the already-evaluated
+    iterable (evaluated eagerly at construction time, as real Python does;
+    see the note above), while the compiled path passes the outermost
+    iterable expression itself (see `desugar_genexps`)."""
+    gens = expr.generators
+    body = [ExprStmt(value=YieldExpr(value=expr.element,
+                                     line=expr.line, col=expr.col),
+                     line=expr.line, col=expr.col)]
+    i = len(gens) - 1
+    while i >= 0:
+        gen = gens[i]
+        inner = body
+        for cond in gen.conditions:
+            inner = [IfStmt(condition=cond, then_body=inner, elifs=[],
+                            else_body=None, line=gen.line, col=gen.col)]
+        iterable = gen.iterable
+        if i == 0:
+            iterable = outer_iterable
+        body = [ForStmt(target=gen.target, iterable=iterable, body=inner,
+                        else_body=None, is_async=False,
+                        line=gen.line, col=gen.col)]
+        i = i - 1
+    return body
+
+
+def _target_names(target, out: set):
+    """Collect the names a binding target introduces. `target` is a plain
+    string for comprehension/`for` targets — possibly comma-joined and
+    possibly starred (`a, *rest`) — or an expression node (an ordinary
+    assignment target)."""
+    if isinstance(target, str):
+        name = target.strip()
+        if name.startswith('(') and name.endswith(')'):
+            name = name[1:-1].strip()
+        if ',' in name:
+            for part in name.split(','):
+                _target_names(part, out)
+            return
+        if name.startswith('*'):
+            name = name[1:].strip()
+        if name and not name.startswith('.'):
+            out.add(name)
+        return
+    if isinstance(target, IdentExpr):
+        out.add(target.name)
+    elif isinstance(target, (TupleExpr, ListExpr)):
+        for el in target.elements:
+            _target_names(el, out)
+    elif isinstance(target, UnaryOp) and target.op == '*':
+        _target_names(target.operand, out)
+
+
+def _collect_assigned_names(node, out: set, stop_at_functions: bool):
+    """Names BOUND anywhere under `node` (assignments, declarations,
+    augmented assignments, `for` targets, `global` declarations). Used to
+    decide whether a generator expression captures a name that is rebound
+    later in its enclosing function — the one capture shape a
+    pass-by-value argument cannot model (real Python's generator expression
+    closes over a CELL, so a rebind is visible to later iterations).
+
+    `stop_at_functions` keeps the walk out of nested `def`/`lambda` bodies
+    (a caller asking about ONE function's own scope), or descends through
+    them (a caller asking about the whole module)."""
+    if node is None:
+        return
+    if isinstance(node, list):
+        for item in node:
+            _collect_assigned_names(item, out, stop_at_functions)
+        return
+    if stop_at_functions and isinstance(node, (FunctionDef, LambdaExpr)):
+        return
+    if isinstance(node, (AssignStmt, AugAssignStmt, ForStmt)):
+        _target_names(node.target, out)
+    elif isinstance(node, VarDecl):
+        _target_names(node.name, out)
+    elif isinstance(node, MultiAssignStmt):
+        for t in node.targets:
+            _target_names(t, out)
+    elif isinstance(node, GlobalStmt):
+        for n in node.names:
+            out.add(n)
+    if isinstance(node, Comprehension):
+        for gen in node.generators:
+            _target_names(gen.target, out)
+    if dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            _collect_assigned_names(getattr(node, f.name), out, stop_at_functions)
+
+
+def _collect_free_names(node, bound: set, out: list):
+    """Names `node` READS, in first-appearance (source) order, excluding
+    anything in `bound` (the generator expression's own loop targets) and
+    excluding the attribute half of `obj.attr` (only `obj` is a name)."""
+    if node is None:
+        return
+    if isinstance(node, IdentExpr):
+        if node.name not in bound and node.name not in out:
+            out.append(node.name)
+        return
+    if isinstance(node, MemberExpr):
+        _collect_free_names(node.obj, bound, out)
+        return
+    if isinstance(node, list):
+        for item in node:
+            _collect_free_names(item, bound, out)
+        return
+    if isinstance(node, Comprehension):
+        # A nested generator expression has its own scope and its own
+        # targets: recurse so its targets count as bound HERE too.
+        nested_bound = set(bound)
+        for gen in node.generators:
+            _target_names(gen.target, nested_bound)
+        if node.kind == 'dict':
+            _collect_free_names(node.element, nested_bound, out)
+            _collect_free_names(node.key, nested_bound, out)
+        else:
+            _collect_free_names(node.element, nested_bound, out)
+        for gen in node.generators:
+            _collect_free_names(gen.iterable, nested_bound, out)
+            for cond in gen.conditions:
+                _collect_free_names(cond, nested_bound, out)
+        return
+    if dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            if f.name in ('target', 'targets', 'name'):
+                continue
+            _collect_free_names(getattr(node, f.name), bound, out)
+
+
+class _GenexpDesugarer:
+    """Rewrites every `Comprehension(kind='generator')` in a parsed module
+    into a call to a synthesized module-level generator function (see
+    `genexp_body`), returning the module with those definitions inserted at
+    the front — before any call site can run, since real Python executes
+    top-level statements in order.
+
+    The synthesized function INLINES the outermost iterable expression
+    rather than taking it as a parameter. That is what makes the compiled
+    lowering correct: the generator body's own `for` then sees the very
+    expression the program wrote, so the compiler's regular container
+    inference types the loop variable (and everything computed from it)
+    exactly as it would in a hand-written generator — a value smuggled in
+    through an untyped parameter instead erases to a boxed `int64_t`, and
+    the loop over it falls back to a runtime-tag guess whose ARITHMETIC is
+    then emitted for the guessed branch's type (a list of ints silently
+    becoming `char *` string repetition). The cost is that the outermost
+    iterable is evaluated on the generator's first resume rather than at
+    construction, which is why `_inline_safe_outer_iterable` restricts it to
+    expressions where that is unobservable.
+
+    Names the expression reads that are neither module-level names nor
+    builtins are CAPTURED: passed as extra arguments at the call site and
+    taken as parameters by the synthesized function, so the hoisted
+    function never needs a closure. A captured name REBOUND anywhere in the
+    enclosing function is left alone (the node is not rewritten): real
+    Python's generator expression closes over a mutable cell, so such a
+    capture is genuinely observable (`g = (x + n for x in xs); n = 5` sees
+    the new `n`), and passing it by value would silently compute something
+    else. `self` is left alone for the same reason — a method's receiver is
+    not safely passable as a value."""
+
+    def __init__(self, module_names: set, rebound_module: set):
+        self.module_names = module_names
+        self.rebound_module = rebound_module
+        self.hoisted: list = []
+        self.counter = 0
+        self._assigned_cache: dict = {}
+
+    def _unique_name(self) -> str:
+        while True:
+            name = '__genexp_' + str(self.counter)
+            self.counter = self.counter + 1
+            if name not in self.module_names:
+                self.module_names.add(name)
+                return name
+
+    def _assigned_in(self, fn_body):
+        """Names bound anywhere in an enclosing function's own body, cached
+        per body list."""
+        if fn_body is None:
+            return set()
+        key = id(fn_body)
+        cached = self._assigned_cache.get(key)
+        if cached is None:
+            cached = set()
+            _collect_assigned_names(fn_body, cached, True)
+            self._assigned_cache[key] = cached
+        return cached
+
+    def desugar(self, node, fn_body):
+        """Return the replacement expression for one generator expression,
+        or `node` itself when it must be left alone."""
+        gens = node.generators
+        if not _inline_safe_outer_iterable(gens[0].iterable, self.module_names,
+                                          self.rebound_module):
+            return node
+
+        bound: set = set()
+        for gen in gens:
+            _target_names(gen.target, bound)
+        # Free names of everything the hoisted body will contain EXCEPT the
+        # outermost iterable, which is inlined rather than captured.
+        free: list = []
+        if node.kind == 'dict':
+            _collect_free_names(node.element, bound, free)
+            _collect_free_names(node.key, bound, free)
+        else:
+            _collect_free_names(node.element, bound, free)
+        for i, gen in enumerate(gens):
+            if i > 0:
+                _collect_free_names(gen.iterable, bound, free)
+            for cond in gen.conditions:
+                _collect_free_names(cond, bound, free)
+
+        captures: list = []
+        rebound: list = []
+        assigned = self._assigned_in(fn_body)
+        for name in free:
+            if name in _BUILTIN_NAMES or name in self.module_names:
+                continue
+            if name in assigned:
+                rebound.append(name)
+                continue
+            captures.append(name)
+
+        if rebound or 'self' in free:
+            # Left exactly as the parser produced it — see the class
+            # docstring for why these captures are not approximable.
+            return node
+
+        fn_name = self._unique_name()
+        body = genexp_body(node, gens[0].iterable)
+        is_gen, yield_ids = _detect_generator(body)
+        params = []
+        for cap in captures:
+            params.append((cap, None))
+        self.hoisted.append(FunctionDef(
+            name=fn_name, params=params, return_type=None, body=body,
+            is_generator=is_gen, yield_bearing_node_ids=yield_ids,
+            line=node.line, col=node.col))
+
+        args = []
+        for cap in captures:
+            args.append(IdentExpr(name=cap, line=node.line, col=node.col))
+        return CallExpr(func=IdentExpr(name=fn_name, line=node.line, col=node.col),
+                        args=args, line=node.line, col=node.col)
+
+    # ── generic walk ──────────────────────────────────────────────────────
+
+    def walk_list(self, seq: list, fn_body):
+        i = 0
+        while i < len(seq):
+            item = seq[i]
+            if isinstance(item, Comprehension) and item.kind == 'generator' and item.generators:
+                seq[i] = self.desugar(item, fn_body)
+            elif isinstance(item, list):
+                self.walk_list(item, fn_body)
+            elif dataclasses.is_dataclass(item):
+                self.walk_node(item, fn_body)
+            i = i + 1
+
+    def walk_node(self, node, fn_body):
+        """Recurse into one non-generator-expression dataclass node."""
+        if isinstance(node, FunctionDef):
+            # Parameter defaults and decorators are evaluated in the
+            # ENCLOSING scope, so they keep the outer `fn_body`; the body
+            # itself becomes the new enclosing function scope.
+            for f in dataclasses.fields(node):
+                if f.name == 'body':
+                    continue
+                self.walk_field(node, f.name, fn_body)
+            self.walk_list(node.body, node.body)
+            return
+        if isinstance(node, LambdaExpr):
+            # A lambda's `body` is a single EXPRESSION (not a statement
+            # list, unlike FunctionDef.body), and it is evaluated in the
+            # enclosing scope.
+            self.walk_field(node, 'body', fn_body)
+            return
+        for f in dataclasses.fields(node):
+            self.walk_field(node, f.name, fn_body)
+
+    def walk_field(self, obj, name: str, fn_body):
+        value = getattr(obj, name)
+        if isinstance(value, list):
+            self.walk_list(value, fn_body)
+        elif isinstance(value, Comprehension) and value.kind == 'generator' and value.generators:
+            setattr(obj, name, self.desugar(value, fn_body))
+        elif dataclasses.is_dataclass(value):
+            self.walk_node(value, fn_body)
+
+
+def desugar_genexps(stmts: list) -> list:
+    """Module-level entry point: rewrite every generator expression in
+    `stmts` into a call to a synthesized module-level generator function,
+    returning the same list with those definitions inserted at the front.
+
+    A no-op for a module with no generator expressions, and for any single
+    expression whose capture cannot be modeled (see `_GenexpDesugarer`)."""
+    d = _GenexpDesugarer(_module_level_names(stmts), _rebound_names(stmts))
+    d.walk_list(stmts, None)
+    if d.hoisted:
+        stmts[0:0] = d.hoisted
+    return stmts
+
+
+def _rebound_names(stmts: list) -> set:
+    """Module-level names that are assigned MORE THAN ONCE anywhere in the
+    module, or assigned anywhere from inside a function body.
+
+    Only consulted for the outermost iterable of a generator expression: a
+    module-level name is read directly by the hoisted generator function
+    (no parameter, so no type is lost), but the hoisted function's loop
+    runs on the generator's FIRST RESUME — so the name must be guaranteed
+    to hold the same object then as it did when the expression was written.
+    A single module-level assignment is that initialization (`DATA = [...]`
+    at the top of the file), which is fine; anything beyond it could
+    differ."""
+    counts: dict = {}
+    inside_fn: set = set()
+
+    def _count(node, in_fn):
+        if node is None:
+            return
+        if isinstance(node, list):
+            for item in node:
+                _count(item, in_fn)
+            return
+        if isinstance(node, FunctionDef):
+            in_fn = True
+        if isinstance(node, (AssignStmt, VarDecl, AugAssignStmt,
+                             MultiAssignStmt, ForStmt)):
+            names: set = set()
+            _collect_assigned_names(node, names, True)
+            for n in names:
+                if in_fn:
+                    inside_fn.add(n)
+                else:
+                    counts[n] = counts.get(n, 0) + 1
+        if isinstance(node, Comprehension):
+            return
+        if dataclasses.is_dataclass(node):
+            for f in dataclasses.fields(node):
+                _count(getattr(node, f.name), in_fn)
+
+    _count(stmts, False)
+    out = set(inside_fn)
+    for n, c in counts.items():
+        if c > 1:
+            out.add(n)
+    return out
+
+
+def _module_level_names(stmts: list) -> set:
+    """Every name bound at module level — the ones a generator expression
+    can read WITHOUT capturing them, since a hoisted module-level function
+    can see them directly."""
+    names: set = set()
+    for s in stmts:
+        if isinstance(s, (FunctionDef, StructDef, TraitDef)):
+            names.add(s.name)
+        elif isinstance(s, VarDecl):
+            _target_names(s.name, names)
+        elif isinstance(s, AssignStmt):
+            _target_names(s.target, names)
+        elif isinstance(s, MultiAssignStmt):
+            for t in s.targets:
+                _target_names(t, names)
+        elif isinstance(s, ImportStmt):
+            # `_as_str`: on the self-hosted compiled path these fields are
+            # boxed `char *` handles, not Python strs, so `.split`/truth
+            # tests must go through the file's own narrowing helper (same
+            # convention as every other reader of ImportStmt in the
+            # compiled pipeline).
+            alias = _as_str(s.alias) if s.alias is not None else ''
+            if alias:
+                names.add(alias)
+            else:
+                names.add(_as_str(s.module).split('.')[0])
+            for extra_module, extra_alias in (s.extra or []):
+                extra_alias = _as_str(extra_alias) if extra_alias is not None else ''
+                if extra_alias:
+                    names.add(extra_alias)
+                else:
+                    names.add(_as_str(extra_module).split('.')[0])
+        elif isinstance(s, FromImportStmt):
+            # `names` holds (name, alias|None) TUPLES as the parser builds
+            # them; `name_alias_strs` is the flat "name" / "name as alias"
+            # string list the compiled/self-hosted representation carries
+            # (see FromImportStmt's own field docs — tuples do not survive
+            # self-hosting intact). Accept either shape.
+            for entry in s.names:
+                if isinstance(entry, tuple):
+                    bound = entry[1] or entry[0]
+                else:
+                    bound = str(entry).split(' as ')[-1].strip()
+                if bound:
+                    names.add(bound)
+            for entry in (getattr(s, 'name_alias_strs', None) or []):
+                bound = str(entry).split(' as ')[-1].strip()
+                if bound:
+                    names.add(bound)
+    return names
+
+
 def _as_ident_node(e: object) -> IdentExpr:
     """Static narrowing view of a boxed AST-side expression handle.
 

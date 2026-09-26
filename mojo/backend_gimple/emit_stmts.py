@@ -2791,6 +2791,21 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name == 'len' and len(node.value.args) == 1:
             gen._lower_builtin_len(node.value)
             return
+        # A bare, value-discarding `next(g)` statement — the generator
+        # protocol's "advance one step, ignore the value" spelling (e.g.
+        # draining a generator toward exhaustion, or a `try: next(g)
+        # except StopIteration:` probe). Same shape as the `len` case
+        # above: the value-CONSUMING dispatch lives in `_lower_call`, and
+        # the generic call-building path further down has no notion of the
+        # generator `next` at all — it emitted a call to a `next` function
+        # that exists nowhere, failing at LINK time with "Undefined
+        # symbols: _next" (found via `next(g)` as a statement inside a
+        # try/except StopIteration, where the enclosing `print(next(g))`
+        # form worked and hid the gap).
+        if (raw_name == 'next' and 1 <= len(node.value.args) <= 2
+                and not gen._locally_binds_name('next')):
+            gen._lower_call(node.value)
+            return
         # A bare, value-discarding `list(x)` / `tuple(x)` statement
         # (e.g. `tuple(g())` used to force/drain a generator for its
         # side effects — Lib/test/crashers/gc_inspection.py). Without

@@ -183,6 +183,21 @@ __mojo_gen_set_return(int64_t coro, int64_t v)
     __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, v);
 }
 
+/* The value a `x = yield <double>` receives. The yield shims all return the
+   raw int64_t slot (that is the whole channel), so a DOUBLE-valued
+   generator's body has to reinterpret those bits -- the exact inverse of
+   `__mojo_coro_yield_d`'s bit-cast on the way out, and the same
+   memcpy-unbox idiom `<base>_value` uses for a 'd' generator's yields.
+   Without this, `x = yield 1.5` bound x to the raw bit pattern of whatever
+   was sent and every later use of x computed on garbage. */
+double
+__mojo_gen_send_d(int64_t bits)
+{
+    double d;
+    __builtin_memcpy(&d, &bits, sizeof d);
+    return d;
+}
+
 /* `yield (a, b, ...)` -- box the slots into a MojoList (each stored as its
    raw int64_t bits, exactly the convention _emit_generator_tuple_unpack
    reads back via mojo_list_get_{int,str,...}) and hand the list pointer

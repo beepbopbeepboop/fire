@@ -28,6 +28,13 @@ import fire_compiler as N
 # rather than duplicating the operator table.
 _COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'}
 
+# Name the outermost `for` clause's already-evaluated iterable is bound to
+# inside a generator expression's own scope, so the synthesized outer `for`
+# iterates that name instead of re-evaluating the expression on first resume
+# (see Interpreter._generator_expression). Dunder-ish to stay clear of any
+# name a real program would use.
+_GENEXP_ITER_NAME = '__mojo_genexp_iter__'
+
 
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
@@ -5238,43 +5245,107 @@ class Interpreter:
         return (('a' <= ch and ch <= 'z') or ('A' <= ch and ch <= 'Z')
                 or ('0' <= ch and ch <= '9') or ch == '_')
 
+    def _generator_expression(self, expr):
+        """Build a REAL lazy generator object for a parenthesized generator
+        expression (`(x for x in xs)`), matching CPython: nothing is
+        computed until the object is iterated, an INFINITE source is fine,
+        and each item is produced on demand.
+
+        Implemented by SYNTHESIZING the equivalent statement body with
+        `fire_compiler.genexp_body` — the ONE definition of what a generator
+        expression means as statements, shared with the compiled path's
+        desugar (`fire_compiler.desugar_genexps`), which hoists that same
+        body into a synthesized module-level generator function — and
+        handing it to the SAME `MojoGeneratorObject` a real Mojo `def`
+        generator function uses, so the whole existing generator protocol
+        (`__iter__`/`__next__`/`.send()`/`.throw()`/`.close()`, per-resume
+        `interpreter.scope` swapping, exhaustion) is reused rather than
+        reimplemented.
+
+        Two Python fidelity details this gets right that the old
+        list-materializing version did not:
+        - Only the OUTERMOST iterable is evaluated eagerly, at construction
+          time (so its side effects/errors happen when the expression is
+          written, not on first `next()`); every inner iterable and every
+          condition is evaluated lazily, per item, on the worker thread.
+        - The generator gets its OWN child scope, so the loop variables do
+          not leak into the enclosing scope (a real Python generator
+          expression's variables are scoped to it), while names it READS
+          from the enclosing function stay live through that scope's parent
+          chain — a real closure, which is why this path does not need (and
+          does not do) the compiled path's capture-by-value approximation.
+
+        The synthesized AST uses `N.YieldExpr` — deliberately never this
+        file's own `yield` keyword, since a single literal `yield` in a
+        top-level function body of myinterpreter.py makes gimple_codegen.py
+        treat the WHOLE file as an unsupported user generator and fall back
+        to interpreting it from source (see _ThreadedGenerator's docstring).
+        """
+        scope = Scope(parent=self.scope)
+        # Outermost iterable: evaluated HERE, eagerly, per Python. Its value
+        # is bound in the generator's own scope and the synthesized outer
+        # `for` iterates that name, so it is not evaluated a second time
+        # when the first resume happens.
+        scope.define(_GENEXP_ITER_NAME,
+                     self.eval_expr(expr.generators[0].iterable))
+        return MojoGeneratorObject(
+            self, scope,
+            N.genexp_body(expr,
+                          N.IdentExpr(name=_GENEXP_ITER_NAME,
+                                      line=expr.line, col=expr.col)))
+
     def eval_Comprehension(self, expr):
         """List/set/dict comprehensions and parenthesized generator
         expressions (`expr.kind` in 'list'/'set'/'dict'/'generator').
 
-        Real Python comprehensions get their own scope; this interpreter
-        evaluates them in the *current* scope instead (same simplification
-        execute_ForStmt already makes for a plain `for` loop) — loop
-        variables leak into the enclosing scope, a known minor fidelity
-        gap. A 'generator' expression is likewise returned as a plain list,
-        not a lazy generator — every real consumer seen here (sum(), any(),
-        list(), etc.) accepts any iterable, so the laziness itself is never
-        actually needed.
+        A 'generator' expression is a REAL lazy generator object (see
+        `_generator_expression`), not a materialized list.
+
+        Real Python list/set/dict comprehensions get their own scope; this
+        interpreter evaluates those in the *current* scope instead (same
+        simplification execute_ForStmt already makes for a plain `for`
+        loop) — their loop variables leak into the enclosing scope, a known
+        minor fidelity gap.
 
         For a dict comprehension, fire_compiler.py's parser stores the KEY
         expression in `.element` and the VALUE expression in `.key` (yes,
-        swapped from what the names suggest — see _parse_dict_or_set)."""
-        results = []
+        swapped from what the names suggest — see _parse_dict_or_set).
 
-        def run(generators):
-            if not generators:
-                if expr.kind == 'dict':
-                    k = self.eval_expr(expr.element)
-                    v = self.eval_expr(expr.key)
-                    results.append((k, v))
-                else:
-                    results.append(self.eval_expr(expr.element))
-                return
-            gen = generators[0]
-            rest = generators[1:]
-            for item in self.eval_expr(gen.iterable):
-                self._bind_comprehension_target(gen.target, item)
-                if all(self.eval_expr(cond) for cond in gen.conditions):
-                    run(rest)
+        ONE `return`, through a single `result` variable, deliberately —
+        the same shape (and for the same reason) as `MojoFunction._invoke`
+        above: this file is self-hosted, and its return-type inference is a
+        whole-function unification that cannot cope with several
+        differently-shaped `return` statements in one function. Adding the
+        generator-expression branch as its own early `return` made the
+        unification pick one of {MojoGeneratorObject, MojoSet *, MojoDict *,
+        MojoList *} and then fail coercing the others ("cannot coerce
+        MojoSet * to MojoDict *" when self-hosting myinterpreter.py)."""
+        if expr.kind == 'generator' and expr.generators:
+            result = self._generator_expression(expr)
+        else:
+            results = []
 
-        run(expr.generators)
-        if expr.kind == 'set':
-            return set(results)
-        if expr.kind == 'dict':
-            return dict(results)
-        return results
+            def run(generators):
+                if not generators:
+                    if expr.kind == 'dict':
+                        k = self.eval_expr(expr.element)
+                        v = self.eval_expr(expr.key)
+                        results.append((k, v))
+                    else:
+                        results.append(self.eval_expr(expr.element))
+                    return
+                gen = generators[0]
+                rest = generators[1:]
+                for item in self.eval_expr(gen.iterable):
+                    self._bind_comprehension_target(gen.target, item)
+                    if all(self.eval_expr(cond) for cond in gen.conditions):
+                        run(rest)
+
+            run(expr.generators)
+            if expr.kind == 'set':
+                result = set(results)
+            elif expr.kind == 'dict':
+                result = dict(results)
+            else:
+                result = results
+        return result

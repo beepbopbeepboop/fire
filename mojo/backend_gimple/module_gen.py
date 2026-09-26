@@ -5944,6 +5944,15 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_gen_arg (int64_t, int64_t);',
             'extern double  __mojo_gen_arg_d (int64_t, int64_t);',
             'extern void    __mojo_gen_set_return (int64_t, int64_t);',
+            # The generator protocol as driven from ordinary
+            # (non-coroutine) code: `g.send(v)` resumes the generator with
+            # a payload for the yield it is suspended on (see
+            # _lower_generator_send in emit_calls.py — the per-generator
+            # `<base>_resume` trampoline hardcodes a zero send, so this
+            # path calls the runtime entry both funnel into directly).
+            'extern int64_t __mojo_gen_resume (int64_t, int64_t);',
+            'extern int64_t __mojo_gen_value (int64_t);',
+            'extern double  __mojo_gen_send_d (int64_t);',
             'extern int64_t __mojo_tuple_box_2 (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_3 (int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_4 (int64_t, int64_t, int64_t, int64_t);',
@@ -5970,6 +5979,7 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_gen_retval (int64_t);',
             'extern int64_t __mojo_gen_resume (int64_t, int64_t);',
             'extern int64_t __mojo_gen_value (int64_t);',
+            'extern double  __mojo_gen_send_d (int64_t);',
             'extern void    __mojo_gen_destroy (int64_t);',
             'extern void    __mojo_async_run_gen (int64_t);',
             'extern void    __mojo_async_task_schedule (int64_t);',

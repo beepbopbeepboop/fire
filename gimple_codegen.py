@@ -29,6 +29,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node,
+    desugar_genexps,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -4441,6 +4442,17 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
     stmts = ast_rewriter.rewrite(stmts)
+    # Generator expressions (`(x * 2 for x in xs)`) become REAL lazy
+    # generators here, not the eager list this used to materialize: each
+    # one is rewritten into a call to a synthesized module-level generator
+    # function (fire_compiler.genexp_body builds the statement body both
+    # this and the interpreter use). Must run BEFORE the coroutine
+    # lowering below so those synthesized functions are seen — and lowered
+    # — as ordinary top-level generators like any hand-written one. See
+    # fire_compiler._GenexpDesugarer for the one capture shape
+    # (a name rebound later in the enclosing function, or `self`) it
+    # deliberately leaves alone.
+    stmts = desugar_genexps(stmts)
     # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones

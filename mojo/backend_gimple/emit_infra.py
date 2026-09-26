@@ -1726,6 +1726,68 @@ def _coerce_to_type(gen, src_type: str, dst_type: str, value: str) -> str:
     return result
 
 
+def _generator_to_list(gen, value: str) -> str:
+    """R7 addition to the `_materialize_as_list` chokepoint: drain a
+    `MojoGenerator *` into a fresh `MojoList *`, so every consumer that
+    wants a list view of "any iterable" (`sum()`/`any()`/`all()`/
+    `max()`/`min()`/`sorted()`/...) accepts a generator expression or a
+    generator call exactly as it accepts a list.
+
+    Real Python's `sum(x for x in xs)` consumes the generator lazily and
+    abandons it once exhausted; this is the same computation, materialized.
+    The resume/value/destroy driving is the SAME convention
+    `_compr_generator_loop` and `_gen_for_generator_iter` use (see that
+    function's docstring), driven off the four-symbol per-generator API
+    recorded in `_generator_var_api` when the generator value was built —
+    so no new ABI and no per-call-site symbol knowledge is needed.
+
+    Each value is appended with the accessor matching the generator's own
+    declared `value_ctype`, so a string-valued generator really appends
+    `char *` values rather than boxing the pointer bits as integers.
+    """
+    _iv = _as_str(value)
+    api = gen._generator_var_api.get(_iv)
+    if api is None:
+        # No known API for this handle: refuse rather than cast a
+        # MojoGenerator* to MojoList* and read a list header out of a
+        # coroutine object (the unchecked-coercion crash this branch
+        # replaces).
+        raise RuntimeError(
+            f"cannot materialize a generator as a list: no known generator "
+            f"API for {_iv!r} (pass the generator through a variable, or "
+            f"consume it with a for loop)")
+    base = api['base']
+    vct = api.get('value_ctype') or 'int64_t'
+    res = gen._new_temp('MojoList *')
+    gen._emit(f"  {res} = mojo_list_new ();")
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    more = gen._new_val('_Bool', f"{base}_resume ({_iv})")
+    gen._emit(f"  if ({more}) goto {bb_body}; else goto {bb_after};")
+    gen._emit_label(bb_body)
+    val = gen._new_val(vct, f"{base}_value ({_iv})")
+    if vct in ('char *', 'MojoStr *'):
+        gen._void_call('mojo_list_append_str',
+                       [('MojoList *', res), ('const char *', val)])
+        gen._elem_types[res] = 'char *'
+    elif vct == 'double':
+        gen._void_call('mojo_list_append_double',
+                       [('MojoList *', res), ('double', val)])
+        gen._elem_types[res] = 'double'
+    else:
+        boxed = gen._new_val('int64_t', gen._to_int64(vct, val))
+        gen._void_call('mojo_list_append_int',
+                       [('MojoList *', res), ('int64_t', boxed)])
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+    # No `{base}_destroy` — same reason as `_compr_generator_loop`: draining
+    # a generator does not close it, and the caller may hold the handle
+    # (`sum(g)` must leave `g` a valid, exhausted generator, not a dangling
+    # pointer).
+    return res
+
+
 def _materialize_as_list(gen, src_type: str, value: str) -> str:
     """DESIGN.html R1: the shared "give me a MojoList* view of this value"
     decision, for an operation that accepts any iterable (Python's
@@ -1744,8 +1806,15 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     This exact "materialize dict-keys/set-sorted/else-coerce" shape was
     independently duplicated 5 times (all()/any(), enumerate(),
     str.join(), bytes.join(), shlex.join()) during the same 2026-09-13 R3
-    cast-migration pass that introduced each of them one at a time — this
+    cast-migration pass that introduced each of them one at a time — that
     consolidation is the R1 follow-up DESIGN.html calls for.
+
+    A `MojoGenerator *` (a generator call, including every compiled
+    generator expression — see `fire_compiler.desugar_genexps`) is drained
+    into a list by `_generator_to_list` below, so `sum(x for x in xs)` and
+    friends work: before that case existed, such a value fell through to
+    the generic coercion below and a coroutine object was read as a list
+    header (a hard crash).
 
     DESIGN.html R5 (added same day as a direct follow-on of the R1
     consolidation above): when `src_type` is a genuinely opaque/boxed
@@ -1762,6 +1831,8 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         return _dk
     if src_type == 'MojoSet *':
         return gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
+    if src_type == 'MojoGenerator *':
+        return _generator_to_list(gen, value)
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
         _td = _tagged_dyn_read(gen, value, 'list')
         if _td is not None:
@@ -2595,7 +2666,17 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit_label(bb_post)
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    gen._emit(f"  {base}_destroy ({_iv});")
+    # Deliberately NO `{base}_destroy` here. Consuming a generator does not
+    # CLOSE it, in real Python or here: the handle belongs to whatever holds
+    # it (usually a variable), and this loop may be run again over the same,
+    # now-exhausted generator — `g = (x for x in xs); sum(x for x in g);
+    # sum(x for x in g)` must print the total and then 0, exactly like
+    # CPython. Destroying it here freed the coroutine while `g` still pointed
+    # at it, so that second pass was a use-after-free (a real SIGSEGV, found
+    # by test_gimple_runner.py's `gimple_genexp_local_consumed_twice` once
+    # generator expressions became real generators). An unnamed temporary
+    # (`list(x for x in xs)`) now simply lives until process exit, which is
+    # what CPython's GC does too.
 
 
 def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):

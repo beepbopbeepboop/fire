@@ -739,6 +739,56 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
 
+    # `g.send(v)` — resuming a compiled generator with a value for the
+    # `yield` it is suspended on: the rest of Python's generator protocol
+    # alongside `next(g)` (see _lower_call). Checked FIRST, before any of
+    # the module/struct/pointer receiver dispatch below: a generator value
+    # is a `MojoGenerator *` handle, and without this case `g.send(1)` fell
+    # through to the generic scalar-method stub, which read it as a FIELD
+    # access on that object and emitted a call to an undefined
+    # `_MojoGenerator_send` symbol — a link-time failure, so every
+    # `.send()` in a compiled program failed to build.
+    if func.member == 'send':
+        at, av = gen.lower_expr(func.obj)
+        at = gen._get_actual_type(at, av)
+        if at == 'MojoGenerator *':
+            api = gen._generator_var_api.get(av)
+            if api is None:
+                raise RuntimeError(
+                    f"generator .send() on a value with no known generator "
+                    f"API ({av!r}) — bind the generator to a variable first "
+                    f"(g = gen(); g.send(v))")
+            return ggc._lower_generator_send(gen, node, av, api)
+
+    # `g.throw(Exc)` / `g.close()` — REFUSED, honestly, rather than
+    # compiled into something that quietly misbehaves. Both are the one
+    # shape this backend's coroutine runtime cannot yet express: they
+    # inject an exception INTO a suspended generator body, and the A3
+    # stack-switch body's own try/except/finally does not survive that.
+    # Measured, not assumed: `g.throw(ValueError)` inside a body that
+    # CATCHES it works today, but when the exception instead propagates
+    # out of the generator it lands outside the CALLER's `except` (the
+    # body's exception-frame slice is restored over the caller's live
+    # frame), and `g.close()` on a body with `try: ... finally: cleanup`
+    # runs the body to completion WITHOUT running `cleanup` — silently
+    # skipping exactly the resource release close() exists to perform.
+    # Both need the coroutine-body exception-injection work tracked as the
+    # next generator-protocol item; until then, refusing at compile time
+    # is the honest answer (the alternative this replaced was a link error
+    # for a struct field that does not exist).
+    if func.member in ('throw', 'close'):
+        at, av = gen.lower_expr(func.obj)
+        at = gen._get_actual_type(at, av)
+        if at == 'MojoGenerator *':
+            raise RuntimeError(
+                f"generator .{func.member}() is not supported by the "
+                f"compiled path yet: injecting an exception into a suspended "
+                f"generator body is not expressible in the stack-switch "
+                f"coroutine lowering (a propagating .throw() escapes the "
+                f"caller's except, and .close() skips the body's finally "
+                f"cleanup). Use next(g)/g.send(v), or drive the generator "
+                f"from the interpreter.")
+
     # `UnsafePointer[T].alloc(n)` / `OwnedPointer[T].alloc(n)` etc. — the
     # static heap-allocation constructor, whose receiver is the type
     # subscript `UnsafePointer[T]` (a SubscriptExpr), not a value. Checked
