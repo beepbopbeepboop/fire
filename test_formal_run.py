@@ -36,6 +36,25 @@ RUN_TIMEOUT = 60
 # bind opcodes that fill the GOT slot the stub branches through.
 CASES = [
     ("ret42", "def ret42():\n    return 42\n", 42, None),
+    # Comparisons involving a NEGATIVE value. A bare literal takes its type
+    # from context, and with both operands typeless the comparison came out
+    # unsigned -- so `-3` was 0xFFFF...FD and `-3 < 2` was false. Two places
+    # had to change: `infer_expr` reports a negated literal signed, and a
+    # range's counter is no longer seeded with the (unsigned) default, which
+    # made EVERY range unsigned regardless of its bounds.
+    # The third case guards the other direction: an all-positive comparison
+    # must still be unchanged.
+    ("neg_cmp_true", "def f(n):\n    a = -3\n    if a < 2:\n        return 1\n"
+     "    return 0\n", 1, None),
+    ("neg_cmp_zero", "def f(n):\n    a = -3\n    if a < 0:\n        return 1\n"
+     "    return 0\n", 1, None),
+    ("pos_cmp_still_false", "def f(n):\n    a = 3\n    if a < 2:\n"
+     "        return 1\n    return 0\n", 0, None),
+    # Counted, not summed: the sum is -5, and every expected value in this
+    # suite must fit in a byte (see the retraction in BUG.md).
+    ("range_neg_bounds", "def f(n):\n    s = 0\n    c = 0\n"
+     "    for i in range(-3, 2):\n        s = s + i\n        c = c + 1\n"
+     "    return c\n", 5, None),
     # Spilling, not just register allocation. `_spill_off` is the distance DOWN
     # to a slot, and the LDUR/STUR fast path was passing it as a POSITIVE
     # displacement: `stur x0, [x29, #+0x58]` stores ABOVE the frame pointer,

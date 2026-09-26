@@ -85,6 +85,23 @@ def infer_expr(e, vtypes: dict, call_types: dict = None):
         # A string expression evaluates to its address (pointer-sized).
         return DEFAULT_INT_TYPE
     if isinstance(e, F.UnaryOp):
+        # A negated literal is the one case where "no type yet" is not good
+        # enough. The bare-literal rule below returns None so a literal takes
+        # the type of its context, but a NEGATIVE value cannot be an unsigned
+        # one: with both operands typeless, `common_type` is None,
+        # `cmp_signed(None)` is False, and the comparison was emitted with
+        # unsigned condition codes -- so `if -3 < 2` was false, because -3 is
+        # 0xFFFF...FD as a UInt64. Reporting it signed is what Python and Mojo
+        # mean, and `common_type` treats None as neutral, so the signedness
+        # survives promotion against a typeless literal.
+        #
+        # Narrow on purpose: `0 - 3` is a BinaryOp and stays typeless, and a
+        # negation of a *variable* still recurses, so only a literal negative
+        # changes behaviour. Both the CSET value path and the B.cond branch
+        # path read this one function, so they cannot disagree.
+        if (e.op == "-" and isinstance(e.operand, F.IntLiteral)
+                and e.operand.value != 0):
+            return IntType(64, True)
         return infer_expr(e.operand, vtypes, call_types)
     if isinstance(e, F.BinaryOp):
         return common_type(infer_expr(e.left, vtypes, call_types),
@@ -172,7 +189,17 @@ def function_var_types(fn: F.FunctionDef, call_types: dict = None) -> dict:
                     if _tn not in vtypes:
                         rargs = _range_args(s.iterable)
                         if rargs:
-                            rt = DEFAULT_INT_TYPE
+                            # Seed with None, NOT DEFAULT_INT_TYPE. The seed
+                            # was unsigned, and `common_type` resolves mixed
+                            # signed/unsigned to unsigned, so the counter came
+                            # out unsigned for EVERY range -- `range(-3, 2)`
+                            # emitted an unsigned loop test, compared -3 as
+                            # 0xFFFF...FD, and did not run at all. None is
+                            # neutral in `common_type`, so a range whose
+                            # bounds are all typeless literals still resolves
+                            # to the default exactly as before, and a negative
+                            # bound now makes the counter signed.
+                            rt = None
                             for a in rargs:
                                 rt = common_type(
                                     rt, infer_expr(a, vtypes, call_types))

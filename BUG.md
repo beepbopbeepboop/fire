@@ -723,6 +723,87 @@ Two bugs, both fixed:
     compiled to a loop bound that is the wrong way round: a wrong answer, not
     a slow one.
 
+### FIXED: comparisons involving negative values were unsigned
+
+Was: `range(-3, 2)` returned 0 and `if -3 < 2: return 1` returned 0. Two
+independent causes, both in `formal/types.py`, and both had to be fixed — the
+first alone does not make `range` work.
+
+**1. `infer_expr` reported a negated literal as typeless.** The bare-literal
+rule returns `None` so a literal takes its type from context, and `UnaryOp`
+recurred into the operand — so `UnaryOp('-', IntLiteral(3))` was `None` too.
+With both operands typeless, `common_type` was `None`, `cmp_signed(None)` is
+`False` (`formal/types.py:260`), and the comparison was emitted with the
+*unsigned* condition codes. `-3` is `0xFFFF...FD` as a `UInt64`, so `-3 < 2` is
+false. A negative value cannot be an unsigned one, so `infer_expr` now reports
+`IntType(64, True)` for `UnaryOp('-', IntLiteral(v))` with `v != 0`. Narrow on
+purpose: `0 - 3` is a `BinaryOp` and stays typeless, and negating a *variable*
+still recurses, so only a literal negative changes behaviour.
+
+**2. A range's counter was seeded with the unsigned default.** Even with (1),
+`range(-3, 2)` still did not run:
+
+```python
+rt = DEFAULT_INT_TYPE          # IntType(64, signed=False) -- UNSIGNED
+for a in rargs:
+    rt = common_type(rt, infer_expr(a, ...))
+```
+
+`common_type` resolves mixed signed/unsigned to *unsigned*, so seeding with the
+unsigned default made the counter unsigned for **every** range, whatever the
+bounds said. Seeding with `None`, which `common_type` treats as neutral, fixes
+it and leaves every all-positive range resolving to the default exactly as
+before.
+
+Both the `CSET` value path and the `B.cond` branch path read this one function,
+so they cannot now disagree about signedness — which was the whole reason this
+was left alone while the `B.cond` work was in flight.
+
+Verified: arm64 formal 40/3/0 and x86-64 43/0/0 both unchanged (this is a shared
+file), runtime 33/33, emission 5/5, imports 11/11, dylib 9/9. Four cases added,
+including a positive comparison to guard the other direction and a counted
+`range(-3, 2)` — counted rather than summed, because the sum is `-5` and every
+expected value in this suite has to fit in a byte.
+
+## `for i in range(a, b)` never terminated: the loop had no exit test at all
+
+Found while wiring `B.cond` into the for-range test. This is the worst-shaped
+bug in this file, because it is not a wrong answer — it is a hang, and it was
+sitting in a code path the test suite never entered.
+
+The for-range lowering called `_emit_cmp(...)` at the top of the loop and then
+**never branched on the CSET it left behind**. The emitted loop was:
+
+```
+loop:  cmp x0, x1          ; i vs end
+       cset x0, lo         ; x0 = (i < end)   <- and then?
+       add x0, x20, #0x0   ; x0 is overwritten here
+       ...body...
+       b loop
+```
+
+`cset` is flags-to-register; nothing consumed the register. There is no `cbz`
+anywhere in the loop and no other exit, so control reaches the end of the
+function's range only by running out of stack.
+
+Every `for i in range(...)` therefore hung. It survived because comprehensions
+use their own loop emitter, and the range cases in `test_formal_run.py` went
+through comprehensions rather than a `for` statement.
+
+Two bugs, both fixed:
+
+  * **The missing exit test.** Now `CMP` + `B.cond` on the flags, the same
+    shape as the `while` condition. Seven cases in `test_formal_run.py`
+    (ascending, empty, descending, stride 2, single-argument, nested, `break`).
+
+  * **Descending ranges exited immediately.** The test was hard-coded
+    `i < end`, so `range(4, 0, -1)` — whose *counter* already advanced
+    correctly, via `SUB` — compared `4 < 0` and did nothing. The comparison now
+    follows the step's direction. A step whose sign is only known at runtime
+    (`range(a, b, -step)`) is now **refused with a clear error** rather than
+    compiled to a loop bound that is the wrong way round: a wrong answer, not
+    a slow one.
+
 ### Still open: comparisons involving negative values are unsigned
 
 Found in the same pass, and NOT fixed, because the root cause is a type bug
