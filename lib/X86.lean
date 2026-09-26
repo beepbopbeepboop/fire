@@ -907,6 +907,21 @@ theorem x86_step_mov_rbp_rsp (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, h_rip, h_b0, h_b1, h_b2]
 
+/-- `add rsp, imm32` (REX.W 81 /0 id, ModRM c4).  The counterpart of
+    `x86_step_sub_rsp_imm32` below, and the reason it exists: EVERY `alu_ri32:add`
+    the backend emits targets rsp, so wiring that form to the rax-only
+    `x86_step_add_rax_imm32` matches none of them.  A lemma named for one
+    register sitting under a general form name is the same failure as the
+    `mov_rm64_r64` -> `mov_rbp_rsp` one, and the only symptom is a proof that
+    does not apply. -/
+theorem x86_step_add_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (imm : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48)
+    (h_b1 : code (m + 1) = 0x81) (h_b2 : code (m + 2) = 0xc4)
+    (h_imm : read_i32_le code (m + 3) = imm) :
+    x86_step s code = some { x86_flags_add s s.rsp (UInt64.ofInt imm) (s.rsp + UInt64.ofInt imm) with rsp := s.rsp + UInt64.ofInt imm, rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_flags_add, h_rip, h_b0, h_b1, h_b2, h_imm]
+
 /-- `sub rsp, imm32` — the frame allocation (REX.W 81 /5 id, ModRM 0xec). -/
 theorem x86_step_sub_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
     (imm : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48)
@@ -986,8 +1001,7 @@ theorem x86_step_setcc_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     (h_rip : s.rip = m) (h_b0 : code m = 0x0f) (h_b1 : code (m + 1) = op2)
     (h_b2 : code (m + 2) = modrm) (h_cc : op2.toNat - 0x90 = cc)
     (h_lo : (0x90 : UInt8) ≤ op2) (h_hi : op2 ≤ 0x9f)
-    (h_njcc_lo : ¬ ((0x80 : UInt8) ≤ op2))
-    (h_njcc_hi : ¬ (op2 ≤ 0x8f))
+    (h_njcc : ¬ (op2 ≤ 0x8f))
     (h_nzx : ¬ (op2 = 0xb6 ∨ op2 = 0xb7 ∨ op2 = 0xbe ∨ op2 = 0xbf))
     (h_notrex : x86_is_rex 0x0f = false) (h_mod : modrm.toNat >>> 6 = 3)
     (h_rm : modrm.toNat &&& 7 = rmv) (h_rb : x86_rex_b 0 = 0) :
@@ -995,7 +1009,7 @@ theorem x86_step_setcc_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
       { x86_set_reg s rmv (if x86_cond cc s then 1 else 0) with rip := m + 3 } := by
   simp [x86_step, x86_step_plain, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_rex_b,
-        h_rip, h_b0, h_b1, h_b2, h_cc, h_lo, h_hi, h_njcc_lo, h_njcc_hi,
+        h_rip, h_b0, h_b1, h_b2, h_cc, h_lo, h_hi, h_njcc,
         h_nzx, h_notrex, h_mod, h_rm, h_rb]
   -- The 1-byte write zero-extends, and the two values `setcc` ever produces
   -- have `[simp]` facts for exactly that.  Splitting on the condition is what
@@ -1093,25 +1107,35 @@ theorem x86_step_mov_rm64_r64_reg (s : X86State) (code : Nat → UInt8)
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
-/-- `mov r64, qword [rbp + disp8]` (REX.W 8B /r, mod=1, rm=5: base rbp, an
-    8-bit displacement), general over the destination register.  The other
-    half of the two shapes `mov r64, r/m64` actually has in this corpus: every
-    spilled-argument access is one of these or the `[rsp]` below, and there is
-    no third. -/
+/-! `mov r64, qword [rbp + disp8]` (REX.W 8B /r, mod=1, rm=5), the other
+    half of the two shapes `mov r64, r/m64` has in this corpus: every
+    spilled-argument access is one of these or the `[rsp]` one, and there is no
+    third.
+
+    The destination register is a CONCRETE argument, with
+    `reg + x86_rex_r rex = dst` beside it, and that is what makes this go
+    through.  Stated with the symbolic index it does not: the destination is
+    `x86_set_reg s (reg + x86_rex_r rex) ...`, `x86_set_reg` is a `match` on
+    its index, and `simp` will not reduce a match on a non-literal -- so the
+    goal is left as two 20-field structures that differ in a `match`, which
+    shows the whole field list and says nothing about what is wrong.  The STORE
+    below has the same shape and does normalise, because there the index only
+    ever appears inside `x86_get_reg`.  Hence the asymmetry, and hence the extra
+    argument: the caller reads the destination out of the encoding. -/
 theorem x86_step_mov_rm64_mem_disp8_rbp (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+    (m : Nat) (rex modrm : UInt8) (reg dst : Nat) (disp : Int)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rr : x86_rex_r rex = 0) :
-    x86_step s code = some { x86_set_reg s (reg + x86_rex_r rex) (mem_read_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat 8) with
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat 8) with
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
-        h_rr]
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_dst,
+        h_dst_lt]
 
 /-! The two store-direction `mov` shapes (opcode 89), mirroring the load ones
     above.  These are the STORE direction, and the field sense flips: the
@@ -1142,14 +1166,32 @@ theorem x86_step_mov_mem_disp8_r64 (s : X86State) (code : Nat → UInt8)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rr : x86_rex_r rex = 0) :
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg]
+
+/-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM 04, SIB 24: scale 0, index
+    none, base rsp) -- the store counterpart of `mov rax, [rsp]` below, and
+    general over the source register.  This is the shape a computed value takes
+    on its way to the stack frame. -/
+theorem x86_step_mov_mem_sib_rsp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (modrm : UInt8) (reg : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x24)
+    (h_rex : x86_is_rex 0x48 = true) (h_w : x86_rex_w 0x48 = true)
+    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b 0x48 = 0) (h_rr : x86_rex_r 0x48 = 0) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem s.rsp.toNat (x86_get_reg s (reg + x86_rex_r 0x48)) 8,
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
         h_rr]
 
 /-- `mov rax, qword [rsp + 0]` (REX.W 8B /r, ModRM 04: mod=0 rm=4, SIB 24:

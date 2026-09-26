@@ -36,6 +36,27 @@ RUN_TIMEOUT = 60
 # bind opcodes that fill the GOT slot the stub branches through.
 CASES = [
     ("ret42", "def ret42():\n    return 42\n", 42, None),
+    # Spilling, not just register allocation. `_spill_off` is the distance DOWN
+    # to a slot, and the LDUR/STUR fast path was passing it as a POSITIVE
+    # displacement: `stur x0, [x29, #+0x58]` stores ABOVE the frame pointer,
+    # inside the CALLER's frame. Every function with more locals than the ten
+    # callee-saved registers silently corrupted its caller and returned a
+    # wrong number -- 15 locals summed to 237 instead of 120.
+    ("spills_15_locals",
+     "def f(n):\n" + "".join(f"    v{i} = {i + 1}\n" for i in range(15))
+     + "    return " + " + ".join(f"v{i}" for i in range(15)) + "\n",
+     120, None),
+    ("spills_22_locals",
+     "def f(n):\n" + "".join(f"    v{i} = {i + 1}\n" for i in range(22))
+     + "    return " + " + ".join(f"v{i}" for i in range(22)) + "\n",
+     253, None),
+    # One spilled variable on its own: the smallest case that reaches the
+    # spill path at all, so a regression in the offset sign cannot hide behind
+    # a function that never spills.
+    ("spills_one_local",
+     "def f(n):\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    e = 5\n"
+     "    g = 6\n    h = 7\n    i = 8\n    j = 9\n    k = 10\n    l = 11\n"
+     "    return l + k + j\n", 30, None),
     # for-range loops. The exit test is the whole loop: before it, the
     # lowering computed a CSET and never branched on it, so EVERY one of these
     # hung rather than returning a wrong number -- which is why they need to be

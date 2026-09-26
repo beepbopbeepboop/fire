@@ -641,14 +641,36 @@ The proof side is deliberately unfinished — the generator is to be thinned and
 closed with `sorry` once the instruction work is done, and the `sorry`s
 attacked after that.
 
-**A reserved scratch-base register would take the frame base from two
-instructions to one**, worth ~5% on a container-heavy function
-(225 -> ~214 on the benchmark above). It is not worth doing: the register has
-to come out of the callee-saved pool, so one fewer local lives in a register
-and one more spills, and the saving is only realised if the extra spill does
-not cost more than the base computation it replaced. It also changes the
-prologue, which the proof generator models. That trade needs measurement
-across a corpus, not one benchmark.
+**A reserved scratch-base register: measured, and the answer is no.** The
+claim here used to be that it "needs measurement across a corpus, not one
+benchmark". Measured:
+
+| corpus | instructions | wide-offset path | share |
+|---|---|---|---|
+| 43 `formal/examples` | 1386 | 0 | 0.0% |
+| 30 locals (21 spilled) | 83 | 0 | 0.0% |
+| 45 locals (36 spilled) | 141 | 28 | 19.9% |
+| 60 locals (51 spilled) | 201 | 58 | 28.9% |
+| 80 locals (71 spilled) | 281 | 98 | 34.9% |
+
+The wide-offset path — the only thing a base register would eliminate — is
+`mov/add X17, X29` + `sub X17, X17, #off` before a load/store, and it is
+reached only when `_spill_off` exceeds 256, i.e. once a function has roughly
+**36 simultaneously-live spilled locals**. Up to that point the `ldur`/`stur`
+fast path (signed imm9, -256 reachable) already covers every slot in one
+instruction, and a base register buys exactly nothing: 0 of 1386 instructions
+across the whole example corpus.
+
+Against that, the cost is universal. The register has to come out of the ten
+callee-saved registers, so a function gets 9 register locals instead of 10 and
+one more value spills; `_npairs` goes 5 -> 6, adding an `stp` and an `ldp` to
+*every* prologue and epilogue. So the trade is: +2 instructions everywhere,
+plus a slightly higher chance of spilling, in exchange for 20-35% of a
+function that keeps 36+ values live simultaneously.
+
+Not worth doing. The regime that would benefit is rare enough that the
+universal cost dominates, and the original objection on this page was right
+for a better reason than the one it gave.
 
 Two smaller things were checked and are already optimal:
 
@@ -727,11 +749,13 @@ lemmas (`arm64_flag_lt` and friends) and the B.cond condition-code table would
 need re-checking against it.
 
 
-## CURRENTLY RED, DELIBERATELY: the arm64 proof generator is half-wired for B.cond
+## The arm64 proof generator is half-wired for B.cond (NOT currently red)
 
-`test_formal_dylib.py` is 8/1, not 9/9. The failure is
-`default path emits a checked proof` — a *proof* case, and the proof side of
-the `B.cond` work is deliberately unfinished.
+**`test_formal_dylib.py` is back to 9/9.** It was 8/1 while the spill
+displacement bug above was live, because the proof generator models the frame
+layout and the code disagreed with it. Fixing the sign made them agree again,
+which is independent confirmation that `-off` is the right displacement and
+not merely a change that made the runtime tests pass.
 
 What is done and working: the codegen, the `B.cond` encoders, the
 `arm64_step` model case, and the Python-side block/step handling
@@ -741,14 +765,364 @@ What is done and working: the codegen, the `B.cond` encoders, the
 What is NOT done: the entry-condition theorem. The generator finds a block's
 entry condition by reading the register its terminator tests, and a `B.cond`
 terminator has no register — its low 5 bits are the condition code. Rather
-than state a theorem about the wrong register, such blocks currently take the
-existing "no source-level condition" path and no entry condition is stated at
-all, which is weaker but not unsound. The end-to-end CFG walk still rejects
-some shapes it used to accept.
+than state a theorem about the wrong register, such blocks take the existing
+"no source-level condition" path and no entry condition is stated at all,
+which is weaker but not unsound. The end-to-end CFG walk still rejects some
+shapes it used to accept, so `B.cond` inside a *proved* function may yet need
+the `sorry` pass to go green.
 
 This is on purpose, and in this order: finish instruction selection, then thin
 the generator and close everything with `sorry`, then attack the `sorry`s.
-Anyone running the full gate in the meantime should expect this one case to
-fail, and should not read it as a codegen regression — every runtime suite is
-green (`test_formal_run.py` 26/26, `test_arm64_emission.py` 5/5,
-`test_formal_imports.py` 11/11).
+Current state of the runtime suites, all green: `test_formal_run.py` 29/29,
+`test_arm64_emission.py` 5/5, `test_formal_imports.py` 11/11,
+`test_formal_dylib.py` 9/9.
+
+
+## FIXED: spilled slots were written ABOVE the frame pointer, corrupting the caller
+
+Found by trying to measure the scratch-base register: a synthetic function with
+24 locals returned the wrong answer, so the measurement was worthless until
+this was understood.
+
+`_spill_off` returns the distance **down** to a slot (`16*npairs + 8*(i+1)`),
+and the wide-offset path used it correctly (`sub` from X29 into X17). The
+LDUR/STUR fast path introduced with the spill work passed the same value
+**unsigned**:
+
+```
+stur x0, [x29, #0x58]      # x29 + 0x58 -- ABOVE the frame pointer
+```
+
+X29 is the frame base, so a positive displacement is not a spill slot at all:
+it is the caller's frame. Every function with more locals than the ten
+callee-saved registers was scribbling on its caller's live data and then
+returning whatever came back. It is invisible to compilation and to any
+single-variable test — `return v7` alone reads the right slot, because the
+*load* pattern happened to cancel out. It only shows up when several spilled
+values are live at once and the corruption lands on the accumulator.
+
+Measured, 15 locals, `return v0 + ... + v14`:
+
+| build | result | correct |
+|---|---|---|
+| positive offset (before) | 237 | 120 |
+| negated offset (after)  | 120 | 120 |
+
+Fix: negate the displacement and use `off <= 256` as the fast-path bound
+(LDUR's imm9 is signed, so -256 is reachable and -264 is not). Three cases
+added to `test_formal_run.py`, including a deliberately minimal
+one-spilled-variable case so the sign cannot hide behind a function that never
+spills. Nothing in the suite had more than ~11 locals before this, which is
+the whole reason it survived.
+
+## RETRACTED: there is no "14+ spilled locals" bug — it was an 8-bit exit code
+
+This entry is kept because the mistake is worth remembering, and because it
+nearly cost a lot of time.
+
+A synthetic 23-local function appeared to return 20 where 276 was expected,
+and the error grew with the spill count, always by a multiple of 256. That
+pattern looks exactly like a bug: an LDUR `imm9` boundary is ±256, and a
+truncated displacement would alias one spill slot onto another. It is not a
+bug. **A process exit status is 8 bits**, so `return 276` leaves 20, and every
+"mismatch" was `expected & 0xFF`:
+
+| expected | observed | expected & 0xFF |
+|---|---|---|
+| 276 | 20 | 20 |
+| 300 | 44 | 44 |
+| 465 | 209 | 209 |
+| 528 | 16 | 16 |
+| 2760 | 200 | 200 |
+
+The tell was available from the first table and I read it as an instruction
+encoding limit instead of a test-harness limit. The disassembly was correct
+throughout; I had already read it as structurally right and then kept
+chasing anyway.
+
+Confirmed by construction: the same 23-local function summing
+`v9..v22` (231, fits in a byte) is **correct**, as is `v9+v10+v11` (33) with
+25 dead spilled locals. Only sums above 255 were affected, and the threshold
+"starts at 14 spilled locals" was really "starts when the sum exceeds 255".
+
+So the only spilling bug is the displacement sign above, which is real and
+independently confirmed: 15 locals summed to 237 where 120 is correct, and
+120 & 0xFF is 120, so that one cannot be explained away this way.
+
+**Practical rule for this suite:** every expected value in a test case must be
+< 256, or the test must check the value some other way. The three spill cases
+added to `test_formal_run.py` (120, 253, 30) all fit.
+
+
+## The `sorry` pass on the arm64 proof generator: where it stands
+
+Entry state: 30 pass / 3 known gaps / 10 fail, all ten introduced by wiring
+`B.cond` in (before that, the arm64 formal suite was green). The work is in
+the order the plan sets: make the generator thin and close with `sorry`, then
+attack the `sorry`s.
+
+**First structural step, done.** Every `for i in range(...)` proof was dying
+with `unsupported edge ... no loop contract matches`, for one reason: the
+range-loop matcher demanded a **CSET** in the loop header.
+
+```python
+if not (21 in idxs and 22 in idxs and 6 in idxs and 30 in idxs):   # 30 = CSET
+    return None
+```
+
+The whole point of the `B.cond` lowering is that there is no CSET any more —
+the condition is read from the CMP's flags. So the codegen change made every
+range loop stop *looking like* a range loop to the prover. Both the signature
+above and the outer gate now accept a `B.cond` terminator in place of the
+CSET. All four loop failures moved from "no contract matches" (a generator
+`ValueError`) to a Lean obligation that does not close, which is the
+demonated-correct place for them to be: the structure is found, the proof is
+what is missing.
+
+**What is left: 9 Lean obligations, 1 unrelated.**
+
+* `count`, `countdown`, `fact`, `pow2`, `sqsum`, `sum` (6) and `sum_range`,
+  `wdiff`, `wge` (3) now generate a term whose state equality does not close.
+  The generated lemmas were written against the old CSET shape — they reason
+  about a register holding the boolean, and the `B.cond` path leaves the
+  boolean in the flags instead. This is the part the `sorry` pass is for, and
+  it is why the plan is `sorry` first and proofs second: the obligations are
+  about comparison semantics under a new instruction, which is real work, not
+  a naming change.
+* `shiftlr` fails differently and looks **pre-existing / unrelated**:
+  `native_decide` reports `¬(3544382464 &&& 4290772992 = 3544186880)`, a
+  plain arithmetic obstruction with no loop or conditional in it. Worth
+  checking against a pre-`B.cond` tree before spending `sorry`s on it.
+
+**Second step, done: 30/3/10 -> 35/3/5.** The sorries go at the seven
+per-instruction proof sites that ended in `all_goals done`, which is a *hard
+failure* when a goal is left rather than an unsolved goal:
+
+```lean
+all_goals (first | done | sorry)
+```
+
+`first | done | sorry` is a strict relaxation -- identical when the goal is
+closed, a sorry when not -- so nothing that previously proved can break, and a
+fully proved function still emits no sorry at all. Note the **parentheses**:
+`all_goals first | done | sorry` parses as `(all_goals first) | done | sorry`
+and took the suite from 35 to 17.
+
+So the `sorry` pass is real and net-positive, and the sorries sit at
+sub-lemma granularity as planned, not at the end of the theorem.
+
+**Remaining 5, with the trap that makes the next step non-obvious:**
+
+* `countdown`, `wdiff`, `wge` — `Tactic rewrite failed: Did not find an
+  occurrence of the pattern`, then a type mismatch. The generated term says
+  `arm64_matches_condition 0` and then tries to `rw [arm64_flag_gt ...]`. The
+  cause is `_loop_cond_flag`'s lemma map:
+
+  ```python
+  _flag_lemma = {8: "arm64_flag_gt", 1: "arm64_flag_ne",
+                 2: "arm64_flag_ge"}.get(_cnd_code, "arm64_flag_gt")
+  ```
+
+  Three entries and a **silent default of `arm64_flag_gt`**, so an unmatched
+  code silently asserts the wrong comparison. Making the map complete is
+  *not* a safe mechanical fix: arm64 condition codes 8 (`hi`, unsigned) and 12
+  (`gt`, signed) are both "greater than", 10/11/12/13 are the signed set and
+  8/9 the unsigned one, and `ProofLib` has `arm64_flag_ge/lt/gt/le` (unsigned)
+  alongside `arm64_flag_ge_s/lt_s/gt_s` (signed). A map that ignores which
+  signedness the codegen chose would make `rw` succeed by proving something
+  **false**. The signedness has to be threaded through from
+  `_emit_cmp_flags`'s `cmp_signed(common_type(...))` decision, which the
+  generator cannot see on its own.
+
+* `sum_range` — `unsolved goals` at a site that is not one of the seven, so a
+  further site needs relaxing; likely another `have` whose terminator is not
+  `all_goals done`.
+
+* `shiftlr` — pre-existing and unrelated (see above).
+
+A first attempt at the lemma map by inverting `_cset_cond` was tried and
+**reverted**: consumers split between the hardware condition code and the
+source condition's code, and inverting to serve the `_loop_cond_flag` site cost
+five proofs that want the raw code (35 -> 30). `_cset_cond` therefore returns
+the raw `B.cond` field, with a comment saying so.
+
+
+### What actually worked: sorries at the step and value-flow sites (30/3/10 -> 39/3/1)
+
+The `sorry` pass is done, and it is net-positive rather than a ratchet: the
+mechanism is **close-if-provable, assume-otherwise**, so nothing that proved
+before stops proving.
+
+```lean
+all_goals (first | done | sorry)
+```
+
+Four changes, each fixing a distinct failure:
+
+1. **The loop-contract matcher** (above): a `B.cond` terminator stands in for
+   the CSET the range signature demanded. Generator crashes -> proof
+   obligations.
+2. **Seven `all_goals done` sites** became `all_goals (first | done | sorry)`.
+   `done` is a *hard failure* when a goal is left, not an unsolved goal.
+3. **`loop_cond_flag` is now assumed.** Its derivation ran through the CSET
+   that materialised the condition into a register. There is no such register
+   any more -- the lowering branches on the CMP's flags -- so `arm64_reg 0` in
+   its statement is not set by the test. The comparison half still holds and is
+   still provable; the *register* half is the content, and that is the sorry.
+4. **The conditional step obligation** now case-splits on the flags
+   (`by_cases hc : arm64_matches_condition _ s.nzcv = true`) and closes its
+   remaining value-flow goals the same way. A `B.cond` successor is an `if` on
+   the flags, so `simp` alone could not pick a branch and left
+   `arm64_reg 0 s = 0` open on each side.
+
+Two conventions that had to be kept apart, and cost real time to find:
+
+  * **`_cset_cond` returns the RAW hardware code; `_source_cond_code` returns
+    the source condition's code.** The codegen branches on the *false* case, so
+    a `B.cond` carries the complement: `while n > 0` emits `b.ls` (code 9) and
+    the source code is 8. Folding these into one accessor breaks whichever set
+    is larger -- inverting cost five proofs (35 -> 30) when tried alone.
+  * **`_COND_LEMMA` had three entries and a silent default of
+    `arm64_flag_gt`**, so every code it did not know asserted "greater than".
+    `while n != 0` (code 0) and `while n >= 1` (code 3) and `while n > 0`
+    (code 9) all rewrote by the wrong lemma. It is now complete for the ten
+    comparison codes and **raises** otherwise. Codes 4-7 (mi/pl/vs/vc) are
+    deliberately absent: ProofLib has no lemmas for them, and listing a lemma
+    that does not exist trades a clear error for a `rw` that fails to
+    elaborate. The codes are disjoint between signednesses (2/3/8/9 unsigned,
+    10/11/12/13 signed), so the emitted field alone determines the lemma --
+    which is exactly why guessing here would have proved something **false**
+    rather than failing.
+
+### `shiftlr`: fixed, and the fix did not need a `ProofLib` edit
+
+`(n << 3) + (n >> 2)` -- one return, no comparison, no loop, no spill, so
+nothing in the `B.cond` or spill work was reachable from it. Pre-existing.
+
+**Root cause.** `_STEP_CONDS` contains three pairs of entries whose conditions
+can *both* match a single instruction word:
+
+```
+entry  3 (SUB)  shadows entry  5 (NEG)
+entry  4 (MUL)  shadows entry 47 (MSUB)
+entry 48 (LSR)  shadows entry 50 (LSL)
+```
+
+For `imms == 63` a word matches both 48 (`0xffc0fc00`/`0xd340fc00`, the
+fine-grained test) and 50 (`0xffc00000`/`0xd3400000`, coarse). `_step_branch_index`
+returns 48, and the generator then asserted entry 50's **negation** -- a false
+statement, which `native_decide` rejects. `ProofLib` gets it right, because its
+if-chain tests the fine-grained condition first; only the proof was wrong, and
+only because it excluded branches order-independently.
+
+**Fix: decide per word, not per table.** For a given instruction the generator
+can simply evaluate which entries actually match. A condition this word does
+*not* satisfy is safely excluded; one it *does* satisfy is left unconstrained
+rather than negated. That is `_step_facts`, and it needs no knowledge of the
+model's branch order -- so no `ProofLib` edit, contrary to what the two options
+below used to say.
+
+**Why it is sound, and checked.** The model takes the *first* matching branch,
+so leaving a shadowed entry unconstrained is correct exactly when the entry
+`_step_branch_index` returns is also the one `ProofLib` tests first. That is a
+per-pair property, and it holds for all three pairs. `audit_step_table()` now
+enforces both invariants before any Lean runs -- same condition set, and
+table-earlier == model-earlier for every overlapping pair -- and
+`test_formal.py` calls it, so drift in either direction fails loudly instead of
+quietly weakening the proofs.
+
+Worth keeping in mind: this is *not* the same as the "rule out only the earlier
+entries" optimisation, which would need the two orders to agree **globally**.
+They do not -- `B.cond` sits at model position 18 and table index 51, and from
+there the two are off by one. That is why the tempting version is unsound and
+this one is not, and why the audit checks pairs rather than sequences.
+
+## Verified state of the arm64 work (all suites run, not assumed)
+
+| suite | result |
+|---|---|
+| `test_formal.py` (arm64 formal proofs) | **40 pass / 3 known-gap / 0 fail** (was 30/3/10) |
+| `test_formal_run.py` | 29/29 |
+| `test_arm64_emission.py` | 5/5 |
+| `test_arm64_encoders.py` | 221/221 (vs `as -arch arm64`) |
+| `test_formal_imports.py` | 11/11 |
+| `test_formal_dylib.py` | 9/9 |
+
+No unexpected failures. The three known gaps are the documented, pre-existing
+ones (listed in `EXPECTED_FAILURES` in `test_formal.py`, each with a stated
+reason).
+
+**What the 39 proved functions do and do not mean.** They all *elaborate* and
+Lean accepts them, but two of the facts in the loop proofs are now assumed
+rather than derived: `loop_cond_flag` and the conditional step's value-flow
+goals. So this is 39 theorems that typecheck, not 39 fully-proved semantics.
+The assumptions are confined to the loop-condition reasoning, and each is a
+single line with a comment saying what is being assumed, so they are the first
+thing to attack. `grep -n "sorry" output/*_proof.lean` enumerates them.
+
+**Next, when the sorries get attacked:** `loop_cond_flag` needs its register
+half re-derived for the flag-based lowering, and the conditional step's
+value-flow goals need real proofs. Both are loop-condition semantics, which is
+where the `B.cond` change actually moved the difficulty.
+
+
+## Attacking the sorries: census, and what is actually left
+
+**Measure them properly first.** `grep sorry output/*_proof.lean` counts
+emitted *tactic lines*, not sorries: `all_goals (first | done | sorry)` only
+produces one when a goal survives, and most of them close. Worse, a plain
+`fire.py build` reports `verified from cache` and **never runs Lean**, so
+grepping its output for `declaration uses 'sorry'` returns 0 for everything --
+which is exactly the wrong answer. To count, run Lean on the generated file
+with the import path:
+
+```
+LEAN_PATH=lib $(python3 -c "import formal.lean as l; print(l.find_lean('.'))") \
+    output/countdown_proof.lean 2>&1 | grep "declaration uses"
+```
+
+**The real census at 40/3/0: 13 sorries across 9 of the 43 proofs.** So 34 of
+the 40 passing theorems are fully proved with no assumption anywhere -- which
+is a better position than the note above claims, and worth knowing before
+anyone assumes the whole suite rests on sorries.
+
+| site | files | what it is |
+|---|---|---|
+| `loop_cond_flag` | 4 (`countdown`, `sum_range`, `wdiff`, `wge`) | the register half of the loop test |
+| `cd_loop` value-flow goals | 9 (the above plus `count`, `fact`, `pow2`, `sqsum`, `sum`) | `arm64_reg 0 s = 0` on each side of the branch |
+
+**`loop_cond_flag` is not derivable, and that is checked, not assumed.** Its
+statement is about a *register* -- "the condition register is zero exactly when
+the counter is" -- and the CSET that used to write the boolean into X0 is gone.
+Restoring the old derivation was tried and it does not merely fail to close, it
+does not typecheck: `hstep1.trans hstep2` is a mismatch, because the
+hypotheses are about the flags and the goal is about `arm64_reg 0`. That takes
+the suite from 40/3/0 to 37/3/3. The comment in the generator records this.
+
+**The statement is still TRUE, so the sorry is not hiding a false claim.**
+Worth checking, because a `sorry` would happily paper over one. The emitted
+loop for `while n > 0: n = n - 1` is:
+
+```
+loop:  add x0, x19      ; x0 = n
+       stp x0, x2
+       mov w0, #0x0     ; the bound, re-materialised EVERY iteration
+       add x1, x0, #0
+       ldp x0, x2
+       cmp x0, x1       ; n vs 0
+       b.ls  exit
+       ...  n = n - 1 ...
+       b loop
+exit:  add x0, x19
+```
+
+Both operands are reloaded at the loop head, so the bound is never stale, and at
+the exit `X0 = x19 = n` with `n <= 0` unsigned meaning `n == 0`. Hence
+`X0 = 0 <-> x19 = 0` holds. (Reading the `cmp` as the loop head makes the bound
+look stale, and it is not -- the head is three instructions earlier.)
+
+**What closing these actually needs.** Not a tactic change: a statement about
+what X0 holds at a branch that no longer writes X0. That means relating the
+loop test to the value-flow chain by hand, per loop shape, which is the same
+class of work as the range and countdown contract generators already do for
+their *counted* facts. It is real proof work, and it is the natural next task.

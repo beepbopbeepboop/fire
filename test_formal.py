@@ -192,6 +192,18 @@ def main():
 
     check_prereqs()
     backend = args.backend
+    if backend == "arm64":
+        # Cheap, Lean-free, and it must run before anything else: the step
+        # table and ProofLib's if-chain have to agree, or `_step_facts` leaves
+        # the wrong entry unconstrained and the proofs stop meaning anything.
+        # The orders deliberately do NOT match globally (B.cond is model
+        # position 18, table index 51), so this checks per-pair overlap
+        # ordering rather than assuming a shared sequence.
+        from formal.arm64_proof_gen import audit_step_table
+        notes = audit_step_table(os.path.join(HERE, "lib", "ProofLib.lean"))
+        print(f"step table: {len(notes)} overlapping entr"
+              f"{'y' if len(notes) == 1 else 'ies'} ("
+              + ", ".join(notes) + ")")
     expected_failures = (EXPECTED_FAILURES if backend == "arm64"
                          else EXPECTED_FAILURES_X86_64)
     outdir = OUTDIR if backend == "arm64" else os.path.join(HERE, "output", backend)
