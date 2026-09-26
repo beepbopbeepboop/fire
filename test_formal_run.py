@@ -71,6 +71,53 @@ CASES = [
     ("len_sum", "def len_sum(n):\n"
                 "    xs = [1, 2, 3]\n    return len(xs) + len(range(4))\n",
      7, None),
+    # Comprehensions. These were all SIGSEGV, and the cause was not the
+    # nesting BUG.md suspected: the walk that allocates a comprehension's
+    # control temps was handed the statement LIST and only recursed through
+    # __dataclass_fields__, which a list does not have — so it returned
+    # immediately and no temp was ever allocated. Both temps then fell through
+    # _store_var/_load_var's unknown-name path, which uses X19, so the loop's
+    # blob base and its index shared one register and the index store
+    # destroyed the base. Every comprehension then read `ldr xN, [x0]`.
+    #
+    # The single-generator cases are here because the bug was NOT
+    # nesting-specific — one generator failed exactly as hard as two.
+    ("compr_single", "def compr_single(n):\n"
+                     "    xs = [i for i in range(3)]\n"
+                     "    t = 0\n"
+                     "    for x in xs:\n        t = t + x\n"
+                     "    return t\n", 3, None),
+    ("compr_nested", "def compr_nested(n):\n"
+                     "    xs = [i + j for i in range(2) for j in range(2)]\n"
+                     "    t = 0\n"
+                     "    for x in xs:\n        t = t + x\n"
+                     "    return t\n", 4, None),
+    ("compr_nested3", "def compr_nested3(n):\n"
+                      "    return len([i * 10 + j for i in range(3) "
+                      "for j in range(2)])\n", 6, None),
+    # Bound to a local first: subscripting a comprehension DIRECTLY
+    # (`[i for i in ...][2]`) is a separate, still-open gap — the subscript
+    # path wants a list/tuple name or literal as its base. Tracked in BUG.md.
+    ("compr_over_literal", "def compr_over_literal(n):\n"
+                           "    xs = [i * 2 for i in [1, 2, 3]]\n"
+                           "    return xs[2]\n", 6, None),
+    ("compr_condition", "def compr_condition(n):\n"
+                        "    return len([i for i in range(6) if i > 3])\n",
+     2, None),
+    # A comprehension nested inside a for-loop, so the comprehension temps and
+    # the for-list temps have to coexist without aliasing each other.
+    ("compr_in_for", "def compr_in_for(n):\n"
+                     "    t = 0\n"
+                     "    for k in [1, 2]:\n"
+                     "        xs = [j for j in range(2)]\n"
+                     "        t = t + xs[1]\n"
+                     "    return t\n", 2, None),
+    # `range(n)` with a RUNTIME bound, as a value. Its epilogue used to drop
+    # the loop's start/stop/step with `ldp_sp_post` — which writes X0 — after
+    # the blob address had been put there, so the function returned `start`
+    # (0) instead of its result.
+    ("len_runtime_range", "def len_runtime_range(n):\n"
+                          "    return len(range(n))\n", 10, None),
     ("comptime_call", "def comptime_call(n):\n"
                       "    comptime var a = square(6)\n"
                       "    comptime var b = add(a, 1)\n"

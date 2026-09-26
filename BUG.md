@@ -180,6 +180,75 @@ with the hardware on all 43 examples (`test_x86_64_examples.py`: 43/43).
 
 ## Nested comprehensions: the second generator's loop corrupts the first
 
+**Status: FIXED on arm64** (the default backend). The cause was not the
+register reuse described below, and it was not specific to nesting — a
+SINGLE-generator comprehension failed exactly as hard as a nested one.
+`test_x86_64_containers.py --arch arm64` went 32/45 -> 37/45, and
+`test_formal_run.py` now carries eight comprehension cases (single, nested 2x2,
+nested 3x2, over a list literal, with a condition, inside a for-loop, plus
+`len(range(n))` with a runtime bound).
+
+The actual cause: `_collect_var_names`'s `walk_compr_temps` was called with
+`f.body` — a statement LIST — and recursed only through
+`__dataclass_fields__`, which a list does not have. It therefore returned
+immediately and **no comprehension control temp was ever allocated, in any
+function**. `_ci{d}` (index) and `_cb{d}` (blob base) both fell through
+`_store_var`/`_load_var`'s unknown-name path, which uses X19 — so the two
+temps shared one register, and storing the index destroyed the base. Every
+comprehension then executed `ldr xN, [x0]`.
+
+Disassembly at the fault (`ldr x1, [x9]`, x9 = 0):
+
+```
+add  x0, x9, #0x0     ; blob base
+add  x19, x0, #0x0     ; _cb0 -> X19
+mov  w0, #0x0
+add  x19, x0, #0x0     ; _ci0 -> X19 as well; base destroyed
+add  x9, x19, #0x0
+ldr  x1, [x9]          ; reads address 0 -> SIGSEGV
+```
+
+The sibling `walk_for_temps` did not have this bug because it iterates
+`stmts or []` at its own top level.
+
+**x86-64 is NOT fixed by this** and still returns 98 for 100 on
+`test_x86_64_containers.py`. Its `walk_compr` is called per-statement rather
+than with the list, so its temps are allocated correctly and the bug there is
+the one described below: the inner generator reuses R10/R11/R8/RDI, which the
+outer generator's loop bookkeeping still holds.
+
+### Two gaps found while fixing this, both still open
+
+**A dict comprehension computes the wrong value.**
+
+```python
+d = {i: i * i for i in range(3)}   # d[2] should be 4, returns 0
+d = {i: i for i in range(3)}       # d[1] == 1  — correct
+d = {i * i: i for i in range(3)}   # d[4] should be 2, returns 1
+```
+
+A list comprehension with the same element expression is correct
+(`[i * 2 for i in range(3)][2] == 4`), and dict *literals* index correctly, so
+this is specific to the dict-comprehension path. It returns the loop index
+rather than the computed key/value. It was previously masked: the
+register-aliasing bug above killed every comprehension before the value could
+be observed.
+
+**Subscripting a comprehension directly is unsupported.**
+
+```python
+[i * 2 for i in [1, 2, 3]][2]
+```
+
+    build: subscript base must be a list/tuple name or literal on the formal
+    arm64 path (got Comprehension)
+
+Binding to a local first works. The subscript path recognises a name or a
+literal base but not a comprehension, and since a comprehension produces a
+blob in exactly the same shape, admitting it is a small change.
+
+### Original report, for the record
+
 ```python
 def f(n):
     xs = [i + j for i in range(2) for j in range(2)]

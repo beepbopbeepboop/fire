@@ -198,6 +198,18 @@ def _collect_var_names(f: F.FunctionDef) -> list:
     def walk_compr_temps(node, depth: int, acc: list) -> None:
         if node is None or isinstance(node, (str, int, float, bool)):
             return
+        if isinstance(node, list):
+            # A statement list is what this is called with (`f.body`), and a
+            # list has no __dataclass_fields__, so without this the walk
+            # returned immediately and NO comprehension temp was ever
+            # allocated. They then fell through _store_var/_load_var's
+            # unknown-name path, which silently uses X19 — so `_cb0` (the
+            # loop's blob base) and `_ci0` (the index) aliased one register,
+            # and storing the index destroyed the base. Every comprehension
+            # read `ldr xN, [x0]`.
+            for x in node:
+                walk_compr_temps(x, depth, acc)
+            return
         if isinstance(node, F.Comprehension):
             gens = node.generators or []
             n = len(gens)
@@ -4203,11 +4215,19 @@ class ARM64Codegen:
         self.asm.emit(encode_add_xd_xn_xm(4, 4, 6))     # idx += step
         self._emit_b_to(start_label)
         self.asm.label(end_label)
-        self._emit_list_base(offset)
-        self.asm.emit(encode_mov_zr_xn(0, 9))
+        # Drop step/stop/start BEFORE materialising the result. `ldp_sp_post`
+        # writes X0 and X1, so computing the blob base into X0 first and
+        # popping afterwards returned the loop's `start` (0 for range(n))
+        # instead of the blob address. Every consumer of a range() value —
+        # including the comprehension generator, which stores the address as
+        # its loop bound and then does `ldr xN, [xBound]` — therefore read
+        # through a null pointer and the program died with SIGSEGV, or
+        # silently walked whatever was at address 0.
         self.asm.emit(encode_ldp_sp_post(0, 31))        # drop step/stop/start
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
         self._emit_b_to(oob_end)
         self.asm.label(oob)
         self.asm.emit(encode_movz_xd_imm(0, 1))
