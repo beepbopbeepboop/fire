@@ -599,3 +599,48 @@ that actually decides how big the generated code is.
 Also folded while in there: `_emit_list_base` emitted `mov x9, x29` followed
 by up to three separate adjustments, when the whole displacement is a
 compile-time constant and fits the shifted form in one.
+
+
+## What is left in the instruction work, measured rather than guessed
+
+Two items remain, and both are recorded here with their real cost so the next
+person does not have to re-derive them.
+
+**`B.cond` — the biggest single item in the audit (~154k occurrences) — is
+blocked on the deferred proof work, and the block is wider than it looks.**
+Emitting it at a conditional site is easy; emitting it *correctly* is not. All
+four sites (`if`/`elif`, `while`/`for`, the ternary, a comprehension's generator
+conditions) call `_record_cond_branch()`, and `arm64_proof_gen` finds an entry
+condition by locating a block whose terminator is a recorded `cbz` and reading
+the register that CBZ tests. A `B.cond` is neither a `cbz` block nor a
+register, so the change is not one branch swap — it is:
+
+  1. `_step_branch_index` recognising the `0x54..` opcode,
+  2. the block scanner emitting a new terminator kind carrying the condition,
+  3. the entry-condition search walking back to the governing `CMP` instead of
+     reading a register, and
+  4. the Lean emitter proving a flag predicate rather than `reg != 0`.
+
+Steps 3 and 4 are the real work, and 4 is a proof about comparison semantics,
+not a naming change. That is exactly the work deferred, so `B.cond` is left
+unwired rather than wired and silently mis-proved.
+
+**A reserved scratch-base register would take the frame base from two
+instructions to one**, worth ~5% on a container-heavy function
+(225 -> ~214 on the benchmark above). It is not worth doing: the register has
+to come out of the callee-saved pool, so one fewer local lives in a register
+and one more spills, and the saving is only realised if the extra spill does
+not cost more than the base computation it replaced. It also changes the
+prologue, which the proof generator models. That trade needs measurement
+across a corpus, not one benchmark.
+
+Two smaller things were checked and are already optimal:
+
+  * `add x4, x9, #8` + `add x4, x4, x1, lsl #3` (17 occurrences) is an
+    address computation that cannot be one instruction — arm64 has no
+    scaled-index addressing, that is an x86-ism.
+  * The `and`/`or` and ternary CSEL paths cost two push/pop pairs, which is
+    the price of evaluating both arms without a stack frame convention for
+    expression temporaries. Making them one needs registers that expression
+    evaluation provably does not clobber; X9 alone is used by
+    `_emit_list_base`.
