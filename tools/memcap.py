@@ -25,15 +25,13 @@ Exit codes:
     125       the ceiling was exceeded and the process tree was killed
     2         usage error
 
-Two approximations, both stated because they affect how much the number means:
-
-- RSS is summed over the process TREE, not the process alone. `mojoc` spawns
-  `gcc -fgimple` subprocesses, and a cap that ignored them would let the real
-  cost hide in a child.
-- Summing RSS double-counts pages shared between processes (the copy-on-write
-  runtime image, chiefly), so the true total is somewhat below this figure.
-  That makes the cap read high rather than low, which is the safe direction:
-  it errs toward killing early.
+The measurement and the kill both live in `tools/procrun.py` rather than
+here, because `tools/suite.py` needs the same two — to kill a job's whole tree
+on a timeout, and to read a peak — and a second copy of the process-walk and
+kill order is a second copy of the ways to get them wrong. That file documents
+the two approximations in the number (RSS is summed over the process TREE, and
+summing double-counts shared pages, so the cap reads high — the safe
+direction).
 """
 
 import argparse
@@ -43,77 +41,14 @@ import subprocess
 import sys
 import time
 
-GB = 1024 ** 3
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import procrun                                                   # noqa: E402
+from procrun import GB                                           # noqa: E402
+
 POLL_SECONDS = 0.5
 # macOS `ps` costs ~50-100ms, and a 3-minute run is ~360 samples. Sampling
 # more finely than this buys nothing: RSS does not move fast enough between
 # samples for the 3.5x margin to matter.
-
-
-def _ppid_rss_by_pid():
-    try:
-        out = subprocess.run(["ps", "-Ao", "pid=,ppid=,rss="],
-                             capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return {}, {}
-    ppid, rss = {}, {}
-    for line in out.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 3:
-            try:
-                pid, parent, resident = (int(x) for x in parts)
-            except ValueError:
-                continue
-            ppid[pid] = parent
-            rss[pid] = resident
-    return ppid, rss
-
-
-def _tree_rss(root):
-    """`(bytes, n_procs)` for `root` and everything under it."""
-    ppid, rss = _ppid_rss_by_pid()
-    if root not in ppid:
-        return (0, 0)
-    kids = {}
-    for pid, parent in ppid.items():
-        kids.setdefault(parent, []).append(pid)
-    total, count, stack = 0, 0, [root]
-    while stack:
-        pid = stack.pop()
-        count += 1
-        total += rss.get(pid, 0)
-        stack.extend(kids.get(pid, ()))
-    return (total * 1024, count)
-
-
-def _kill_tree(root):
-    """SIGKILL the subtree, children first, then reap.
-
-    SIGKILL rather than SIGTERM: the ceiling exists precisely because the
-    process is in a state where cooperative shutdown is not arriving, and a
-    TERM that a runaway ignores is the same as no TERM. Killing children
-    before the parent matters because `mojoc`'s `gcc` children hold their own
-    RSS — leaving them running would keep most of the memory allocated after
-    the parent is gone.
-    """
-    ppid, _ = _ppid_rss_by_pid()
-    kids = {}
-    for pid, parent in ppid.items():
-        kids.setdefault(parent, []).append(pid)
-    order, stack = [], [root]
-    while stack:
-        pid = stack.pop()
-        order.append(pid)
-        stack.extend(kids.get(pid, ()))
-    for pid in reversed(order):                      # children before parents
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    try:
-        os.waitpid(root, 0)
-    except (ChildProcessError, OSError):
-        pass
 
 
 def main(argv):
@@ -138,14 +73,14 @@ def main(argv):
           % (label, args.limit_gb), flush=True)
 
     # `start_new_session` so the whole subtree is in one process group we can
-    # signal as a unit. The `_kill_tree` walk is the precise path; the group
-    # kill is the belt-and-braces fallback for a pid we lose track of.
+    # signal as a unit. procrun.kill_tree's walk is the precise path; the
+    # group kill is the belt-and-braces fallback for a pid we lose track of.
     proc = subprocess.Popen(cmd, start_new_session=True)
     peak, peak_n = 0, 0
     try:
         while True:
             rc = proc.poll()
-            total, n = _tree_rss(proc.pid)
+            total, n = procrun.tree_rss(proc.pid)
             if total > peak:
                 peak, peak_n = total, n
             if total > limit:
@@ -155,7 +90,7 @@ def main(argv):
                       % (total / GB, args.limit_gb, pct, n, label), flush=True)
                 print("memcap: peak observed before the kill: %.1f GB"
                       % (peak / GB), flush=True)
-                _kill_tree(proc.pid)
+                procrun.kill_tree(proc.pid)
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
@@ -172,7 +107,7 @@ def main(argv):
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
         print("\nmemcap: interrupted, killing %s" % label, flush=True)
-        _kill_tree(proc.pid)
+        procrun.kill_tree(proc.pid)
         return 130
     except BaseException as exc:            # noqa: BLE001
         # Fail CLOSED. This is a safety tool, so a bug in the watchdog must
@@ -182,7 +117,7 @@ def main(argv):
         # left a test hog running to 3 GB after the watchdog had died.
         print("\nmemcap: WATCHDOG FAILED (%r) -- killing %s rather than "
               "leaving it unmonitored" % (exc, label), flush=True)
-        _kill_tree(proc.pid)
+        procrun.kill_tree(proc.pid)
         raise
 
 
