@@ -1042,6 +1042,35 @@ theorem x86_step_jcc_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat)
     with the add's own, so the two end up with the same shape -- which is
     worth knowing, because the code does not look like it does. -/
 
+/-- `imul r64, r64` (REX.W 0F AF /r, mod=3).  Unlike the ALU forms the
+    destination is the reg field -- the SAME field the first multiplicand is
+    read from -- so the operation is `reg := reg * rm` rather than `rm :=
+    reg op rm`, and the byte order is 0F AF not 01 /r.
+
+    `imul` sets no flags, so the successor is just the register and the rip.
+    It is worth a lemma of its own because the backend emits it for 8 of the 43
+    examples, and without one those 8 have no path tree at all.
+
+    `dst` is the CONCRETE destination register, for the same reason the
+    `rbp + disp8` load takes one: `x86_set_reg` is a `match` on its index and
+    `simp` will not reduce a match on a non-literal. -/
+theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex op2 modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x0f)
+    (h_b2 : code (m + 2) = op2) (h_b3 : code (m + 3) = modrm)
+    (h_op2 : op2 = 0xaf) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some
+      { x86_set_reg s dst (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
+        with rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_op2, h_rex, h_w, h_mod, h_reg, h_rm,
+        h_dst, h_dst_lt]
+
 /-- `add r64, r64` (REX.W 01 /r, mod=3), general over both registers. -/
 theorem x86_step_add_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
     (rex modrm : UInt8) (reg rm : Nat)

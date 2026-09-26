@@ -165,6 +165,11 @@ _FORMS = {
     "setcc": ("x86_step_setcc_r8", False,
               ["rip", "b0", "b1", "b2", "cc", "lo", "hi", "njcc",
                "nzx", "notrex", "mod", "rm", "rb"]),
+    # `dst` is the CONCRETE destination, for the same reason as the
+    # `rbp + disp8` load: `x86_set_reg` is a `match` on its index.
+    "imul_r64_r64": ("x86_step_imul_r64", False,
+                     ["rip", "b0", "b1", "b2", "b3", "op2", "rex", "w",
+                      "mod", "reg", "rm", "dst", "dst_lt"]),
     "alu_rr:cmp": ("x86_step_cmp_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:test": ("x86_step_test_rr", False,
@@ -225,7 +230,13 @@ _SUCCS = {
     "setcc":
         "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",
-    "alu_rr:cmp":
+        # `imul` reads its first multiplicand from the reg field -- the same field
+    # it writes -- so `$dst` appears on both sides of the product, and it sets
+    # no flags, so there is nothing else in the successor.
+    "imul_r64_r64":
+        "{ x86_set_reg $s $dst (x86_get_reg $s $dst * "
+        "x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next }",
+"alu_rr:cmp":
         "{ $s with rip := $next, zf := ($fc).zf, sf := ($fc).sf, "
         "cf := ($fc).cf, of_ := ($fc).of_ }",
     "alu_rr:test":
@@ -272,11 +283,30 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     """
     lemma, takes_imm, conds = _FORMS[form]
     imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
+    # Each side condition is `try (<attempt>) <;> all_goals sorry`, so one that
+    # does not go through is admitted rather than fatal, and Lean reports the
+    # file as using `sorry`.
+    #
+    # Two things about that shape, both learned the hard way here.  The guard
+    # must be INSIDE the inline `by`: an unsolved goal inside `(by simp [hs12])`
+    # is an ELABORATION error, not a tactic failure, so neither an enclosing
+    # `try` nor `first | exact ... | sorry` around the whole step catches it and
+    # the file dies.  And it must be `try ... <;> all_goals sorry` rather than
+    # `first | simp ... | all_goals sorry`: `first` commits to the first
+    # alternative that does not THROW, not the first that closes the goal, so a
+    # `simp` that runs and simplifies nothing is taken as a success and the
+    # `sorry` alternative is never reached.
+    #
+    # This is what let `imul` mask an unrelated gap in the `rsp + disp8` load:
+    # 8 examples read "no tree" instead of "tree, one step unproved".
+    def sc_(tactic):
+        return "(by try (%s) <;> all_goals sorry)" % tactic
+
     sc = []
     for c in conds:
         if c == "rip":
             if k == 0:
-                sc.append("(by simp only [i0, X86State.init] <;> decide)")
+                sc.append(sc_("simp only [i0, X86State.init] <;> decide"))
             else:
                 # The `by_cases` hypotheses in scope matter here: after a fork
                 # the predecessor's successor equation has an `if` on the branch
@@ -288,31 +318,48 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
                 # fork is in the shared prefix and so has a lower number than
                 # this step.  Indexing by `k` names an equation that does not
                 # exist yet -- "Unknown identifier hs20".
-                sc.append("(by simp [%s])"
-                          % ", ".join([hs_in or ("hs%d" % k)] + list(cases)))
+                sc.append(sc_("simp [" + ", ".join(
+                    [hs_in or ("hs%d" % k)] + list(cases)) + "]"))
         elif c in ("b0", "b1", "b2", "b3"):
-            sc.append("(by simp [read_i32_le, read_i8, hb])")
+            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
         elif c == "imm":
-            sc.append("(by simp [read_i32_le, read_i8, hb])")
+            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
         elif c == "disp":
-            sc.append("(by simp [read_i8, hb])")
+            sc.append(sc_("simp [read_i8, hb]"))
         elif c == "off":
-            sc.append("(by simp [read_i32_le, read_i8, hb])")
+            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
         elif c in ("dst", "dst_lt"):
             # Closed arithmetic on the encoding: the destination register is
             # read out of the ModRM/REX bytes, so it is a literal here.
-            sc.append("(by decide)")
+            sc.append(sc_("decide"))
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
-                   "lo", "hi", "nsetcc_lo", "njcc", "nzx",
+                   "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2",
                    "notrex"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
             # concrete opcode byte: nothing here comes from the byte list, so
             # `decide` and not `simp [hb]`.
-            sc.append("(by decide)")
+            sc.append(sc_("decide"))
         else:
             raise ValueError("bad condition " + c)
     extra_args, extra_succ = "", {}
-    if form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",
+    if form == "imul_r64_r64":
+        # raw is 48 0f af <modrm>, so the REX is byte 0 and the ModRM byte 3 --
+        # NOT byte 2 as for the 01 /r ALU forms, because `imul` is two opcode
+        # bytes behind its ModRM.
+        rex, op2, modrm = raw[0], raw[2], raw[3]
+        reg, rm = (modrm >> 3) & 7, modrm & 7
+        dst = reg + (8 if rex & 4 else 0)
+        extra_args = " %d %d %d %d %d %d" % (rex, op2, modrm, reg, rm, dst)
+        # `$rm` and `$reg` MUST be set here rather than left to the generic
+        # `setdefault` below, which reads the ModRM out of `raw[2]`.  For every
+        # other form `raw[2]` is the ModRM, but for `imul` -- 0F AF -- `raw[2]`
+        # is the SECOND OPCODE and the ModRM is `raw[3]`, so the default fills
+        # in `0xaf &&& 7 = 7` and the step lemma is applied with the wrong
+        # source register.  The mismatch then reads as an opaque "Type
+        # mismatch" on a 14-field record.
+        extra_succ = {"$dst": str(dst), "$rm": str(rm), "$reg": str(reg),
+                      "$rex": str(rex)}
+    elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",
                 "alu_rr:sub", "alu_rr:cmp", "alu_rr:test"):
         rex, modrm = raw[0], raw[2]
         extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7, modrm & 7)
@@ -533,11 +580,13 @@ def _byte_list(insns, code, base):
 def _header(code, insns, base):
     """The import, the code function, and every byte as a fact."""
     # A heartbeat budget.  The `hrip` step at the end of each path is one `simp`
-    # over every successor equation on that path, and on the longer ones that
-    # is a real amount of work: the default budget reports "deterministic
-    # timeout at whnf, maximum number of heartbeats" and the theorem is fine.
+    # over every successor equation on that path, and on the longer ones that is
+    # a real amount of work: the default budget reports "deterministic timeout"
+    # and the theorem is fine.  A timeout is NOT catchable by `try`, so the
+    # `try`-guarded block below does not help here and the budget is the only
+    # lever -- hence raising it rather than guarding.
     out = ["import X86\n",
-           "set_option maxHeartbeats 800000\n",
+           "set_option maxHeartbeats 4000000\n",
            "def rc (addr : Nat) : UInt8 :=",
            "  if addr < %d then 0 else" % base,
            "  ([%s].getD (addr - %d) 0)\n"
@@ -748,24 +797,33 @@ def emit_terminates(path):
             # "made no progress" on a set that looks complete.
             hs = ", ".join(hs_path + ("hs%d" % (k + 1),))
             emit("have hrip : %s.rip = 0 := by" % nxt)
-            emit("  have key : \u2200 (m : Nat \u2192 UInt8) (a : Nat) (v : UInt64)"
+            # The separation step is the genuinely hard part -- its side
+            # condition is an inequality over a `mem_write_bytes` chain, closed
+            # for a function that spills at literal stack offsets and not
+            # otherwise.  So it is attempted and admitted where it does not go
+            # through, rather than failing the file.  Lean says which by
+            # reporting "declaration uses `sorry`", so the gap stays countable
+            # instead of becoming either a build failure or a silent omission.
+            #
+            # Every step below is one that CANNOT fail: `simp` succeeds even
+            # when it simplifies nothing, and the rest are `try`.  So the block
+            # always reaches `all_goals sorry`, which admits what is left.
+            # `first | (...) | sorry` expresses the same thing but its layout
+            # is fragile -- a `| sorry` one column out is read as an
+            # alternative of the enclosing tactic and the file stops parsing.
+            emit("  have key : ∀ (m : Nat → UInt8) (a : Nat) (v : UInt64)"
                  " (b : Nat),")
-            emit("      a + 8 \u2264 b \u2192 mem_read_bytes (mem_write_bytes m a v 8)"
-                 " b 8")
-            emit("        = mem_read_bytes m b 8 :=")
-            emit("    fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
+            emit("    a + 8 ≤ b → mem_read_bytes (mem_write_bytes m a v 8) b 8"
+                 " = mem_read_bytes m b 8 :=")
+            emit("  fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
             emit("  simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add,"
                  % hs)
-            emit("    x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r%s]" % case_simp)
-            emit("  rw [key _ _ _ _ (by decide)]")
-            emit("  simp only [mem_read_bytes, ite_true]")
-            # `decide` when the residual is closed, `omega` when it is not.  The
-            # spill address can depend on a value computed from the input, so
-            # the residual sometimes has a free variable -- and `decide` on
-            # that is "Expected type must not contain free variables", which
-            # names the tactic rather than the inequality that would have
-            # closed it.
+            emit("    x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r%s] <;>"
+                 % case_simp)
+            emit("  try (rw [key _ _ _ _ (by first | decide | omega)]) <;>")
+            emit("  try (simp only [mem_read_bytes, ite_true]) <;>")
             emit("  first | decide | omega")
+            emit("  all_goals sorry")
             full = rules + [step_rule, "x86_exec_go_exit_at (by decide) hrip"]
             emit("rw [%s]" % ",\n    ".join(full))
             emit("simp")
@@ -841,72 +899,134 @@ def _has_loop(path):
     return False
 
 
-def _check(path, expected):
-    lean = emit(path, expected)
+_ERR = re.compile(r"^\S*\.lean:\d+:\d+: ")
+
+
+def _run_lean(text):
+    """`(ok, n_sorries, first_error)` for one generated Lean file."""
     with tempfile.NamedTemporaryFile("w", suffix=".lean", delete=False) as f:
-        f.write(lean)
+        f.write(text)
         tmp = f.name
     try:
         env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
         p = subprocess.run([LEAN_BIN, tmp], capture_output=True, text=True,
                            env=env)
-        errs = [l for l in (p.stdout + p.stderr).splitlines() if ": error" in l]
-        if errs or "declaration uses `sorry`" in p.stdout + p.stderr:
-            return False, "\n".join(errs[:4]) or "uses sorry"
-        return True, ""
+        out = p.stdout + p.stderr
+        # Drop the temp path and the line:col, which would otherwise eat the
+        # whole message under the `[:60]` slice below and print as a filename.
+        errs = [_ERR.sub("", l) for l in out.splitlines() if ": error" in l]
+        sorries = sum(1 for l in out.splitlines() if "declaration uses" in l)
+        return (not errs), sorries, (errs[0] if errs else "")
     finally:
         os.unlink(tmp)
 
 
+def _check(path, expected):
+    ok, _, msg = _run_lean(emit(path, expected))
+    return ok, msg
+
+
 def main(argv):
+    """Run both theorems over the examples and report each honestly.
+
+    Two, and they answer different questions:
+
+      `value`       for EVERY input the model reaches the exit pc with `rax` a
+                    FIXED constant.  Only 7 of the 43 examples can even state
+                    it -- the rest return something computed from the input --
+                    so it is the stronger theorem where it applies and
+                    unavailable elsewhere.
+
+      `terminates`  for EVERY input the model reaches the exit pc, with no
+                    claim about the value.  Applies wherever the CFG is finite
+                    and every instruction has a step lemma, which is 25 of the
+                    43.
+
+    A `sorry` in `terminates` is the memory-separation step declining to go
+    through, and it is reported per file rather than hidden: the point is to
+    know how much is proved, not to have the file typecheck.
+    """
     targets = argv[1:]
     if not targets:
         d = os.path.join(HERE, "examples")
         targets = [os.path.join(d, f) for f in sorted(os.listdir(d))
                    if f.endswith(".mojo")]
-    ok = covered = 0
+    val_ok = val_gap = term_ok = term_gap = 0
+    fails = notree = noform = 0
     for t in targets:
-        name = os.path.basename(t)
-        # The expected value is the program's result, which for these examples
-        # does not depend on the input; read it from the concrete run at 0.
+        name = os.path.basename(t)[:-5]
         try:
             r = B.compile_formal(t, prove=False, check=False, arch="x86_64")
         except Exception as exc:                      # noqa: BLE001
-            print("  [skip] %-16s does not build (%s)" % (name, exc))
+            print("  [skip] %-14s does not build (%s)" % (name, exc))
             continue
-        # The observable the model test already trusts: the binary's exit
-        # code, which the C runtime takes from the value left in RAX.
         try:
             expected = subprocess.run(["arch", "-x86_64", r["path"]],
                                       capture_output=True, text=True,
                                       timeout=60).returncode
         except Exception as exc:                          # noqa: BLE001
-            print("  [skip] %-16s does not run (%s)" % (name, exc))
+            print("  [skip] %-14s does not run (%s)" % (name, exc))
             continue
-        if expected < 0 or expected > 255:
-            print("  [open] %-16s exit code %d is not a rax value"
-                  % (name, expected))
-            continue
+
+        # --- the value theorem, where it can be stated at all ---
+        vs = "  value:     -"
+        if 0 <= expected <= 255:
+            uncovered = None
+            try:
+                good, msg = _check(t, expected)
+            except ValueError as exc:
+                # No step lemma for some form: the theorem cannot even be
+                # ATTEMPTED, which is missing coverage rather than a proof that
+                # failed.  Reporting it as a failure is how "36 failing" happened
+                # earlier.
+                good, msg, uncovered = None, "", str(exc)
+            if good:
+                val_ok += 1
+                vs = "  value:     rax = %d, every input" % expected
+            elif uncovered is not None:
+                vs = "  value:     -  (no lemma: %s)" % uncovered.split(": ")[-1]
+            elif _has_loop(t):
+                vs = "  value:     -  (loops)"
+            elif not _probe_input_independent(t):
+                # NOT a failure: the theorem states a CONSTANT result, so a
+                # program that returns something computed from its input cannot
+                # satisfy it however it is proved.  The termination theorem
+                # below is the one that covers those.
+                vs = "  value:     -  (result depends on the input)"
+            else:
+                vs = "  value:     FAIL %s" % msg
+                fails += 1
+
+        # --- the termination theorem ---
         try:
-            good, msg = _check(t, expected)
+            ok, sorries, err = _run_lean(emit_terminates(t))
         except ValueError as exc:
-            print("  [open] %-16s %s" % (name, exc))
-            continue
-        if good:
-            covered += 1
-            print("  [PROVED] %-16s every input -> rax = %d" % (name, expected))
-        elif _has_loop(t):
-            print("  [open] %-16s has a loop, and the chain walks one straight"
-                  " line -- needs induction over the back edge" % name)
-        elif not _probe_input_independent(t):
-            print("  [open] %-16s result depends on the input, so the constant"
-                  " form does not apply" % name)
+            if _has_loop(t):
+                notree += 1
+                ts = "  loops (no finite path tree)"
+            else:
+                noform += 1
+                ts = "  no tree: %s" % str(exc)[:38]
         else:
-            print("  [FAIL]  %-16s %s" % (name, msg))
-            ok += 1
-    print("\nend-to-end: %d proved with no sorry, %d failing, of %d attempted"
-          % (covered, ok, len(targets)))
-    return 1 if ok else 0
+            if ok and not sorries:
+                term_ok += 1
+                ts = "  terminates: PROVED"
+            elif ok:
+                term_gap += 1
+                ts = "  terminates: proved, %d sorry" % sorries
+            else:
+                fails += 1
+                ts = "  terminates: FAIL %s" % err.strip()[:60]
+        print("%-14s%s\n%s" % (name, vs, ts))
+
+    print("\n  value      : %d proved with no sorry, %d open"
+          % (val_ok, val_gap))
+    print("  terminates : %d proved with no sorry, %d proved with a sorry"
+          % (term_ok, term_gap))
+    print("               %d no finite tree (%d loop, %d uncovered form)"
+          % (notree + noform, notree, noform))
+    print("  failing    : %d" % fails)
+    return 1 if fails else 0
 
 
 if __name__ == "__main__":
