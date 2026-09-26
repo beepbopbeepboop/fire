@@ -1391,15 +1391,22 @@ class X86_64Codegen:
 
     # ── print ────────────────────────────────────────────────────────────
 
-    def _print_arg_kind(self, expr):
-        """What a `print` operand holds: "str", "int", or None if undecidable.
+    # ── what a value is, for the paths that must decide before emitting ──
+
+    def _expr_str_kind(self, expr):
+        """What `expr` holds: "str", "int", or None if undecidable.
 
         Two sources, and `_string_vars` WINS where they disagree: it is
         flow-sensitive and tracks what the emission of this very function has
         bound so far, so it is strictly better informed than the
         whole-function `ValueKinds`, which is what covers the shapes
         `_note_binding` does not see (a parameter's annotation, a function's
-        return type, a subscript's element kind)."""
+        return type, a subscript's element kind).
+
+        Named for what it answers rather than for the first caller: `print`,
+        the method-receiver guard and `_note_binding` all need the same
+        question, and three copies of this precedence rule is three chances for
+        one of them to decide that a `char *` is a number."""
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
@@ -1426,7 +1433,7 @@ class X86_64Codegen:
             if isinstance(a, F.StringLiteral):
                 frags.append(M.print_literal(a.value))
                 continue
-            kind = self._print_arg_kind(a)
+            kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")
             elif kind == M.INT_KIND:
@@ -1491,11 +1498,22 @@ class X86_64Codegen:
     # ── methods on a value ───────────────────────────────────────────────
 
     def _is_value_receiver(self, obj) -> bool:
-        """True when `obj` names a local, so `obj.m(...)` is a method call.
+        """True when `obj` is a VALUE, so `obj.m(...)` is a method call.
 
         A module path (`os.path.join`) roots at a name too, so the test is
         whether that name is one of this function's own; register allocation
-        knows every local, parameters included."""
+        knows every local, parameters included.
+
+        A string LITERAL is a value as unambiguously as a name is, and it has
+        to be here: with only `append`/`write`/`close` lowerable, every one of
+        them needs a NAME to mutate or to file-descriptor, so a literal
+        receiver could not arise — and `"x".strip()` fell through to the extern
+        path and became a call to a symbol spelled `x.strip`, which is the
+        flat-symbol bug this predicate exists to prevent. The arm64 backend
+        found the same hole at the same time; the two must agree, or `"x".count("x")`
+        works on one architecture and dies in dyld on the other."""
+        if isinstance(obj, F.StringLiteral):
+            return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._var_regs or obj.name in self._var_spills
         if isinstance(obj, F.MemberExpr):
@@ -1505,28 +1523,303 @@ class X86_64Codegen:
         return False
 
     def _emit_value_method(self, e, method: str) -> None:
-        """`recv.method(...)` where `recv` is a local value."""
-        how = M.builtin_value_method(method)
-        if how is None:
-            raise CodegenError(
-                f"{_dotted(e.func)}() is a method call on a value, and this "
-                f"backend lowers only "
-                f"{', '.join(sorted(M.BUILTIN_VALUE_METHODS))} — the receiver "
-                f"is a plain word on this path, so what {method!r} would mean "
-                f"depends on what the receiver holds. Refused rather than "
-                f"emitted as a call to a symbol spelled {_dotted(e.func)!r}, "
-                f"which is what this used to do: the image built and then died "
-                f"in the loader")
+        """`recv.method(...)` where `recv` is a value."""
+        reason = M.value_method_refusal(method, self._method_recv_kind(e),
+                                        _dotted(e.func))
+        if reason is not None:
+            raise CodegenError(reason)
         if e.kwargs:
             raise CodegenError(
                 f"{_dotted(e.func)}() takes no keyword arguments on the formal "
                 f"x86-64 path (got {[k for k, _v in e.kwargs]})")
+        how = M.builtin_value_method(method) or M.pointer_bounded_method(method)
         if how == "list_append":
             self._emit_list_append(e)
         elif how == "file_write":
             self._emit_file_write(e)
-        else:
+        elif how == "file_close":
             self._emit_file_close(e)
+        elif how == "str_lstrip":
+            self._emit_str_lstrip(e)
+        elif how in ("str_startswith", "str_endswith"):
+            self._emit_str_affix(e, at_end=how == "str_endswith")
+        elif how == "str_find":
+            self._emit_str_find(e)
+        else:
+            self._emit_str_count(e)
+
+    # ── methods on a string ───────────────────────────────────────────────
+    #
+    # The arm64 backend carries the reasoning; this is the same list of
+    # methods for the same reasons, with x86-64 instructions. `lstrip`,
+    # `startswith`, `endswith`, `find` and `count` are pointer-bounded — their
+    # answer is a function of the bytes from the receiver to its NUL — and
+    # libSystem already implements each one, so what is emitted is a CALL and
+    # not a second implementation of `strstr` that could be subtly wrong.
+    # `strip`/`rstrip`/`upper`/`split`/... are refused by name, with the
+    # reason in model.LENGTH_DEPENDENT_METHODS, which both backends share so
+    # the two architectures cannot disagree about what is supported.
+
+    def _method_recv_kind(self, e):
+        """What the receiver of a method call holds, for the model's guard.
+
+        The same question `print` asks, under the same precedence — the
+        flow-sensitive `_string_vars` first, the whole-function `ValueKinds`
+        second. It is load-bearing: without it `mlir_value.value()` (359 of the
+        method calls in the stdlib) would be lowered as a string operation on
+        whatever word the receiver holds."""
+        obj = e.func.obj if isinstance(e.func, F.MemberExpr) else None
+        return None if obj is None else self._expr_str_kind(obj)
+
+    def _emit_str_lstrip(self, e) -> None:
+        """`s.lstrip()` — an INTERIOR pointer to the first non-whitespace byte.
+
+        `strspn(s, STRIP_CHARS)` IS the left-strip: it returns the length of the
+        initial segment of `s` made only of those characters, so `s + that` is
+        the answer. Nothing is written and nothing is copied, which is what
+        makes this pointer-bounded and `strip` not.
+
+        The character set is model.STRIP_CHARS, ONE definition for both
+        backends. An earlier version hand-wrote the scan loop per architecture
+        and each copy had its own bug."""
+        # One push, so [rsp] = s.
+        self._emit_expr(e.func.obj)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(F.StringLiteral(M.STRIP_CHARS))
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))    # accept set
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 0))  # s
+        self._emit_extern_call("strspn")
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RCX))     # s + strspn
+        self._pop_slot(Reg.R11)          # never RAX — it holds the answer
+
+    # `_push_slot` pushes, so the LAST thing pushed is at [rsp+0] and each
+    # earlier one is one _SLOT further up. Every offset below is counted from
+    # that, and the rule is worth stating because getting it backwards is
+    # invisible: the call still happens, still returns a value, and the
+    # arguments are simply the wrong two strings. `strstr(needle, haystack)`
+    # is a well-defined NULL, so a reversed pair of arguments made every
+    # `find` return -1 and every `count` return 0 — plausible-looking wrong
+    # answers, which is the one outcome these methods must never produce.
+
+    def _emit_str_affix(self, e, *, at_end: bool) -> None:
+        """`s.startswith(p)` / `s.endswith(p)` — a bounded compare, 0 or 1.
+
+        Both are `strncmp(...) == 0`, and `strncmp` stops at the first
+        difference or at a NUL in either operand, so neither can read past the
+        end of a NUL-terminated buffer. An empty affix is a zero-length
+        compare, which compares equal — the "yes" Python gives.
+
+        `endswith` compares from `s + len(s) - len(p)`, so the lengths are
+        needed first AND the suffix must be shown not to be longer than the
+        receiver: without that test the subtraction underflows and `strncmp`
+        reads before the start of the buffer. Unsigned compares, matching the
+        signedness `strlen` actually returns."""
+        args = list(e.args)
+        name = "str.endswith" if at_end else "str.startswith"
+        if len(args) != 1:
+            raise CodegenError(
+                f"{name}() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        # RDI, not RAX: an expression leaves its value in RAX and the first
+        # ARGUMENT register is RDI. Omitting the move is not a wrong-answer bug
+        # but a fault inside libc — strlen dereferences whatever RDI held.
+        if not at_end:
+            # push s, then p  =>  [rsp] = p, [rsp+16] = s
+            self._emit_expr(e.func.obj)
+            self._push_slot(Reg.RAX)
+            self._emit_expr(args[0])
+            self._push_slot(Reg.RAX)
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))     # p
+            self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+            self._emit_extern_call("strlen")           # RAX = len(p)
+            self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))         # n
+            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))    # s
+            self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))     # p
+            self._emit_extern_call("strncmp")
+            # `_emit_setcc_bool`, not a bare `sete`: a SETcc writes only the
+            # low byte and RAX still holds strncmp's return value, so the
+            # answer would be 0x...0000FF and every later comparison of it
+            # wrong. The helper's own docstring says so.
+            self._emit_setcc_bool(Reg.RAX, "sete")
+            # Pop into R11, never RAX: arm64's epilogue is an `add rsp, N` that
+            # leaves the result alone, but x86-64's _pop_slot WRITES its target
+            # — popping into RAX threw away the 0/1 the setcc had just produced.
+            self._pop_slot(Reg.R11)
+            self._pop_slot(Reg.R11)
+            return
+        # push s, p, len(p), len(s)
+        #   => [rsp] = len(s), [rsp+16] = len(p), [rsp+32] = p, [rsp+48] = s
+        self._while_counter += 1
+        no_label = f"{self.func_name}_endswith{self._while_counter}_no"
+        done_label = f"{self.func_name}_endswith{self._while_counter}_done"
+        self._emit_expr(e.func.obj)
+        self._push_slot(Reg.RAX)                      # s
+        self._emit_expr(args[0])
+        self._push_slot(Reg.RAX)                      # p
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))     # p
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_extern_call("strlen")
+        self._push_slot(Reg.RAX)                      # len(p)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 32))    # s
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_extern_call("strlen")
+        self._push_slot(Reg.RAX)                      # len(s)
+        # len(s) < len(p) -> cannot be a suffix
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))      # len(s)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDX, Reg.RSP, 16))     # len(p)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, Reg.RDX))
+        self._emit_jcc(COND_B, no_label)
+        # RAX = s + len(s) - len(p)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 48))     # s
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RCX))
+        self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.RDX))
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))         # s+ls-lp
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 32))    # p
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDX, Reg.RSP, 16))    # len(p)
+        self._emit_extern_call("strncmp")
+        self._emit_setcc_bool(Reg.RAX, "sete")
+        self._emit_jmp(done_label)
+        self.asm.label(no_label)
+        self._emit_mov_imm(Reg.RAX, 0)
+        self.asm.label(done_label)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+
+    def _emit_str_find(self, e) -> None:
+        """`s.find(p)` — the index of the first occurrence, or -1.
+
+        `strstr` walks both operands to their NULs, so the answer is exactly
+        the difference of two pointers, and the case that has to be handled is
+        "not found", which is a NULL rather than a position: -1 is what Python
+        returns, and returning the NULL's own low bits would be a
+        plausible-looking address. An empty needle makes `strstr` return the
+        receiver itself, i.e. 0, which is also what Python returns.
+
+        The argument order is `strstr(HAYSTACK, NEEDLE)` and it is the whole
+        method: `strstr("bc", "abcabc")` is a well-defined NULL, so getting it
+        backwards does not crash and does not look wrong in the image — it
+        returns -1 for every haystack that contains its needle."""
+        args = list(e.args)
+        if len(args) != 1:
+            raise CodegenError(
+                f"str.find() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        self._while_counter += 1
+        no_label = f"{self.func_name}_find{self._while_counter}_no"
+        done_label = f"{self.func_name}_find{self._while_counter}_done"
+        # push s, then p  =>  [rsp] = p, [rsp+16] = s
+        self._emit_expr(e.func.obj)
+        self._push_slot(Reg.RAX)                      # [rsp+16] = s
+        self._emit_expr(args[0])
+        self._push_slot(Reg.RAX)                      # [rsp] = p
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))    # haystack
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))     # needle
+        self._emit_extern_call("strstr")
+        self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
+        self._emit_jcc(COND_E, no_label)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 16))    # s
+        self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.RCX))
+        self._emit_jmp(done_label)
+        self.asm.label(no_label)
+        self._emit_mov_imm(Reg.RAX, -1)
+        self.asm.label(done_label)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+
+    def _emit_str_count(self, e) -> None:
+        """`s.count(p)` — how many NON-OVERLAPPING occurrences.
+
+        Non-overlapping is Python's rule and it is the whole of the loop: each
+        match advances the cursor by the needle's length, so "aaa".count("aa")
+        is 1 and not 2. Overlapping it would be a one-instruction difference
+        and a silently wrong count.
+
+        The empty needle is the case with no loop at all — it matches at each of
+        the L+1 positions in a string of length L, so the count is
+        `strlen(s) + 1` — and it is also the case that would otherwise spin
+        forever, since `strstr` returns the cursor unchanged for it."""
+        args = list(e.args)
+        if len(args) != 1:
+            raise CodegenError(
+                f"str.count() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        self._while_counter += 1
+        n = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_count{n}_loop"
+        done = f"{fn}_count{n}_done"
+        empty = f"{fn}_count{n}_empty"
+        end = f"{fn}_count{n}_end"
+        # push s, p, len(p), cursor, count
+        #   => [rsp] = count, [rsp+16] = cursor, [rsp+32] = len(p),
+        #      [rsp+48] = p, [rsp+64] = s
+        self._emit_expr(e.func.obj)
+        self._push_slot(Reg.RAX)                      # s
+        self._emit_expr(args[0])
+        self._push_slot(Reg.RAX)                      # p
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))     # p
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_extern_call("strlen")
+        self._push_slot(Reg.RAX)                      # len(p)
+        # Still three slots deep here: [rsp] = len(p), [rsp+16] = p,
+        # [rsp+32] = s — NOT the offsets the five-slot layout below uses.
+        # Reading len(p) from the five-slot table's [rsp+16] loads `p` itself,
+        # a non-zero pointer, so the empty-needle branch is never taken and
+        # count("") spins forever in the loop.
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))     # len(p)
+        self.asm.emit(encode_cmp_r64_imm8(Reg.RCX, 0))
+        self._emit_jcc(COND_E, empty)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 32))    # s
+        self._push_slot(Reg.RAX)                      # cursor
+        self._emit_mov_imm(Reg.RAX, 0)
+        self._push_slot(Reg.RAX)                      # count = 0
+        self.asm.label(loop)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))    # cursor
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 48))    # p
+        self._emit_extern_call("strstr")
+        self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
+        self._emit_jcc(COND_E, done)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))      # count
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RCX))
+        # cursor = hit + len(p)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 32))    # len(p)
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RCX))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 16, Reg.RAX))
+        self._emit_jmp(loop)
+        self.asm.label(empty)
+        # Three slots deep: [rsp+32] = s. The answer goes into [rsp+0], which
+        # on this path holds len(p) == 0 and is dead — and it has to go there
+        # rather than staying in RAX, because `done` reads the answer from
+        # [rsp+0] and a path that branches there with the answer only in RAX
+        # returns the loop's counter instead.
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 32))    # s
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_extern_call("strlen")
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))   # L+1 positions
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RAX))
+        # Release the THREE slots this path actually pushed and leave. Branching
+        # to `done` instead would run its five pops over three pushes and leave
+        # RSP 32 bytes too high — which does not fault here, it makes the NEXT
+        # statement's stack-relative operand loads read the wrong slots. A
+        # following printf then printed the image's own bytes. The arm64
+        # backend cannot hit this: its window is one `sub sp` at the top and
+        # one `add sp` at the bottom, so both paths share a depth.
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._emit_jmp(end)
+        self.asm.label(done)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))      # count
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self.asm.label(end)
 
     def _emit_list_append(self, e) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
@@ -3177,6 +3470,18 @@ class X86_64Codegen:
                 isinstance(value, F.IdentExpr)
                 and value.name in self._string_vars):
             self._string_vars.add(name)
+        elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
+                value, self._expr_str_kind(
+                    value.func.obj if isinstance(value.func, F.MemberExpr)
+                    else None) == M.STR_KIND):
+            # A lowered string method that yields a string: `m = s.lstrip()`
+            # binds a `char *` exactly as `m = s` does. Without this the name
+            # fell through to the clearing `else` below, and the consequence
+            # was not a refusal — it was a WRONG ANSWER, because the things
+            # that consult `_string_vars` (a string `==`, and `print`) then
+            # treated the pointer as a number. `"  hi".lstrip() == "hi"`
+            # compared a pointer against an integer and said False.
+            self._string_vars.add(name)
         else:
             self._string_vars.discard(name)
             self._dict_vars.discard(name)
@@ -3246,6 +3551,17 @@ class X86_64Codegen:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
         is_extern = name not in self._functions
+        # The gimple backend's C runtime is a library of a DIFFERENT target, not
+        # an external dependency of this one, and the source spells its ABI as
+        # bare `mojo_*` names. Everything a call to one of those could bind to
+        # has been ruled out above (not a function of this module, not a struct,
+        # not a type constructor, and a linked dylib supplies its own spelling
+        # below), so what is left has nowhere to go — and the extern path emits
+        # a `call` the image carries to its death in the loader. Same refusal,
+        # same words as arm64's, from the one shared function.
+        if is_extern and name not in self._dylib_syms \
+                and M.is_gimple_runtime_builtin(name):
+            raise CodegenError(M.gimple_runtime_refusal(name))
         # A callee that a linked formal dylib provides is emitted against the
         # spelling that dylib exports, not the name the source used.
         symbol = self._dylib_syms.get(name, name)

@@ -10,15 +10,10 @@ nothing.
 
     python3 test_formal_sweep.py [-v]
 
-NOT YET WIRED INTO make: no check-* target covers tools/formal_sweep.py, and
-adding one means editing the Makefile, which is shared with the other agents in
-flight. When that is done it should follow the checked_run.py convention the
-other suites use:
-
-    check-formal-sweep: tools/formal_sweep.py test_formal_sweep.py fire.py
-        python3 checked_run.py check-formal-sweep \\
-            --extra tools/formal_sweep.py --extra test_formal_sweep.py \\
-            --extra fire.py --extra fire_compiler.py -- python3 test_formal_sweep.py
+Run by `make check-formal-sweep`, which wraps it in checked_run.py with this
+file, tools/formal_sweep.py, fire.py, fire_compiler.py and every formal/*.py
+as the hashed inputs — the sweep's verdict is a function of all of those, so a
+cached result from a different set would be a different answer.
 """
 import io
 import os
@@ -215,6 +210,180 @@ class TestClassify(unittest.TestCase):
         a = cas.formal_build_key("s", "p.mojo", S.build_flags("arm64"), "c")
         b = cas.formal_build_key("s", "p.mojo", S.build_flags("x86_64"), "c")
         self.assertNotEqual(a, b)
+
+
+class TestDyldProbe(unittest.TestCase):
+    """`pass` vs `not-answerable/unresolved-extern`, checked against real dyld.
+
+    The probe this replaces asked `hasattr(ctypes.CDLL(None), name)` — "is this
+    name visible in the sweeping python process" — and so reported as a load
+    failure every image whose import machinery had worked: the helper symbol
+    lives in a dylib on the image's link line, which python has not loaded. On
+    the arm64 repo sweep that was one file (`example_imports.mojo`, whose image
+    runs and exits 40), i.e. the instrument calling the exact success the
+    import path exists to produce a FAILURE. The rest of this file checks that
+    things other than the sweep's own wording: every case below is settled by
+    RUNNING the image dyld would load, so the probe cannot be quietly inverted
+    in either direction without one of these going red.
+
+    Two real images are built (both from throwaway sources in a temp dir, one
+    build each, ~0.3s); the rest are the linker's own emitter, which is what
+    produces the bind stream under test.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        import tempfile
+        cls.subprocess = subprocess
+        cls._tmp = tempfile.TemporaryDirectory(prefix="fs_probe_")
+        d = cls._tmp.name
+        with open(os.path.join(d, "helper.mojo"), "w") as f:
+            f.write("fn add(a: Int, b: Int) -> Int:\n    return a + b\n")
+        with open(os.path.join(d, "main.mojo"), "w") as f:
+            f.write("from helper import add\n\n"
+                    "fn main() -> Int:\n"
+                    "    var x: Int = add(2, 3)\n    return x\n")
+        with open(os.path.join(d, "bogus.mojo"), "w") as f:
+            f.write("fn main() -> Int:\n"
+                    "    return definitely_not_a_real_symbol_9f3a(1)\n")
+        cls.resolvable_img = cls._fire("main.mojo", "arm64")
+        cls.bogus_img = cls._fire("bogus.mojo", "arm64")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @classmethod
+    def _fire(cls, name, arch):
+        out = os.path.join(cls._tmp.name, name.replace(".mojo", ".aout"))
+        p = cls.subprocess.run(
+            [sys.executable, os.path.join(S.REPO, "fire.py"), "build",
+             "--formal", "--no-prove", f"--backend={arch}", "-o", out,
+             os.path.join(cls._tmp.name, name)],
+            capture_output=True, text=True, cwd=S.REPO, timeout=300)
+        if p.returncode != 0:
+            raise AssertionError(f"building {name} failed: "
+                                 f"{(p.stderr or p.stdout).strip()[-400:]}")
+        with open(out, "rb") as f:
+            return f.read()
+
+    def _runs(self, image, name):
+        """Run the image; return (returncode, first line of stderr)."""
+        out = os.path.join(self._tmp.name, "run_" + name)
+        with open(out, "wb") as f:
+            f.write(image)
+        os.chmod(out, 0o755)
+        self.subprocess.run(["codesign", "-s", "-", out],
+                            capture_output=True, timeout=120)
+        p = self.subprocess.run([out], capture_output=True, text=True,
+                                timeout=60)
+        err = (p.stderr or "").strip().splitlines()
+        return p.returncode, (err[0] if err else "")
+
+    def test_the_helper_symbol_is_invisible_to_this_process(self):
+        # Why the old probe was wrong, pinned as a fact rather than a story:
+        # the name the import machinery mangles IS resolvable, and IS NOT
+        # visible to the sweeping interpreter. If this ever starts passing,
+        # the old mechanism would stop being wrong for the wrong reason.
+        image = self.resolvable_img
+        (ordinal, name), = S._binds(image)
+        self.assertEqual(ordinal, 2, "the helper must bind from the dylib")
+        import ctypes
+        self.assertFalse(hasattr(ctypes.CDLL(None), name),
+                         "if the host process can see it, this test no longer "
+                         "exercises the bug it exists to pin")
+
+    def test_a_real_imported_helper_resolves_and_the_image_runs(self):
+        # The false positive, end to end: the probe must find nothing missing…
+        self.assertEqual(S._unresolved_imports(self.resolvable_img), [])
+        # …and dyld must agree, by actually loading it.
+        rc, err = self._runs(self.resolvable_img, "ok")
+        self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
+        self.assertEqual(rc, 5, "main() returns add(2, 3)")
+
+    def test_an_image_nothing_defines_is_reported_and_dyld_agrees(self):
+        # The true positive, and the check that the probe is not simply
+        # answering "yes" to everything now.
+        missing = S._unresolved_imports(self.bogus_img)
+        self.assertEqual([m.name for m in missing],
+                         ["definitely_not_a_real_symbol_9f3a"])
+        self.assertIn("libSystem", missing[0].why)
+        rc, err = self._runs(self.bogus_img, "bogus")
+        self.assertIn("Symbol not found", err)
+        self.assertNotEqual(rc, 0)
+
+    def test_the_ordinal_decides_which_library_is_consulted(self):
+        # The anti-inversion case. The same symbol, the same library on the
+        # same link line, and the answer must follow the ordinal the image
+        # recorded: dyld resolves a two-level bind in ONE named library, so a
+        # probe that searched "every library on the line" gets the first of
+        # these two wrong — in the false-PASS direction.
+        from formal import macho_linker as ML
+        helper = S._load_dylib_names(self.resolvable_img)[1]
+        code = ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4)
+        name = S._binds(self.resolvable_img)[0][1]
+
+        wrong = ML.build_macho_executable_extern(
+            code, [name], "arm64", dylibs=[{"install_name": helper,
+                                            "symbols": set()}])
+        self.assertEqual(S._binds(wrong), [(1, name)])
+        self.assertEqual([m.name for m in S._unresolved_imports(wrong)], [name])
+
+        right = ML.build_macho_executable_extern(
+            code, [name], "arm64", dylibs=[{"install_name": helper,
+                                            "symbols": {name}}])
+        self.assertEqual(S._binds(right), [(2, name)])
+        self.assertEqual(S._unresolved_imports(right), [])
+
+    def test_a_dylib_of_the_wrong_architecture_is_not_a_resolution(self):
+        # dlopen would happily load the arm64 helper into this arm64
+        # interpreter, so a probe that used dlopen alone would report the
+        # x86-64 image as resolvable — a false PASS. dyld's own message for
+        # the same image is "Library not loaded: … incompatible architecture",
+        # so the finding is real and the reason must name the architecture.
+        import struct
+        from formal import macho_linker as ML
+        helper = S._load_dylib_names(self.resolvable_img)[1]
+        self.assertNotIn(ML.CPU_TYPE_X86_64, S._macho_cputypes(helper),
+                         "precondition: the helper is a thin non-x86_64 dylib")
+        self.assertIn(ML.CPU_TYPE_ARM64, S._macho_cputypes(helper))
+        code = ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4)
+        name = S._binds(self.resolvable_img)[0][1]
+        img = ML.build_macho_executable_extern(
+            code, [name], "x86_64", dylibs=[{"install_name": helper,
+                                             "symbols": {name}}])
+        self.assertEqual(struct.unpack_from("<i", img, 4)[0],
+                         ML.CPU_TYPE_X86_64)
+        missing = S._unresolved_imports(img)
+        self.assertEqual([m.name for m in missing], [name])
+        self.assertIn("arm64", missing[0].why)
+        self.assertIn("x86_64", missing[0].why)
+
+    def test_an_unreadable_image_is_said_so_and_never_called_a_pass(self):
+        # The failure mode of a hand-rolled Mach-O reader is to raise on a
+        # header it does not recognise (run_one turns that into a `tool`
+        # verdict, which says nothing about the file) — or, worse, to find
+        # "no load commands, therefore nothing missing" and call it a pass.
+        # Both are wrong; the answer has to be a stated reason.
+        self.assertEqual(S._binds(b""), [])
+        self.assertEqual(S._load_dylib_names(b""), [])
+        missing = S._unresolved_imports(b"")
+        self.assertEqual([m.name for m in missing], ["<unreadable image>"])
+        self.assertIn("no Mach-O header", missing[0].why)
+
+    def test_a_bind_naming_an_ordinal_the_image_does_not_have_is_reported(self):
+        # dyld would refuse the image; the probe must not read past the end of
+        # the load-command list and fall off into "resolvable". The same
+        # lookup for an ordinal the image DOES have is the control.
+        from formal import macho_linker as ML
+        only_libsystem = [S._LIBSYSTEM]
+        self.assertNotEqual(
+            S._resolvable(9, "printf", only_libsystem, ML.CPU_TYPE_ARM64), "")
+        self.assertEqual(
+            S._resolvable(1, "printf", only_libsystem, ML.CPU_TYPE_ARM64), "")
+        self.assertNotEqual(
+            S._resolvable(1, "printf", [], ML.CPU_TYPE_ARM64), "")
 
 
 class TestReport(unittest.TestCase):

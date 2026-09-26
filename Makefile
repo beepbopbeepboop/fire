@@ -1,6 +1,7 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-ab-native \
         check-coro check-formal check-formal-dylib check-formal-run \
+        check-formal-sweep \
         check-formal-x86 check-formal-x86-model check-formal-x86-endtoend \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
@@ -244,6 +245,21 @@ check-formal-dylib: $(FORMAL_SOURCES) test_formal_dylib.py fire.py \
 		--extra lib/ProofLib.olean --extra lib/X86.olean \
 		--extra lib/work.olean --extra lib/Refine.olean \
 		-- python3 test_formal_dylib.py
+
+# ── check-formal-sweep: the SWEEP's own verdict layer ───────────────────────
+# tools/formal_sweep.py is the instrument every other lane reads to decide what
+# to work on, so a wrong verdict in it is a wrong task assignment; nothing else
+# in the suite covers it (test_formal_sweep.py was unwired until now). Cheap:
+# no full-repo sweep, and the two images it builds for the dyld probe are two
+# `fire.py build --formal` calls. Not gated into `check` — it is a tool test,
+# not a compiler test, like the other test-only targets.
+check-formal-sweep: $(FORMAL_SOURCES) test_formal_sweep.py \
+              tools/formal_sweep.py fire.py fire_compiler.py
+	python3 checked_run.py check-formal-sweep \
+		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
+		--extra test_formal_sweep.py --extra tools/formal_sweep.py \
+		--extra fire.py --extra fire_compiler.py \
+		-- python3 test_formal_sweep.py
 
 # ── check-formal-x86: the x86-64 examples, built and proof-checked ──────────
 # Same examples as check-formal, through the x86-64 backend and its proof

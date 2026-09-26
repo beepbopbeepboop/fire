@@ -36,7 +36,10 @@ FAIL bucket it did two kinds of damage at once: it buried the real findings,
 and it made the headline a number whose denominator was mostly host-platform
 facts. So every verdict now carries a class:
 
-  pass                              built, loads, all imports dyld-resolvable
+  pass                              built, and every symbol it binds is in a
+                                    library on its own link line that dyld can
+                                    load (see the probe's own comment for what
+                                    that does and does not prove)
   codegen                           the backend refused or crashed on a
                                     construct — THE FINDING, the only class
                                     whose count is a gap in the backend
@@ -53,11 +56,12 @@ facts. So every verdict now carries a class:
                                     alone, so it is reported separately with
                                     the module named rather than merged into
                                     the host class
-  not-answerable/unresolved-extern  builds, but dyld cannot resolve the
-                                    symbols it binds: this path compiles ONE
-                                    file and resolves no imports, so a
-                                    cross-module call lowers to a BL against
-                                    nothing. A limit of the path, not coverage
+  not-answerable/unresolved-extern  builds, but no library on its link line
+                                    provides a symbol it binds, so the image
+                                    is refused at load (or at the first call to
+                                    the symbol). Real, and not coverage — a
+                                    call to a runtime the image never links,
+                                    typically, rather than a codegen gap
   tool                              timeout, unreadable file, or an internal
                                     exception in the sweep or the build
                                     driver — no verdict about the source was
@@ -116,6 +120,13 @@ per file instead of recompiling. Editing anything under formal/, the parser,
 or mojo/middle/ invalidates it. The cache stores the raw build verdict; the
 class is recomputed from it on every run, so a cached entry can never be
 reported under a class the current rules would not assign it.
+
+The one thing deliberately NOT published is a verdict for an image that links
+a formal dylib, because that verdict depends on the dylib and the dylib is not
+in the key (it lives at a fixed path keyed by module name alone, so the two
+architectures overwrite each other's copy). Such a file is rebuilt every run —
+one file today — and the accounting line says so rather than leaving the
+count unexplained. This narrows what is cached; nothing new is.
 
 The default scope is this repo plus the stdlib's std/ (the stdlib tree lives
 outside the repo and is far larger); pass --no-stdlib for the repo alone, or
@@ -437,6 +448,19 @@ def _bump(kind: str) -> None:
         cas.stats[kind] += 1
 
 
+# Files whose verdict this run declined to cache because it depends on a
+# formal dylib that is not in the cache key. Counted here rather than in
+# cas.stats because cas's own dict is a fixed two-key record of ITS lookups
+# and this is a fact about this tool's publication decision, not a lookup.
+_DYLIB_LINKED = 0
+
+
+def _bump_dylib_linked() -> None:
+    global _DYLIB_LINKED
+    with _STATS_LOCK:
+        _DYLIB_LINKED += 1
+
+
 SKIP_DIRS = {
     ".git", ".pixi", "output", "build", "__pycache__", ".mypy_cache",
     ".pytest_cache", "node_modules",
@@ -552,28 +576,91 @@ def rel(path):
     return os.path.relpath(path, REPO)
 
 
-def _bind_symbols(binary: bytes) -> list:
-    """The external symbol names a Mach-O image binds, read from its bind stream.
+# Container magics, as the BYTES they sit as. A fat header is big-endian
+# (0xCAFEBABE) and a Mach-O header is little-endian (0xFEEDFACF), so reading
+# either one as an integer through the other's byte order silently fails —
+# which is why these are bytes and not numbers. In both kinds the CPU type is
+# the second 4-byte field of the entry, at the same offset.
+_MACHO_FAT = (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf")
+_MACHO_THIN = (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf")
+_MACHO_MAGICS = _MACHO_THIN
+
+
+def _load_commands(binary: bytes) -> list:
+    """(cmd, offset) for every load command in a Mach-O image, in order.
+
+    Total on purpose: a buffer too short to hold a header yields no commands
+    rather than raising, because the callers must be able to ANSWER "I cannot
+    read this image" — an exception here would surface as a `tool` verdict,
+    which says nothing about the file, where a stated reason says the image
+    could not be examined at all.
+    """
+    if len(binary) < 32:
+        return []
+    ncmds = struct.unpack_from("<I", binary, 16)[0]
+    off, out = 32, []
+    for _ in range(ncmds):
+        if off + 8 > len(binary):
+            break
+        cmd, cmdsize = struct.unpack_from("<II", binary, off)
+        if not cmdsize:
+            break                       # a zero cmdsize would loop forever
+        out.append((cmd, off))
+        off += cmdsize
+    return out
+
+
+def _load_dylib_names(binary: bytes) -> list:
+    """The LC_LOAD_DYLIB paths, in the image's own order.
+
+    Order is the whole point: this emitter writes libSystem first and the
+    linked formal libraries after it, and the bind stream's dylib ordinals are
+    1-based over exactly this list (ordinal 1 = libSystem, ordinal k+2 =
+    dylibs[k]). That is macho_linker.build_macho_executable_extern's own stated
+    contract, and the same one its dylib layout follows ("libSystem is 1, then
+    deps in the order recorded"), so there is no second numbering here to keep
+    in step with the linker's.
+    """
+    names = []
+    for cmd, off in _load_commands(binary):
+        if cmd != ML.LOAD_DYLIB_CMD:
+            continue
+        # dylib_command: cmd, cmdsize, name.offset (into this command), …,
+        # then the NUL-terminated name.
+        name_off = struct.unpack_from("<I", binary, off + 8)[0]
+        start = off + name_off
+        if not off + 24 <= start < len(binary):
+            continue                     # a name offset outside the command
+        end = binary.find(b"\0", start)
+        if end < 0:
+            continue
+        names.append(binary[start:end].decode("utf-8", "replace"))
+    return names
+
+
+def _binds(binary: bytes) -> list:
+    """[(dylib ordinal, symbol name)] from the image's bind stream, in order.
 
     The images carry no LC_SYMTAB (the linker never emits one), so neither
     `nm -u` nor `dyld_info -imports` can list what they need — the names live
     only in the classic dyld bind opcodes, which this project writes itself
     (macho_linker._bind_info), so walking them here is exact rather than a
     heuristic. Opcode constants come from the linker, so the two cannot drift.
+
+    The ordinal is read rather than assumed, and kept, because it is what dyld
+    itself will use: a two-level-namespace bind is resolved in ONE named
+    library, so the question "is this name available?" is only meaningful
+    relative to the library the image said provides it.
     """
     # LC_DYLD_INFO_ONLY gives the bind stream's file offset and size.
-    ncmds = struct.unpack_from("<I", binary, 16)[0]
-    off = 32
     bind_off = bind_size = None
-    for _ in range(ncmds):
-        cmd, cmdsize = struct.unpack_from("<II", binary, off)
+    for cmd, off in _load_commands(binary):
         if cmd == ML.DYLD_INFO_ONLY_CMD:
             # dyld_info_command: cmd, cmdsize, rebase_off, rebase_size,
             # bind_off, bind_size, … — bind_off is the FIFTH field.
             (_c, _cs, _ro, _rs, bind_off,
              bind_size) = struct.unpack_from("<IIIIII", binary, off)
             break
-        off += cmdsize
     if not bind_size:
         return []
     # Walk the opcodes. This emitter's own layout (macho_linker._bind_info),
@@ -585,17 +672,25 @@ def _bind_symbols(binary: bytes) -> list:
     # the plain SET_SYMBOL form gets wrong: it reads it as the first
     # character of the name.
     stream = memoryview(binary)[bind_off:bind_off + bind_size]
-    i, out = 0, []
+    # dyld's documented default when no ordinal has been set is "this image",
+    # which is never what the formal linker emits — it writes
+    # BIND_SET_DYLIB_ORDINAL_IMM before every single name — so the default here
+    # is libSystem (ordinal 1), and a stream that ever relied on the default
+    # would report every one of its names against the wrong library.
+    i, ordinal, out = 0, 1, []
     while i < len(stream):
         byte = stream[i]
         i += 1
-        if byte == ML.BIND_SET_SYMBOL_TRAILING_FLAGS_IMM:
+        if (byte & 0xF0) == ML.BIND_SET_DYLIB_ORDINAL_IMM:
+            ordinal = byte & 0x0F         # BIND_OPCODE_MASK / _IMMEDIATE_MASK
+        elif byte == ML.BIND_SET_SYMBOL_TRAILING_FLAGS_IMM:
             i += 1                       # the trailing-flags byte
             start = i
             while i < len(stream) and stream[i] != 0:
                 i += 1
             if i > start:
-                out.append(bytes(stream[start:i]).decode("utf-8", "replace"))
+                name = bytes(stream[start:i]).decode("utf-8", "replace")
+                out.append((ordinal, name))
             i += 1                       # the NUL
         elif (byte & 0xF0) == ML.BIND_SET_SEGMENT_AND_OFFSET_ULEB:
             while i < len(stream) and stream[i] & 0x80:      # ULEB offset
@@ -605,37 +700,209 @@ def _bind_symbols(binary: bytes) -> list:
     return out
 
 
-# One dyld-resolved libSystem binding in this process answers "can dyld
-# resolve this name at load time" exactly, without executing the image.
-_LIB = None
-_RESOLVABLE: dict = {}
+def _bind_symbols(binary: bytes) -> list:
+    """The external symbol names a Mach-O image binds, in bind-stream order."""
+    return [name for _ordinal, name in _binds(binary)]
 
 
-def _resolvable(name: str) -> bool:
-    """Whether this process's libSystem has `name`.
+# ── Can dyld bind what this image binds? ─────────────────────────────────────
+#
+# The question, stated exactly: for THIS image, at load time, can the dynamic
+# linker find every name in its bind stream?
+#
+# The probe this replaces answered a different question — "is this name visible
+# in the sweeping python process right now?" — and the two come apart in BOTH
+# directions, which is what made it unfit to decide a verdict:
+#
+#   * FALSE POSITIVE, and the one that made this tool lie. A formal import is
+#     resolved into a real dylib that goes on the link line (formal/build.py's
+#     _resolve_imports), so the image's LC_LOAD_DYLIB names it and dyld binds
+#     the call from there. The helper symbol is in no library this python has
+#     loaded, so the probe said "unresolvable" and reported the exact success
+#     the import machinery exists to produce: `example_imports.mojo`, whose
+#     image builds, loads, and exits 40.
+#   * FALSE PASS, which is worse and is why the probe could not simply be
+#     widened to "search every library the process has". `ctypes.CDLL(None)`
+#     searches the whole global namespace, so a name exported by the python
+#     binary, or by anything else already loaded, read as "resolvable" even
+#     when nothing on this image's link line defines it.
+#
+# The method here answers the question asked, from the image's own bytes:
+#
+#   1. read the image's LC_LOAD_DYLIB list, in order (_load_dylib_names);
+#   2. read each bind as the (ordinal, name) pair dyld itself will use (_binds);
+#   3. look the name up in THAT library alone — dlopen it, then dlsym.
+#
+# So the answer is dyld's own two-level lookup, minus dyld.
+#
+# What this DOES prove: for every name the image binds, there is a library on
+# its link line that loads here and exports that name.
+#
+# What this does NOT prove, spelled out so nobody reads a `pass` as more than
+# it is:
+#   * libSystem is answered from the HOST process's libSystem
+#     (`ctypes.CDLL(None)`), which is the same library the image will load and
+#     the same one an x86-64 image's dyld resolves against under Rosetta 2 —
+#     same library, same exports, different slice. A name the two slices
+#     disagreed on would be missed; the formal backends emit no such name.
+#   * dlopen happily accepts a library whose architecture is not the image's,
+#     so that is checked separately (_loadable_for): an arm64 dylib on an
+#     x86-64 image's link line exports exactly the right names and still
+#     cannot be loaded. That is a real load failure, reported as one.
+#   * Nothing about behaviour. This says the image can be loaded and its
+#     symbols bound; it does not say the program computes the right answer.
+#     `make check-formal-run` is what runs images. Note the direction of the
+#     remaining error: dyld binds function calls LAZILY, so an image that never
+#     calls a missing symbol would run clean, and this probe still calls it
+#     unresolved — the conservative direction, never the flattering one.
+#
+# A test that builds two real images through `fire.py build --formal` — one
+# with a genuinely imported helper, one whose extern nothing defines — and
+# settles every case against what dyld does when it loads them, lives in
+# test_formal_sweep.py (TestDyldProbe). It is the only thing standing between
+# this and a silent inversion.
+_LIBSYSTEM = ML.LIBSYSTEM_PATH.decode().rstrip("\0")
+_LIBS: dict = {}            # dylib path -> "" if it loads here, else the reason
+_MEMO: dict = {}            # (dylib path, name) -> bool, for the whole run
 
-    The probe is the host's own (arm64) libSystem, which is also what an
-    x86_64 image's dyld resolves against under Rosetta 2 — same library, same
-    exports, different slice. The bind stream itself is read from the image
-    under test, so which symbols it NEEDS is exact either way; only the
-    answer to "could dyld find it" is approximated, and the two slices do not
-    differ in any name the formal backends emit."""
-    global _LIB
-    if name not in _RESOLVABLE:
-        if _LIB is None:
-            _LIB = ctypes.CDLL(None)
-        _RESOLVABLE[name] = hasattr(_LIB, name)
-    return _RESOLVABLE[name]
+# The two CPU types this tool ever sees an image or a library built for, named
+# so the "why" a finding prints is readable. Anything else falls back to the
+# number, which is still an answer.
+_CPU_NAMES = {ML.CPU_TYPE_ARM64: "arm64", ML.CPU_TYPE_X86_64: "x86_64"}
+
+
+def _cpu_name(cputype: int) -> str:
+    return _CPU_NAMES.get(cputype, f"cpu type {cputype}")
+
+
+def _macho_cputypes(path: str) -> set:
+    """Every CPU type in the Mach-O file at `path` (empty if unreadable).
+
+    Fat and thin both: a system library can be a fat file whose slice is
+    chosen by dyld, and a thin one is what this project's linker emits. An
+    unreadable or unrecognised file yields the empty set, which _loadable_for
+    treats as "not provably loadable" — the direction that produces a finding
+    rather than a pass. (See _MACHO_FAT/_MACHO_THIN for why the magics are
+    compared as bytes.)
+    """
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+            if magic in _MACHO_FAT:
+                n = struct.unpack(">I", f.read(4))[0]
+                table = f.read(32 * n)     # fat_arch_64 covers fat_arch too
+                return {struct.unpack_from(">i", table, 32 * i + 4)[0]
+                        for i in range(n)}
+            if magic in _MACHO_THIN:
+                f.seek(4)
+                return {struct.unpack("<i", f.read(4))[0]}
+            return set()
+    except OSError:
+        return set()
+
+
+def _loadable_for(path: str, cputype: int) -> str:
+    """"" for a library this image's dyld could load, else why not.
+
+    dlopen is deliberately NOT the test — it is happy to load a library built
+    for the other architecture, which is precisely the case dyld refuses
+    ("Library not loaded: … (mach-o file, but is an incompatible architecture
+    (have 'arm64', need 'x86_64'))") and precisely the case that would turn
+    this probe into a false PASS. The architecture is checked first, from the
+    file's own header; cpusubtype is not, because dyld accepts a mismatch
+    there and matching it more strictly would invent findings.
+
+    libSystem short-circuits to "loadable" without either check: it is answered
+    from the host process (see the block comment above), and on this system
+    /usr/lib/libSystem.B.dylib is a shared-cache stub with no header to read —
+    so the arch test below would report every image as unloadable, which is the
+    false-finding direction.
+    """
+    if path == _LIBSYSTEM:
+        return ""                       # ordinal 1, answered from the host
+    types = _macho_cputypes(path)
+    if not types:
+        return f"cannot read a Mach-O header at {path}"
+    if cputype not in types:
+        have = "/".join(sorted(_cpu_name(t) for t in types))
+        return (f"{path} is built for {have}, which this "
+                f"{_cpu_name(cputype)} image cannot load")
+    if path in _LIBS:
+        return _LIBS[path]
+    try:
+        _LIBS[path] = ""
+        ctypes.CDLL(path)
+    except OSError as e:
+        _LIBS[path] = f"dyld cannot load {path} here: {e}"
+    return _LIBS[path]
+
+
+def _exports(path: str, name: str) -> bool:
+    """Whether the library at `path` exports `name`, which is spelled bare.
+
+    `hasattr` on a CDLL is a dlsym, and dlsym re-adds the leading underscore
+    the Mach-O symbol carries — so the name the bind stream holds (bare, as
+    macho_linker writes it) is exactly what dlsym wants. libSystem is the one
+    exception to "the library at `path`": it is answered from the HOST process
+    (see the block comment above for why that is the same library), and
+    CDLL(None) searches the global namespace, which is why the lstrip is not
+    optional here.
+    """
+    key = (path, name)
+    if key not in _MEMO:
+        lib = ctypes.CDLL(None) if path == _LIBSYSTEM else ctypes.CDLL(path)
+        _MEMO[key] = hasattr(lib, name.lstrip("_"))
+    return _MEMO[key]
+
+
+def _resolvable(ordinal: int, name: str, dylibs: list, cputype: int) -> str:
+    """Why dyld cannot bind `name` from dylib `ordinal`, or "" if it can.
+
+    See the block comment above: the answer is read out of the image's own load
+    commands and bind stream, and looked up in the one library dyld would use.
+    "" is the only success value, so a caller cannot mistake a partial answer
+    for a resolution.
+    """
+    if not dylibs:
+        return "the image has no load commands"
+    if ordinal < 1 or ordinal > len(dylibs):
+        return (f"the bind names dylib ordinal {ordinal}, which the image's "
+                f"{len(dylibs)} load command(s) do not define")
+    path = dylibs[ordinal - 1]
+    bad = _loadable_for(path, cputype)
+    if bad:
+        return f"{bad}; nothing in it binds"
+    if not _exports(path, name):
+        return f"{name} is not exported by {path}"
+    return ""
+
+
+# A name the image binds that no loadable library provides, and the reason —
+# so the printed finding says WHICH library was consulted and what was wrong
+# with it, rather than only how many names there were.
+Missing = collections.namedtuple("Missing", "name why")
 
 
 def _unresolved_imports(binary: bytes) -> list:
-    """Externs the image needs that dyld cannot resolve — i.e. it cannot load.
+    """The names the image binds that dyld cannot bind, with the reason each.
 
-    This backend compiles ONE file and resolves no imports, so a call into
-    another module lowers to a BL against a symbol nothing defines. That is a
-    real limit of the path, not a codegen failure, but it must not be counted
-    as coverage: the binary builds and then dies in dyld at launch."""
-    return [s for s in _bind_symbols(binary) if not _resolvable(s.lstrip("_"))]
+    A name here means the image builds and then dyld refuses to load it (or
+    would, at the first call to it): that is not coverage and is not a codegen
+    finding, so it is reported in its own class. See the block comment above
+    for what this does and does not prove.
+    """
+    dylibs = _load_dylib_names(binary)
+    if not dylibs and binary[:4] not in _MACHO_MAGICS:
+        # A real image of this project always loads libSystem, so no load
+        # commands at all means the header was not readable — NOT "there is
+        # nothing to bind", which would be a false pass produced by the
+        # failure of the reader itself. Said out loud instead.
+        return [Missing("<unreadable image>",
+                        f"{len(binary)} bytes with no Mach-O header, so what "
+                        f"it binds could not be read at all")]
+    cputype = struct.unpack_from("<i", binary, 4)[0]
+    return [Missing(name, why) for ordinal, name in _binds(binary)
+            for why in [_resolvable(ordinal, name, dylibs, cputype)] if why]
 
 
 def _verdict_bytes(ok, detail):
@@ -731,13 +998,18 @@ def run_one(path, timeout, flags) -> Verdict:
                     binary = f.read()
         if proc.returncode == 0:
             missing = _unresolved_imports(binary)
+            # Whether the image links anything but libSystem decides whether
+            # its verdict may be published at all — see the publish guard
+            # below, which is the whole reason this is computed here.
+            linked = [d for d in _load_dylib_names(binary) if d != _LIBSYSTEM]
             cause = None
             if missing:
+                names = sorted({m.name for m in missing})
                 ok, detail = False, (
                     f"builds, but {len(missing)} import(s) dyld cannot "
-                    f"resolve (one file compiled, no import resolution): "
-                    f"{', '.join(sorted(set(missing))[:3])}"
-                    + (" ..." if len(set(missing)) > 3 else ""))
+                    f"resolve: {', '.join(names[:3])}"
+                    + (" ..." if len(names) > 3 else "")
+                    + f" [{missing[0].why}]")
             else:
                 ok, detail = True, ""
         else:
@@ -765,6 +1037,20 @@ def run_one(path, timeout, flags) -> Verdict:
         # verdict depends on stderr this tool does not cache.
         if cause:
             return verdict(ok, detail, cause, False)
+        if proc.returncode == 0 and linked:
+            # A verdict about an image that links a formal dylib DEPENDS ON
+            # that dylib, and the dylib is not part of the cache key: it lives
+            # at a fixed path under the CAS dir, keyed by module name only, so
+            # an arm64 sweep and an x86-64 sweep overwrite each other's copy
+            # (formal/imports.py's build_module_dylib picks no per-arch name).
+            # Publishing here would let a stale `ok` survive a dylib being
+            # replaced by one of the wrong architecture — a false PASS, the one
+            # outcome worse than being wrong in the other direction. So these
+            # files are rebuilt every run instead, and the accounting line says
+            # so rather than leaving a reader to wonder what "not cached"
+            # means. This NARROWS what is cached; it caches nothing new.
+            _bump_dylib_linked()
+            return verdict(ok, detail, None, False)
         cas.publish(key, ".result", _verdict_bytes(ok, detail))
         return verdict(ok, detail, None, True)
     except subprocess.TimeoutExpired:
@@ -866,14 +1152,15 @@ def report_history(prev, verdicts: dict) -> None:
 # count of 170 files called `not-answerable/host-import` is only honest if the
 # report also says what that is.
 CLASS_BLURB = {
-    CLASS_PASS: "built, loads, all imports dyld-resolvable",
+    CLASS_PASS: "built, and every symbol it binds is in a library on its own "
+                "link line that dyld can load",
     CLASS_CODEGEN: "THE FINDING: the backend refused or crashed on a construct",
     CLASS_HOST: "imports a CPython host module that has no Mojo source: "
                 "outside this backend's reach, not a gap, not fixable",
     CLASS_UNRESOLVED: "imports a module that is neither host nor in this "
                       "backend's module set (reason not provable from the file)",
-    CLASS_EXTERN: "builds, but dyld cannot resolve what it binds (this path "
-                  "compiles one file and resolves no imports)",
+    CLASS_EXTERN: "builds, but no library on its link line provides a symbol it "
+                  "binds (the printed line names the library and why)",
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "
                    "classifier needs updating, not the backend",
     CLASS_TOOL: "no verdict reached: timeout, unreadable file, or an internal "
@@ -999,6 +1286,18 @@ def main():
     # class. Nothing that used to print as `FAIL:` stops printing: a file
     # reclassified out of FAIL is still here, with the class that says where
     # it went, and report_history() below names the move in both directions.
+    #
+    # `detail` is printed WHOLE, deliberately, and this is the settled
+    # position rather than an oversight (it was ~20 KB for a 263-field
+    # diagnostic; that generator now bounds its own text and the longest line
+    # in a 280-file run is under 800 bytes, with the whole report ~70 KB).
+    # `reason` above is the bounded one-line form, and it is what the per-class
+    # breakdown uses. Truncating here would hide the actionable half of a
+    # message from the one class the report exists for — and it would buy
+    # nothing: the full text is in the CAS entry this same run published
+    # (cas.lookup(cas.formal_build_key(...), ".result")), and for a build
+    # refusal it is the build's own message, reproducible with the `fire.py
+    # build --formal` line this file prints at the top of the run.
     for r, cls, _reason, detail in rows:
         print(f"{cls.upper()}: {r}  ({detail})")
 
@@ -1055,6 +1354,11 @@ def main():
     if uncached < 0:
         print("  WARNING: hits+misses exceeds the file count — the counters "
               "lost an update; treat the cache line as unreliable")
+    if _DYLIB_LINKED:
+        print(f"  note: {_DYLIB_LINKED} file(s) link a formal dylib and are "
+              f"rebuilt every run on purpose: the dylib is not in the cache "
+              f"key, so publishing their verdict could outlive the dylib it "
+              f"was measured against")
     if counts[CLASS_TOOL]:
         print(f"  note: {counts[CLASS_TOOL]} file(s) got no verdict at all "
               f"(timeout/unreadable/tool error) and are in NO rate; a "

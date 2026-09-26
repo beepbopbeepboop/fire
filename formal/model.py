@@ -142,6 +142,16 @@ def is_generic(fn) -> bool:
     return bool(getattr(fn, "comptime_params", None))
 
 
+# The kind constants live HERE, above every table that names one, because the
+# string-method table below records what each method YIELDS and a table that
+# had to spell "str" as a literal to dodge a forward reference would be one
+# more place for the two spellings to drift apart. Their meaning is documented
+# in full at the "What a value is" section further down, next to ValueKinds.
+INT_KIND = "int"
+STR_KIND = "str"
+LIST_PREFIX = "list"
+
+
 # ── Calls that are not calls to a symbol ──────────────────────────────────
 #
 # The default lowering of a call is a BL against a symbol spelled the way the
@@ -165,6 +175,11 @@ def is_generic(fn) -> bool:
 # A method NOT in this table is refused by the backend rather than guessed at:
 # `elem.copy()` has no meaning without knowing what `elem` holds, and picking
 # one would be a plausible-looking wrong answer behind a clean build.
+#
+# Membership here is NECESSARY but not SUFFICIENT: a name in it is only lowered
+# when the receiver's kind is also established (see value_method_refusal), so
+# adding a name here without a kind guard would lower `x.value()` on a
+# non-string x as a string operation.
 BUILTIN_VALUE_METHODS = {
     # `list.append(x)`: store x at count and bump the count. There is no heap
     # on this path, so the blob's capacity is a compile-time bound — the count
@@ -177,6 +192,278 @@ BUILTIN_VALUE_METHODS = {
     # `f.close()`: the C library's `close` on the same descriptor.
     "close": "file_close",
 }
+
+# ── Methods on a string ───────────────────────────────────────────────────
+#
+# A string on this path is a bare `char *` with no header and no length: see
+# the note on ValueKinds below, and bugs/FORMAL_x86_64_formal_backend_gaps.md
+# for why that also makes `len` of a *string* a real question rather than a
+# field load. That single fact SPLITS the string methods into two classes, and
+# which side a method falls on decides whether it can be lowered at all:
+#
+#   POINTER-BOUNDED — the answer is a function of the bytes from the receiver
+#   to the NUL, computable by walking the buffer. `strstr`/`strncmp`/`strcspn`
+#   are exactly these algorithms and libSystem has all three, so the lowering
+#   is a call, not a hand-written scan that could be subtly wrong.
+#
+#   LENGTH-DEPENDENT — the answer needs a LENGTH first, and a length on a bare
+#   `char *` is only available by scanning to the NUL. Where that is the whole
+#   of the work (`len`) it is still pointer-bounded, because `strlen` computes
+#   it exactly. Where the length is needed to decide WHERE THE RESULT ENDS, the
+#   result has to be a buffer of its own, and this path has nowhere to put one:
+#   there is no heap, and the receiver's own bytes are not available as a
+#   scratch area (see the strip note below).
+#
+# The refusal is per-NAME and says which half of that is missing, because the
+# two are not interchangeable arguments: a reader who wants `split` has to
+# change the string REPRESENTATION, and a reader who wants `strip` needs only
+# a place to copy into.
+
+# What each lowered string method does, and what it yields. The yield is what
+# the classifier needs so that `m = s.lstrip()` binds `m` as a string and the
+# NEXT method call on it is not refused for want of a kind. This is the
+# `_expr_str_kind` lesson one level up: a method whose result is misclassified
+# poisons every use site after it, and the symptom is a wrong answer rather
+# than a diagnostic — `print(m)` prints a pointer as a number, and `m == "x"`
+# compares a pointer against an integer.
+POINTER_BOUNDED_METHODS = {
+    # An INTERIOR pointer: the bytes from the first non-whitespace character to
+    # the existing NUL are exactly the answer, still in place, and nothing is
+    # written. That is what makes this one pointer-bounded and `strip` not —
+    # see the strip entry in LENGTH_DEPENDENT_METHODS, which is the measured
+    # reason rather than a guess.
+    "lstrip": ("str_lstrip", STR_KIND),
+    # `strncmp(s, p, strlen(p)) == 0` — a bounded compare, since strncmp stops
+    # at the first difference or at a NUL in either operand. An empty prefix
+    # is a zero-length compare, which is 0, which is "yes" as Python has it.
+    "startswith": ("str_startswith", INT_KIND),
+    # The same compare from the far end, but only after establishing that the
+    # suffix is not longer than the receiver; without that guard the pointer
+    # `s + len(s) - len(p)` is computed from an unsigned underflow and the
+    # compare reads outside the buffer.
+    "endswith": ("str_endswith", INT_KIND),
+    # `strstr` walks to the NUL of both operands, so the index of the first
+    # occurrence is exactly `strstr(s, p) - s`. An empty needle is the whole
+    # receiver's start, i.e. 0, which is what Python returns.
+    "find": ("str_find", INT_KIND),
+    # Non-overlapping, as Python's is: each match advances the cursor by the
+    # needle's length, so "aaa".count("aa") is 1 and not 2. The empty needle
+    # is the one case with no loop — it matches at every position, so the
+    # answer is the receiver's length.
+    "count": ("str_count", INT_KIND),
+}
+
+# The ASCII whitespace set, shared by the two backends so a trim cannot mean
+# one thing on arm64 and another on x86-64. 0x20 is the space; 0x09..0x0D are
+# tab/LF/VT/FF/CR. As a predicate over a byte B:
+#     B == 0x20  or  0x09 <= B <= 0x0D
+# NUL is deliberately NOT in the set: the terminator is what ends the string,
+# and trimming it would walk off the end of the buffer.
+STRIP_MAX = 0x20
+STRIP_LO = 0x09
+STRIP_HI = 0x0D
+
+# The same set as the ACCEPT SET of `strspn`, which is how both backends
+# actually compute `lstrip`: `s + strspn(s, STRIP_CHARS)` IS the left-strip,
+# because strspn returns the length of the initial segment consisting only of
+# characters from that set.
+#
+# This is not a shortcut, it is the correction. The first version of this was a
+# hand-written byte loop in each backend, and TWO bugs lived in it that neither
+# shared: the arm64 copy lost the `cmp` that sets the flags its final `b.eq`
+# tests, so it silently failed to trim the space — the one character the method
+# is named after — while still trimming tabs; and the x86-64 copy was
+# correct-looking code that did not run. One libc call is the same algorithm
+# Python uses, it cannot be half-right, and there is now nothing here to keep in
+# step between two architectures. A second implementation of a libc routine is
+# a second thing to be wrong.
+#
+# The control characters are REAL bytes here, which is the point: this is a
+# Python-level constant, not a Mojo string literal, so the unescaping question
+# (does "\t" in the source mean a tab or a backslash and a t?) does not arise.
+# STRIP_CHARS is a superset test in strspn, so a NUL in it would be a bug —
+# it is not, and there is an assertion below.
+STRIP_CHARS = " \t\n\v\f\r"
+assert len(STRIP_CHARS) == 6, "the whitespace set changed shape"
+assert "\0" not in STRIP_CHARS, "NUL must not be trimmable"
+assert STRIP_CHARS[0] == chr(STRIP_MAX)
+assert all(STRIP_LO <= ord(c) <= STRIP_HI for c in STRIP_CHARS[1:])
+
+# Methods that are REAL string methods and are still refused, with the reason
+# each one is out of reach. Keyed by name; the value is the missing half of
+# the argument, quoted in the diagnostic.
+LENGTH_DEPENDENT_METHODS = {
+    # The one that is NOT about length, and the clearest statement of what is
+    # actually missing. `strip` is a one-character edit away from `lstrip`:
+    # both find the first non-whitespace byte. The difference is what happens
+    # at the FAR end, and it is not a computation but a WRITE — a shorter
+    # string has to be terminated one byte earlier, and on a bare `char *` the
+    # only byte there to write is the receiver's own.
+    #
+    # Measured, not assumed. String literals are interned by content and
+    # emitted after the code into `__TEXT,__text` (`_intern_string` in either
+    # backend), and that segment is mapped `maxprot 0x5` — read and execute,
+    # NO write — so writing the terminator over a literal's trailing space
+    # faults. And for a receiver that is not a literal, the bytes are shared
+    # with every other reference to the same interned string, so the write
+    # would be visible through all of them.
+    #
+    # An earlier version of this lowering computed the new end pointer and
+    # returned it without writing anything. It built, ran, and was WRONG:
+    # "   hi   ".strip() returned a pointer to a byte that still held a space,
+    # so the result printed as "   " — a plausible-looking string that is not
+    # the answer. That is the outcome this table exists to prevent.
+    "strip": "returns a SHORTER string, which on a bare char * means writing "
+             "a terminator over the first trailing whitespace byte — and the "
+             "receiver's bytes cannot be written: a string literal is interned "
+             "into __TEXT,__text, which is mapped read+execute and not "
+             "writable, and a non-literal receiver shares its bytes with every "
+             "other reference to the same interned string. lstrip() needs no "
+             "write and IS lowered",
+    "rstrip": "returns a SHORTER string and so needs the terminator write that "
+              "strip cannot do; see strip. lstrip() is the lowered half",
+    "upper": "returns a NEW string of the same length, and the only buffer "
+             "available for it is the receiver's own bytes — which live in "
+             "the image's text section and are interned by content, so "
+             "rewriting them in place would fault and would also change "
+             "every other reference to the same literal",
+    "lower": "returns a NEW string of the same length; see upper",
+    "swapcase": "returns a NEW string of the same length; see upper",
+    "capitalize": "returns a NEW string; see upper",
+    "title": "returns a NEW string; see upper",
+    "casefold": "returns a NEW string; see upper",
+    "replace": "has to find every occurrence of the old text and lay the new "
+               "text down between them, so the RESULT's length is not the "
+               "receiver's and no buffer of the right size exists",
+    "join": "has to allocate one buffer sized by walking the sequence and "
+            "measuring every element, and there is no heap to allocate it in",
+    "split": "returns a SEQUENCE of strings, and a sequence on this path is a "
+             "frame-allocated blob whose capacity has to be a compile-time "
+             "bound (the count of append sites) — a split's element count is "
+             "only known at run time, so there is no capacity to give it",
+    "rsplit": "returns a SEQUENCE of strings; see split",
+    "splitlines": "returns a SEQUENCE of strings; see split",
+    "partition": "returns a sequence; see split",
+    "index": "is a length-dependent SEARCH whose result is a position, which "
+             "find already answers — use find, which is lowered",
+    "rfind": "walks the buffer backwards from its NUL, which needs the length "
+             "first; find is the lowered direction",
+    "center": "pads to a width, so it allocates a new buffer; see upper",
+    "ljust": "pads to a width, so it allocates a new buffer; see upper",
+    "rjust": "pads to a width, so it allocates a new buffer; see upper",
+    "zfill": "pads to a width, so it allocates a new buffer; see upper",
+    "format": "its result's length is a function of the format AND the "
+              "operands, so it is a fresh buffer of a size nothing knows at "
+              "compile time; see upper",
+    "removeprefix": "returns a new string whenever the prefix is present, "
+                    "which is a different pointer every time; a method that "
+                    "sometimes aliases its receiver and sometimes does not is "
+                    "worse than a refusal",
+    "removesuffix": "returns a new string whenever the suffix is present; see "
+                    "removeprefix",
+    "reverse": "returns a NEW string, and writing into the receiver's own "
+               "bytes would fault (see upper)",
+    "__len__": "is len(), which IS lowered for a string — as strlen, not as a "
+               "field read. Call len(s), which reads better and is the "
+               "spelling both backends agree on",
+}
+
+
+def string_method_result_kind(method: str):
+    """The kind a lowered string method yields, or None if it is not one."""
+    entry = POINTER_BOUNDED_METHODS.get(method)
+    return entry[1] if entry else None
+
+
+def string_method_yields_string(call, receiver_is_str: bool) -> bool:
+    """True when `call` is a lowered string method that produces a STRING.
+
+    `receiver_is_str` is the caller's own answer to "is the receiver a char *",
+    because each classifier has a different one to give: ValueKinds asks its
+    own whole-function map, while a backend also has the flow-sensitive
+    `_string_vars` and that one is better informed. The DECISION of what such a
+    call yields belongs here so the two cannot drift — a method that one
+    classifier calls a string and the other calls a word produces a program
+    that is right up to the first `==` and wrong after it.
+
+    `lstrip` is the only method this is true of today, and it is enough to
+    matter: `m = s.lstrip()` followed by `m == "x"` is two statements, and
+    without this the second one compares a pointer to an integer."""
+    if not receiver_is_str:
+        return False
+    func = getattr(call, "func", None)
+    if not isinstance(func, F.MemberExpr):
+        return False
+    return string_method_result_kind(func.member) == STR_KIND
+
+
+def pointer_bounded_method(method: str):
+    """The lowering name of a pointer-bounded string method, or None."""
+    entry = POINTER_BOUNDED_METHODS.get(method)
+    return entry[0] if entry else None
+
+
+def is_string_method(method: str) -> bool:
+    """True when `method` is a method of `str` in this model — whether it is
+    lowered (POINTER_BOUNDED_METHODS) or refused by name
+    (LENGTH_DEPENDENT_METHODS).
+
+    The distinction matters because a name in NEITHER table is a different
+    failure: the source asked for a method this model has never heard of, and
+    saying "that needs a length-prefixed string" about it would be a guess
+    about what it does."""
+    return method in POINTER_BOUNDED_METHODS or method in LENGTH_DEPENDENT_METHODS
+
+
+def value_method_refusal(method: str, receiver_kind, dotted: str) -> str | None:
+    """Why `recv.method()` cannot be lowered here, or None when it can.
+
+    Shared by both backends so the two architectures cannot disagree about
+    which method calls are supported — the same rule the struct field-count
+    refusal follows, and the reason this text lives in the model rather than
+    being spelled twice.
+
+    `receiver_kind` is what ValueKinds says the receiver holds, or None when
+    the source does not say. It is REQUIRED for every string method and
+    ignored for the container ones (`append` on a list blob, `write` on a file
+    descriptor), whose meaning the receiver's name already settled.
+
+    The kind guard is the load-bearing part. Without it, `mlir_value.value()`
+    — 359 of the calls in the stdlib — would be lowered as a string operation
+    on whatever word the receiver happens to hold, and a struct's `.copy()`
+    would be a `strstr` over a frame address. Both build. Both are wrong."""
+    if method in POINTER_BOUNDED_METHODS and method not in LENGTH_DEPENDENT_METHODS:
+        if receiver_kind == STR_KIND:
+            return None
+        if receiver_kind is None:
+            return (f"{dotted}() is a method on a string, and the source does "
+                    f"not say what its receiver holds — this path has no way "
+                    f"to tell a char * from a word here, and lowering "
+                    f"{method!r} anyway would treat an arbitrary 64-bit word "
+                    f"as a pointer to bytes. Annotate the receiver (e.g. "
+                    f"`s: String`) or bind it to a string literal")
+        return (f"{dotted}() is a method on a string, and its receiver is "
+                f"classified as {receiver_kind!r} rather than a string. "
+                f"{method!r} is only lowered on a char *, and on anything else "
+                f"the same bytes mean something different")
+    if method in LENGTH_DEPENDENT_METHODS:
+        return (f"{dotted}() is a real method of String, but it {LENGTH_DEPENDENT_METHODS[method]}. "
+                f"Answering it would need a string representation that "
+                f"carries a length — a value-model change, shared by both "
+                f"backends and the Lean proof, not a lowering of this one "
+                f"call")
+    if method in BUILTIN_VALUE_METHODS:
+        return None
+    return (f"{dotted}() is a method call on a value, and this backend "
+            f"lowers only "
+            f"{', '.join(sorted(BUILTIN_VALUE_METHODS))} and the string "
+            f"methods "
+            f"{', '.join(sorted(POINTER_BOUNDED_METHODS))}"
+            f" — the receiver is a plain word on this path, so what "
+            f"{method!r} would mean depends on what the receiver holds. "
+            f"Refused rather than emitted as a call to a symbol spelled "
+            f"{dotted!r}, which is what this used to do: the image built and "
+            f"then died in the loader")
 
 # The same question for a call by BARE NAME that is a builtin rather than a
 # function: `open(path, "w")` is the C library's `open` underneath, but the C
@@ -192,6 +479,88 @@ def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
     the builtins this model represents."""
     return BUILTIN_FUNCTIONS.get(name)
+
+
+# ── The gimple backend's C runtime, by name ────────────────────────────────
+#
+# The OTHER backend in this repository — the one that generates GIMPLE for clang
+# — has a C runtime: runtime/fire_runtime.c, embedded by every image it builds,
+# with a header (runtime/fire_runtime.h, runtime/fire_sqlite3.h) that spells its
+# ABI. That ABI has a naming convention of its own: every entry point is
+# `mojo_<thing>`, so a program written against it calls `mojo_sqlite3_open(...)`,
+# `mojo_list_len(xs)` and `mojo_print(s)` by those bare names, and
+# gimple_codegen.py maps the source's own `print` onto `mojo_print` (line 617).
+#
+# None of that exists on a formal target. A formal image is freestanding: it
+# links libSystem and nothing else (formal/build.py), it embeds no interpreter,
+# and its values are one 64-bit word proved by a Lean model. So a call to one of
+# these names is not an external dependency to be satisfied — it is a call into
+# a library that is not part of THIS target, and the default lowering of an
+# unknown bare name is a BL against a symbol spelled the way the source spelled
+# it. That is the worst failure a compiler has: the build reports success and
+# the program dies in the loader with "Symbol not found".
+#
+# So the namespace is REFUSED BY NAME here, before the extern path can reach it.
+# By name rather than by shape, because the shape is not decidable: the
+# repository also has ordinary Mojo functions and ordinary local variables whose
+# names begin `mojo_` (scripts/stage2_mojo_interpreter.mojo defines
+# `mojo_to_python` and takes a parameter called `mojo_file`), and a rule that
+# could not tell those from the runtime's own entry points would refuse correct
+# code. Every caller of is_gimple_runtime_builtin must therefore have already
+# established that the name is NOT a function of this module and NOT an export
+# of a dylib the program explicitly linked; what is left is exactly the set of
+# names that reached the extern path with nowhere to bind.
+GIMPLE_RUNTIME_PREFIX = "mojo_"
+
+# The subset of the namespace whose ARGUMENT is what makes it unfixable by
+# linking the library. `mojo_list_len`/`mojo_list_get_int`/`mojo_list_get_str`
+# take a `MojoList *` — a heap box the gimple runtime owns, with a length and
+# a data pointer inside it — while a list on a formal path is a frame blob whose
+# first word IS its count (see _emit_list in either backend). So these could not
+# be answered by adding libmojostdlib to the link line even in principle: the
+# operand and the answer are of different types, and reading offset 0 of a
+# `MojoList *` would be a plausible-looking wrong number rather than a crash.
+# The refusal says so, because "no library here" is the weaker half of the
+# reason and the one a reader is most likely to try to argue with.
+GIMPLE_LIST_PREFIX = "mojo_list_"
+
+
+def is_gimple_runtime_builtin(name: str) -> bool:
+    """True when `name` is spelled as an entry point of the gimple C runtime.
+
+    True for a call this target cannot bind, ASSUMING the caller has already
+    established that the name is not a function of the module being compiled and
+    not an export of a dylib the program linked. See the note above for why the
+    test is a prefix and not a shape."""
+    return isinstance(name, str) and name.startswith(GIMPLE_RUNTIME_PREFIX)
+
+
+def gimple_runtime_refusal(name: str) -> str:
+    """The refusal for a call to `name`, in the words BOTH backends must use.
+
+    One function rather than the sentence written out in each backend, because
+    the two architectures are one language implementation and a refusal that
+    differed between them would be the same class of divergence as an answer
+    that did (test_formal_run.py's `refuse:` cases assert the agreement)."""
+    extra = ""
+    if name.startswith(GIMPLE_LIST_PREFIX):
+        extra = (
+            " It could not be answered by linking that library either: these "
+            "take a `MojoList *`, a heap box the gimple runtime owns, where a "
+            "list on this path is a blob in the frame whose first word is its "
+            "count — so the operand and the answer are of different types, and "
+            "reading offset 0 of the box would be a plausible-looking wrong "
+            "number.")
+    return (
+        f"{name} is an entry point of the gimple backend's C runtime (the "
+        f"`{GIMPLE_RUNTIME_PREFIX}*` ABI declared in runtime/fire_runtime.h and "
+        f"runtime/fire_sqlite3.h), and a formal image is freestanding: it links "
+        f"libSystem and nothing else, embeds no C runtime, and its values are "
+        f"one 64-bit word. There is nothing here for the call to bind to, and "
+        f"nothing in it that could be lowered in the backend instead."
+        f"{extra} Refused rather than emitted as a call to a symbol nothing "
+        f"defines, which is what this used to do — the image built and then "
+        f"died in the loader with \"Symbol not found\".")
 
 
 # Python's text mode -> the C library's open(2) flag word. A formal string is a
@@ -378,11 +747,6 @@ def print_format(fragments: list, sep: str = " ", end: str = "\n") -> str:
 # (`_note_binding` tracks it per function, flow sensitively); ValueKinds is the
 # same question asked of a whole function at once, for the callers that have to
 # decide before any statement is emitted.
-
-INT_KIND = "int"
-STR_KIND = "str"
-LIST_PREFIX = "list"
-
 
 def list_kind(elem_kind):
     """The kind of a list blob whose elements are all of `elem_kind`."""
@@ -674,6 +1038,14 @@ class ValueKinds:
             callee = _flat_callee(e)
             if callee is None:
                 return None
+            # A lowered string method, asked first: `m = s.strip()` binds `m`,
+            # and if `m` came back as a word then the NEXT method call on it
+            # would be refused for want of a kind and a correct program would
+            # stop. The receiver's own kind is the condition, for the same
+            # reason the backend guards the lowering on it.
+            skind = self._string_method_kind(e)
+            if skind is not None:
+                return skind
             kind = _kind_of_call(callee, self._func_kind(callee))
             if kind is not None:
                 return kind
@@ -692,6 +1064,24 @@ class ValueKinds:
             if not isinstance(e.index, F.SliceExpr):
                 return list_elem_kind(self.kind_of(e.obj))
         return None
+
+    def _string_method_kind(self, call):
+        """What a lowered string method call yields, or None if this is not one.
+
+        None for a method the model does not lower, for a bare name, and — the
+        case that makes this a guard rather than a lookup — for a method whose
+        receiver is not classified as a string. `x.value()` on a struct whose
+        kind is unknown must stay unknown here, or the caller would bind `x`'s
+        result to a string and format an integer as text."""
+        func = call.func
+        if not isinstance(func, F.MemberExpr):
+            return None
+        method = func.member
+        if method not in POINTER_BOUNDED_METHODS:
+            return None
+        if not string_method_yields_string(call, self.kind_of(func.obj) == STR_KIND):
+            return None
+        return POINTER_BOUNDED_METHODS[method][1]
 
 
 _COMPARISON_OPS = ("<", ">", "<=", ">=", "==", "!=", "is", "is not", "in",
@@ -900,8 +1290,8 @@ def _slots_names(value) -> list:
     return out
 
 
-def _self_field_names(node, out: set) -> None:
-    """Add to `out` every name reached as `self.<name>` anywhere under `node`.
+def _self_field_names(node, out: set, receivers=("self",)) -> None:
+    """Add to `out` every name reached as `<receiver>.<name>` under `node`.
 
     A field access either way round declares a field: `self.x = 1` writes one,
     and a bare `self.x` reads one that some other method (or the caller) filled
@@ -913,38 +1303,443 @@ def _self_field_names(node, out: set) -> None:
     A method call is not a field access. `self.helper()` names a method, and
     counting it would add a field to every class that calls one of its own
     methods — enough to make a genuinely one-word class measure wide. So a
-    `CallExpr` whose callee is `self.<name>` contributes nothing and its
+    `CallExpr` whose callee is `<receiver>.<name>` contributes nothing and its
     callee is not descended into, while its arguments still are (a method can
     be handed `self.x` as an argument, which is a real field access).
 
     A nested `FunctionDef` is not descended into either: its `self`, if it has
-    one, is a different binding from the struct's receiver."""
+    one, is a different binding from the struct's receiver.
+
+    `receivers` is every spelling this struct's own methods bind their receiver
+    to — `self` plus each method's first parameter (see `struct_receivers`).
+    It was `self` alone, which missed a class written `def __init__(this)` or a
+    `@classmethod def is_float(cls, …)`: their `this.n` / `cls._SIGNED` were
+    invisible here, so a field written only that way looked unwritten. Missing
+    a field is the direction that aliases two real fields into one slot, so the
+    receiver set is a superset of the obvious spelling rather than just it."""
     if isinstance(node, list):
         for x in node:
-            _self_field_names(x, out)
+            _self_field_names(x, out, receivers)
         return
     if isinstance(node, F.FunctionDef):
         return
     if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr) \
             and isinstance(node.func.obj, F.IdentExpr) \
-            and node.func.obj.name == "self":
+            and node.func.obj.name in receivers:
         for a in node.args or []:
-            _self_field_names(a, out)
+            _self_field_names(a, out, receivers)
         for _k, v in (node.kwargs or []):
-            _self_field_names(v, out)
+            _self_field_names(v, out, receivers)
         return
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr) \
-            and node.obj.name == "self":
+            and node.obj.name in receivers:
         out.add(node.member)
         return
     for fname in getattr(node, "__dataclass_fields__", {}):
         if fname in ("line", "col"):
             continue
-        _self_field_names(getattr(node, fname, None), out)
+        _self_field_names(getattr(node, fname, None), out, receivers)
+
+
+def _decorator_names(method) -> set:
+    """The decorator names on a method, as bare strings.
+
+    `@staticmethod` / `@classmethod` are spelled bare in the source and arrive
+    as the string; a call form (`@functools.wraps(f)`) arrives as a CallExpr
+    and contributes only its callee, which is enough to keep it from matching
+    the two names that matter here."""
+    out = set()
+    for d in getattr(method, "decorators", None) or []:
+        if isinstance(d, str):
+            out.add(d)
+        elif isinstance(d, F.IdentExpr):
+            out.add(d.name)
+        elif isinstance(d, F.CallExpr) and isinstance(d.func, F.IdentExpr):
+            out.add(d.func.name)
+    return out
+
+
+def struct_receivers(struct_def) -> set:
+    """Every name this struct's own methods bind their receiver to.
+
+    `self` — the overwhelmingly common spelling — plus the first parameter of
+    every method that HAS a receiver, which is the same binding written
+    differently: `def __init__(this)` stores into `this.n`, and a
+    `@classmethod def is_float(cls, …)` reads the class through `cls`. Both are
+    real member accesses, and a receiver set that recognised only the literal
+    `self` could not see them, so a field written only that way looked
+    unwritten — and a field that looks unwritten is the one error this whole
+    rule is built to avoid.
+
+    A `@staticmethod`'s first parameter is NOT a receiver; it is an ordinary
+    argument, and treating it as one made `myinterpreter.Interpreter` measure 34
+    fields instead of 10 (every `node.<attr>` an `@staticmethod` helper read
+    became a field of the class it happened to live in). That is the safe
+    direction and a useless one — a census that calls an argument a field stops
+    being a census — so the decorator decides, and an unrecognised decorator
+    form is treated as HAVING a receiver."""
+    out = {"self"}
+    for m in struct_methods(struct_def):
+        if "staticmethod" in _decorator_names(m):
+            continue
+        params = list(getattr(m, "params", None) or [])
+        if params and isinstance(params[0], (tuple, list)) and params[0]:
+            first = params[0][0]
+            if isinstance(first, str):
+                out.add(first)
+    return out
+
+
+def struct_declared_names(struct_def) -> list:
+    """The class body's own names, in declaration order, `__slots__` expanded.
+
+    The `fields` list minus the `__slots__` bookkeeping, kept as a function
+    because the demotion rule below needs the ORDER (a positional constructor
+    fills fields in declaration order) and because `struct_field_names` needs
+    the same list without recomputing it."""
+    out, seen = [], set()
+    for field in struct_fields(struct_def):
+        slots = _slots_names(field.value) \
+            if isinstance(field, F.AssignStmt) \
+            and struct_field_name(field) == SLOTS_FIELD else []
+        for name in (slots or [struct_field_name(field)]):
+            if isinstance(name, str) and name not in seen:
+                seen.add(name)
+                out.append(name)
+    return out
+
+
+# ── Telling a class-level CONSTANT from per-instance state ───────────────
+#
+# `struct_field_names` counts a class-level assignment as a field, because it
+# has no type information and cannot tell `x = 1` (a constant every instance
+# shares) from `x: int` (a slot per instance). Counting both is the safe
+# direction — a constant counted as a field can only cause a refusal, never a
+# wrong answer — and for a long time it was also the ONLY direction. The
+# conservative direction is only free while it costs nothing, and here it cost
+# the whole arm64 sweep's headline number: `GimpleGen` was reported as a
+# 263-field receiver whose first fields were `BUILTIN_VALUE_MAP,
+# _KNOWN_EXCEPTION_NAMES, _KNOWN_SIGS`, i.e. the diagnostic led with its lookup
+# tables, and 15 of the 263 were not fields at all.
+#
+# So the rule is a real one, derived from the whole translation unit rather
+# than from the class body, and it is deliberately lopsided: EVERY doubt
+# resolves to "field". Naming an instance field a constant is the catastrophic
+# error on this path — the receiver is then treated as narrower than it is, two
+# real fields collapse into one slot, and the program builds, runs, and returns
+# the wrong number. Naming a constant a field is a refusal with a good message.
+# Nothing below may resolve a doubt the other way.
+#
+# The rule: a class-level name is a CONSTANT — not per-instance state — when
+# every one of these holds.
+#
+#   1. It is declared in the class body and NOT named by `__slots__`.
+#      `__slots__` is a declaration of instance storage in the language itself,
+#      so a name it lists is a field whatever else is true of it.
+#   2. No method of this struct reaches it through the receiver (`self.NAME`,
+#      `this.NAME`, `cls.NAME` — see struct_receivers). A read through the
+#      receiver is what the member-access lowering turns into a local slot
+#      spelled `self.<name>`, and nothing here can prove such a slot is not
+#      this struct's own storage, so it stays a field.
+#      This one is not only conservative, it is what makes the `self.CONST`
+#      spelling CORRECT: a one-field struct's receiver IS its field, so
+#      `return self.A` with `A = 3` reads the word `A()` left there, and
+#      `struct_default_word` is what put the 3 there. Demote `A` instead and
+#      the read falls to a slot nothing ever writes, which is 0 — so the
+#      materializing rewrite in formal/build.py would have to reach the
+#      receiver spelling too. Keeping the name a field gets it right for free,
+#      and the existing `struct_default_word_int` case is that program.
+#   3. Nothing in the translation unit WRITES it through any object —
+#      `obj.NAME = …`, `obj.NAME += …`, `for obj.NAME in …`, `del obj.NAME`
+#      (see `unit_field_evidence`). This is the load-bearing clause, and the
+#      reason the rule is sound: on this path a field that is never written
+#      through a receiver can only ever READ as the same value in every
+#      instance (an unwritten local slot, which is 0), so it carries no
+#      per-instance state to lose. A class that merely NAMES a field without
+#      writing it is clause 6's business, not this one's.
+#   4. Nothing in the translation unit fills it by NAME — a keyword argument
+#      (`Point(x=1)`) or a positional argument to this struct's constructor
+#      (which fills declared fields in declaration order). A dataclass whose
+#      fields are all set in its own constructor is full of names that clause 3
+#      alone would demote, and demoting them is precisely the aliasing bug:
+#      `Point(x=1, y=2)` writes two fields that no `obj.x` ever appears to.
+#   5. The unit has no name-less attribute write this census cannot see —
+#      `setattr(o, name, v)` with a computed name, a `__dict__` subscript with
+#      a computed key, `globals()[…] = …`. Then NO name in the unit is demoted
+#      (see the `dynamic` flag), because a write nobody can name is a write to
+#      everything.
+#   6. It is declared WITH a value. `LIMIT = 10` defines a value every instance
+#      shares; `var limit: Int` declares storage and nothing else. The second
+#      is a field even when no code in the unit ever writes it, because the
+#      moment anything reads one of two such fields they would share a word —
+#      and `struct Pair: var a: Int; var b: Int` is refused by name for exactly
+#      that reason (test_formal_imports.py asserts it). A declaration with no
+#      initializer is the one shape in which "nothing writes it" is a statement
+#      about the PROGRAM rather than about the DECLARATION.
+#
+# Two things this deliberately does NOT do. It does not resolve a bare read:
+# `X` inside a method does not see the class body's scope in Python or Mojo, so
+# a bare read is a global (or a local), never this rule's constant — there is
+# nothing here to decide. And it does not demote on a name's NAME, however
+# constant-looking (`_SIGNED = 1` and `self.n = 0` differ in spelling and in
+# nothing else a typeless scan can see); it decides on where the name is
+# WRITTEN, which is the one property that separates the two.
+#
+# What it is worth, measured: of 232 structs in the repository 11 get narrower,
+# by exactly the names the rule identifies, and NONE gets wider. What it does
+# NOT buy is a receiver that has real instance state: `GimpleGen` has 248 of
+# those, so the sixteen files refused on it are still refused, and the honest
+# summary of that half is in the sweep's own numbers rather than here.
+
+# The name-less attribute writers, and what to do about each. `setattr` and
+# `delattr` with a string LITERAL name are readable, and the name is added to
+# the evidence; with a computed name they are not, so the whole unit is treated
+# as dynamic. `globals`/`locals`/`vars`/`eval`/`exec` can manufacture a write
+# out of nothing and are therefore dynamic outright.
+_DYNAMIC_WRITERS = ("globals", "locals", "vars", "eval", "exec")
+_STRING_NAMED_WRITERS = ("setattr", "delattr")
+# `o.__dict__` / `o.__dict__[k]` / `o.__dict__.update(...)` — a dict of
+# attributes under a name this scan can read, so it is decoded rather than
+# distrusted; a computed key is not decodable and is dynamic.
+_DICT_CHAIN_METHODS = ("update", "setdefault", "pop")
+
+
+def _dict_chain_key(node):
+    """What a `__dict__` read or write names: an attribute name, "" or None.
+
+    An attribute name for `o.__dict__["n"]` and for `.update`/`.setdefault`/
+    `.pop` called on a `__dict__` with a string literal; "" for a node that has
+    nothing to do with `__dict__` at all (which is nearly every subscript in the
+    repository — `d[k]`, `a[i]` — and must not be confused with one that does);
+    None for a `__dict__` chain whose key is computed, which is the one thing
+    here the caller cannot resolve, so it turns the whole unit dynamic."""
+    if isinstance(node, F.SubscriptExpr):
+        if not _rooted_at(node.obj, "__dict__"):
+            return ""
+        idx = node.index
+        if isinstance(idx, F.StringLiteral) and isinstance(idx.value, str):
+            return idx.value
+        return None
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr) \
+            and node.func.member in _DICT_CHAIN_METHODS:
+        if not _rooted_at(node.func.obj, "__dict__"):
+            return ""
+        for a in list(node.args) + [v for _k, v in (node.kwargs or [])]:
+            if isinstance(a, F.StringLiteral) and isinstance(a.value, str):
+                return a.value
+        return None
+    return ""
+
+
+def _rooted_at(node, member: str) -> bool:
+    """True when `node` is `….<member>` or a subscript/attribute chain on one."""
+    while True:
+        if isinstance(node, F.MemberExpr):
+            if node.member == member:
+                return True
+            node = node.obj
+            continue
+        if isinstance(node, F.SubscriptExpr):
+            node = node.obj
+            continue
+        return False
+
+
+def unit_field_evidence(stmts) -> tuple:
+    """`(names, dynamic)` — what one translation unit says about instance state.
+
+    `names` is every name this unit could possibly write into a field, by any
+    spelling that carries the name: a member-assignment target, a
+    keyword-argument name, a string literal handed to `setattr`/`delattr`/
+    `__dict__`, and — for a call to a struct declared in the same unit — each
+    positional argument, which fills that struct's declared fields in
+    declaration order.
+
+    `dynamic` is True when the unit contains a write whose NAME this scan
+    cannot read. It is a blunt instrument on purpose: one `setattr(o, k, v)`
+    with a computed `k` means no name in the unit can be trusted as unwritten,
+    and the cost of being wrong in that direction is a silent wrong answer
+    rather than a refusal."""
+    declared = {}
+    for st in iter_struct_defs(stmts):
+        names = struct_declared_names(st)
+        if names:
+            declared[getattr(st, "name", None)] = names
+    names, dynamic = set(), False
+
+    def walk(node):
+        nonlocal dynamic
+        if isinstance(node, list):
+            for x in node:
+                walk(x)
+            return
+        if not hasattr(node, "__dataclass_fields__"):
+            return
+        # a member in ASSIGNMENT position — the only write that makes a field
+        # per-instance state. `targets` covers MultiAssignStmt and DelStmt,
+        # which is where `a, b.x = …` and `del b.x` land.
+        for tgt in [getattr(node, "target", None)] \
+                + list(getattr(node, "targets", None) or []):
+            if isinstance(tgt, F.MemberExpr):
+                names.add(tgt.member)
+        if isinstance(node, F.CallExpr):
+            for k, _v in (node.kwargs or []):
+                if isinstance(k, str):
+                    names.add(k)
+            callee = node.func
+            if isinstance(callee, F.IdentExpr):
+                if callee.name in _DYNAMIC_WRITERS:
+                    dynamic = True
+                elif callee.name in _STRING_NAMED_WRITERS:
+                    if len(node.args) >= 2 and isinstance(node.args[1],
+                                                          F.StringLiteral) \
+                            and isinstance(node.args[1].value, str):
+                        names.add(node.args[1].value)
+                    else:
+                        dynamic = True
+                else:
+                    for i, _a in enumerate(node.args or []):
+                        if i < len(declared.get(callee.name, ())):
+                            names.add(declared[callee.name][i])
+        key = _dict_chain_key(node)
+        if key is None:
+            dynamic = True
+        elif key:
+            names.add(key)
+        for fname in node.__dataclass_fields__:
+            if fname in ("line", "col"):
+                continue
+            walk(getattr(node, fname, None))
+
+    walk(stmts)
+    return (frozenset(names), dynamic)
+
+
+def struct_field_evidence(struct_def):
+    """The `(names, dynamic)` evidence attached to this struct, or None.
+
+    None means NO evidence — not "no evidence against". A struct nobody
+    attached evidence to keeps every class-level name as a field, which is
+    exactly the pre-rule behaviour; that is what a caller that cannot see the
+    whole unit gets, and it is why attaching it is the pipeline's job rather
+    than an optimisation."""
+    return getattr(struct_def, "_field_evidence", None)
+
+
+def attach_field_evidence(struct_defs, evidence) -> None:
+    """Give every one of `struct_defs` this evidence, in place.
+
+    On the struct rather than passed down, because the two backends ask the
+    model about a struct they were handed, with no unit in hand: a width that
+    depended on a caller-supplied argument could differ between the build pass
+    and the codegen pass, which is the one divergence this shared model exists
+    to make impossible (see this module's docstring)."""
+    for st in struct_defs or []:
+        setattr(st, "_field_evidence", evidence)
+
+
+def iter_struct_defs(node):
+    """Every StructDef under `node`, including nested ones.
+
+    Public because the build pipeline needs the same set the census is taken
+    over (`parse_module` attaches the evidence, `_prepare_functions` re-attaches
+    it to the structs the file being compiled declares), and a second,
+    slightly different notion of "the structs in this statement list" is how one
+    of the two ends up measuring a class the other does not."""
+    if isinstance(node, list):
+        for x in node:
+            yield from iter_struct_defs(x)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    if isinstance(node, F.StructDef):
+        yield node
+    for fname in node.__dataclass_fields__:
+        if fname in ("line", "col"):
+            continue
+        yield from iter_struct_defs(getattr(node, fname, None))
+
+
+def _split_declaration(struct_def):
+    """`(fields, constants)` — the two halves of the class body, or None.
+
+    None means "no evidence", i.e. the caller must fall back to counting every
+    declared name as a field; see `struct_field_evidence` for why that is the
+    answer rather than "no constants".
+
+    `constants` is `[(name, default_node)]` in declaration order, which is also
+    the order a positional constructor fills them in, so it is kept rather than
+    reduced to a set."""
+    evidence = struct_field_evidence(struct_def)
+    if evidence is None:
+        return None
+    written, dynamic = evidence
+    receivers = struct_receivers(struct_def)
+    # clause 2, over the whole struct: every name any of its own methods
+    # reaches through the receiver, whatever the unit-wide write census says.
+    reached = set()
+    for method in struct_methods(struct_def):
+        _self_field_names(getattr(method, "body", None), reached, receivers)
+    fields, constants, seen = [], [], set()
+    for field in struct_fields(struct_def):
+        slots = _slots_names(field.value) \
+            if isinstance(field, F.AssignStmt) \
+            and struct_field_name(field) == SLOTS_FIELD else []
+        for name in (slots or [struct_field_name(field)]):
+            if not isinstance(name, str) or name in seen:
+                continue
+            seen.add(name)
+            # clause 1: a `__slots__` name is instance storage by declaration.
+            # clause 3/4: written anywhere in the unit, by receiver or by name.
+            # clause 5: nothing is demoted while the unit has a write whose
+            # name cannot be read, so `dynamic` short-circuits all of it.
+            through = reached | _receiver_names(getattr(field, "value", None),
+                                                receivers)
+            if slots or dynamic or name in written or name in through \
+                    or getattr(field, "value", None) is None:
+                # clause 6, and the reason a DECLARED field is not a constant:
+                # a class-level name with no initializer (`var a: Int`) declares
+                # storage, while one WITH a value (`_SIGNED = 1`) defines a
+                # value every instance shares. `struct Pair: var a: Int; var b:
+                # Int` is a two-field struct even in a program that never
+                # touches either field, and refusing it is what
+                # test_formal_imports.py's `a struct too wide for one word is
+                # refused by name` asserts; demoting it would make the two
+                # fields share one word the moment anything read them.
+                fields.append(name)
+            else:
+                constants.append((name, getattr(field, "value", None)))
+    # Per method, not globally sorted, so that the field list is byte-for-byte
+    # the list `_pre_rule_field_names` produces for a struct with no evidence:
+    # a name that moves position in a diagnostic is a change nobody asked for.
+    for method in struct_methods(struct_def):
+        touched = _receiver_names(getattr(method, "body", None), receivers)
+        for name in sorted(touched):
+            if name not in seen:
+                seen.add(name)
+                fields.append(name)
+    return (fields, constants)
+
+
+def _receiver_names(node, receivers) -> set:
+    """The names `node` reaches through one of `receivers`."""
+    out = set()
+    _self_field_names(node, out, receivers)
+    return out
+
+
+def struct_class_constants(struct_def) -> list:
+    """`(name, default_node)` per class-level constant, in declaration order.
+
+    The complement of `struct_field_names`, and empty for every struct with no
+    evidence attached — where nothing can be told apart, so everything stays a
+    field and there is no constant to speak of."""
+    split = _split_declaration(struct_def)
+    return list(split[1]) if split is not None else []
 
 
 def struct_field_names(struct_def) -> list:
-    """Every field name this struct has, in a stable order.
+    """Every INSTANCE field name this struct has, in a stable order.
 
     THE field set, and therefore the whole of the representability decision
     (`struct_fits_one_word` reads its length). It is derived from every place a
@@ -953,12 +1748,17 @@ def struct_field_names(struct_def) -> list:
     fields:
 
       * a class-level `VarDecl` / assignment — the annotated or defaulted
-        spelling (`x: int`, `x: int = 0`, `x = 0`);
+        spelling (`x: int`, `x: int = 0`, `x = 0`) — MINUS the names that are
+        class-level CONSTANTS rather than storage, which is what
+        `struct_class_constants` decides and the note above that function is
+        the rule;
       * a class-level `__slots__ = (...)` — the one class-level assignment
         that names fields instead of storing one, contributing the names it
-        lists rather than the name `__slots__`;
-      * any `self.<name>` a method of this struct touches — the Python-style
-        spelling, in which the fields are whatever `__init__` assigns.
+        lists rather than the name `__slots__`. Names it lists are never
+        demoted: that is a declaration of instance storage in the language;
+      * any `<receiver>.<name>` a method of this struct touches — the
+        Python-style spelling, in which the fields are whatever `__init__`
+        assigns.
 
     Reading only the class body measured `imports.Resolver` — which assigns
     `path`, `gcc`, `flags` and `_modules` in `__init__` and declares nothing —
@@ -972,12 +1772,26 @@ def struct_field_names(struct_def) -> list:
     A name that appears in two of those places is ONE field, not two: a class
     that declares `x: int` and also assigns `self.x = 0` has one field.
 
-    Note what this cannot do: it has no type information, so it cannot tell a
-    per-instance field from a class-level CONSTANT (`_SIGNED = 1`), and it
-    counts both. That is the conservative direction — a constant counted as a
-    field can only cause a refusal, never a wrong answer — but it does mean a
-    reported width is an upper bound, which is why every refusal that quotes
-    one also quotes the names it counted."""
+    What it still cannot do: with no evidence attached it counts a class-level
+    constant as a field, because it cannot see the unit that would settle it.
+    That remains the conservative direction — see the note above
+    `struct_class_constants` — and it is why a reported width is an UPPER
+    BOUND whenever the evidence is missing, which is why every refusal that
+    quotes one also quotes the names it counted."""
+    split = _split_declaration(struct_def)
+    if split is None:
+        return _pre_rule_field_names(struct_def)
+    return list(split[0])
+
+
+def _pre_rule_field_names(struct_def) -> list:
+    """The field set as it was before constants were separated out: all of them.
+
+    What `struct_field_names` returns for a struct with no evidence attached,
+    and what it returned for every struct before this rule existed. Kept as its
+    own function rather than inlined so the two derivations cannot drift apart
+    in their handling of `__slots__` and of `self.<name>` — the parts that are
+    not about constants at all."""
     names, seen = [], set()
 
     def add(name):
@@ -994,9 +1808,10 @@ def struct_field_names(struct_def) -> list:
                 add(name)
         else:
             add(struct_field_name(field))
+    receivers = struct_receivers(struct_def)
     for method in struct_methods(struct_def):
         touched = set()
-        _self_field_names(getattr(method, "body", None), touched)
+        _self_field_names(getattr(method, "body", None), touched, receivers)
         for name in sorted(touched):
             add(name)
     return names
@@ -1034,11 +1849,13 @@ def struct_field_summary(struct_def) -> str:
     """`N fields: a, b, c` — the width, and the names behind it.
 
     Every refusal that quotes a width quotes the names too, because the derived
-    count is an upper bound (it cannot separate a per-instance field from a
-    class-level constant) and a bare number would be asking the reader to trust
-    a census they cannot check. The list is bounded by `MAX_LISTED_FIELDS`:
+    count is an UPPER BOUND — a class-level name the unit's evidence could not
+    clear is still counted, and one with no evidence attached counts every
+    declared name — and a bare number would be asking the reader to trust a
+    census they cannot check. The list is bounded by `MAX_LISTED_FIELDS`:
     past that the count itself is the news and the first few names are enough
-    to confirm the tool looked at the class you think it did."""
+    to confirm the tool looked at the class you think it did.
+    """
     names = struct_field_names(struct_def)
     if not names:
         return "no fields at all"
@@ -1122,16 +1939,51 @@ def struct_default_word(struct_def) -> tuple:
         if struct_field_name(field) == field_name:
             default = getattr(field, "value", None)
             break
-    if default is None:
+    kind, payload = literal_default_word(default)
+    return (kind, field_name if kind == DEFAULT_OPAQUE else payload)
+
+
+def literal_default_word(value) -> tuple:
+    """`(kind, payload)` for a class-body initializer — the ONE reading of it.
+
+    A literal has no free names, so its value is the same at every read site in
+    every function and either backend can materialize it exactly. Anything else
+    — a name, a call, a container display — needs a scope this path does not
+    have at a use site, and is (DEFAULT_OPAQUE, None) so each caller can name
+    what it could not bring up.
+
+    Shared by `struct_default_word` (a field's default, materialized by the
+    constructor) and `class_constant_word` (a class-level constant, materialized
+    at each read of it) because they are the same question asked of the same
+    node, and two copies of this decision would eventually disagree about which
+    defaults are representable."""
+    if value is None:
         return (DEFAULT_NONE, None)
-    if isinstance(default, F.IntLiteral):
-        return (DEFAULT_INT, int(default.value))
-    if isinstance(default, F.BoolLiteral):
-        return (DEFAULT_INT, 1 if default.value else 0)
-    if isinstance(default, F.StringLiteral) \
-            and isinstance(default.value, str) and not default.is_bytes:
-        return (DEFAULT_STRING, default.value)
-    return (DEFAULT_OPAQUE, field_name)
+    if isinstance(value, F.IntLiteral):
+        return (DEFAULT_INT, int(value.value))
+    if isinstance(value, F.BoolLiteral):
+        return (DEFAULT_INT, 1 if value.value else 0)
+    if isinstance(value, F.StringLiteral) \
+            and isinstance(value.value, str) and not value.is_bytes:
+        return (DEFAULT_STRING, value.value)
+    return (DEFAULT_OPAQUE, None)
+
+
+def class_constant_word(name: str, default) -> tuple:
+    """`(kind, payload)` — what a read of the class constant `name` yields.
+
+    The same contract as `struct_default_word`, for the other kind of class-body
+    initializer: a class-level constant is not brought up by `S()` (there is no
+    constructor to bring it up in — a constant has one value for every instance,
+    so it is not part of the value), it is materialized where it is READ.
+
+    Which is why a constant that is not a literal has to be refused rather than
+    read as the zero an unwritten slot would give: there is no module-global
+    storage on this path (see the backends' handling of `global NAME`), so a
+    bare `S.NAME` read has nothing to bind to, and 0 would be a plausible-
+    looking wrong number rather than a crash."""
+    kind, payload = literal_default_word(default)
+    return (kind, name if kind == DEFAULT_OPAQUE else payload)
 
 
 def struct_fits_one_word(struct_def) -> bool:

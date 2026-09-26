@@ -701,7 +701,7 @@ class ARM64Codegen:
         # function, so they are computed once here rather than guessed at each
         # use site: `_string_vars` above is the flow-sensitive half of the same
         # question, and the two are combined (never contradicted) in
-        # _print_arg_kind.
+        # _expr_str_kind.
         self._vkinds = self._scan_value_kinds(f)
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
@@ -2125,6 +2125,19 @@ class ARM64Codegen:
             else:
                 self._string_vars.discard(name)
                 self._dict_vars.discard(name)
+        elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
+                value, self._expr_str_kind(
+                    value.func.obj if isinstance(value.func, F.MemberExpr)
+                    else None) == M.STR_KIND):
+            # A lowered string method that yields a string: `m = s.lstrip()`
+            # binds a `char *` exactly as `m = s` does. Without this the name
+            # fell through to the clearing `else` below, and the consequence
+            # was not a refusal — it was a WRONG ANSWER, because the two
+            # things that consult `_string_vars` (a string `==`, and `print`)
+            # then treated the pointer as a number. `"  hi".lstrip() == "hi"`
+            # compared a pointer against an integer and said False.
+            self._string_vars.add(name)
+            self._dict_vars.discard(name)
         else:
             self._string_vars.discard(name)
             self._dict_vars.discard(name)
@@ -2443,15 +2456,35 @@ class ARM64Codegen:
         Split from `_emit_subscript_store` so a caller that already HAS the
         value in a register — a tuple unpack popping its elements — does not
         have to invent an AST node to carry it. The address is computed once
-        and survives the store, exactly as in the statement form."""
-        self._emit_subscript_addr(target)
-        self.asm.emit(encode_stp_sp_pre(0, 2))  # save addr
-        self.asm.emit(encode_mov_zr_xn(9, 0))   # X9 = addr
+        and survives the store, exactly as in the statement form.
+
+        The VALUE is spilled across the address computation, and that is the
+        whole point of this function. `_emit_subscript_addr` builds its answer
+        in X0 out of X0..X4 and X9, so with `reg == 0` — which is what both
+        callers pass, the statement form and the tuple unpack alike — the
+        value was destroyed before the store and the ADDRESS is what got
+        written: `xs[2] = 9` left a frame pointer at element 2, and reading it
+        back printed that address as if it were the program's data. It built,
+        it ran, and it disagreed with the x86-64 backend, which spills the
+        value for exactly this reason. The spill is unconditional rather than
+        special-cased on `reg == 0` because the register set the address
+        computation clobbers is the backend's business, not this caller's.
+        """
+        self.asm.emit(encode_stp_sp_pre(reg, 31))   # push the value
+        self._emit_subscript_addr(target)           # X0 = address
+        self.asm.emit(encode_stp_sp_pre(0, 2))      # save addr
+        self.asm.emit(encode_mov_zr_xn(9, 0))       # X9 = addr
+        # X5 is outside the set the address computation above uses, and
+        # nothing is emitted between the load and the store. The value is at
+        # [sp+16]: the addr pair pushed just above took [sp+0] and [sp+8].
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 16))  # X5 = value
         if self._is_string_subscript(target.obj):
-            self.asm.emit(encode_strb_wd_wn(reg, 9, 0))
+            self.asm.emit(encode_strb_wd_wn(5, 9, 0))
         else:
-            self.asm.emit(encode_str_xt_xn_imm(reg, 9, 0))
-        self.asm.emit(encode_ldp_sp_post(0, 31))
+            self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
+        self.asm.emit(encode_ldp_sp_post(0, 31))    # pop addr
+        self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, 0))  # value back in X{reg}
+        self.asm.emit(encode_ldp_sp_post(0, 31))    # pop value
 
     def _emit_subscript_aug(self, stmt) -> None:
         """`obj[index] <op>= value` — addr and old value evaluated once."""
@@ -2531,15 +2564,22 @@ class ARM64Codegen:
 
     # ── print ────────────────────────────────────────────────────────────
 
-    def _print_arg_kind(self, expr):
-        """What a `print` operand holds: "str", "int", or None if undecidable.
+    # ── what a value is, for the paths that must decide before emitting ──
+
+    def _expr_str_kind(self, expr):
+        """What `expr` holds: "str", "int", or None if undecidable.
 
         Two sources, and `_string_vars` WINS where they disagree. It is
         flow-sensitive and tracks what the emission of this very function has
-        bound so far, so it is strictly better informed than the
-        whole-function `ValueKinds`; the whole-function map is what covers the
-        shapes `_note_binding` does not see (a parameter's annotation, a
-        function's return type, a subscript's element kind)."""
+        bound so far, so it is strictly better informed than the whole-function
+        `ValueKinds`; the whole-function map is what covers the shapes
+        `_note_binding` does not see (a parameter's annotation, a function's
+        return type, a subscript's element kind).
+
+        Named for what it answers rather than for the first caller: `print`,
+        the method-receiver guard and `_note_binding` all need the same
+        question, and three copies of this precedence rule is three chances for
+        one of them to decide that a `char *` is a number."""
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
@@ -2562,7 +2602,7 @@ class ARM64Codegen:
             if isinstance(a, F.StringLiteral):
                 frags.append(M.print_literal(a.value))
                 continue
-            kind = self._print_arg_kind(a)
+            kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")
             elif kind == M.INT_KIND:
@@ -2631,12 +2671,25 @@ class ARM64Codegen:
     # ── methods on a value ───────────────────────────────────────────────
 
     def _is_value_receiver(self, obj) -> bool:
-        """True when `obj` names a local, so `obj.m(...)` is a method call.
+        """True when `obj` is a VALUE, so `obj.m(...)` is a method call.
 
         A module path (`os.path.join`) roots at a name too, so the test is
         whether that name is one of this function's own. Register allocation
         knows every local of the function being emitted, including its
-        parameters, so membership there is the whole answer."""
+        parameters, so membership there is the whole answer for a name.
+
+        A string LITERAL is a value as unambiguously as a name is: it is
+        interned into a `char *` and `s.strip()` on one means exactly what it
+        means on a local. It has to be here, and the reason it was not is
+        worth recording: with only `append`/`write`/`close` lowerable, every
+        one of them needs a NAME to mutate or to file-descriptor, so a literal
+        receiver was never a case that could arise — and `"x".strip()` fell
+        through to the extern path and became `BL _strip`, the flat-symbol call
+        to a method this path is supposed to refuse. Adding the string methods
+        made the hole reachable, and a method on a literal is the most ordinary
+        method call there is."""
+        if isinstance(obj, F.StringLiteral):
+            return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._var_regs or obj.name in self._var_spills
         if isinstance(obj, F.MemberExpr):
@@ -2647,26 +2700,276 @@ class ARM64Codegen:
 
     def _emit_value_method(self, e: F.CallExpr, method: str) -> None:
         """`recv.method(...)` where `recv` is a local value."""
-        how = M.builtin_value_method(method)
-        if how is None:
-            raise CodegenError(
-                f"{_dotted(e.func)}() is a method call on a value, and this "
-                f"backend lowers only {', '.join(sorted(M.BUILTIN_VALUE_METHODS))}"
-                f" — the receiver is a plain word on this path, so what "
-                f"{method!r} would mean depends on what the receiver holds. "
-                f"Refused rather than emitted as a call to a symbol spelled "
-                f"{_dotted(e.func)!r}, which is what this used to do: the image "
-                f"built and then died in the loader")
+        reason = M.value_method_refusal(method, self._method_recv_kind(e),
+                                        _dotted(e.func))
+        if reason is not None:
+            raise CodegenError(reason)
         if e.kwargs:
             raise CodegenError(
                 f"{_dotted(e.func)}() takes no keyword arguments on the formal "
                 f"arm64 path (got {[k for k, _v in e.kwargs]})")
+        how = M.builtin_value_method(method) or M.pointer_bounded_method(method)
         if how == "list_append":
             self._emit_list_append(e)
         elif how == "file_write":
             self._emit_file_write(e)
-        else:
+        elif how == "file_close":
             self._emit_file_close(e)
+        elif how == "str_lstrip":
+            self._emit_str_lstrip(e)
+        elif how in ("str_startswith", "str_endswith"):
+            self._emit_str_affix(e, at_end=how == "str_endswith")
+        elif how == "str_find":
+            self._emit_str_find(e)
+        else:
+            self._emit_str_count(e)
+
+    # ── methods on a string ───────────────────────────────────────────────
+    #
+    # All of these are pointer-bounded: their answer is a function of the bytes
+    # from the receiver to its NUL, and libSystem already implements each one.
+    # The instructions below are therefore selection, not algorithm — a
+    # hand-written scan would be a second implementation of `strstr` that could
+    # be subtly wrong, where a call cannot. `model.POINTER_BOUNDED_METHODS` is
+    # the list, and the reason each method is on it and not on the other table
+    # is written there.
+    #
+    # The one thing every one of these needs and does not assume is that the
+    # receiver IS a char *: `value_method_refusal` has already established
+    # that, and it is the check that stops `mlir_value.value()` (359 of the
+    # method calls in the stdlib) from being read as a string operation.
+
+    def _method_recv_kind(self, e: F.CallExpr):
+        """What the receiver of a method call holds, for the model's guard.
+
+        Literally the question `_expr_str_kind` already answers, under the same
+        precedence: the flow-sensitive `_string_vars` map is strictly better
+        informed than the whole-function `ValueKinds`, and it covers the case
+        that matters most here — a name bound to a string literal in an earlier
+        statement of this very function."""
+        obj = e.func.obj if isinstance(e.func, F.MemberExpr) else None
+        return None if obj is None else self._expr_str_kind(obj)
+
+    def _emit_b_cond_to(self, cond: str, label: str) -> None:
+        """A conditional branch to a forward label (relocation-based)."""
+        self.asm.emit(encode_b_cond(cond, 0))
+        self.asm.emit_label_rel(label, here_offset=-4)
+
+    def _emit_str_lstrip(self, e: F.CallExpr) -> None:
+        """`s.lstrip()` — an INTERIOR pointer to the first non-whitespace byte.
+
+        `strspn(s, STRIP_CHARS)` IS the left-strip: it returns the length of the
+        initial segment of `s` made only of those characters, so `s + that` is
+        the answer. Nothing is written and nothing is copied — the bytes from
+        there to the receiver's existing NUL are already the result, which is
+        what makes this pointer-bounded and `strip` not (see
+        model.LENGTH_DEPENDENT_METHODS["strip"], where the measured `maxprot`
+        and the wrong answer a pointer-only version gives are both recorded).
+
+        The character set is model.STRIP_CHARS, ONE definition for both
+        backends. An earlier version hand-wrote the scan loop per architecture
+        and each copy had its own bug."""
+        _emit_sub_imm(self.asm, 31, 31, 32)
+        self._emit_expr(e.func.obj)
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))          # [sp+0] = s
+        self._emit_expr(F.StringLiteral(M.STRIP_CHARS))
+        self.asm.emit(encode_mov_zr_xn(1, 0))                  # X1 = the set
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))          # X0 = s
+        self._emit_extern_call("strspn")
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 0))
+        self.asm.emit(encode_add_xd_xn_xm(0, 0, 1))           # s + strspn(s)
+        _emit_add_imm(self.asm, 31, 31, 32)
+
+    def _emit_str_affix(self, e: F.CallExpr, *, at_end: bool) -> None:
+        """`s.startswith(p)` / `s.endswith(p)` — a bounded compare, 0 or 1.
+
+        Both are `strncmp(...) == 0`, and `strncmp` stops at the first
+        difference or at a NUL in either operand, so neither can read past the
+        end of a NUL-terminated buffer. An empty affix is a zero-length
+        compare, which compares equal, which is the "yes" Python gives.
+
+        `endswith` compares from `s + len(s) - len(p)`, so the lengths are
+        needed first AND the suffix has to be shown not to be longer than the
+        receiver: without that test the subtraction underflows and `strncmp`
+        reads before the start of the buffer. The test is unsigned, matching
+        the signedness `strlen` actually returns."""
+        args = list(e.args)
+        name = "str.endswith" if at_end else "str.startswith"
+        if len(args) != 1:
+            raise CodegenError(
+                f"{name}() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        if not at_end:
+            # [sp+0] the receiver, [sp+8] the affix.
+            _emit_sub_imm(self.asm, 31, 31, 32)
+            self._emit_expr(e.func.obj)
+            self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))
+            self._emit_expr(args[0])
+            self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+            self._emit_extern_call("strlen")
+            self.asm.emit(encode_mov_zr_xn(2, 0))            # X2 = len(p)
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))     # X0 = s
+            self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))     # X1 = p
+            self._emit_extern_call("strncmp", 3)
+            self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "eq"))
+            _emit_add_imm(self.asm, 31, 31, 32)
+            return
+        # [sp+0] s, [sp+8] p, [sp+16] len(s), [sp+24] len(p)
+        self._while_counter += 1
+        no_label = f"{self.func_name}_endswith{self._while_counter}_no"
+        done_label = f"{self.func_name}_endswith{self._while_counter}_done"
+        _emit_sub_imm(self.asm, 31, 31, 32)
+        self._emit_expr(e.func.obj)
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))
+        self._emit_expr(args[0])
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+        self._emit_extern_call("strlen")
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 24))        # len(p)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self._emit_extern_call("strlen")
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 16))        # len(s)
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 31, 16))        # X2 = len(s)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 24))        # X1 = len(p)
+        self.asm.emit(encode_cmp_xn_xm(2, 1))
+        self._emit_b_cond_to("lo", no_label)                  # len(s) < len(p)
+        # X0 = s + len(s) - len(p)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 16))
+        self.asm.emit(encode_add_xd_xn_xm(0, 0, 1))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 24))
+        self.asm.emit(encode_sub_xd_xn_xm(0, 0, 1))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))         # X1 = p
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 31, 24))        # X2 = len(p)
+        self._emit_extern_call("strncmp", 3)
+        self.asm.emit(encode_cmp_xn_imm(0, 0))
+        self.asm.emit(encode_cset_xd_cond(0, "eq"))
+        self._emit_b_to(done_label)
+        self.asm.label(no_label)
+        self.asm.emit(encode_movz_xd_imm(0, 0))
+        self.asm.label(done_label)
+        _emit_add_imm(self.asm, 31, 31, 32)
+
+    def _emit_str_find(self, e: F.CallExpr) -> None:
+        """`s.find(p)` — the index of the first occurrence, or -1.
+
+        `strstr` walks both operands to their NULs, so the answer is exactly
+        the difference of two pointers, and the one case that has to be handled
+        is "not found", which is a NULL rather than a position: -1 is what
+        Python returns, and returning the NULL's own low bits would be a
+        plausible-looking address. An empty needle makes `strstr` return the
+        receiver itself, i.e. 0, which is also what Python returns.
+
+        The argument order is `strstr(HAYSTACK, NEEDLE)` and it is the whole
+        method: `strstr("bc", "abcabcabc")` is a well-defined NULL, so getting
+        it backwards does not crash and does not look wrong in the image — it
+        returns -1 for every haystack that contains its needle, which is every
+        real use of `find`. `strncmp` is symmetric and does not care; `strstr`
+        is not, and this one was backwards in a first version of this code."""
+        args = list(e.args)
+        if len(args) != 1:
+            raise CodegenError(
+                f"str.find() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        self._while_counter += 1
+        no_label = f"{self.func_name}_find{self._while_counter}_no"
+        done_label = f"{self.func_name}_find{self._while_counter}_done"
+        _emit_sub_imm(self.asm, 31, 31, 32)
+        self._emit_expr(e.func.obj)
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))          # [sp+0] = s
+        self._emit_expr(args[0])
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))          # [sp+8] = p
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))          # X0 = s
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))          # X1 = p
+        self._emit_extern_call("strstr")
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(no_label, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 0))
+        self.asm.emit(encode_sub_xd_xn_xm(0, 0, 1))
+        self._emit_b_to(done_label)
+        self.asm.label(no_label)
+        self._emit_mov_imm("X0", -1)
+        self.asm.label(done_label)
+        _emit_add_imm(self.asm, 31, 31, 32)
+
+    def _emit_str_count(self, e: F.CallExpr) -> None:
+        """`s.count(p)` — how many NON-OVERLAPPING occurrences.
+
+        Non-overlapping is Python's rule and it is the whole of the loop: each
+        match advances the cursor by the needle's length, so "aaa".count("aa")
+        is 1 and not 2. Overlapping it would be a one-instruction difference
+        and a silently wrong count.
+
+        The empty needle is the case with no loop at all — it matches at every
+        one of the L+1 positions in a string of length L, so the count is
+        `strlen(s) + 1` — and it is also the case that would otherwise spin
+        forever, since `strstr` returns the cursor unchanged for it."""
+        args = list(e.args)
+        if len(args) != 1:
+            raise CodegenError(
+                f"str.count() takes exactly one argument on this path "
+                f"(got {len(args)})")
+        self._while_counter += 1
+        n = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_count{n}_loop"
+        done = f"{fn}_count{n}_done"
+        empty = f"{fn}_count{n}_empty"
+        _emit_sub_imm(self.asm, 31, 31, 48)
+        self._emit_expr(e.func.obj)
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))          # [sp+0] s
+        self._emit_expr(args[0])
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))          # [sp+8] p
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+        self._emit_extern_call("strlen")
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 16))         # [sp+16] len(p)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 16))
+        # NOTE the argument order: encode_cbz_xn takes (offset, register), so
+        # the register goes SECOND. Written the other way round this is
+        # `cbz x0` with a one-word offset — it tests the strlen result, which
+        # is not zero, so the empty-needle case is never taken and count("")
+        # walks off into the loop instead. Every other call in this file has
+        # the register second; this one had it first.
+        self.asm.emit(encode_cbz_xn(0, 1))
+        self.asm.emit_label_rel(empty, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 31, 0))
+        self.asm.emit(encode_str_xt_xn_imm(3, 31, 24))         # cursor = s
+        self.asm.emit(encode_movz_xd_imm(3, 0))
+        self.asm.emit(encode_str_xt_xn_imm(3, 31, 32))         # count = 0
+        self.asm.label(loop)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 24))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
+        self._emit_extern_call("strstr")
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 31, 32))
+        self.asm.emit(encode_add_xd_xn_imm(3, 3, 1))
+        self.asm.emit(encode_str_xt_xn_imm(3, 31, 32))
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 16))
+        self.asm.emit(encode_add_xd_xn_xm(0, 0, 1))            # hit + len(p)
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 24))
+        self._emit_b_to(loop)
+        self.asm.label(empty)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        self._emit_extern_call("strlen")
+        # An empty needle matches BETWEEN every pair of adjacent characters as
+        # well as at each end, so a string of length L has L+1 positions and
+        # the answer is L+1 — not L. `"".count("")` is 1 and `"ab".count("")`
+        # is 3, which is the only place the off-by-one is visible.
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        # Store into the SAME slot the loop accumulates into, because `done`
+        # reads the answer from there and not from X0. Branching to `done` with
+        # the answer only in X0 looks right and is not: the reload at `done`
+        # overwrites it with the loop's counter, which is 0 on this path, so
+        # every count("") returned 0. Both paths now leave the answer in one
+        # place.
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 32))
+        self._emit_b_to(done)
+        self.asm.label(done)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 32))
+        _emit_add_imm(self.asm, 31, 31, 48)
 
     def _emit_list_append(self, e: F.CallExpr) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
@@ -3444,6 +3747,18 @@ class ARM64Codegen:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
         is_extern = name not in self._functions
+        # The gimple backend's C runtime is not an external dependency of THIS
+        # target but a library of a different one, and it is spelled in the
+        # source as bare `mojo_*` names (`mojo_sqlite3_open`, `mojo_list_len`,
+        # `mojo_print`). Everything a call to one of those could bind to has
+        # been ruled out above: not a function of this module, not a struct, not
+        # a type constructor, and a dylib the program linked would have
+        # supplied its own spelling below. So what is left is a call with
+        # nowhere to go, and the extern path would emit a BL that the image
+        # carries to its death in the loader.
+        if is_extern and name not in self._dylib_syms \
+                and M.is_gimple_runtime_builtin(name):
+            raise CodegenError(M.gimple_runtime_refusal(name))
         if is_extern:
             # Unknown signature: AAPCS has no place for Python kwargs on a
             # raw BL. Drop them (they are almost always literals like

@@ -78,7 +78,19 @@ def _ad_hoc_sign(path: str) -> None:
 
 def parse_module(source: str, filename: str = "<input>") -> list:
     from fire_compiler import py_tokenize, Parser
-    return Parser(py_tokenize(source)).with_filename(filename).parse_module()
+    stmts = Parser(py_tokenize(source)).with_filename(filename).parse_module()
+    # One census of what this unit writes into a field, attached to every struct
+    # it declares. It is what lets formal.model tell a class-level CONSTANT from
+    # per-instance state (see the rule above struct_class_constants), and it has
+    # to be attached HERE rather than at the point of use because the two
+    # backends ask the model about a struct they were handed, with no unit in
+    # hand. Attached per FILE, so it is exactly what this file can see; a struct
+    # that arrives from an imported module keeps whatever its own module's parse
+    # attached, and a module parsed without it keeps every declared name as a
+    # field.
+    M.attach_field_evidence(list(M.iter_struct_defs(stmts)),
+                            M.unit_field_evidence(stmts))
+    return stmts
 
 
 def _synthetic_main() -> F.FunctionDef:
@@ -1014,6 +1026,118 @@ def _rewrite_self_fields(node, mapping: dict):
     return node
 
 
+def _constant_read_sites(body, structs_by_name: dict) -> dict:
+    """{access path: struct} for every read of a class-level constant.
+
+    The two spellings that are provably a read of the CLASS's own value:
+    `S.NAME`, where `S` is the struct's name, and `x.NAME` where `x` is a local
+    initialised from `S()`. A read through any other object is deliberately not
+    in here: without types, `o.NAME` might be an instance of `S` (a constant) or
+    of some other struct with a real field of the same name (a field), and
+    guessing is the error this whole rule is arranged to avoid.
+
+    A receiver spelling (`self.NAME`) is not here either, and cannot be: the
+    model counts any name a method reaches that way as a FIELD, precisely so
+    this decision never has to be made."""
+    aliases = {}
+    for node in _iter_nodes(body):
+        target = value = None
+        if isinstance(node, F.VarDecl):
+            target, value = node.name, node.value
+        elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                           F.IdentExpr):
+            target, value = node.target.name, node.value
+        if target and isinstance(value, F.CallExpr) \
+                and isinstance(value.func, F.IdentExpr) \
+                and value.func.name in structs_by_name:
+            aliases[target] = value.func.name
+    out = {}
+    for st in structs_by_name.values():
+        for name, _default in M.struct_class_constants(st):
+            out[f"{st.name}.{name}"] = st
+    for local, struct_name in aliases.items():
+        for key in [k for k in out if k.startswith(struct_name + ".")]:
+            out[f"{local}.{key.split('.', 1)[1]}"] = out[key]
+    return out
+
+
+def _constant_literal(struct_def, name: str):
+    """The literal node a read of `struct_def`'s constant `name` yields, or None.
+
+    None when the constant's value is not a literal this path can materialize
+    exactly — a dict, a list, a call, a name. The caller refuses there; see
+    `_rewrite_class_constants` for why substituting a zero is not an option."""
+    for const_name, default in M.struct_class_constants(struct_def):
+        if const_name != name:
+            continue
+        kind, payload = M.class_constant_word(const_name, default)
+        if kind == M.DEFAULT_INT:
+            return F.IntLiteral(value=int(payload))
+        if kind == M.DEFAULT_STRING:
+            return F.StringLiteral(value=payload)
+        return None
+    return None
+
+
+def _rewrite_class_constants(node, structs_by_name: dict):
+    """`S.NAME` -> the literal `NAME` holds, in place, over a statement tree.
+
+    A class-level constant is not part of any value: it is one value for every
+    instance, so there is nothing for a receiver word to hold and nothing for
+    the member-access lowering to read. The two ways this could go wrong are
+    both wrong answers rather than refusals, which is why the value is
+    materialized HERE, at the read, instead of being left to the field path:
+
+      * leave it. `Regs.R0` then reads the local slot spelled `Regs.R0`, which
+        nothing ever writes, and the constant becomes whatever the register
+        held. A class of nothing but literal constants, with a method adding
+        two of them, then built, ran, and returned 31 where the source says 12.
+      * refuse everything. Then a class whose constants are all literals — the
+        case this path can represent exactly — would be refused for a
+        representable program.
+
+    So a LITERAL constant is substituted (it has no free names, so its value is
+    the same at every read site in every function), and anything else is
+    refused by name: there is no module-global storage on this path for a
+    non-literal to live in, and a container constant read as 0 is a
+    plausible-looking wrong number rather than a crash."""
+    if not structs_by_name:
+        return node
+    return _apply_constant_sites(node,
+                                 _constant_read_sites(node, structs_by_name))
+
+
+def _apply_constant_sites(node, sites: dict):
+    """The substitution itself, over a statement tree, in place.
+
+    Split from `_rewrite_class_constants` so the sites can be computed once per
+    function: they are a census of the whole body, and recomputing them at every
+    node would be quadratic in the size of the function."""
+
+    if isinstance(node, list):
+        for i, x in enumerate(node):
+            node[i] = _apply_constant_sites(x, sites)
+        return node
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
+        st = sites.get(f"{node.obj.name}.{node.member}")
+        if st is not None:
+            literal = _constant_literal(st, node.member)
+            if literal is None:
+                raise CodegenError(
+                    f"{st.name}.{node.member} is a class-level constant, and a "
+                    f"formal value is one 64-bit word with nowhere to keep a "
+                    f"non-literal one: this path has no module-global storage, "
+                    f"so reading {st.name}.{node.member} can only be answered by "
+                    f"the value it is written with, and that value is not a "
+                    f"literal. Write the value at the use site (a literal, or "
+                    f"an assignment the compiler can see), which is the same "
+                    f"program with a representation")
+            return literal
+    for name in getattr(node, "__dataclass_fields__", {}):
+        setattr(node, name, _apply_constant_sites(getattr(node, name), sites))
+    return node
+
+
 def _prepare_functions(stmts: list, synthetic: bool = True,
                        extra_structs: list = None) -> tuple:
     """Turn a parsed module into the function list the codegen compiles.
@@ -1042,6 +1166,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     method_owners = M.method_owner_names(structs)
     functions = functions + _struct_methods(stmts)
     wide = {st.name: st for st in structs if not M.struct_fits_one_word(st)}
+    # Re-attach the census to the structs THIS FILE declares, so that a
+    # consumer of the same file's declarations cannot narrow one of them behind
+    # this build's back: the two would then measure the same class differently
+    # (here 248 fields, in an importer 263) and the one that is wrong is the one
+    # that computes on it. A struct from an imported module keeps whatever its
+    # OWN file's parse attached, and a module parsed without that evidence (the
+    # current formal/imports.py, which parses imported sources directly rather
+    # than through parse_module) keeps every declared name as a field — the
+    # pre-rule answer, which is a refusal rather than a wrong answer. Widening
+    # the union across files instead would be unsound for exactly that reason:
+    # an importer's census says nothing about the writes in the file that
+    # DECLARES the class, which is where the rest of them live.
+    own = {id(st) for st in M.iter_struct_defs(stmts)}
+    M.attach_field_evidence([st for st in structs if id(st) in own],
+                            M.unit_field_evidence(stmts))
     for fn in functions:
         _rewrite_method_calls(fn.body, owners, wide)
         # A method's `self` IS the field; a local initialised from a one-word
@@ -1052,6 +1191,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                 and M.struct_field_count(st) == 1:
             mapping["self"] = _sole_field_name(st)
         _rewrite_self_fields(fn.body, mapping)
+        # A class-level CONSTANT is not part of any value, so it is not
+        # lowered as a field: it is materialized where it is read. Without
+        # this a struct of nothing but constants — which the width rule now
+        # correctly calls one word, or zero — reads its own table as the zero
+        # an unwritten slot gives, and a program that builds and runs returns
+        # a number nobody wrote.
+        _rewrite_class_constants(fn.body, structs_by_name)
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)

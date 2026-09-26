@@ -177,6 +177,106 @@ def FrameOk (st st' : Arm64State) : Prop :=
     mem_read_u64 st'.mem ((st.sp + UInt64.ofNat j).toNat) =
     mem_read_u64 st.mem ((st.sp + UInt64.ofNat j).toNat))
 
+/-! ## 4b. A receiver frame the callee is allowed to write
+
+`FrameOk` is the wrong predicate for a method, and it is wrong for a reason
+that is not a technicality: its memory clause says the callee leaves the
+caller's window alone, and a method that assigns `self.x` is *required* to
+write into the frame the caller handed it.  So a method cannot satisfy
+`FrameOk`, and the design's own callee lemma
+(`ProofLib.Frame.frameWrite_read_above_sp`) says exactly why it need not: a
+write into a frame that lies entirely **below** `sp` cannot reach anything at
+or above `sp`, which is the whole window.
+
+That gives the honest repair, and it is additive.  `FrameOk` stays exactly as
+it is for the proofs that use it, and `FrameOk_except` carves the receiver
+frame out of the window rather than asserting the window is intact.  The
+exclusion premise is `¬ FrameBelow`, i.e. "unless this really is a receiver
+frame sitting below the stack pointer" -- the same predicate
+`frameWrite_read_above_sp` consumes, so the per-block reasoning the existing
+`FrameOk` proofs do is reused rather than reinvented.
+
+`FrameOk_except_zero` is the lemma that makes the addition safe rather than a
+second, weaker version of the same claim: for a frame that is empty, or that
+sits entirely above `sp`, the old predicate is *recovered*, not replaced.
+
+Nothing here is reachable yet.  No emitter produces a by-reference receiver and
+no generated proof mentions these names; they are the callee-contract half of
+`bugs/FORMAL_wide_receiver_by_reference.md`, landed first because they are the
+part that has to be right before any codegen can be. -/
+
+/-- **Frame preservation, modulo the receiver frame.**  Everything `FrameOk`
+    says, except that the callee may have rewritten the `n` slots of a receiver
+    frame based at `base`.  The register and `sp` clauses are literally the
+    same conjuncts as `FrameOk`'s, because a method that writes its receiver
+    frame still restores the callee-saved registers and still balances its own
+    frame. -/
+def FrameOk_except (st st' : Arm64State) (base : UInt64) (n : Nat) : Prop :=
+  st'.x19 = st.x19 ∧ st'.x20 = st.x20 ∧ st'.x21 = st.x21 ∧ st'.x22 = st.x22 ∧
+  st'.x23 = st.x23 ∧ st'.x24 = st.x24 ∧ st'.x25 = st.x25 ∧ st'.x26 = st.x26 ∧
+  st'.x27 = st.x27 ∧ st'.x28 = st.x28 ∧ st'.x29 = st.x29 ∧ st'.x30 = st.x30 ∧
+  st'.sp = st.sp ∧
+  (∀ j, st.sp.toNat + j < 2^64 →
+    ¬ Frame.FrameBelow base st.sp n →
+    mem_read_u64 st'.mem ((st.sp + UInt64.ofNat j).toNat) =
+    mem_read_u64 st.mem ((st.sp + UInt64.ofNat j).toNat))
+
+/-- A frame that is empty, or that sits entirely above `sp`, is not below `sp`
+    and so carves nothing out of the window. -/
+theorem not_below_of_above {base sp : UInt64} {n : Nat} (h : sp.toNat < base.toNat) :
+    ¬ Frame.FrameBelow base sp n := by
+  intro hb
+  unfold Frame.FrameBelow at hb
+  simp only [Frame.frameBytes, Frame.SLOT, Nat.mul_zero, Nat.add_zero] at hb
+  omega
+
+/-- **The old predicate is recovered, not replaced.**  With an empty frame (or
+    any frame above `sp`), `FrameOk_except` *is* `FrameOk`: the extra premise is
+    dischargeable at every `j`, so the except-clause has exactly the old window
+    and the twelve register clauses are shared.  This is what makes adding
+    `FrameOk_except` safe for the 40 proofs that use `FrameOk`. -/
+theorem FrameOk_except_zero (st st' : Arm64State) (base : UInt64)
+    (habove : st.sp.toNat < base.toNat) :
+    FrameOk_except st st' base 0 ↔ FrameOk st st' := by
+  have hnb : ¬ Frame.FrameBelow base st.sp 0 := not_below_of_above habove
+  constructor
+  · intro h
+    obtain ⟨h19, h20, h21, h22, h23, h24, h25, h26, h27, h28, h29, h30, hsp, hwin⟩ := h
+    refine ⟨h19, h20, h21, h22, h23, h24, h25, h26, h27, h28, h29, h30, hsp, ?_⟩
+    intro j hj
+    exact hwin j hj hnb
+  · intro h
+    obtain ⟨h19, h20, h21, h22, h23, h24, h25, h26, h27, h28, h29, h30, hsp, hwin⟩ := h
+    refine ⟨h19, h20, h21, h22, h23, h24, h25, h26, h27, h28, h29, h30, hsp, ?_⟩
+    intro j hj _
+    exact hwin j hj
+
+/-- **A callee that only writes its own receiver frame restores everything
+    else.**  This is the generic step a method's per-block walk needs, and it
+    is a direct application of `ProofLib.Frame.frameWrite_read_above_sp`: the
+    frame is below `sp`, so the write cannot reach the caller's window.
+
+    `mem` is threaded in the same left-fold shape the emitter's stores have, so
+    this composes with the per-block value flow the way `FrameOk`'s clause does
+    today rather than needing a new per-block reasoning mode. -/
+theorem frameWrites_window_preserved (st st' : Arm64State) (base : UInt64) (n : Nat)
+    (kvs : List (Nat × UInt64))
+    (hbelow : Frame.FrameBelow base st.sp n)
+    (hks : ∀ kv, kv ∈ kvs → kv.1 < n)
+    (hok : FrameOk st st') :
+    (∀ j, st.sp.toNat + j < 2 ^ 64 →
+      mem_read_u64 (List.foldl (fun m kv => Frame.frameWrite m base kv.1 kv.2) st.mem kvs)
+        ((st.sp + UInt64.ofNat j).toNat) =
+      mem_read_u64 st.mem ((st.sp + UInt64.ofNat j).toNat)) ∧
+    FrameOk_except st st' base n := by
+  refine ⟨?_, ?_⟩
+  · intro j hj
+    exact Frame.frameWrites_read_above_sp st.mem base st.sp n kvs hbelow hks j hj
+  · obtain ⟨h19, h20, h21, h22, h23, h24, h25, h26, h27, h28, h29, h30, hsp, hw⟩ := hok
+    refine ⟨h19, h20, h21, h22, h23, h24, h25, h26, h27, h28, h29, h30, hsp, ?_⟩
+    intro j hj _
+    exact hw j hj
+
 /-- The per-frame size bound threaded through the contract, at `stride` bytes of
     stack per recursion level: every frame's stores (`sp - K`, `K ≤ FRAME`) sit
     in the non-wrapping regime, so `FrameOk`'s window clause can be proved

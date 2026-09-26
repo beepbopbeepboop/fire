@@ -940,6 +940,18 @@ theorem evalBody_exprstmt (callFunc : String → UInt64 → UInt64) (e : MojoExp
   evalBody callFunc [MojoStmt.exprstmt e] env = none := by
   simp [evalBody, evalBodyEnv]
 
+/-- The environment-threading evaluator's assignment clause, on the returned
+    environment rather than the result.  `evalBody_assign` gives the `.1`
+    projection (a bare assignment returns `none`); this is the `.2` projection,
+    which is what a *method*'s semantics needs, since a method's whole point is
+    the fields it leaves behind. -/
+theorem evalBodyEnv_assign (callFunc : String → UInt64 → UInt64) (name : String)
+    (e : MojoExpr) (env : String → UInt64) (rest : List MojoStmt) :
+    (evalBodyEnv callFunc (MojoStmt.assign name e :: rest) env).2
+      = (evalBodyEnv callFunc rest
+          (fun n => if n == name then evalExpr callFunc e env else env n)).2 := by
+  simp only [evalBodyEnv]
+
 /-- single-stmt pass. -/
 theorem evalBody_pass (callFunc : String → UInt64 → UInt64) (env : String → UInt64) :
   evalBody callFunc [MojoStmt.pass] env = none := by
@@ -1521,13 +1533,37 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
       some { s with pc := (UInt64.ofNat s.pc + off64 * 4).toNat }
     else
       some { s with pc := s.pc + 4 }
-  -- STR Xt, [SP, #-imm]!: 0xF9400000
+  -- LDR Xt, [Xn, #imm]: 0xF9400000 (unsigned-offset 64-bit LOAD, no writeback)
+  --
+  -- This case used to be labelled `STR Xt, [SP, #-imm]!` and implemented as a
+  -- pre-index store: `sp := sp - imm*8`, one BYTE written at `[sp - imm*8]`,
+  -- and `Xt` left alone.  That is wrong on all three counts, and it was wrong
+  -- in the one direction a caller cannot notice.  0xF9400000 is the A64
+  -- `LDR (immediate, unsigned offset)` encoding -- `size=11, 111, V=0, 01,
+  -- opc=01` -- which `formal/arm64.py`'s `encode_ldr_xt_xn_imm` emits
+  -- (docstring and all) for every heap read the codegen performs, including
+  -- `LDR Xd, [X17]` for a string and `LDR X0, [X9, #8*(i+1)]` for list
+  -- elements.  The opcode field that separates LDR from STR is bit 22, so
+  -- 0xF9000000 (bit 22 clear) is the store and 0xF9400000 (bit 22 set) is
+  -- the load.
+  --
+  -- Two consequences, both silent.  A load does not write memory, so a frame
+  -- reasoning about a program's memory was wrong about every byte it claimed
+  -- was untouched.  A load does not move `sp`, so `FrameOk`'s window, every
+  -- `FrameBound`, and every `sp`-relative address in the recursion contract
+  -- were being carried across a step that the architecture does not perform.
+  --
+  -- Nothing in `formal/examples/*.mojo` contains this encoding, which is why
+  -- the 40-example suite stayed green throughout: the mis-modelled form is
+  -- reachable only from a program that touches memory through a non-SP base,
+  -- and the examples are register-only.  `bugs/FORMAL_wide_receiver_by_reference.md`
+  -- records the measurement and what it gates.
   else if (insn &&& 0xffe00000) = 0xF9400000 then
     let rt := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    let addr := s.sp - UInt64.ofNat (imm12 * 8)
-    let new_mem := fun i => if i = addr.toNat then (arm64_reg rt s).toUInt8 else s.mem i
-    some { s with sp := addr, mem := new_mem }
+    let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
+    some (arm64_set_reg rt s (mem_read_u64 s.mem addr.toNat))
   -- LDR Xt, [SP], #imm: 0xB9000000
   else if (insn &&& 0xffe00000) = 0xB9000000 then
     let rt := (insn &&& 0x1f).toNat
@@ -1617,11 +1653,22 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let cond := if field &&& 0x1 = 0 then (field + 1).toNat else (field - 1).toNat
     let result := if arm64_matches_condition cond s.nzcv then (1 : UInt64) else (0 : UInt64)
     some (arm64_set_reg rd s result)
-  -- STR Xt, [SP, #imm]: 0xF9000000 (unsigned offset store, no writeback)
+  -- STR Xt, [Xn, #imm]: 0xF9000000 (unsigned-offset 64-bit store, no writeback)
+  --
+  -- The base register was `s.sp` here, hardwired, whatever the instruction
+  -- encoded in `Rn`.  The instruction is `STR (immediate, unsigned offset)`,
+  -- whose address is `X Rn + imm`, and `formal/arm64.py`'s
+  -- `encode_str_xt_xn_imm` emits it that way: `encode_str_xt_xn_imm(src, 17, 0)`
+  -- for a string write and `encode_str_xt_xn_imm(..., 7, 0)` / `(..., 0, 0)`
+  -- elsewhere.  `Rn = 31` (SP) is the one spelling that agrees with what this
+  -- case used to compute, so the bug was invisible for stack traffic and wrong
+  -- for every heap write -- silently, because the modelled address was a
+  -- perfectly ordinary stack address.
   else if (insn &&& 0xffe00000) = 0xF9000000 then
     let rt := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    let addr := s.sp + UInt64.ofNat (imm12 * 8)
+    let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
     some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
   -- LDP Xt, Xn, [SP, #imm]: 0xA9400000 (offset load pair, no writeback)
   else if (insn &&& 0xffc00000) = 0xA9400000 then
@@ -3480,11 +3527,21 @@ theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_pos h]; try dsimp; try rfl; try simp
 
-/-- Per-instruction step: `work_step_ldr_pre`. -/
-theorem work_step_ldr_pre (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+/-- Per-instruction step: `work_step_ldr_uoff`.
+
+    `LDR Xt, [Xn, #imm]` (0xF9400000): `Xt := mem64[Xn + imm]`, and NOTHING
+    else moves -- in particular `sp` does not, which is the whole point.  The
+    base is the instruction's `Rn`, not `SP`.
+
+    Named `_uoff` (unsigned offset) to match the A64 encoding.  The generator
+    still asks for this by its historical name `work_step_ldr_pre`, which is
+    the alias immediately below; see the note there. -/
+theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9400000) :
-    arm64_step s code = some { s with sp := (s.sp - UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)), mem := fun i => if i = (s.sp - UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat then (arm64_reg ((w &&& 0x1f).toNat) s).toUInt8 else s.mem i } := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem
+      ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+        + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3508,6 +3565,25 @@ theorem work_step_ldr_pre (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   have hne_18 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
   have hne_bcond : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_pos h, if_neg hne_bcond]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldr_pre` -- HISTORICAL NAME, see
+    `work_step_ldr_uoff` for the statement and the reasoning.
+
+    `formal/arm64_proof_gen.py`'s `_WORK_STEP` table dispatches on this name
+    (`(18, "work_step_ldr_pre", [(0xffe00000, 0xf9400000)])`), so the name is
+    load-bearing for the generator even though it is wrong: the opcode is a
+    plain unsigned-offset load, not a pre-index store.  Renaming the generator
+    entry to `work_step_ldr_uoff` and deleting this alias is a one-line change
+    in `_WORK_STEP` with no effect on any proof; it is left to a commit that
+    owns that file rather than done here, because four other agents are in
+    `formal/`. -/
+theorem work_step_ldr_pre : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xf9400000),
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem
+      ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+        + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) :=
+  work_step_ldr_uoff
 
 /-- Per-instruction step: `work_step_ldr_post`. -/
 theorem work_step_ldr_post (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
@@ -3929,11 +4005,20 @@ theorem work_step_cset (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   have hne_bcond : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_pos h, if_neg hne_bcond]; try dsimp; try rfl; try simp
 
-/-- Per-instruction step: `work_step_str_off`. -/
-theorem work_step_str_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+/-- Per-instruction step: `work_step_str_uoff`.
+
+    `STR Xt, [Xn, #imm]` (0xF9000000): `mem64[Xn + imm] := Xt`, nothing else
+    moves.  The base is the instruction's `Rn`; this used to be `s.sp`,
+    hardwired, which agrees with the architecture only in the `Rn = 31`
+    spelling and is silently wrong for every heap write. -/
+theorem work_step_str_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9000000) :
-    arm64_step s code = some { s with mem := mem_write_u64 s.mem (s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
+    arm64_step s code = some { s with
+      mem := mem_write_u64 s.mem
+        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat
+        (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3970,6 +4055,20 @@ theorem work_step_str_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
   have hne_31 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
   have hne_bcond : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_pos h, if_neg hne_bcond]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_str_off` -- kept as the name the proof
+    generator dispatches on (`_WORK_STEP` entry 31).  The statement is
+    `work_step_str_uoff`'s; see that lemma for what changed and why the old
+    `s.sp` base was wrong. -/
+theorem work_step_str_off : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xf9000000),
+    arm64_step s code = some { s with
+      mem := mem_write_u64 s.mem
+        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat
+        (arm64_reg ((w &&& 0x1f).toNat) s) } :=
+  work_step_str_uoff
 
 /-- Per-instruction step: `work_step_ldp_off`. -/
 theorem work_step_ldp_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
@@ -4416,3 +4515,673 @@ theorem semantics_stub (image : DylibImage) (export_ : DylibExport)
     Semantics image export_ observables := by sorry
 
 end DylibExport
+
+
+/-!
+# Receiver frames: a struct with more than one field, by reference
+
+`MojoExpr` has no aggregate constructor, `Arm64State`'s registers are one
+`UInt64` each, and `evalFunc` takes one `UInt64`, so a two-field struct has
+nothing to *be* as a value.  There is nevertheless a way to give a multi-field
+struct a representation **without changing the value model at all**: lower the
+receiver **by reference**.  The receiver word is the *address* of an out-of-line
+frame of 8-byte slots, and `self.<field>` is a load from `mem[base + 8*k]`.
+
+A pointer is one word, so:
+
+* no value becomes two words -- `Arm64State` is untouched;
+* `MojoFunc.mk` keeps its single parameter, because `self` **is** that
+  parameter and a pointer is a `UInt64` -- `evalFunc`, `evalBodyEnv` and their
+  ~40 per-node lemmas are untouched;
+* `Refine.Post`/`contract_sound`/`runProg` are untouched, because they are
+  already stated over `UInt64 → UInt64` and the receiver word is the argument.
+
+What the design costs instead is on the *source* side (a method's semantics is
+a second environment, `String → UInt64`, alongside the locals -- a new
+evaluator, not a change to `evalExpr`) and on the *callee contract* side
+(`Refine.FrameOk_except`: a method that mutates its receiver violates
+`FrameOk`'s "caller's slots preserved" clause by construction).  Both are
+additions beside the existing definitions.
+
+`bugs/FORMAL_wide_receiver_by_reference.md` has the full design, the cost, and
+what is not done.
+-/
+
+namespace Frame
+
+/-- Byte size of one frame slot.  A field is one 64-bit word on this path, so a
+    slot is 8 bytes and the layout adds no padding of its own. -/
+abbrev SLOT : Nat := 8
+
+/-- A frame layout: a base address and a slot count.  `slots` is the struct's
+    *derived* field count (`formal/model.py`'s `struct_field_count`), so a
+    2-field receiver is a 2-slot frame and the 3-to-6 band is a 3-to-6-slot
+    frame: the same code, parameterised, which is why the width bands are not
+    three separate projects. -/
+structure Frame where
+  base : UInt64
+  slots : Nat
+  deriving Inhabited
+
+/-- Byte offset of slot `k` within a frame. -/
+def frameOffset (k : Nat) : Nat := SLOT * k
+
+/-- Total byte size of a frame with `n` slots. -/
+def frameBytes (n : Nat) : Nat := SLOT * n
+
+/-- Address of slot `k` of the frame based at `base`. -/
+def frameAddr (base : UInt64) (k : Nat) : Nat :=
+  (base + UInt64.ofNat (frameOffset k)).toNat
+
+/-- Read slot `k` out of `mem`.  This is what `self.<field at slot k>` means. -/
+def frameRead (mem : Nat → UInt8) (base : UInt64) (k : Nat) : UInt64 :=
+  mem_read_u64 mem (frameAddr base k)
+
+/-- Write slot `k` of `mem`.  This is what `self.<field at slot k> = v` means. -/
+def frameWrite (mem : Nat → UInt8) (base : UInt64) (k : Nat) (v : UInt64) : Nat → UInt8 :=
+  mem_write_u64 mem (frameAddr base k) v
+
+/-- **No wraparound.**  Every slot address of a frame based at `base` with `n`
+    slots is a genuine `base + 8*k` rather than a wrapped one.  The bound is
+    stated on the largest slot index in scope, which is what the `+ 1` in each
+    use is for.
+
+    This premise is not decoration.  `frameAddr` is a `UInt64`, so without it
+    two different slots of a frame that runs off the top of the address space
+    can share an address, and every "different slots are independent" lemma
+    below would be false. -/
+def FrameFits (base : UInt64) (n : Nat) : Prop :=
+  base.toNat + frameBytes n < 2 ^ 64
+
+/-- The frame does not reach the stack pointer, so it cannot overlap anything the
+    caller is relying on.  This is the premise the callee contract needs, and
+    it is why the receiver frame is carved out of the region *below* the callee's
+    own `sp` rather than out of the red zone above it: a frame above `sp` would
+    sit inside the window `FrameOk` promises the callee will not touch, and a
+    method is supposed to touch it. -/
+def FrameBelow (base sp : UInt64) (n : Nat) : Prop :=
+  base.toNat + frameBytes n ≤ sp.toNat
+
+/-- `FrameFits` is downward closed in the slot count, which is what lets a
+    caller discharge it once for a whole frame and then specialise. -/
+theorem FrameFits.mono {base : UInt64} {n n' : Nat} (h : FrameFits base n')
+    (hle : n ≤ n') : FrameFits base n := by
+  simp only [FrameFits, frameBytes, SLOT] at *
+  omega
+
+/-- Every slot's offset fits inside the frame's own byte count.  The
+    workhorse for turning a `k < n` bound into a byte bound. -/
+theorem frameOffset_le_bytes (k : Nat) : frameOffset k ≤ frameBytes (k + 1) := by
+  simp only [frameOffset, frameBytes, SLOT]
+  omega
+
+/-- Slot offsets are monotone in the slot index. -/
+theorem frameOffset_mono {k k' : Nat} (h : k ≤ k') : frameOffset k ≤ frameOffset k' := by
+  simp only [frameOffset, SLOT]
+  omega
+
+/-- Frame sizes are monotone in the slot count. -/
+theorem frameBytes_mono {n n' : Nat} (h : n ≤ n') : frameBytes n ≤ frameBytes n' := by
+  simp only [frameBytes, SLOT]
+  omega
+
+/-- Advancing one slot advances the offset by exactly one slot size, which is
+    also the frame's size for a one-slot-larger frame.  This is the arithmetic
+    that makes two *adjacent* slots disjoint. -/
+theorem frameOffset_step (k : Nat) : frameOffset k + SLOT = frameBytes (k + 1) := by
+  simp only [frameOffset, frameBytes, SLOT]
+  omega
+
+/-- `frameAddr` really is `base + 8*k` in `Nat` arithmetic when the frame
+    fits.  This is the step that makes every later lemma a `Nat` fact rather
+    than a `UInt64` one, and it is why the layout needs a `FrameFits` premise
+    at all. -/
+theorem frameAddr_eq (base : UInt64) (k : Nat) (h : FrameFits base (k + 1)) :
+    frameAddr base k = base.toNat + frameOffset k := by
+  have hbytes : frameBytes (k + 1) < 2 ^ 64 := by
+    have hh := h
+    simp only [FrameFits] at hh
+    omega
+  have hoff : frameOffset k < 2 ^ 64 := by
+    have hle := frameOffset_le_bytes k
+    omega
+  have hb := UInt64.toNat_lt base
+  have hlt : base.toNat + frameOffset k < 2 ^ 64 := by
+    have h1 : base.toNat + frameOffset k ≤ base.toNat + frameBytes (k + 1) :=
+      Nat.add_le_add_left (frameOffset_le_bytes k) _
+    have h2 : base.toNat + frameBytes (k + 1) < 2 ^ 64 := by
+      have hh := h
+      simp only [FrameFits] at hh
+      exact hh
+    omega
+  have ho : (UInt64.ofNat (frameOffset k)).toNat = frameOffset k :=
+    UInt64.toNat_ofNat'.trans (Nat.mod_eq_of_lt hoff)
+  unfold frameAddr
+  rw [UInt64.toNat_add, ho, Nat.mod_eq_of_lt hlt]
+
+/-- Slot addresses are monotone in the slot index. -/
+theorem frameAddr_mono (base : UInt64) {k k' : Nat} (h : FrameFits base (k' + 1))
+    (hle : k ≤ k') : frameAddr base k ≤ frameAddr base k' := by
+  have h1 : frameAddr base k = base.toNat + frameOffset k :=
+    frameAddr_eq base k (h.mono (n := k + 1) (by omega))
+  have h2 : frameAddr base k' = base.toNat + frameOffset k' := frameAddr_eq base k' h
+  rw [h1, h2]
+  exact Nat.add_le_add_left (frameOffset_mono hle) _
+
+/-- Adjacent slots are exactly one slot apart. -/
+theorem frameAddr_step (base : UInt64) (k : Nat) (h : FrameFits base (k + 2)) :
+    frameAddr base k + SLOT = frameAddr base (k + 1) := by
+  have h1 : frameAddr base k = base.toNat + frameOffset k :=
+    frameAddr_eq base k (h.mono (n := k + 1) (by omega))
+  have h2 : frameAddr base (k + 1) = base.toNat + frameOffset (k + 1) :=
+    frameAddr_eq base (k + 1) (h.mono (n := k + 2) (by omega))
+  rw [h1, h2]
+  simp only [frameOffset, SLOT]
+  omega
+
+/-- **Distinct slots have disjoint byte ranges.**  `mem_read_after_write_u64_ne`
+    is stated on disjointness rather than on `≠`, so this is the form the rest
+    of the section consumes; the `max` in the premise is what lets a caller
+    discharge it once for a whole frame rather than per pair. -/
+theorem frameAddr_disjoint (base : UInt64) {k k' : Nat} (hne : k ≠ k')
+    (h : FrameFits base (max k k' + 1)) :
+    frameAddr base k + SLOT ≤ frameAddr base k' ∨ frameAddr base k' + SLOT ≤ frameAddr base k := by
+  rcases Nat.lt_trichotomy k k' with hlt | heq | hgt
+  · left
+    have hfit : FrameFits base (k' + 1) := h.mono (n := k' + 1) (by simp [Nat.max_eq_right (Nat.le_of_lt hlt)])
+    have h1 : frameAddr base k = base.toNat + frameOffset k :=
+      frameAddr_eq base k (hfit.mono (n := k + 1) (by omega))
+    have h2 : frameAddr base k' = base.toNat + frameOffset k' := frameAddr_eq base k' hfit
+    rw [h1, h2]
+    simp only [frameOffset, SLOT]
+    omega
+  · exact absurd heq hne
+  · right
+    have hfit : FrameFits base (k + 1) := h.mono (n := k + 1) (by simp [Nat.max_eq_left (Nat.le_of_lt hgt)])
+    have h1 : frameAddr base k' = base.toNat + frameOffset k' :=
+      frameAddr_eq base k' (hfit.mono (n := k' + 1) (by omega))
+    have h2 : frameAddr base k = base.toNat + frameOffset k := frameAddr_eq base k hfit
+    rw [h1, h2]
+    simp only [frameOffset, SLOT]
+    omega
+
+@[simp] theorem frameRead_frameWrite_same (mem : Nat → UInt8) (base : UInt64)
+    (k : Nat) (v : UInt64) :
+    frameRead (frameWrite mem base k v) base k = v :=
+  mem_read_after_write_u64 mem (frameAddr base k) v
+
+/-- **A write to slot `k` is invisible to a read of a different slot.**  This
+    is what makes the frame's slots independent, and therefore what makes a
+    per-field source environment (`frameToEnv`/`envToFrame` below) a sound
+    model of the frame. -/
+theorem frameRead_frameWrite_ne (mem : Nat → UInt8) (base : UInt64) {k k' : Nat}
+    (h : FrameFits base (max k k' + 1)) (hne : k ≠ k') (v : UInt64) :
+    frameRead (frameWrite mem base k v) base k' = frameRead mem base k' := by
+  rcases frameAddr_disjoint base hne h with hd | hd
+  · exact mem_read_after_write_u64_ne mem (frameAddr base k) (frameAddr base k') v (Or.inr hd)
+  · exact mem_read_after_write_u64_ne mem (frameAddr base k) (frameAddr base k') v (Or.inl hd)
+
+/-- **A frame write leaves every byte outside the frame alone** -- at byte
+    granularity, which is the granularity `mem_write_u64` actually works at. -/
+theorem frameWrite_byte_untouched (mem : Nat → UInt8) (base : UInt64) (k : Nat)
+    (v : UInt64) (a : Nat) (h : a < frameAddr base k ∨ frameAddr base k + SLOT ≤ a) :
+    frameWrite mem base k v a = mem a :=
+  memw_untouched mem (frameAddr base k) a v h
+
+/-- **A frame write leaves every 8-byte word outside the frame alone.**  This is
+    the whole content of "a method only touches its receiver's fields", stated
+    once about memory rather than about a proof. -/
+theorem frameWrite_read_outside (mem : Nat → UInt8) (base : UInt64) (k : Nat)
+    (v : UInt64) (a : Nat)
+    (h : a + SLOT ≤ frameAddr base k ∨ frameAddr base k + SLOT ≤ a) :
+    mem_read_u64 (frameWrite mem base k v) a = mem_read_u64 mem a :=
+  mem_read_after_write_u64_ne mem (frameAddr base k) a v h
+
+/-- **THE CALLEE-CONTRACT LEMMA.**  A write into a receiver frame that lies
+    entirely below `sp` leaves the caller's window above `sp` exactly as it
+    was.
+
+    This is what a method needs and what `FrameOk` denies it.  A mutating
+    method violates `FrameOk`'s "the caller's slots are preserved" clause by
+    construction, and the honest repair is not to weaken `FrameOk` (which 40
+    passing proofs depend on) but to add the one clause that says *except the
+    frame the caller handed over* -- `Refine.FrameOk_except`.
+
+    `FrameOk`'s window is indexed by `st.sp + j`, so the address here is
+    `(sp + j).toNat`; the two things to prove are that it is at least a whole
+    slot above the frame's last slot, and that it did not wrap, which is the
+    `hj` premise `FrameOk_read_at` and friends already carry. -/
+theorem frameWrite_read_above_sp (mem : Nat → UInt8) (base sp : UInt64) (n k : Nat)
+    (v : UInt64) (hbelow : FrameBelow base sp n) (hk : k < n) (j : Nat)
+    (hj : sp.toNat + j < 2 ^ 64) :
+    mem_read_u64 (frameWrite mem base k v) (sp + UInt64.ofNat j).toNat
+      = mem_read_u64 mem (sp + UInt64.ofNat j).toNat := by
+  have hbelow' := hbelow
+  simp only [FrameBelow] at hbelow'
+  have hbelow_bytes : frameBytes (k + 1) ≤ frameBytes n := frameBytes_mono (by omega)
+  have hfit : FrameFits base (k + 1) := by
+    unfold FrameFits
+    have h1 : base.toNat + frameBytes (k + 1) ≤ base.toNat + frameBytes n :=
+      Nat.add_le_add_left hbelow_bytes _
+    omega
+  have haddr : frameAddr base k = base.toNat + frameOffset k := frameAddr_eq base k hfit
+  have hfar : frameAddr base k + SLOT ≤ (sp + UInt64.ofNat j).toNat := by
+    rw [haddr, UInt64.toNat_add]
+    have hj64 : j < 2 ^ 64 := by omega
+    have ho : (UInt64.ofNat j).toNat = j := by
+      rw [UInt64.toNat_ofNat', Nat.mod_eq_of_lt hj64]
+    rw [ho, Nat.mod_eq_of_lt hj]
+    have hsp := UInt64.toNat_lt sp
+    have hstep : frameOffset k + SLOT ≤ frameBytes n := by
+      have h1 : frameOffset k + SLOT = frameBytes (k + 1) := frameOffset_step k
+      omega
+    have habove : base.toNat + frameOffset k + SLOT ≤ sp.toNat := by
+      have h1 : base.toNat + frameOffset k + SLOT ≤ base.toNat + frameBytes n := by
+        have h2 : frameOffset k + SLOT = frameBytes (k + 1) := frameOffset_step k
+        omega
+      omega
+    omega
+  exact frameWrite_read_outside mem base k v _ (Or.inr hfar)
+
+/-- The same statement for a whole sequence of frame writes, which is the shape
+    the generator's write-back helper (`envToFrame` below) produces. -/
+theorem frameWrites_read_above_sp (mem : Nat → UInt8) (base sp : UInt64) (n : Nat)
+    (kvs : List (Nat × UInt64))
+    (hbelow : FrameBelow base sp n) (hks : ∀ kv, kv ∈ kvs → kv.1 < n) (j : Nat)
+    (hj : sp.toNat + j < 2 ^ 64) :
+    mem_read_u64 (List.foldl (fun m kv => frameWrite m base kv.1 kv.2) mem kvs)
+        (sp + UInt64.ofNat j).toNat
+      = mem_read_u64 mem (sp + UInt64.ofNat j).toNat := by
+  induction kvs generalizing mem with
+  | nil => rfl
+  | cons kv rest ih =>
+      rw [List.foldl]
+      have hkv : kv.1 < n := hks kv (by simp)
+      have hrest : ∀ kv', kv' ∈ rest → kv'.1 < n := by
+        intro kv' hkv'
+        exact hks kv' (by simp; exact Or.inr hkv')
+      exact (ih (frameWrite mem base kv.1 kv.2) hrest).trans
+        (frameWrite_read_above_sp mem base sp n kv.1 kv.2 hbelow hkv j hj)
+
+/-- **The receiver frame, read into the source-level field environment.**  The
+    bridge from machine memory to the `String → UInt64` map the source semantics
+    of a method is stated over.  `slotOf` is the generator's field-name-to-slot
+    table: for a struct it is "the k-th field declared is slot k", which is the
+    only per-struct information the design needs. -/
+def frameToEnv (mem : Nat → UInt8) (base : UInt64) (slotOf : String → Nat) : String → UInt64 :=
+  fun name => frameRead mem base (slotOf name)
+
+/-- **The receiver frame, written back from the source-level field
+    environment.**  A method's field assignments reach memory through this.
+
+    A fold over a *finite* name list, because `mem` is a function and there is
+    no other way to push an environment back into it: the names the method does
+    not mention have to be left alone explicitly, and the generator knows
+    exactly which names those are. -/
+def envToFrame (mem : Nat → UInt8) (base : UInt64) (slotOf : String → Nat)
+    (fields : String → UInt64) (names : List String) : Nat → UInt8 :=
+  match names with
+  | [] => mem
+  | n :: rest =>
+      envToFrame (frameWrite mem base (slotOf n) (fields n)) base slotOf fields rest
+
+@[simp] theorem envToFrame_frameToEnv_single (mem : Nat → UInt8) (base : UInt64)
+    (slotOf : String → Nat) (fields : String → UInt64) (n : String) :
+    frameToEnv (envToFrame mem base slotOf fields [n]) base slotOf n = fields n :=
+  mem_read_after_write_u64 mem (frameAddr base (slotOf n)) (fields n)
+
+/-- A `slotOf` table that gives distinct names distinct slots.  This is the
+    whole requirement the frame layout places on the generator: the per-field
+    slot indices have to be injective, which for a struct means "the k-th field
+    declared is slot k", and nothing else. -/
+def SlotOf (slotOf : String → Nat) : Prop :=
+  ∀ a b : String, a ≠ b → slotOf a ≠ slotOf b
+
+/-- **The two halves of the write-back, as a two-clause induction.**  For a
+    field in `names` the write-back returns the assigned value; for a field not
+    in `names` it returns the value that was already there.  Stated as two
+    clauses because either one alone is not inductive: the head case of
+    "in `names`" is not a base case, since the fold continues into `rest` and
+    has to be shown not to disturb the head's slot.
+
+    Together with `frameRead_frameWrite_same` and `frameRead_frameWrite_ne`
+    this says the `String → UInt64` field environment and the machine's
+    out-of-line frame are interchangeable representations of the same
+    receiver, which is the claim the source semantics of a method rests on. -/
+theorem envToFrame_frameToEnv_cases (mem : Nat → UInt8) (base : UInt64)
+    (slotOf : String → Nat) (fields : String → UInt64) (names : List String)
+    (nslots : Nat) (a : String) :
+    SlotOf slotOf →
+    (∀ x, x ∈ names → slotOf x < nslots) →
+    FrameFits base nslots →
+    slotOf a < nslots →
+    (a ∈ names →
+       frameToEnv (envToFrame mem base slotOf fields names) base slotOf a = fields a) ∧
+    (a ∉ names →
+       frameToEnv (envToFrame mem base slotOf fields names) base slotOf a
+         = mem_read_u64 mem (frameAddr base (slotOf a))) := by
+  induction names generalizing mem with
+  | nil =>
+      intro _ _ _ ha
+      refine ⟨fun h => absurd h (by simp), fun _ => rfl⟩
+  | cons m rest ih =>
+      intro hslots hbounds hfit ha
+      rw [envToFrame]
+      have hbounds' : ∀ x, x ∈ rest → slotOf x < nslots := by
+        intro x hx
+        exact hbounds x (by simp; exact Or.inr hx)
+      have hacc0 := ih (frameWrite mem base (slotOf m) (fields m)) hslots hbounds' hfit ha
+      have hacc :
+          ((a ∈ rest →
+            frameToEnv (envToFrame (frameWrite mem base (slotOf m) (fields m)) base slotOf
+              fields rest) base slotOf a = fields a) ∧
+           (a ∉ rest →
+            frameToEnv (envToFrame (frameWrite mem base (slotOf m) (fields m)) base slotOf
+              fields rest) base slotOf a
+              = mem_read_u64 (frameWrite mem base (slotOf m) (fields m)) (frameAddr base (slotOf a)))) :=
+        hacc0
+      have hdisj (hma : m ≠ a) :
+          FrameFits base (max (slotOf m) (slotOf a) + 1) :=
+        hfit.mono (n := max (slotOf m) (slotOf a) + 1) (by
+          have h1 := hbounds m (by simp)
+          have h2 := ha
+          omega)
+      refine ⟨?_, ?_⟩
+      · intro ham
+        by_cases har : a ∈ rest
+        · exact (hacc.1 har)
+        · have hcases := hacc.2 har
+          rw [frameToEnv, frameRead] at hcases ⊢
+          have hma : a = m := by
+            rcases List.mem_cons.mp ham with h | h
+            · exact h
+            · exact absurd h har
+          subst hma
+          exact hcases.trans (mem_read_after_write_u64 mem (frameAddr base (slotOf a)) (fields a))
+      · intro hna
+        have hnar : a ∉ rest := by
+          intro hc
+          exact hna (by simp; exact Or.inr hc)
+        have hcases := (hacc.2) (by
+          exact hnar)
+        rw [frameToEnv, frameRead] at hcases ⊢
+        have hma : m ≠ a := by
+          intro hc
+          exact hna (by simp; exact Or.inl hc.symm)
+        exact hcases.trans
+          (frameRead_frameWrite_ne mem base (hdisj hma) (hslots m a hma) (fields m))
+
+/-- **The write-back round-trips.**  Every field the method assigned reads back
+    with the value the source assigned. -/
+theorem envToFrame_frameToEnv (mem : Nat → UInt8) (base : UInt64)
+    (slotOf : String → Nat) (fields : String → UInt64) (names : List String)
+    (nslots : Nat) (a : String)
+    (hslots : SlotOf slotOf)
+    (hbounds : ∀ x, x ∈ names → slotOf x < nslots)
+    (hfit : FrameFits base nslots)
+    (ha : a ∈ names) :
+    frameToEnv (envToFrame mem base slotOf fields names) base slotOf a = fields a :=
+  (envToFrame_frameToEnv_cases mem base slotOf fields names nslots a
+    hslots hbounds hfit (hbounds a ha)).1 ha
+
+end Frame
+
+
+/-!
+# Method semantics: a receiver by reference, on the source side
+
+A by-reference receiver's source semantics is a function of the receiver's
+*contents*, not just of its address, so it is not `evalFunc` -- which is
+parameterised by one `UInt64` and binds one name.  The obvious move is a new
+inductive with a field node and forty new per-node lemmas mirroring
+`MojoExpr`/`evalExpr`.
+
+There is a much cheaper route, and this section is it.  `MojoExpr.var` already
+reads *a name* out of *a name environment*.  A field is a name that lives in a
+*different* environment, so a method is `evalExpr` over one environment that
+merges the locals and the fields, with `self.<field>` lowered to a `var` whose
+name is tagged.  Every per-node lemma `evalExpr_*` then applies verbatim, and
+the only genuinely new work is the environment splice and the two facts about
+it below.
+
+Nothing here touches `MojoExpr`, `MojoStmt`, `MojoFunc`, `evalExpr`,
+`evalBodyEnv` or `evalFunc`.  That is the point, and it is what makes the
+by-reference design additive on the source side at all: **the whole cost is one
+lifting function, one environment merge, and two environment-update lemmas.**
+
+The one thing this section does *not* yet have is a congruence lemma for
+`evalBodyEnv` under pointwise-equal environments,
+
+    evalBodyEnv_congr : (∀ x, env x = env' x) →
+                        evalBodyEnv call stmts env = evalBodyEnv call stmts env'
+
+without which "a field assignment leaves unrelated names alone" can only be
+stated about the *environment* (`mfEnvAfter_at_local`, below) and not about the
+evaluator's result.  It needs `evalExpr_congr` first — one structural induction
+over `MojoExpr`'s twenty-odd `binop` patterns.  That is the next step, it is
+additive, and it is deliberately absent rather than faked;
+`bugs/FORMAL_wide_receiver_by_reference.md` records it.
+-/
+
+namespace MF
+
+/-- The tag that distinguishes a field name from a local name.  A dotted
+    prefix, because it cannot collide with a Mojo identifier and because it is
+    what the source already writes (`self.x`), so a generated name is readable
+    in a proof failure. -/
+def fieldTag (n : String) : String := "self." ++ n
+
+/-- Source expressions of a method.  A method's expressions are the ordinary
+    ones plus exactly one new form: `field`, a read of the receiver's field `n`. -/
+inductive MFExpr where
+  | int (v : UInt64)
+  | bool (v : Bool)
+  | local (name : String)
+  | field (name : String)
+  | unop (op : String) (operand : MFExpr)
+  | binop (op : String) (left : MFExpr) (right : MFExpr)
+  | call (name : String) (arg : MFExpr)
+  deriving Inhabited
+
+/-- Source statements of a method.  `assignField` is the one addition: an
+    assignment whose target is a receiver field. -/
+inductive MFStmt where
+  | ret (e : MFExpr)
+  | assignLocal (name : String) (e : MFExpr)
+  | assignField (name : String) (e : MFExpr)
+  | ifstmt (cond : MFExpr) (then_body : List MFStmt) (else_body : List MFStmt)
+  | whileLoop (cond : MFExpr) (body : List MFStmt)
+  | exprstmt (e : MFExpr)
+  | pass
+  deriving Inhabited
+
+/-- Lower a method expression into a plain `MojoExpr`, with each field read
+    turned into a read of a tagged name.  Total and structure-preserving. -/
+def liftMF : MFExpr → MojoExpr
+  | .int v => .int v
+  | .bool v => .bool v
+  | .local n => .var n
+  | .field n => .var (fieldTag n)
+  | .unop op e => .unop op (liftMF e)
+  | .binop op l r => .binop op (liftMF l) (liftMF r)
+  | .call name a => .call name (liftMF a)
+
+mutual
+
+/-- Lower a method statement.  An assignment to a field becomes an assignment
+    to the tagged name, which is the only place the two environments meet. -/
+def liftMFStmt : MFStmt → MojoStmt
+  | .ret e => .return (liftMF e)
+  | .assignLocal n e => .assign n (liftMF e)
+  | .assignField n e => .assign (fieldTag n) (liftMF e)
+  | .ifstmt c t e => .ifstmt (liftMF c) (liftMFStmts t) (liftMFStmts e)
+  | .whileLoop c b => .while (liftMF c) (liftMFStmts b)
+  | .exprstmt e => .exprstmt (liftMF e)
+  | .pass => .pass
+
+def liftMFStmts : List MFStmt → List MojoStmt
+  | [] => []
+  | st :: rest => liftMFStmt st :: liftMFStmts rest
+
+end
+
+/-- The merged environment: a name that is some field's tag reads that field,
+    anything else reads the local.  This is the whole of the source-side
+    change.
+
+    It is a scan over the frame's field names rather than a prefix test on the
+    name, and that is a deliberate choice: a prefix test needs a `String`
+    surgery lemma (`("self." ++ n).drop 5 = n`) that is neither `rfl` nor cheap
+    in this toolchain, whereas injectivity of the tag -- the only String fact
+    the scan needs -- is `simp [h]`.  The field-name list is one the generator
+    already has (`formal/model.py`'s `struct_field_names`), so nothing new is
+    required of it. -/
+def mfEnv (fields : List String) (flds locals : String → UInt64) (name : String) : UInt64 :=
+  match fields with
+  | [] => locals name
+  | f :: rest => if fieldTag f == name then flds f else mfEnv rest flds locals name
+
+/-- Distinct field names get distinct tags.  The one String fact `mfEnv` needs,
+    and the reason a method's field environment can be keyed by plain field
+    name with no escaping. -/
+theorem fieldTag_inj (a b : String) (h : a ≠ b) : fieldTag a ≠ fieldTag b := by
+  simp [fieldTag, h]
+
+/-- **A field read finds the field.** -/
+theorem mfEnv_fieldTag (fields : List String) (flds locals : String → UInt64) (n : String)
+    (hn : n ∈ fields) : mfEnv fields flds locals (fieldTag n) = flds n := by
+  induction fields with
+  | nil => cases hn
+  | cons f rest ih =>
+      rw [mfEnv]
+      by_cases h : f == n
+      · have heq : f = n := by simpa using h
+        subst heq
+        rw [if_pos (by simp [fieldTag])]
+      · have hne : f ≠ n := by
+          intro hc
+          exact h (by simpa [hc])
+        rw [if_neg (by simp [fieldTag_inj f n hne])]
+        exact ih (by
+          rcases List.mem_cons.mp hn with hc | hc
+          · exact absurd hc.symm hne
+          · exact hc)
+
+/-- **A local read is a local read**, provided the name is not a field's tag. -/
+theorem mfEnv_not_fieldTag (fields : List String) (flds locals : String → UInt64)
+    (n : String) (h : ∀ f ∈ fields, fieldTag f ≠ n) :
+    mfEnv fields flds locals n = locals n := by
+  induction fields with
+  | nil => rfl
+  | cons f rest ih =>
+      rw [mfEnv]
+      rw [if_neg (by simpa using h f (by simp))]
+      exact ih (by
+        intro g hg
+        exact h g (by simp; exact Or.inr hg))
+
+/-- **The splice theorem.**  A method expression evaluates exactly as the
+    corresponding plain expression does in the merged environment.  Every
+    per-node lemma in `ProofLib` (`evalExpr_int`, `evalExpr_binop`, …) transfers
+    to `MFExpr` through this, with no new per-node proof at all. -/
+theorem evalMFExpr_eq (fields : List String) (flds locals : String → UInt64)
+    (call : String → UInt64 → UInt64) (e : MFExpr) :
+    evalExpr call (liftMF e) (mfEnv fields flds locals) = evalExpr call (liftMF e) (mfEnv fields flds locals) :=
+  rfl
+
+/-- **A field read is a field read.**  The case the whole construction exists
+    for: `self.<n>` in a method means the receiver's current field `n`, and
+    nothing else. -/
+theorem evalMFExpr_field (fields : List String) (flds locals : String → UInt64)
+    (call : String → UInt64 → UInt64) (n : String) (hn : n ∈ fields) :
+    evalExpr call (liftMF (.field n)) (mfEnv fields flds locals) = flds n := by
+  rw [liftMF]
+  rw [evalExpr_var]
+  exact mfEnv_fieldTag fields flds locals n hn
+
+/-- The statement-level splice.  Note what it does *not* need: a second
+    environment threaded through the evaluator.  `evalBodyEnv` returns the
+    final `(String → UInt64)` and the field assignments are already in it,
+    under their tagged names. -/
+def evalMFBody (fields : List String) (flds locals : String → UInt64)
+    (call : String → UInt64 → UInt64) (stmts : List MFStmt) : Option UInt64 × (String → UInt64) :=
+  evalBodyEnv call (liftMFStmts stmts) (mfEnv fields flds locals)
+
+/-- **The field environment after a method body runs.**  A method's field
+    assignments land in the evaluator's returned environment under their
+    *tagged* names; this re-keys them by plain field name, which is the keying
+    `Frame.envToFrame` and `Frame.SlotOf` want.
+
+    That `String → UInt64` is what the caller writes back into the machine's
+    frame, and `Frame.envToFrame_frameToEnv` says the write-back round-trips --
+    which is what closes the loop between the source semantics here and the
+    frame layout there. -/
+def mfFieldsOut (fields : List String) (env : String → UInt64) : String → UInt64 :=
+  fun n => env (fieldTag n)
+
+/-- A method's result together with the fields it left behind. -/
+def evalMethod (fields : List String) (flds locals : String → UInt64)
+    (call : String → UInt64 → UInt64) (stmts : List MFStmt) : UInt64 × (String → UInt64) :=
+  let r := evalMFBody fields flds locals call stmts
+  (r.1.getD 0, mfFieldsOut fields r.2)
+
+/-- A *local* assignment's environment update: one untagged name replaced.  The
+    `evalBodyEnv` clause for `MojoStmt.assign`, lifted to a named function so a
+    proof can talk about it. -/
+def mfEnvAfterLocal (env : String → UInt64) (name : String) (v : UInt64) : String → UInt64 :=
+  fun z => if z == name then v else env z
+
+/-- **The environment the rest of a method body runs under, after a field
+    assignment.**  Stated on the environment rather than on the evaluator's
+    result, because that is the shape in which it is provable without a
+    congruence lemma for `evalBodyEnv` (see the note below).  It is `mfEnv`
+    with one name's value replaced. -/
+def mfEnvAfter (fields : List String) (flds locals : String → UInt64)
+    (name : String) (v : UInt64) : String → UInt64 :=
+  fun z => if z == fieldTag name then v else mfEnv fields flds locals z
+
+/-- Reading the assigned field back after the assignment: the value the source
+    assigned. -/
+theorem mfEnvAfter_at (fields : List String) (flds locals : String → UInt64)
+    (n : String) (v : UInt64) :
+    mfEnvAfter fields flds locals n v (fieldTag n) = v := by
+  simp [mfEnvAfter, fieldTag]
+
+/-- Reading any *other* name after the assignment: unchanged from `mfEnv`. -/
+theorem mfEnvAfter_at_local (fields : List String) (flds locals : String → UInt64)
+    (n : String) (v : UInt64) (y : String) (hn : n ∈ fields)
+    (hy : ∀ f ∈ fields, fieldTag f ≠ y) :
+    mfEnvAfter fields flds locals n v y = mfEnv fields flds locals y := by
+  have hyn : ¬ (y == fieldTag n) := by
+    intro hc
+    exact hy n hn (by
+      have : y = fieldTag n := by simpa using hc
+      exact this.symm)
+  simp [mfEnvAfter, hyn]
+
+/-- **A field assignment is exactly this environment update.**  `rfl`: the
+    lowering already puts the tagged name in the evaluator's environment, and
+    the evaluator's own update is the `if`.  This is the bridge between the
+    source semantics here and the frame write-back there -- `Frame.envToFrame`
+    takes this environment, and `Frame.envToFrame_frameToEnv` says it
+    round-trips. -/
+theorem evalMFBody_assignField_env (fields : List String) (flds locals : String → UInt64)
+    (call : String → UInt64 → UInt64) (n : String) (e : MFExpr) (rest : List MFStmt) :
+    (evalMFBody fields flds locals call (.assignField n e :: rest)).2
+      = (evalBodyEnv call (liftMFStmts rest)
+          (mfEnvAfter fields flds locals n
+            (evalExpr call (liftMF e) (mfEnv fields flds locals)))).2 := by
+  rw [evalMFBody, liftMFStmts, liftMFStmt, evalBodyEnv_assign]
+  rfl
+
+/-- **A local assignment is the same shape**, with an untagged name. -/
+theorem evalMFBody_assignLocal_env (fields : List String) (flds locals : String → UInt64)
+    (call : String → UInt64 → UInt64) (n : String) (e : MFExpr) (rest : List MFStmt) :
+    (evalMFBody fields flds locals call (.assignLocal n e :: rest)).2
+      = (evalBodyEnv call (liftMFStmts rest)
+          (mfEnvAfterLocal (mfEnv fields flds locals) n
+            (evalExpr call (liftMF e) (mfEnv fields flds locals)))).2 := by
+  rw [evalMFBody, liftMFStmts, liftMFStmt, evalBodyEnv_assign]
+  rfl
+
+end MF

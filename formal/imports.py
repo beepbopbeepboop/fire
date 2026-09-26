@@ -59,6 +59,15 @@ HOST_MODULES = frozenset((
     "webbrowser", "unittest.mock", "difflib", "fnmatch", "operator",
     "heapq", "bisect", "array", "numbers", "decimal", "fractions", "secrets",
     "select", "queue", "weakref", "types", "dis", "pprint", "reprlib",
+    # Added because the sweep's classifier was working around their absence:
+    # a file importing one of these was told "not a stdlib or sibling module",
+    # which is a statement about module RESOLUTION and is simply false — they
+    # are CPython standard-library modules with no Mojo source, which is what
+    # this list exists to say. `__future__` is deliberately NOT here: it is not
+    # a host module but a compiler directive that binds nothing, and it is
+    # excluded as INERT_MODULES below, which is a different and more accurate
+    # reason than "the host provides it".
+    "asyncio", "ctypes", "concurrent", "concurrent.futures",
 ))
 
 
