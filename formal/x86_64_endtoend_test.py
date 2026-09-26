@@ -137,6 +137,15 @@ _FORMS = {
     "mov_rm64_r64_disp8": ("x86_step_mov_mem_disp8_r64", False,
                            ["rip", "b0", "b1", "b2", "disp", "rex", "w",
                             "mod", "rm", "reg", "rb", "rr"]),
+    # The only movzx the backend emits is `movzx rax, al` (48 0f b6 c0), all 33
+    # of them, so this uses the existing concrete lemma rather than a
+    # nibble- and register-parameterised one nothing would use.
+    "movzx_r64_r8": ("x86_step_movzx_rax_al", False,
+                     ["rip", "b0", "b1", "b2", "b3"]),
+    "alu_rr:add": ("x86_step_add_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:sub": ("x86_step_sub_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:cmp": ("x86_step_cmp_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:test": ("x86_step_test_rr", False,
@@ -175,6 +184,11 @@ _SUCCS = {
         "{ $s with mem := mem_write_bytes $s.mem "
         "(Int.ofNat $s.rbp.toNat + $disp).toNat "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $m + 4 }",
+    "movzx_r64_r8": "{ $s with rax := $s.rax, rip := $m + 4 }",
+    "alu_rr:add":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
+    "alu_rr:sub":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
     "alu_rr:cmp":
         "{ $s with rip := $m + 3, zf := ($fc).zf, sf := ($fc).sf, "
         "cf := ($fc).cf, of_ := ($fc).of_ }",
@@ -306,17 +320,29 @@ def emit(path, expected):
             extra_args = " %d %d %d (%d)" % (rex, modrm, (modrm >> 3) & 7, disp)
             extra_succ = {"$reg": str((modrm >> 3) & 7), "$disp": str(disp),
                           "$rex": str(rex)}
+        elif form in ("alu_rr:add", "alu_rr:sub"):
+            rex, modrm = raw[0], raw[2]
+            oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
+            ob = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
+            op = "+" if form.endswith("add") else "-"
+            res = "(%s %s %s)" % (oa, op, ob)
+            extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
+                                           modrm & 7)
+            extra_succ = {"$res": res, "$rex": str(rex), "$rm": str(modrm & 7),
+                          ("$fa" if op == "+" else "$fs"):
+                          "x86_flags_%s $s %s %s %s"
+                          % ("add" if op == "+" else "sub", oa, ob, res)}
         elif form in ("alu_rr:cmp", "alu_rr:test"):
             rex, modrm = raw[0], raw[2]
-            a = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
-            b = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
+            oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
+            ob = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
             extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
                                            modrm & 7)
             if form == "alu_rr:cmp":
                 extra_succ = {"$fc": "x86_flags_sub $s %s %s (%s - %s)"
                               % (a, b, a, b)}
             else:
-                extra_succ = {"$fl": "x86_flags_logic $s (%s &&& %s)" % (a, b)}
+                extra_succ = {"$fl": "x86_flags_logic $s (%s &&& %s)" % (oa, ob)}
             extra_succ["$rex"] = str(rex)
         elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg"):
             rex, modrm = raw[0], raw[2]
