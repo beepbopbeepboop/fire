@@ -1,7 +1,7 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-ab-native \
         check-coro check-formal check-formal-dylib check-formal-run \
-        check-formal-x86 check-formal-x86-model \
+        check-formal-x86 check-formal-x86-model check-formal-x86-endtoend \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -252,6 +252,27 @@ check-formal-x86: $(FORMAL_SOURCES) $(FORMAL_EXAMPLES) test_formal.py fire.py \
 		--extra lib/ProofLib.olean --extra lib/X86.olean \
 		--extra lib/work.olean --extra lib/Refine.olean \
 		-- python3 test_formal.py --backend x86_64
+
+# ── check-formal-x86-endtoend: the WHOLE run, every input, no sorry ────────
+# The strongest x86-64 proof here: for every input n -- not the handful the
+# run tests sample -- the model provably runs the compiled image to the exit
+# pc with the right value in rax.  `check-formal-x86` accepts a `sorry` in
+# this file's end-to-end theorem; this one refuses it.
+#
+# It does not fail when a function is uncovered.  Coverage is bounded by which
+# instruction forms have a step lemma this can state a successor expression
+# for, and the test NAMES the missing form per example so the next lemma is
+# chosen from what actually unblocks the most programs.  It fails only if a
+# covered program stops proving, or if a proved one grows a `sorry`.
+check-formal-x86-endtoend: formal/x86_64_endtoend_test.py fire.py \
+              fire_compiler.py formal/build.py formal/x86_64_decode.py \
+              formal/x86_64_model_test.py lib/X86.olean
+	python3 checked_run.py check-formal-x86-endtoend \
+		--extra formal/x86_64_endtoend_test.py --extra fire.py \
+		--extra fire_compiler.py --extra formal/build.py \
+		--extra formal/x86_64_decode.py \
+		--extra formal/x86_64_model_test.py --extra lib/X86.olean \
+		-- python3 formal/x86_64_endtoend_test.py
 
 # ── check-formal-x86-model: the x86-64 machine model, against the hardware ──
 # Two tests, and they answer different questions, so neither replaces the

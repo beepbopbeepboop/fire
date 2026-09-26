@@ -910,6 +910,34 @@ theorem x86_step_sub_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_flags_sub, h_rip, h_b0, h_b1, h_b2, h_imm]
 
+/-! The two disp8 memory forms every spilled-argument function uses.  These are
+the instructions that make a proof about the stack need the separation lemmas
+above: the store writes memory and the load reads it back, so a chain that
+walks a spilled argument has to relate a read at one state to a write at an
+earlier one. -/
+
+/-- `mov qword [rbp + disp8], rdi` (REX.W 89 /r, ModRM 7d: mod=1 disp8,
+    reg=rdi, rm=rbp).  A 64-bit store, so the value is written whole. -/
+theorem x86_step_mov_mem_disp8_rdi (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (disp : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = 0x7d) (h_disp : read_i8 (code (m + 3)) = disp) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat s.rdi 8,
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_mem_addr,
+        x86_rm_write, h_rip, h_b0, h_b1, h_b2, h_disp]
+
+/-- `mov rax, qword [rbp + disp8]` (REX.W 8B /r, ModRM 45: mod=1 disp8,
+    reg=rax, rm=rbp).  The load of what the store above wrote. -/
+theorem x86_step_mov_rax_mem_disp8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (disp : Int) (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = 0x45) (h_disp : read_i8 (code (m + 3)) = disp) :
+    x86_step s code = some { s with
+        rax := mem_read_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat 8,
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, h_rip, h_b0, h_b1, h_b2, h_disp]
+
 /-- The initial state's memory reads as zero everywhere.  This is what makes
     address 0 a usable exit sentinel rather than a lucky guess: the entry
     function's own `ret` pops a zero from the initial stack, so the runner
