@@ -9,6 +9,13 @@ serial single-stem path; this is the suite runner).
 
 Invoked via `make check-formal` or directly:
     python3 test_formal.py [-j N]
+
+`--backend` picks the architecture; it defaults to arm64, and `--backend x86_64`
+runs the same examples through the x86-64 backend and its proof generator. The
+two share the examples and this runner but nothing else: the arm64 proof
+generator emits a per-instruction value-flow argument, the x86-64 one emits
+machine-checked run tests over the x86-64 model in lib/X86.lean, so their
+KNOWN-GAP lists are separate and a gap in one says nothing about the other.
 """
 import argparse
 import concurrent.futures
@@ -137,15 +144,18 @@ def run_group(argv, timeout, cwd=None):
     return proc.returncode, out, err
 
 
-def run_one(stem):
+def run_one(stem, backend="arm64", outdir=None):
     """build --formal (which generates and checks the proof), or fail."""
+    outdir = outdir or OUTDIR
+    os.makedirs(outdir, exist_ok=True)
     src = os.path.join(EXAMPLES, f"{stem}.mojo")
-    aout = os.path.join(OUTDIR, f"{stem}.aout")
-    proof = os.path.join(OUTDIR, f"{stem}_proof.lean")
+    aout = os.path.join(outdir, f"{stem}.aout")
+    proof = os.path.join(outdir, f"{stem}_proof.lean")
 
     try:
         code, sout, serr = run_group(
-            [sys.executable, FIRE, "build", "--formal", "-o", aout, src],
+            [sys.executable, FIRE, "build", "--formal", "-o", aout,
+             f"--backend={backend}", src],
             BUILD_TIMEOUT, cwd=HERE,
         )
         if code != 0:
@@ -160,29 +170,46 @@ def run_one(stem):
         return False, str(e)
 
 
+EXPECTED_FAILURES_X86_64 = {}
+"""x86-64 gaps, kept separate from arm64's because the two generators prove
+different things (see the module docstring).  Empty today: every example's
+x86-64 proof builds and typechecks, and the run tests in them are real
+`native_decide` evaluations of the model in lib/X86.lean, not `sorry`.  An
+entry here would mean "known unproven, for the stated reason" — and, as with
+the arm64 table, a stem that starts passing is reported as stale."""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-j", "--jobs", type=int, default=DEFAULT_JOBS,
                     help=f"parallel workers (default {DEFAULT_JOBS})")
+    ap.add_argument("--backend", default="arm64",
+                    choices=("arm64", "x86_64"),
+                    help="architecture to build and prove (default: arm64)")
     ap.add_argument("stems", nargs="*",
                     help="subset of example stems (default: all)")
     args = ap.parse_args()
 
     check_prereqs()
+    backend = args.backend
+    expected_failures = (EXPECTED_FAILURES if backend == "arm64"
+                         else EXPECTED_FAILURES_X86_64)
+    outdir = OUTDIR if backend == "arm64" else os.path.join(HERE, "output", backend)
     stems = args.stems or find_examples()
-    os.makedirs(OUTDIR, exist_ok=True)
+    os.makedirs(outdir, exist_ok=True)
 
     jobs = max(1, args.jobs)
     total = len(stems)
     print(f"Found {total} formal examples in {EXAMPLES}")
-    print(f"Running build+lean typecheck ({jobs} workers)...")
+    print(f"Running {backend} build+lean typecheck ({jobs} workers)...")
 
     results = [None] * total
     ok = fail = completed = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         fut_map = {
-            ex.submit(run_one, stem): i for i, stem in enumerate(stems)
+            ex.submit(run_one, stem, backend, outdir): i
+            for i, stem in enumerate(stems)
         }
         for fut in concurrent.futures.as_completed(fut_map):
             i = fut_map[fut]
@@ -202,28 +229,28 @@ def main():
     # unexpectedly PASSES is a stale entry and is reported as such rather than
     # silently ignored, so the list cannot drift from reality.
     expected_failed = [s for s, (passed, _) in zip(stems, results)
-                       if not passed and s in EXPECTED_FAILURES]
+                       if not passed and s in expected_failures]
     unexpected_failed = [s for s, (passed, _) in zip(stems, results)
-                         if not passed and s not in EXPECTED_FAILURES]
+                         if not passed and s not in expected_failures]
     stale_expected = sorted(s for s, (passed, _) in zip(stems, results)
-                            if passed and s in EXPECTED_FAILURES)
+                            if passed and s in expected_failures)
 
     for i, (stem, (passed, detail)) in enumerate(zip(stems, results)):
         if passed:
             tag = "PASS"
-        elif stem in EXPECTED_FAILURES:
+        elif stem in expected_failures:
             tag = "KNOWN-GAP"
         else:
             tag = "FAIL"
         suffix = "" if passed or not detail else f"  ({detail})"
         print(f"  [{i+1}/{total}] {tag}  {stem}{suffix}")
 
-    print(f"\nResults for formal proofs: PASS={ok} "
+    print(f"\nResults for {backend} formal proofs: PASS={ok} "
           f"KNOWN-GAP={len(expected_failed)} FAIL={len(unexpected_failed)}")
     if stale_expected:
-        print("\nSTALE EXPECTED_FAILURES entries (now passing — remove them):")
+        print("\nSTALE expected-failure entries (now passing — remove them):")
         for s in stale_expected:
-            print(f"  {s}: {EXPECTED_FAILURES[s]}")
+            print(f"  {s}: {expected_failures[s]}")
     sys.exit(1 if (unexpected_failed or stale_expected) else 0)
 
 

@@ -1,6 +1,7 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
         check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit check-ab-native \
         check-coro check-formal check-formal-dylib check-formal-run \
+        check-formal-x86 check-formal-x86-model \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -234,6 +235,49 @@ check-formal-dylib: $(FORMAL_SOURCES) test_formal_dylib.py fire.py \
 		--extra lib/ProofLib.olean --extra lib/X86.olean \
 		--extra lib/work.olean --extra lib/Refine.olean \
 		-- python3 test_formal_dylib.py
+
+# ── check-formal-x86: the x86-64 examples, built and proof-checked ──────────
+# Same examples as check-formal, through the x86-64 backend and its proof
+# generator.  Artifacts land in output/x86_64/ so an x86-64 run cannot
+# overwrite the arm64 ones (both name files <stem>.aout / <stem>_proof.lean,
+# and the verdicts are cached per file, so sharing a directory would have the
+# two backends' verdicts collide).
+check-formal-x86: $(FORMAL_SOURCES) $(FORMAL_EXAMPLES) test_formal.py fire.py \
+              fire_compiler.py lib/ProofLib.olean lib/X86.olean \
+              lib/work.olean lib/Refine.olean
+	python3 checked_run.py check-formal-x86 \
+		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
+		$(foreach s,$(FORMAL_EXAMPLES),--extra $(s)) \
+		--extra test_formal.py --extra fire.py --extra fire_compiler.py \
+		--extra lib/ProofLib.olean --extra lib/X86.olean \
+		--extra lib/work.olean --extra lib/Refine.olean \
+		-- python3 test_formal.py --backend x86_64
+
+# ── check-formal-x86-model: the x86-64 machine model, against the hardware ──
+# Two tests, and they answer different questions, so neither replaces the
+# other (see formal/x86_64_model_coverage_test.py's own docstring):
+#
+#   coverage  every byte sequence formal/x86_64.py can emit is one x86_step
+#             can step.  Derived from the ENCODER, so a form added to the
+#             backend is covered the moment it exists rather than when some
+#             example happens to use it.
+#   vs-hardware  all 43 examples run in the model and agree with the binary
+#             the backend actually produces.
+#
+# The coverage half is cheap; the hardware half builds and runs every example
+# under Rosetta, so it is a separate target.
+check-formal-x86-model: $(FORMAL_SOURCES) lib/ProofLib.olean lib/X86.olean \
+              lib/work.olean lib/Refine.olean \
+              formal/x86_64_model_coverage_test.py formal/x86_64_model_test.py \
+              formal/x86_64_decode.py formal/x86_64.py
+	python3 checked_run.py check-formal-x86-model \
+		$(foreach s,$(FORMAL_SOURCES),--extra $(s)) \
+		--extra formal/x86_64_model_coverage_test.py \
+		--extra formal/x86_64_model_test.py \
+		--extra formal/x86_64_decode.py --extra formal/x86_64.py \
+		--extra lib/ProofLib.olean --extra lib/X86.olean \
+		--extra lib/work.olean --extra lib/Refine.olean \
+		-- python3 formal/x86_64_model_coverage_test.py
 
 # Parse and validate entire stdlib (all .mojo files)
 stdlib:
