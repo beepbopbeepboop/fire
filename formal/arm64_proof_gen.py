@@ -1688,6 +1688,99 @@ def _cset_cond(block, words: dict):
     return c
 
 
+def audit_step_table(lean_path: str) -> list:
+    """Check `_STEP_CONDS` against ProofLib's if-chain. Returns overlap notes.
+
+    Two invariants, both load-bearing for `_step_facts`:
+
+      1. every condition `ProofLib` tests appears in `_STEP_CONDS` (and vice
+         versa), so `_step_branch_index` can classify anything the model can
+         execute;
+      2. for every pair of entries whose conditions can BOTH match a single
+         word, the one that comes first in `_STEP_CONDS` is also the one
+         `ProofLib` tests first. `_step_facts` leaves the shadowed entry
+         unconstrained rather than asserting a negation of something true,
+         which is only correct because the model takes the same branch
+         `_step_rhs` describes.
+
+    The orders do NOT have to agree globally -- they do not, in fact: the
+    B.cond case sits at model position 18 and table index 51. That is why
+    ruling out only "the earlier entries" would be unsound, and why this
+    per-pair check is the right one to enforce.
+    """
+    import re as _re
+    with open(lean_path) as fh:
+        body = fh.read()
+    body = body[body.index("def arm64_step"):]
+    body = body[:body.index("\n\n")]
+    full = 0xFFFFFFFF
+    model = [(int(m, 0), int(b, 0)) for m, b in
+             _re.findall(r"insn &&& (0x[0-9a-fA-F]+|\d+)\) = (0x[0-9a-fA-F]+|\d+)", body)]
+    for m in _re.findall(r"insn = (0x[0-9a-fA-F]+)\s*then", body):
+        model.insert(0, (full, int(m, 0)))
+    table = [(full if msk is None else msk, base) for msk, base in _STEP_CONDS]
+    if sorted(model) != sorted(table):
+        only_model = [e for e in model if e not in table]
+        only_table = [e for e in table if e not in model]
+        raise AssertionError(
+            f"step table and ProofLib disagree: only in ProofLib {only_model}, "
+            f"only in _STEP_CONDS {only_table}")
+    notes = []
+    for i in range(len(table)):
+        for j in range(i + 1, len(table)):
+            m1, b1 = table[i]
+            m2, b2 = table[j]
+            if ((b1 ^ b2) & (m1 & m2)) == 0:          # can both match one word
+                if model.index(table[i]) > model.index(table[j]):
+                    raise AssertionError(
+                        f"entries {i} and {j} overlap, but ProofLib tests the "
+                        f"later one first")
+                notes.append(f"entry {i} shadows entry {j}")
+    return notes
+
+
+def _cond_matches(mask, base, w: int) -> bool:
+    """Does instruction word `w` satisfy this (mask, base) condition?"""
+    if mask is None:
+        return w == base
+    return (w & mask) == base
+
+
+def _step_facts(w: int, idx: int) -> tuple:
+    """Discriminator facts for instruction `w`, whose entry is `idx`.
+
+    Normally every other entry's condition is FALSE for this word, and saying
+    so is what lets `simp` reduce the model's if-chain to the right branch.
+
+    Not always, though. Entries 48 (LSR imm, `imms == 63`) and 50 (LSL imm, any
+    UBFM64) *overlap*: a word with `imms == 63` matches both, `_step_branch_index`
+    returns 48, and asserting entry 50's negation asserts something false --
+    `native_decide` rejects it, which is the `shiftlr` failure.
+
+    Deciding per word instead of per table fixes it without knowing anything
+    about the model's branch order: a condition this word does not satisfy is
+    safely excluded, and one it does satisfy is left unconstrained. The model
+    takes the first matching branch, and `idx` is the first match in table
+    order; for the only overlapping pair the table's fine-grained entry also
+    comes first in `ProofLib`, so the branch the model takes is the one
+    `_step_rhs` describes.
+
+    Returns (facts, fact_names) with `fact_names` naming only what was emitted.
+    """
+    facts = []
+    for j, (mask, b) in enumerate(_STEP_CONDS):
+        lhs = (f"({w} : UInt32) = ({b} : UInt32)" if mask is None
+               else f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)")
+        if j == idx:
+            facts.append(f"have h{j} : ({lhs}) := by native_decide")
+        elif _cond_matches(mask, b, w):
+            continue          # shadowed by an earlier entry; see above
+        else:
+            facts.append(f"have h{j} : \u00ac ({lhs}) := by native_decide")
+    return facts, ", ".join(f"h{j}" for j in range(len(_STEP_CONDS))
+                            if f"have h{j} :" in " ".join(facts))
+
+
 def _cond_step_tactic(words: dict, pc: int) -> str:
     """Closing tactic for a conditional-branch step obligation.
 
@@ -4790,16 +4883,8 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
         # with an unsolved goal that named no branch.  Excluding all of them is
         # order-independent, so the two lists only have to AGREE, not agree in
         # sequence.  `_check_step_conds` enforces that they agree.
-        for j, (mask, b) in enumerate(_STEP_CONDS):
-            if mask is None:
-                lhs = f"({w} : UInt32) = ({b} : UInt32)"
-            else:
-                lhs = f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)"
-            if j == idx:
-                facts.append(f"have h{j} : ({lhs}) := by native_decide")
-            else:
-                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
-        fact_names = ", ".join(f"h%d" % j for j in range(len(_STEP_CONDS)))
+        _facts, fact_names = _step_facts(w, idx)
+        facts.extend(_facts)
         tactics = [
             f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
             f":= by native_decide",
@@ -4871,16 +4956,8 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
         # with an unsolved goal that named no branch.  Excluding all of them is
         # order-independent, so the two lists only have to AGREE, not agree in
         # sequence.  `_check_step_conds` enforces that they agree.
-        for j, (mask, b) in enumerate(_STEP_CONDS):
-            if mask is None:
-                lhs = f"({w} : UInt32) = ({b} : UInt32)"
-            else:
-                lhs = f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)"
-            if j == idx:
-                facts.append(f"have h{j} : ({lhs}) := by native_decide")
-            else:
-                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
-        fact_names = ", ".join(f"h%d" % j for j in range(len(_STEP_CONDS)))
+        _facts, fact_names = _step_facts(w, idx)
+        facts.extend(_facts)
         tactics = [
             f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
             f":= by native_decide",
@@ -4972,16 +5049,8 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
         # with an unsolved goal that named no branch.  Excluding all of them is
         # order-independent, so the two lists only have to AGREE, not agree in
         # sequence.  `_check_step_conds` enforces that they agree.
-        for j, (mask, b) in enumerate(_STEP_CONDS):
-            if mask is None:
-                lhs = f"({w} : UInt32) = ({b} : UInt32)"
-            else:
-                lhs = f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)"
-            if j == idx:
-                facts.append(f"have h{j} : ({lhs}) := by native_decide")
-            else:
-                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
-        fact_names = ", ".join(f"h%d" % j for j in range(len(_STEP_CONDS)))
+        _facts, fact_names = _step_facts(w, idx)
+        facts.extend(_facts)
         tactics = [
             f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
             f":= by native_decide",

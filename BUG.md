@@ -994,77 +994,63 @@ Two conventions that had to be kept apart, and cost real time to find:
     which is exactly why guessing here would have proved something **false**
     rather than failing.
 
-### The one remaining failure, `shiftlr`, is pre-existing and now root-caused
+### `shiftlr`: fixed, and the fix did not need a `ProofLib` edit
 
 `(n << 3) + (n >> 2)` -- one return, no comparison, no loop, no spill, so
-nothing in the `B.cond` or spill work is reachable from it.
+nothing in the `B.cond` or spill work was reachable from it. Pre-existing.
 
-**Correction to an earlier version of this note**, which said entries 48 and
-50 have "identical mask and base". They do not:
-
-```
-48  LSR imm  (0xffc0fc00, 0xd340fc00)   fine-grained on imms  (imms == 63)
-50  LSL imm  (0xffc00000, 0xd3400000)   coarse -- any UBFM64
-```
-
-They **overlap**. `imms == 63` matches both, `_step_branch_index` returns 48
-(first match), and the generator then asserts for entry 50
+**Root cause.** `_STEP_CONDS` contains three pairs of entries whose conditions
+can *both* match a single instruction word:
 
 ```
-have h50 : ¬ ((0xd342fc00 : UInt32) &&& 0xffc00000 = 0xd3400000) := by native_decide
+entry  3 (SUB)  shadows entry  5 (NEG)
+entry  4 (MUL)  shadows entry 47 (MSUB)
+entry 48 (LSR)  shadows entry 50 (LSL)
 ```
 
-which is false, and `native_decide` says so. The overlap is semantically
-harmless -- LSL by 1 and LSR by 1 are the same encoding -- and `ProofLib`'s
-if-chain gets it *right*, because the fine-grained test comes first there and
-the coarse one catches the remainder. It is only the proof that is wrong, and
-only because it excludes branches order-independently.
+For `imms == 63` a word matches both 48 (`0xffc0fc00`/`0xd340fc00`, the
+fine-grained test) and 50 (`0xffc00000`/`0xd3400000`, coarse). `_step_branch_index`
+returns 48, and the generator then asserted entry 50's **negation** -- a false
+statement, which `native_decide` rejects. `ProofLib` gets it right, because its
+if-chain tests the fine-grained condition first; only the proof was wrong, and
+only because it excluded branches order-independently.
 
-**Why the obvious fix is unsound, and the invariant that would be needed.**
-The tempting repair is to stop ruling out all 52 branches and rule out only
-those *before* the chosen one. Checked, and it does not hold: the two orders
-disagree.
+**Fix: decide per word, not per table.** For a given instruction the generator
+can simply evaluate which entries actually match. A condition this word does
+*not* satisfy is safely excluded; one it *does* satisfy is left unconstrained
+rather than negated. That is `_step_facts`, and it needs no knowledge of the
+model's branch order -- so no `ProofLib` edit, contrary to what the two options
+below used to say.
 
-```
-table _STEP_CONDS : [0] RET 0xd65f03c0, [1] MOV, ...
-ProofLib          :       MOV, ...
-```
+**Why it is sound, and checked.** The model takes the *first* matching branch,
+so leaving a shadowed entry unconstrained is correct exactly when the entry
+`_step_branch_index` returns is also the one `ProofLib` tests first. That is a
+per-pair property, and it holds for all three pairs. `audit_step_table()` now
+enforces both invariants before any Lean runs -- same condition set, and
+table-earlier == model-earlier for every overlapping pair -- and
+`test_formal.py` calls it, so drift in either direction fails loudly instead of
+quietly weakening the proofs.
 
-They hold the same *set* of 52 conditions but not the same order -- the
-`B.cond` case sits at model position 18 (where it was inserted, after CBNZ)
-and at table index 51 (appended, to keep the hard-coded indices valid). So
-"rule out the earlier ones" would rule out the wrong set and the proofs would
-be unsound rather than merely incomplete.
-
-**The fix, then, in one of two parts:**
-
-* *Sound and local:* assert negations only for the table entries that occur
-  **earlier in `ProofLib`'s if-chain order**, which needs that order available
-  to the generator -- either maintained as an explicit list with a test that
-  it still matches `ProofLib`, or parsed. This also drops ~30 needless
-  `native_decide` calls per instruction.
-* *Or merge the cases:* fold 48 and 50 into one UBFM64 entry whose semantics
-  read `imms` (`imms == 63` -> shift `immr`, else shift `64 - imms`), in
-  `_STEP_CONDS`, in `_step_rhs`, **and** in `ProofLib`. That makes the table
-  pairwise-disjoint and the order stops mattering.
-
-Both need a `ProofLib` edit, which is shared with the x86-64 work, and a
-model change that does not compile takes both formal suites down. So this is a
-deliberate, separate piece of work rather than something to slip in here.
+Worth keeping in mind: this is *not* the same as the "rule out only the earlier
+entries" optimisation, which would need the two orders to agree **globally**.
+They do not -- `B.cond` sits at model position 18 and table index 51, and from
+there the two are off by one. That is why the tempting version is unsound and
+this one is not, and why the audit checks pairs rather than sequences.
 
 ## Verified state of the arm64 work (all suites run, not assumed)
 
 | suite | result |
 |---|---|
-| `test_formal.py` (arm64 formal proofs) | **39 pass / 3 known-gap / 1 fail** (was 30/3/10) |
+| `test_formal.py` (arm64 formal proofs) | **40 pass / 3 known-gap / 0 fail** (was 30/3/10) |
 | `test_formal_run.py` | 29/29 |
 | `test_arm64_emission.py` | 5/5 |
 | `test_arm64_encoders.py` | 221/221 (vs `as -arch arm64`) |
 | `test_formal_imports.py` | 11/11 |
 | `test_formal_dylib.py` | 9/9 |
 
-The one remaining failure is `shiftlr`, pre-existing and root-caused above
-(entries 48 and 50 of `_STEP_CONDS` share a mask and base).
+No unexpected failures. The three known gaps are the documented, pre-existing
+ones (listed in `EXPECTED_FAILURES` in `test_formal.py`, each with a stated
+reason).
 
 **What the 39 proved functions do and do not mean.** They all *elaborate* and
 Lean accepts them, but two of the facts in the loop proofs are now assumed
@@ -1074,9 +1060,7 @@ The assumptions are confined to the loop-condition reasoning, and each is a
 single line with a comment saying what is being assumed, so they are the first
 thing to attack. `grep -n "sorry" output/*_proof.lean` enumerates them.
 
-**Not done, deliberately:** the `shiftlr` fix needs either the `ProofLib`
-if-chain order to be *verified* against `_STEP_CONDS` (so the proofs can stop
-ruling out all 51 branches and rule out only the earlier ones), or entries
-48/50 merged into one UBFM64 case that reads `imms`. Both change the model,
-and a model change that leaves the library not compiling takes both formal
-suites down -- so it is a deliberate, separate piece of work.
+**Next, when the sorries get attacked:** `loop_cond_flag` needs its register
+half re-derived for the flag-based lowering, and the conditional step's
+value-flow goals need real proofs. Both are loop-condition semantics, which is
+where the `B.cond` change actually moved the difficulty.
