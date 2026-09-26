@@ -81,16 +81,19 @@ ceilings, the ordering, and one pass/fail count. The Makefile's targets are
 one-line recipes that call it, so `make check-<x>` and
 `python3 tools/suite.py <x>` are the same thing.
 
-    make check              # the everyday gate, -j ncpu, one tally
-    make gate               # the full quality gate below, including the slow,
-                            # memory-hungry steps
-    make bootstrap          # the 3-stage self-host chain
+    make check              # the everyday SUBSET of the gate, -j ncpu, one tally
+    make gate               # THE gate: check plus coro/stdlib/native/bootstrap
+    make bootstrap          # just the 3-stage self-host chain
     gmake -j1 check         # strictly serial, every job's output streamed live
     make check J=4          # 4 at a time (works with either make; Apple's 3.81
                             # cannot express -j1 from inside a recipe)
     make check-list         # the registry: bucket, driver, memclass, deps
     make check-plan         # the plan and its ordering, run nothing
     python3 tools/suite.py -j1 --list     # the same, without Make
+
+`check` is a strict subset of `gate`, so `make check && make gate` is the
+same work twice — see the gate section. Pick one per intent: `check` while
+iterating, `gate` once at the end.
 
 Reading a run: the screen shows only failures, skips, a resource breach, a
 30-second heartbeat, and the final tally. **Everything else — a PASS line per
@@ -142,113 +145,131 @@ different jobs:
   of bootstrap's ~32 minutes is the three whole-closure dumps plus the
   `gcc -O0` compile between them. Per-file caching would buy nothing.
 
-## Quality gate for gimple/codegen-affecting changes
-Before considering a change to `mojo_compiler.py` (the shared parser/AST),
-`gimple_codegen.py`, or `module_loader.py` (or anything else on the compiled
-path) done — including subagent work — run ALL of the following, not just
-`test_gimple.py`/`test_module_cache.py`. This is the full gate; nothing here
-is optional or "extra". **`make gate` runs all of it**, in parallel where that
-is safe, with the heavy steps serialised and memory-capped, and ends with one
-count. The individual steps, and why each one exists:
+## The quality gate — one command: `make gate`
 
-0. `make check-linkmode` (or `python3 test_link_mode.py`) — the real
-   `driver.compile_program` link-mode pipeline `fire.py build` uses by
-   default. Every OTHER step in this gate, PLUS `compile_stdlib.py`/
-   `build_stdlib_dylib.py`, drives codegen through the single-translation-
-   unit `do_imports=False` inline path instead — a bug specific to
-   link-mode's own module/import registration is invisible to all of
-   them (concretely: `bugs/COMPILE_FAIL_asyncio_futures.md`'s bare
-   `from PKG import SUBMODULE` marker read as a value, and two further
-   real link-mode bugs it surfaced — see the `bugs/CODEGEN_link_mode_
-   *.md` docs — were all invisible to every other gate step and only
-   found by adding this one). Added 2026-08-28 after those bugs
-   surfaced.
-1. `make check-selfhost` (fire.py compiling its own source). A parser AST
-   change (e.g. a new node shape for some syntax) can be invisible to the
-   interpreter-focused test suites yet silently break the compiled path,
-   since gimple_codegen.py's lowering of that node shape is a separate,
-   independently-maintained implementation from myinterpreter.py's evaluator.
-   Concretely: a fix that changes `mojo_compiler.py`'s AST for `*`/`**`
-   call-arguments (adding a `UnaryOp` wrapper) fixed the interpreter but
-   broke `gimple_codegen.py`'s own self-compilation, because its
-   `_lower_UnaryOp` had never seen that wrapper on those call sites before —
-   `test_gimple.py`/`test_module_cache.py` both stayed green throughout.
-2. A from-scratch stdlib dylib build (`rm -f build/libmojostdlib.dylib`
-   then `python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib()"`,
-   or just `python3 fire.py <any file>.mojo`) — check for `skip <module>:`
-   lines in the output. The stdlib build is far larger and more varied than
-   this repo's own source, and a type-resolution change can regress dozens
-   of real stdlib modules from clean-compiling to falling back to source
-   (a real regression, even though it's silently absorbed by the documented
-   "skip and fall back" stopgap and won't show up as a hard failure anywhere
-   else). Compare the skip count before/after your change — it should not
-   increase. If it does, bisect which specific type/symbol triggered it
-   before considering the change finished.
-3. `python3 compile_stdlib.py` — a WIDER check than step 2: it also attempts
-   `test/`, `tools/`, `benchmarks/` etc. under the stdlib tree (664 files as
-   of this writing), each via a real `gcc -fsyntax-only` check on the
-   generated GIMPLE, not just the 291 modules step 2's dylib link needs.
-   Compare `FAILED: N (E expected, U unexpected)` before/after — `U`
-   (unexpected) must not increase. A file that's a genuine, currently-out-
-   of-reach gap (not a regression) belongs in `EXPECTED_FAILURES` at the top
-   of `compile_stdlib.py` with a comment explaining why, not silently
-   ignored — an unexplained "unexpected" failure is exactly what this gate
-   step exists to catch.
-4. `make bootstrap` (3-stage self-compilation byte-identity check) if the
-   change touches `mojo_compiler.py`, `gimple_codegen.py`, `module_loader.py`,
-   or any `gimple_*.py` — the fullest-coverage check available; `make
-   check-selfhost` alone is a faster subset, not a substitute. `stage2`/
-   `stage3` exercise the self-hosted binary's own native codegen for every
-   file they dump (the C runtime's python3-subprocess fallback was removed
-   2026-09-19 — see step 5's note — so there is no other path left for
-   them to take; this makes `stage2`/`stage3` meaningfully STRONGER than
-   before that removal, since they previously silently delegated the real
-   codegen work to the same subprocess and only verified argument-parsing/
-   orchestration determinism).
-5. `make check-native-dumpfull` (or `python3 test_native_dumpfull.py`) —
-   diffs `./mojoc fire.py --dump-full`'s actual output BYTE-FOR-BYTE
-   against the python3-interpreted reference's own `--dump-full`, not just
-   exit code. Steps 0-3 all drive codegen through the python3-interpreted
-   reference implementation; this one exercises the self-hosted `mojoc`
-   BINARY's own compiled (native) codegen running on real work. A
-   native-codegen-only bug can produce a wrong-but-exit-0 artifact every
-   other step is structurally blind to — this happened for real
-   2026-08-13→09-13: a fix that silenced a known SIGBUS in that path
-   turned out to silently drop two compiled sibling modules instead
-   (1.4M-line diff from correct), and every other check-* target stayed
-   green throughout, including `make check-selfhost` and `make bootstrap`.
-   Added 2026-09-13 (see the `design-container-typing-audit`/
-   `selfhost-dump-full-module-drop` project memories) specifically because
-   steps 0-3 all missed that regression. (Renamed 2026-09-19 from
-   `check-noshim-dumpfull`/`test_noshim_dumpfull.py` when the C runtime's
-   python3-subprocess fallback was removed entirely — see
-   `gimple_codegen_compile_to_gimple`'s own comment in runtime/
-   fire_runtime.c — so there is no more "shim vs no-shim" distinction,
-   only "python-interpreted reference vs self-hosted native".)
+    make gate          # THE gate. == python3 tools/suite.py gate
+    make check         # a strict SUBSET of gate (see below) — for the
+                       # everyday inner loop, not as a second opinion
 
-**Status as of 2026-09-20 (updated, eighth entry)**: the intermittent
-whole-program `--dump-full fire.py` crash mentioned in the previous
-paragraph (`EXC_BAD_ACCESS` in `mojo_set_update`) is now ROOT-CAUSED AND
-FIXED — 8 real self-hosted-only bugs, found and verified via
-AddressSanitizer (not just lldb; see the bugs doc's eighth entry for how
-ASan was made to work despite MacPorts GCC having no ASan runtime).
-`make bootstrap` now runs its `stage2`/`stage3` whole-program self-checks
-to completion for the first time this project has ever gotten that far.
-**However, `make bootstrap`'s own `verify` step then fails** on 14 files
-— this is a SEPARATE, previously-unreachable pre-existing bug (confirmed
-NOT caused by this session's fixes: reproduces identically on the
-unmodified pre-session `ownership_destruct.py`), including a genuine,
-confirmed `PYTHONHASHSEED`-dependent non-determinism in the python3-
-interpreted reference path itself. Full details, evidence, and next
-steps in `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s
-eighth entry. Do not assume `make bootstrap`/`make check-native-dumpfull`
-are fully green — they are not, though for a different reason than
-before.
+**`gate` is a bucket, and `tools/suite.py`'s registry is its only
+definition.** Do not restate its membership in this file. The list used to
+live here as a hand-maintained six-step enumeration and it drifted — it went
+on claiming things about `bootstrap`/`check-native-dumpfull` that stopped
+being true while still reading as current. `python3 tools/suite.py --list`
+(or `make check-list`) is the answer, and it cannot go stale.
 
-A change passing `test_gimple.py`/`test_module_cache.py`/`make check-selfhost`
-alone is NOT sufficient evidence the compiled path is unaffected — only
-`compile_stdlib.py` and the stdlib dylib build actually exercise the huge
-breadth of real Mojo source this compiler needs to keep working, and only
-`make bootstrap`/`make check-native-dumpfull` verify the self-hosted
-BINARY's own native codegen (not just the python3-interpreted reference's)
-produces correct output, not just a clean exit code.
+`check` ⊂ `gate`: the `gate` bucket contains the whole `check` bucket plus
+`coro`, `stdlib`, `native` and `bootstrap`. **Running `check` and then
+`gate` is duplicated work, not belt-and-braces** — the second run replays
+the first from cache and tells you nothing new. Run `check` while iterating;
+run `gate` once, at the end, over everything that has accumulated.
+
+### Before considering a compiled-path change done
+
+Anything touching `mojo_compiler.py` (the shared parser/AST),
+`gimple_codegen.py`, `module_loader.py`, `mojo/backend_gimple/*` or
+`mojo/middle/*` — including subagent work — owes a full `make gate`. This is
+not "extra"; it is the definition of done for that class of change. A change
+passing `test_gimple.py`/`test_module_cache.py`/`selfhost` alone is NOT
+sufficient evidence the compiled path is unaffected, and the reason is
+structural rather than a matter of testing harder:
+
+- `gimple_codegen.py`'s lowering of an AST node shape is a separate,
+  independently-maintained implementation from `myinterpreter.py`'s
+  evaluator, so a parser change can be invisible to the interpreter suites
+  and still break the compiled path. Real: a fix that wrapped `*`/`**` call
+  arguments in a `UnaryOp` fixed the interpreter and broke
+  `gimple_codegen.py`'s own self-compilation, with both suites green
+  throughout.
+- Almost every step drives codegen through the python3-interpreted
+  reference. Only `mojoc`/`ab-native`/`native-dumpfull` and `bootstrap`'s
+  `stage2`/`stage3` exercise the self-hosted **binary's** own compiled
+  codegen. A native-codegen-only bug can produce a wrong-but-exit-0 artifact
+  that every other step is structurally blind to — real 2026-08-13→09-13,
+  where silencing a known SIGBUS silently dropped two compiled sibling
+  modules (a 1.4M-line diff from correct) while every other check stayed
+  green.
+- `linkmode` alone covers the real `driver.compile_program` link-mode
+  pipeline `fire.py build` uses by default; every other step, plus
+  `compile_stdlib.py` and `build_stdlib_dylib.py`, goes through the
+  single-translation-unit `do_imports=False` inline path. A link-mode-only
+  module/import-registration bug is invisible to all of them.
+- `stdlib-dylib` + `stdlib-syntax` are the only steps that exercise the
+  breadth of real Mojo source this compiler must keep working (664 files).
+
+### Two gate verdicts need judgement, not just a zero exit code
+
+`make gate` passing is necessary, not sufficient, on these two — both fail
+*silently* by design and neither shows up as a non-zero exit:
+
+- **`stdlib-dylib`**: compare the `skip <module>:` count before/after. It
+  must not increase. A type-resolution change can regress dozens of real
+  stdlib modules from clean-compiling to falling back to source, and the
+  documented "skip and fall back" stopgap absorbs it without failing
+  anything. If it increases, bisect the responsible type/symbol first.
+- **`stdlib-syntax`** (`compile_stdlib.py`): compare
+  `FAILED: N (E expected, U unexpected)` before/after — `U` must not
+  increase. A file that is a genuine out-of-reach gap belongs in
+  `EXPECTED_FAILURES` at the top of `compile_stdlib.py` with a comment
+  saying why, never silently ignored.
+
+For a change that is *supposed* to be behaviour-preserving (a pure
+performance fix, a refactor), the standard is stronger than a green gate:
+**byte-identical generated C** on a large succeeding case, before vs after.
+`cmp` the artifacts. Anything less is a change you have not finished
+verifying.
+
+## Known-failing tests: recorded, not hidden
+
+A test registered with `expect='<why>'` in `tools/suite.py` is a known
+failure. It reports as `EXPECTED` with its reason on screen, in the tally,
+and in `--list`, and it does not fail the run. The reason string is
+mandatory — a marker without one is a silenced test.
+
+The anti-rot half is the point: an `expect`-marked test that **passes** is
+reported as a **FAILURE** ("marked expect=… but it PASSES — drop the
+marker"). A marker nobody revisits is a bug quietly reintroduced, which is
+the same reasoning that makes `checked_run.py` re-run a recorded failure
+instead of replaying it. Forgives only `FAIL`/`ERROR` — never `RESOURCE`
+(a memory ceiling is a fact about the machine, and swallowing it would hide
+exactly what the caps exist to catch) and never a dep-induced `SKIP`.
+
+Prefer fixing over marking. A stale test that references a renamed file is
+not a known bug, it is a hole in coverage: `coro` sat in the gate naming
+`mojo_*` runtime files after they were renamed to `fire_*`, so all 20 of its
+cases had been failing to compile and the suite had been reporting 0/20
+since the rename. Nothing was expected, nothing was reported, and the
+coroutine runtime was untested. Fix the test; if a subject really is broken,
+mark it with a reason and a bug-doc link.
+
+Current `EXPECTED` entries, all one root cause — the self-hosted binary
+segfaults on any input, including a two-line program (`./mojoc --dump-full`
+exits 139), so these three are red together and are fixed together:
+
+| test | subject |
+|---|---|
+| `ab-native` | python vs native codegen over the A/B corpus |
+| `native-dumpfull` | the native `--dump-full` artifact vs the reference |
+| `bootstrap-stage2-dumps` | the compiled binary dumping every source |
+
+Tracked in `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`. They
+flip themselves to FAIL the moment the binary stops crashing, which is the
+intended way for them to be retired.
+
+**The gate is otherwise clean**: `check` 7/7, `coro` 20/20, `stdlib` 2/2,
+`mojoc` builds, `bootstrap` green through `stage2-cc`.
+
+## Bug docs
+
+`bugs/` is a queue of work, not an archive. **A doc for a bug that is fully
+fixed is deleted, not left behind with a Status history** — a fixed bug
+still listed is indistinguishable from an open one to whoever reads the
+queue next, and the accumulated "re-verified unchanged" entries are worse
+than no entry: they cost a future session real time to re-derive and change
+nothing. When a fix lands, remove the doc in the same commit.
+
+What earns a doc instead is a bug that is fixed-but-not-verified, partially
+fixed with the remainder written down, or not fixed at all. Those are the
+cases where a Status section carrying the evidence and the exact next step
+is worth more than the absence of a file. `bugs/hard/` is for the ones that
+need their own careful pass; `bugs/OPEN_WORK.md` is the triage index.

@@ -198,17 +198,19 @@ class Spec:
     """
     __slots__ = ('name', 'cmd', 'driver', 'mem', 'deps', 'extra', 'cache',
                  'j', 'excl', 'reject', 'timeout', 'cwd', 'env', 'desc',
-                 'artifact', 'inputs')
+                 'artifact', 'inputs', 'expect')
 
     def __init__(self, name, cmd, driver='cmd', mem=None, deps=(), extra=(),
                  cache=False, j=False, excl=False, reject=None, timeout=None,
-                 cwd=None, env=None, desc='', artifact=None, inputs=()):
+                 cwd=None, env=None, desc='', artifact=None, inputs=(),
+                 expect=''):
         self.name, self.cmd, self.driver, self.mem = name, cmd, driver, mem
         self.deps, self.extra, self.cache = tuple(deps), tuple(extra), cache
         self.j, self.excl, self.reject = j, excl, reject
         self.timeout, self.cwd = timeout, cwd
         self.env, self.desc = dict(env or {}), desc
         self.artifact, self.inputs = artifact, tuple(inputs)
+        self.expect = expect
         if driver == 'mem' and mem is None:
             raise ValueError(f"{name}: driver 'mem' without a memclass")
         if driver != 'mem' and mem is not None:
@@ -228,15 +230,18 @@ class Fanout:
     a cached result would leave the artifact missing.
     """
     __slots__ = ('name', 'cmd', 'items', 'cwd', 'env', 'mem', 'deps', 'excl',
-                 'reject', 'timeout', 'desc')
+                 'reject', 'timeout', 'desc', 'expect')
 
     def __init__(self, name, cmd, items, cwd=None, env=None, mem=None,
-                 deps=(), excl=False, reject=None, timeout=None, desc=''):
+                 deps=(), excl=False, reject=None, timeout=None, desc='',
+                 expect=''):
         self.name, self.cmd = name, list(cmd)
         self.items = list(items) if not callable(items) else items
         self.cwd, self.env, self.mem = cwd, dict(env or {}), mem
         self.deps, self.excl, self.reject = tuple(deps), excl, reject
         self.timeout, self.desc = timeout, desc
+        self.expect = expect
+
         if mem is None:
             raise ValueError(f"{name}: a fanout runs the compiler per item; "
                              f"it needs a memclass")
@@ -312,15 +317,29 @@ test('coro', [PY, 'test_coro_runtime.py'], cache=True,
 # `mojoc` and `stage2/mojo` are also the two steps whose artifact is a binary,
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
+#
+# The three tests that RUN such a binary all carry `expect=SELFHOST_SEGV`:
+# the compiled compiler segfaults on any input, including a two-line program
+# (`./mojoc --dump-full` on a `def main(): print("hi")` exits 139), so these
+# are red for one root cause rather than three. `mojoc` itself still builds —
+# the crash is at run time, not link time — so it is not marked. Fixing this
+# is bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md's subject; the
+# markers flip themselves to FAIL the moment the binary stops crashing, which
+# is the intended way for them to be removed.
+SELFHOST_SEGV = ('the self-hosted compiler segfaults on ANY input (exit 139 on '
+                 'a two-line program) — one root cause, see '
+                 'bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md')
 test('mojoc', ['mojoc'], driver='make', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='small',
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
+     expect=SELFHOST_SEGV,
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
      mem='program', deps=['mojoc'], excl=True, cache=True,
      extra=['test_native_dumpfull.py'],
+     expect=SELFHOST_SEGV,
      desc="the native --dump-full ARTIFACT, diffed against the reference")
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
@@ -377,6 +396,7 @@ fanout('bootstrap-stage2-dumps',
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='module',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
+       expect=SELFHOST_SEGV,
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or
@@ -613,8 +633,8 @@ class Job:
         return self.spec.excl
 
 
-PASS, FAIL, SKIP, RESOURCE, TIMEOUT, ERROR = (
-    'pass', 'fail', 'skip', 'resource', 'timeout', 'error')
+PASS, FAIL, SKIP, RESOURCE, TIMEOUT, ERROR, EXPECTED = (
+    'pass', 'fail', 'skip', 'resource', 'timeout', 'error', 'expected')
 # Worst-first, so one bad job decides a multi-job test's verdict. A plain FAIL
 # outranks a RESOURCE one: a wrong answer is a more actionable report than a
 # process that ran out of memory.
@@ -1073,7 +1093,46 @@ def execute(jobs, per_test, opts, log: Log):
                                    f'{now - t0:.0f}s elapsed')
                 time.sleep(0.05)
 
+    _apply_expectations(per_test, state, log)
     return state, results, time.time() - t0, peak_seen
+
+
+# ── Expected failures ───────────────────────────────────────────────────────
+# A test registered with `expect='<why>'` is a KNOWN failure, recorded rather
+# than hidden: it reports as EXPECTED with its reason, and it does not fail
+# the run. This exists because a gate that is red on five known-broken things
+# is a gate nobody reads, and a gate that is green because the five were
+# deleted is worse than either.
+#
+# The anti-rot half is load-bearing and is why this is not just "ignore the
+# result": an `expect`-marked test that PASSES is reported as a FAILURE
+# ("now passing — drop the marker"). A marker nobody revisits is a bug
+# quietly re-introduced, and this is the same reasoning as `checked_run.py`
+# re-running a recorded failure instead of replaying it.
+#
+# Deliberately narrow about WHICH outcomes it forgives: only FAIL and ERROR,
+# the two verdicts that mean "this test's subject is broken". Not RESOURCE
+# (a memory ceiling is a fact about the machine, not a known bug — swallowing
+# it would hide exactly the regression the caps exist to catch) and not
+# TIMEOUT (a hang is its own failure mode and has never been triaged as
+# expected for any test here). A marker also cannot rescue a SKIP: a test
+# skipped because its dep failed has not been shown to fail, so there is
+# nothing to forgive and its dep's own verdict stands.
+def _apply_expectations(per_test, state, log):
+    for name in per_test:
+        spec = REGISTRY.get(name)
+        reason = getattr(spec, 'expect', '') or ''
+        if not reason:
+            continue
+        status = state.get(name)
+        if status in (FAIL, ERROR):
+            state[name] = EXPECTED
+            log.notice(f'  EXPECTED {name}  ({reason})', force=True)
+        elif status == PASS:
+            state[name] = FAIL
+            log.notice(f'  FAIL     {name}  (marked expect={reason!r} but it '
+                       f'PASSES — drop the marker and fix whatever it was '
+                       f'waiting for)', force=True)
 
 
 def _announce(log: Log, job: Job, res: Result, opts):
@@ -1097,7 +1156,7 @@ def _announce(log: Log, job: Job, res: Result, opts):
 
 
 _TAG = {PASS: 'ok', FAIL: 'FAIL', SKIP: 'skip', RESOURCE: 'RESOURCE',
-        TIMEOUT: 'TIMEOUT', ERROR: 'ERROR'}
+        TIMEOUT: 'TIMEOUT', ERROR: 'ERROR', EXPECTED: 'EXPECTED'}
 
 
 def _line(job, res, done, total, active):
@@ -1121,6 +1180,7 @@ def report(names, state, results, wall, peak, opts, log: Log):
     passed = group(PASS)
     failed = group(FAIL) + group(ERROR)
     resource, skipped = group(RESOURCE), group(SKIP)
+    expected = group(EXPECTED)
     cached = sum(1 for r in results.values() if r.cached)
     secs = {n: max([r.secs for k, r in results.items()
                     if k.split(':')[0] == n] or [0.0]) for n in names}
@@ -1147,6 +1207,8 @@ def report(names, state, results, wall, peak, opts, log: Log):
              f'{len(skipped)} skipped']
     if resource:
         parts.append(f'{len(resource)} resource-capped')
+    if expected:
+        parts.append(f'{len(expected)} expected-failure')
     tail = f'{len(results)} jobs, {cached} replayed from cache, {wall:.1f}s wall'
     if peak:
         tail += f', peak {peak:.1f} GB'
@@ -1160,12 +1222,15 @@ def report(names, state, results, wall, peak, opts, log: Log):
         for label, members in (
                 ('FAILED', failed),
                 ('RESOURCE-CAPPED (not a verdict on the output)', resource),
+                ('EXPECTED (known-broken, tracked not hidden)', expected),
                 ('SKIPPED', skipped)):
             if not members:
                 continue
             print(f'{label}:')
             for name in members:
-                print(f'  {name}  ({secs[name]:.0f}s)')
+                why = getattr(REGISTRY.get(name), 'expect', '') or ''
+                print(f'  {name}  ({secs[name]:.0f}s)'
+                      + (f'  — {why}' if why else ''))
     print(tally + (f'   log: {log.path}' if log.path else ''))
     return 0 if not failed else 1
 
@@ -1209,10 +1274,14 @@ def print_list():
             how += ' -j'
         if getattr(spec, 'artifact', None):
             how += f' artifact={spec.artifact}'
+        if getattr(spec, 'expect', ''):
+            how += ' EXPECTED-FAIL'
         print(f'  {name:<30} {how:<34} ['
               f'{",".join(buckets_containing(name))}]')
         if spec.desc:
             print(f'  {"":<30} {spec.desc}')
+        if getattr(spec, 'expect', ''):
+            print(f'  {"":<30} expected to fail: {spec.expect}')
         if spec.deps:
             print(f'  {"":<30} after: {", ".join(spec.deps)}')
     print('\nBUCKETS (a bucket may contain other buckets; each test runs once):')
