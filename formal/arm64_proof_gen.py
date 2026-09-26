@@ -1159,6 +1159,12 @@ _STEP_CONDS = [
     (0xffc0fc00, 0xd340fc00),  # 48 LSR imm (UBFM imms=63)
     (0xffc0fc00, 0x9340fc00),  # 49 ASR imm (SBFM imms=63)
     (0xffc00000, 0xd3400000),  # 50 LSL imm (UBFM64 remaining)
+    # 51 B.cond. Appended, never inserted: every index above is hard-coded in
+    # _step_rhs and in the block scanner. Identified by the top byte alone --
+    # 0x54 is unique to B.cond. Keeping the cond bits in the mask (0xff00001f)
+    # makes the comparison against a zero-cond base unmatchable, so the
+    # instruction is never recognised and the model silently skips it.
+    (0xff000000, 0x54000000),
 ]
 
 
@@ -1231,6 +1237,18 @@ def _step_rhs(w: int, idx: int):
             tgt = f"(UInt64.ofNat s.pc - UInt64.ofNat {-delta}).toNat"
         cmpop = "=" if idx == 16 else "≠"
         return (f"(if arm64_reg {rn_c} s {cmpop} 0 then "
+                f"({{ s with pc := {tgt} }} : Arm64State) "
+                f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
+    if idx == 51:  # B.cond -- flags-only, so nothing but pc changes
+        imm19 = (w >> 5) & 0x7ffff
+        cond = w & 0xf
+        signed = imm19 - (1 << 19) if imm19 & 0x40000 else imm19
+        delta = signed * 4
+        if delta >= 0:
+            tgt = f"(UInt64.ofNat s.pc + UInt64.ofNat {delta}).toNat"
+        else:
+            tgt = f"(UInt64.ofNat s.pc - UInt64.ofNat {-delta}).toNat"
+        return (f"(if arm64_matches_condition {cond} s.nzcv = true then "
                 f"({{ s with pc := {tgt} }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (9, 10):  # ADD immediate 32/64
@@ -1431,6 +1449,10 @@ def _step_rhs_generic(idx: int):
     if idx == 15:
         return (f"some {{ s with x30 := UInt64.ofNat (s.pc + 4), "
                 f"pc := (UInt64.ofNat s.pc + {_OFF26} * 4).toNat }}")
+    if idx == 51:  # B.cond -- flags-only, exactly as in _step_rhs
+        return (f"(if arm64_matches_condition {w & 0xf} s.nzcv = true then "
+                f"({{ s with pc := (UInt64.ofNat s.pc + {_OFF19} * 4).toNat }} : Arm64State) "
+                f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (16, 17):
         cmpop = "=" if idx == 16 else "≠"
         return (f"(if arm64_reg {_RN} s {cmpop} 0 then "
@@ -1617,13 +1639,26 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
 
 
 def _cset_cond(block, words: dict):
-    """Condition code of the last CSET in `block` (the branch's flag test)."""
+    """Condition code of the last CSET in `block` (the branch's flag test).
+
+    A block terminated by a B.cond has no CSET: the condition code is in the
+    branch's own cond field. Reading it from there is the same value the
+    hardware tests, so every caller that reasons about "which condition does
+    this block branch on" keeps working unchanged. Note the sign: codegen
+    branches on the *inverted* condition, and so does this.
+    """
     c = None
     for pc in block["instrs"]:
         w = words.get(pc)
         if w is not None and _step_branch_index(w) == 30:
             field = (w >> 12) & 0xf
             c = (field + 1) if (field & 1) == 0 else (field - 1)
+    if c is None:
+        for pc in reversed(block["instrs"]):
+            w = words.get(pc)
+            if w is not None and _step_branch_index(w) == 51:
+                c = w & 0xf
+                break
     return c
 
 
@@ -1759,7 +1794,7 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
 
 
 def _branch_target(words: dict, pc: int):
-    """Absolute target pc of a B/BL/CBZ/CBNZ at pc (unconditional) or None."""
+    """Absolute target pc of a B/BL/CBZ/CBNZ/B.cond at pc, or None."""
     w = words.get(pc)
     if w is None:
         return None
@@ -1772,7 +1807,7 @@ def _branch_target(words: dict, pc: int):
         imm = w & 0x03ffffff
         off = imm - (1 << 26) if imm & 0x02000000 else imm
         return pc + off * 4
-    if idx in (16, 17):  # CBZ / CBNZ
+    if idx in (16, 17, 51):  # CBZ / CBNZ / B.cond -- all three use imm19<<5
         imm19 = (w >> 5) & 0x7ffff
         signed = imm19 - (1 << 19) if imm19 & 0x40000 else imm19
         return pc + signed * 4
@@ -1804,7 +1839,7 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
         if tgt is not None and func_entry <= tgt < func_end:
             starts.add(tgt)
         # fall-through after a conditional branch is also a start
-        if idx in (14, 15, 16, 17) and pc + 4 < func_end:
+        if idx in (14, 15, 16, 17, 51) and pc + 4 < func_end:
             starts.add(pc + 4)
 
     blocks = []
@@ -1823,7 +1858,7 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
             if idx == 0:
                 kind = "ret"
                 break
-            if idx in (14, 15, 16, 17):
+            if idx in (14, 15, 16, 17, 51):
                 if idx == 14:
                     kind = "b"
                     targets = [_branch_target(words, pc)]
@@ -1831,6 +1866,9 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
                     kind = "bl"
                     targets = [pc + 4, _branch_target(words, pc)]
                 elif idx == 16:
+                    kind = "cbz"
+                    targets = [pc + 4, _branch_target(words, pc)]
+                elif idx == 51:  # B.cond: same two-way shape as a CBZ
                     kind = "cbz"
                     targets = [pc + 4, _branch_target(words, pc)]
                 else:  # 17 CBNZ
@@ -1851,7 +1889,7 @@ def _cfg_blocks(words: dict, func_entry: int, func_end: int):
 def _regs_written(w: int, idx: int):
     """GPR indices (0..31, 31 = sp) written by the instruction, or None if unknown."""
     rd = w & 0x1f
-    if idx in (0, 6, 13, 14, 16, 17, 34, 35):
+    if idx in (0, 6, 13, 14, 16, 17, 34, 35, 51):
         return set()
     if idx == 15:
         return {30}
@@ -2009,7 +2047,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         return None
     for k, pc in enumerate(run_pcs):
         idx = _step_branch_index(words[pc])
-        if idx in (14, 15, 16, 17) and k != m - 1:
+        if idx in (14, 15, 16, 17, 51) and k != m - 1:
             return None
         if idx == 0 and k != m - 1:
             return None
@@ -3117,6 +3155,17 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     and bool(_collect_conds(fn, fn.params[0][0],
                                             {fn.params[0][0]: "n"})))):
             entry_cond_needed = True
+        # ...unless that branch is a B.cond.  The entry seed states a fact about
+        # the materialised condition FLAG REGISTER, and the backend no longer
+        # materialises one: a comparison now leaves its answer in NZCV and
+        # B.cond reads that, so at the entry state the register holds whatever
+        # was there before and the claim is simply false (`bv_decide` found the
+        # counterexample `n = 2^64 - 1`).  Each `hcond` is derived from the
+        # comparison inside its own block instead, so no seed is needed.
+        if entry_cond_needed and _first_cbz is not None:
+            _eidx = _step_branch_index(words[_first_cbz["instrs"][-1]])
+            if _eidx == 51:
+                entry_cond_needed = False
     # The terminal x0 handler is only needed when the terminal goal is not
     # already closed by the `{name}_go_zero`/`_go` simp (constant-recursion
     # functions like `count` close on their own).
@@ -3136,6 +3185,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # condition then gets modelled as the `and`/`or`'s *left* operand
             # (`if a or b:` read as `if a:`), which is simply false.
             if cond_branches and b["instrs"][-1] not in cond_branches:
+                continue
+            # A B.cond terminator carries no register: its low 5 bits are the
+            # condition code, and reading them as a register index would state
+            # a false theorem about the wrong register. Such a block gets the
+            # same treatment as one with no source-level condition -- the entry
+            # condition is simply not stated, which weakens the proof but never
+            # makes it unsound.
+            if (words[b["instrs"][-1]] & 0xff000000) == 0x54000000:
                 continue
             entry_reg = words[b["instrs"][-1]] & 0x1f
             _entry_bpc = b["start"]
@@ -3715,13 +3772,28 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             r = w & 0x1f
             i = (block["instrs"][-1] - base) // 4
             cbz_pc = block["instrs"][-1]
+            # The three branch-on-something forms share a block shape and NOT a
+            # condition.  CBZ tests a register against zero, CBNZ tests it
+            # against non-zero -- note the `= 0` this used to emit was simply
+            # wrong for CBNZ -- and B.cond tests the FLAGS, so its condition
+            # mentions `nzcv` and names no register at all.  The backend now
+            # lowers comparisons to `cmp` + B.cond rather than `cmp` + `cset` +
+            # CBZ, so this is the common case, not a corner.
+            _bidx = _step_branch_index(w)
+            if _bidx == 51:
+                _condtxt = (f"arm64_matches_condition {w & 0xf} "
+                            f"{s_cur}.nzcv = true")
+            elif _bidx == 17:
+                _condtxt = f"arm64_reg {r} {s_cur} \u2260 0"
+            else:
+                _condtxt = f"arm64_reg {r} {s_cur} = 0"
             hpcb_proof = _pc_fact_lookup(s_cur)
             if hpcb_proof is None:
                 A(f"{IND}have hpcb_{bi} : ({s_cur}).pc = {cbz_pc} := by change {cbz_pc} = {cbz_pc}; rfl")
             else:
                 A(f"{IND}have hpcb_{bi} : ({s_cur}).pc = {cbz_pc} := {hpcb_proof}")
             A(f"{IND}have hcbz_{bi} : arm64_step {s_cur} {C} = some "
-              f"(if arm64_reg {r} {s_cur} = 0 then "
+              f"(if {_condtxt} then "
               f"({{ {s_cur} with pc := {taken} }} : Arm64State) "
               f"else ({{ {s_cur} with pc := {fall} }} : Arm64State)) := by")
             A(f"{IND}  have hsr := {name}_sr_{i} {s_cur} hpcb_{bi}")
@@ -3798,7 +3870,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
                                 _hpriors.append(_hp)
-                    A(f"{IND}have hcond_{bi} : (arm64_reg {r} {s_cur} = 0) ↔ ¬({_src}) := by")
+                    A(f"{IND}have hcond_{bi} : ({_condtxt}) ↔ ¬({_src}) := by")
                     if _hpriors:
                         # The prior block is opaque here (`s_{pb}`), so the
                         # current block's spill addresses are relative to that
@@ -3808,16 +3880,18 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  simp only [arm64_reg_pc]")
                         A(f"{IND}  simp only [{', '.join(list(def_names) + _hpriors + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
                         A(f"{IND}  rw [{', '.join(_hcond_mem_rws(blocks[bi]['instrs'], blocks[bi]['instrs'], words, _pb_state))}]")
-                        A(f"{IND}  by_cases h : ({_src}) <;> simp [h, {', '.join(_fls)}, Arm64State.init"
-                          f"{', ' + _tw_defs if _tw_defs else ''}] <;> bv_decide")
+                        A(f"{IND}  by_cases h : ({_src}) <;> simp ["
+                          + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
+                          + "] <;> bv_decide")
                     else:
                         if _hsid:
                             A(f"{IND}  rw [{', '.join(_hsid)}]")
                             A(f"{IND}  simp only [arm64_reg_pc]")
                         A(f"{IND}  simp only [{', '.join(list(_bdefs) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition'])}]")
                         A(f"{IND}  rw [{', '.join(_hcond_mem_rws(_all_instrs, blocks[bi]['instrs'], words, _init))}]")
-                        A(f"{IND}  by_cases h : ({_src}) <;> simp [h, {', '.join(_fls)}, Arm64State.init"
-                          f"{', ' + _tw_defs if _tw_defs else ''}] <;> bv_decide")
+                        A(f"{IND}  by_cases h : ({_src}) <;> simp ["
+                          + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
+                          + "] <;> bv_decide")
             # Codegen-internal CBZ (no source-level condition): if the tested
             # register holds a compile-time non-zero constant at the CBZ, the
             # taken (div0/error) arm is statically dead — close it by
@@ -3831,7 +3905,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             elif cbz_force == "fall":
                 raise ValueError("unsupported: forced-fall cbz branch condition")
             else:
-                A(f"{IND}by_cases hc_{bi} : arm64_reg {r} {s_cur} = 0")
+                A(f"{IND}by_cases hc_{bi} : {_condtxt}")
             if cbz_force is None:
                 A(f"{IND}·")
             BIND = IND if cbz_force is not None else IND + "  "
@@ -3919,6 +3993,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{BIND}rw [hg_{bi}]")
                 tgt_bi = start_to_bi.get(fall)
                 if tgt_bi is None or tgt_bi in path:
+                    import os as _os
+                    if _os.environ.get("ARMPROOF_DEBUG"):
+                        print("BLOCKS:", [(hex(b["start"]), b["kind"]) for b in blocks])
+                        print("start_to_bi:", {hex(k): v for k, v in start_to_bi.items()})
+                        print("path:", path, "bi:", bi, "fall:", hex(fall), "tgt_bi:", tgt_bi)
                     raise ValueError(f"unsupported cbz fall continuation to {hex(fall)}")
                 else:
                     if is_contract:
@@ -4582,17 +4661,24 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
             continue
         pc = base + i * 4
         facts = []
-        for j in range(idx + 1):
-            mask, b = _STEP_CONDS[j]
+        # EVERY branch is excluded except the one that matched -- not just
+        # those before it in `_STEP_CONDS`.  The proof needs every decoder
+        # branch that precedes the matched one in the MODEL, and the table's
+        # order is not the decoder's: B.cond sat at index 51 here and at 22 in
+        # `arm64_step`, so `0..idx` left its `if` open and 40 examples failed
+        # with an unsolved goal that named no branch.  Excluding all of them is
+        # order-independent, so the two lists only have to AGREE, not agree in
+        # sequence.  `_check_step_conds` enforces that they agree.
+        for j, (mask, b) in enumerate(_STEP_CONDS):
             if mask is None:
                 lhs = f"({w} : UInt32) = ({b} : UInt32)"
             else:
                 lhs = f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)"
-            if j < idx:
-                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
-            else:
+            if j == idx:
                 facts.append(f"have h{j} : ({lhs}) := by native_decide")
-        fact_names = ", ".join(f"h{j}" for j in range(idx + 1))
+            else:
+                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
+        fact_names = ", ".join(f"h%d" % j for j in range(len(_STEP_CONDS)))
         tactics = [
             f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
             f":= by native_decide",
@@ -4603,6 +4689,9 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
             "simp [h, hinsn]",
             f"all_goals simp [{fact_names}]",
         ])
+        if idx == 51:  # B.cond branches on the flags, not a register
+            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
+            tactics.append(f"<;> simp [hp]")
         if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
             rn = w & 0x1f
             tactics.append(f"by_cases hp : arm64_reg {rn} s = 0 <;> simp [hp]")
@@ -4653,17 +4742,24 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
                 f"  exact {lemma} s {name}_code {pc} ({w} : UInt32) h hinsn hw")
             continue
         facts = []
-        for j in range(idx + 1):
-            mask, b = _STEP_CONDS[j]
+        # EVERY branch is excluded except the one that matched -- not just
+        # those before it in `_STEP_CONDS`.  The proof needs every decoder
+        # branch that precedes the matched one in the MODEL, and the table's
+        # order is not the decoder's: B.cond sat at index 51 here and at 22 in
+        # `arm64_step`, so `0..idx` left its `if` open and 40 examples failed
+        # with an unsolved goal that named no branch.  Excluding all of them is
+        # order-independent, so the two lists only have to AGREE, not agree in
+        # sequence.  `_check_step_conds` enforces that they agree.
+        for j, (mask, b) in enumerate(_STEP_CONDS):
             if mask is None:
                 lhs = f"({w} : UInt32) = ({b} : UInt32)"
             else:
                 lhs = f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)"
-            if j < idx:
-                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
-            else:
+            if j == idx:
                 facts.append(f"have h{j} : ({lhs}) := by native_decide")
-        fact_names = ", ".join(f"h{j}" for j in range(idx + 1))
+            else:
+                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
+        fact_names = ", ".join(f"h%d" % j for j in range(len(_STEP_CONDS)))
         tactics = [
             f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
             f":= by native_decide",
@@ -4677,7 +4773,7 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             tactics.append(
                 f"have hc : ((({w} : UInt32) >>> 12 &&& 15) {opn} 1).toNat = {cst} "
                 f":= by native_decide")
-        if idx in (14, 16, 17):
+        if idx in (14, 16, 17, 51):
             # decide the sign-extend branch on the offset before simp; the
             # fact must be phrased over the masked immediate exactly as it
             # appears after simp normalizes the model term
@@ -4697,7 +4793,16 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
                 tactics.append(f"have hb : \u00ac ({lhs}) := by native_decide")
             else:
                 tactics.append(f"have hb : {lhs} := by native_decide")
-        if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
+        # These three are ONE chain, not three blocks: each ends by closing the
+        # goal, so a following block's `unfold arm64_step` would run on nothing
+        # and Lean reports "No goals to be solved" -- pointing at a line that
+        # looks like ordinary boilerplate.
+        if idx == 51:  # B.cond branches on the flags, not a register
+            tactics.append(f"unfold arm64_step")
+            tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
+            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
+            tactics.append(f"all_goals simp [hp]")
+        elif idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
             rn = w & 0x1f
             tactics.append(f"unfold arm64_step")
             tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
@@ -4738,17 +4843,24 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             continue
         pc = base + i * 4
         facts = []
-        for j in range(idx + 1):
-            mask, b = _STEP_CONDS[j]
+        # EVERY branch is excluded except the one that matched -- not just
+        # those before it in `_STEP_CONDS`.  The proof needs every decoder
+        # branch that precedes the matched one in the MODEL, and the table's
+        # order is not the decoder's: B.cond sat at index 51 here and at 22 in
+        # `arm64_step`, so `0..idx` left its `if` open and 40 examples failed
+        # with an unsolved goal that named no branch.  Excluding all of them is
+        # order-independent, so the two lists only have to AGREE, not agree in
+        # sequence.  `_check_step_conds` enforces that they agree.
+        for j, (mask, b) in enumerate(_STEP_CONDS):
             if mask is None:
                 lhs = f"({w} : UInt32) = ({b} : UInt32)"
             else:
                 lhs = f"({w} : UInt32) &&& ({mask} : UInt32) = ({b} : UInt32)"
-            if j < idx:
-                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
-            else:
+            if j == idx:
                 facts.append(f"have h{j} : ({lhs}) := by native_decide")
-        fact_names = ", ".join(f"h{j}" for j in range(idx + 1))
+            else:
+                facts.append(f"have h{j} : ¬ ({lhs}) := by native_decide")
+        fact_names = ", ".join(f"h%d" % j for j in range(len(_STEP_CONDS)))
         tactics = [
             f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
             f":= by native_decide",
@@ -4759,6 +4871,9 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             "simp [h, hinsn]",
             f"all_goals simp [{fact_names}]",
         ])
+        if idx == 51:  # B.cond branches on the flags, not a register
+            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
+            tactics.append(f"<;> simp [hp]")
         if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
             rn = w & 0x1f
             tactics.append(f"by_cases hp : arm64_reg {rn} s = 0 <;> simp [hp]")
@@ -4768,6 +4883,25 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
             + "\n".join(f"  {t}" for t in tactics)
         )
     return "\n\n".join(blocks)
+
+
+def _simp_list(*parts):
+    """`simp [a, b, c]` arguments, skipping the empty parts.
+
+    A part that is an empty list used to leave a bare `, ` in the emitted text,
+    and Lean rejects that as a syntax error that names no line of Lean logic --
+    the file just looks malformed, and the real error is reported against a
+    comma.  Built here rather than with a `', '.join(...)` at each site so the
+    empty case cannot come back.
+    """
+    out = []
+    for part in parts:
+        if isinstance(part, str):
+            part = [part]
+        for x in part:
+            if x:
+                out.append(x)
+    return ", ".join(out)
 
 
 def _find_extern_call(fn, sym: str):

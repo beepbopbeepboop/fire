@@ -146,6 +146,14 @@ _FORMS = {
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:sub": ("x86_step_sub_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "jcc_rel32": ("x86_step_jcc_rel32", True,
+                  ["rip", "b0", "b1", "cc", "off", "lo", "hi", "nsetcc_lo",
+                   "nzx", "notrex"]),
+    "jmp_rel32": ("x86_step_jmp_rel32", True,
+                  ["rip", "b0", "off"]),
+    "setcc": ("x86_step_setcc_r8", True,
+              ["rip", "b0", "b1", "b2", "cc", "lo", "hi", "njcc_lo",
+               "njcc_hi", "nzx", "notrex", "mod", "rm", "rb"]),
     "alu_rr:cmp": ("x86_step_cmp_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:test": ("x86_step_test_rr", False,
@@ -189,6 +197,14 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
     "alu_rr:sub":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
+    "jcc_rel32":
+        "{ $s with rip := if x86_cond $cc $s then (Int.ofNat $m + 6 + $off).toNat"
+        " else $m + 6 }",
+    "jmp_rel32":
+        "{ $s with rip := (Int.ofNat $m + 5 + $off).toNat }",
+    "setcc":
+        "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
+        " rip := $m + 3 }",
     "alu_rr:cmp":
         "{ $s with rip := $m + 3, zf := ($fc).zf, sf := ($fc).sf, "
         "cf := ($fc).cf, of_ := ($fc).of_ }",
@@ -226,47 +242,150 @@ def _byte_facts(insns, code, base):
     return " ∧\n    ".join(facts)
 
 
-def emit(path, expected):
-    """Return the Lean text proving the end-to-end theorem, or raise ValueError."""
-    r = B.compile_formal(path, prove=False, check=False, arch="x86_64")
-    code, info = r["code"], r["info"]
-    base, entry = info["base_addr"], info["func_offset"]
-    insns = _body(code, info)
-    if insns is None:
-        raise ValueError("body does not decode")
-    shapes = []
+def _resolve(form, raw, addr, prev, k):
+    """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
+    the successor expression its conclusion has.
+
+    Both the straight-line and the path-tree emitters go through here, so a form
+    cannot be wired up in one and forgotten in the other.
+    """
+    lemma, takes_imm, conds = _FORMS[form]
+    imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
+    sc = []
+    for c in conds:
+        if c == "rip":
+            sc.append("(by simp only [i0, X86State.init] <;> decide)" if k == 0
+                      else "(by simp [hs%d])" % k)
+        elif c in ("b0", "b1", "b2", "b3"):
+            sc.append("(by simp [read_i32_le, read_i8, hb])")
+        elif c == "imm":
+            sc.append("(by simp [read_i32_le, read_i8, hb])")
+        elif c == "disp":
+            sc.append("(by simp [read_i8, hb])")
+        elif c == "off":
+            sc.append("(by simp [read_i32_le, read_i8, hb])")
+        elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
+                   "lo", "hi", "nsetcc_lo", "njcc_lo", "njcc_hi", "nzx",
+                   "notrex"):
+            # Closed arithmetic on the ModRM/REX literals, or a range test on a
+            # concrete opcode byte: nothing here comes from the byte list, so
+            # `decide` and not `simp [hb]`.
+            sc.append("(by decide)")
+        else:
+            raise ValueError("bad condition " + c)
+    extra_args, extra_succ = "", {}
+    if form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg", "alu_rr:add",
+                "alu_rr:sub", "alu_rr:cmp", "alu_rr:test"):
+        rex, modrm = raw[0], raw[2]
+        extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7, modrm & 7)
+        oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
+        ob = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
+        extra_succ = {"$rex": str(rex), "$rm": str(modrm & 7),
+                      "$reg": str((modrm >> 3) & 7)}
+        if form in ("alu_rr:add", "alu_rr:sub"):
+            op = "+" if form.endswith("add") else "-"
+            res = "(%s %s %s)" % (oa, op, ob)
+            extra_succ["$res"] = res
+            extra_succ["$fa" if op == "+" else "$fs"] = (
+                "x86_flags_%s $s %s %s %s"
+                % ("add" if op == "+" else "sub", oa, ob, res))
+        elif form == "alu_rr:cmp":
+            extra_succ["$fc"] = "x86_flags_sub $s %s %s (%s - %s)" % (
+                oa, ob, oa, ob)
+        elif form == "alu_rr:test":
+            extra_succ["$fl"] = "x86_flags_logic $s (%s &&& %s)" % (oa, ob)
+    elif form == "jcc_rel32":
+        op2 = raw[1]
+        off = int.from_bytes(raw[2:6], "little", signed=True)
+        extra_args = " %d %d %d" % (op2, op2 - 0x80, off)
+        extra_succ = {"$cc": str(op2 - 0x80), "$off": str(off)}
+    elif form == "jmp_rel32":
+        off = int.from_bytes(raw[1:5], "little", signed=True)
+        extra_args = " %d" % off
+        extra_succ = {"$off": str(off)}
+    elif form == "setcc":
+        op2, modrm = raw[1], raw[2]
+        extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)
+        extra_succ = {"$cc": str(op2 - 0x90), "$rmv": str(modrm & 7)}
+    elif form in ("mov_r64_rm64_disp8", "mov_rm64_r64_disp8"):
+        rex, modrm = raw[0], raw[2]
+        disp = raw[3] - 256 if raw[3] > 127 else raw[3]
+        # A negative displacement is parenthesised: `-8 (by ...)` parses as an
+        # application of it.
+        extra_args = " %d %d %d (%d)" % (rex, modrm, (modrm >> 3) & 7, disp)
+        extra_succ = {"$reg": str((modrm >> 3) & 7), "$disp": str(disp),
+                      "$rex": str(rex)}
+    call = "%s %s rc %d%s" % (lemma, prev, addr, extra_args)
+    if takes_imm:
+        call += " %d" % imm
+    call += " " + " ".join(sc)
+    succ = _SUCCS[form].replace("$s", prev)
+    for ph, val in extra_succ.items():
+        succ = succ.replace(ph, val)
+    succ = succ.replace("$m", str(addr)).replace("$imm", str(imm) if imm is not None else "0")
+    return call, succ
+
+
+def _shapes(code, insns):
+    """`[(insn, resolved_form, raw)]`, splitting the two `mov` opcodes into
+    their shapes.  A form not in `_FORMS` is left alone, and the caller reports
+    it by name rather than skipping the function."""
+    out = []
     for i in insns:
         raw = code[i.offset:i.next_offset]
         form = i.form
-        if form == "mov_rm64_r64":
-            modrm = raw[2]
-            if (modrm >> 6) == 3:
-                form = "mov_rm64_r64_reg"
-            elif (modrm >> 6) == 1 and (modrm & 7) == 5:
-                form = "mov_rm64_r64_disp8"
-        elif form == "mov_r64_rm64":
-            modrm = raw[2]
-            if (modrm >> 6) == 3:
-                form = "mov_r64_rm64_reg"
-            elif (modrm >> 6) == 0 and (modrm & 7) == 4 and len(raw) >= 4 \
-                    and raw[3] == 0x24:
-                form = "mov_r64_rm64_sib"
-            elif (modrm >> 6) == 1 and (modrm & 7) == 5:
-                form = "mov_r64_rm64_disp8"
-        shapes.append((i, form, raw))
+        modrm = raw[2] if len(raw) > 2 else 0
+        if form in ("mov_r64_rm64", "mov_rm64_r64"):
+            m, rm = modrm >> 6, modrm & 7
+            if m == 3:
+                form += "_reg"
+            elif m == 1 and rm == 5:
+                form += "_disp8"
+            elif form == "mov_r64_rm64" and m == 0 and rm == 4 \
+                    and len(raw) >= 4 and raw[3] == 0x24:
+                form += "_sib"
+        out.append((i, form, raw))
+    return out
+
+
+def _header(code, insns, base):
+    """The import, the code function, and every byte as a fact."""
+    L = ["import X86\n",
+         "def rc (addr : Nat) : UInt8 :=",
+         "  if addr < %d then 0 else" % base,
+         "    ([%s].getD (addr - %d) 0)\n"
+         % (", ".join("0x%02x" % b for b in code), base),
+         "/-- Every byte of the function, as a fact about `rc`. -/",
+         "theorem all_bytes :\n    %s := by native_decide\n"
+         % _byte_facts(insns, code, base)]
+    return L
+
+
+def _plan(path):
+    """`(code, info, insns, shapes)` for one source file."""
+    r = B.compile_formal(path, prove=False, check=False, arch="x86_64")
+    code, info = r["code"], r["info"]
+    insns = _body(code, info)
+    if insns is None:
+        raise ValueError("body does not decode")
+    shapes = _shapes(code, insns)
     missing = sorted({f for _, f, _ in shapes} - set(_FORMS))
     if missing:
         raise ValueError("no step lemma wired for: " + ", ".join(missing))
+    return code, info, insns, shapes
 
-    L = []
+
+def emit(path, expected):
+    """The straight-line end-to-end theorem: every input, constant result.
+
+    Only usable when the function's result does not depend on its input, which
+    is 7 of the 43 examples -- see `emit_terminates` for the one that covers
+    the rest.
+    """
+    code, info, insns, shapes = _plan(path)
+    base, entry = info["base_addr"], info["func_offset"]
+    L = _header(code, insns, base)
     a = L.append
-    a("import X86\n")
-    a("def rc (addr : Nat) : UInt8 :=")
-    a("  if addr < %d then 0 else" % base)
-    a("    ([%s].getD (addr - %d) 0)\n"
-      % (", ".join("0x%02x" % b for b in code), base))
-    a("/-- Every byte of the function, as a fact about `rc`. -/")
-    a("theorem all_bytes :\n    %s := by native_decide\n" % _byte_facts(insns, code, base))
     a("/-- For EVERY input: the model runs this image to the exit pc and leaves")
     a("    `%d` in `rax`.  Proved, not asserted. -/" % expected)
     a("theorem all_inputs (n : UInt64) :")
@@ -279,92 +398,9 @@ def emit(path, expected):
     prev, k = "i0", 0
     chain = []
     for insn, form, raw in shapes:
-        lemma, takes_imm, conds = _FORMS[form]
         addr = base + insn.offset
-        imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
-        # side conditions, in the lemma's own order
-        sc = []
-        for c in conds:
-            if c == "rip":
-                if k == 0:
-                    sc.append("(by simp only [i0, X86State.init] <;> decide)")
-                else:
-                    sc.append("(by simp [hs%d])" % k)
-            elif c == "b0":
-                sc.append("(by simp [read_i32_le, read_i8, hb])")
-            elif c == "b1":
-                sc.append("(by simp [read_i32_le, read_i8, hb])")
-            elif c == "b2":
-                sc.append("(by simp [read_i32_le, read_i8, hb])")
-            elif c == "imm":
-                sc.append("(by simp [read_i32_le, read_i8, hb])")
-            elif c == "b3":
-                sc.append("(by simp [read_i32_le, read_i8, hb])")
-            elif c == "disp":
-                sc.append("(by simp [read_i8, hb])")
-            elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr"):
-                # Closed arithmetic on the ModRM/REX literals -- nothing here
-                # comes from the byte list, so `decide` and not `simp [hb]`.
-                sc.append("(by decide)")
-            else:
-                raise ValueError("bad condition " + c)
-        extra_args, extra_succ = "", {}
-        if form == "mov_r64_rm64_sib":
-            extra_args = ""
-        elif form in ("mov_r64_rm64_disp8", "mov_rm64_r64_disp8"):
-            rex, modrm = raw[0], raw[2]
-            disp = raw[3] - 256 if raw[3] > 127 else raw[3]
-            # The displacement can be negative, and a negative literal
-            # followed by `(` parses as an application of it -- so it is
-            # parenthesised.
-            extra_args = " %d %d %d (%d)" % (rex, modrm, (modrm >> 3) & 7, disp)
-            extra_succ = {"$reg": str((modrm >> 3) & 7), "$disp": str(disp),
-                          "$rex": str(rex)}
-        elif form in ("alu_rr:add", "alu_rr:sub"):
-            rex, modrm = raw[0], raw[2]
-            oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
-            ob = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
-            op = "+" if form.endswith("add") else "-"
-            res = "(%s %s %s)" % (oa, op, ob)
-            extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
-                                           modrm & 7)
-            extra_succ = {"$res": res, "$rex": str(rex), "$rm": str(modrm & 7),
-                          ("$fa" if op == "+" else "$fs"):
-                          "x86_flags_%s $s %s %s %s"
-                          % ("add" if op == "+" else "sub", oa, ob, res)}
-        elif form in ("alu_rr:cmp", "alu_rr:test"):
-            rex, modrm = raw[0], raw[2]
-            oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
-            ob = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
-            extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
-                                           modrm & 7)
-            if form == "alu_rr:cmp":
-                extra_succ = {"$fc": "x86_flags_sub $s %s %s (%s - %s)"
-                              % (a, b, a, b)}
-            else:
-                extra_succ = {"$fl": "x86_flags_logic $s (%s &&& %s)" % (oa, ob)}
-            extra_succ["$rex"] = str(rex)
-        elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg"):
-            rex, modrm = raw[0], raw[2]
-            extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
-                                           modrm & 7)
-            extra_succ = {"$reg": str((modrm >> 3) & 7),
-                          "$rm": str(modrm & 7), "$rex": str(rex)}
-        call = "%s %s rc %d%s" % (lemma, prev, addr, extra_args)
-        if takes_imm:
-            call += " %d" % imm
-        call += " " + " ".join(sc)
-        succ = _SUCCS[form].replace("$s", prev)
-        for ph, val in extra_succ.items():
-            succ = succ.replace(ph, val)
-        succ = succ.replace("$m", str(addr))
-        succ = succ.replace("$imm", str(imm) if imm is not None else "0")
+        call, succ = _resolve(form, raw, addr, prev, k)
         nxt = "s%d" % (k + 1)
-        # The step equation is stated with the successor EXPLICITLY first, so
-        # the step lemma is elaborated against a known type.  Passing it
-        # straight into the anonymous constructor of the `obtain` instead
-        # leaves the lemma's own hypotheses as metavariables, because the
-        # witness is not yet fixed at that point.
         a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
         a("    %s" % call)
         a("  obtain \u27e8%s, h%d\u27e9 : \u2203 t, x86_step %s rc = some t :="
@@ -376,23 +412,20 @@ def emit(path, expected):
         chain.append((k, nxt))
         prev, k = nxt, k + 1
 
-    # the two facts the goal is about
+    hs = ", ".join("hs%d" % (j + 1) for j, _ in chain)
     a("  have hrax : %s.rax = %d := by" % (prev, expected))
-    a("    simp [%s, i0, x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r,"
-      % ", ".join("hs%d" % (j + 1) for j, _ in chain))
+    a("    simp [%s, i0, x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r," % hs)
     a("      x86_flags_sub, x86_flags_add]")
     a("  have hrip : %s.rip = 0 := by" % prev)
     a("    have key : \u2200 (m : Nat \u2192 UInt8) (a : Nat) (v : UInt64) (b : Nat),")
     a("        a + 8 \u2264 b \u2192 mem_read_bytes (mem_write_bytes m a v 8) b 8")
     a("          = mem_read_bytes m b 8 :=")
     a("      fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
-    a("    simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add,"
-      % ", ".join("hs%d" % (j + 1) for j, _ in chain))
+    a("    simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add," % hs)
     a("      x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r]")
     a("    rw [key _ _ _ _ (by decide)]")
     a("    simp only [mem_read_bytes, ite_true]")
     a("    decide")
-    # collapse the run
     rules = ["x86_exec_go_exit_step (by decide) "
              "(by simp only [i0, X86State.init] <;> decide) h0"]
     for j, _ in chain[1:]:
@@ -402,23 +435,6 @@ def emit(path, expected):
     a("  rw [%s]" % ",\n      ".join(rules))
     a("  simp [hrax]")
     return "\n".join(L) + "\n"
-
-
-def _result_at(binary, n):
-    """The exit code with `n` as the program's input, or None if it won't run.
-
-    The generated binaries take their input from the environment rather than
-    stdin, so this drives them the same way the model test does and reports
-    the exit code; a program that ignores its input gives the same answer
-    twice, which is the case this is here to detect.
-    """
-    import os as _os
-    env = dict(_os.environ, MOJO_TEST_INPUT=str(n))
-    try:
-        return subprocess.run(["arch", "-x86_64", binary], capture_output=True,
-                              text=True, timeout=60, env=env).returncode
-    except Exception:                                      # noqa: BLE001
-        return None
 
 
 def _probe_input_independent(path):
@@ -442,7 +458,7 @@ def _probe_input_independent(path):
             "theorem input_independent :\n"
             "    (x86_exec_exit (X86State.init 0 %d) rc 0).map X86State.rax =\n"
             "      (x86_exec_exit (X86State.init 5 %d) rc 0).map X86State.rax :=\n"
-            "  native_decide\n"
+            "  by\n  native_decide\n"
             % (info["base_addr"], ", ".join("0x%02x" % b for b in code),
                info["base_addr"], entry, entry))
     with tempfile.NamedTemporaryFile("w", suffix=".lean", delete=False) as f:
@@ -455,6 +471,33 @@ def _probe_input_independent(path):
         return ": error" not in p.stdout + p.stderr
     finally:
         os.unlink(tmp)
+
+
+def _has_loop(path):
+    """Does the function body contain a back edge?
+
+    The chain walks one straight line from the entry, so a function that loops
+    is out of its reach -- and that is a limit of the method rather than a
+    proof that stopped working, so it is reported as uncovered rather than as a
+    failure.  A back edge is any branch whose target is at or before itself.
+    """
+    r = B.compile_formal(path, prove=False, check=False, arch="x86_64")
+    code, info = r["code"], r["info"]
+    insns = _body(code, info)
+    if insns is None:
+        return False
+    for i in insns:
+        raw = code[i.offset:i.next_offset]
+        if i.form == "jmp_rel32":
+            if 5 + int.from_bytes(raw[1:5], "little", signed=True) <= 0:
+                return True
+        elif i.form == "jcc_rel32":
+            if 6 + int.from_bytes(raw[2:6], "little", signed=True) <= 0:
+                return True
+        elif i.form in ("jmp_rel8", "jcc_rel8"):
+            if 2 + int.from_bytes(raw[1:2], "little", signed=True) <= 0:
+                return True
+    return False
 
 
 def _check(path, expected):
@@ -511,6 +554,9 @@ def main(argv):
         if good:
             covered += 1
             print("  [PROVED] %-16s every input -> rax = %d" % (name, expected))
+        elif _has_loop(t):
+            print("  [open] %-16s has a loop, and the chain walks one straight"
+                  " line -- needs induction over the back edge" % name)
         elif not _probe_input_independent(t):
             print("  [open] %-16s result depends on the input, so the constant"
                   " form does not apply" % name)
