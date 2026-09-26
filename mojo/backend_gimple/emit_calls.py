@@ -3727,15 +3727,13 @@ def _lower_LambdaExpr(gen, node) -> tuple:
 
     if _env_struct:
         # Built from `ci.captures` AFTER the body was generated, not from the
-        # list computed up front: `_gen_lifted_closure` adds to it — the
-        # genexp induction variables (`_IL`) and the enclosing names the C++
-        # paths resolve for themselves (`p`, `gen`) all land there, and it is
-        # `ci.captures` that becomes `gen._captures`, i.e. what the body
-        # actually reads as `_env-><name>`. A struct built from the earlier,
-        # shorter list compiled fine until the body referenced a member the
-        # struct did not have ("'_gen_for_zip_longest_lambda_2_env' has no
-        # member named 'p'"). The definition is emitted ahead of the forward
-        # declaration, so the typedef still precedes both in the output.
+        # list computed up front, and unioned with the read set scanned out
+        # of that body below: it is `ci.captures` that becomes
+        # `gen._captures`, i.e. what the body reads as `_env-><name>`, and a
+        # struct built from a shorter list compiles fine until the body
+        # references a member the struct does not have. The definition is
+        # emitted ahead of the forward declaration, so the typedef still
+        # precedes both in the output.
         # The definitive read set is the generated body itself: with an env
         # present, `_lower_IdentExpr` emits `_env-><name>` for every name it
         # could not resolve locally, so the body names exactly the fields the
@@ -3771,10 +3769,37 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                     (_ct or '').endswith(' *')):
                 _ct = 'int64_t'
             _final.append((_cn, _ct))
-        for _line in ([f'typedef struct {_env_struct} {{']
-                      + [f'  {_ct} {_cn};' for _cn, _ct in _final]
-                      + [f'}} {_env_struct};']):
-            if _line not in gen._elaborated_externs:
+        # Dedupe the typedef as a BLOCK, keyed by its closing line — never
+        # per line. The per-line form silently DROPPED a field whose
+        # declaration text an EARLIER lambda in the same enclosing function
+        # had already contributed, because a field line
+        # (`  int64_t _IL;`) says nothing about which struct it belongs to:
+        # `_gen_stmt_ForStmt`'s `_neg1 = lambda: ... _IL(1)` emitted
+        # `_gen_stmt_ForStmt_lambda_1_env`'s block with `  int64_t _IL;`, and
+        # the very next lambda (`_minus1 = lambda e: _BO('-', e, _IL(1))`,
+        # which reads BOTH `_BO` and `_IL` through the env) then found its
+        # own `  int64_t _IL;` "already emitted" and skipped it — so its
+        # struct came out with `_BO` only, while the body still emitted
+        # `_env->_IL`, a hard "'_gen_stmt_ForStmt_lambda_2_env' has no
+        # member named '_IL'". Same shape for
+        # `_gen_cpp_generator_unit_lambda_1_env`'s `  GimpleGen * gen;`
+        # starving `_gen_cpp_async_unit_lambda_2_env` (empty struct, body
+        # reading `_env->gen`), and for
+        # `_gen_for_zip_longest_lambda_1_env`'s `  int64_t p;` starving
+        # lambda_2/lambda_3 (three identical-field structs, so the last two
+        # came out EMPTY). A repeated capture is the NORMAL case — sibling
+        # lambdas in one function overwhelmingly share the enclosing
+        # locals — so the per-line guard dropped a field in almost every
+        # multi-lambda function. `} <name>;` is unique per struct, so
+        # testing the closing line keys the block correctly, and appending
+        # all-or-nothing keeps a struct's fields contiguous (appending a
+        # late field line after another struct's `};` would not compile
+        # either).
+        _env_typedef = ([f'typedef struct {_env_struct} {{']
+                        + [f'  {_ct} {_cn};' for _cn, _ct in _final]
+                        + [f'}} {_env_struct};'])
+        if _env_typedef[-1] not in gen._elaborated_externs:
+            for _line in _env_typedef:
                 gen._elaborated_externs.append(_line)
 
     gen.decls                   = saved_decls
