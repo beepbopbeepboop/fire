@@ -1796,6 +1796,11 @@ def _cond_step_tactic(words: dict, pc: int) -> str:
         # branch is the value-flow fact about the successor's X0 -- the same
         # content as `loop_cond_flag`, and just as hard. Close-if-provable,
         # assume otherwise, per the `sorry` pass.
+        # Tried and rejected: adding `arm64_flag_le, u64_le_zero_iff,
+        # u64_ofNat_zero` to the `simp` set, to hop from the flag predicate to
+        # `a = 0`. It closes nothing here and costs four proofs elsewhere
+        # (40/3/0 -> 36/3/4) by over-simplifying. The goal is not an arithmetic
+        # hop at all -- see the note on the contract invariant below.
         return (f"by_cases hc : arm64_matches_condition {w & 0xf} s.nzcv = true "
                 f"<;> simp [hs, hc] <;> all_goals (first | done | sorry)")
     return "simp [hs] <;> all_goals (first | done | sorry)"

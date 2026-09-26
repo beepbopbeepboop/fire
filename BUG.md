@@ -1126,3 +1126,46 @@ what X0 holds at a branch that no longer writes X0. That means relating the
 loop test to the value-flow chain by hand, per loop shape, which is the same
 class of work as the range and countdown contract generators already do for
 their *counted* facts. It is real proof work, and it is the natural next task.
+
+
+## Why the `cd_loop` value-flow goals are not closable by tactics
+
+The 9-file sorry site. The residual goal, with the fallback removed so Lean
+reports it:
+
+```
+s : Arm64State
+hs : s.pc = 4294967872
+hc : arm64_matches_condition 9 s.nzcv = true
+\u22a2 arm64_reg 0 s = 0
+```
+
+`s` is **arbitrary**, subject only to `s.pc` being the loop head. Nothing in
+the context says what X0 holds, and two states at the same pc may hold
+different X0 -- so the goal is not derivable from these hypotheses at all, and
+no choice of `simp`/`grind`/`omega` will reach it.
+
+**This is the substantive consequence of the flag-based lowering.** The CSET
+lowering *wrote* the boolean into X0, so `X0 = 0` on the false branch followed
+from the CSET's own semantics -- the register was itself the record of the
+test. `B.cond` reads `nzcv` instead and writes no register, so the loop
+contract now has to carry an invariant tying X0 to `nzcv` at the loop head:
+
+> at the loop head, `x0` holds the counter and `nzcv = subs_flags x0 0`
+
+The current contract carries neither. Until it does, the exit obligation has
+nothing to stand on and `sorry` is the honest outcome.
+
+Note the shape of the fix, because it is not a tactic change: the range and
+countdown *contract generators* would each need an extra conjunct (or an extra
+hypothesis argument) at the head state, and `while_dec_exit_contract` in
+`ProofLib` would need to accept and use it. That is a change to the model --
+the same category of work as the `shiftlr` decision, and for the same reason it
+is not something to slip in at the end of a pass.
+
+**Rejected along the way:** adding `arm64_flag_le`, `u64_le_zero_iff` and
+`u64_ofNat_zero` to the closing `simp` set, to hop from the flag predicate to
+`a = 0`. It closes nothing (the missing step is the X0 invariant, not
+arithmetic) and over-simplifies four other proofs: 40/3/0 -> 36/3/4. The two
+`ProofLib` lemmas were verified to compile in isolation and were dropped again
+rather than left unused in a file shared with the x86-64 work.
