@@ -1,4 +1,8 @@
 # CODEGEN (A3 stack-switch): `yield <identifier-or-member-expr>` always
+
+**State: CLOSED.** Call-site yield-kind propagation landed, and the non-unanimous residual is an HONEST
+REFUSAL on both backends rather than a truncated float / printed pointer.
+
 defaults to int64_t, silently truncating float/string values
 
 ## Status (2026-09-25 — the non-unanimous residual is now an HONEST REFUSAL on both backends; the silent miscompile is gone)

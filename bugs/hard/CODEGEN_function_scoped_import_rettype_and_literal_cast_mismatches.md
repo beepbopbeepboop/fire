@@ -1,5 +1,9 @@
 # HARD BUG (4 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls, (4) imported-class name mistaken for a zero-arg accessor function in `X.ATTR` member access
 
+**State: CLOSED.** Inherited methods keep their defining module's #line; the constructor-call residual no
+longer reproduces.
+
+
 ## Status (2026-09-25 — Mechanism 4's CONSTRUCTOR-CALL residual no longer reproduces; the weakref.py `#line` misattribution is FIXED)
 
 Two things changed since the last re-verification entry.

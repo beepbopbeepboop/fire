@@ -1,5 +1,11 @@
 # HARD BUG: `self.field = param` with an unannotated, no-default `__init__` parameter always types the field `int64_t`, even for real string/list/etc. call-site arguments
 
+**State: CLOSED.** Both causes of the old "Remaining limitation" closed: the observation pass now scans
+method bodies, and _arg_scalar_type resolves MemberExpr / str-concat arguments.
+Attribute chains and unknown receivers remain no-evidence by design, which is the
+doc's own "not unanimous -> leave unresolved" rule, not an open defect.
+
+
 ## Status (2026-09-25 — the `MemberExpr` ctor-argument limitation is FIXED; the deeper METHOD-BODY blind spot behind it too)
 
 The doc's long-standing "Remaining limitation" — "a constructor argument

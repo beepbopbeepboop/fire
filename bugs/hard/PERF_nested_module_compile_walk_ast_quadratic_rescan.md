@@ -1,5 +1,9 @@
 # HARD BUG (performance): `_walk_ast` re-scan blowup for large transitive-import graphs
 
+**State: CLOSED.** Phase 6 landed: the unused extracted-function index is no longer built for non-selfhost
+compiles, which was the remaining quadratic rescan.
+
+
 ## Status (2026-09-25, Phase 6 — `_selfhost_extracted_fn_index` no longer built for non-selfhost compiles)
 
 A fresh cProfile of `Lib/contextlib.py` on the current tree (post-Phase-5,

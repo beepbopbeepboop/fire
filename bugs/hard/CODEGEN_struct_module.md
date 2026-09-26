@@ -1,5 +1,11 @@
 # CODEGEN: the `struct` module (binary pack/unpack) in the compiled path
 
+**State: CLOSED.** Both recorded codegen gaps fixed (per-slot unpack kinds for mixed int/float formats;
+`var`-declared class fields, which had been a NULL-deref segfault). The `.format`
+residual recorded here was found to be misdescribed and has been moved to its own doc:
+CODEGEN_struct_format_shadowed_by_format_attribute.md.
+
+
 ## Status (2026-09-25 audit — BOTH remaining codegen gaps closed)
 
 Stages 1–4 (below) are landed and were sound. This pass audited what they
@@ -69,16 +75,26 @@ now reads `1 2 4` (was a segfault), and `var NAME/N/ITEMS/TABLE` class
 fields read `hello 5 0 0` (were `0 0 0 0`). Regression test
 `gimple_struct_var_declared_class_field`.
 
-### Recorded, NOT this doc's bug: `.format` read off a class-attribute-held `Struct`
+### Moved to its own doc: calling `Struct.format(...)`
 
-`self.FIELD_STRUCT.format` returns a pointer-sized integer rather than the
-format string, while `.size` and `.unpack` on the same field are correct,
-and a LOCAL `s = struct.Struct('<HH'); s.format` is correct too. Confirmed
-**identical on the unmodified tree**, and it affects the BARE class-attr
-spelling exactly as it does the `var` one — so it is a pre-existing,
-separate defect in the class-attribute read path, not a consequence of
-anything above and not the gap this doc recorded. Left for a future pass;
-worth its own doc if it is pursued.
+`.format` on a `Struct` is a real, separate defect, but this doc's earlier
+note about it was wrong in both halves and has been replaced rather than
+carried forward. Re-tested:
+
+- the ATTRIBUTE READ `s.format` is **correct** (`<HH`, matching CPython) —
+  not "a pointer-sized integer", as recorded here before;
+- the CALL `s.format(70)` returns **`0`** with exit 0, where CPython and
+  this repo's own reference interpreter both raise `TypeError: 'str'
+  object is not callable` — because `format` is an attribute shadowing the
+  method, so calling it is an error;
+- the LOCAL spelling fails exactly like the class-attribute one, so this is
+  not a class-attribute-read-path bug.
+
+Tracked, with the full evidence and the dispatch asymmetry that identifies
+where to look, in
+`CODEGEN_struct_format_shadowed_by_format_attribute.md`. Confirmed
+identical on a clean `HEAD~1` worktree, so it is pre-existing and not a
+consequence of anything in this doc.
 
 ### Audit result for the other two recorded gaps — still open, unchanged
 

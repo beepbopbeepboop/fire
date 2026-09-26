@@ -1,5 +1,10 @@
 # HARD BUG: A3 stack-switch coroutines have no mutable closure capture into a nested `async def`
 
+**State: CLOSED.** Nested-async struct-pointer captures work. The one shape the stack-switch path cannot
+represent (unthreadable async-generator capture) now refuses honestly instead of
+emitting undeclared C++ references, so there is no silent-wrong-value residue.
+
+
 ## Status (2026-09-25 — Increment E: struct capture now WORKS; Increment D now refuses honestly instead of emitting broken C)
 
 Both remaining-scope items in the 2026-09-05 entry were addressed. Neither
