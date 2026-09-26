@@ -3077,6 +3077,37 @@ def _split_top_level_comma(s: str) -> list[str]:
     parts.append(s[start:].strip())
     return parts
 
+# Per-part parse results for `_dedup_variadic_externs`, keyed by the part's
+# exact text: (concrete, variadic) function names, or None-absent.
+#
+# The function is called ONCE PER `gen_module_impl` with the CUMULATIVE
+# `parts` list — the generated C of every module compiled so far ANYWHERE in
+# the transitive tree, because `_module_stmts` and the preamble accumulation
+# are shared by reference into every `temp_gen`. So without this cache the
+# same parts are re-split and re-parsed at every one of the N levels: O(N^2)
+# in emitted text, which is the same per-level-rescan-the-cumulative-total
+# shape as bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+# documents for the AST-walking consumers, just measured in C fragments
+# instead of AST nodes. That doc ruled this site "out of scope" on 08-18 and
+# 08-25 because it is not an `imported_stmts` AST consumer; a 2026-09-26
+# re-profile of a 160-module struct chain put it at 34% of the run (12.97s of
+# 38.6s, with its nested `_is_extern_decl` called 11,188,407 times), which is
+# 4x the largest AST consumer still standing — so the unit of work does not
+# change the complexity class, and this is now the top remaining site.
+#
+# Process-global rather than per-gen, for two reasons. There is no gen
+# instance to hang it on (this is a free function reached through a
+# `self._dedup_variadic_externs` shim), and the cached value is a pure
+# function of the key — the full text of the part — with nothing time-
+# dependent in it, so unlike the `_field_scan_var_cache` /
+# `_calls_in_stmts_cache` family it needs no write-invalidation at all. Same
+# shape as `_WALK_FIELD_NAMES_CACHE`. Lookup is cheap rather than merely
+# correct because CPython caches a str's hash on the object, and `parts`
+# holds the SAME str objects across levels (they are appended, never
+# re-joined), so a repeat level pays a hash-cache hit per part and nothing
+# more.
+_DEDUP_EXTERN_PARTS_CACHE: dict = {}
+
 def _dedup_variadic_externs(parts: list) -> str:
     """Join the preamble, dropping a variadic `extern T name (...);` import
     declaration when a CONCRETE prototype for the same function is also present
@@ -3112,9 +3143,27 @@ def _dedup_variadic_externs(parts: list) -> str:
                 return True
         return False
 
-    concrete = set()
-    for p in parts:
-        for stmt in p.split(';'):
+    def _parse_part(part: str) -> tuple:
+        """One part's extern declarations, as (concrete, variadic) name lists.
+
+        A PURE function of `part`'s own text — it reads no gen state, no
+        module globals, nothing but its argument — which is exactly what
+        makes `_DEDUP_EXTERN_PARTS_CACHE` sound. Split out of the two passes
+        below so a part is split/parsed ONCE rather than once per pass, and
+        (with the cache) once per `gen_module` level rather than once per
+        level per pass; see that dict's own comment for why the repetition
+        across levels was the expensive part.
+
+        A name is `concrete` when its parameter list is neither `...` nor
+        empty, and `variadic` when it is exactly `...` — the two lists are
+        disjoint by construction, and an empty parameter list is in neither
+        (the old first pass skipped it via `params not in ('...', '')`; the
+        old second pass skipped it via `params != '...'`, so it never
+        decided anything either way).
+        """
+        concrete = []
+        variadic = []
+        for stmt in part.split(';'):
             if not _is_extern_decl(stmt):
                 continue
             paren = stmt.find('(')
@@ -3128,34 +3177,44 @@ def _dedup_variadic_externs(parts: list) -> str:
             if not head_toks:
                 continue
             name = head_toks[-1].lstrip('*')
-            if params not in ('...', ''):
-                concrete.add(name)
+            if params == '...':
+                variadic.append(name)
+            elif params != '':
+                concrete.append(name)
+        return concrete, variadic
+
+    # ONE pass over `parts`, not two. The old shape scanned every fragment
+    # twice — once to build `concrete`, once to decide each part's fate —
+    # re-deriving `paren`/`close`/`params`/`name` the second time, and it
+    # could not be collapsed into one pass only because `concrete` is not
+    # complete until every part has been read. Collecting each part's
+    # `variadic` names alongside its `concrete` names makes the drop test a
+    # membership question that can be asked afterwards, so the parse is
+    # shared instead of repeated. Same predicate, same inputs, same
+    # decision: a part is dropped iff one of its variadic names is in the
+    # tree-wide `concrete` set.
+    concrete = set()
+    variadic_by_part = []
+    for p in parts:
+        entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
+        if entry is None:
+            entry = _parse_part(p)
+            _DEDUP_EXTERN_PARTS_CACHE[p] = entry
+        part_concrete, part_variadic = entry
+        for name in part_concrete:
+            concrete.add(name)
+        variadic_by_part.append(part_variadic)
     if not concrete:
         return '\n'.join(parts)
     kept = []
-    for p in parts:
+    for i in range(len(parts)):
         drop = False
-        for stmt in p.split(';'):
-            if not _is_extern_decl(stmt):
-                continue
-            paren = stmt.find('(')
-            if paren < 0:
-                continue
-            close = stmt.rfind(')')
-            if close < paren:
-                continue
-            params = stmt[paren + 1:close].strip()
-            if params != '...':
-                continue
-            head_toks = stmt[:paren].strip().split()
-            if not head_toks:
-                continue
-            name = head_toks[-1].lstrip('*')
+        for name in variadic_by_part[i]:
             if name in concrete:
                 drop = True
                 break
         if not drop:
-            kept.append(p)
+            kept.append(parts[i])
     return '\n'.join(kept)
 
 

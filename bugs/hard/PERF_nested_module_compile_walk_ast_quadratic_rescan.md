@@ -1,8 +1,195 @@
 # HARD BUG (performance): `_walk_ast` re-scan blowup for large transitive-import graphs
 
-**State: CLOSED.** Phase 6 landed: the unused extracted-function index is no longer built for non-selfhost
-compiles, which was the remaining quadratic rescan.
+**State: OPEN — the CLOSED banner this doc carried until 2026-09-26 was wrong.**
+Phases 1-6 did land, and the AST-node-visit blowup the doc's own Symptom
+section measured IS gone (numbers below). But the underlying shape — per-level
+work proportional to *cumulative* tree size, summed over N levels, i.e. O(N²) —
+survives in a different unit of work, and is now the single largest consumer in
+a profile. Do not read "Phase 6 removed the last quadratic rescan" as the bug
+being fixed; see the 2026-09-26 entry for the measurement and the named site.
 
+
+## Status (2026-09-26, Phase 7 — `_dedup_variadic_externs`: one pass + per-part memo; the residual is now provably the corpus, not the rescan)
+
+Fixed the double scan and made every byte-stable part free. The function is
+`mojo/backend_gimple/emit_infra.py:_dedup_variadic_externs`, reached once per
+`gen_module_impl` through the `self._dedup_variadic_externs` shim.
+
+**What changed.** Two things, both in that one function:
+
+- **Two passes → one.** The old shape scanned every fragment twice, once to
+  build the `concrete` name set and once to decide each part's fate,
+  re-deriving `paren`/`close`/`params`/`name` the second time. It could not
+  be collapsed only because `concrete` is incomplete until every part has
+  been read — but a per-part `_parse_part` returning `(concrete, variadic)`
+  name lists lets the drop test become a membership question asked
+  afterwards, so the parse is shared instead of repeated. The predicate is
+  unchanged: a part is dropped iff one of its variadic names is in the
+  tree-wide `concrete` set, and an empty parameter list still decides
+  nothing in either direction (the old pass 1 skipped it via
+  `params not in ('...', '')`, the old pass 2 via `params != '...'`).
+- **Per-part memo, process-global** (`_DEDUP_EXTERN_PARTS_CACHE`), keyed by
+  the part's exact text. Sound with no invalidation logic because the cached
+  value is a pure function of the key — the whole text of the part, with
+  nothing time-dependent in it — unlike the `_field_scan_var_cache` /
+  `_calls_in_stmts_cache` family. Same shape as `_WALK_FIELD_NAMES_CACHE`;
+  a free function has no gen instance to hang it on. Lookup is cheap rather
+  than merely correct because CPython caches a str's hash on the object.
+
+**Measured** (160-module struct chain; `_is_extern_decl` call count is the
+doc's own "4.47M calls" metric in this unit, and is profiler-independent):
+
+| metric | before | after |
+|---|---|---|
+| `_is_extern_decl` calls, n=160 | 11,188,407 | 5,411,601 (−52%) |
+| `_dedup_variadic_externs` cumtime, n=160 | 12.97s (34% of run) | 12.47s (not top-8) |
+| total function calls, n=160 | 311,230,595 | 249,144,568 (−20%) |
+| total profiled time, n=160 | 38.64s | 33.26s (−14%) |
+| part-lookup hit rate, n=40 | n/a | 89.8% (14,426 lookups, 1,476 misses) |
+
+Direct wall clock, before/after interleaved on the same machine: n=40
+5.69s→5.46s, n=80 6.32s→6.21s, n=160 10.33s→9.41s. The win is real but
+noticeably smaller than the 34% the profile attributed, and the reason is
+worth recording rather than hiding: **cProfile inflates this site
+enormously**, because it charges per-call overhead to a function called
+11.2M times. The call-count halving above is the trustworthy number; the
+wall-clock column is the honest end-to-end one.
+
+**Equivalence evidence.** Byte-identity anchor: the full generated artifact
+for a 160-module chain, same generated module sources both sides, `cmp`
+clean — 4,025,900 bytes, md5 `e3ac15998b324c44604f688946f3dcab` both sides.
+Differential harness, old body vs new body on real generated text: whole-file
+(498,600 chars) identical; 6 fragment arrangements (all `;`-pieces, first 50,
+every 7th, per-line split, `[text, '', text]`, reversed) identical;
+repeat-call stability (the cache must not change a second answer) identical;
+9 hand-built edge shapes identical (variadic-before-concrete and
+concrete-before-variadic, empty param list, unbalanced `(`/`)`, `extern *
+foo (...)` vs a concrete prototype, a `#line ".../external_b.mojo"`
+directive that must NOT read as `extern`, empty-string parts, a fragment
+with no `;` terminator, one name declared both ways).
+
+**Gate** (2026-09-26): `make check` 5/7 with `modcache` (client object 9320
+bytes) and `no-new-casts` (34 vs baseline 28) failing — both byte-identical
+to the pre-change baseline. `stdlib-dylib` and `stdlib-syntax` 2/2, 0 skip
+lines. `mojoc` builds; `ab-native` 0/30 and `native-dumpfull`
+(`./mojoc fire.py --dump-full` → exit −11) unchanged from baseline.
+`bootstrap`: stage1-transitive and stage2-cc pass, stage2-dumps all exit
+−11 — the pre-existing self-hosted SIGSEGV, untouched by this phase. The
+`emit_calls.py` env-struct fix earlier in this series is what makes
+stage2-cc pass at all. The user's own separate tree (`~/net/gcc-fire/gcc`,
+`rm fire.ci; make`) still regenerates and links `fire1` with this change in
+the compiled closure.
+
+**What is left, precisely.** The residual is still superlinear
+(`_is_extern_decl` calls per doubling: 41,691 → 184,021 → 933,481 for
+n=20/40/80, i.e. ~4.4x then ~5.1x), and it is now *provably* the corpus
+rather than a rescan that a cache could have absorbed. Instrumenting the
+misses at n=40: 1,839 missed parts totalling 13.9 MB, largest 728 KB and
+growing with the tree, with the top 5 alone 24.6% of missed bytes. So the
+texts that miss are not a small unstable remainder — a module's emitted
+`parts` genuinely *is* O(its import closure), because `do_imports` inlines
+each imported module's output, so the corpus handed to this function really
+does grow with the tree at every level. 89.8% of lookups hit (the
+byte-stable parts), and the misses carry essentially all the fragments.
+
+That means the only remaining way to make this sub-quadratic is to stop
+re-deriving both name sets from the whole corpus on every call, and maintain
+them incrementally as parts are appended, at the single place parts are
+appended. **That is not attempted here and is not obviously safe**: a shared
+running set is a superset of any one level's own corpus whenever a module's
+text differs between two levels (which the miss data says it does), so it
+could drop a part that the per-level computation would have kept — a silent
+output change, which is exactly the trap the write-invalidation analysis in
+"Phase 5 implementation notes" rejected for the Pass 2c cache. It needs its
+own pass, with its own proof that the running set is exactly the per-level
+corpus's set, not a superset.
+
+So the doc stays OPEN, but the honest headline is now narrow: the AST-node
+rescan this was named for is fixed and has been for several phases; the
+per-level re-derivation over generated C text is halved and cached, and what
+remains is a corpus-size cost that no per-call cache can remove.
+
+## Status (2026-09-26 — the CLOSED banner is withdrawn; the rescan is reduced, not eliminated)
+
+Re-measured the doc's own headline metric on the current tree, with `cas`
+defeated (every generated module's source made unique per run, since
+`compile_to_gimple`'s imported-module path is CAS-served and would otherwise
+report a warm cache rather than a compile). Metric: total `_walk_ast_into`
+node visits, i.e. exactly the "4.47M calls" the Symptom section reports, as a
+function of the number of modules in a linear import chain.
+
+**Function-only chain — LINEAR, the original defect is genuinely fixed:**
+
+| modules | node visits | ratio |
+|---|---|---|
+| 20 | 6,532 | |
+| 40 | 12,832 | 1.96x |
+| 80 | 25,432 | 1.98x |
+| 160 | 50,632 | 1.99x |
+
+A clean 2x per doubling, ~316 visits per module, flat. For comparison the
+Symptom section's 36-module `contextlib.py` case cost 4,473,166 `_walk_ast`
+calls; a 36-module chain costs ~11k today. That is the win, and it is real.
+
+**Struct/class-attr chain — still SUPERLINEAR.** Repeating the same
+measurement with a `class` per module (class attrs `A`/`B`/`var D`,
+`__init__` self-assigns, a method) so the struct-shaped consumers the
+"Remaining work" list names are actually exercised:
+
+| modules | node visits | ratio | per-module |
+|---|---|---|---|
+| 20 | 38,585 | | 1,929 |
+| 40 | 96,696 | 2.51x | 2,417 |
+| 80 | 273,136 | 2.83x | 3,414 |
+| 160 | 866,016 | 3.17x | 5,413 |
+
+Per-module cost nearly triples from n=20 to n=160, and the per-doubling ratio
+is *rising* (2.51 → 2.83 → 3.17). Total work is ~n^1.7 and still steepening.
+So the unmemoized consumers this doc's "Remaining work" section names are
+live exactly as written.
+
+**The dominant remaining site, and it is the one the doc wrote off.**
+`cProfile` of the 160-module struct chain (38.6s profiled, 311M calls):
+
+| rank | function | cumtime | ncalls | note |
+|---|---|---|---|---|
+| 1 | `_dedup_variadic_externs` | 12.97s | 161 | **34% of the run** |
+| 2 | `_is_extern_decl` (nested in it) | 11.41s | **11,188,407** | ~69.5k statements re-scanned per call |
+| 3 | `ast_rewriter.rewrite` | 7.04s | 430 | per-module parse/rewrite, legitimately linear |
+| 4 | `_selfhost_module_scalar_globals` | 6.28s | 161 | see below |
+
+`_dedup_variadic_externs` (emit_infra.py:3080, called once per
+`gen_module_impl`) is handed the ENTIRE accumulated `parts` — the generated C
+text of every module compiled so far, across the whole tree — and scans it
+TWICE end to end, once to build the `concrete` set and once to decide what to
+drop, calling `_is_extern_decl` (a per-line `.split`) on every `;`-delimited
+fragment each time. Per level that is O(cumulative emitted text); over N
+levels, O(N²). This is **the same bug this doc exists to kill, measured in
+generated-C fragments instead of AST nodes** — the identical "re-walk the
+cumulative total at every level" shape, and it is 4x larger than the largest
+AST-walking consumer left.
+
+It was ruled out of scope on 08-18 and again on 08-25 on the grounds that it
+is "NOT an `imported_stmts` AST consumer (post-hoc string dedup of generated
+C text)". That classification is what left the O(N²) alive under a CLOSED
+banner: the unit of work is irrelevant to the complexity class, and this site
+is the one the doc's own metric now points at.
+
+Not attempted yet. It looks like a self-contained, low-risk fix — the two
+passes share one parse per fragment (the second re-derives `paren`/`close`/
+`params`/`name` the first already computed), and a per-fragment-text memo
+would collapse the repeated per-level rescans. It is still a change to
+compiled-path codegen, so it owes the full quality gate and a byte-identity
+anchor, which is why it is named here rather than landed in the same pass as
+the measurement.
+
+Separately, the other three named items in "Remaining work" are unchanged and
+still unmeasured against this doc's metric: `_class_attr_ctype`'s Pass 1.1
+caller loop, the Pass 2c residual scan, and
+`_collect_self_assigns`/`_collect_self_reads`. Given
+`_dedup_variadic_externs` is 34% of the run, it is the one to do first; the
+`_class_attr_ctype` entanglement analysis (unchanged since 08-18) should be
+re-run against a post-fix profile rather than trusted as still-current.
 
 ## Status (2026-09-25, Phase 6 — `_selfhost_extracted_fn_index` no longer built for non-selfhost compiles)
 
