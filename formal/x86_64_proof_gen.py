@@ -102,6 +102,80 @@ def _generate_model(fn, tc):
     go_defs = "\n\n".join(AP._gen_go(fn, tc))
     return go_defs, list(AP._go_simp_lemmas(fn))
 
+def _returns_string_literal(fn) -> bool:
+    """Does the function hand back a string literal?
+
+    The run tests compare RAX against `mojo`, a numeric model of the source.
+    A function returning a string cannot be compared that way: the machine's
+    result is the ADDRESS of an interned literal, and no numeric model of
+    `return "small"` is that address.  The obligation would then fail for a
+    program that is entirely correct — worse than saying nothing about it.
+
+    Only a literal in return position counts, which is the shape these take in
+    practice (an if/elif chain of literals).  A function returning a VARIABLE
+    that holds a string is not caught here; its run test still fails, for the
+    same real reason, and the failure says so.
+    """
+    import fire_compiler as F
+
+    # fire_compiler has no `Var`; a bare name is an `IdentExpr`.
+    _NAME_NODES = (getattr(F, "IdentExpr", None),)
+
+    def is_str(node) -> bool:
+        return isinstance(node, F.StringLiteral)
+
+    def scan(node, in_return: bool) -> bool:
+        if node is None or isinstance(node, (str, int, float, bool, bytes)):
+            return False
+        if in_return and is_str(node):
+            return True
+        if _NAME_NODES and in_return and isinstance(node, _NAME_NODES):
+            # `return x` where x was assigned a literal above.
+            nm = getattr(node, "name", None)
+            if nm and nm in _str_assigned(fn):
+                return True
+        kids = getattr(node, "__dict__", {})
+        for key, val in kids.items():
+            if key in ("lineno", "col_offset", "end_lineno", "end_col_offset"):
+                continue
+            child_return = in_return or isinstance(node, F.ReturnStmt)
+            if isinstance(val, (list, tuple)):
+                if any(scan(v, child_return) for v in val):
+                    return True
+            elif scan(val, child_return):
+                return True
+        return False
+
+    body = getattr(fn, "body", None)
+    stmts = body if isinstance(body, list) else [body]
+    return any(scan(st, False) for st in stmts)
+
+
+def _str_assigned(fn):
+    """Names assigned a string literal anywhere in `fn`."""
+    import fire_compiler as F
+    out = set()
+
+    def walk(node):
+        if node is None or isinstance(node, (str, int, float, bool, bytes)):
+            return
+        d = getattr(node, "__dict__", {})
+        if isinstance(node, F.AssignStmt) and is_str(getattr(node, "value", None)):
+            for tgt in (getattr(node, "targets", None) or []):
+                nm = getattr(tgt, "name", None)
+                if nm:
+                    out.add(nm)
+        for key, val in d.items():
+            if key in ("lineno", "col_offset"):
+                continue
+            if isinstance(val, (list, tuple)):
+                for v in val:
+                    walk(v)
+            else:
+                walk(val)
+    walk(getattr(fn, "body", None))
+    return out
+
 
 def _ast_value(fn, func_name: str) -> str:
     """The `MojoFunc` value mirroring `fn`'s source AST.
@@ -212,8 +286,9 @@ def _step_certificate_section(func_name: str, code_len: int) -> str:
         f"    exist yet, and the end-to-end theorem below inherits that gap. -/\n")
 
 
-def _run_tests_section(func_name: str, test_input: int,
-                        externs: list = None, placeholder: bool = False) -> str:
+def _run_tests_section(func_name: str, test_input: int, externs: list = None,
+                       placeholder: bool = False,
+                       string_result: bool = False) -> str:
     """Concrete run tests: the machine model on the real bytes, by evaluation.
 
     These are not `sorry` and not assertions — `native_decide` executes the
@@ -260,6 +335,15 @@ def _run_tests_section(func_name: str, test_input: int,
             f"   machine against that placeholder and fail, which would say\n"
             f"   nothing about either.  Modelling this function's shape is what\n"
             f"   would close it. -/\n")
+
+    if string_result:
+        return (
+            f"/- NO RUN TESTS for {func_name}: it returns a string, and the\n"
+            f"   machine's result is the ADDRESS of an interned literal.  No\n"
+            f"   numeric model of `return \"small\"` is that address, so the\n"
+            f"   comparison would fail for a program that is entirely\n"
+            f"   correct.  Comparing string results needs the intern table in\n"
+            f"   the model, which is not there. -/\n")
 
     if externs:
         syms = ", ".join(sorted(set(externs)))
@@ -347,6 +431,31 @@ def generate_x86_64_proof(prog, code, info) -> str:
                       f"the semantic model below is the identity and nothing "
                       f"downstream of it is claimed. -/\n")
 
+    # The shared model generator can EMIT a model that references a function it
+    # never defines — a class constructor lowers to `Point_go`, for instance,
+    # with no `Point_go` in the output.  That produces a proof that does not
+    # typecheck, and the error is a bare "unknown identifier" pointing at a
+    # name the reader has never seen.  So the model is checked against itself
+    # before it goes in: every `<name>_go` / `<name>_model` it MENTIONS has to
+    # be one it DEFINES.  A model that fails this falls back to the
+    # placeholder, which is a stated gap rather than a crash.
+    if not model_placeholder:
+        import re as _re
+        defined = set(_re.findall(r"def (\w+)", go_defs))
+        defined |= set(_re.findall(r"theorem (\w+)", go_defs))
+        referenced = set(_re.findall(r"\b(\w+_(?:go|model))\b", go_defs))
+        missing = sorted(referenced - defined)
+        if missing:
+            model_placeholder = True
+            model_note += (
+                f"/- NOTE: the generated model refers to {', '.join(missing)}, "
+                f"which the shared generator does not define, so the semantic "
+                f"model below is the identity and nothing downstream of it is "
+                f"claimed. -/\n")
+            go_defs = (f"def {func_name}_go (n : UInt64) : UInt64 :=\n"
+                       f"  n\n")
+            go_lemma_names = []
+
     parts.append("/-- Mojo semantics: direct Lean model of the source code. -/\n"
                  + model_note + go_defs + "\n")
 
@@ -366,21 +475,36 @@ def generate_x86_64_proof(prog, code, info) -> str:
                if re.search(r"def %s_model\b" % func_name, go_defs)
                else f"{func_name}_go")
     binder = re.search(r"def %s \((\w+) : (\w+)\)" % mojo_fn, go_defs)
-    if binder:
-        param, ptype = binder.group(1), binder.group(2)
-    else:
-        curried = re.search(r"def %s : (\w+) →" % mojo_fn, go_defs)
-        param, ptype = "n", (curried.group(1) if curried else "UInt64")
-    mojo_arg = f"{param}.toNat" if ptype == "Nat" else param
+    ptype = (binder.group(2) if binder
+             else (re.search(r"def %s : (\w+) →" % mojo_fn, go_defs) or [None, "UInt64"])[1]
+             if re.search(r"def %s : (\w+) →" % mojo_fn, go_defs) else "UInt64")
+    # The model is applied POSITIONALLY to `mojo`'s own parameter, which is
+    # always `n` whatever the function's parameter is called — passing the
+    # model's binder name instead left `def mojo (n) := double_go x` for a
+    # function whose parameter is `x`, and `x` is not in scope there.
+    mojo_arg = "n.toNat" if ptype == "Nat" else "n"
     parts.append("/-- The semantic model as a UInt64 -> UInt64 function. -/\n"
                  f"def mojo (n : UInt64) : UInt64 :=\n"
                  f"  {mojo_fn} {mojo_arg}\n")
 
     # ── AST bridge ───────────────────────────────────────────────────
-    try:
-        section = _eval_eq_mojo_section(func_name, fn, typed, go_lemma_names)
-    except Exception:                               # noqa: BLE001
-        section = None
+    #
+    # A PLACEHOLDER model suppresses the bridge as well as the run tests: the
+    # bridge claims the AST evaluation agrees with `mojo`, and against the
+    # identity fallback that is simply false — `return Point(3)` evaluates to
+    # 0 through the call handler while `mojo n` is `n`, so the obligation
+    # would be `0 = n`.  Suppressing it says what is true (nothing is claimed)
+    # instead of what is unprovable.
+    if model_placeholder:
+        section = ("/- AST bridge omitted: the semantic model is a "
+                   "PLACEHOLDER (see the note on it), so there is no claim "
+                   "for the AST evaluation to agree with. -/\n")
+    else:
+        try:
+            section = _eval_eq_mojo_section(func_name, fn, typed,
+                                            go_lemma_names)
+        except Exception:                           # noqa: BLE001
+            section = None
     if section is None:
         # Either the AST value could not be built (a construct the untyped
         # model has no form for) or the shape's bridge is not closed. Both
@@ -396,8 +520,19 @@ def generate_x86_64_proof(prog, code, info) -> str:
                        "method calls have none). Correctness would have to "
                        "come from the machine value flow alone. -/\n")
     else:
-        parts.append(f"/- AST for {func_name} (mirrors source code). -/\n"
-                     f"def ast : MojoFunc := {_ast_value(fn, func_name)}\n")
+        # Guarded on its own: the probe inside `_eval_eq_mojo_section` sits
+        # behind the typed-function early return, so a TYPED function whose
+        # body has no AST form reached this unguarded call and raised out of
+        # the build instead of omitting the AST.
+        try:
+            ast_value = _ast_value(fn, func_name)
+        except Exception:                           # noqa: BLE001
+            section = ("/- AST omitted: this function's body has no form in "
+                       "the untyped AST model (a for-loop, break/continue or "
+                       "a method call). -/\n")
+        else:
+            parts.append(f"/- AST for {func_name} (mirrors source code). -/\n"
+                         f"def ast : MojoFunc := {ast_value}\n")
     parts.append(section)
 
     # ── the compiled image ───────────────────────────────────────────
@@ -416,7 +551,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
     parts.append(_run_tests_section(
         func_name, test_input,
         [e.get("sym") for e in (info.get("extern_calls") or [])],
-        placeholder=model_placeholder))
+        placeholder=model_placeholder,
+        string_result=_returns_string_literal(fn)))
     parts.append(_step_certificate_section(func_name, len(code)))
 
     # ── end to end ───────────────────────────────────────────────────
