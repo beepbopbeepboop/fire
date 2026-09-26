@@ -387,6 +387,15 @@ def _gen_stmt_VarDecl(gen, node):
             gen._elem_types[node.name] = gen._elem_types[v]
             if v in gen._nested_elem_types:
                 gen._nested_elem_types[node.name] = gen._nested_elem_types[v]
+        # Same propagation for a `struct.unpack(...)` result's PER-SLOT
+        # kinds: `var m = struct.unpack('<if', buf)` records them on the
+        # unpack temp, and the subscript on `m` needs them under `m`'s own
+        # name. Without this the mixed-format fix silently does nothing for
+        # the local-variable spelling (only a bare
+        # `struct.unpack(...)[1]` would see it). Mirrors _elem_types
+        # exactly, including the `type_ann is None` guard.
+        if node.type_ann is None and v in gen._struct_slot_kinds:
+            gen._struct_slot_kinds[node.name] = gen._struct_slot_kinds[v]
         # `var g = counter(3)` / `var task = create_task(f())` — the
         # `var`-keyword spelling of a declaration lowers through THIS
         # method (VarDecl), not the plain AssignStmt path a few lines

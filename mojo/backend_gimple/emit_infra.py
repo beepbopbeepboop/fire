@@ -33,6 +33,7 @@ from fire_compiler import (
 import regex_compile
 import mlir
 import mojo.middle.types as gimple_ctypes
+import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -91,7 +92,50 @@ def _is_exc_class_name(gen, name: str) -> bool:
     return name in gen._KNOWN_EXCEPTION_NAMES or name in gen.struct_field_types
 
 
-def _reset_func(gen, body: list = None, params: list = None):
+def _reset_func(gen, body: list = None, params: list = None,
+                allow_lambda_reduction: bool = True):
+    # The enclosing AST body, kept so a later pass can answer "how is this
+    # local USED?" — specifically the lambda beta-reduction, which may only
+    # inline a `lambda`'s body at its call sites when the local holding it
+    # is used for NOTHING ELSE (an escaping lambda would be captured at
+    # creation but read at some other call, where there is no call site to
+    # inline into). Cheap: a reference, and the body is already alive for
+    # the whole function.
+    gen._cur_func_body = body
+    # The enclosing function's PARAMETER names, for the same reason the body
+    # is kept. `mojo/middle/lambdareduce` uses this to refuse inlining a
+    # lambda that captures a PARAMETER: a parameter's ctype is the least
+    # reliable one in the compiled path (self-hosting shows the backend's own
+    # `gen` parameter — a GimpleGen struct pointer — degrade to a plain
+    # `int64_t`), so a body inlined over it is typed against a type that is
+    # not the variable's real one. Only the NAMES are needed, and only
+    # during the reduction, so this is a reference-cheap set built once.
+    gen._cur_func_params = set()
+    for _p in (params or ()):
+        gen._cur_func_params.add(_p[0] if isinstance(_p, (tuple, list)) else _p)
+    # The lambda beta-reduction's cache is keyed by body IDENTITY (see
+    # mojo/middle/lambdareduce.reducible_lambdas), so it deliberately
+    # SURVIVES `_reset_func` — a lifted closure resets too, and a one-slot
+    # cache would then be overwritten mid-function. The scan is still kicked
+    # off eagerly here, because it needs only the body (its ctype lookups
+    # fall back to a placeholder) and doing it now guarantees every
+    # qualifying lambda is STAMPED before any of them is reached, which is
+    # how `_lower_LambdaExpr` recognises one.
+    #
+    # `allow_lambda_reduction` is False for a COROUTINE BODY (see
+    # `gen_func`'s call site and coro.py's `_mojo_coro_body` marker). The
+    # reduction is only sound where the ENCLOSING scope can represent the
+    # captured values' real types, and a coroutine body's lowering
+    # deliberately cannot: the C++ coroutine body model is scalar-only
+    # (`_infer_simple_expr_ctype` returns None, and the caller defaults to
+    # int64_t). Inlining a `lambda: some_string` there turned the captured
+    # pointer into an int64_t, which printed as the pointer's bit pattern
+    # and, under -Werror=int-conversion, failed the whole self-host build.
+    # Skipping the scan leaves such a lambda on the pre-existing lifted
+    # path — still wrong, but unchanged and separately documented — instead
+    # of making it wrong in a NEW way inside a pass that cannot represent it.
+    if body and allow_lambda_reduction:
+        gimple_lambdareduce.reducible_lambdas(gen)
     gen.bb_counter   = 2
     gen.temp_counter = 0
     gen.decls:       list[str]         = []

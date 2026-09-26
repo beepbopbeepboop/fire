@@ -2083,7 +2083,22 @@ def _func_csym(gen, bare_name: str) -> str:
 
 
 def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
-    gen._reset_func(node.body, node.params)
+    # A COROUTINE BODY is lowered by a dedicated pass whose body model is
+    # scalar-only, so the lambda beta-reduction must not inline a capturing
+    # lambda's body into it — see `_reset_func`'s own comment for the exact
+    # miscompile (a captured `char *` collapsed to int64_t) and coro.py's
+    # `_mojo_coro_body` marker for why the two is_generator/is_async flags
+    # cannot be used to detect this. Read off the node rather than inferred
+    # from the name: `*_body` is a legal user function name.
+    _is_coro_body = bool(getattr(node, '_mojo_coro_body', False))
+    gen._reset_func(node.body, node.params,
+                    allow_lambda_reduction=not _is_coro_body)
+    # Per-FUNCTION record of which locals hold a beta-reducible
+    # capturing lambda (see mojo/middle/lambdareduce). Cleared here,
+    # at a real per-function entry point, rather than in `_reset_func`
+    # — a lifted closure resets too, and clearing there would wipe the
+    # enclosing function's entries mid-body.
+    gen._inlined_lambdas = {}
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is
@@ -3310,6 +3325,8 @@ def _struct_method_csym_static(qualifier: str, struct_name: str, method_name: st
 
 def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, overload_id: str = '') -> str:
     gen._reset_func(node.body, node.params)
+    # Per-function, same reason and same placement as gen_func's.
+    gen._inlined_lambdas = {}
     ginf.reset_no_candidates(gen)
     # Set module context for global field access -- mirrors the identical
     # line in gen_func/_gen_toplevel (this method was missing it entirely).

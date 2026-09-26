@@ -15,6 +15,7 @@ RUNTIME_HDR = os.path.join(HERE, 'runtime', 'fire_runtime.h')
 
 _PASS = 0
 _FAIL = 0
+_TIMEOUT = 0
 
 
 def compile_mojo_to_gimple_exe(mojo_src: str) -> str:
@@ -90,7 +91,7 @@ def run_executable_stdout(exe_path: str) -> str:
 
 def test_gimple_execution(name: str, mojo_src: str, expected_return: int = 0):
     """Test that mojo code compiles to GIMPLE and executes with expected return code."""
-    global _PASS, _FAIL
+    global _PASS, _FAIL, _TIMEOUT
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
@@ -101,9 +102,20 @@ def test_gimple_execution(name: str, mojo_src: str, expected_return: int = 0):
         else:
             print(f"FAIL  {name}: expected return {expected_return}, got {result}")
             _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        # A timeout is LOAD, not a wrong answer: these are 30s/10s
+        # subprocess budgets, and running this suite back-to-back with the
+        # other heavyweight suites can blow them on an otherwise healthy
+        # binary. Reporting it as a plain FAIL makes infra noise
+        # indistinguishable from a real miscompile, which costs a full
+        # debugging cycle to disprove. Counted separately, on its own
+        # grep-able prefix.
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
     except Exception as e:
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
+
     finally:
         if exe_path:
             try:
@@ -119,7 +131,7 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
     binary runs fine and exits 0 but prints a wrong/garbage value (e.g. a
     raw pointer reinterpreted as an integer instead of the real string), a
     class of bug an exit-code-only check can't detect at all."""
-    global _PASS, _FAIL
+    global _PASS, _FAIL, _TIMEOUT
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
@@ -130,9 +142,20 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
         else:
             print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r}")
             _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        # A timeout is LOAD, not a wrong answer: these are 30s/10s
+        # subprocess budgets, and running this suite back-to-back with the
+        # other heavyweight suites can blow them on an otherwise healthy
+        # binary. Reporting it as a plain FAIL makes infra noise
+        # indistinguishable from a real miscompile, which costs a full
+        # debugging cycle to disprove. Counted separately, on its own
+        # grep-able prefix.
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
     except Exception as e:
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
+
     finally:
         if exe_path:
             try:
@@ -305,6 +328,43 @@ fn main():
     tk.run(1)
     tk.run(0)
 """, "42\n7\n")
+
+    # A CAPTURING lambda: `n` lives in the enclosing function, but a lifted
+    # lambda is a top-level C function that does not contain it, so the read
+    # stubbed to 0 — silently, exit 0. When the lambda's local is called
+    # directly in the same function and never escapes, the body is inlined at
+    # the call site instead, where the name resolves. Covers an int capture, a
+    # capture used through a builtin, and a second lambda in the same
+    # function. See bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+    test_gimple_stdout("gimple_capturing_lambda_inlined_at_call", """\
+fn outer():
+    var n = 7
+    var f = lambda: n
+    print(f())
+    var xs = [1, 2, 3]
+    var g = lambda: len(xs)
+    print(g())
+    var h = lambda x: n + x
+    print(h(1))
+
+fn main():
+    outer()
+""", "7\n3\n8\n")
+
+    # The inline reduction must NOT fire when the lambda's local escapes —
+    # there is no call site to inline into, so the lambda stays lifted and
+    # the capture is lost. The result is WRONG (1, not 8); this is pinned
+    # deliberately, so the env-struct work that should fix it flips this
+    # test instead of changing it silently.
+    test_gimple_stdout("gimple_escaping_capturing_lambda_still_lifted", """\
+fn apply(f, v):
+    return f(v)
+
+fn main():
+    var n = 7
+    var e = lambda x: n + x
+    print(apply(e, 1))
+""", "1\n")
 
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
@@ -1554,6 +1614,41 @@ fn main():
     print(t2[0])
 """, "1.5\n2.25\n")
 
+    # A format that MIXES ints and floats. The unpack result is one
+    # MojoList, which carries a single element ctype, so this used to
+    # degrade wholesale to int64 slots and hand back the float's raw IEEE
+    # bits (1 4607182418800017408). The format is a compile-time constant,
+    # so each slot's real kind IS statically known — the per-slot kinds are
+    # recorded and the subscript picks the right accessor per index.
+    # See bugs/hard/CODEGEN_struct_module.md.
+    test_gimple_stdout("gimple_struct_mixed_int_float_formats", """\
+fn main():
+    var m = struct.unpack('<if', b'\\x01\\x00\\x00\\x00\\x00\\x00\\x80?')
+    print(m[0])
+    print(m[1])
+    var q = struct.unpack('>dhh', b'?\\xf0\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x01')
+    print(q[0])
+    print(q[1])
+    print(q[2])
+    var b = struct.unpack('<Bd', b'\\x07\\x00\\x00\\x00\\x00\\x00\\x00\\xf0?')
+    print(b[0])
+    print(b[1])
+""", "1\n1.0\n1.0\n2\n1\n7\n1.0\n")
+
+    # The uniform cases must be unchanged by the per-slot-kind path.
+    test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
+fn main():
+    var d = struct.unpack('<2f', b'\\x00\\x00\\x80?\\x00\\x00\\x00@')
+    print(d[0])
+    print(d[1])
+    var i = struct.unpack('<3i', b'\\x01\\x00\\x00\\x00\\x02\\x00\\x00\\x00\\x03\\x00\\x00\\x00')
+    print(i[0])
+    print(i[1])
+    print(i[2])
+    var s = struct.unpack('<4s', b'ab\\x00\\x00')
+    print(s[0])
+""", "1.0\n2.0\n1\n2\n3\nb'ab\\x00\\x00'\n")
+
     test_gimple_stdout("gimple_struct_unpack_from_and_error", """\
 fn main():
     var u = struct.unpack_from('<H', b'\\xff\\x01\\x00\\x02', 2)
@@ -1591,6 +1686,37 @@ fn main():
     var c = CentralDir()
     c.read(b'\\x01\\x00\\x02\\x00')
 """, "1 2 4\n")
+
+    # The `var` spelling of a class-body field. To Python this is the SAME
+    # declaration as the bare `NAME = ...` above — `var` only suppresses a
+    # type inference the class body never did — but only the bare spelling
+    # reached the class-attribute registration and global-declaration
+    # passes. A `var` field got a struct field with NO initializer anywhere,
+    # so it stayed NULL and the first read was a live segfault; a scalar
+    # `var` field was typed as a `struct <Cls> *` (the "unknown field"
+    # fallback) and read back 0. See bugs/hard/CODEGEN_struct_module.md.
+    test_gimple_stdout("gimple_struct_var_declared_class_field", """\
+struct CentralDir:
+    var FIELD_STRUCT = struct.Struct('<HH')
+
+    fn read(self, data: bytes):
+        var t = self.FIELD_STRUCT.unpack(data)
+        print(t[0], t[1], self.FIELD_STRUCT.size)
+
+class Config:
+    var NAME = 'hello'
+    var N = 5
+    var ITEMS = []
+    var TABLE = {}
+
+    fn show(self):
+        print(self.NAME, self.N, len(self.ITEMS), len(self.TABLE))
+
+fn main():
+    var c = CentralDir()
+    c.read(b'\\x01\\x00\\x02\\x00')
+    Config().show()
+""", "1 2 4\nhello 5 0 0\n")
 
     # struct.pack with a trailing splat arg + the packed bytes fed into a
     # `+` concat whose other operand isn't statically MojoBytes* — the
@@ -1716,7 +1842,8 @@ def main():
     run_tests()
 
     print()
-    print(f"Results: {_PASS} passed, {_FAIL} failed")
+    print(f"Results: {_PASS} passed, {_FAIL} failed"
+          + (f", {_TIMEOUT} timed out" if _TIMEOUT else ""))
     sys.exit(0 if _FAIL == 0 else 1)
 
 

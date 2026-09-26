@@ -1,5 +1,87 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
+## Status (2026-09-26 — CAPTURING lambdas called through their local now WORK; `*a, **k` still open, with the root cause re-scoped)
+
+The doc's framing was "the parameterized-lambda gap": a `lambda` with
+`*args`/`**kwargs` is refused. Chasing that turned up something bigger and
+more general underneath it, so this entry is reorganised around what was
+actually found.
+
+### The real defect: ANY lambda that captures an enclosing local silently returned 0
+
+A `lambda` lifts to a top-level C function taking only its own declared
+parameters — a plain function pointer, with nowhere to put the enclosing
+function's locals. A nested `def` closure does not have this problem
+because it goes through the env-struct mechanism
+(`mojo/middle/closures.py`), which **lambdas never participated in**. So a
+lambda reading an enclosing local compiled to a body naming a variable
+that does not exist there, and each read stubbed to 0:
+
+```python
+var n = 7
+var f = lambda: n
+print(f())          # printed 0 — silently, exit 0
+```
+
+Not the variadic shape, and not specific to generators: every capturing
+lambda in the compiled path. `_lower_LambdaExpr`'s `captures` list only
+ever picked up the `lambda e, self=self` default-BINDING idiom, never a
+body that simply reads a local.
+
+### Landed: inline reduction for the dominant shape
+
+New `mojo/middle/lambdareduce.py` decides, per enclosing function, which
+locals hold a lambda that (a) captures something, (b) declares no
+`*args`/`**kwargs`, and (c) never escapes — assigned once, never rebound,
+and every other occurrence of the name is the callee of a call. Those
+lambdas are NOT lifted; their body is lowered at the call site, in the
+enclosing scope, where every captured name already resolves. No function
+pointer, no env struct, no capture plumbing.
+
+Verified by real compile+link+run: `lambda: n` → 7 (was 0),
+`lambda: len(xs)` → 3 (was 0), `lambda x: n + x` → 8 (was 1). Regression
+test `gimple_capturing_lambda_inlined_at_call`.
+
+`*args`/`**kwargs` is deliberately EXCLUDED from the reduction: those need
+the extra positionals packed into a `MojoList *` and the keywords into a
+`MojoDict *` at every call site, and the lifted path already does exactly
+that (see `_lower_LambdaExpr`'s `pname.startswith('**')` branches).
+Re-implementing the packing in the inliner would be a second,
+independently-maintained copy of one convention — worse than leaving the
+shape as it is.
+
+### Still open, with the corpus instances named
+
+A capturing lambda that ESCAPES (passed as an argument, returned, stored),
+is REBOUND, or declares `*args`/`**kwargs` is still lifted, still loses
+its captures, and still returns a wrong value. Measured occurrences of the
+escaping/rebound form in real stdlib: `importlib/util.py` 8 sites
+(including the `lambda *args, **kwargs: cls(loader(*args, **kwargs))`
+LazyLoader factory this doc has always named), `functools.py` 4,
+`enum.py` 3. Pinned by `gimple_escaping_capturing_lambda_still_lifted`,
+which asserts the current (wrong) value on purpose so a fix flips it
+deliberately rather than silently.
+
+The right fix is to put lambdas on the env-struct path nested `def`
+closures already use — the machinery is proven (a nested `def` capturing a
+local returns 7 today) and `discover_closures` already computes `free`
+variables and builds an env struct; lambdas are simply not discovered,
+because they are expressions rather than statements. That is a real piece
+of work, not a widening of this one.
+
+### A refusal that was written and then deliberately removed
+
+Worth recording, because it is the third time this pattern came up and the
+blast radius was different each time. Non-reducible capturing lambdas were
+at first made an outright `RuntimeError`, matching what the generator and
+nested-async paths do for shapes they cannot represent. It fires on
+`functools.py` — a core module. Trading "compiles, with a wrong value
+inside" for "this module stops compiling", on the strength of a false
+positive in a same-day static escape analysis, is not a good trade, so the
+refusal was reverted and the unconditional win kept instead. The escape
+analysis is sound as far as it is exercised (the escaping case does NOT
+get inlined), but "sound" is not the same as "safe to fail a build on".
+
 ## Status (2026-09-25 — `pickletools._genops` lambda occurrence confirmed superseded on A3)
 
 The A3 mixed-arity tuple-yield work now makes real `Lib/pickletools.py`

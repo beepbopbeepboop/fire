@@ -566,6 +566,31 @@ def _struct_value_codes(fmt: str | None):
     return codes
 
 
+def _struct_slot_kinds(codes):
+    """Per-slot element kind for an unpack format: one of 'int'/'double'/
+    'bytes' per value, in wire order.
+
+    A `MojoList` holds ONE element ctype, which is why a format mixing ints
+    and floats used to degrade wholesale to int64 slots — the float came
+    back as its raw IEEE bits (`struct.unpack('<if', ...)` giving
+    `1 4607182418800017408`). But the format string is a compile-time
+    constant here, so each slot's real kind is statically known and only
+    the CONTAINER is untyped. Recording the per-slot kinds lets the
+    subscript path pick the right accessor per index instead of one
+    accessor for the whole list. See
+    bugs/hard/CODEGEN_struct_module.md.
+    """
+    out = []
+    for c in codes or ():
+        if c in 'fd':
+            out.append('double')
+        elif c == 's' or c == 'c':
+            out.append('bytes')
+        else:
+            out.append('int')
+    return out
+
+
 def _struct_elem_ctype(codes):
     """Uniform MojoList element ctype for an unpack tuple, or 'int64_t'
     when the codes are mixed / unknown (the common integer-format case is
@@ -642,6 +667,13 @@ def _struct_buffer_arg(gen, node_arg):
 def _struct_tag_unpack_result(gen, t, codes):
     gen._actual_types[t] = 'MojoList *'
     gen._elem_types[t] = _struct_elem_ctype(codes)
+    # Per-slot kinds, so a format that mixes ints and floats still reads
+    # each slot with the right accessor (see _struct_slot_kinds). Recorded
+    # for EVERY format, not just mixed ones: it is the precise answer, and
+    # it costs one dict write.
+    kinds = _struct_slot_kinds(codes)
+    if kinds:
+        gen._struct_slot_kinds[t] = kinds
 
 
 def _lower_struct_module_call(gen, node, method_name):

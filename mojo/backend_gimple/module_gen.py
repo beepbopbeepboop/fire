@@ -673,6 +673,26 @@ def _emit_reflection_dispatch(self, parts):
 
 
 
+def _class_field_decl(field):
+    """`(name, value)` for a class-body field declaration in EITHER
+    spelling, or None if this field is not that shape.
+
+    `NAME = <value>` (an AssignStmt) and `var NAME = <value>` (a VarDecl)
+    are the same declaration to Python — `var` only suppresses a type
+    inference the class body never performed — but the class-attribute
+    registration and global-declaration passes both used to match only the
+    bare AssignStmt. A `var FIELD = struct.Struct('<HH')` therefore got a
+    struct FIELD with the right ctype and NO initializer anywhere, leaving
+    it NULL: the first `self.FIELD.size` was a live segfault, not a wrong
+    value. Both spellings now reach both passes. Returns None for a bare
+    `var x` with no value, which neither pass can initialize."""
+    if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr):
+        return field.target.name, field.value
+    if isinstance(field, VarDecl) and field.name and field.value is not None:
+        return field.name, field.value
+    return None
+
+
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
     for node in _walk_ast(body):
@@ -2427,7 +2447,27 @@ def gen_module_impl(self, stmts):
                         # A recognisable value-typed default (e.g.
                         # `var FIELD_STRUCT = struct.Struct('<HH')`) — take
                         # its ctype rather than the `Struct *`-self fallback.
-                        _val_ct = _class_attr_ctype(getattr(field, 'value', None))
+                        _fval = getattr(field, 'value', None)
+                        _val_ct = _class_attr_ctype(_fval)
+                        if _val_ct is None:
+                            # A literal default states its own type, and the
+                            # `s.name + ' *'` fallback below ("we don't know
+                            # what this field holds") is what made the `var`
+                            # spelling of a class attribute unusable: a `var
+                            # NAME = 'hello'` field was typed as a
+                            # `struct <Cls> *`, so the allocator's
+                            # per-instance init — gated on the field type and
+                            # the `_classattr_` global type agreeing — never
+                            # fired and `self.NAME` read back 0. The BARE
+                            # `NAME = 'hello'` spelling never hit this path
+                            # (it is an AssignStmt, not a VarDecl) and worked,
+                            # which is exactly the asymmetry this closes.
+                            if isinstance(_fval, StringLiteral):
+                                _val_ct = 'char *'
+                            elif isinstance(_fval, FloatLiteral):
+                                _val_ct = 'double'
+                            elif isinstance(_fval, (IntLiteral, BoolLiteral)):
+                                _val_ct = 'int64_t'
                         self.struct_field_types[s.name][field.name] = (
                             _inherited_ft if _inherited_ft is not None
                             else _val_ct if _val_ct is not None
@@ -2436,53 +2476,87 @@ def gen_module_impl(self, stmts):
                 m.name for m in s.methods if getattr(m, 'is_generator', False))
             self._class_attrs[s.name] = {}
             for field in s.fields:
-                if isinstance(field, AssignStmt):
-                    if isinstance(field.target, IdentExpr):
-                        aname = field.target.name
-                        mangled = f"_classattr_{s.name}__{aname}"
-                        self._class_attrs[s.name][aname] = mangled
-                        v = field.value
-                        ctype = _class_attr_ctype(v)
-                        if ctype is not None:
-                            self._global_var_types[mangled] = ctype
-                            # UPGRADE an already-registered instance field's
-                            # type only — do NOT create one for a pure
-                            # class-level attribute. A container-valued class
-                            # attr (`Parser._CONV_KWS = {...}`) otherwise gets
-                            # a struct field here, and `_lower_MemberExpr`
-                            # returns its struct-FIELD branch before its
-                            # class-attr branch — so `self._CONV_KWS` read the
-                            # (never-initialized) field, not the
-                            # `_classattr_<Cls>__<X>` global, and the
-                            # self-hosted parser stopped recognizing
-                            # convention keywords (`for ref x in ...`).
-                            cur = self.struct_field_types[s.name].get(aname)
-                            if cur is not None and cur in ('int', 'int64_t'):
-                                self.struct_field_types[s.name][aname] = ctype
-                            if ctype == 'MojoList *' and isinstance(v, (ListExpr, TupleExpr)):
-                                self._field_elem_types.setdefault(s.name, {})[aname] = (
-                                    self._infer_list_elem_type(v.elements))
-                        elif isinstance(v, StringLiteral):
-                            self._global_var_types[mangled] = 'char *'
-                        elif isinstance(v, (IntLiteral, BoolLiteral)):
-                            self._global_var_types[mangled] = 'int64_t'
-                        else:
-                            self._global_var_types[mangled] = 'int64_t'
-                        if field.type_ann is not None:
-                            _dv_cls_early = self._annotation_dict_val_type(_as_str(field.type_ann))
-                            if _dv_cls_early is not None:
-                                self._global_dict_val_types[mangled] = _dv_cls_early
-                                # An annotated container class-attr
-                                # (`_str_pool: dict[str, str] = {}`) is ALSO
-                                # an instance field — the typed-assign loop
-                                # below skips it (already registered here),
-                                # so record its dict VALUE type for
-                                # `_lower_MemberExpr` field reads too, or
-                                # `for k, v in self._str_pool.items()`
-                                # unpacks `v` as int64 and `str()`s the
-                                # pointer (garbage `_slit_N` names).
-                                self._field_dict_val_types.setdefault(
-                                    s.name, {})[aname] = _dv_cls_early
+                # A `var NAME = <value>` class-body field and a bare
+                # `NAME = <value>` one are the SAME declaration to Python —
+                # `var` only suppresses a type inference the class body
+                # doesn't do anyway — but only the bare spelling was
+                # registered here. A `var FIELD = struct.Struct('<HH')`
+                # therefore got a struct FIELD (right ctype, from the loop
+                # above) with NO initializer emitted anywhere, so the field
+                # stayed NULL and the first `self.FIELD.size` dereferenced
+                # it: a live SEGFAULT, not a wrong value. Accept both
+                # spellings; the VarDecl case just reads name/value off the
+                # node instead of off `.target`/`.value`.
+                _is_assign = isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr)
+                if _is_assign:
+                    aname = field.target.name
+                    v = field.value
+                elif isinstance(field, VarDecl) and field.name and field.value is not None:
+                    # Only for a value this block can actually INITIALIZE. A
+                    # bare `var x` (no value), or one whose value is not a
+                    # shape handled below, must NOT become a class
+                    # attribute: the field-init path further down owns
+                    # those, and minting a `_classattr_` global for them
+                    # would shadow the field exactly the way the `_CONV_KWS`
+                    # comment below describes.
+                    if not isinstance(field.value, (StringLiteral, IntLiteral,
+                                                    BoolLiteral, ListExpr, TupleExpr,
+                                                    DictExpr, SetExpr, FloatLiteral)) \
+                            and _class_attr_ctype(field.value) is None:
+                        continue
+                    aname = field.name
+                    v = field.value
+                else:
+                    continue
+                mangled = f"_classattr_{s.name}__{aname}"
+                self._class_attrs[s.name][aname] = mangled
+                ctype = _class_attr_ctype(v)
+                if ctype is None:
+                    if isinstance(v, StringLiteral):
+                        ctype = 'char *'
+                    elif isinstance(v, FloatLiteral):
+                        ctype = 'double'
+                    else:
+                        ctype = 'int64_t'
+                self._global_var_types[mangled] = ctype
+                # UPGRADE an already-registered instance field's type —
+                # do NOT create one for a pure class-level attribute. A
+                # container-valued class attr (`Parser._CONV_KWS = {...}`)
+                # otherwise gets a struct field here, and `_lower_MemberExpr`
+                # returns its struct-FIELD branch before its class-attr
+                # branch — so `self._CONV_KWS` read the (never-initialized)
+                # field, not the `_classattr_<Cls>__<X>` global, and the
+                # self-hosted parser stopped recognizing convention keywords
+                # (`for ref x in ...`).
+                #
+                # This runs for the SCALAR defaults too, not just container
+                # ones: `_lower_MemberExpr` also prefers the struct field for
+                # `self.NAME`, so a `var NAME = 'hello'` whose field stayed
+                # at the generic `int64_t` default never got the per-instance
+                # init (the allocator's init is gated on the field type and
+                # the global type agreeing) and read back 0. Resolving the
+                # type ONCE above, then upgrading from it, is what makes the
+                # two agree for every spelling.
+                cur = self.struct_field_types[s.name].get(aname)
+                if cur is not None and cur in ('int', 'int64_t') and ctype != 'int64_t':
+                    self.struct_field_types[s.name][aname] = ctype
+                if ctype == 'MojoList *' and isinstance(v, (ListExpr, TupleExpr)):
+                    self._field_elem_types.setdefault(s.name, {})[aname] = (
+                        self._infer_list_elem_type(v.elements))
+                if getattr(field, 'type_ann', None) is not None:
+                    _dv_cls_early = self._annotation_dict_val_type(_as_str(field.type_ann))
+                    if _dv_cls_early is not None:
+                        self._global_dict_val_types[mangled] = _dv_cls_early
+                        # An annotated container class-attr
+                        # (`_str_pool: dict[str, str] = {}`) is ALSO an
+                        # instance field — the typed-assign loop below skips
+                        # it (already registered here), so record its dict
+                        # VALUE type for `_lower_MemberExpr` field reads too,
+                        # or `for k, v in self._str_pool.items()` unpacks `v`
+                        # as int64 and `str()`s the pointer (garbage `_slit_N`
+                        # names).
+                        self._field_dict_val_types.setdefault(
+                            s.name, {})[aname] = _dv_cls_early
             for field in s.fields:
                 _is_typed_assign = (isinstance(field, AssignStmt)
                                      and isinstance(field.target, IdentExpr)
@@ -7401,8 +7475,9 @@ def gen_module_impl(self, stmts):
                 mangled = _as_str(_ca_map[aname])
                 aname = _as_str(aname)
                 for field in s.fields:
-                    if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr) and field.target.name == aname:
-                        v = field.value
+                    _cfd = _class_field_decl(field)
+                    if _cfd is not None and _cfd[0] == aname:
+                        v = _cfd[1]
                         ctype = _class_attr_ctype(v)
                         # `_X = frozenset({...})` / `set([...])` / `list((...))`:
                         # the container-constructor call wraps the literal whose
