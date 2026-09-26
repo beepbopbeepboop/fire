@@ -365,19 +365,56 @@ def _member_slot_key(expr) -> str | None:
 
 
 def _emit_add_imm(asm, xd: int, xn: int, imm: int) -> None:
-    """ADD Xd, Xn, #imm for imm > 4095 (split into imm12 chunks)."""
+    """ADD Xd, Xn, #imm, using the shifted form where it fits."""
+    if imm >= 0:
+        _emit_imm_shift12(asm, xd, xn, imm, encode_add_xd_xn_imm,
+                          encode_add_xd_xn_imm_sh)
+    else:
+        _emit_imm_shift12(asm, xd, xn, -imm, encode_sub_xd_xn_imm,
+                          encode_sub_xd_xn_imm_sh)
+
+
+def _emit_imm_shift12(asm, xd, xn, imm, enc_plain, enc_shift) -> None:
+    """Materialise `imm` into Xd with as few ADD/SUB immediates as possible.
+
+    The instruction has a 12-bit immediate field and a shift that scales it by
+    4096, so almost every large constant is ONE instruction with `sh` set
+    rather than a chain. The frame scratch here is 131072 = 32 << 12, and this
+    runs at the top of every list base, dict, comprehension and container
+    append — the chunked version spent 33 instructions on it each time, in a
+    function that had no other reason to be large.
+
+    Two instructions cover everything that fits: the low 12 bits plainly, then
+    the remainder shifted. Only beyond 2^24 does it fall back to chunking.
+    """
+    if imm < 0:
+        imm = -imm
+    if imm <= 0xFFF:
+        asm.emit(enc_plain(xd, xn, imm))
+        return
+    if (imm & 0xFFF) == 0 and (imm >> 12) <= 0xFFF:
+        asm.emit(enc_shift(xd, xn, imm >> 12, 1))
+        return
+    low = imm & 0xFFF
+    high = imm >> 12
+    if high <= 0xFFF:
+        asm.emit(enc_plain(xd, xn, low))
+        asm.emit(enc_shift(xd, xd, high, 1))
+        return
     while imm > 0:
-        chunk = min(imm, 4095)
-        asm.emit(encode_add_xd_xn_imm(xd, xn, chunk))
+        chunk = min(imm, 0xFFF)
+        asm.emit(enc_plain(xd, xn, chunk))
         imm -= chunk
 
 
 def _emit_sub_imm(asm, xd: int, xn: int, imm: int) -> None:
-    """SUB Xd, Xn, #imm for imm > 4095 (split into imm12 chunks)."""
-    while imm > 0:
-        chunk = min(imm, 4095)
-        asm.emit(encode_sub_xd_xn_imm(xd, xn, chunk))
-        imm -= chunk
+    """SUB Xd, Xn, #imm, using the shifted form where it fits."""
+    if imm >= 0:
+        _emit_imm_shift12(asm, xd, xn, imm, encode_sub_xd_xn_imm,
+                          encode_sub_xd_xn_imm_sh)
+    else:
+        _emit_imm_shift12(asm, xd, xn, -imm, encode_add_xd_xn_imm,
+                          encode_add_xd_xn_imm_sh)
 
 
 class ARM64Codegen:
@@ -2299,13 +2336,14 @@ class ARM64Codegen:
         The body only pushes BELOW SP (stp_sp_pre), so this region stays
         free for list blobs. Addressing is X29-relative because SP moves
         during expression evaluation. Exits with base in X9."""
-        self.asm.emit(encode_mov_zr_xn(9, 29))
-        _emit_sub_imm(self.asm, 9, 9, _SCRATCH)
-        saved = 16 * self._npairs
-        if saved:
-            self.asm.emit(encode_sub_xd_xn_imm(9, 9, saved))
-        if offset:
-            _emit_add_imm(self.asm, 9, 9, offset)
+        # One SUB from the frame pointer, not mov-then-three-subs. The total
+        # is a compile-time constant, and with the shifted-immediate form it
+        # almost always fits in a single instruction; expressing it as
+        # separate steps also made the codegen fragile, since the saved-pair
+        # and blob offsets are only meaningful relative to the scratch base
+        # this line is computing.
+        total = _SCRATCH + 16 * self._npairs - offset
+        _emit_sub_imm(self.asm, 9, 29, total)
 
     def _emit_list(self, expr: F.ListExpr) -> None:
         """Stack-allocate a list blob: [count:i64][elem0]...[elemN-1].

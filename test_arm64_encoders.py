@@ -114,6 +114,15 @@ def cases():
         c.append((f"ldrsw x4, [x3, #{imm}]", A.encode_ldrsw_xt_xn_imm(4, 3, imm)))
     for imm in (0, 1, 9):
         c.append((f"ldrsb x4, [x3, #{imm}]", A.encode_ldrsb_xt_xn_imm(4, 3, imm)))
+    # ── the shifted immediate form, which is what a large scratch offset
+    # actually needs (131072 = 32 << 12) ─────────────────────────────────
+    for imm12, sh in ((0, 0), (1, 0), (0xFFF, 0), (1, 1), (32, 1),
+                      (0xFFF, 1)):
+        scale = "" if sh == 0 else ", lsl #12"
+        c.append((f"sub x9, x9, #{imm12}{scale}",
+                  A.encode_sub_xd_xn_imm_sh(9, 9, imm12, sh)))
+        c.append((f"add x0, x0, #{imm12}{scale}",
+                  A.encode_add_xd_xn_imm_sh(0, 0, imm12, sh)))
     # ── flag-setting ALU ───────────────────────────────────────────────
     for xn, xm in ((0, 1), (1, 0), (7, 31), (31, 31)):
         c.append((f"tst x{xn}, x{xm}", A.encode_tst_xn_xm(xn, xm)))

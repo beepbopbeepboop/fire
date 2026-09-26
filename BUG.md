@@ -563,3 +563,39 @@ reading the register that CBZ tests. A `B.cond` there is neither a `cbz` block
 nor a register, so the proof would silently lose the condition. That is the
 work being deferred, and it is the only thing standing between the current
 tree and the largest win available in the audit.
+
+
+## The largest codegen win in the project: immediates above 4095
+
+Found by asking where the instructions actually GO, after the audit's
+instruction-count measurement came out suspiciously small.
+
+`_emit_sub_imm` / `_emit_add_imm` split any immediate above 4095 into a chain
+of 4095-sized `SUB`/`ADD` instructions. The formal backend subtracts its 128KB
+scratch from the frame pointer at the top of **every** list base, dict,
+comprehension, container append and indexed access — and 131072 is
+`32 << 12`, which arm64's `SUB (immediate)` encodes in ONE instruction via the
+optional `LSL #12` on its 12-bit field.
+
+So every container operation in the backend was paying **33 instructions** for
+an address computation, and a program using lists and dicts was roughly 4x
+larger than it needed to be:
+
+    container benchmark, before -> after
+      997 -> 261    (shifted immediates)
+      261 -> 246    (fold the frame-base SUB)
+      246 -> 225    (one SUB from X29 instead of mov + three subs)
+
+Same answer (58) at every step. The 12 new cases in
+`test_arm64_encoders.py` check the `sh` variants against `as -arch arm64`, so
+the encoding is the assembler's and not a bit layout recalled from the spec.
+
+The lesson worth keeping: an instruction-count audit that only asks "can we
+express what a compiler expresses" misses this entirely. `sub` was fully
+covered the whole time. The defect was not a missing instruction but a
+*misuse* of one that was present — which is a different question, and the one
+that actually decides how big the generated code is.
+
+Also folded while in there: `_emit_list_base` emitted `mov x9, x29` followed
+by up to three separate adjustments, when the whole displacement is a
+compile-time constant and fits the shifted form in one.

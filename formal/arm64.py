@@ -901,3 +901,29 @@ def encode_subs_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
     """
     assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= xm <= 31
     return struct.pack('<I', 0xEB000000 | (xm << 16) | (xn << 5) | xd)
+
+
+def encode_sub_xd_xn_imm_sh(xd: int, xn: int, imm12: int, sh: int = 0) -> bytes:
+    """SUB (immediate) with the optional LSL #12 on the 12-bit field.
+
+    Without this, an immediate above 4095 can only be reached by a chain of
+    subtractions — and the formal backend subtracts its 128KB scratch from the
+    frame pointer at the top of EVERY list base, dict, comprehension and
+    container append. 131072 is 32 << 12, so the honest encoding is one
+    instruction; the chunked path was emitting thirty-three.
+
+    `sh` selects the shift: 0 is plain, 1 scales imm12 by 4096.
+    """
+    # 31 is SP, and the function prologue adjusts SP through here.
+    assert 0 <= xd <= 31 and 0 <= xn <= 31
+    assert 0 <= imm12 <= 0xFFF
+    insn = 0xD1000000 | (sh << 22) | (imm12 << 10) | (xn << 5) | xd
+    return struct.pack('<I', insn)
+
+
+def encode_add_xd_xn_imm_sh(xd: int, xn: int, imm12: int, sh: int = 0) -> bytes:
+    """ADD (immediate) with the optional LSL #12. See encode_sub_xd_xn_imm_sh."""
+    assert 0 <= xd <= 31 and 0 <= xn <= 31
+    assert 0 <= imm12 <= 0xFFF
+    insn = 0x91000000 | (sh << 22) | (imm12 << 10) | (xn << 5) | xd
+    return struct.pack('<I', insn)
