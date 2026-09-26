@@ -916,6 +916,97 @@ theorem x86_step_sub_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_flags_sub, h_rip, h_b0, h_b1, h_b2, h_imm]
 
+/-! The compare family: `cmp` and `test` set flags and leave every register
+    alone, which is what makes them pleasant to generalise -- there is no
+    successor register to name, only flags.  Both are REX.W 3x /r with mod=3,
+    and the operands are the rm field extended by REX.B (as `a`) and the reg
+    field extended by REX.R (as `b`), so `cmp %rax, %rbx` reads as
+    `flags_sub rbx rax`.  Together with `setcc` below these three lemmas
+    unblocked the most examples of anything in this file. -/
+
+/-- `cmp r64, r64` (REX.W 39 /r, mod=3), general over both registers: flags
+    only, so nothing in the register file moves. -/
+theorem x86_step_cmp_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x39)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { s with
+        rip := m + 3,
+        zf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) (x86_get_reg s (rm + x86_rex_b rex) - x86_get_reg s (reg + x86_rex_r rex))).zf,
+        sf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) (x86_get_reg s (rm + x86_rex_b rex) - x86_get_reg s (reg + x86_rex_r rex))).sf,
+        cf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) (x86_get_reg s (rm + x86_rex_b rex) - x86_get_reg s (reg + x86_rex_r rex))).cf,
+        of_ := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) (x86_get_reg s (rm + x86_rex_b rex) - x86_get_reg s (reg + x86_rex_r rex))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `test r64, r64` (REX.W 85 /r, mod=3), general over both registers: the
+    AND is computed and thrown away, and only the flags survive. -/
+theorem x86_step_test_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x85)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { s with
+        rip := m + 3,
+        zf := (x86_flags_logic s (x86_get_reg s (rm + x86_rex_b rex) &&& x86_get_reg s (reg + x86_rex_r rex))).zf,
+        sf := (x86_flags_logic s (x86_get_reg s (rm + x86_rex_b rex) &&& x86_get_reg s (reg + x86_rex_r rex))).sf,
+        cf := (x86_flags_logic s (x86_get_reg s (rm + x86_rex_b rex) &&& x86_get_reg s (reg + x86_rex_r rex))).cf,
+        of_ := (x86_flags_logic s (x86_get_reg s (rm + x86_rex_b rex) &&& x86_get_reg s (reg + x86_rex_r rex))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-! The two register-to-register ALU forms the backend emits, general over
+    both registers.  The destination is the rm field, as everywhere else; only
+    the source is the reg field.  The model computes `add`'s flags through
+    `x86_flags_logic` on the written-back state and then overwrites all four
+    with the add's own, so the two end up with the same shape -- which is
+    worth knowing, because the code does not look like it does. -/
+
+/-- `add r64, r64` (REX.W 01 /r, mod=3), general over both registers. -/
+theorem x86_step_add_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x01)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) + (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) + (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) + (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) + (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_add s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) + (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `sub r64, r64` (REX.W 29 /r, mod=3), general over both registers. -/
+theorem x86_step_sub_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x29)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some { x86_set_reg s (rm + x86_rex_b rex) ((x86_get_reg s (rm + x86_rex_b rex)) - (x86_get_reg s (reg + x86_rex_r rex))) with
+        rip := m + 3,
+        zf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) - (x86_get_reg s (reg + x86_rex_r rex)))).zf,
+        sf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) - (x86_get_reg s (reg + x86_rex_r rex)))).sf,
+        cf := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) - (x86_get_reg s (reg + x86_rex_r rex)))).cf,
+        of_ := (x86_flags_sub s (x86_get_reg s (rm + x86_rex_b rex)) (x86_get_reg s (reg + x86_rex_r rex)) ((x86_get_reg s (rm + x86_rex_b rex)) - (x86_get_reg s (reg + x86_rex_r rex)))).of_ } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
+        x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
 /-! `mov r64, r/m64` in its two shapes.  These two cover every instance the
 backend emits -- 170 across the examples, and `mov_r64_rm64` was the single
 form blocking the most end-to-end proofs, so it is worth having the general

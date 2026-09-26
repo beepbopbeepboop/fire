@@ -40,14 +40,34 @@ skipped silently -- the point is to know what is and is not proved.
   3 examples are proved end to end -- ret42, seven, const2 -- and the rest
   name the forms that block them, most-blocking first:
 
-      28  jcc_rel32        26  movzx_r64_r8   1  each of the rest
-      27  alu_rr:test      21  jmp_rel32
-      27  alu_rr:cmp       17  alu_rr:add
-      26  setcc            11  alu_rr:sub
+      28  jcc_rel32        26  setcc          8  imul_r64_r64
+      26  movzx_r64_r8     21  jmp_rel32      7  call_rel32
+      17  alu_rr:add       11  alu_rr:sub      3  movsx_r64_r8
+
+  `alu_rr:cmp` and `alu_rr:test` came off this list with the two flags-only
+  lemmas, 27 examples each.  The proved count did not move, because every
+  example they blocked was also blocked by something else -- the blockers
+  overlap heavily, so the useful measure of a lemma is what it removes from
+  this list, not the count it adds to the proved line.
 
   `mov_r64_rm64` and `mov_rm64_r64` are gone from that list: the five general
   `mov` lemmas in X86.lean cover every shape the backend emits for them, and
   taking them out is what took the suite from 1 proved to 3.
+
+  `setcc` (26) is the one that does NOT fall out of a generalisation, and it
+  is worth saying why rather than leaving it in the list.  `cmp` and `test`
+  above are flags-only: proving them is proving the operands and the flag
+  function, and the successor names no register.  `setcc` sits behind the
+  decoder's 0x0F dispatch, where reaching the case means excluding the jcc
+  range, 0xaf (imul) and the movzx/movsx opcodes, and where the destination
+  is the r/m field rather than the reg field -- the opposite sense to `mov`,
+  which is where the two existing concrete lemmas (`setne_al`, `setle_al`) got
+  their orientation.  The two concrete lemmas do cover the common conditions;
+  what is missing is the nibble-parameterised version, and the work is pinning
+  down which decoder (there is a 0x0F dispatch in `x86_step_rex` and another in
+  `x86_step_plain`, with different `rip + 3` / `rip + 4` lengths) the
+  no-REX encoding actually reaches, then stating the range and exclusion facts
+  separately so `simp` can use each as a rewrite.
 
   Three limits are worth stating separately, because each is a limit of what
   is proved here rather than a gap in it:
@@ -117,6 +137,19 @@ _FORMS = {
     "mov_rm64_r64_disp8": ("x86_step_mov_mem_disp8_r64", False,
                            ["rip", "b0", "b1", "b2", "disp", "rex", "w",
                             "mod", "rm", "reg", "rb", "rr"]),
+    # The only movzx the backend emits is `movzx rax, al` (48 0f b6 c0), all 33
+    # of them, so this uses the existing concrete lemma rather than a
+    # nibble- and register-parameterised one nothing would use.
+    "movzx_r64_r8": ("x86_step_movzx_rax_al", False,
+                     ["rip", "b0", "b1", "b2", "b3"]),
+    "alu_rr:add": ("x86_step_add_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:sub": ("x86_step_sub_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:cmp": ("x86_step_cmp_rr", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
+    "alu_rr:test": ("x86_step_test_rr", False,
+                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "leave": ("x86_step_leave", False, ["rip", "b0"]),
     "ret": ("x86_step_ret", False, ["rip", "b0"]),
 }
@@ -151,6 +184,17 @@ _SUCCS = {
         "{ $s with mem := mem_write_bytes $s.mem "
         "(Int.ofNat $s.rbp.toNat + $disp).toNat "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $m + 4 }",
+    "movzx_r64_r8": "{ $s with rax := $s.rax, rip := $m + 4 }",
+    "alu_rr:add":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
+    "alu_rr:sub":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
+    "alu_rr:cmp":
+        "{ $s with rip := $m + 3, zf := ($fc).zf, sf := ($fc).sf, "
+        "cf := ($fc).cf, of_ := ($fc).of_ }",
+    "alu_rr:test":
+        "{ $s with rip := $m + 3, zf := ($fl).zf, sf := ($fl).sf, "
+        "cf := ($fl).cf, of_ := ($fl).of_ }",
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
         "rsp := $s.rbp + 8, rip := $m + 1 }",
@@ -276,6 +320,30 @@ def emit(path, expected):
             extra_args = " %d %d %d (%d)" % (rex, modrm, (modrm >> 3) & 7, disp)
             extra_succ = {"$reg": str((modrm >> 3) & 7), "$disp": str(disp),
                           "$rex": str(rex)}
+        elif form in ("alu_rr:add", "alu_rr:sub"):
+            rex, modrm = raw[0], raw[2]
+            oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
+            ob = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
+            op = "+" if form.endswith("add") else "-"
+            res = "(%s %s %s)" % (oa, op, ob)
+            extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
+                                           modrm & 7)
+            extra_succ = {"$res": res, "$rex": str(rex), "$rm": str(modrm & 7),
+                          ("$fa" if op == "+" else "$fs"):
+                          "x86_flags_%s $s %s %s %s"
+                          % ("add" if op == "+" else "sub", oa, ob, res)}
+        elif form in ("alu_rr:cmp", "alu_rr:test"):
+            rex, modrm = raw[0], raw[2]
+            oa = "(x86_get_reg $s (%d + x86_rex_b $rex))" % (modrm & 7)
+            ob = "(x86_get_reg $s (%d + x86_rex_r $rex))" % ((modrm >> 3) & 7)
+            extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
+                                           modrm & 7)
+            if form == "alu_rr:cmp":
+                extra_succ = {"$fc": "x86_flags_sub $s %s %s (%s - %s)"
+                              % (a, b, a, b)}
+            else:
+                extra_succ = {"$fl": "x86_flags_logic $s (%s &&& %s)" % (oa, ob)}
+            extra_succ["$rex"] = str(rex)
         elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg"):
             rex, modrm = raw[0], raw[2]
             extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
