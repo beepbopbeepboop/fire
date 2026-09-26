@@ -714,8 +714,13 @@ class ARM64Codegen:
             return
         if name in self._var_spills:
             off = self._spill_off(name)
-            if -256 <= off <= 255:
-                self.asm.emit(encode_ldur_xt_xn_imm(dst, 29, off))
+            # `_spill_off` is the distance DOWN to the slot, so the
+            # displacement is NEGATIVE. Passing the positive value here
+            # addressed x29+off -- above the frame pointer, inside the
+            # CALLER's frame -- and silently corrupted it. The unscaled form
+            # takes a signed imm9, so it covers every offset from -8 to -256.
+            if off <= 256:
+                self.asm.emit(encode_ldur_xt_xn_imm(dst, 29, -off))
                 return
             self.asm.emit(encode_mov_zr_xn(17, 29))
             _emit_sub_imm(self.asm, 17, 17, off)
@@ -733,13 +738,12 @@ class ARM64Codegen:
             return
         if name in self._var_spills:
             off = self._spill_off(name)
-            if -256 <= off <= 255:
-                # One instruction instead of three. The unscaled form takes
-                # the displacement directly, which is exactly what a spill
-                # slot is: a fixed negative offset from the frame pointer.
-                # Nothing else in this backend needs X17 for a spill, which
-                # is why the saved-scratch dance existed only for this.
-                self.asm.emit(encode_stur_xt_xn_imm(src, 29, off))
+            # One instruction instead of three. The unscaled form takes a
+            # signed displacement directly, which is exactly what a spill slot
+            # is: a fixed negative offset from the frame pointer. (The sign
+            # matters: see the note in `_load_var`.)
+            if off <= 256:
+                self.asm.emit(encode_stur_xt_xn_imm(src, 29, -off))
                 return
             self.asm.emit(encode_mov_zr_xn(17, 29))
             _emit_sub_imm(self.asm, 17, 17, off)

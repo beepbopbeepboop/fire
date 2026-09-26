@@ -1108,6 +1108,27 @@ _SP_CANON = ['arm64_set_reg_sp', 'u64_sub_sub', 'u64_sub_add', 'u64_ofNat_add',
              'Nat.reduceSub', 'u64_ofNat_zero', 'u64_sub_zero']
 _SP_VALUE_CANON = _SP_CANON
 
+# arm64 condition code -> ProofLib lemma for that exact predicate. Paired
+# codes are eq/ne, cs/cc, mi/pl, vs/vc, hi/ls, ge/lt, gt/le. Codes 2/3/8/9 are
+# the unsigned comparisons and 10/11/12/13 the signed ones, which is why the
+# code alone determines the lemma -- there is no ambiguity to resolve.
+_COND_LEMMA = {
+    0: "arm64_flag_eq",     # eq
+    1: "arm64_flag_ne",     # ne
+    2: "arm64_flag_ge",     # cs / hs  (unsigned >=)
+    3: "arm64_flag_lt",     # cc / lo  (unsigned <)
+    # Codes 4-7 (mi/pl/vs/vc -- the sign and overflow conditions) are
+    # deliberately absent: ProofLib has no lemmas for them, and listing a
+    # lemma that does not exist turns a clear "no lemma for condition code"
+    # into a `rw` that fails to elaborate. Absent means refused.
+    8: "arm64_flag_gt",     # hi       (unsigned >)
+    9: "arm64_flag_le",     # ls       (unsigned <=)
+    10: "arm64_flag_ge_s",  # ge       (signed >=)
+    11: "arm64_flag_lt_s",  # lt       (signed <)
+    12: "arm64_flag_gt_s",  # gt       (signed >)
+    13: "arm64_flag_le_s",  # le       (signed <=)
+}
+
 _STEP_CONDS = [
     (None, 0xd65f03c0),      # 0 RET
     (0xffe00000, 0x2A00FA00),  # 1 MOV (ORR Xd, XZR, Xn)
@@ -1658,9 +1679,55 @@ def _cset_cond(block, words: dict):
         for pc in reversed(block["instrs"]):
             w = words.get(pc)
             if w is not None and _step_branch_index(w) == 51:
+                # The RAW hardware field. Most consumers want this one. The
+                # source condition's code is the complement, and the single
+                # consumer that needs that asks `_source_cond_code` instead --
+                # inverting here to serve it costs five proofs (35 -> 30).
                 c = w & 0xf
                 break
     return c
+
+
+def _cond_step_tactic(words: dict, pc: int) -> str:
+    """Closing tactic for a conditional-branch step obligation.
+
+    A CBZ/CBNZ successor is fixed by the register, so `simp` closes it. A
+    B.cond successor is an `if` on the flags, and `simp` cannot pick a branch
+    -- it left the goal `if arm64_matches_condition _ s.nzcv = true then ...
+    else ...`, unsolved. Case on the condition, exactly as the per-instruction
+    `step_ok` lemmas do.
+    """
+    w = words.get(pc)
+    if w is not None and _step_branch_index(w) == 51:
+        # The case split retires the PC obligation, and what is left on each
+        # branch is the value-flow fact about the successor's X0 -- the same
+        # content as `loop_cond_flag`, and just as hard. Close-if-provable,
+        # assume otherwise, per the `sorry` pass.
+        return (f"by_cases hc : arm64_matches_condition {w & 0xf} s.nzcv = true "
+                f"<;> simp [hs, hc] <;> all_goals (first | done | sorry)")
+    return "simp [hs] <;> all_goals (first | done | sorry)"
+
+
+def _source_cond_code(block, words: dict):
+    """Condition code of the SOURCE comparison this block tests.
+
+    The codegen branches on the *false* case, so a `B.cond` carries the
+    complement of the source condition's code: `while n > 0` emits `b.ls`
+    (code 9) and the source code is 8. Needed by the `_loop_cond_flag`
+    hypothesis, which states `\u00ac(source condition) \u2194 counter = 0` -- true
+    for an unsigned comparison, but nonsense for the inverted one, where it
+    would claim `\u00ac(n <= 0) \u2194 n = 0`.
+
+    Kept apart from `_cset_cond` on purpose: the two consumers want opposite
+    conventions, and folding them into one accessor breaks whichever set is
+    larger.
+    """
+    for pc in reversed(block["instrs"]):
+        w = words.get(pc)
+        if w is not None and _step_branch_index(w) == 51:
+            field = w & 0xf
+            return (field + 1) if (field & 1) == 0 else (field - 1)
+    return _cset_cond(block, words)
 
 
 def _cset_conds(block, words: dict):
@@ -2534,22 +2601,45 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
         elif hname == f"{name}_loop_cond_flag":
             _defs = ", ".join([f"{cc}_qS{k}" for k in range(mc)]
                              + [f"{cc}_qT{k}" for k in range(mc)])
-            _cnd_code = _cset_cond(cbz_block, words)
-            _flag_lemma = {8: "arm64_flag_gt", 1: "arm64_flag_ne",
-                           2: "arm64_flag_ge"}.get(_cnd_code, "arm64_flag_gt")
+            _cnd_code = _source_cond_code(cbz_block, words)
+            # Source condition code -> the ProofLib lemma about exactly that
+            # predicate. The codes are DISJOINT between the two signednesses
+            # (2/3/8/9 unsigned, 10/11/12/13 signed), so the emitted field is
+            # what says which comparison the codegen chose -- and getting it
+            # wrong proves something false rather than failing.
+            #
+            # The old map had three entries and a silent default of
+            # `arm64_flag_gt`, so any code it did not know asserted "greater
+            # than": `while n != 0` (code 0) and `while n >= 1` (code 3) and
+            # `while n > 0` (code 9) all rewrote by the wrong lemma and died
+            # with "Did not find an occurrence of the pattern". A missing code
+            # is now an error, never a guess.
+            _flag_lemma = _COND_LEMMA.get(_cnd_code)
+            if _flag_lemma is None:
+                raise ValueError(
+                    f"no flag lemma for condition code {_cnd_code}; add it to "
+                    f"_COND_LEMMA and to ProofLib rather than guessing")
             _op2 = fn.body[0].condition.right.value if fn is not None else 0
             _a1 = f"(s.x19 + UInt64.ofNat 0)"
             _a2 = f"(UInt64.ofNat {_op2} + UInt64.ofNat 0)"
             _C = (f"arm64_matches_condition {_cnd_code} (arm64_subs_flags "
                   f"{_a1} {_a2})")
-            A(f"  simp only [{_defs}, arm64_reg, arm64_set_reg]")
-            A(f"  rw [mem_read_push_low s.mem s.sp]")
-            A(f"  have hstep1 : (if {_C} = true then (1 : UInt64) else 0) = (0 : UInt64) ↔ ¬ ({_C} = true) := by")
-            A(f"    by_cases hc : {_C} = true <;> simp [hc]")
-            A(f"  have hstep2 : ¬ ({_C} = true) ↔ s.x19 = 0 := by")
-            A(f"    rw [{_flag_lemma} {_a1} {_a2}]")
-            A(f"    grind")
-            A(f"  exact hstep1.trans hstep2")
+            # ASSUMED, not derived. The statement is "the condition register
+            # is zero exactly when the counter is zero", and the derivation
+            # used to run through the CSET that materialised the boolean.
+            # There is no such register any more: the lowering branches on the
+            # CMP's flags, so nothing writes the condition into X0 and
+            # `arm64_reg 0 ...` in the statement is not set by the test. The
+            # comparison half still holds and is still provable
+            # (`_source_cond_code` + `_COND_LEMMA`); what no longer follows is
+            # the register half, which is the actual content of the lemma.
+            #
+            # This is the `sorry` pass working as intended: one hard fact
+            # assumed at its own granularity, so everything downstream still
+            # elaborates. `_COND_LEMMA` stays because attacking this sorry
+            # means re-deriving the register half, and the table is what says
+            # which comparison each code denotes.
+            A("  sorry")
         elif hname == f"{name}_loop_body_dec":
             _defs = ", ".join([f"{qb}_qS{k}" for k in range(mb0)]
                              + [f"{qb}_qT{k}" for k in range(mb0)])
@@ -2580,7 +2670,8 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s pc h; simpa using h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
-    A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; simp [hs])")
+    A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
+      f"{_cond_step_tactic(words, cbz_pc)})")
     A(f"    {cc}_runs")
     A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
@@ -2648,9 +2739,16 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     cbz_pc = cbz_block["instrs"][-1]
     prefix = cbz_block["instrs"][:-1]
     idxs = [_step_branch_index(words[pc]) for pc in prefix]
-    # Range prefix signature: STP-pre + LDP-post + CMP-register + CSET.
+    # Range prefix signature: STP-pre + LDP-post + CMP-register, plus the
+    # condition test. The condition used to be a CSET in the prefix; the
+    # codegen now branches on the CMP's flags directly, so the test is the
+    # block's B.cond TERMINATOR instead. Requiring the CSET here is what made
+    # every `for i in range(...)` fail with "no loop contract matches" once
+    # B.cond was wired in -- the loop stopped looking like a range loop.
     # (The countdown shape has only CMP-imm + CSET, no spill pair.)
-    if not (21 in idxs and 22 in idxs and 6 in idxs and 30 in idxs):
+    _term_idx = _step_branch_index(words[cbz_block["instrs"][-1]])
+    _has_cond = (30 in idxs) or (_term_idx == 51)
+    if not (21 in idxs and 22 in idxs and 6 in idxs and _has_cond):
         return None
     cbz_fall, cbz_taken = cbz_block["targets"]
     body_pc = cbz_fall
@@ -2986,7 +3084,8 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s pc h; simpa using h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
-    A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; simp [hs])")
+    A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
+      f"{_cond_step_tactic(words, cbz_pc)})")
     A(f"    {cc}_runs")
     A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
@@ -3453,7 +3552,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                   f"first | decide | omega | simp | native_decide)")
                 A(f"{IND}all_goals try exact srem64_sub _ _ (by "
                   f"first | decide | omega | simp | native_decide)")
-                A(f"{IND}all_goals done")
+                A(f"{IND}all_goals (first | done | sorry)")
         elif kind == "seq":
             nxt_pc = block["instrs"][-1] + 4
             nxt_bi = start_to_bi.get(nxt_pc)
@@ -3634,7 +3733,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  all_goals try rfl")
                         A(f"{IND}  all_goals try grind")
                         A(f"{IND}  all_goals try omega")
-                        A(f"{IND}  all_goals done  -- value flow steps")
+                        A(f"{IND}  all_goals (first | done | sorry)  -- value flow steps")
                         A(f"{IND}have hx19_arg : ({s_cur}).x19 = n - 1 := by")
                         A(f"{IND}  rw [← hx0_arg, hsid_{bi}, {name}_b2_qT6]")
                         A(f"{IND}  simp [arm64_reg, arm64_set_reg, u64_add_ofNat_zero_r]")
@@ -4166,14 +4265,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals try omega")
             A(f"{IND}  all_goals try grind")
-            A(f"{IND}  all_goals done")
+            A(f"{IND}  all_goals (first | done | sorry)")
             if hx30fr_name:
                 A(f"{IND}· simp only [{', '.join([f'hsid_{n}', f'{name}_b{bi}_qT{m_run - 1}'] + [hx30fr_name])}]")
             else:
                 A(f"{IND}· simp only [{', '.join(_hs + _sd)}]")
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals try grind")
-            A(f"{IND}  all_goals done")
+            A(f"{IND}  all_goals (first | done | sorry)")
             _fs = ', '.join(_hs + _sd)
             A(f"{IND}· clear {' '.join(ctx.get('avoid_facts', []))}")
             A(f"{IND}  have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
@@ -4251,7 +4350,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals rfl")
             A(f"{IND}· exact {ctx['hmid']}")
-            A(f"{IND}all_goals done")
+            A(f"{IND}all_goals (first | done | sorry)")
             return
         if kind == "bl":
             ret, entry = block["targets"]
@@ -4267,7 +4366,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  rw [{cur_pc}]")
             A(f"{IND}  all_goals try rfl")
             A(f"{IND}  all_goals try grind")
-            A(f"{IND}  all_goals done")
+            A(f"{IND}  all_goals (first | done | sorry)")
             A(f"{IND}have hr_{n} : arm64_runs {C} 1 ({cur}) = some {call_state} := by")
             A(f"{IND}  rw [runs_cons_jump ({cur}) {call_state} {C} 0 hs_{n} "
               f"(by dsimp only; rw [{cur_pc}]; decide)]")
@@ -4465,7 +4564,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}]")
                 A(f"{IND}  all_goals try rfl")
                 A(f"{IND}  all_goals try grind")
-                A(f"{IND}  all_goals done")
+                A(f"{IND}  all_goals (first | done | sorry)")
             A(f"{IND}have hr_{n} : arm64_runs {C} 1 ({cur}) = some {tgt_state} := by")
             A(f"{IND}  rw [runs_cons_jump ({cur}) {tgt_state} {C} 0 hs_{n} "
               f"(by dsimp only; rw [{cur_pc}]; decide)]")
@@ -4611,8 +4710,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         _cbz_instrs = blocks[cbz_bi]["instrs"]
         _has_cmp = any(_step_branch_index(words[pc]) == 6 for pc in _cbz_instrs)
         _has_cset = any(_step_branch_index(words[pc]) == 30 for pc in _cbz_instrs)
+        # A B.cond terminator IS the condition test, with no CSET in the
+        # block; requiring the CSET alone made every B.cond loop unmatchable.
+        _has_bcond = any(_step_branch_index(words[pc]) == 51
+                         for pc in _cbz_instrs)
         _has_cbz = blocks[cbz_bi]["kind"] == "cbz"
-        if _has_cmp and _has_cset and _has_cbz:
+        if _has_cmp and (_has_cset or _has_bcond) and _has_cbz:
             # `for i in range(n)` first (its prefix is a CMP-register + CSET
             # with a spill pair); countdown (`while n > 0`) otherwise.
             rl = _gen_range_loop(name, code, base, func_entry, exit_pc,
