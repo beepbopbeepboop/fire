@@ -133,9 +133,10 @@ def _wrap_signed64(v: int) -> int:
         if _neg and _l <= '9223372036854775808':
             return v
     # CPython-only bignum: wrap modulo 2**64, then to signed.
-    v = v % (1 << 64)
+    _two64 = int('18446744073709551616')
+    v = v % _two64
     if v >> 63:
-        v = v - (1 << 64)
+        v = v - _two64
     return v
 
 def _signed_int64(value: int) -> int:
