@@ -80,6 +80,7 @@ landed, all with regression coverage in `test_generators.py` (interpreter),
 
 | # | Bug document | Priority | Why it is here | Next bounded action / done condition |
 |---:|---|---|---|---|
+| 0 | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | **SHARED** | arm64 conditional/loop selection is landed and green, but comparisons involving a negative value and a *variable* are still wrong: unannotated `int` is modelled `UInt64` and `common_type` resolves mixed to unsigned. Also holds the 13 remaining formal sorries, whose single root cause is that `while_dec_exit_contract` is register-shaped. | Signedness: build the minimal failing matrix (negative literal vs unannotated local, `0 - 3` vs literal) before changing `function_var_types` — the default is shared with the truncators, CSET width and the x86-64 shift/compare mnemonics, so a one-line flip needs the full gate. Proofs: parameterise that contract's test (a WIP pass proved the countdown shape) and add the per-condition-code closing-lemma table beside `_COND_LEMMA`. |
 | 1 | `CODEGEN_bootstrap_resource_blowup.md` | **BLOCKER** | Full native Stage 2 still intermittently `SIGTRAP`s on the large transitive dump; bootstrap/gate cannot be trusted. | Capture a deterministic native failure and fix the memory/invariant root cause. Done when repeated `make stage3` and the full gate complete without a native trap. |
 | 2 | `COMPILE_FAIL_Tools_wasm_wasi___main__.md` | **BLOCKER** | `nonlocal` is silently miscompiled: the compiled program exits 0 with the wrong closure value; it also affects compiler self-host source. | Add `NonlocalStmt` parsing, interpreter no-op support, closure capture, and plain-`=` write-back. Done with a compiled program whose outer variable changes exactly as CPython does, plus the wasm repro. |
 | 3 | `COMPILE_FAIL_importlib_resources_readers.md` | HIGH | `yield from cls.<generator>` is refused; the same machinery affects `Lib/enum.py`, a core stdlib module. | Fix the `cls` receiver/delegation path in the C++ generator emitter. Done with synthetic classmethod-generator coverage; do not claim `readers.py` green until its independent `re.Match`/`reversed(list(...))` blockers are also fixed. |
@@ -114,6 +115,7 @@ landed, all with regression coverage in `test_generators.py` (interpreter),
 ## Recently completed or intentionally excluded
 
 - `CODEGEN_all_any_dict_set_miscompile.md` — fixed.
+- `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — added as item 0; the landed half (B.cond selection, loop exits, spill sign) is documented in `BUG.md`, and the doc owns what is still open.
 - `CODEGEN_boxed_method_name_list_set_ambiguity.md` — fixed.
 - `CODEGEN_container_free_registry_dangling_entries.md` — resolved.
 - `CODEGEN_container_no_deallocation_unbounded_growth.md` — resolved.
