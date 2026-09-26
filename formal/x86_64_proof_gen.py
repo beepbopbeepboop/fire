@@ -212,7 +212,8 @@ def _step_certificate_section(func_name: str, code_len: int) -> str:
         f"    exist yet, and the end-to-end theorem below inherits that gap. -/\n")
 
 
-def _run_tests_section(func_name: str, test_input: int) -> str:
+def _run_tests_section(func_name: str, test_input: int,
+                        externs: list = None, placeholder: bool = False) -> str:
     """Concrete run tests: the machine model on the real bytes, by evaluation.
 
     These are not `sorry` and not assertions — `native_decide` executes the
@@ -237,7 +238,40 @@ def _run_tests_section(func_name: str, test_input: int) -> str:
     fact, a model that could not execute the program at all would read as
     "result 0" and quietly agree with any model whose answer is 0.  Together
     they fail loudly on an opcode `x86_step` does not decode, which is a real
-    gap in `lib/X86.lean` rather than something to paper over."""
+    gap in `lib/X86.lean` rather than something to paper over.
+
+    `externs` suppresses the whole section for an image that calls out to the
+    runtime.  A call to `print` is a branch to a `__TEXT,__stubs` trampoline
+    that lives OUTSIDE the image, and the model has no memory for it: the
+    branch lands on a byte the model cannot decode, the run stops, and the
+    termination obligation fails — for a program whose arithmetic is perfectly
+    fine.  Emitting the obligations anyway turns a known limitation into a
+    build failure on every program that prints, which is most of them; naming
+    the symbols in a comment instead says what is actually true."""
+    if placeholder:
+        # The run test's whole value is that it compares the MODEL against the
+        # MACHINE.  When the model is a placeholder the comparison is against
+        # nothing, and it fails for a reason that has nothing to do with the
+        # machine — which would report a codegen or model bug that is not
+        # there.  The honest statement is the gap itself.
+        return (
+            f"/- NO RUN TESTS for {func_name}: the semantic model above is a\n"
+            f"   PLACEHOLDER (see the note on it).  A run test would compare the\n"
+            f"   machine against that placeholder and fail, which would say\n"
+            f"   nothing about either.  Modelling this function's shape is what\n"
+            f"   would close it. -/\n")
+
+    if externs:
+        syms = ", ".join(sorted(set(externs)))
+        return (
+            f"/- NO RUN TESTS for {func_name}: the image calls out to the runtime\n"
+            f"   ({syms}), and the model has no memory for a `__TEXT,__stubs`\n"
+            f"   trampoline.  The branch lands outside the image and the run stops,\n"
+            f"   so a termination obligation here would fail on a program whose\n"
+            f"   arithmetic is fine.  What the model CAN still check is everything\n"
+            f"   up to the call, which is what the per-instruction certificates\n"
+            f"   below cover. -/\n")
+
     helper = (
         f"/-- Result register after running the image from the entry (0 if the\n"
         f"    model could not run it to completion). -/\n"
@@ -298,13 +332,15 @@ def generate_x86_64_proof(prog, code, info) -> str:
     try:
         go_defs, go_lemma_names = _generate_model(fn, tc)
         model_note = ""
+        model_placeholder = False
     except Exception as e:                          # noqa: BLE001
         # The shared model generator does not cover every shape. Rather than
         # failing the build, emit a trivial model and say so: the rest of the
         # file (AST, bytes, certificates) is still real, and the end-to-end
         # theorem is `sorry` regardless, so nothing false is claimed.
-        go_defs = (f"def {func_name}_go (n : Nat) : UInt64 :=\n"
-                   f"  (n : UInt64)\n")
+        go_defs = (f"def {func_name}_go (n : UInt64) : UInt64 :=\n"
+                   f"  n\n")
+        model_placeholder = True
         go_lemma_names = []
         model_note = (f"/- NOTE: the shared model generator does not cover "
                       f"this function's shape ({type(e).__name__}: {e}), so "
@@ -314,16 +350,28 @@ def generate_x86_64_proof(prog, code, info) -> str:
     parts.append("/-- Mojo semantics: direct Lean model of the source code. -/\n"
                  + model_note + go_defs + "\n")
 
-    # How the model is applied depends on which model shape the shared
-    # generator produced: the tree-recursive and countdown models are defined
-    # on Nat, everything else directly on UInt64. Same choice as arm64.
-    from formal import arm64_proof_gen as AP
-    if AP._count_self_calls(fn) >= 2:
-        mojo_fn, mojo_arg = f"{func_name}_model", "n.toNat"
-    elif AP._dec1_pattern(fn) is not None or AP._dec_while_pattern(fn) is not None:
-        mojo_fn, mojo_arg = f"{func_name}_go", "n.toNat"
+    # How `mojo` applies the model depends on the model's own parameter type,
+    # so READ it out of the generated definition rather than guessing from
+    # which pattern matched.  The guess was wrong for a `for` loop over
+    # `range`: `_dec_while_pattern` fires, so the argument became `n.toNat`,
+    # while `_gen_go` had produced a UInt64-parameterised model — a type
+    # mismatch that failed the whole proof for a function the model handles
+    # perfectly well.  Deriving one from the other cannot drift.
+    # The shared generator emits two shapes: `def f_go (n : Nat) : UInt64 :=`
+    # for a bounded model, and the curried `def f_model : Nat → UInt64` with
+    # equation clauses for the tree-recursive one.  Both have to be recognised
+    # or the argument is wrong for one of them.
+    import re
+    mojo_fn = (f"{func_name}_model"
+               if re.search(r"def %s_model\b" % func_name, go_defs)
+               else f"{func_name}_go")
+    binder = re.search(r"def %s \((\w+) : (\w+)\)" % mojo_fn, go_defs)
+    if binder:
+        param, ptype = binder.group(1), binder.group(2)
     else:
-        mojo_fn, mojo_arg = f"{func_name}_go", "n"
+        curried = re.search(r"def %s : (\w+) →" % mojo_fn, go_defs)
+        param, ptype = "n", (curried.group(1) if curried else "UInt64")
+    mojo_arg = f"{param}.toNat" if ptype == "Nat" else param
     parts.append("/-- The semantic model as a UInt64 -> UInt64 function. -/\n"
                  f"def mojo (n : UInt64) : UInt64 :=\n"
                  f"  {mojo_fn} {mojo_arg}\n")
@@ -365,7 +413,10 @@ def generate_x86_64_proof(prog, code, info) -> str:
         f"{_code_function(func_name, base_addr)}")
 
     parts.append(_compile_correct_section(func_name))
-    parts.append(_run_tests_section(func_name, test_input))
+    parts.append(_run_tests_section(
+        func_name, test_input,
+        [e.get("sym") for e in (info.get("extern_calls") or [])],
+        placeholder=model_placeholder))
     parts.append(_step_certificate_section(func_name, len(code)))
 
     # ── end to end ───────────────────────────────────────────────────
