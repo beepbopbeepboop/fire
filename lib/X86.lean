@@ -810,6 +810,62 @@ theorem x86_step_jmp_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat) (off 
     x86_step s code = some { s with rip := (Int.ofNat m + 5 + off).toNat } := by
   simp [x86_step, x86_step_plain, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_imm]
 
+/-! ## Memory separation
+
+`mem_read_bytes` recurses on the read WIDTH and `mem_write_bytes` on the byte
+COUNT, so no single induction sees through both: a one-lemma version leaves
+eight unreduced `if i = a` tests in the goal. Splitting it in two makes each
+induction single-headed — the write is the identity pointwise outside its
+range, and a read through it is then the read of the original memory.
+
+These are what a straight-line body proof needs, and ProofLib has the arm64
+equivalents (`mem_read_push_frame`, `mem_read_two_writes_adjacent_mod`,
+`mem_read_write_pair_below`) but nothing here until now. -/
+
+/-- Above the written range, the write function IS the identity. -/
+theorem mem_write_bytes_above (m : Nat → UInt8) (a : Nat) (v : UInt64)
+    (n i : Nat) (h : a + n ≤ i) :
+    mem_write_bytes m a v n i = m i := by
+  induction n generalizing a v i with
+  | zero => rfl
+  | succ k ih =>
+    simp only [mem_write_bytes]
+    rw [if_neg (by omega : ¬(i = a))]
+    exact ih (a + 1) (v >>> 8) i (by omega)
+
+/-- Below the written range, likewise. -/
+theorem mem_write_bytes_below (m : Nat → UInt8) (a : Nat) (v : UInt64)
+    (n i : Nat) (h : i < a) :
+    mem_write_bytes m a v n i = m i := by
+  induction n generalizing a v i with
+  | zero => rfl
+  | succ k ih =>
+    simp only [mem_write_bytes]
+    rw [if_neg (by omega : ¬(i = a))]
+    exact ih (a + 1) (v >>> 8) i (by omega)
+
+/-- A read whose whole width lies above a write is unaffected by it. -/
+theorem mem_read_bytes_write_above (m : Nat → UInt8) (a : Nat) (v : UInt64)
+    (n w b : Nat) (h : a + n ≤ b) :
+    mem_read_bytes (mem_write_bytes m a v n) b w = mem_read_bytes m b w := by
+  induction w generalizing b with
+  | zero => rfl
+  | succ k ihw =>
+    simp only [mem_read_bytes]
+    rw [mem_write_bytes_above m a v n b h]
+    rw [ihw (b + 1) (by omega)]
+
+/-- A read whose whole width lies below a write is unaffected by it. -/
+theorem mem_read_bytes_write_below (m : Nat → UInt8) (a : Nat) (v : UInt64)
+    (n w b : Nat) (h : b + w ≤ a) :
+    mem_read_bytes (mem_write_bytes m a v n) b w = mem_read_bytes m b w := by
+  induction w generalizing b with
+  | zero => rfl
+  | succ k ihw =>
+    simp only [mem_read_bytes]
+    rw [mem_write_bytes_below m a v n b (by omega)]
+    rw [ihw (b + 1) (by omega)]
+
 /-! ## The prologue forms, and what closing a body still needs
 
 Every x86-64 function starts `push rbp ; mov rbp, rsp ; sub rsp, <frame>`, so
@@ -824,15 +880,17 @@ Closing a function's body outright is a further step, and the reason is worth
 recording because it is not obvious: chaining the step lemmas builds a state
 expression N structure updates deep, and the last `ret` reads
 `memReadBytes` of that whole nest at the initial stack pointer. Proving it is
-0 means proving that every push and spill in the nest wrote SOMEWHERE ELSE —
-a memory-separation lemma per write form (a write at A does not change a read
-at B, for the address ranges each form uses). ProofLib already has that
-family for arm64 (`mem_read_push_frame`, `mem_read_two_writes_adjacent_mod`,
-`mem_read_write_pair_below`); the x86-64 equivalents are what a full
-end-to-end proof of a straight-line function needs, and they are not written.
-Until they are, the generated proofs carry run tests (real `native_decide`
-evaluations, so the machine IS checked against the source semantics for
-concrete inputs) and a `sorry` end-to-end theorem. -/
+0 means proving that every push and spill in the nest wrote SOMEWHERE ELSE.
+The separation lemmas above are the tool for that and they are proved, but the
+chain that needs them is still term-bound: six `x86_exec_go_exit_step` rewrites
+of a leaf function build a state expression deep enough that the kernel
+reports deep recursion, and the last step's side condition is over the whole
+nest. The next thing to write is a chaining lemma that keeps the intermediate
+state ABSTRACT (a variable per step) rather than accumulating one expression, so
+the separation side conditions are discharged one write at a time. Until that
+exists, the generated proofs carry run tests (real `native_decide` evaluations,
+so the machine IS checked against the source semantics for concrete inputs) and
+a `sorry` end-to-end theorem. -/
 
 /-- `mov rbp, rsp` — the frame setup (REX.W 89 /r, ModRM 0xe5: mod=3, reg=4
     RSP as the source, rm=5 RBP as the destination). -/

@@ -257,33 +257,153 @@ def _compile_correct_section(func_name: str) -> str:
         f"  sorry\n")
 
 
-def _step_certificate_section(func_name: str, code_len: int) -> str:
-    """The execution certificates.
+#: Forms whose step is not TOTAL, so a "this always steps" certificate would be
+#: false of them.  `x86_step` returns `none` for a division by zero (and for the
+#: 128-bit overflow that is the same fault), and the divisor here is a symbolic
+#: register, so whether it is zero is not knowable at proof time.  These are
+#: skipped with the reason stated rather than given a certificate that cannot
+#: be proved — which is the certificate doing its job: it noticed that `div`
+#: is not total where a rubber-stamp would not have.
+_NON_TOTAL_FORMS = ("group3:div", "group3:idiv")
 
-    What IS provable without decoding anything is that the byte list in this
-    file is the image the assembler produced — a closed literal, so its length
-    is `rfl`. That is a real (if small) certificate that the file being
-    typechecked is about the code that was actually emitted, and it is proved.
 
-    What is NOT here is the per-instruction work the arm64 generator does:
-    decoding each instruction, cutting the CFG into blocks, and proving one
-    `x86_step` lemma per decoded instruction relating the register-file effect
-    to the source. None of that exists for x86-64 yet, and its absence is the
-    reason the end-to-end theorem below is a `sorry`. It is recorded here as
-    a comment rather than as a `sorry`-bearing `True`-valued lemma, which would
-    inflate the unproved-obligation count while claiming nothing.
+class _Insn:
+    """One decoded instruction, for the per-instruction certificates."""
+    __slots__ = ("addr", "form", "text", "bytes")
+
+    def __init__(self, addr, form, text, raw):
+        self.addr = addr
+        self.form = form
+        self.text = text
+        self.bytes = raw
+
+
+#: How many per-instruction certificates to emit.  Each is a `simp` over the
+#: decoder, so a very large function (test_simple's entry body is 2052
+#: instructions) can exhaust the step budget partway through the list and take
+#: the whole proof file down with it.  The cap is stated in the file when it
+#: bites, so a truncated list never reads as a complete one.
+_MAX_CERTIFICATES = 2000
+
+
+def _decode_function_body(code: bytes, info: dict, func_offset: int,
+                          limit: int = _MAX_CERTIFICATES):
+    """Decode the entry function's own instruction stream.
+
+    The startup stub is skipped: the proof is about the function, and the stub
+    is the same three instructions in every image.  Decoding stops at the
+    string/data pool, whose bytes are not instructions, and is capped so a
+    large program cannot produce a proof file with thousands of certificates
+    in it.
     """
-    return (
+    from formal import x86_64_decode as DEC
+    base = info["base_addr"]
+    start = func_offset - base
+    strs = [a for name, a in (info.get("labels") or {}).items()
+            if name.startswith("str_")]
+    end = (min(strs) - base) if strs else len(code)
+    if end <= start:
+        return [], 0
+    try:
+        insns = DEC.decode_all(code, start, end)
+    except DEC.DecodeError:
+        return [], 0           # a data byte inside the code region
+    out = []
+    for insn in insns[:limit]:
+        out.append(_Insn(base + insn.offset, insn.form,
+                         code[insn.offset:insn.next_offset].hex(" "),
+                         code[insn.offset:insn.next_offset]))
+    return out, len(insns)
+
+
+
+#: The `simp` set that reduces one instruction of `x86_step`.  Each entry is a
+#: decoder helper rather than a step lemma: the certificate below is about the
+#: model DECODING an instruction and producing a successor, so it needs the
+#: decoder unfolded but nothing about the successor state's contents — which is
+#: what keeps it independent of the register values, which are symbolic here.
+_STEP_SIMP = (
+    "x86_step, x86_step_rex, x86_step_plain, x86_is_rex, x86_get_reg, "
+    "x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, "
+    "x86_flags_add, x86_flags_logic, x86_msb, x86_trunc32")
+
+
+def _step_certificate_section(func_name: str, code_len: int, insns: list = None,
+                              total: int = None) -> str:
+    """Per-instruction execution certificates.
+
+    One theorem per decoded instruction: given a state sitting at that
+    instruction's address, `x86_step` decodes it and yields a successor state.
+    Together they say the model can execute every instruction the program
+    actually contains, at the addresses it actually contains them at — which is
+    the local form of what the `_terminates` obligations below assert globally,
+    and the thing that makes a run test's failure mean "the model and the
+    source disagree" rather than "the model gave up partway".
+
+    They are stated with the register file SYMBOLIC, so nothing is claimed about
+    the values: the point is the decode, not the arithmetic. What the successor
+    state IS remains the end-to-end theorem's job, which is why that is still a
+    `sorry` — the certificates say the program is executable in the model, not
+    that it computes the right thing (the run tests say the latter, for
+    concrete inputs).
+
+    Also proved here: the byte list in this file is exactly what the assembler
+    emitted. Its length is `rfl` because it is a closed literal — a real, if
+    small, statement that the file being typechecked is about the code that was
+    emitted.
+    """
+    out = [
         f"/-- The image described above is exactly the {code_len} bytes the\n"
         f"    assembler emitted. -/\n"
         f"theorem {func_name}_code_length :\n"
-        f"    {func_name}_code_bytes.length = {code_len} := rfl\n"
-        f"\n"
-        f"/- MISSING: per-instruction execution certificates.  For each of the\n"
-        f"    {code_len} bytes above, decoding the instruction at its address and\n"
-        f"    proving that `x86_step` moves the state the way the source says is\n"
-        f"    the x86-64 counterpart of arm64_proof_gen's step lemmas; it does not\n"
-        f"    exist yet, and the end-to-end theorem below inherits that gap. -/\n")
+        f"    {func_name}_code_bytes.length = {code_len} := rfl\n",
+    ]
+    if not insns:
+        out.append(
+            f"/- No per-instruction certificates: the image did not decode, so\n"
+            f"   there is no instruction stream to make claims about.  The run\n"
+            f"   tests below carry the termination obligation instead. -/\n")
+        return "\n".join(out)
+    out.append(
+        f"/- Every instruction of {func_name}, decoded from the bytes above.\n"
+        f"   One certificate each: at this address the model decodes this\n"
+        f"   instruction and produces a successor state.  The register file is\n"
+        f"   left symbolic on purpose — this is about the decode, and what the\n"
+        f"   successor IS is the end-to-end theorem's job. -/\n")
+    skipped = [i for i in insns if i.form in _NON_TOTAL_FORMS]
+    certs = [i for i in insns if i.form not in _NON_TOTAL_FORMS]
+    for n, insn in enumerate(certs):
+        facts = "".join(
+            f"\n  have g{n}_{j} : {func_name}_code {insn.addr + j} = "
+            f"0x{b:02x} := by native_decide"
+            for j, b in enumerate(insn.bytes))
+        hs = ", ".join(["h"] + ["g%d_%d" % (n, j)
+                                 for j in range(len(insn.bytes))])
+        out.append(
+            f"/-- `{insn.form}` at {insn.addr} "
+            f"({insn.text}) -/\n"
+            f"theorem {func_name}_steps_at_{insn.addr} (s : X86State) "
+            f"(h : s.rip = {insn.addr}) :\n"
+            f"    (x86_step s {func_name}_code).isSome = true := by{facts}\n"
+            f"  simp [{_STEP_SIMP}, {hs}]\n")
+    if total is not None and total > len(insns) + len(skipped):
+        out.append(
+            f"/- TRUNCATED: {func_name} has {total} instructions and this file\n"
+            f"   carries certificates for the first {len(insns) + len(skipped)}\n"
+            f"   of them.  The cap is there because each certificate is a `simp`\n"
+            f"   over the decoder and a large function exhausts the step budget\n"
+            f"   partway through.  This is a shorter list, not a shorter claim:\n"
+            f"   the run tests below still execute the whole function. -/\n")
+    if skipped:
+        where = ", ".join(str(i.addr) for i in skipped)
+        out.append(
+            f"/- NO CERTIFICATE for {len(skipped)} instruction(s) at {where}:\n"
+            f"   `x86_step` is not total for them.  A division returns `none` when\n"
+            f"   the divisor is zero, and the divisor is a register, so whether it\n"
+            f"   is zero is exactly what the program is computing.  Claiming\n"
+            f"   otherwise would be claiming something false.  The run tests below\n"
+            f"   still cover them at run time. -/\n")
+    return "\n".join(out)
 
 
 def _run_tests_section(func_name: str, test_input: int, externs: list = None,
@@ -553,7 +673,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
         [e.get("sym") for e in (info.get("extern_calls") or [])],
         placeholder=model_placeholder,
         string_result=_returns_string_literal(fn)))
-    parts.append(_step_certificate_section(func_name, len(code)))
+    _certs, _total = _decode_function_body(code, info, func_offset)
+    parts.append(_step_certificate_section(func_name, len(code), _certs, _total))
 
     # ── end to end ───────────────────────────────────────────────────
     parts.append(
