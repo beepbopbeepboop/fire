@@ -655,6 +655,19 @@ int mojo_list_contains_double(MojoList *l, double v)
     return mojo_list_contains_int(l, bits);
 }
 
+/* `x in <list of bytes>`: elements are stored as boxed `MojoBytes *`
+ * pointers, so membership is a CONTENT comparison (Python defines list
+ * membership in terms of `==`, which for bytes is bytewise) rather than
+ * the pointer identity mojo_list_contains_int would give. */
+int mojo_list_contains_bytes(MojoList *l, MojoBytes *v)
+{
+    for (int64_t i = 0; i < l->len; i++) {
+        MojoBytes *e = (MojoBytes *)(uintptr_t)l->data[i];
+        if (mojo_bytes_eq(e, v)) return 1;
+    }
+    return 0;
+}
+
 int mojo_list_contains_str(MojoList *l, char *v)
 {
     for (int64_t i = 0; i < l->len; i++) {
@@ -1199,6 +1212,19 @@ MojoBytes *mojo_bytes_from_cstr(const char *s)
     return mojo_bytes_new_lit(s, (int64_t)strlen(s));
 }
 
+static void mojo_bytes_clamp_range(MojoBytes *b, int64_t *start, int64_t *stop)
+{
+    int64_t lo = *start, hi = *stop;
+    if (lo == MOJO_SLICE_STOP_OMITTED) lo = 0;
+    if (hi == MOJO_SLICE_STOP_OMITTED) hi = b->len;
+    if (lo < 0) lo += b->len;
+    if (hi < 0) hi += b->len;
+    if (lo < 0) lo = 0;
+    if (hi > b->len) hi = b->len;
+    if (hi < lo) hi = lo;
+    *start = lo; *stop = hi;
+}
+
 int64_t mojo_bytes_len(MojoBytes *b) { return b->len; }
 
 int64_t mojo_bytes_get(MojoBytes *b, int64_t i)
@@ -1325,6 +1351,21 @@ int64_t mojo_bytes_count(MojoBytes *hay, MojoBytes *needle)
     return c;
 }
 
+/* count within an explicit [start, stop) range — non-overlapping, as in
+ * Python. Matches mojo_bytes_find_from's sentinel convention. */
+int64_t mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle,
+                              int64_t start, int64_t stop)
+{
+    if (!hay || !needle || needle->len == 0) return 0;
+    mojo_bytes_clamp_range(hay, &start, &stop);
+    int64_t c = 0;
+    for (int64_t i = start; i + needle->len <= stop; ) {
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) { c++; i += needle->len; }
+        else i++;
+    }
+    return c;
+}
+
 int mojo_bytes_startswith(MojoBytes *b, MojoBytes *p)
 {
     if (!p || p->len == 0) return 1;
@@ -1385,18 +1426,37 @@ char *mojo_bytes_hash_hexdigest(MojoBytes *b)
 
 MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to)
 {
+    return mojo_bytes_replace_n(b, from, to, MOJO_SLICE_STOP_OMITTED);
+}
+
+/* `count` bounds the number of replacements (MOJO_SLICE_STOP_OMITTED =
+ * unbounded); a negative count also means "all", per Python. */
+MojoBytes *mojo_bytes_replace_n(MojoBytes *b, MojoBytes *from, MojoBytes *to,
+                                int64_t count)
+{
     if (!b) return mojo_bytes_empty();
     if (!from || from->len == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
-    int64_t cnt = mojo_bytes_count(b, from);
+    if (count < 0) count = MOJO_SLICE_STOP_OMITTED;
+    if (count == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
+    int64_t total = mojo_bytes_count(b, from);
+    if (count != MOJO_SLICE_STOP_OMITTED && total > count) total = count;
     int64_t tn = to ? to->len : 0;
-    MojoBytes *r = mojo_bytes_alloc(b->len + cnt * (tn - from->len));
-    int64_t p = 0;
+    MojoBytes *r = mojo_bytes_alloc(b->len + total * (tn - from->len));
+    int64_t p = 0, done = 0;
     for (int64_t i = 0; i < b->len; ) {
         if (i + from->len <= b->len && memcmp(b->data + i, from->data, (size_t)from->len) == 0) {
             if (tn) memcpy(r->data + p, to->data, (size_t)tn);
             p += tn; i += from->len;
+            if (count != MOJO_SLICE_STOP_OMITTED && ++done >= count) {
+                int64_t rest = b->len - i;
+                if (rest) memcpy(r->data + p, b->data + i, (size_t)rest);
+                p += rest;
+                break;
+            }
         } else r->data[p++] = b->data[i++];
     }
+    r->len = p;
+    r->data[p] = 0;
     return r;
 }
 
@@ -1507,6 +1567,391 @@ MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts)
     return r;
 }
 
+/* ── bytes: search with explicit range, and the int-valued (bytearray)
+ * flavours of index/count ─────────────────────────────────────────────────
+ * Python's optional [start[, end]] argument clamps into the buffer, handles
+ * negatives, and tolerates start > end (empty range). `start`/`stop` use the
+ * MOJO_SLICE_STOP_OMITTED sentinel for "not given". */
+int64_t mojo_bytes_find_from(MojoBytes *hay, MojoBytes *needle,
+                             int64_t start, int64_t stop)
+{
+    if (!needle || needle->len == 0) return -1;
+    if (!hay) return -1;
+    mojo_bytes_clamp_range(hay, &start, &stop);
+    for (int64_t i = start; i + needle->len <= stop; i++)
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_rfind_from(MojoBytes *hay, MojoBytes *needle,
+                              int64_t start, int64_t stop)
+{
+    if (!needle || needle->len == 0) return -1;
+    if (!hay) return -1;
+    mojo_bytes_clamp_range(hay, &start, &stop);
+    for (int64_t i = stop - needle->len; i >= start; i--)
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_rfind(MojoBytes *hay, MojoBytes *needle)
+{
+    return mojo_bytes_rfind_from(hay, needle, 0, MOJO_SLICE_STOP_OMITTED);
+}
+
+/* index/count over a single byte VALUE (bytearray.index(x) /
+ * bytes.index(<int>) — Python accepts an int in 0-255 there). */
+int64_t mojo_bytes_index_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
+{
+    if (!b) return -1;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    for (int64_t i = start; i < stop; i++)
+        if ((int64_t)b->data[i] == (v & 0xFF)) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_rindex_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
+{
+    if (!b) return -1;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    for (int64_t i = stop - 1; i >= start; i--)
+        if ((int64_t)b->data[i] == (v & 0xFF)) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_count_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
+{
+    if (!b) return 0;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    int64_t c = 0;
+    for (int64_t i = start; i < stop; i++) if ((int64_t)b->data[i] == (v & 0xFF)) c++;
+    return c;
+}
+
+MojoBytes *mojo_bytes_removeprefix(MojoBytes *b, MojoBytes *p)
+{
+    if (!b) return mojo_bytes_empty();
+    if (mojo_bytes_startswith(b, p)) return mojo_bytes_new_lit((const char *)(b->data + p->len),
+                                                               b->len - p->len);
+    return mojo_bytes_new_lit((const char *)b->data, b->len);
+}
+
+MojoBytes *mojo_bytes_removesuffix(MojoBytes *b, MojoBytes *p)
+{
+    if (!b) return mojo_bytes_empty();
+    if (mojo_bytes_endswith(b, p)) return mojo_bytes_new_lit((const char *)b->data,
+                                                            b->len - p->len);
+    return mojo_bytes_new_lit((const char *)b->data, b->len);
+}
+
+MojoBytes *mojo_bytes_capitalize(MojoBytes *b)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    for (int64_t i = 0; i < r->len; i++) {
+        uint8_t c = r->data[i];
+        if (c >= 'a' && c <= 'z') r->data[i] = (uint8_t)(c - 32);
+        else if (i > 0 && mojo_bytes_isspace_byte(c)) continue; /* rest lowercased below */
+    }
+    /* everything after the first cased character is lowercase */
+    int seen = 0;
+    for (int64_t i = 0; i < r->len; i++) {
+        uint8_t c = r->data[i];
+        if (!seen) {
+            if (c >= 'a' && c <= 'z') { r->data[i] = (uint8_t)(c - 32); seen = 1; }
+            else if (c >= 'A' && c <= 'Z') seen = 1;
+            continue;
+        }
+        if (c >= 'A' && c <= 'Z') r->data[i] = (uint8_t)(c + 32);
+    }
+    return r;
+}
+
+MojoBytes *mojo_bytes_swapcase(MojoBytes *b)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    for (int64_t i = 0; i < r->len; i++) {
+        uint8_t c = r->data[i];
+        if (c >= 'a' && c <= 'z') r->data[i] = (uint8_t)(c - 32);
+        else if (c >= 'A' && c <= 'Z') r->data[i] = (uint8_t)(c + 32);
+    }
+    return r;
+}
+
+/* ASCII title-casing: first cased char of each whitespace-delimited word
+ * uppercased, the rest lowercased (bytes has no cased-ness beyond ASCII). */
+MojoBytes *mojo_bytes_title(MojoBytes *b)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    int prev_alpha = 0;
+    for (int64_t i = 0; i < r->len; i++) {
+        uint8_t c = r->data[i];
+        int alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (prev_alpha) {
+            if (c >= 'A' && c <= 'Z') r->data[i] = (uint8_t)(c + 32);
+        } else if (c >= 'a' && c <= 'z') {
+            r->data[i] = (uint8_t)(c - 32);
+        }
+        prev_alpha = alpha;
+    }
+    return r;
+}
+
+/* ljust/rjust/center/zfill. `mode`: 0 = ljust (pad on the right), 1 = rjust
+ * (pad on the left), 2 = center. `signbit` is 1 for zfill (pad with '0',
+ * keeping a leading sign in front of the zeros, matching Python). */
+static MojoBytes *mojo_bytes_pad(MojoBytes *b, int64_t width, int fill,
+                                 int mode, int signbit)
+{
+    int64_t n = b ? b->len : 0;
+    if (width <= n) return mojo_bytes_new_lit(b ? (const char *)b->data : "", n);
+    int has_sign = signbit && n > 0 && (b->data[0] == '+' || b->data[0] == '-');
+    int64_t total = width - n;
+    /* `before` = pad bytes placed BEFORE the content: 0 for ljust, all of
+     * them for rjust/zfill, and floor(total/2) for center (Python puts the
+     * odd extra pad byte on the right). */
+    int64_t before = mode == 0 ? 0 : (mode == 1 ? total : total / 2);
+    if (has_sign) before++;
+    MojoBytes *r = mojo_bytes_alloc(width);
+    memset(r->data, fill, (size_t)width);
+    if (has_sign) r->data[0] = b->data[0];
+    if (n) memcpy(r->data + before, b->data + (has_sign ? 1 : 0), (size_t)(n - (has_sign ? 1 : 0)));
+    return r;
+}
+
+MojoBytes *mojo_bytes_ljust(MojoBytes *b, int64_t width, int fill)
+{ return mojo_bytes_pad(b, width, fill & 0xFF, 0, 0); }
+
+MojoBytes *mojo_bytes_rjust(MojoBytes *b, int64_t width, int fill)
+{ return mojo_bytes_pad(b, width, fill & 0xFF, 1, 0); }
+
+MojoBytes *mojo_bytes_center(MojoBytes *b, int64_t width, int fill)
+{ return mojo_bytes_pad(b, width, fill & 0xFF, 2, 0); }
+
+MojoBytes *mojo_bytes_zfill(MojoBytes *b, int64_t width)
+{ return mojo_bytes_pad(b, width, '0', 1, 1); }
+
+/* partition/rpartition -> a 3-element list (head, sep, tail). `from_right`
+ * searches for the LAST occurrence instead of the first. */
+static MojoList *mojo_bytes_partition_go(MojoBytes *b, MojoBytes *sep, int from_right)
+{
+    MojoList *l = mojo_list_new();
+    int64_t n = b ? b->len : 0;
+    int64_t sn = (sep && sep->len) ? sep->len : 0;
+    if (sn == 0) {
+        mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+        mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+        mojo_bytes_list_push(l, b ? b->data : (const uint8_t *)"", n);
+        return l;
+    }
+    int64_t at = from_right ? mojo_bytes_rfind_from(b, sep, 0, n)
+                            : mojo_bytes_find_from(b, sep, 0, n);
+    if (at < 0) {
+        if (from_right) {
+            mojo_bytes_list_push(l, b ? b->data : (const uint8_t *)"", n);
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+        } else {
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+            mojo_bytes_list_push(l, b ? b->data : (const uint8_t *)"", n);
+        }
+        return l;
+    }
+    mojo_bytes_list_push(l, b->data, at);
+    mojo_bytes_list_push(l, sep->data, sn);
+    mojo_bytes_list_push(l, b->data + at + sn, n - at - sn);
+    return l;
+}
+
+MojoList *mojo_bytes_partition(MojoBytes *b, MojoBytes *sep)
+{ return mojo_bytes_partition_go(b, sep, 0); }
+
+MojoList *mojo_bytes_rpartition(MojoBytes *b, MojoBytes *sep)
+{ return mojo_bytes_partition_go(b, sep, 1); }
+
+/* bytes.fromhex: pairs of hex digits, ASCII whitespace ignored. */
+MojoBytes *mojo_bytes_fromhex(char *s)
+{
+    int64_t n = s ? (int64_t)strlen(s) : 0;
+    MojoBytes *r = mojo_bytes_alloc(n / 2);
+    r->len = 0;   /* whitespace is skipped below, so the real count is less */
+    int hi = -1;
+    for (int64_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (mojo_bytes_isspace_byte((uint8_t)c)) continue;
+        int v;
+        if (c >= '0' && c <= '9') v = c - '0';
+        else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+        else { fprintf(stderr, "ValueError: non-hexadecimal number found in fromhex() arg\n"); exit(1); }
+        if (hi < 0) hi = v;
+        else { r->data[r->len++] = (uint8_t)((hi << 4) | v); hi = -1; }
+    }
+    if (hi >= 0) { fprintf(stderr, "ValueError: non-hexadecimal number found in fromhex() arg\n"); exit(1); }
+    return r;
+}
+
+/* bytes.maketrans(from, to) -> a 256-byte translation table. */
+MojoBytes *mojo_bytes_maketrans(MojoBytes *from, MojoBytes *to)
+{
+    MojoBytes *t = mojo_bytes_zeros(256);
+    int64_t fn = from ? from->len : 0;
+    int64_t tn = to ? to->len : 0;
+    for (int64_t i = 0; i < 256; i++) t->data[i] = (uint8_t)i;
+    for (int64_t i = 0; i < fn && i < tn; i++) t->data[from->data[i]] = to->data[i];
+    return t;
+}
+
+MojoBytes *mojo_bytes_translate(MojoBytes *b, MojoBytes *table)
+{
+    if (!b) return mojo_bytes_empty();
+    MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
+    if (!table) return r;
+    for (int64_t i = 0; i < r->len; i++) {
+        uint8_t c = r->data[i];
+        if (c < table->len) r->data[i] = table->data[c];
+    }
+    return r;
+}
+
+/* NUL-terminated copy of the bytes' content, for the char*-keyed dict /
+ * str-tagged set probe paths. Bytes containing an embedded NUL are
+ * truncated at it — the same lossiness the char*-keyed dict has always had
+ * for any non-str key; a container keyed on such bytes needs a typed-key
+ * container, not this shim. */
+char *mojo_bytes_cstr_key(MojoBytes *b)
+{
+    int64_t n = b ? b->len : 0;
+    char *s = malloc((size_t)n + 1);
+    if (n) memcpy(s, b->data, (size_t)n);
+    s[n] = 0;
+    return s;
+}
+
+/* The `bytes.isX()` predicates. Python defines ONLY the ASCII versions for
+ * bytes, so these are pure ASCII tests — `kind` selects which. */
+#define MOJO_BYTES_IS_ALPHA 0
+#define MOJO_BYTES_IS_ALNUM 1
+#define MOJO_BYTES_IS_DIGIT 2
+#define MOJO_BYTES_IS_SPACE 3
+#define MOJO_BYTES_IS_UPPER 4
+#define MOJO_BYTES_IS_LOWER 5
+#define MOJO_BYTES_IS_TITLE  6
+#define MOJO_BYTES_IS_PRINT 7
+#define MOJO_BYTES_IS_ASCII  8
+#define MOJO_BYTES_IS_NUMERIC 9
+
+static int mojo_bytes_is_alpha(uint8_t c)
+{ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static int mojo_bytes_is_digit(uint8_t c) { return c >= '0' && c <= '9'; }
+
+int mojo_bytes_is(MojoBytes *b, int kind)
+{
+    if (!b) return 0;
+    if (b->len == 0) return 1; /* every bytes.isX() is True for b'' */
+    int has_cased = 0, all_upper = 1, all_lower = 1, prev_alpha = 0, title = 1;
+    for (int64_t i = 0; i < b->len; i++) {
+        uint8_t c = b->data[i];
+        int a = mojo_bytes_is_alpha(c), d = mojo_bytes_is_digit(c);
+        if (kind == MOJO_BYTES_IS_ALPHA  && !a) return 0;
+        if (kind == MOJO_BYTES_IS_ALNUM  && !a && !d) return 0;
+        if (kind == MOJO_BYTES_IS_DIGIT  && !d) return 0;
+        if (kind == MOJO_BYTES_IS_NUMERIC && !d) return 0;
+        if (kind == MOJO_BYTES_IS_SPACE  && !mojo_bytes_isspace_byte(c)) return 0;
+        if (kind == MOJO_BYTES_IS_PRINT  && (c < 32 || c > 126)) return 0;
+        if (kind == MOJO_BYTES_IS_ASCII  && c > 127) return 0;
+        if (a) {
+            has_cased = 1;
+            if (c >= 'a' && c <= 'z') all_upper = 0; else all_lower = 0;
+        } else if (kind != MOJO_BYTES_IS_DIGIT && kind != MOJO_BYTES_IS_NUMERIC) {
+            all_upper = all_lower = 0;
+        }
+        if (kind == MOJO_BYTES_IS_TITLE) {
+            if (prev_alpha) { if (a && c >= 'A' && c <= 'Z') title = 0; }
+            else if (a && c >= 'a' && c <= 'z') title = 0;
+            prev_alpha = a;
+        }
+    }
+    if (kind == MOJO_BYTES_IS_UPPER) return has_cased && all_upper;
+    if (kind == MOJO_BYTES_IS_LOWER) return has_cased && all_lower;
+    if (kind == MOJO_BYTES_IS_TITLE)  return title;
+    return 1;
+}
+
+/* split/rsplit with a maxsplit bound (MOJO_SLICE_STOP_OMITTED = unbounded).
+ * Python splits from the right for rsplit, and neither form drops a
+ * trailing empty piece when the bound is not reached. */
+MojoList *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, int from_right)
+{
+    MojoList *l = mojo_list_new();
+    if (!b) return l;
+    int64_t n = b->len;
+    int64_t sn = (sep && sep->len) ? sep->len : 0;
+    if (sn == 0) {
+        /* whitespace split, no empty pieces, no leading/trailing padding */
+        int64_t i = 0;
+        while (i < n) {
+            while (i < n && mojo_bytes_isspace_byte(b->data[i])) i++;
+            if (i >= n) break;
+            int64_t start = i;
+            while (i < n && !mojo_bytes_isspace_byte(b->data[i])) i++;
+            mojo_bytes_list_push(l, b->data + start, i - start);
+            if (maxsplit != MOJO_SLICE_STOP_OMITTED && (int64_t)mojo_list_len(l) >= maxsplit) {
+                while (i < n) mojo_bytes_list_push(l, b->data + i, 0), i++;
+                i = n;
+            }
+        }
+        return l;
+    }
+    if (!from_right) {
+        int64_t start = 0, done = 0;
+        for (int64_t i = 0; i + sn <= n; ) {
+            if (memcmp(b->data + i, sep->data, (size_t)sn) == 0) {
+                mojo_bytes_list_push(l, b->data + start, i - start);
+                i += sn; start = i;
+                if (maxsplit != MOJO_SLICE_STOP_OMITTED && ++done >= maxsplit) break;
+            } else i++;
+        }
+        mojo_bytes_list_push(l, b->data + start, n - start);
+        return l;
+    }
+    int64_t stop = n, done = 0;
+    for (int64_t i = n - sn; i >= 0; ) {
+        if (memcmp(b->data + i, sep->data, (size_t)sn) == 0) {
+            mojo_bytes_list_push(l, b->data + i + sn, stop - i - sn);
+            stop = i; i -= sn;
+            if (maxsplit != MOJO_SLICE_STOP_OMITTED && ++done >= maxsplit) break;
+        } else i--;
+    }
+    mojo_bytes_list_push(l, b->data, stop);
+    /* pushed back-to-front; reverse into source order */
+    int64_t m = mojo_list_len(l);
+    for (int64_t i = 0; i < m / 2; i++) {
+        int64_t x = mojo_list_get_int(l, i), y = mojo_list_get_int(l, m - 1 - i);
+        mojo_list_set_int(l, i, y);
+        mojo_list_set_int(l, m - 1 - i, x);
+    }
+    return l;
+}
+
+MojoList *mojo_bytes_splitlines_keep(MojoBytes *b, int keepends)
+{
+    MojoList *l = mojo_list_new();
+    if (!b) return l;
+    int64_t start = 0;
+    for (int64_t i = 0; i < b->len; i++) {
+        if (b->data[i] == '\n') {
+            mojo_bytes_list_push(l, b->data + start, i - start + (keepends ? 1 : 0));
+            start = i + 1;
+        }
+    }
+    if (start < b->len) mojo_bytes_list_push(l, b->data + start, b->len - start);
+    return l;
+}
+
 /* ── bytearray (mutable, shares the MojoBytes representation) ────────────
  * No capacity field on MojoBytes, so every size-changing op reallocs
  * data to exactly len+1. O(n) amortized append is acceptable for this
@@ -1613,6 +2058,26 @@ void mojo_bytearray_splice(MojoBytes *b, int64_t start, int64_t stop, MojoBytes 
     free(rtmp); free(ttmp);
 }
 
+void mojo_bytearray_insert(MojoBytes *b, int64_t i, int64_t v)
+{
+    if (!b) return;
+    int64_t n = b->len;
+    if (i < 0) i += n;
+    if (i < 0) i = 0;
+    if (i > n) i = n;
+    mojo_bytearray_resize(b, n + 1);
+    memmove(b->data + i + 1, b->data + i, (size_t)(n - i));
+    b->data[i] = (uint8_t)(v & 0xFF);
+}
+
+void mojo_bytearray_remove(MojoBytes *b, int64_t v)
+{
+    if (!b) { fprintf(stderr, "ValueError: bytearray.remove(x): x not in bytearray\n"); exit(1); }
+    int64_t at = mojo_bytes_index_int(b, v, 0, MOJO_SLICE_STOP_OMITTED);
+    if (at < 0) { fprintf(stderr, "ValueError: bytearray.remove(x): x not in bytearray\n"); exit(1); }
+    mojo_bytearray_pop(b, at);
+}
+
 /* ── memoryview (non-copying 1-D byte view) ─────────────────────────────*/
 MojoMemoryView *mojo_memoryview_new(uint8_t *data, int64_t len, int64_t itemsize)
 {
@@ -1679,6 +2144,24 @@ char *mojo_memoryview_hex(MojoMemoryView *m)
 /* .cast(fmt) for a 1-D byte view: only 'B'/'b'/'c' are meaningful and all
  * keep itemsize 1, so this is an identity return. */
 MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt) { (void)fmt; return m; }
+
+/* Read-only descriptive attributes. `nbytes` is len*itemsize; `itemsize` and
+ * `format` describe the element type (always one byte here, so 'B' unless
+ * .cast() named a signed/char variant). */
+int64_t mojo_memoryview_itemsize(MojoMemoryView *m) { return m ? m->itemsize : 0; }
+
+int64_t mojo_memoryview_nbytes(MojoMemoryView *m)
+{ return m ? m->len * m->itemsize : 0; }
+
+char *mojo_memoryview_format(MojoMemoryView *m, char *fmt)
+{ (void)m; return fmt ? fmt : (char *)"B"; }
+
+/* `.obj` is the object the view was taken from; this representation keeps
+ * only a raw window, so a bytes-backed view re-wraps its own window. */
+MojoBytes *mojo_memoryview_obj(MojoMemoryView *m)
+{
+    return mojo_bytes_new_lit(m ? (const char *)m->data : "", m ? m->len : 0);
+}
 
 char *mojo_memoryview_repr(MojoMemoryView *m)
 {
@@ -2587,29 +3070,39 @@ void mojo_dict_clear(MojoDict *d)
     d->next_seq = 0;
 }
 
-static _DictSlot *_dict_find(MojoDict *d, char *key)
+/* `keykind` distinguishes key DOMAINS that share the char* key storage: 0
+ * = a str key, 1 = a bytes key. Both store the key's own characters
+ * (mojo_bytes_cstr_key for bytes), so strcmp still does the matching, but
+ * the tag keeps `d[b'x']` and `d['x']` as the two distinct entries Python
+ * says they are instead of silently aliasing one onto the other. */
+static _DictSlot *_dict_find_k(MojoDict *d, char *key, int64_t keykind)
 {
     uint64_t h = _str_hash(key) % (uint64_t)d->cap;
     for (int64_t i = 0; i < d->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)d->cap);
         _DictSlot *sl = &d->slots[idx];
         if (!sl->key) return sl;          /* empty — insertion point */
-        if (strcmp(sl->key, key) == 0) return sl;
+        if (sl->keykind == keykind && strcmp(sl->key, key) == 0) return sl;
     }
     return NULL;
 }
+
+static _DictSlot *_dict_find(MojoDict *d, char *key)
+{ return _dict_find_k(d, key, 0 /* str key */); }
 
 static void _dict_grow(MojoDict *d);
 
 /* seq >= 0 preserves an already-assigned insertion sequence number (used
  * only by _dict_grow's rehash, so a key's original insertion order survives
  * moving to a new, bigger slot array); seq < 0 assigns a fresh one. */
-static void _dict_set_raw_seq_kind(MojoDict *d, char *key, int64_t val, int64_t seq, int64_t kind)
+static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
+                                     int64_t seq, int64_t kind, int64_t keykind)
 {
     if (d->used * 2 >= d->cap) _dict_grow(d);
-    _DictSlot *sl = _dict_find(d, key);
+    _DictSlot *sl = _dict_find_k(d, key, keykind);
     if (!sl->key) {
         sl->key = strdup(key);
+        sl->keykind = keykind;
         sl->seq = (seq >= 0) ? seq : d->next_seq++;
         if (sl->seq >= d->next_seq) d->next_seq = sl->seq + 1;
         d->used++;
@@ -2618,6 +3111,11 @@ static void _dict_set_raw_seq_kind(MojoDict *d, char *key, int64_t val, int64_t 
     sl->kind = kind;   /* a value re-set under an existing key replaces the
                         * old value AND its type, like real Python's
                         * dict.__setitem__ */
+}
+
+static void _dict_set_raw_seq_kind(MojoDict *d, char *key, int64_t val, int64_t seq, int64_t kind)
+{
+    _dict_set_raw_seq_kind_k(d, key, val, seq, kind, 0 /* str key */);
 }
 
 static void _dict_set_raw_seq(MojoDict *d, char *key, int64_t val, int64_t seq)
@@ -2638,7 +3136,8 @@ static void _dict_grow(MojoDict *d)
     d->used  = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
     for (int64_t i = 0; i < old_cap; i++)
-        if (old[i].key) _dict_set_raw_seq_kind(d, old[i].key, old[i].val, old[i].seq, old[i].kind);
+        if (old[i].key) _dict_set_raw_seq_kind_k(d, old[i].key, old[i].val,
+                                                 old[i].seq, old[i].kind, old[i].keykind);
     for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
     free(old);
 }
@@ -2685,7 +3184,7 @@ void mojo_dict_set_str(MojoDict *d, char *key, char *v)
     _dict_set_raw(d, key, (int64_t)(uintptr_t)v, 2);
 }
 
-static _DictSlot *_dict_lookup(MojoDict *d, char *key)
+static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
     uint64_t h = _str_hash(key) % (uint64_t)d->cap;
@@ -2693,10 +3192,13 @@ static _DictSlot *_dict_lookup(MojoDict *d, char *key)
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)d->cap);
         _DictSlot *sl = &d->slots[idx];
         if (!sl->key) return NULL;
-        if (strcmp(sl->key, key) == 0) return sl;
+        if (sl->keykind == keykind && strcmp(sl->key, key) == 0) return sl;
     }
     return NULL;
 }
+
+static _DictSlot *_dict_lookup(MojoDict *d, char *key)
+{ return _dict_lookup_k(d, key, 0 /* str key */); }
 
 int64_t mojo_dict_get_int(MojoDict *d, char *key)
 {
@@ -2722,6 +3224,89 @@ char *mojo_dict_get_str(MojoDict *d, char *key)
 int mojo_dict_contains(MojoDict *d, char *key)
 {
     return _dict_lookup(d, key) != NULL;
+}
+
+/* ── bytes-keyed dict access ─────────────────────────────────────────────
+ * `d[b'k']` needs its own key domain (see _DictSlot.keykind) so a bytes key
+ * and a str key of the same characters stay distinct entries, as in Python.
+ * Every one of these takes the key's CONTENT as a NUL-terminated copy
+ * (mojo_bytes_cstr_key), the same probe the str path uses. */
+
+static void _dict_set_bytes_raw(MojoDict *d, MojoBytes *key, int64_t val, int64_t kind)
+{
+    if (!d) return;
+    char *k = mojo_bytes_cstr_key(key);
+    _dict_set_raw_seq_kind_k(d, k, val, -1, kind, 1 /* bytes key */);
+    free(k);
+}
+
+void mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v)
+{ _dict_set_bytes_raw(d, key, v, 0); }
+
+void mojo_dict_set_bytes_double(MojoDict *d, MojoBytes *key, double v)
+{
+    int64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    _dict_set_bytes_raw(d, key, bits, 1);
+}
+
+void mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v)
+{ _dict_set_bytes_raw(d, key, (int64_t)(uintptr_t)v, 2); }
+
+static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
+{
+    if (!d) return NULL;
+    char *k = mojo_bytes_cstr_key(key);
+    _DictSlot *sl = _dict_lookup_k(d, k, 1 /* bytes key */);
+    free(k);
+    return sl;
+}
+
+int64_t mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key)
+{
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    return sl ? sl->val : 0;
+}
+
+char *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key)
+{
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    if (!sl) return NULL;
+    return (char *)(uintptr_t)sl->val;
+}
+
+double mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key)
+{
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    if (!sl) return 0.0;
+    double v;
+    memcpy(&v, &sl->val, sizeof(v));
+    return v;
+}
+
+int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)
+{
+    return _dict_lookup_bytes(d, key) != NULL;
+}
+
+int64_t mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt)
+{
+    if (!d) return dflt;
+    if (mojo_dict_contains_bytes(d, key)) return mojo_dict_get_bytes_int(d, key);
+    mojo_dict_set_bytes_int(d, key, dflt);
+    return dflt;
+}
+
+static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind);
+
+int64_t mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt)
+{
+    if (!d) return dflt;
+    if (!mojo_dict_contains_bytes(d, key)) return dflt;
+    char *k = mojo_bytes_cstr_key(key);
+    int64_t v = _dict_pop_k(d, k, 1 /* bytes key */);
+    free(k);
+    return v;
 }
 
 void mojo_dict_print(MojoDict *d)
@@ -3087,7 +3672,10 @@ static int64_t _set_slot_int(MojoSet *s, int64_t v)
     return -1;
 }
 
-static int64_t _set_slot_str(MojoSet *s, char *v)
+/* Probe for `v` among slots of DOMAIN `tag` only (1 = str, 2 = bytes). Both
+ * domains store the value's own characters in val_s, so the tag is what
+ * keeps `{b'a'}` and `{'a'}` the two distinct sets Python says they are. */
+static int64_t _set_slot_str_tag(MojoSet *s, char *v, int tag)
 {
     /* A NULL needle is a real None value the codegen boxed as a null char*
      * (e.g. a `None` alias/name flowing into `{ ... for n in names }`).
@@ -3099,10 +3687,13 @@ static int64_t _set_slot_str(MojoSet *s, char *v)
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)s->cap);
         _SetSlot *sl = &s->slots[idx];
         if (sl->tag == -1) return idx;
-        if (sl->tag == 1 && sl->val_s && strcmp(sl->val_s, v) == 0) return idx;
+        if (sl->tag == tag && sl->val_s && strcmp(sl->val_s, v) == 0) return idx;
     }
     return -1;
 }
+
+static int64_t _set_slot_str(MojoSet *s, char *v)
+{ return _set_slot_str_tag(s, v, 1 /* str domain */); }
 
 static void _set_grow(MojoSet *s)
 {
@@ -3123,7 +3714,7 @@ static void _set_grow(MojoSet *s)
             if (j >= 0) s->slots[j].seq = old[i].seq;
         } else if (old[i].tag == 1) {
             mojo_set_add_str(s, old[i].val_s);
-            int64_t j = _set_slot_str(s, old[i].val_s);
+            int64_t j = _set_slot_str_tag(s, old[i].val_s, old[i].tag);
             if (j >= 0) s->slots[j].seq = old[i].seq;
             free(old[i].val_s);
         }
@@ -3154,6 +3745,46 @@ void mojo_set_add_str(MojoSet *s, char *v)
         s->slots[idx].seq   = s->next_seq++;
         s->used++;
     }
+}
+
+/* `s.add(b'..')` / a `{b'..', b'..'}` literal. The slot is keyed by CONTENT
+ * (the same _set_slot_str probe a str element uses, so `b'a'` matches any
+ * other `b'a'`), but carries its own tag 2 so it can never be confused with
+ * a str element of the same characters — `b'a' in {b'a'}` and `'a' in {b'a'}`
+ * give different answers, as in Python. The stored val_s is a NUL-terminated
+ * copy of the bytes, so a bytes element containing an embedded NUL is
+ * truncated here (the same lossiness the char*-keyed dict already has). */
+void mojo_set_add_bytes(MojoSet *s, MojoBytes *b)
+{
+    char *k = mojo_bytes_cstr_key(b);
+    if (s->used * 2 >= s->cap) _set_grow(s);
+    int64_t idx = _set_slot_str_tag(s, k, 2 /* bytes domain */);
+    if (idx < 0) { _set_grow(s); idx = _set_slot_str_tag(s, k, 2); }
+    if (s->slots[idx].tag == -1) {
+        s->slots[idx].tag   = 2;
+        s->slots[idx].val_s = k;
+        s->slots[idx].seq   = s->next_seq++;
+        s->used++;
+    } else {
+        free(k);
+    }
+}
+
+int mojo_set_contains_bytes(MojoSet *s, MojoBytes *b)
+{
+    if (!s) return 0;
+    char *k = mojo_bytes_cstr_key(b);
+    int64_t idx = _set_slot_str_tag(s, k, 2 /* bytes domain */);
+    free(k);
+    return idx >= 0;
+}
+
+/* Re-materialize a tag-2 (bytes) slot as a real MojoBytes value. */
+MojoBytes *mojo_set_val_bytes(MojoSet *s, int64_t idx)
+{
+    if (!s || idx < 0 || idx >= s->cap || s->slots[idx].tag != 2) return NULL;
+    char *v = s->slots[idx].val_s;
+    return mojo_bytes_from_cstr(v ? v : "");
 }
 
 /* Home slot (the index its own hash probes from, before any collision
@@ -3390,6 +4021,15 @@ int mojo_set_iter_next(MojoSetIter *it)
 {
     it->pos++;
     return (it->order && it->pos < it->n) ? 1 : 0;
+}
+
+/* The backing slot index for the CURRENT position — what mojo_set_val_bytes
+ * needs, since a bytes element lives in the tag-2 domain and has to be
+ * re-materialized from its stored content copy. */
+int64_t mojo_set_iter_pos(MojoSetIter *it)
+{
+    if (!it || it->pos < 0 || it->pos >= it->n || !it->order) return -1;
+    return it->order[it->pos];
 }
 
 /* Both accessors follow the int/str view-equivalence rule documented at
@@ -4673,7 +5313,8 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
     if (!dst || !src) return;
     for (int64_t i = 0; i < src->cap; i++)
         if (src->slots[i].key)
-            mojo_dict_set_int(dst, src->slots[i].key, src->slots[i].val);
+            _dict_set_raw_seq_kind_k(dst, src->slots[i].key, src->slots[i].val,
+                                     -1, src->slots[i].kind, src->slots[i].keykind);
 }
 
 /* dict.setdefault(key, default): return the value for `key`, inserting
@@ -4693,9 +5334,11 @@ char *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt) {
     return dflt;
 }
 
-int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
+/* Remove the entry for `key` in the given key DOMAIN (see _DictSlot.keykind)
+ * and return its value (0 when absent). */
+static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind) {
     if (!d) return 0;
-    _DictSlot *sl = _dict_lookup(d, key);
+    _DictSlot *sl = _dict_lookup_k(d, key, keykind);
     if (!sl) return 0;
     int64_t val = sl->val;
     /* This table is plain linear-probing open addressing with NO tombstones
@@ -4714,12 +5357,17 @@ int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
     d->slots = calloc((size_t)old_cap, sizeof(_DictSlot));
     d->used = 0;
     for (int64_t i = 0; i < old_cap; i++) {
-        if (old[i].key && strcmp(old[i].key, key) != 0)
-            _dict_set_raw_seq_kind(d, old[i].key, old[i].val, old[i].seq, old[i].kind);
+        if (old[i].key && !(old[i].keykind == keykind && strcmp(old[i].key, key) == 0))
+            _dict_set_raw_seq_kind_k(d, old[i].key, old[i].val, old[i].seq,
+                                     old[i].kind, old[i].keykind);
     }
     for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
     free(old);
     return val;
+}
+
+int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
+    return _dict_pop_k(d, key, 0 /* str key */);
 }
 
 MojoDict *mojo_dict_copy(MojoDict *d) {

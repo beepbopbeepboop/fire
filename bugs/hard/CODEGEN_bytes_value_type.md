@@ -1,5 +1,106 @@
 # CODEGEN: `bytes` value type in the compiled path (multi-stage feature)
 
+## Status (2026-09-25, later pass — Stage 2/3/4 API surface COMPLETED; container-membership domain bug fixed)
+
+The staged plan below had gone stale: the runtime and codegen had in fact
+already grown through Stage 4 (see the 2026-09-25 entry above it, which
+landed Stage 2's destination-driven parameter inference). A systematic sweep
+of the real `bytes`/`bytearray`/`memoryview` API surface then found the
+remaining work was **not** the missing stages the plan describes but two
+distinct classes of defect, both fixed here.
+
+### 1. Unsupported methods silently lowered to `0` instead of refusing
+
+`_lower_bytes_method`'s final `gen._stub_result('int', '0', f'TODO:
+bytes.{method}')` is reached by every unrecognized method name, so a
+`b'x'.title()` / `.isalpha()` / `.zfill()` / `mv.nbytes` / `ba.insert(1, 88)`
+/ `d.setdefault(b'k', 7)` all compiled clean, exited 0, and printed `0` (or
+did nothing) — the exact "no compile error, no runtime diagnostic" failure
+mode this doc is about. All of the following now have real lowering
+(`runtime/fire_runtime.c` + `_lower_bytes_method` / `_lower_memoryview_method`
+in `emit_methods.py`):
+
+- **search**: `rfind`, `rindex`, and the optional clamped `[start[, end]]`
+  range on `find`/`index`/`rfind`/`rindex`/`count`
+  (`mojo_bytes_find_from`/`_rfind_from`/`_count_from`), plus the
+  int-needle form `b.index(0x2c)` / `ba.count(98)` that `bytearray`'s own
+  methods are nearly always called with (`_index_int`/`_rindex_int`/`_count_int`).
+- **case/affix**: `title`, `capitalize`, `swapcase`, `removeprefix`,
+  `removesuffix`, `ljust`, `rjust`, `center`, `zfill` (ASCII-correct,
+  sign-aware zero padding, Python's odd-pad-goes-right centering).
+- **predicates**: `isalpha`, `isalnum`, `isdigit`, `isnumeric`, `isspace`,
+  `isupper`, `islower`, `istitle`, `isprintable`, `isascii` — one
+  `mojo_bytes_is(b, MOJO_BYTES_IS_*)`, since Python defines only the ASCII
+  flavours of these on `bytes`.
+- **split family**: `maxsplit=` (positional or keyword) on `split`/`rsplit`
+  with real right-anchored `rsplit` semantics (`mojo_bytes_split_max`),
+  `keepends=` on `splitlines`, and `partition`/`rpartition` returning the
+  3-tuple `(head, sep, tail)`.
+- **replacement count**: `.replace(old, new, count)`.
+- **class-level constructors**: `bytes.fromhex` (whitespace-skipping),
+  `bytes.maketrans(from, to[, delete])` and `bytes.translate(table)` — these
+  are attribute reads on the builtin `bytes` object, which had *no* lowering
+  at all, so the whole call expression vanished.
+- **bytearray**: `insert`, `remove`, and `index`/`count`.
+- **memoryview**: `nbytes`, `itemsize`, `format`, `obj` (attribute reads —
+  these needed a new `_lower_MemberExpr` case, since a descriptor with no
+  call parens is a member read, not a method call) and the constant-foldable
+  `readonly`/`c_contiguous`/`f_contiguous`/`contiguous`.
+
+`bytes.hex()` was deliberately left argument-free: CPython's `bytes.hex()`
+takes **no** parameters (unlike `str.hex(sep)`), so an invented
+`hex(sep, upper)` variant was written and then removed rather than shipping
+a lenient reading of a signature Python rejects.
+
+### 2. `bytes` as a list/dict/set ELEMENT compared by pointer, not by value
+
+The worse bug, and a silent wrong answer rather than a `0`:
+
+- `b'a' in [b'a', b'b']` compiled to `mojo_list_contains_int`, which compares
+  the boxed `MojoBytes *` **pointer**. Two separately-constructed `b'a'`
+  values are different objects, so membership was always False.
+  → `mojo_list_contains_bytes`, a content comparison.
+- `{b'a', b'b'}` stored raw pointers in int-tagged set slots, so `{b'a'}` and
+  `{b'a'}` were two different sets, `b'a' in s` never matched, and
+  `for x in s:` printed pointer decimals. The set now has a third slot
+  **domain** (tag 2) keyed by content (`mojo_set_add_bytes` /
+  `_contains_bytes` / `_val_bytes`), and `_gen_for_set` reads the element
+  through the matching accessor instead of always using the int view.
+- `d[b'x'] = 1; print(d[b'x'])` printed `0`. The write side ran
+  `_char_to_cstr` on the `MojoBytes *` key, which C-CASTS THE POINTER to
+  `char *`, so the dict stored an *address* as its key; the read built a
+  different address and never matched.
+
+  Fixing that by keying bytes into the shared `char *` keyspace was
+  rejected: it would make `d[b'x']` and `d['x']` the SAME entry, where
+  Python says they are two. Instead `_DictSlot` gained a `keykind` field
+  (0 = str key, 1 = bytes key) threaded through `_dict_find` /
+  `_dict_lookup` / `_dict_grow` / the `pop` rebuild / `dict_update`, giving
+  bytes keys their own domain (`mojo_dict_set/get/contains/
+  setdefault/pop_bytes_*`). `_DictSlot` is entirely internal to
+  `fire_runtime.c`/`.h` — no generated code touches its fields — so this
+  adds no ABI surface. Both the dict literal and the subscript-assignment
+  write paths, the subscript read, `in`, and `setdefault` now route a bytes
+  key to that domain.
+
+### Known limitation carried forward
+
+A bytes key containing an **embedded NUL** is truncated at it (the
+`mojo_bytes_cstr_key` shim), because the dict stores keys as NUL-terminated
+strings. A container keyed on such bytes needs a typed-key container, not
+this shim. Also still true and unchanged: a dict has ONE value type in this
+codegen, so a dict literal mixing value types (`{b'x': 1.5, b'y': 'z'}`)
+mis-reads the minority-typed entries — that is a pre-existing
+`_dict_val_types` limitation, not a bytes-key one.
+
+Regression tests: `gimple_bytes_search_family`,
+`gimple_bytes_case_and_affix_methods`, `gimple_bytes_predicates`,
+`gimple_bytes_partition_split_limits`,
+`gimple_bytes_fromhex_maketrans_translate`,
+`gimple_bytes_membership_in_containers`, `gimple_bytes_dict_key_domain`,
+`gimple_bytearray_index_remove_insert`, `gimple_memoryview_descriptors` in
+`test_gimple_runner.py` (all real compile + link + run, exact stdout).
+
 ## Status (2026-09-25 — destination-driven bytes parameter inference LANDED)
 
 The remaining Stage 2 body-usage inference gap for a slice assigned to an

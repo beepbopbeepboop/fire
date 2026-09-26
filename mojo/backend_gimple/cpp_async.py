@@ -390,6 +390,43 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # actually round-trip correctly, not just type-check.
     param_ctypes: list[tuple[str, str]] = []
     fn_params = list(fn.params or [])
+    # Increment D guard: a nested async GENERATOR that captures enclosing
+    # locals in a shape the A3 capture-box threading cannot reach (driven
+    # from a further-nested `async def` sibling's `async for`/await loop).
+    # The A3 side records these in `_UNTHREADABLE_NESTED_ASYNC_GENS` during
+    # `_hoist_nested_async`; this emitter has no capture model at all, so
+    # emitting one produced a body referencing the captured name in a scope
+    # where it does not exist -- a hard "'acc' was not declared in this
+    # scope" from the generated .cpp, which blames generated code rather
+    # than the program. Refuse honestly instead. See
+    # bugs/hard/CODEGEN_coro_nested_async_closure_capture.md.
+    if (getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS
+            or (struct_name and f'{struct_name}_{fn.name}'
+                in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS)):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "is a nested async generator that captures enclosing locals "
+            "which are only read from a further-nested `async def` sibling's "
+            "`async for`/await drive loop; the capture box cannot be threaded "
+            "into a driven consumer (threading it through the async-for "
+            "driver is the remaining work)")
+    # SHARED ambiguity gate with the A3 stack-switch backend. Both backends
+    # fix ONE C value-slot type per generator, so a generator that yields a
+    # parameter whose call sites pass provably DIFFERENT kinds cannot be
+    # represented by either: the slot defaults to int64_t and a yielded
+    # float is silently truncated while a yielded string prints as its
+    # address. `gimple_gen_coro._scan_callsite_param_kinds` records exactly
+    # those params in `_CALLSITE_PARAM_CONFLICTS` (populated once per
+    # module, before either backend runs), and its own `_eligible` refuses
+    # them; this is the same refusal for the C++ backend, so neither can
+    # silently miscompile what the other rejects. See
+    # bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md.
+    _bad = gimple_gen_coro._ambiguous_yielded_params(fn, struct_name)
+    if _bad:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"yields {sorted(_bad)!r}, whose call sites pass conflicting "
+            "types (a compiled generator has ONE fixed C value-slot, so "
+            "this cannot be represented without silently truncating a "
+            "float to int64_t or printing a string as its address)")
     if struct_name is not None:
         if not fn_params or fn_params[0][0] not in ('self', 'cls'):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -2640,6 +2677,23 @@ def _compile_nested_async_functions(gen, outer_fn: gimple_ctypes.FunctionDef,
 
 
 def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[str, str, str, list]:
+    """Increment D guard, for the same reason as
+    `_gen_cpp_generator_unit`'s: a nested async GENERATOR that captures
+    enclosing locals in a shape the A3 capture-box threading cannot reach.
+    Recorded by `_hoist_nested_async` into
+    `_UNTHREADABLE_NESTED_ASYNC_GENS`. Without this the emitted coroutine
+    body referenced the captured name in a scope where it does not exist —
+    a hard "'acc' was not declared in this scope" from the generated .cpp,
+    blaming generated code rather than the program. See
+    bugs/hard/CODEGEN_coro_nested_async_closure_capture.md.
+    """
+    if getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "is a nested async generator that "
+            "captures enclosing locals which are only read from a "
+            "further-nested `async def` sibling's `async for`/await drive "
+            "loop; the capture box cannot be threaded into a driven consumer "
+            "(threading it through the async-for driver is the remaining work)")
     """Final step of the compiled-path async/await codegen project:
     `async def f(): ... yield ... ...` -- an async GENERATOR (is_async
     AND is_generator both true). A THIRD, distinct promise type, not a

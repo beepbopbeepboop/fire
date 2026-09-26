@@ -944,6 +944,186 @@ fn main():
     print(t)
 """, "101\n5\n1\n68656c6c6f\n1\n532\n")
 
+    # ── bytes/bytearray/memoryview: the API surface that used to lower to
+    # a silent `0` stub (the `_stub_result('int', '0', ...)` fallthrough at
+    # the end of _lower_bytes_method) instead of anything real.
+    test_gimple_stdout("gimple_bytes_search_family", """\
+fn main():
+    print(b'abcabc'.find(b'c'))
+    print(b'abcabc'.rfind(b'c'))
+    print(b'abcabc'.index(b'c'))
+    print(b'abcabc'.index(b'c', 3))
+    print(b'abcabc'.rfind(b'c', 0, 4))
+    print(b'abcabc'.count(b'bc'))
+    print(b'abcabc'.count(b'bc', 0, 5))
+    print(b'abc'.index(98))
+    print(b'abcb'.count(98))
+    print(b'abc'.rindex(99))
+    print(b'abcabc'.find(b'z'))
+""", "2\n5\n2\n5\n2\n2\n1\n1\n2\n2\n-1\n")
+
+    test_gimple_stdout("gimple_bytes_case_and_affix_methods", """\
+fn main():
+    print(b'hello world'.title())
+    print(b'hELLO'.capitalize())
+    print(b'Hello'.swapcase())
+    print(b'abcabc'.removeprefix(b'ab'))
+    print(b'abcabc'.removesuffix(b'bc'))
+    print(b'abc'.removeprefix(b'zz'))
+    print(b'a'.ljust(5, 46))
+    print(b'a'.rjust(5, 46))
+    print(b'a'.center(5, 46))
+    print(b'42'.zfill(5))
+    print(b'-42'.zfill(5))
+    print(b'42'.zfill(2))
+""", "b'Hello World'\nb'Hello'\nb'hELLO'\nb'cabc'\nb'abca'\nb'abc'\nb'a....'\nb'....a'\nb'..a..'\nb'00042'\nb'-0042'\nb'42'\n")
+
+    test_gimple_stdout("gimple_bytes_predicates", """\
+fn main():
+    print(b'abc'.isalpha(), b'a1'.isalnum(), b'12'.isdigit())
+    print(b' '.isspace(), b'AB'.isupper(), b'ab'.islower())
+    print(b'Hello World'.istitle(), b'hi'.isascii(), b'a b'.isprintable())
+    print(b'ab1'.isalpha(), b'ab'.isupper(), b'Hello world'.istitle())
+    print(b''.isalpha(), b''.isdigit())
+""", "1 1 1\n1 1 1\n1 1 1\n0 0 0\n1 1\n")
+
+    test_gimple_stdout("gimple_bytes_partition_split_limits", """\
+fn main():
+    print(b'a=b'.partition(b'='))
+    print(b'a=b=c'.rpartition(b'='))
+    print(b'abc'.partition(b'='))
+    print(b'a,b,c'.split(b',', 1))
+    print(b'a,b,c'.rsplit(b',', 1))
+    print(b'a,b,c'.split(b',', maxsplit=1))
+    print(b'a b  c'.split())
+    print(b'a\\nb\\n'.splitlines(True))
+    print(b'aaa'.replace(b'a', b'b', 2))
+    print(b'aaa'.replace(b'a', b'b', 0))
+""", "[b'a', b'=', b'b']\n[b'a=b', b'=', b'c']\n[b'', b'', b'abc']\n[b'a', b'b,c']\n[b'a,b', b'c']\n[b'a', b'b,c']\n[b'a', b'b', b'c']\n[b'a\\n', b'b\\n']\nb'bba'\nb'aaa'\n")
+
+    test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
+fn main():
+    print(bytes.fromhex('68656c6c6f'))
+    print(bytes.fromhex('68 65 6c'))
+    print(bytes.fromhex('DEADBEEF'))
+    print(b'abc'.translate(bytes.maketrans(b'a', b'b')))
+    print(b'abc'.translate(bytes.maketrans(b'a', b'b', b'c')))
+    print(b'abc'.translate(bytes(range(256))))
+""", "b'hello'\nb'hel'\nb'\\xde\\xad\\xbe\\xef'\nb'bbc'\nb'bbc'\nb'abc'\n")
+
+    test_gimple_stdout("gimple_bytes_membership_in_containers", """\
+fn main():
+    print(1 if b'a' in [b'a', b'b'] else 0)
+    print(1 if b'c' in [b'a', b'b'] else 0)
+    var d = {}
+    d[b'a'] = 1
+    print(d[b'a'], 1 if b'a' in d else 0)
+    var s = {b'a', b'b'}
+    print(1 if b'a' in s else 0, len(s))
+    s.add(b'a')
+    print(len(s))
+    for x in s:
+        print(x)
+""", "1\n0\n1 1\n1 2\n2\nb'a'\nb'b'\n")
+
+    # A bytes KEY is its own dict key domain, so `d[b'a']` and `d['a']` are
+    # two distinct entries (Python's answer) rather than one aliasing the
+    # other — and a bytes-keyed read finds what a bytes-keyed write stored.
+    test_gimple_stdout("gimple_bytes_dict_key_domain", """\
+fn main():
+    var d = {}
+    d[b'a'] = 1
+    d['a'] = 2
+    print(d[b'a'], d['a'], len(d))
+    print(1 if 'a' in d else 0, 1 if b'a' in d else 0)
+    var e = {b'x': 1.5}
+    print(e[b'x'])
+    var g = {b'y': 'z'}
+    print(g[b'y'])
+    var h = {}
+    print(h.setdefault(b'k', 7), h[b'k'])
+    var f = {b'a', 'a'}
+    print(len(f), 1 if 'a' in f else 0, 1 if b'a' in f else 0)
+""", "1 2 2\n1 1\n1.5\nz\n7 7\n2 1 1\n")
+
+    test_gimple_stdout("gimple_bytearray_index_remove_insert", """\
+fn main():
+    var ba = bytearray(b'abcb')
+    print(ba.index(98), ba.count(98), ba.rfind(b'b'))
+    ba.remove(98)
+    print(bytes(ba))
+    ba.insert(1, 88)
+    print(bytes(ba))
+    print(bytes(ba[1:3]))
+""", "1 2 3\nb'acb'\nb'aXcb'\nb'Xc'\n")
+
+    test_gimple_stdout("gimple_memoryview_descriptors", """\
+fn main():
+    var mv = memoryview(b'abcd')
+    print(mv.nbytes, mv.itemsize, mv.format)
+    print(mv.obj)
+    print(mv.readonly, mv.c_contiguous)
+    print(len(mv.cast('B')))
+""", "4 1 B\nb'abcd'\n0 1\n4\n")
+
+    # ── constructor-call-site inference reaches METHOD bodies and
+    # MemberExpr/BinaryOp arguments ───────────────────────────────────────
+    # `Reader(self._p)` / `Reader(self._p + "!")` inside a method: the
+    # ctor-argument observation pass only walked free functions and toplevel,
+    # and only resolved bare literals/IdentExprs, so these contributed no
+    # evidence, the `__init__` param stayed int64_t, and the field printed as
+    # a raw pointer decimal.
+    test_gimple_stdout("gimple_ctor_arg_from_method_self_field", """\
+class Reader:
+    def __init__(self, path):
+        self._path = path
+
+class Holder:
+    def __init__(self, p):
+        self._p = p
+    def direct(self):
+        var r = Reader(self._p)
+        return r._path
+    def concat(self):
+        var r = Reader(self._p + "!")
+        return r._path
+    def literal(self):
+        var r = Reader("lit")
+        return r._path
+
+fn main():
+    var h = Holder("hello")
+    print(h.direct())
+    print(h.concat())
+    print(h.literal())
+""", "hello\nhello!\nlit\n")
+
+    # The positive case is only safe because the evidence is UNANIMOOUS. A
+    # slot with mixed `char *`/`double` call-site evidence must stay at the
+    # default rather than pick a winner. (Each field here is separately
+    # unanimous: a single field cannot be both types in this codegen's
+    # one-type-per-field model at all.)
+    test_gimple_stdout("gimple_ctor_arg_unanimous_str_and_int", """\
+class FromStr:
+    def __init__(self, label):
+        self.label = label
+
+class FromInt:
+    def __init__(self, count):
+        self.count = count
+
+fn use_str():
+    var o = FromStr("abc")
+    return o.label
+fn use_int():
+    var o = FromInt(42)
+    return o.count
+
+fn main():
+    print(use_str())
+    print(use_int())
+""", "abc\n42\n")
+
     # ── bytes value type (Stage 4): bytes-typed struct fields ────────────
     # `self._buf = b''` in __init__ makes the field a real bytes value, so
     # a slice of the field and `acc += <bytes>` accumulation work end to

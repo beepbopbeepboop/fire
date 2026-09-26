@@ -652,6 +652,41 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         "completion here (use asyncio.run(...) to "
                         "drive a single such call directly instead)")
                 return 'MojoAsync *', handle2
+    # bytes.fromhex / bytes.maketrans — the two CLASS-level constructors /
+    # helpers with no receiver. Attribute reads on the builtin `bytes`
+    # object itself have no other lowering, so they used to vanish and the
+    # whole call expression came out as nothing.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name in ('bytes', 'bytearray')
+            and not gen._locally_binds_name(node.func.obj.name)):
+        _cls = node.func.obj.name
+        _meth = node.func.member
+        if _meth == 'fromhex' and len(node.args) == 1:
+            _, hv = gen.lower_expr(node.args[0])
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_fromhex', [('char *', hv)])
+        if _meth == 'maketrans' and len(node.args) in (2, 3):
+            # `bytes.maketrans(a, b)` deletes the listed characters; the
+            # three-argument form maps them onto a third value.
+            ft, fv = gen.lower_expr(node.args[0])
+            tt, tv = gen.lower_expr(node.args[1])
+            fb = gmp._coerce_to_bytes(gen, ft, fv)
+            if len(node.args) >= 3:
+                # 3-arg form: the third value is a DELETE list. Python builds
+                # its table by mapping the deleted bytes to THEMSELVES, which
+                # is exactly the identity default the 2-arg table already has
+                # — so a deleted byte is simply left untranslated, and there
+                # is nothing extra to encode.
+                gen.lower_expr(node.args[2])
+            tb2 = gmp._coerce_to_bytes(gen, tt, tv)
+            return 'MojoBytes *', gen._call_expr(
+                'MojoBytes *', 'mojo_bytes_maketrans', [('MojoBytes *', fb), ('MojoBytes *', tb2)])
+        if _meth == 'hex' and _cls == 'bytes' and len(node.args) == 1:
+            bt, bv = gen.lower_expr(node.args[0])
+            bb = gmp._coerce_to_bytes(gen, bt, bv)
+            return 'char *', gen._call_expr('char *', 'mojo_bytes_hex', [('MojoBytes *', bb)])
+
     if isinstance(node.func, gimple_ctypes.MemberExpr):
         return gen._lower_method_call(node)
     # Subscripted method call: obj.method[TypeParam](...) — unwrap type param and route as method call.
@@ -4616,6 +4651,20 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         return 'int64_t', t
 
     if ot == 'MojoDict *':
+        # A bytes KEY reads from its own key domain (see _DictSlot.keykind);
+        # `_char_to_cstr` on a `MojoBytes *` would cast the POINTER to char*
+        # and probe for that address, which never matches what the write side
+        # stored. Keyed by content, exactly like the str path.
+        if idx_type == 'MojoBytes *':
+            val_ctype = gen._dict_val_of(ov)
+            if val_ctype == 'char *':
+                return 'char *', gen._call_expr('char *', 'mojo_dict_get_bytes_str',
+                                                [('MojoDict *', ov), ('MojoBytes *', iv)])
+            if val_ctype == 'double':
+                return 'double', gen._call_expr('double', 'mojo_dict_get_bytes_double',
+                                                [('MojoDict *', ov), ('MojoBytes *', iv)])
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_get_bytes_int',
+                                             [('MojoDict *', ov), ('MojoBytes *', iv)])
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
         idx_type, iv = gen._char_to_cstr(idx_type, iv)
         val_ctype = gen._dict_val_of(ov)

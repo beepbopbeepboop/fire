@@ -467,6 +467,16 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # self-hosted `mojoc fire.py --dump-full` run vs the real
                 # absolute path on the next, for the identical invocation.
                 temp_gen._current_filename = _abspath  # Set filename for #line directives
+                # Record which FILE this module's statements really came
+                # from, on the SHARED gen (and hand the same dict to the
+                # temp_gen), so an ancestor that later re-emits one of
+                # them — the inheritance merge copies a base class's
+                # method node into the subclass and emits it a second
+                # time as `Sub___m` — can still attribute its `#line`
+                # directives to the defining module rather than to
+                # itself. See GimpleGen._module_source_paths.
+                gen._module_source_paths[module_name] = _abspath
+                temp_gen._module_source_paths = gen._module_source_paths
                 temp_gen._compiled_modules = gen._compiled_modules
                 temp_gen._inline_module_qualifiers = gen._inline_module_qualifiers
                 temp_gen._compiling_file_paths = gen._compiling_file_paths  # share: path-identity self-import guard (see its own declaration)

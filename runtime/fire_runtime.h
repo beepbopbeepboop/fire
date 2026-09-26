@@ -373,6 +373,9 @@ typedef struct {
 } MojoBytes;
 
 MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` bytes */
+/* `x in <list of bytes>`: elements are boxed MojoBytes * pointers, so plain
+ * mojo_list_contains_int would compare POINTER identity instead of `==`. */
+int          mojo_list_contains_bytes(MojoList *l, MojoBytes *v);
 MojoBytes *mojo_bytes_empty(void);
 MojoBytes *mojo_bytes_zeros(int64_t n);
 MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
@@ -389,19 +392,59 @@ MojoBytes *mojo_bytes_repeat(MojoBytes *b, int64_t n);
 MojoBytes *mojo_bytes_slice(MojoBytes *b, int64_t start, int64_t stop, int64_t step);
 int        mojo_bytes_contains(MojoBytes *hay, MojoBytes *needle);
 int64_t    mojo_bytes_find(MojoBytes *hay, MojoBytes *needle);
+int64_t    mojo_bytes_rfind(MojoBytes *hay, MojoBytes *needle);
+/* start/stop use the MOJO_SLICE_STOP_OMITTED sentinel for "not given" and are
+ * otherwise Python's clamped [start, end) bounds (negatives count from the
+ * end, start > end yields an empty range). */
+int64_t    mojo_bytes_find_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
+int64_t    mojo_bytes_rfind_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
+/* index/count of a single byte VALUE (bytes/bytearray `.index(0xNN)`). */
+int64_t    mojo_bytes_index_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
+int64_t    mojo_bytes_rindex_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
+int64_t    mojo_bytes_count_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
 int64_t    mojo_bytes_count(MojoBytes *hay, MojoBytes *needle);
+int64_t    mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 int        mojo_bytes_startswith(MojoBytes *b, MojoBytes *p);
 int        mojo_bytes_endswith(MojoBytes *b, MojoBytes *p);
 char      *mojo_bytes_decode(MojoBytes *b, char *encoding);
 char      *mojo_bytes_hex(MojoBytes *b);
 char      *mojo_bytes_hash_hexdigest(MojoBytes *b);  /* hashlib(...).hexdigest() backing */
+MojoBytes *mojo_bytes_removeprefix(MojoBytes *b, MojoBytes *p);
+MojoBytes *mojo_bytes_removesuffix(MojoBytes *b, MojoBytes *p);
+MojoBytes *mojo_bytes_title(MojoBytes *b);
+MojoBytes *mojo_bytes_capitalize(MojoBytes *b);
+MojoBytes *mojo_bytes_swapcase(MojoBytes *b);
+MojoBytes *mojo_bytes_ljust(MojoBytes *b, int64_t width, int fill);
+MojoBytes *mojo_bytes_rjust(MojoBytes *b, int64_t width, int fill);
+MojoBytes *mojo_bytes_center(MojoBytes *b, int64_t width, int fill);
+MojoBytes *mojo_bytes_zfill(MojoBytes *b, int64_t width);
+/* partition/rpartition -> a 3-element list of (head, sep, tail). */
+MojoList  *mojo_bytes_partition(MojoBytes *b, MojoBytes *sep);
+MojoList  *mojo_bytes_rpartition(MojoBytes *b, MojoBytes *sep);
+MojoBytes *mojo_bytes_fromhex(char *s);
+/* NUL-terminated copy of the bytes' content, for the char*-keyed dict probe
+ * path; truncates at an embedded NUL (documented lossiness). */
+char      *mojo_bytes_cstr_key(MojoBytes *b);
+MojoBytes *mojo_bytes_maketrans(MojoBytes *from, MojoBytes *to);
+MojoBytes *mojo_bytes_translate(MojoBytes *b, MojoBytes *table);
+/* The bytes.isX() predicates, selected by `kind` (the MOJO_BYTES_IS_*
+ * codes above mojo_bytes_is in fire_runtime.c). Python defines only the
+ * ASCII versions of these for bytes. */
+int        mojo_bytes_is(MojoBytes *b, int kind);
 MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to);
+/* `.replace(old, new, count)` — count < 0 or MOJO_SLICE_STOP_OMITTED replaces
+ * every occurrence. */
+MojoBytes *mojo_bytes_replace_n(MojoBytes *b, MojoBytes *from, MojoBytes *to, int64_t count);
 MojoBytes *mojo_bytes_strip(MojoBytes *b, MojoBytes *chars, int do_left, int do_right);
 MojoBytes *mojo_bytes_upper(MojoBytes *b);
 MojoBytes *mojo_bytes_lower(MojoBytes *b);
 MojoList  *mojo_bytes_split(MojoBytes *b, MojoBytes *sep);
 MojoList  *mojo_bytes_rsplit(MojoBytes *b, MojoBytes *sep);
+/* maxsplit == MOJO_SLICE_STOP_OMITTED means unbounded; from_right selects
+ * rsplit semantics (splitting anchored at the end). */
+MojoList  *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, int from_right);
 MojoList  *mojo_bytes_splitlines(MojoBytes *b);
+MojoList  *mojo_bytes_splitlines_keep(MojoBytes *b, int keepends);
 MojoBytes *mojo_bytes_join(MojoBytes *sep, MojoList *parts);
 MojoBytes *mojo_bytes_copy(MojoBytes *src);   /* bytes(bytearray) — real copy */
 MojoBytes *mojo_bytes_reverse(MojoBytes *src);/* reversed(<bytes>) */
@@ -417,6 +460,8 @@ void       mojo_bytearray_extend(MojoBytes *b, MojoBytes *other);
 int64_t    mojo_bytearray_pop(MojoBytes *b, int64_t i); /* i==MOJO_SLICE_STOP_OMITTED -> last */
 void       mojo_bytearray_delitem(MojoBytes *b, int64_t i);
 void       mojo_bytearray_splice(MojoBytes *b, int64_t start, int64_t stop, MojoBytes *repl);
+void       mojo_bytearray_insert(MojoBytes *b, int64_t i, int64_t v);
+void       mojo_bytearray_remove(MojoBytes *b, int64_t v);
 
 /* ── memoryview (non-copying 1-D byte view, itemsize 1 / format 'B') ─────*/
 typedef struct {
@@ -435,6 +480,10 @@ int             mojo_memoryview_eq(MojoMemoryView *m, MojoBytes *b);
 char           *mojo_memoryview_hex(MojoMemoryView *m);
 MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt);
 char           *mojo_memoryview_repr(MojoMemoryView *m);
+int64_t         mojo_memoryview_itemsize(MojoMemoryView *m);
+int64_t         mojo_memoryview_nbytes(MojoMemoryView *m);
+char           *mojo_memoryview_format(MojoMemoryView *m, char *fmt);
+MojoBytes      *mojo_memoryview_obj(MojoMemoryView *m);
 
 /* ── struct module (binary pack / unpack) ───────────────────────────────
  * Format mini-language, a subset of CPython's `struct`:
@@ -505,6 +554,10 @@ typedef struct {
                      * %-formatting): 0 = plain int64_t, 1 = double bit-cast,
                      * 2 = char * pointer. Maintained by the typed setters
                      * below; zero-defaulted everywhere else. */
+    int64_t  keykind; /* key DOMAIN, since every key is stored as its own
+                     * characters in `key` and matched with strcmp: 0 = a str
+                     * key, 1 = a bytes key. Keeps `d[b'x']` and `d['x']` the
+                     * two distinct entries Python says they are. */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
@@ -530,6 +583,7 @@ int         mojo_is_bool_dict(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
+void        mojo_dict_set_bytes_double(MojoDict *d, MojoBytes *key, double v);
 void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
 
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
@@ -613,6 +667,16 @@ int64_t     mojo_hash_str(char *s);
 int64_t     mojo_hash(int64_t val);
 
 int         mojo_dict_contains(MojoDict *d, char *key);
+/* bytes-keyed access — its own key DOMAIN (see _DictSlot.keykind), so
+ * `d[b'x']` and `d['x']` stay distinct entries. Keyed by content. */
+void        mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v);
+void        mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v);
+int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
+char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
+double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
+int         mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key);
+int64_t     mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
+int64_t     mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
 
@@ -662,6 +726,9 @@ void     mojo_set_add_str(MojoSet *s, char *v);
 
 int      mojo_set_contains_int(MojoSet *s, int64_t v);
 int      mojo_set_contains_str(MojoSet *s, char *v);
+void     mojo_set_add_bytes(MojoSet *s, MojoBytes *b);
+int      mojo_set_contains_bytes(MojoSet *s, MojoBytes *b);
+MojoBytes *mojo_set_val_bytes(MojoSet *s, int64_t idx);
 int64_t  mojo_set_len(MojoSet *s);
 MojoSet *mojo_set_union(MojoSet *a, MojoSet *b);
 MojoSet *mojo_set_intersection(MojoSet *a, MojoSet *b);
@@ -691,6 +758,7 @@ typedef struct {
 } MojoSetIter;
 MojoSetIter *mojo_set_iter_new(MojoSet *s);
 int          mojo_set_iter_next(MojoSetIter *it);      /* 1=has entry, 0=done */
+int64_t      mojo_set_iter_pos(MojoSetIter *it);       /* backing slot idx, or -1 */
 int64_t      mojo_set_iter_val_int(MojoSetIter *it);
 char *mojo_set_iter_val_str(MojoSetIter *it);
 void         mojo_set_iter_free(MojoSetIter *it);

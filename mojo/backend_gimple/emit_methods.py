@@ -328,9 +328,9 @@ def _lower_builtin_bound_method_call(gen, fname_raw: str,
     if recv_ct == 'MojoDict *':
         return gen._lower_dict_method(recv_v, method, node.args)
     if recv_ct == 'MojoBytes *':
-        return gen._lower_bytes_method(recv_v, method, node.args)
+        return gen._lower_bytes_method(recv_v, method, node.args, node.kwargs)
     if recv_ct == 'MojoMemoryView *':
-        return gen._lower_memoryview_method(recv_v, method, node.args)
+        return gen._lower_memoryview_method(recv_v, method, node.args, node.kwargs)
     return gen._lower_set_method(recv_v, method, node.args)
 
 
@@ -2608,7 +2608,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                '__len__', '__contains__')
                 and not gen._struct_defines_method(_bsub_m, method)):
             _bsub_bp = gen._new_val('MojoBytes *', f"{ov}->_data")
-            return gen._lower_bytes_method(_bsub_bp, method, node.args)
+            return gen._lower_bytes_method(_bsub_bp, method, node.args, node.kwargs)
 
     # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
     # Must intercept BEFORE the opaque-int coerce below, which would misidentify
@@ -2908,9 +2908,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if ot == 'MojoSet *':
         return gen._lower_set_method(ov, method, node.args)
     if ot == 'MojoBytes *':
-        return gen._lower_bytes_method(ov, method, node.args)
+        return gen._lower_bytes_method(ov, method, node.args, node.kwargs)
     if ot == 'MojoMemoryView *':
-        return gen._lower_memoryview_method(ov, method, node.args)
+        return gen._lower_memoryview_method(ov, method, node.args, node.kwargs)
     _RAW_PTR_METHODS = frozenset({
         'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
         'destroy_pointee', 'take_pointee', 'initialize_pointee',
@@ -3163,7 +3163,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _sn == 'MojoStr':
         return gen._lower_str_method(ov, method, node.args)
     if _sn == 'MojoBytes':
-        return gen._lower_bytes_method(ov, method, node.args)
+        return gen._lower_bytes_method(ov, method, node.args, node.kwargs)
     if (len(_sn) > 0
             and (_sn not in gen.struct_field_types
                  or f'{_sn}_{method}' not in gen.func_return_types)
@@ -3393,11 +3393,21 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # own `gen_module_impl` uses it) appended to a NULL list and
         # segfaulted the self-hosted binary.
         key_type, key_val = gen.lower_expr(args[0])
-        key_type, key_val = gen._char_to_cstr(key_type, key_val)
+        if key_type != 'MojoBytes *':
+            key_type, key_val = gen._char_to_cstr(key_type, key_val)
         if len(args) >= 2:
             dt, dv = gen.lower_expr(args[1])
         else:
             dt, dv = 'int64_t', '0'
+        if key_type == 'MojoBytes *':
+            # bytes keys live in their own dict key domain — see
+            # _DictSlot.keykind. `_char_to_cstr` would have cast the
+            # MojoBytes POINTER to char*, so the insert went into the str
+            # domain under an address and the read-back never found it.
+            dv64 = gen._to_int64(dt, dv)
+            return 'int64_t', gen._call_expr(
+                'int64_t', 'mojo_dict_setdefault_bytes_int',
+                [('MojoDict *', ov), ('MojoBytes *', key_val), ('int64_t', dv64)])
         if dt == 'char *':
             return 'char *', gen._call_expr(
                 'char *', 'mojo_dict_setdefault_str',
@@ -3643,6 +3653,13 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         # segfaulted in `strcmp`).
         if at == 'char *' and ov not in gen._elem_types:
             gen._elem_types[ov] = 'char *'
+        if at == 'MojoBytes *':
+            # bytes elements live in their own slot domain (set tag 2), so
+            # `s.add(b'a')` twice is still one element and `b'a' in s` hits —
+            # an int slot would store the raw pointer and give both failures.
+            if gen._elem_of(ov) in (None, 'int64_t'):
+                gen._elem_types[ov] = 'MojoBytes *'
+            return gen._void_call('mojo_set_add_bytes', [('MojoSet *', ov), ('MojoBytes *', av)])
         if at == 'char *':
             return gen._void_call('mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
         av64 = gen._to_int64(at, av)
@@ -3970,7 +3987,73 @@ def _coerce_to_bytes(gen, t: str, v: str) -> str:
     return gen._new_val('MojoBytes *', f'(MojoBytes *){v}')
 
 
-def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
+def _bytes_is_kind(method: str) -> int | None:
+    """Map a `bytes.isX()` predicate name to its MOJO_BYTES_IS_* code (see
+    mojo_bytes_is in fire_runtime.c). Returns None for a non-predicate name.
+    Python defines only the ASCII flavours of these on `bytes`, which is
+    exactly what the runtime implements."""
+    return {
+        'isalpha': 0, 'isalnum': 1, 'isdigit': 2, 'isspace': 3,
+        'isupper': 4, 'islower': 5, 'istitle': 6, 'isprintable': 7,
+        'isascii': 8, 'isnumeric': 9,
+    }.get(method)
+
+
+def _opt_arg(gen, args, kwargs, name, want, default):
+    """Resolve one optional positional-or-keyword argument of a bytes /
+    memoryview method: `args` is the positional list, `kwargs` the
+    `[(str, Expr)]` pairs. Returns a lowered C value of type `want`.
+
+    Positional lookup is by the parameter's position among the method's
+    OPTIONAL parameters (`slot`, 0-based); an explicit keyword always wins
+    over a positional, as in Python."""
+    for k, v in (kwargs or []):
+        if k == name:
+            return gen.lower_expr(v)[1]
+    if want == 'int64_t':
+        lo, hi = _OPT_SLOTS.get(name, (None, None))
+        if lo is not None and len(args) > lo:
+            return gen._to_int64(*gen.lower_expr(args[lo]))
+    elif want == 'char *' and args:
+        t, v = gen.lower_expr(args[0])
+        return v if t == 'char *' else default
+    elif want == 'MojoBytes *':
+        lo, hi = _OPT_SLOTS.get(name, (None, None))
+        if lo is not None and len(args) > lo:
+            return _coerce_to_bytes(gen, *gen.lower_expr(args[lo]))
+    return default
+
+
+# Optional-parameter positional slots, per method family: (first_positional,
+# last_positional) counted over the method's OPTIONAL parameters only (the
+# required leading argument is handled separately by each case below).
+_OPT_SLOTS = {
+    'start': (0, 1), 'end': (1, 1), 'maxsplit': (1, 1), 'width': (0, 0),
+    'fillchar': (1, 1), 'keepends': (0, 0), 'sep': (0, 0), 'upper': (1, 1),
+    'do_left': (1, 2), 'do_right': (2, 2),
+}
+
+
+def _range_opts(gen, args, kwargs, first_optional):
+    """Resolve the optional `[start[, end]]` of a find/index/count family
+    call into a (start, stop) C pair, using the MOJO_SLICE_STOP_OMITTED
+    sentinel for "not given" so the runtime's own clamping handles negatives
+    and start > end exactly like Python's slice bounds."""
+    start = '0'
+    stop = 'MOJO_SLICE_STOP_OMITTED'
+    for k, v in (kwargs or []):
+        if k == 'start':
+            start = gen._to_int64(*gen.lower_expr(v))
+        elif k == 'end':
+            stop = gen._to_int64(*gen.lower_expr(v))
+    if len(args) > first_optional:
+        start = gen._to_int64(*gen.lower_expr(args[first_optional]))
+    if len(args) > first_optional + 1:
+        stop = gen._to_int64(*gen.lower_expr(args[first_optional + 1]))
+    return start, stop
+
+
+def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> tuple:
     """Lower `MojoBytes *` method calls (mirrors _lower_str_method, but
     bytes-typed: .decode/.hex return char*, everything else returns bytes,
     split-family returns list-of-bytes)."""
@@ -3981,7 +4064,10 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
 
     if method == 'decode':
         enc = '"utf-8"'
-        if arg_pairs and arg_pairs[0][0] == 'char *':
+        for k, v in (kwargs or []):
+            if k == 'encoding':
+                enc = gen.lower_expr(v)[1]
+        if not enc.startswith('"') and arg_pairs and arg_pairs[0][0] == 'char *':
             enc = arg_pairs[0][1]
         return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
                                         [('MojoBytes *', ov), ('char *', enc)])
@@ -3997,6 +4083,8 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
     if method == 'hexdigest':
         return 'char *', gen._call_expr('char *', 'mojo_bytes_hash_hexdigest', [('MojoBytes *', ov)])
     if method == 'hex':
+        # `bytes.hex()` takes NO arguments in Python (unlike `str.hex(sep)`
+        # and unlike `binascii.hexlify`, which is a different function).
         return 'char *', gen._call_expr('char *', 'mojo_bytes_hex', [('MojoBytes *', ov)])
 
     if method in ('startswith', 'endswith') and arg_pairs:
@@ -4005,25 +4093,75 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
         t = gen._call_expr('int', fn, [('MojoBytes *', ov), ('MojoBytes *', pv)])
         return '_Bool', gen._new_val('_Bool', f'{t} != 0')
 
-    if method in ('find', 'index') and arg_pairs:
+    # find/index/rindex/rfind/count. The needle is EITHER a bytes value or a
+    # single byte as an int (`b.index(0x2c)` — the form bytearray's own
+    # index/count are nearly always called with). Both take an optional
+    # clamped [start[, end]] range.
+    if method in ('find', 'index', 'rfind', 'rindex', 'count') and arg_pairs:
+        backward = method in ('rfind', 'rindex')
+        by_value = arg_pairs[0][0] in ('int64_t', 'int', 'char', '_Bool')
+        st, sp = _range_opts(gen, args, kwargs, 1)
+        full = st == '0' and sp == 'MOJO_SLICE_STOP_OMITTED'
+        if by_value:
+            v = gen._to_int64(*arg_pairs[0])
+            if method == 'count':
+                fn = 'mojo_bytes_count_int'
+            elif method in ('index', 'rindex'):
+                fn = 'mojo_bytes_rindex_int' if backward else 'mojo_bytes_index_int'
+            else:
+                # find/rfind over a byte VALUE is find_of a 1-byte needle;
+                # express it through the int indexer, which is exact.
+                fn = 'mojo_bytes_rindex_int' if backward else 'mojo_bytes_index_int'
+            return 'int64_t', gen._call_expr('int64_t', fn,
+                                             [('MojoBytes *', ov), ('int64_t', v),
+                                              ('int64_t', st), ('int64_t', sp)])
         sv = _coerce_to_bytes(gen, *arg_pairs[0])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_find',
-                                         [('MojoBytes *', ov), ('MojoBytes *', sv)])
-    if method == 'count' and arg_pairs:
-        sv = _coerce_to_bytes(gen, *arg_pairs[0])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_count',
-                                         [('MojoBytes *', ov), ('MojoBytes *', sv)])
+        if method == 'count':
+            if full:
+                return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_count',
+                                                 [('MojoBytes *', ov), ('MojoBytes *', sv)])
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_count_from',
+                                             [('MojoBytes *', ov), ('MojoBytes *', sv),
+                                              ('int64_t', st), ('int64_t', sp)])
+        if full and method in ('find', 'rfind'):
+            fn = 'mojo_bytes_rfind' if backward else 'mojo_bytes_find'
+            return 'int64_t', gen._call_expr('int64_t', fn,
+                                             [('MojoBytes *', ov), ('MojoBytes *', sv)])
+        fn = 'mojo_bytes_rfind_from' if backward else 'mojo_bytes_find_from'
+        return 'int64_t', gen._call_expr('int64_t', fn,
+                                         [('MojoBytes *', ov), ('MojoBytes *', sv),
+                                          ('int64_t', st), ('int64_t', sp)])
 
     if method in ('split', 'rsplit'):
         sep = 'NULL'
         if arg_pairs and arg_pairs[0][0] != 'void':
             sep = _coerce_to_bytes(gen, *arg_pairs[0])
-        fn = 'mojo_bytes_split' if method == 'split' else 'mojo_bytes_rsplit'
-        t = gen._call_expr('MojoList *', fn, [('MojoBytes *', ov), ('MojoBytes *', sep)])
+        maxsplit = 'MOJO_SLICE_STOP_OMITTED'
+        for k, v in (kwargs or []):
+            if k == 'maxsplit':
+                maxsplit = gen._to_int64(*gen.lower_expr(v))
+        if len(args) > 1:
+            maxsplit = gen._to_int64(*arg_pairs[1])
+        t = gen._call_expr('MojoList *', 'mojo_bytes_split_max',
+                           [('MojoBytes *', ov), ('MojoBytes *', sep),
+                            ('int64_t', maxsplit), ('int', '1' if method == 'rsplit' else '0')])
         gen._elem_types[t] = 'MojoBytes *'
         return 'MojoList *', t
     if method == 'splitlines':
-        t = gen._call_expr('MojoList *', 'mojo_bytes_splitlines', [('MojoBytes *', ov)])
+        keepends = '0'
+        for k, v in (kwargs or []):
+            if k == 'keepends':
+                keepends = gen._to_int64(*gen.lower_expr(v))
+        if arg_pairs and arg_pairs[0][0] != 'void':
+            keepends = gen._to_int64(*arg_pairs[0])
+        t = gen._call_expr('MojoList *', 'mojo_bytes_splitlines_keep',
+                           [('MojoBytes *', ov), ('int', keepends)])
+        gen._elem_types[t] = 'MojoBytes *'
+        return 'MojoList *', t
+    if method in ('partition', 'rpartition') and arg_pairs:
+        sep = _coerce_to_bytes(gen, *arg_pairs[0])
+        fn = 'mojo_bytes_rpartition' if method == 'rpartition' else 'mojo_bytes_partition'
+        t = gen._call_expr('MojoList *', fn, [('MojoBytes *', ov), ('MojoBytes *', sep)])
         gen._elem_types[t] = 'MojoBytes *'
         return 'MojoList *', t
 
@@ -4061,11 +4199,23 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
         return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_join',
                                              [('MojoBytes *', ov), ('MojoList *', it)])
 
-    if method == 'replace' and len(arg_pairs) >= 2:
+    if method == 'replace' and arg_pairs:
+        # `replace(old, new, count=-1)` — count 0 is a legal no-op replace.
         a0 = _coerce_to_bytes(gen, *arg_pairs[0])
         a1 = _coerce_to_bytes(gen, *arg_pairs[1])
-        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_replace',
-                                             [('MojoBytes *', ov), ('MojoBytes *', a0), ('MojoBytes *', a1)])
+        if len(arg_pairs) < 3 and not any(k == 'count' for k, _ in (kwargs or [])):
+            return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_replace',
+                                                [('MojoBytes *', ov), ('MojoBytes *', a0),
+                                                 ('MojoBytes *', a1)])
+        cnt = 'MOJO_SLICE_STOP_OMITTED'
+        for k, v in (kwargs or []):
+            if k == 'count':
+                cnt = gen._to_int64(*gen.lower_expr(v))
+        if len(arg_pairs) > 2:
+            cnt = gen._to_int64(*arg_pairs[2])
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_replace_n',
+                                            [('MojoBytes *', ov), ('MojoBytes *', a0),
+                                             ('MojoBytes *', a1), ('int64_t', cnt)])
 
     if method in ('strip', 'lstrip', 'rstrip'):
         chars = 'NULL'
@@ -4081,6 +4231,35 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
         fn = 'mojo_bytes_upper' if method == 'upper' else 'mojo_bytes_lower'
         return 'MojoBytes *', gen._call_expr('MojoBytes *', fn, [('MojoBytes *', ov)])
 
+    if method in ('title', 'capitalize', 'swapcase'):
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', f'mojo_bytes_{method}',
+                                             [('MojoBytes *', ov)])
+
+    if method in ('ljust', 'rjust', 'center', 'zfill'):
+        width = gen._to_int64(*arg_pairs[0]) if arg_pairs else '0'
+        if method == 'zfill':
+            return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_zfill',
+                                                [('MojoBytes *', ov), ('int64_t', width)])
+        fill = _opt_arg(gen, args, kwargs, 'fillchar', 'int64_t', '32')
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', f'mojo_bytes_{method}',
+                                             [('MojoBytes *', ov), ('int64_t', width),
+                                              ('int', fill)])
+
+    if method in ('removeprefix', 'removesuffix') and arg_pairs:
+        pv = _coerce_to_bytes(gen, *arg_pairs[0])
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', f'mojo_bytes_{method}',
+                                             [('MojoBytes *', ov), ('MojoBytes *', pv)])
+
+    if method == 'translate' and arg_pairs:
+        tbl = _coerce_to_bytes(gen, *arg_pairs[0])
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_translate',
+                                             [('MojoBytes *', ov), ('MojoBytes *', tbl)])
+
+    _is_kind = _bytes_is_kind(method)
+    if _is_kind is not None:
+        t = gen._call_expr('int', 'mojo_bytes_is', [('MojoBytes *', ov), ('int', str(_is_kind))])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+
     if method in ('encode',):
         return 'MojoBytes *', ov
 
@@ -4092,6 +4271,15 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
     if method == 'extend' and arg_pairs:
         other = _coerce_to_bytes(gen, *arg_pairs[0])
         gen._emit(f"  mojo_bytearray_extend ({ov}, {other});")
+        return 'void', ov
+    if method == 'insert' and arg_pairs:
+        i = gen._to_int64(*arg_pairs[0])
+        v = gen._to_int64(*arg_pairs[1])
+        gen._emit(f"  mojo_bytearray_insert ({ov}, {i}, {v});")
+        return 'void', ov
+    if method == 'remove' and arg_pairs:
+        v = gen._to_int64(*arg_pairs[0])
+        gen._emit(f"  mojo_bytearray_remove ({ov}, {v});")
         return 'void', ov
     if method == 'pop':
         i = gen._to_int64(*arg_pairs[0]) if arg_pairs else 'MOJO_SLICE_STOP_OMITTED'
@@ -4110,7 +4298,7 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list) -> tuple:
     return gen._stub_result('int', '0', f'TODO: bytes.{method}')
 
 
-def _lower_memoryview_method(gen, ov: str, method: str, args: list) -> tuple:
+def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None) -> tuple:
     """Lower `MojoMemoryView *` method calls (1-D byte view)."""
     arg_pairs = [gen.lower_expr(a) for a in args]
     if method == '__len__':
@@ -4123,9 +4311,30 @@ def _lower_memoryview_method(gen, ov: str, method: str, args: list) -> tuple:
         return 'char *', gen._call_expr('char *', 'mojo_memoryview_hex',
                                         [('MojoMemoryView *', ov)])
     if method == 'cast':
-        fmt = arg_pairs[0][1] if arg_pairs and arg_pairs[0][0] == 'char *' else '"B"'
+        fmt = '"B"'
+        for k, v in (kwargs or []):
+            if k == 'format':
+                fmt = gen.lower_expr(v)[1]
+        if arg_pairs and arg_pairs[0][0] == 'char *':
+            fmt = arg_pairs[0][1]
         return 'MojoMemoryView *', gen._call_expr('MojoMemoryView *', 'mojo_memoryview_cast',
                                                   [('MojoMemoryView *', ov), ('char *', fmt)])
+    if method == 'nbytes':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_nbytes',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'itemsize':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_itemsize',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'format':
+        return 'char *', gen._call_expr('char *', 'mojo_memoryview_format',
+                                        [('MojoMemoryView *', ov), ('char *', '"B"')])
+    if method == 'obj':
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
+                                             [('MojoMemoryView *', ov)])
+    if method in ('readonly', 'c_contiguous', 'f_contiguous', 'contiguous'):
+        # This representation is always a writable 1-D byte window over
+        # contiguous memory, so these descriptors are constant-folded.
+        return '_Bool', gen._new_val('_Bool', '0' if method == 'readonly' else '1')
     if method in ('release', '__enter__', '__exit__'):
         # No refcount model — context-manager / release is a no-op that
         # yields the view itself (so `with memoryview(x) as m:` binds m).

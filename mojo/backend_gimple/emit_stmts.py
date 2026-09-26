@@ -55,7 +55,19 @@ def gen_stmt(gen, node):
     # Only emit if we haven't emitted this exact (filename, line) pair before.
     node_kind = type(node).__name__
     if hasattr(node, 'line') and node.line and node.line > 0:
-        filename = '' + getattr(gen, '_current_filename', '')
+        # `_line_src_file` overrides `_current_filename` for the duration of
+        # one enclosing unit (a base class's method body re-emitted as a
+        # SUBCLASS method by the inheritance merge, whose nodes physically
+        # belong to the base's module). Without it every such statement was
+        # tagged with the subclass's filename and the base's line NUMBER —
+        # e.g. Lib/weakref.py's inherited `Mapping.__eq__` reported as
+        # "weakref.py:962" when weakref.py is only 574 lines long and the
+        # real source is _collections_abc.py:819. A pure diagnostics defect
+        # (the emitted C itself was correct); see
+        # bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+        # mismatches.md's "Not fixed" item 1.
+        filename = '' + (getattr(gen, '_line_src_file', '')
+                         or getattr(gen, '_current_filename', ''))
         emitted_pairs = getattr(gen, '_emitted_line_pairs', set())
 
         # Create unique key for this (filename, line) combination
@@ -161,7 +173,8 @@ def gen_stmt(gen, node):
 
     if (body_start is not None and hasattr(node, 'line') and node.line and node.line > 0
             and len(gen.body_lines) - body_start > 1):
-        filename = getattr(gen, '_current_filename', '')
+        filename = (getattr(gen, '_line_src_file', '')
+                    or getattr(gen, '_current_filename', ''))
         directive = f"#line {node.line} \"{filename}\"" if filename else f"#line {node.line}"
         # Skip the very first emitted line (already directly preceded by
         # the directive above); re-stamp every one after it, from the end
@@ -1227,8 +1240,25 @@ def _gen_stmt_AssignStmt(gen, node):
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
-            _, key_tmp = gen._char_to_cstr(it, idx_v)
-            if vtype == 'char *':
+            if it == 'MojoBytes *':
+                # A bytes KEY is its own key domain in the runtime (see
+                # _DictSlot.keykind), not a char* one: routing it through
+                # _char_to_cstr cast the MojoBytes POINTER to char*, so the
+                # stored key was an address — a later `d[b'x']` read built a
+                # different address and always missed, and two entries could
+                # never collide or compare equal.
+                if vtype == 'char *':
+                    gen._emit_call('void', '', 'mojo_dict_set_bytes_str',
+                                    [('MojoDict *', obj_v), ('MojoBytes *', idx_v), ('char *', v)])
+                else:
+                    gen._emit_call('void', '', 'mojo_dict_set_bytes_int',
+                                    [('MojoDict *', obj_v), ('MojoBytes *', idx_v), (vtype, v)])
+                key_tmp = None
+            else:
+                _, key_tmp = gen._char_to_cstr(it, idx_v)
+            if key_tmp is None:
+                pass
+            elif vtype == 'char *':
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
