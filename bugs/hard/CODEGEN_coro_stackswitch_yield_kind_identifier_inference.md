@@ -22,17 +22,19 @@ refs via the caller's own `_static_env`.
 - Runtime: a small `mojo_coro_gen.c` addition (see the commit).
 
 **Residuals (still default to int64_t):**
-1. **`yield <arithmetic on the inferred param>`** — `def h(a): yield a * 2`
-   called `h(2.5)` still prints `5`, not `5.0`. The param kind is now in
-   the env, but `_yield_kind`'s `BinaryOp` handling doesn't promote
-   through the `* <int literal>`.
-2. **Non-unanimous call sites** — `g` called with both `3.5` and `"hi"`
+1. **Non-unanimous call sites** — `g` called with both `3.5` and `"hi"`
    in one program stays unresolved (correct under the "not unanimous →
    unresolved" rule; genuinely needs per-call-site monomorphization or a
    tagged yield-value ABI — the detailed analysis retained below).
 
-`MOJO_CORO=cpp` remains the escape hatch for both residuals. Doc kept
-open for residual 1 (the smaller, likely-bounded one).
+The former `yield <arithmetic on the inferred param>` residual is closed:
+`def h(a): yield a * 2` called `h(2.5)` now prints `5.0`, because the
+shared compiled `print` path uses the existing Python-repr float helper
+instead of `%g`. The fix is covered by `gimple_print_double_python_repr`
+and the generator expectations for `2.0`/`5.0` in `test_gimple_runner.py`
+and `test_gimple_generator_runner.py`.
+
+`MOJO_CORO=cpp` remains the escape hatch for the non-unanimous residual.
 
 ## Status
 

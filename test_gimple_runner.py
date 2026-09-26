@@ -407,6 +407,16 @@ def g(a, b):
 print(f"result: {g('a', 'b')}")
 """, "result: ab\n")
 
+    test_gimple_stdout("gimple_print_double_python_repr", """\
+def main():
+    x = 2.0 * 2.5
+    print(x)
+    print(10.0)
+    print(1.0e20)
+    print(0.1 + 0.2)
+    print([x, 1.5])
+""", "5.0\n10.0\n1e+20\n0.30000000000000004\n[5.0, 1.5]\n")
+
     # 17. Dynamic-attribute Steps 1-4 (bugs/hard/CODEGEN_dynamic_attribute_
     # on_generic_object.md): a genuinely NEW attribute set on an opaque
     # object (real per-object storage, not a silent no-op) and a MISSING

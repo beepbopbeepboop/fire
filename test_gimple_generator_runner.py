@@ -418,7 +418,7 @@ def stepper(start: Float64, step: Float64, count):
 def main():
     for x in stepper(1.5, 0.5, 3):
         print(x)
-""", "1.5\n2\n2.5\n")
+""", "1.5\n2.0\n2.5\n")
 
     # An UNANNOTATED parameter that's provably `double` at every call site
     # (the cross-call scalar-contract mechanism, reused from the ordinary
@@ -458,8 +458,7 @@ def main():
     # And through a binary expression: `yield a * 2` with `a` resolved to
     # 'd' from the call site keeps the arithmetic in `double` (the arg ABI
     # bit-casts the double through its int64_t slot, __mojo_gen_arg_d reads
-    # it back). Value is 5.0; `%g` prints it "5" (same as `print(5.0)` in
-    # the compiled path generally — a separate float-formatting matter).
+    # it back). The value is 5.0, and compiled `print` preserves that repr.
     test_generator_stdout("param_generator_unannotated_double_binexpr", """\
 def h(a):
     yield a * 2
@@ -468,7 +467,7 @@ def h(a):
 def main():
     for v in h(2.5):
         print(v)
-""", "5\n5\n")
+""", "5.0\n5.0\n")
 
     # A generator METHOD with an unannotated param, called consistently
     # with a float argument: the cross-call contract feeds `v`'s kind into

@@ -3196,6 +3196,10 @@ def _gen_stmt_AssertStmt(gen, node):
         mt, mv = gen.lower_expr(node.msg)
         if mt == 'char *':
             gen._emit(f'  puts ({mv});')
+        elif mt in ('double', 'float', '__fp16'):
+            dv = mv if mt == 'double' else gen._new_val('double', f'(double){mv}')
+            rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
+            gen._emit(f'  printf ("%s\\n", {rv});')
         else:
             gen._emit(f'  printf ("{gimple_ctypes.TypeLattice.printf_fmt(mt)}\\n", {mv});')
     gen._emit("  __builtin_trap ();")
