@@ -418,9 +418,15 @@ pushed word has to be shown separated from the callee's frame, and the callee
 must be in the path tree at all. This is a bigger job than `imul` was, and worth
 thinking about before writing.
 
-**The 15 uncovered forms**, after `call_rel32`: `movsx_r64_r8` (3 examples) and
-a tail of singletons — `alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`, `shift_imm8:shl`/
-`:shr`, `alu_ri32:add_other`, `alu_ri32:and`, `group3:div`, one example each.
+**The remaining uncovered forms**, after `call_rel32`: `movsx_r64_r8` (3
+examples) and eight singletons — `alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`,
+`shift_imm8:shl`/`:shr`, `group3:div`, `alu_ri32:and`, one example each. That
+is 12 distinct forms over 18 example-slots; an earlier draft of this line said
+"15 uncovered forms" and listed `alu_ri32:add_other` as well, both of which
+measurement contradicts — the gate prints 15 *examples* with no coverage, which
+is a different quantity from the number of distinct forms. Counts re-measured
+against `emit_terminates` rather than a proxy; see `OPEN_WORK.md` D2 for the
+separate loop-count discrepancy, which is still unresolved.
 
 **The 14 sorries** (B18): the symbolic `mem_write_bytes` separation inequalities.
 
