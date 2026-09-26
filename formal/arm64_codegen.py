@@ -2475,6 +2475,24 @@ class ARM64Codegen:
             # CBZ ends a basic block exactly like the real one does, which is
             # why `_cond_branches` exists as a filter at all.
             self._emit_expr(left)
+            if (self._is_flag_preserving_load(left)
+                    and self._is_flag_preserving_load(right)):
+                # The left operand has to be moved out of X0 BEFORE the right
+                # one is evaluated into it, or the left is simply lost — the
+                # same overwrite that inverted the ternary. MOV does not write
+                # the flags, so hoisting it above the compare is free.
+                self.asm.emit(encode_mov_zr_xn(1, 0))    # X1 = left
+                self.asm.emit(encode_cmp_xn_imm(0, 0))
+                self._emit_expr(right)                  # X0 = right; a load
+                # X1 is the LEFT and X0 the RIGHT, and the two operators read
+                # that pair in opposite directions: `or` takes the left when it
+                # is truthy, `and` takes the right. Collapsing them into one
+                # CSEL compiles and inverts `and`.
+                if is_or:
+                    self.asm.emit(encode_csel_xd_xm_cond(0, 1, 0, "ne"))
+                else:
+                    self.asm.emit(encode_csel_xd_xm_cond(0, 0, 1, "ne"))
+                return
             self.asm.emit(encode_stp_sp_pre(0, 31))
             self._emit_expr(right)
             self.asm.emit(encode_mov_zr_xn(1, 0))       # X1 = right
@@ -3805,6 +3823,23 @@ class ARM64Codegen:
         self._emit_stmt(F.AssignStmt(target=F.IdentExpr(name=target),
                                      value=value, line=0, col=0))
 
+    def _is_flag_preserving_load(self, e) -> bool:
+        """True when `e` lowers to one load or move, neither of which writes
+        the flags.
+
+        That is what makes the no-stack CSEL path sound. The general form has
+        to spill, because evaluating an arm clobbers the flags the condition's
+        compare just set — but `LDR`/`LDUR`/`MOV`/`MOVZ` leave the flags
+        alone, so when every arm is a plain local or literal the two values can
+        be materialised after the compare with nothing saved at all.
+
+        Deliberately narrow: any arithmetic, call, or container re-evaluates
+        something and is excluded, which is the same reason the purity test is
+        narrow. A wrong answer here would be a CSEL reading a stale flag, and
+        that is silent."""
+        return isinstance(e, (F.IdentExpr, F.IntLiteral, F.StringLiteral,
+                              F.BoolLiteral))
+
     def _emit_csel_ternary(self, expr) -> None:
         """`a if c else b` branchlessly: evaluate both arms, CSEL between them.
 
@@ -3826,6 +3861,21 @@ class ARM64Codegen:
         takes the `then` arm.
         """
         self._emit_expr(expr.condition)
+        if (self._is_flag_preserving_load(expr.then_val)
+                and self._is_flag_preserving_load(expr.else_val)):
+            # Nothing to spill: the arms are loads, and a load does not write
+            # the flags. Compare, materialise both arms, select.
+            self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self._emit_expr(expr.then_val)         # X0 = then arm
+            self.asm.emit(encode_mov_zr_xn(1, 0))  # X1 = then arm
+            self._emit_expr(expr.else_val)         # X0 = else arm
+            # Select X1 when the condition held. The obvious-looking
+            # `csel X0, X0, X1, ne` is WRONG here: X0 has been overwritten
+            # with the else arm by now, so its "then" operand is the else arm
+            # and the ternary comes out inverted. It compiles, runs, and
+            # answers with the other value.
+            self.asm.emit(encode_csel_xd_xm_cond(0, 1, 0, "ne"))
+            return
         self.asm.emit(encode_stp_sp_pre(0, 31))
         self._emit_expr(expr.then_val)
         self.asm.emit(encode_stp_sp_pre(0, 31))

@@ -165,9 +165,43 @@ def test_spills_use_unscaled_access(tmpdir, verbose):
         print(f"  ok   spill_ldur (exit {code}, ldur/stur present)")
 
 
+def test_simple_operands_avoid_the_stack(tmpdir, verbose):
+    """When the arms are plain locals, CSEL must not touch the stack.
+
+    A load does not write the flags, so both arms can be materialised after
+    the compare and nothing needs saving. The general form still spills,
+    because evaluating an arm clobbers the flags — but for `x = a if c else b`
+    with local arms, which is the common shape, that spill is pure overhead.
+
+    This also pins WHICH registers hold what: an earlier version of the fast
+    path read X0 as the "then" operand after X0 had already been overwritten
+    with the else arm, which compiles, runs, and returns the other value.
+    Asserting the absence of stp/ldp is what makes the fast path a path at
+    all rather than an accident."""
+    src = ("def f(n):\n    a = 3\n    b = 4\n"
+           "    x = a if a > 0 else b\n"
+           "    return x\n")
+    code, dis, _ = build_and_run(src, tmpdir, "csel_nostack")
+    check(code == 3, f"returned {code}, expected 3")
+    ms = mnemonics(dis)
+    check(any(m == "csel" for m in ms), f"no csel emitted: {sorted(set(ms))}")
+    # No push/pop AROUND THE CSEL. Not "no stp anywhere": the prologue and
+    # epilogue save the frame pointer and the callee-saved pairs, so those are
+    # always present and have nothing to do with the conditional.
+    idx = ms.index("csel")
+    around = ms[max(0, idx - 5):idx]
+    check(not any(m in ("stp", "ldp") for m in around),
+          f"the CSEL still spills its operands: {around} immediately before "
+          f"the csel")
+    if verbose:
+        print(f"  ok   csel_nostack (exit {code}, no stack)")
+
+
 TESTS = [
     ("CSEL is emitted and computes the right value",
      test_csel_emitted_and_correct),
+    ("simple CSEL operands avoid the stack",
+     test_simple_operands_avoid_the_stack),
     ("spills use unscaled frame-relative access",
      test_spills_use_unscaled_access),
     ("an observable arm keeps the short-circuiting branch",
