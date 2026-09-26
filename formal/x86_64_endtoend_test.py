@@ -130,9 +130,12 @@ _FORMS = {
     "mov_rm64_r64_sib": ("x86_step_mov_mem_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
                           "rm", "reg", "rb", "rr"]),
+    # `dst` is the CONCRETE destination register, which the lemma needs because
+    # `x86_set_reg` is a `match` on its index and `simp` will not reduce one on
+    # a non-literal.  See the note on the lemma.
     "mov_r64_rm64_disp8": ("x86_step_mov_rm64_mem_disp8_rbp", False,
                            ["rip", "b0", "b1", "b2", "disp", "rex", "w",
-                            "mod", "rm", "reg", "rb", "rr"]),
+                            "mod", "rm", "reg", "dst", "dst_lt"]),
     "mov_rm64_r64_reg": ("x86_step_mov_rm64_r64_reg_st", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
@@ -196,8 +199,9 @@ _SUCCS = {
         "{ $s with mem := mem_write_bytes $s.mem $s.rsp.toNat "
         "(x86_get_reg $s ($reg + x86_rex_r 0x48)) 8, rip := $next }",
     "mov_r64_rm64_disp8":
-        "{ x86_set_reg $s ($reg + x86_rex_r $rex) (mem_read_bytes $s.mem "
-        "(Int.ofNat $s.rbp.toNat + $disp).toNat 8) with rip := $next }",
+        "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
+        "(Int.ofNat (x86_get_reg $s (5 + x86_rex_b $rex)).toNat + $disp).toNat 8) "
+        "with rip := $next }",
     "mov_rm64_r64_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $next }",
@@ -294,6 +298,10 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             sc.append("(by simp [read_i8, hb])")
         elif c == "off":
             sc.append("(by simp [read_i32_le, read_i8, hb])")
+        elif c in ("dst", "dst_lt"):
+            # Closed arithmetic on the encoding: the destination register is
+            # read out of the ModRM/REX bytes, so it is a literal here.
+            sc.append("(by decide)")
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
                    "lo", "hi", "nsetcc_lo", "njcc", "nzx",
                    "notrex"):
@@ -349,11 +357,19 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     elif form in ("mov_r64_rm64_disp8", "mov_rm64_r64_disp8"):
         rex, modrm = raw[0], raw[2]
         disp = raw[3] - 256 if raw[3] > 127 else raw[3]
+        reg = (modrm >> 3) & 7
+        rex_r = 8 if rex & 4 else 0
+        rex_b = 8 if rex & 1 else 0
         # A negative displacement is parenthesised: `-8 (by ...)` parses as an
         # application of it.
-        extra_args = " %d %d %d (%d)" % (rex, modrm, (modrm >> 3) & 7, disp)
-        extra_succ = {"$reg": str((modrm >> 3) & 7), "$disp": str(disp),
-                      "$rex": str(rex)}
+        if form == "mov_r64_rm64_disp8":
+            extra_args = " %d %d %d %d (%d)" % (rex, modrm, reg, reg + rex_r,
+                                                disp)
+        else:
+            extra_args = " %d %d %d (%d)" % (rex, modrm, reg, disp)
+        extra_succ = {"$reg": str(reg), "$disp": str(disp), "$rex": str(rex),
+                      "$dst": str(reg + rex_r),
+                      "$base": str(5 + rex_b)}
     call = "%s %s rc %d%s" % (lemma, prev, addr, extra_args)
     if takes_imm:
         call += " %d" % imm
@@ -743,7 +759,13 @@ def emit_terminates(path):
             emit("    x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r%s]" % case_simp)
             emit("  rw [key _ _ _ _ (by decide)]")
             emit("  simp only [mem_read_bytes, ite_true]")
-            emit("  decide")
+            # `decide` when the residual is closed, `omega` when it is not.  The
+            # spill address can depend on a value computed from the input, so
+            # the residual sometimes has a free variable -- and `decide` on
+            # that is "Expected type must not contain free variables", which
+            # names the tactic rather than the inequality that would have
+            # closed it.
+            emit("  first | decide | omega")
             full = rules + [step_rule, "x86_exec_go_exit_at (by decide) hrip"]
             emit("rw [%s]" % ",\n    ".join(full))
             emit("simp")

@@ -1107,25 +1107,35 @@ theorem x86_step_mov_rm64_r64_reg (s : X86State) (code : Nat → UInt8)
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
-/-- `mov r64, qword [rbp + disp8]` (REX.W 8B /r, mod=1, rm=5: base rbp, an
-    8-bit displacement), general over the destination register.  The other
-    half of the two shapes `mov r64, r/m64` actually has in this corpus: every
-    spilled-argument access is one of these or the `[rsp]` below, and there is
-    no third. -/
+/-! `mov r64, qword [rbp + disp8]` (REX.W 8B /r, mod=1, rm=5), the other
+    half of the two shapes `mov r64, r/m64` has in this corpus: every
+    spilled-argument access is one of these or the `[rsp]` one, and there is no
+    third.
+
+    The destination register is a CONCRETE argument, with
+    `reg + x86_rex_r rex = dst` beside it, and that is what makes this go
+    through.  Stated with the symbolic index it does not: the destination is
+    `x86_set_reg s (reg + x86_rex_r rex) ...`, `x86_set_reg` is a `match` on
+    its index, and `simp` will not reduce a match on a non-literal -- so the
+    goal is left as two 20-field structures that differ in a `match`, which
+    shows the whole field list and says nothing about what is wrong.  The STORE
+    below has the same shape and does normalise, because there the index only
+    ever appears inside `x86_get_reg`.  Hence the asymmetry, and hence the extra
+    argument: the caller reads the destination out of the encoding. -/
 theorem x86_step_mov_rm64_mem_disp8_rbp (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+    (m : Nat) (rex modrm : UInt8) (reg dst : Nat) (disp : Int)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
     (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 0) (h_rr : x86_rex_r rex = 0) :
-    x86_step s code = some { x86_set_reg s (reg + x86_rex_r rex) (mem_read_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat 8) with
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (5 + x86_rex_b rex)).toNat + disp).toNat 8) with
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
-        h_rr]
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_dst,
+        h_dst_lt]
 
 /-! The two store-direction `mov` shapes (opcode 89), mirroring the load ones
     above.  These are the STORE direction, and the field sense flips: the
