@@ -1,5 +1,14 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
+**State: PARTIAL.** The real underlying defect (ANY capturing lambda silently returned 0) is FIXED for the
+dominant shape by beta-reduction. Still open, and deliberately so: variadic
+(*args/**kwargs) captures, and capturing lambdas that ESCAPE or are rebound. Those need
+the env-struct/callable-value representation nested `def` closures already use. A
+capturing lambda inside a coroutine body is also excluded on purpose -- that body model
+is scalar-only. `*_a, **k` and the `sorted(key=lambda...)` struct-pointer case are the
+two named stdlib targets.
+
+
 ## Status (2026-09-26 — CAPTURING lambdas called through their local now WORK; `*a, **k` still open, with the root cause re-scoped)
 
 The doc's framing was "the parameterized-lambda gap": a `lambda` with

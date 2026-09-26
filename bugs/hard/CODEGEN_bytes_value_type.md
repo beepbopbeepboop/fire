@@ -1,5 +1,9 @@
 # CODEGEN: `bytes` value type in the compiled path (multi-stage feature)
 
+**State: CLOSED.** All four stages landed and verified (bytes/bytearray/memoryview API surface, plus the
+str-vs-bytes dict-key domain fix). No open residue tracked here.
+
+
 ## Status (2026-09-25, later pass — Stage 2/3/4 API surface COMPLETED; container-membership domain bug fixed)
 
 The staged plan below had gone stale: the runtime and codegen had in fact

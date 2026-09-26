@@ -1,6 +1,11 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
-## Status (2026-09-26 audit — 5 of the 6 recorded refusal shapes are GONE; the 6th is an api-ordering bug, now isolated)
+**State: PARTIAL.** 5 of 6 recorded refusal shapes are already fixed
+upstream. The 6th is a silent miscompile whose real cause is a general
+generator bug, split out into its own doc (see Shape 5 below). Nothing in
+this entry is a compile failure any more.
+
+## Status (2026-09-26 audit — 5 of the 6 recorded refusal shapes are GONE; the 6th is a `value_ctype` derivation gap, split into its own doc)
 
 `Tools/c-aalyzer/c_common/fsutil.py` is **no longer present in this
 checkout**, so this pass could not build the real file. Instead each of the
@@ -16,77 +21,25 @@ was written, not by anything here.
 | 5 | `iter_files_by_suffix`: `call to unresolved callee '_iter_files(...)'` | compiles and runs, but **produces a wrong value** — see below |
 | 6 | `process_filenames`: `call to unresolved callee 'set(...)'` + tuple-yield | **WORKS** — mixed-arity tuple yields (`yield "store", ("name",)` / `yield "rel", (1, 2, 3)`) unpack correctly, giving `store 2` / `rel 6` |
 
-### Shape 5 isolated: a GENERATOR consuming another GENERATOR mis-types the value (silently)
+### Shape 5: NOT fsutil-specific — it is a general generator bug, now its own doc
 
-Minimal repro, no `fsutil.py` needed:
+The `iter_files_by_suffix` entry ("call to unresolved callee
+'_iter_files(...)'") is a **silent miscompile**, not a compile failure, and
+its real cause is general: a generator that consumes a sibling generator
+types the callee's yielded value as the `int64_t` default, so a yielded
+string comes out as a pointer's bit pattern. That has been split out into
 
-```python
-def inner():
-    yield "a.txt"
+- `CODEGEN_generator_consuming_generator_value_ctype.md` — the general
+  bug, its minimal repro, the full evidence chain, the root cause
+  (`gimple_codegen.py` runs `gimple_gen_coro.lower(stmts)` — which derives
+  `value_ctype` — BEFORE `register()` populates `_generator_api`), why the
+  existing fixpoint retry is structurally blind to it (the consumer never
+  raises, it just gets the wrong type), and the fix direction.
 
-def outer(g):
-    for f in inner():
-        if f.endswith(".txt"):
-            yield f
-
-def main():
-    for v in outer("x"):
-        print(v)
-```
-
-prints a raw pointer (`4308653504`) instead of `a.txt`.
-
-**The value is correct; only the TYPE is wrong.** Established by reading the
-emitted GIMPLE, in this order:
-
-1. `__mgco_inner_body` yields `_slit_10000`, and that slot IS properly
-   defined and statically initialized (`static char * _slit_10000 =
-   "a.txt";`) — the string literal is not the problem.
-2. Inside `__mgco_outer_body`, the loop variable is declared correctly:
-   `char * f;`, fed from `__mgco_inner_value`. So the consumer's *emission*
-   is fine.
-3. But `_generator_api['outer']['value_ctype']` is **`int64_t`**, not
-   `char *` — so `v` in `main` is an `int64_t` and `print(v)` renders the
-   pointer's bit pattern. The bytes on the wire were always right; the
-   static type is what got lost, which is why it looks exactly like a
-   dangling pointer rather than a wrong string.
-
-**Root cause, in `gimple_codegen.py`'s compile pipeline.** The two phases
-run in this order:
-
-```
-stmts, _coro_meta = gimple_gen_coro.lower(stmts)   # (1) computes each generator's value_ctype
-gen = GimpleGen(...)
-gimple_gen_coro.register(gen, _coro_meta)          # (2) populates gen._generator_api
-```
-
-Phase (1) is what derives a generator's `value_ctype` from its body's
-local variable types — including the loop variable of
-`for f in <sibling generator>():`. But `_generator_api` is only populated in
-phase (2), so during phase (1) the consumer cannot know that `inner` yields
-`char *`, types `f` as the `int64_t` default, and propagates that into its
-OWN `value_ctype`. The wrong type is then baked into the registered api and
-reused by every later consumer, including ordinary `fn main()`.
-
-This also explains the original `iter_files_by_suffix` failure directly and
-more usefully than "unresolved callee" did: `fsutil`'s generators yield
-**file paths** (strings), so `_iter_files` is consumed by a sibling
-generator, and the sibling's `value_ctype` collapses to `int64_t` — the
-path pointer then surfaces as a large integer. It is a silent
-miscompile, not a compile failure, and it is the same single root cause as
-the `struct.unpack` shape that shape 6's audit also turned up.
-
-**Why it is not just an ordering/retry problem.** `gen_module` already has a
-multi-pass fixpoint retry for a consumer that can't see a not-yet-compiled
-sibling, and the C++ coroutine path has a matching guard
-(`_cpp_iterable_is_delegatable_generator_call`, which consults
-`_all_generator_names` and raises `_UnsupportedGeneratorShape` to force a
-retry). Neither helps here: the consumer never *raises* — it succeeds with
-the wrong type, so there is nothing to retry. The fix has to be a fixpoint
-over phase (1)'s `value_ctype` derivation itself (seed the sibling
-loop-variable types from each generator's own value type, iterating until
-stable, then lower bodies), not another retry pass.
-
+`fsutil` is simply where it became visible: those generators yield **file
+paths**, so a string-typed value collapsed to `int64_t` reads exactly like
+a dangling pointer. The two docs should not be kept in sync by hand — this
+one records only that the fsutil shape maps onto that bug.
 
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
 

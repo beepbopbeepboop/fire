@@ -1,5 +1,10 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
+**State: OPEN.** NOT fixed. Deprioritised since 2026-08-09 and untouched since. Needs module-qualified
+field-table keys / typedef-name qualification so two same-named structs in sibling
+modules stop colliding. This is the last wholly-unstarted item in bugs/hard.
+
+
 ## Re-verified 2026-08-26 (branch fix/rest-remainder15): minimal repro still corrupts identically; general plan remains DOCUMENTED-NOT-FIXED, deliberately not attempted
 
 Re-ran the exact minimal 2-file repro (`mod_a.Dialog{widgetName}` /
