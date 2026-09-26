@@ -312,7 +312,7 @@ test('coro', [PY, 'test_coro_runtime.py'], cache=True,
 # `mojoc` and `stage2/mojo` are also the two steps whose artifact is a binary,
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
-test('mojoc', ['make', 'mojoc'], driver='make', excl=True,
+test('mojoc', ['mojoc'], driver='make', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='small',
@@ -367,7 +367,7 @@ test('bootstrap-stage1-transitive',
 # through the argv), which is a textbook content-addressed build: a miss costs
 # a few minutes, and a wrong hit could not survive its own output being
 # compared by `verify` a few steps later.
-test('bootstrap-stage2-cc', ['make', 'stage2/mojo'], driver='make',
+test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make',
      deps=['bootstrap-stage1-transitive'],
      artifact='stage2/mojo', inputs=['stage1/fire.ci', RUNTIME_SRC, RUNTIME_HDR],
      desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo')
@@ -436,11 +436,11 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
      desc='every byte the x86-64 emitter can produce is a step the model can step')
 
 # ── the A/B sweep: Make's own job server, so driver='make' ─────────────────
-test('ab-clean', ['make', 'ab-clean'], driver='make',
+test('ab-clean', ['ab-clean'], driver='make',
      desc='drop aside/ bside/ ab.mk and the per-file locks')
-test('ab-aside', ['make', 'aside'], driver='make', deps=['ab-clean'],
+test('ab-aside', ['aside'], driver='make', deps=['ab-clean'],
      desc='per-file python-reference dumps for the whole A/B corpus')
-test('ab-bside', ['make', 'bside'], driver='make', deps=['ab-aside'],
+test('ab-bside', ['bside'], driver='make', deps=['ab-aside'],
      desc='per-file native dumps for the whole A/B corpus')
 test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
      desc='diff the two sides, print only the failures')
@@ -652,6 +652,8 @@ def build_cmd(job: Job, opts) -> list[str]:
         pass                                    # already the bare command
     elif spec.driver == 'make':
         # Make's own job server, so a per-file A/B target gets real -j.
+        # `spec.cmd` is the make TARGET(S) only, never the program: the argv
+        # this builds already starts with `make`.
         cmd = (['make', f'-j{opts.jobs}']
                + [f'{v}={os.environ[v]}' for v in MAKE_VARS if os.environ.get(v)]
                + cmd)
@@ -670,7 +672,13 @@ def build_cmd(job: Job, opts) -> list[str]:
     if isinstance(spec, Spec) and spec.driver == 'mem':
         limit = memlimit(spec.mem)
         if limit > 0:
-            cmd = [PY, 'tools/memcap.py', '--limit-gb', str(limit),
+            # ABSOLUTE, not repo-relative: a `mem` job may run in another
+            # directory (bootstrap's stage1/stage2/stage3 trees), and
+            # `python3 tools/memcap.py` then resolves against THAT cwd and
+            # dies with "can't open file .../stage1/tools/memcap.py" before
+            # the wrapped command ever runs.
+            cmd = [PY, os.path.join(HERE, 'memcap.py'),
+                   '--limit-gb', str(limit),
                    '--label', job.key, '--'] + cmd
         elif isinstance(spec, Spec) and spec.mem:
             log_warn_no_cap(spec)
