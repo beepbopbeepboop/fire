@@ -3155,6 +3155,17 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     and bool(_collect_conds(fn, fn.params[0][0],
                                             {fn.params[0][0]: "n"})))):
             entry_cond_needed = True
+        # ...unless that branch is a B.cond.  The entry seed states a fact about
+        # the materialised condition FLAG REGISTER, and the backend no longer
+        # materialises one: a comparison now leaves its answer in NZCV and
+        # B.cond reads that, so at the entry state the register holds whatever
+        # was there before and the claim is simply false (`bv_decide` found the
+        # counterexample `n = 2^64 - 1`).  Each `hcond` is derived from the
+        # comparison inside its own block instead, so no seed is needed.
+        if entry_cond_needed and _first_cbz is not None:
+            _eidx = _step_branch_index(words[_first_cbz["instrs"][-1]])
+            if _eidx == 51:
+                entry_cond_needed = False
     # The terminal x0 handler is only needed when the terminal goal is not
     # already closed by the `{name}_go_zero`/`_go` simp (constant-recursion
     # functions like `count` close on their own).
@@ -3761,13 +3772,28 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             r = w & 0x1f
             i = (block["instrs"][-1] - base) // 4
             cbz_pc = block["instrs"][-1]
+            # The three branch-on-something forms share a block shape and NOT a
+            # condition.  CBZ tests a register against zero, CBNZ tests it
+            # against non-zero -- note the `= 0` this used to emit was simply
+            # wrong for CBNZ -- and B.cond tests the FLAGS, so its condition
+            # mentions `nzcv` and names no register at all.  The backend now
+            # lowers comparisons to `cmp` + B.cond rather than `cmp` + `cset` +
+            # CBZ, so this is the common case, not a corner.
+            _bidx = _step_branch_index(w)
+            if _bidx == 51:
+                _condtxt = (f"arm64_matches_condition {w & 0xf} "
+                            f"{s_cur}.nzcv = true")
+            elif _bidx == 17:
+                _condtxt = f"arm64_reg {r} {s_cur} \u2260 0"
+            else:
+                _condtxt = f"arm64_reg {r} {s_cur} = 0"
             hpcb_proof = _pc_fact_lookup(s_cur)
             if hpcb_proof is None:
                 A(f"{IND}have hpcb_{bi} : ({s_cur}).pc = {cbz_pc} := by change {cbz_pc} = {cbz_pc}; rfl")
             else:
                 A(f"{IND}have hpcb_{bi} : ({s_cur}).pc = {cbz_pc} := {hpcb_proof}")
             A(f"{IND}have hcbz_{bi} : arm64_step {s_cur} {C} = some "
-              f"(if arm64_reg {r} {s_cur} = 0 then "
+              f"(if {_condtxt} then "
               f"({{ {s_cur} with pc := {taken} }} : Arm64State) "
               f"else ({{ {s_cur} with pc := {fall} }} : Arm64State)) := by")
             A(f"{IND}  have hsr := {name}_sr_{i} {s_cur} hpcb_{bi}")
@@ -3844,7 +3870,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
                                 _hpriors.append(_hp)
-                    A(f"{IND}have hcond_{bi} : (arm64_reg {r} {s_cur} = 0) ↔ ¬({_src}) := by")
+                    A(f"{IND}have hcond_{bi} : ({_condtxt}) ↔ ¬({_src}) := by")
                     if _hpriors:
                         # The prior block is opaque here (`s_{pb}`), so the
                         # current block's spill addresses are relative to that
@@ -3879,7 +3905,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             elif cbz_force == "fall":
                 raise ValueError("unsupported: forced-fall cbz branch condition")
             else:
-                A(f"{IND}by_cases hc_{bi} : arm64_reg {r} {s_cur} = 0")
+                A(f"{IND}by_cases hc_{bi} : {_condtxt}")
             if cbz_force is None:
                 A(f"{IND}·")
             BIND = IND if cbz_force is not None else IND + "  "
