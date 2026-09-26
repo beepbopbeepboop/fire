@@ -1,5 +1,103 @@
 # CODEGEN: the `struct` module (binary pack/unpack) in the compiled path
 
+## Status (2026-09-25 audit — BOTH remaining codegen gaps closed)
+
+Stages 1–4 (below) are landed and were sound. This pass audited what they
+left open and closed the two that were codegen problems, recording one
+that is not.
+
+### Closed: mixed int+float unpack formats (was a documented degradation)
+
+The Design section said a format mixing ints and floats "degrades to int64
+slots". It does not degrade *gracefully* — `struct.unpack('<if', buf)`
+returned `1 4607182418800017408`, i.e. the float's raw IEEE bits, because
+the result is one `MojoList` and a `MojoList` carries a single element
+ctype.
+
+But the *format string is a compile-time constant*, so each slot's real
+kind is statically known and only the CONTAINER is untyped. Fixed by
+recording the per-slot kinds and letting the subscript pick the accessor
+per index:
+
+- `_struct_slot_kinds(codes)` (`emit_methods.py`) — one of
+  `'int'`/`'double'`/`'bytes'` per value, in wire order.
+- `_struct_tag_unpack_result` records it in a new
+  `gen._struct_slot_kinds`, propagated to the local name by the `VarDecl`
+  path exactly as `_elem_types` is (this propagation is load-bearing: with
+  the unpack temp only, the `var m = struct.unpack(...)` spelling silently
+  did nothing, which is how the first attempt at this fix appeared to fail).
+- The `MojoList *` subscript path consults it for a **literal** index —
+  the overwhelmingly common shape. A computed index genuinely has no
+  static answer, so it keeps the uniform fallback rather than guessing.
+
+Verified by real compile+link+run: `'<if'` → `1 1.0`, `'>dhh'` → `1.0 2 1`,
+`'<Bd'` → `7 1.0`, `'<fd'` round-trip → `1.25 -0.5`, and the uniform cases
+(`<2f`, `<3i`, `<4s`) unchanged. Regression tests
+`gimple_struct_mixed_int_float_formats` and
+`gimple_struct_uniform_formats_still_uniform` in `test_gimple_runner.py`.
+
+### Closed: `var`-declared class field with a `struct.Struct(...)` default
+
+The gap was recorded as "the constructor does not emit the initializer, so
+the field is NULL at runtime" — and the real-world consequence is worse
+than "does not work": the first `self.FIELD_STRUCT.size` **segfaulted**
+(NULL dereference), and a scalar `var NAME = 'hello'` field read back `0`.
+
+Root cause, and it was in three places, not one:
+
+1. **Class-attribute registration** matched only a bare `NAME = ...`
+   (`AssignStmt`), never `var NAME = ...` (`VarDecl`).
+2. **The `_classattr_<Cls>__<X>` global declaration + init** loop had the
+   same `AssignStmt`-only match, so even once registered there was no
+   global and nothing to initialize.
+3. **The field's own type** was assigned by a different loop that only
+   recognised *container* defaults, so `var NAME = 'hello'` was typed
+   `struct <Cls> *` — the "unknown field" fallback. That in turn defeated
+   the allocator's per-instance init, which is gated on the field type and
+   the `_classattr_` global type agreeing. This is the asymmetry that made
+   the bare spelling work and the `var` spelling not: the bare form is an
+   `AssignStmt`, so it never entered that loop at all.
+
+Fixed by a shared `_class_field_decl(field)` helper returning
+`(name, value)` for either spelling, used by both class-attr passes, plus
+a literal-default type in the field-type loop (string → `char *`, float →
+`double`, int/bool → `int64_t`) and a single type resolution in the
+registration pass so the field and global types always agree.
+
+Verified by real compile+link+run: `var FIELD_STRUCT = struct.Struct('<HH')`
+now reads `1 2 4` (was a segfault), and `var NAME/N/ITEMS/TABLE` class
+fields read `hello 5 0 0` (were `0 0 0 0`). Regression test
+`gimple_struct_var_declared_class_field`.
+
+### Recorded, NOT this doc's bug: `.format` read off a class-attribute-held `Struct`
+
+`self.FIELD_STRUCT.format` returns a pointer-sized integer rather than the
+format string, while `.size` and `.unpack` on the same field are correct,
+and a LOCAL `s = struct.Struct('<HH'); s.format` is correct too. Confirmed
+**identical on the unmodified tree**, and it affects the BARE class-attr
+spelling exactly as it does the `var` one — so it is a pre-existing,
+separate defect in the class-attribute read path, not a consequence of
+anything above and not the gap this doc recorded. Left for a future pass;
+worth its own doc if it is pursued.
+
+### Audit result for the other two recorded gaps — still open, unchanged
+
+- Keyword args to `struct.*` (`unpack_from(fmt, buf, offset=0)`) still
+  fall through (guarded out); positional only.
+- No interpreter (`myinterpreter.py`) `struct` module — compiled path
+  only, so a comptime-evaluated `struct.Struct(...)` default still
+  `NameError`s.
+
+### Verification
+
+`test_gimple_runner.py` 84/84, `test_gimple.py` 316/316,
+`test_gimple_generator_runner.py` 128/128, `test_generators.py` 29/29,
+`test_module_cache.py` 81/81, `test_link_mode.py` 3/3, and
+`compile_stdlib.py` **664/664 with 0 unexpected** — the last run because
+both changes touch class-attribute and field-type registration, which every
+class body in the corpus passes through, so the stdlib breadth check is the
+load-bearing one here rather than optional.
+
 ## Problem
 
 The compiled path (`mojo_compiler.py` → `gimple_gen_*.py` → C/GIMPLE, runtime

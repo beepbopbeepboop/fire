@@ -610,6 +610,26 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # earlier function's unrelated keyword-named parameter) can
     # never leak into this one.
     gen._cpp_kw_param_renames = {}
+    # Same per-unit reset for the lambda beta-reduction's per-function map
+    # (`_inlined_lambdas`), and for the same reason: it is FUNCTION-scoped
+    # state, and this is a function entry point that the map's own
+    # invariant ("cleared at the real per-function entry points" — see
+    # emit_calls._lower_LambdaExpr) requires, but which had no such reset
+    # because the map postdates it.
+    #
+    # Without it, a stale entry leaked into this file's SIGNATURE-building
+    # code, which calls the ordinary call lowering on codegen-internal
+    # names (`_sig_pn(...)`) that are not user calls at all. A self-host
+    # compile then "inlined a lambda" there, emitting the inlined body's
+    # result into an int64_t it had no type for — `-Werror=int-conversion`
+    # failures (`char *` into `int64_t`) that failed `make check-selfhost`
+    # outright.
+    #
+    # Clearing is the correct fix rather than teaching the signature code
+    # to ignore the map: those calls genuinely are not calls in any
+    # enclosing function scope, so no reduction can legitimately apply to
+    # them, and an empty map says exactly that.
+    gen._inlined_lambdas = {}
     for _pn, _ in param_ctypes:
         if _pn in gimple_ctypes._C_KEYWORDS or _pn in gimple_ctypes._CPP_KEYWORD_FIELDS or _pn in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
             gen._cpp_kw_param_renames[_pn] = f"_kw_{_pn}"

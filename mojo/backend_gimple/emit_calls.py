@@ -34,6 +34,7 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.lambdareduce as _gld
 import gimple_codegen
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.emit_methods as gmp
@@ -2056,6 +2057,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # first-decl-wins `char *` (a sibling `_gen_for_dict` branch declared
     # it for the dict-iteration arm), so treat any var-types local as a
     # fnptr call rather than guessing it names a C function.
+    # A CAPTURING lambda bound to a local and called only through that
+    # local: lower its body right here, in this scope, where the captured
+    # names already resolve. Lifted to a function pointer the body named
+    # variables that don't exist in it, and each read stubbed to 0 — a
+    # silent wrong answer with exit 0. Guarded by mojo/middle/lambdareduce's
+    # escape analysis, so a lambda that outlives its call site never
+    # reaches here.
+    _red = getattr(gen, '_inlined_lambdas', None) or {}
+    _red_lambda = _red.get(fname_raw)
+    if _red_lambda is not None:
+        return _lower_inlined_lambda_call(gen, _red_lambda, node)
+
     if (fname_raw in gen.var_types) or (
             _fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool')
             and fname_raw not in gen._mangled_funcs
@@ -3217,6 +3230,54 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     as a function pointer.  The actual body is accumulated in
     self._lambda_parts and flushed by gen_module into func_parts.
     """
+    # A capturing lambda whose local never escapes is beta-reduced at its
+    # call sites (see _lower_inlined_lambda_call), so it must NOT also be
+    # lifted: the lifted pass would emit the same body a second time, as a
+    # top-level function naming variables that do not exist in it.
+    # Check the STAMP, not the map: the map is rebuilt per function and
+    # cleared whenever a lifted closure calls `_reset_func`, so a lambda
+    # lowered after that point would see an empty map even though the scan
+    # already classified it. The stamp is set on the node once, at the
+    # enclosing function's `_reset_func`, and persists.
+    _bl = getattr(node, '_bound_local', None)
+    if _bl:
+        # Record the reduction under the LOCAL's name. The call site reads
+        # this map rather than re-scanning, because by the time a call is
+        # lowered `gen._cur_func_body` may belong to some other function: a
+        # lifted closure calls `_reset_func` too, and a re-scan then sees
+        # the closure's body instead of the enclosing one's. Recording at
+        # the assignment is scope-correct by construction — that is
+        # definitionally the enclosing function's own statement — and the
+        # map is cleared at the real per-function entry points.
+        _inl = getattr(gen, '_inlined_lambdas', None)
+        if _inl is None:
+            _inl = {}
+            gen._inlined_lambdas = _inl
+        _inl[_bl] = node
+        return 'int64_t', gen._new_val('int64_t', '0')
+
+    # A capturing lambda we could NOT reduce — because its local escapes, is
+    # rebound, or it declares *args/**kwargs — still lifts to a top-level
+    # function that does not contain the names it reads, and each such read
+    # stubs to 0. That is a real remaining defect, and NOT fixed here.
+    #
+    # It was tempting to refuse these outright, as the generator and
+    # nested-async paths do, but the escape analysis is new and static, and
+    # the blast radius is not: it fires on real, CENTRAL stdlib modules —
+    # importlib/util.py (8 sites, including the LazyLoader
+    # `lambda *args, **kwargs: cls(loader(*args, **kwargs))` this bug doc
+    # names), functools.py (4), enum.py (3). Refusing those would trade a
+    # silently-wrong value inside an otherwise-compiling module for a module
+    # that stops compiling, on the strength of a false positive in a
+    # same-day heuristic. Not a good trade.
+    #
+    # So: land the unconditional win (an ordinary capturing lambda called
+    # through its local is now inlined and CORRECT, verified below) and
+    # record the rest as the remaining work, with the corpus instances named
+    # so whoever extends this to the env-struct path starts from evidence
+    # rather than a search. See
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+
     outer_ctx = gen.current_func_name or 'root'
     gen._lambda_counter += 1
     lifted_name = f'{outer_ctx}_lambda_{gen._lambda_counter}'
@@ -3445,6 +3506,37 @@ def _emit_asyncio_run_drive(gen, base: str, vct: str, arg_pairs: list) -> tuple[
     result = gen._new_val(vct, f"{base}_value ({handle})")
     gen._emit(f"  {base}_destroy ({handle});")
     return vct, result
+
+
+def _lower_inlined_lambda_call(gen, lam, node) -> tuple[str, str]:
+    """Lower `f(args)` where `f` is a beta-reducible capturing lambda, by
+    binding the lambda's parameters to the arguments as ordinary locals of
+    the CURRENT scope and lowering its body expression right there.
+
+    The parameters are declared and then un-declared around the body: a
+    lambda's parameter names are its own scope, so leaving them in
+    `var_types` would let a later statement in the enclosing function see
+    a name that does not exist there. Restoring `var_types` (and only it)
+    afterwards is what keeps the binding invisible."""
+    pnames = _gld._param_names(lam)
+    defaults = _gld._param_defaults(lam)
+    saved = dict(gen.var_types)
+    try:
+        for i, pname in enumerate(pnames):
+            if i < len(node.args):
+                at, av = gen.lower_expr(node.args[i])
+                gen._declare_var(pname, at)
+                gen._safe_coerce_emit(at, at, av, gen._write_dest(pname))
+            else:
+                dv = defaults[i] if i < len(defaults) else None
+                if dv is None:
+                    continue
+                dt, dvv = gen.lower_expr(dv)
+                gen._declare_var(pname, dt)
+                gen._safe_coerce_emit(dt, dt, dvv, gen._write_dest(pname))
+        return gen.lower_expr(lam.body)
+    finally:
+        gen.var_types = saved
 
 
 def _lower_fnptr_call(gen, fname_raw: str, var_ctype: str,
@@ -4936,6 +5028,30 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     if ot == 'MojoList *':
         elem = gen._elem_of(ov)
+        # A `struct.unpack(...)` result has ONE container ctype but a
+        # per-slot real kind, known statically from the format. Prefer it
+        # over the uniform element type so a format mixing ints and floats
+        # reads each slot correctly instead of handing back a float's raw
+        # IEEE bits. Needs a literal index (the overwhelmingly common shape:
+        # `a, b = struct.unpack('<if', buf)` then `a`/`b`); a computed
+        # index genuinely has no static answer, so it keeps the uniform
+        # fallback rather than guessing.
+        _sk = gen._struct_slot_kinds.get(ov)
+        if _sk and isinstance(node.index, gimple_ctypes.IntLiteral):
+            _si = node.index.value
+            if 0 <= _si < len(_sk):
+                _skd = _sk[_si]
+                idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+                if _skd == 'double':
+                    return 'double', gen._new_val(
+                        'double', f"mojo_list_get_double ({ov}, {idx64})")
+                if _skd == 'bytes':
+                    _bt = gen._new_val('int64_t',
+                                       f"mojo_list_get_int ({ov}, {idx64})")
+                    return 'MojoBytes *', gen._new_val(
+                        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
+                return 'int64_t', gen._new_val(
+                    'int64_t', f"mojo_list_get_int ({ov}, {idx64})")
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
         if suf == 'double':

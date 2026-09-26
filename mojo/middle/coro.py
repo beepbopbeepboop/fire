@@ -1544,6 +1544,38 @@ def _async_method_setup(fn, base, struct_name):
     return base, is_method, real_params, prologue, body_params, c_params
 
 
+def _mark_coro_body(body_fd):
+    """Tag a synthesized coroutine BODY function, and return it.
+
+    Every coroutine lowering here produces a plain `FunctionDef` that the
+    ORDINARY codegen then lowers, so it deliberately sets `is_generator =
+    False` and `is_async = False` — the generic backend has no coroutine
+    concept of its own and must treat the body as a normal function. The
+    cost of that is that those two flags can no longer be used to tell such
+    a body apart from any other function, so a consumer that must behave
+    differently inside one has no way to ask. This is that way.
+
+    The attribute is checked rather than inferred from the `*_body` name
+    suffix, because a user function is free to have that name too.
+
+    Current consumer: gimple_codegen's lambda beta-reduction stays OFF
+    inside a coroutine body, because the C++ coroutine body model is
+    deliberately SCALAR-ONLY (`_infer_simple_expr_ctype` returns None, and
+    the caller then defaults to int64_t). Inlining a capturing lambda's
+    body there loses the captured value's real type: `lambda: some_string`
+    yielded from a generator came out as the pointer's bit pattern, and
+    under -Werror=int-conversion that took the whole self-host build down
+    (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
+
+    Defined once here and called from all three body-synthesis sites,
+    rather than being spelled out at each: the reasoning is long enough
+    that three copies would be three things to keep in sync, and the whole
+    point of the marker is that it is a single shared contract.
+    """
+    body_fd._mojo_coro_body = True
+    return body_fd
+
+
 def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
                          struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
     base, is_method, real_params, prologue, body_params, c_params = \
@@ -1555,6 +1587,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
     body_fd.is_async = False
+    body_fd = _mark_coro_body(body_fd)
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'is_async_gen': True,
@@ -1578,6 +1611,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
     body_fd.is_async = False
+    body_fd = _mark_coro_body(body_fd)
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'base': base, 'body_name': body_name,
@@ -2910,6 +2944,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     )
     body_fd.is_generator = False
     body_fd.is_async = False
+    body_fd = _mark_coro_body(body_fd)
 
     _lead = ([f'{struct_name} *'] if has_self else
              ['int64_t'] if is_classmethod else [])

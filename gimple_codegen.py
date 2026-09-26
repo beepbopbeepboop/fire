@@ -1715,6 +1715,13 @@ class GimpleGen:
         self._gimple_mut_ptr: dict[str, str] = {}
         self._boxed_mut_locals: dict[str, str] = {}
         self._elem_types: dict[str, str] = {}
+        # Unpack-result C value -> per-slot element kind ('int'/'double'/
+        # 'bytes'), for a `struct.unpack(...)` tuple. A MojoList carries a
+        # single element ctype, but a struct format has one kind PER SLOT
+        # and the format is a compile-time constant, so recording them
+        # separately is what lets a mixed int/float format read back
+        # correctly. See bugs/hard/CODEGEN_struct_module.md.
+        self._struct_slot_kinds: dict[str, list] = {}
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}
@@ -3829,8 +3836,9 @@ class GimpleGen:
         return ginf._exc_type_id(self, name)
     def _is_exc_class_name(self, name: str) -> bool:
         return ginf._is_exc_class_name(self, name)
-    def _reset_func(self, body: list=None, params: list=None):
-        return ginf._reset_func(self, body, params)
+    def _reset_func(self, body: list=None, params: list=None,
+                    allow_lambda_reduction: bool=True):
+        return ginf._reset_func(self, body, params, allow_lambda_reduction)
     def _record_sys_path_inserts(self, source: str, base_dir: str=None) -> None:
         return ginf._record_sys_path_inserts(self, source, base_dir)
     def _compile_link_inline_cpp_unit(self, cpp_code: str):
