@@ -2218,6 +2218,41 @@ class ARM64Codegen:
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
 
+    def _emit_len(self, e: F.CallExpr) -> None:
+        """`len(x)` — the count field of a list/tuple blob.
+
+        A builtin, and it has to be intercepted here for the same reason
+        `range` is: nothing else on this path knows the name. Left to the
+        extern path it became a BL against a symbol `len` that libSystem does
+        not define, so the image built and then aborted in the loader with
+        "Symbol not found: _len" (or, where a `len` happened to exist, called
+        it and returned whatever was in the result register).
+
+        The blob is `[count:i64][elem0]...` (see _emit_list) and a list value
+        IS its address, so this is one load from offset 0 — no traversal.
+
+        A STRING is refused rather than guessed at. A string here is a bare
+        `char *` with no length prefix, so there is nothing at offset 0 to
+        read; returning the pointer's low bits, or the address itself, would
+        be a plausible-looking wrong answer."""
+        args = list(e.args)
+        if len(args) != 1 or e.kwargs:
+            raise CodegenError(
+                f"len() takes exactly one argument on this path "
+                f"(got {len(args) + len(e.kwargs)})")
+        operand = args[0]
+        if isinstance(operand, F.StringLiteral) or (
+                isinstance(operand, F.CallExpr)
+                and _callee_symbol(operand.func) in M.IDENTITY_TYPE_CTORS):
+            raise CodegenError(
+                f"len() of a string is not lowered on this path: a string is "
+                f"a bare char * with no length prefix, so its length cannot be "
+                f"read (len of a list or tuple is the blob's count field and "
+                f"is supported)")
+        self._emit_expr(operand)
+        # X0 holds the blob address; the count is its first 8 bytes.
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+
     def _emit_list_base(self, offset: int) -> None:
         """X9 = address of the list blob at frame_bottom + offset.
 
@@ -2619,6 +2654,9 @@ class ARM64Codegen:
                 f"(got {type(e.func).__name__})")
         if name == "range":
             self._emit_range_list(list(e.args))
+            return
+        if name == "len":
+            self._emit_len(e)
             return
         # A type constructor is a conversion, not a call. Intercepted before the
         # extern path, because the extern path would emit a BL against a

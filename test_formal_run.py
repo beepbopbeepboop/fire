@@ -54,6 +54,23 @@ CASES = [
     # result, and emit the branch the folded condition selects.
     # The entry function is the FIRST one in the file, so it comes first here
     # and the comptime callees it folds follow.
+    # `len` is a builtin and has to be intercepted in the call path, the same
+    # way `range` is. It had no coverage at all: left to the extern path it
+    # became a BL against a symbol `len` that libSystem does not define, so
+    # the image built and then aborted in the loader with "Symbol not found:
+    # _len". A list is a `[count][elements]` blob, so the answer is one load
+    # from offset 0 — and the tuple and range cases check it is the COUNT and
+    # not, say, the last element or the address.
+    ("len_list", "def len_list(n):\n    return len([1, 2, 3, 4])\n",
+     4, None),
+    ("len_range", "def len_range(n):\n    return len(range(10))\n",
+     10, None),
+    ("len_empty", "def len_empty(n):\n    return len([])\n", 0, None),
+    ("len_nested", "def len_nested(n):\n"
+                   "    return len([[1, 2], [3, 4, 5]])\n", 2, None),
+    ("len_sum", "def len_sum(n):\n"
+                "    xs = [1, 2, 3]\n    return len(xs) + len(range(4))\n",
+     7, None),
     ("comptime_call", "def comptime_call(n):\n"
                       "    comptime var a = square(6)\n"
                       "    comptime var b = add(a, 1)\n"
