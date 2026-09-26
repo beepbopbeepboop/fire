@@ -116,7 +116,6 @@ LIB = os.path.join(ROOT, "lib")
 #: the argument order of each lemma.
 _FORMS = {
     "push_r64": ("x86_step_push_rbp", False, ["rip", "b0"]),
-    "mov_rm64_r64": ("x86_step_mov_rbp_rsp", False, ["rip", "b0", "b1", "b2"]),
     "alu_ri32:sub": ("x86_step_sub_rsp_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
     "mov_rm64_imm32": ("x86_step_mov_rax_imm32", True,
@@ -128,6 +127,9 @@ _FORMS = {
                           "reg", "rm"]),
     "mov_r64_rm64_sib": ("x86_step_mov_rax_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "w", "rex"]),
+    "mov_rm64_r64_sib": ("x86_step_mov_mem_sib_rsp", False,
+                         ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
+                          "rm", "reg", "rb", "rr"]),
     "mov_r64_rm64_disp8": ("x86_step_mov_rm64_mem_disp8_rbp", False,
                            ["rip", "b0", "b1", "b2", "disp", "rex", "w",
                             "mod", "rm", "reg", "rb", "rr"]),
@@ -146,14 +148,18 @@ _FORMS = {
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:sub": ("x86_step_sub_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
-    "jcc_rel32": ("x86_step_jcc_rel32", True,
+    "jcc_rel32": ("x86_step_jcc_rel32", False,
                   ["rip", "b0", "b1", "cc", "off", "lo", "hi", "nsetcc_lo",
                    "nzx", "notrex"]),
-    "jmp_rel32": ("x86_step_jmp_rel32", True,
+    "jmp_rel32": ("x86_step_jmp_rel32", False,
                   ["rip", "b0", "off"]),
-    "setcc": ("x86_step_setcc_r8", True,
-              ["rip", "b0", "b1", "b2", "cc", "lo", "hi", "njcc_lo",
-               "njcc_hi", "nzx", "notrex", "mod", "rm", "rb"]),
+    # `njcc` is the jcc range's UPPER bound only.  Adding its lower bound as
+    # well would be unsatisfiable for every setcc byte -- and a step lemma with
+    # contradictory hypotheses still compiles and still proves its goal, it
+    # just cannot be applied to anything.
+    "setcc": ("x86_step_setcc_r8", False,
+              ["rip", "b0", "b1", "b2", "cc", "lo", "hi", "njcc",
+               "nzx", "notrex", "mod", "rm", "rb"]),
     "alu_rr:cmp": ("x86_step_cmp_rr", False,
                    ["rip", "b0", "b1", "b2", "rex", "w", "mod", "reg", "rm"]),
     "alu_rr:test": ("x86_step_test_rr", False,
@@ -169,7 +175,6 @@ _SUCCS = {
     "push_r64":
         "{ $s with rsp := $s.rsp - 8, rip := $m + 1, "
         "mem := mem_write_bytes $s.mem ($s.rsp - 8).toNat $s.rbp 8 }",
-    "mov_rm64_r64": "{ $s with rbp := $s.rsp, rip := $m + 3 }",
     "alu_ri32:sub":
         "{ x86_flags_sub $s $s.rsp $imm ($s.rsp - $imm) with "
         "rsp := $s.rsp - $imm, rip := $m + 7 }",
@@ -182,6 +187,9 @@ _SUCCS = {
         "(x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $m + 3 }",
     "mov_r64_rm64_sib":
         "{ $s with rax := mem_read_bytes $s.mem $s.rsp.toNat 8, rip := $m + 4 }",
+    "mov_rm64_r64_sib":
+        "{ $s with mem := mem_write_bytes $s.mem $s.rsp.toNat "
+        "(x86_get_reg $s ($reg + x86_rex_r 0x48)) 8, rip := $m + 4 }",
     "mov_r64_rm64_disp8":
         "{ x86_set_reg $s ($reg + x86_rex_r $rex) (mem_read_bytes $s.mem "
         "(Int.ofNat $s.rbp.toNat + $disp).toNat 8) with rip := $m + 4 }",
@@ -197,11 +205,14 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
     "alu_rr:sub":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $m + 3, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, of_ := ($fs).of_ }",
+    # `= true` explicitly.  The model's `if` is over a `Bool`, and the
+    # `by_cases` hypothesis is an equation about a `Prop`; writing the condition
+    # the same way on both sides is what lets the hypothesis rewrite it.  It is
+    # defeq either way, but only this spelling fires.
     "jcc_rel32":
-        "{ $s with rip := if x86_cond $cc $s then (Int.ofNat $m + 6 + $off).toNat"
-        " else $m + 6 }",
+        "{ $s with rip := if x86_cond $cc $s = true then $tgt else $fall }",
     "jmp_rel32":
-        "{ $s with rip := (Int.ofNat $m + 5 + $off).toNat }",
+        "{ $s with rip := $tgt }",
     "setcc":
         "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
         " rip := $m + 3 }",
@@ -242,7 +253,7 @@ def _byte_facts(insns, code, base):
     return " ∧\n    ".join(facts)
 
 
-def _resolve(form, raw, addr, prev, k):
+def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None):
     """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
     the successor expression its conclusion has.
 
@@ -254,8 +265,21 @@ def _resolve(form, raw, addr, prev, k):
     sc = []
     for c in conds:
         if c == "rip":
-            sc.append("(by simp only [i0, X86State.init] <;> decide)" if k == 0
-                      else "(by simp [hs%d])" % k)
+            if k == 0:
+                sc.append("(by simp only [i0, X86State.init] <;> decide)")
+            else:
+                # The `by_cases` hypotheses in scope matter here: after a fork
+                # the predecessor's successor equation has an `if` on the branch
+                # condition in its `rip`, and without the hypothesis that `if`
+                # does not reduce, so the next address is not a literal.
+                #
+                # `hs_in`, not `hs{k}`: the equation describing the state this
+                # step starts in was emitted by the PREVIOUS step, which after a
+                # fork is in the shared prefix and so has a lower number than
+                # this step.  Indexing by `k` names an equation that does not
+                # exist yet -- "Unknown identifier hs20".
+                sc.append("(by simp [%s])"
+                          % ", ".join([hs_in or ("hs%d" % k)] + list(cases)))
         elif c in ("b0", "b1", "b2", "b3"):
             sc.append("(by simp [read_i32_le, read_i8, hb])")
         elif c == "imm":
@@ -265,7 +289,7 @@ def _resolve(form, raw, addr, prev, k):
         elif c == "off":
             sc.append("(by simp [read_i32_le, read_i8, hb])")
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
-                   "lo", "hi", "nsetcc_lo", "njcc_lo", "njcc_hi", "nzx",
+                   "lo", "hi", "nsetcc_lo", "njcc", "nzx",
                    "notrex"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
             # concrete opcode byte: nothing here comes from the byte list, so
@@ -298,15 +322,24 @@ def _resolve(form, raw, addr, prev, k):
         op2 = raw[1]
         off = int.from_bytes(raw[2:6], "little", signed=True)
         extra_args = " %d %d %d" % (op2, op2 - 0x80, off)
-        extra_succ = {"$cc": str(op2 - 0x80), "$off": str(off)}
+        # The two successors as LITERAL addresses.  The model's own form is
+        # `(Int.ofNat m + 6 + off).toNat`, and `simp` does not reduce that
+        # `Int` arithmetic, so the taken address never becomes a numeral and
+        # the `if` cannot be resolved against the next instruction's address.
+        extra_succ = {"$cc": str(op2 - 0x80), "$off": str(off),
+                      "$tgt": str(addr + 6 + off), "$fall": str(addr + 6)}
     elif form == "jmp_rel32":
         off = int.from_bytes(raw[1:5], "little", signed=True)
         extra_args = " %d" % off
-        extra_succ = {"$off": str(off)}
+        extra_succ = {"$off": str(off), "$tgt": str(addr + 5 + off)}
     elif form == "setcc":
         op2, modrm = raw[1], raw[2]
         extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)
         extra_succ = {"$cc": str(op2 - 0x90), "$rmv": str(modrm & 7)}
+    elif form == "mov_rm64_r64_sib":
+        modrm = raw[2]
+        extra_args = " %d %d" % (modrm, (modrm >> 3) & 7)
+        extra_succ = {"$reg": str((modrm >> 3) & 7)}
     elif form in ("mov_r64_rm64_disp8", "mov_rm64_r64_disp8"):
         rex, modrm = raw[0], raw[2]
         disp = raw[3] - 256 if raw[3] > 127 else raw[3]
@@ -319,10 +352,36 @@ def _resolve(form, raw, addr, prev, k):
     if takes_imm:
         call += " %d" % imm
     call += " " + " ".join(sc)
-    succ = _SUCCS[form].replace("$s", prev)
-    for ph, val in extra_succ.items():
-        succ = succ.replace(ph, val)
-    succ = succ.replace("$m", str(addr)).replace("$imm", str(imm) if imm is not None else "0")
+    # Every placeholder is substituted in ONE pass, from a single table.  It
+    # used to be positional -- `$s` and `$m` first, then the `extra_succ`
+    # values -- which silently breaks any form whose successor is BUILT from
+    # those values, because `$s` and `$rex` arrive already inside the inserted
+    # text and nothing replaces them after.  The result is a `$s` in the middle
+    # of a Lean term, reported as `term.pseudo.antiquot has not been
+    # implemented`, which names neither the form nor the substitution.  One
+    # table, one pass, no ordering to get wrong.
+    subs = dict(extra_succ)
+    subs["$s"] = prev
+    subs["$m"] = str(addr)
+    subs["$imm"] = str(imm) if imm is not None else "0"
+    if len(raw) > 2:
+        modrm = raw[2]
+        subs.setdefault("$rex", str(raw[0]))
+        subs.setdefault("$rm", str(modrm & 7))
+        subs.setdefault("$reg", str((modrm >> 3) & 7))
+    # A FIXPOINT, not one pass.  A value substituted in can itself contain
+    # placeholders -- the flag expressions are built from the operand
+    # templates, so `$fc`'s value contains `$s` and `$rex` -- and any fixed
+    # ordering leaves those behind.  Sorting by length only moves the breakage
+    # to a different form; repeating until the text stops changing cannot.
+    succ = _SUCCS[form]
+    for _ in range(len(subs) + 1):
+        nxt = succ
+        for ph, val in subs.items():
+            nxt = nxt.replace(ph, val)
+        if nxt == succ:
+            break
+        succ = nxt
     return call, succ
 
 
@@ -341,24 +400,128 @@ def _shapes(code, insns):
                 form += "_reg"
             elif m == 1 and rm == 5:
                 form += "_disp8"
-            elif form == "mov_r64_rm64" and m == 0 and rm == 4 \
-                    and len(raw) >= 4 and raw[3] == 0x24:
+            elif m == 0 and rm == 4 and len(raw) >= 4 and raw[3] == 0x24:
                 form += "_sib"
         out.append((i, form, raw))
     return out
 
 
+class _Node:
+    """One instruction in the path tree, with the children its branch allows.
+
+    `kind` is "seq" (one successor), "jcc" (two, selected by a condition on
+    `state`), "jmp" (one, unconditional) or "ret" (none: the run is over).
+    """
+    __slots__ = ("insn", "form", "raw", "addr", "kind", "state", "succ", "kids")
+
+    def __init__(self, insn, form, raw, addr, kind, state, succ):
+        self.insn, self.form, self.raw, self.addr = insn, form, raw, addr
+        self.kind, self.state, self.succ = kind, state, succ
+        self.kids = []
+
+
+def _tree(code, info, shapes):
+    """The path tree from the entry, or None if it loops or leaves the body.
+
+    A loop is reported as None rather than walked: the chain proves one path, so
+    a back edge has no finite unfolding here.  Four of the examples have one and
+    they are named in the test output as needing induction.
+    """
+    base, entry = info["base_addr"], info["func_offset"]
+    by_addr = {base + i.offset: (i, f, r) for i, f, r in shapes}
+    counter = [0]
+
+    def build(addr, state, depth):
+        if depth > 64:
+            return None
+        got = by_addr.get(addr)
+        if got is None:
+            return None
+        insn, form, raw = got
+        if form in ("jcc_rel32", "jcc_rel8"):
+            off = (int.from_bytes(raw[2:6], "little", signed=True)
+                   if form == "jcc_rel32"
+                   else int.from_bytes(raw[1:2], "little", signed=True))
+            nxt = addr + (6 if form == "jcc_rel32" else 2)
+            node = _Node(insn, form, raw, addr, "jcc", state, nxt)
+            taken = build(addr + off, None, depth + 1)
+            fell = build(nxt, None, depth + 1)
+            if taken is None or fell is None:
+                return None
+            # `by_cases h : P` presents the `P` case FIRST, so the taken path
+            # must be kids[0] or each arm gets the other's address.
+            node.kids = [taken, fell]
+            return node
+        if form in ("jmp_rel32", "jmp_rel8"):
+            off = (int.from_bytes(raw[1:5], "little", signed=True)
+                   if form == "jmp_rel32"
+                   else int.from_bytes(raw[1:2], "little", signed=True))
+            node = _Node(insn, form, raw, addr, "jmp", state, addr + off)
+            node.kids = [build(addr + off, None, depth + 1)]
+            return None if node.kids[0] is None else node
+        if form == "ret":
+            return _Node(insn, form, raw, addr, "ret", state, None)
+        node = _Node(insn, form, raw, addr, "seq", state, addr + insn.length)
+        node.kids = [build(addr + insn.length, None, depth + 1)]
+        return None if node.kids[0] is None else node
+
+    root = build(entry, "i0", 0)
+    if root is None:
+        return None
+    counter[0] = 0
+    return root
+
+
+def _paths(node, acc=None):
+    """Every root-to-`ret` path in the tree, as lists of nodes."""
+    acc = [] if acc is None else acc
+    acc.append(node)
+    if not node.kids:
+        yield list(acc)
+    for kid in node.kids:
+        yield from _paths(kid, list(acc))
+    acc.pop()
+
+
+def _byte_list(insns, code, base):
+    """Every byte of the function, as `rc <addr> = <value>` conjuncts."""
+    out = []
+    for i in insns:
+        for j in range(i.length):
+            out.append("rc %d = %d" % (base + i.offset + j, code[i.offset + j]))
+    return out
+
+
 def _header(code, insns, base):
     """The import, the code function, and every byte as a fact."""
-    L = ["import X86\n",
-         "def rc (addr : Nat) : UInt8 :=",
-         "  if addr < %d then 0 else" % base,
-         "    ([%s].getD (addr - %d) 0)\n"
-         % (", ".join("0x%02x" % b for b in code), base),
-         "/-- Every byte of the function, as a fact about `rc`. -/",
-         "theorem all_bytes :\n    %s := by native_decide\n"
-         % _byte_facts(insns, code, base)]
-    return L
+    out = ["import X86\n",
+           "def rc (addr : Nat) : UInt8 :=",
+           "  if addr < %d then 0 else" % base,
+           "  ([%s].getD (addr - %d) 0)\n"
+           % (", ".join("0x%02x" % b for b in code), base),
+           "/-- Every byte of the function, as a fact about `rc`. -/",
+           "theorem all_bytes :\n    %s := by" % _byte_facts(insns, code, base)]
+    # Proved as a chain of small `native_decide`s rather than one.  Asking for
+    # a single `Decidable` instance for a conjunction of a few hundred byte
+    # equalities exhausts instance synthesis, and it fails as "failed to
+    # synthesize Decidable (rc ... = 85 /\u2227 rc ... = 72 /\u2227 ...)" -- a
+    # wall of byte facts that never mentions the fact that there are too many
+    # of them.  Each conjunct is closed on its own instead.
+    facts = _byte_list(insns, code, base)
+    if not facts:
+        out.append("  trivial")
+    elif len(facts) == 1:
+        out.append("  native_decide")
+    else:
+        # `And.intro` rather than `refine`: these files import only X86, so
+        # `refine` (a Mathlib tactic) is not in scope, and the core
+        # `And.intro` needs nothing.
+        term = "by native_decide"
+        for f in reversed(facts[1:]):
+            term = "And.intro (by native_decide) (%s)" % term
+        out.append("  exact " + term)
+    out.append("")
+    return out
 
 
 def _plan(path):
@@ -435,6 +598,127 @@ def emit(path, expected):
     a("  rw [%s]" % ",\n      ".join(rules))
     a("  simp [hrax]")
     return "\n".join(L) + "\n"
+
+
+def emit_terminates(path):
+    """For EVERY input, the model runs this image to the exit pc.
+
+    This is the theorem that scales.  `emit` states the value left in `rax`,
+    which is a fixed constant only for the 7 of 43 examples whose result does
+    not depend on the input -- so for the other 36 it cannot even be FORMULATED,
+    however good the chain gets.  Termination needs no value reasoning: it says
+    the run reaches the exit pc, which is what makes `x86_exec_exit` total, and
+    it holds for every input whether or not the answer is constant.
+
+    The chain forks at each conditional.  A `jcc`'s successor carries an `if` on
+    the condition in its `rip` rather than a constant address, so the two paths
+    have different next addresses, and the only sound way through is to split on
+    the condition -- which is what `by_cases` does.  The case hypothesis then
+    joins the `simp` sets, so a step after a fork resolves its `rip` from the
+    branch's own successor equation.
+    """
+    code, info, insns, shapes = _plan(path)
+    base, entry = info["base_addr"], info["func_offset"]
+    root = _tree(code, info, shapes)
+    if root is None:
+        raise ValueError("body loops, or branches out of the function")
+    out = _header(code, insns, base)
+    out.append("/-- For EVERY input, the model runs this image to the exit pc.\n"
+               "    No `sorry`: the path tree is walked once per branch outcome. -/")
+    out.append("theorem terminates (n : UInt64) :")
+    out.append("    (x86_exec_exit (X86State.init n %d) rc 0).isSome = true := by"
+               % entry)
+    out.append("  rw [x86_exec_exit_eq_go]")
+    out.append("  have hb := all_bytes")
+    out.append("  let i0 : X86State := X86State.init n %d" % entry)
+
+    counter = [0]
+
+    def walk(node, state, ind, cases, rules, hs_in=None, hs_path=()):
+        """Emit one node and, for a branch, both of its children.
+
+        `cases` are the `by_cases` hypotheses in scope at this point; `rules`
+        the `x86_exec_go_exit_step` applications that reduce the run so far, in
+        order, which is what the closing `rw` replays.
+        """
+        k = counter[0]
+        counter[0] = k + 1
+        call, succ = _resolve(node.form, node.raw, node.addr, state, k,
+                              cases, hs_in)
+        nxt = "s%d" % (k + 1)
+        pad = "  " * ind
+        case_simp = (", " + ", ".join(cases)) if cases else ""
+
+        def emit(line):
+            out.append(pad + line if line else "")
+
+        emit("have hstep%d : x86_step %s rc = some %s :=" % (k, state, succ))
+        emit("  " + call)
+        emit("obtain \u27e8%s, h%d\u27e9 : \u2203 t, x86_step %s rc = some t :="
+             % (nxt, k, state))
+        emit("  \u27e8_, hstep%d\u27e9" % k)
+        emit("have hs%d : %s = %s := by" % (k + 1, nxt, succ))
+        emit("  rw [h%d] at hstep%d" % (k, k))
+        emit("  exact Option.some.inj hstep%d" % k)
+        # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
+        # exit`, and `s_k` is the state this step STARTS in -- which the
+        # PREVIOUS step's successor equation describes.  So this uses `hs_k`,
+        # not `hs_{k+1}`; for the first step the predecessor is the initial
+        # state, which `i0` names.
+        if k == 0:
+            step_rule = ("x86_exec_go_exit_step (by decide) (by simp only "
+                         "[i0, X86State.init] <;> decide) h0")
+        else:
+            step_rule = ("x86_exec_go_exit_step (by decide) (by simp [hs%d%s]) h%d"
+                         % (k, case_simp, k))
+
+        if node.kind == "jcc":
+            # The condition is over the state the branch READS -- the one this
+            # step starts in -- not the successor.  A `jcc`'s successor carries
+            # `rip := if x86_cond cc s_k ... else ...`, so splitting on the
+            # successor's own flags produces a hypothesis that never rewrites
+            # anything, and the next step's `rip` stays an `if`.
+            cc = node.raw[1] - 0x80
+            emit("by_cases hc%d : x86_cond %d %s = true" % (k, cc, state))
+            both = rules + [step_rule]
+            emit("\u00b7")
+            walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
+                 "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
+            emit("\u00b7")
+            walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
+                 "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
+            return
+
+        if node.kind == "ret":
+            # The successor equations IN SCOPE ON THIS PATH, collected as the
+            # walk went -- not `hs1..hs{k}`.  The counter is global across both
+            # arms of every fork, so a range over it names hypotheses the other
+            # arm has not emitted yet, and the file dies on "Unknown identifier
+            # hs18" inside a `simp` set that looks entirely reasonable.
+            hs = ", ".join(hs_path)
+            emit("have hrip : %s.rip = 0 := by" % nxt)
+            emit("  have key : \u2200 (m : Nat \u2192 UInt8) (a : Nat) (v : UInt64)"
+                 " (b : Nat),")
+            emit("      a + 8 \u2264 b \u2192 mem_read_bytes (mem_write_bytes m a v 8)"
+                 " b 8")
+            emit("        = mem_read_bytes m b 8 :=")
+            emit("    fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
+            emit("  simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add,"
+                 % hs)
+            emit("    x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r%s]" % case_simp)
+            emit("  rw [key _ _ _ _ (by decide)]")
+            emit("  simp only [mem_read_bytes, ite_true]")
+            emit("  decide")
+            full = rules + [step_rule, "x86_exec_go_exit_at (by decide) hrip"]
+            emit("rw [%s]" % ",\n    ".join(full))
+            emit("simp")
+            return
+
+        walk(node.kids[0], nxt, ind, cases, rules + [step_rule],
+             "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
+
+    walk(root, "i0", 1, [], [], None, ())
+    return "\n".join(out) + "\n"
 
 
 def _probe_input_independent(path):

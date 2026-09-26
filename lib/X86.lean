@@ -986,8 +986,7 @@ theorem x86_step_setcc_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     (h_rip : s.rip = m) (h_b0 : code m = 0x0f) (h_b1 : code (m + 1) = op2)
     (h_b2 : code (m + 2) = modrm) (h_cc : op2.toNat - 0x90 = cc)
     (h_lo : (0x90 : UInt8) ≤ op2) (h_hi : op2 ≤ 0x9f)
-    (h_njcc_lo : ¬ ((0x80 : UInt8) ≤ op2))
-    (h_njcc_hi : ¬ (op2 ≤ 0x8f))
+    (h_njcc : ¬ (op2 ≤ 0x8f))
     (h_nzx : ¬ (op2 = 0xb6 ∨ op2 = 0xb7 ∨ op2 = 0xbe ∨ op2 = 0xbf))
     (h_notrex : x86_is_rex 0x0f = false) (h_mod : modrm.toNat >>> 6 = 3)
     (h_rm : modrm.toNat &&& 7 = rmv) (h_rb : x86_rex_b 0 = 0) :
@@ -995,7 +994,7 @@ theorem x86_step_setcc_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
       { x86_set_reg s rmv (if x86_cond cc s then 1 else 0) with rip := m + 3 } := by
   simp [x86_step, x86_step_plain, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_rex_b,
-        h_rip, h_b0, h_b1, h_b2, h_cc, h_lo, h_hi, h_njcc_lo, h_njcc_hi,
+        h_rip, h_b0, h_b1, h_b2, h_cc, h_lo, h_hi, h_njcc,
         h_nzx, h_notrex, h_mod, h_rm, h_rb]
   -- The 1-byte write zero-extends, and the two values `setcc` ever produces
   -- have `[simp]` facts for exactly that.  Splitting on the condition is what
@@ -1150,6 +1149,26 @@ theorem x86_step_mov_mem_disp8_r64 (s : X86State) (code : Nat → UInt8)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
+        h_rr]
+
+/-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM 04, SIB 24: scale 0, index
+    none, base rsp) -- the store counterpart of `mov rax, [rsp]` below, and
+    general over the source register.  This is the shape a computed value takes
+    on its way to the stack frame. -/
+theorem x86_step_mov_mem_sib_rsp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (modrm : UInt8) (reg : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x24)
+    (h_rex : x86_is_rex 0x48 = true) (h_w : x86_rex_w 0x48 = true)
+    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b 0x48 = 0) (h_rr : x86_rex_r 0x48 = 0) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem s.rsp.toNat (x86_get_reg s (reg + x86_rex_r 0x48)) 8,
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
         h_rr]
 
 /-- `mov rax, qword [rsp + 0]` (REX.W 8B /r, ModRM 04: mod=0 rm=4, SIB 24:
