@@ -95,11 +95,17 @@ def x86_set_reg (s : X86State) (i : Nat) (v : UInt64) : X86State :=
 
 def x86_is_rex (b : UInt8) : Bool := b.toNat ≥ 64 && b.toNat ≤ 79
 
-def x86_rex_w (b : UInt8) : Bool := b &&& 0x08 != 0
+/-! The bit tests go through `toNat` rather than masking the `UInt8` directly.
+    Same values -- the byte is in range either way -- but `simp` reduces `Nat`
+    literal arithmetic and knows no lemmas for `UInt8`'s, so the `UInt8` form
+    leaves `if 72 &&& 1 = 0 then ...` unreduced in a proof, which is what a
+    symbolic register index turns into. -/
 
-def x86_rex_r (b : UInt8) : Nat := if b &&& 0x04 != 0 then 8 else 0
+def x86_rex_w (b : UInt8) : Bool := (b.toNat &&& 8) != 0
 
-def x86_rex_b (b : UInt8) : Nat := if b &&& 0x01 != 0 then 8 else 0
+def x86_rex_r (b : UInt8) : Nat := if (b.toNat &&& 4) != 0 then 8 else 0
+
+def x86_rex_b (b : UInt8) : Nat := if (b.toNat &&& 1) != 0 then 8 else 0
 
 /-! ### REX bit decoding, as `simp` facts
 
@@ -909,6 +915,105 @@ theorem x86_step_sub_rsp_imm32 (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some { x86_flags_sub s s.rsp (UInt64.ofInt imm) (s.rsp - UInt64.ofInt imm) with rsp := s.rsp - UInt64.ofInt imm, rip := m + 7 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_flags_sub, h_rip, h_b0, h_b1, h_b2, h_imm]
+
+/-! `mov r64, r/m64` in its two shapes.  These two cover every instance the
+backend emits -- 170 across the examples, and `mov_r64_rm64` was the single
+form blocking the most end-to-end proofs, so it is worth having the general
+version rather than the one-register-pair instances above. -/
+
+/-- `mov r64, r64` register to register (REX.W 8B /r, mod=3), general over both
+    registers and over the REX bits that extend either of them.
+
+    The field names are the encoding's, not intuition's: the DESTINATION is
+    the reg field, extended by REX.R, and the SOURCE is the rm field, extended
+    by REX.B.  Swapping them typechecks fine as long as both are symbolic --
+    `movzx_rax_al` above is the same instruction read the other way round --
+    and is the reason this is stated with `reg`/`rm` rather than src/dst. -/
+theorem x86_step_mov_rm64_r64_reg (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some
+      { x86_set_reg s (reg + x86_rex_r rex) (x86_get_reg s (rm + x86_rex_b rex)) with
+        rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `mov r64, qword [rbp + disp8]` (REX.W 8B /r, mod=1, rm=5: base rbp, an
+    8-bit displacement), general over the destination register.  The other
+    half of the two shapes `mov r64, r/m64` actually has in this corpus: every
+    spilled-argument access is one of these or the `[rsp]` below, and there is
+    no third. -/
+theorem x86_step_mov_rm64_mem_disp8_rbp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b rex = 0) (h_rr : x86_rex_r rex = 0) :
+    x86_step s code = some { x86_set_reg s (reg + x86_rex_r rex) (mem_read_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat 8) with
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
+        h_rr]
+
+/-! The two store-direction `mov` shapes (opcode 89), mirroring the load ones
+    above.  These are the STORE direction, and the field sense flips: the
+    SOURCE is the reg field (+REX.R) and the DESTINATION is the rm field
+    (+REX.B).  Reading them the other way round typechecks while both indices
+    are symbolic, which is how `mov_rbp_rsp` above came to look general when it
+    is one register pair. -/
+
+/-- `mov r64, r64` register to register (REX.W 89 /r, mod=3). -/
+theorem x86_step_mov_rm64_r64_reg_st (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some
+      { x86_set_reg s (rm + x86_rex_b rex) (x86_get_reg s (reg + x86_rex_r rex)) with
+        rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+/-- `mov qword [rbp + disp8], r64` (REX.W 89 /r, mod=1, rm=5). -/
+theorem x86_step_mov_mem_disp8_r64 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_disp : read_i8 (code (m + 3)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 5)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b rex = 0) (h_rr : x86_rex_r rex = 0) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (Int.ofNat s.rbp.toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
+        h_rr]
+
+/-- `mov rax, qword [rsp + 0]` (REX.W 8B /r, ModRM 04: mod=0 rm=4, SIB 24:
+    scale 0, index none, base rsp).  Every SIB operand the backend emits has
+    this shape, so the general SIB case would be machinery nothing uses. -/
+theorem x86_step_mov_rax_sib_rsp (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = 0x04) (h_b3 : code (m + 3) = 0x24)
+    (h_w : x86_rex_w 0x48 = true) (h_rex : x86_is_rex 0x48 = true) :
+    x86_step s code = some
+      { s with rax := mem_read_bytes s.mem s.rsp.toNat 8, rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg,
+        x86_mem_addr, x86_rm_read,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_w, h_rex]
 
 /-! The two disp8 memory forms every spilled-argument function uses.  These are
 the instructions that make a proof about the stack need the separation lemmas

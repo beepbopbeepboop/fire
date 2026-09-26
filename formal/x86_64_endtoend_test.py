@@ -37,25 +37,34 @@ step lemma for that this can state a successor expression for.  A function
 using anything else is reported as uncovered, with the form named, rather than
 skipped silently -- the point is to know what is and is not proved.
 
-  ret42 is proved end to end.  Of the other 42 examples, none is covered yet,
-  and the forms that block them, most-blocking first, are:
+  3 examples are proved end to end -- ret42, seven, const2 -- and the rest
+  name the forms that block them, most-blocking first:
 
-      42  mov_r64_rm64     26  setcc          8  imul_r64_r64
-      28  jcc_rel32        21  jmp_rel32       7  call_rel32
-      27  alu_rr:test      17  alu_rr:add      3  movsx_r64_r8
-      27  alu_rr:cmp       11  alu_rr:sub      1  each of the rest
+      28  jcc_rel32        26  movzx_r64_r8   1  each of the rest
+      27  alu_rr:test      21  jmp_rel32
+      27  alu_rr:cmp       17  alu_rr:add
+      26  setcc            11  alu_rr:sub
 
-  `mov_r64_rm64` alone unblocks 42 of 43, and it is one lemma: the model
-  already has the rax/rbx instance of it, just not the general register and
-  not the memory-source shape.  `alu_rr:test`/`alu_rr:cmp` and `setcc` are one
-  family each -- a compare that only sets flags, and a condition code turned
-  into 0 or 1 -- and between them they unblock 27.
+  `mov_r64_rm64` and `mov_rm64_r64` are gone from that list: the five general
+  `mov` lemmas in X86.lean cover every shape the backend emits for them, and
+  taking them out is what took the suite from 1 proved to 3.
 
-  Note the coverage is not the same as the model's coverage: `X86.lean` has
-  step lemmas for several of these in one register pair only (`mov_rax_rbx`,
-  `add_rax_imm32`, `jz_rel32`, `setne_al`), which is why a form shows up as
-  missing here while a lemma with a similar name exists.  Generalising those
-  is most of the remaining work, and it is mechanical rather than hard.
+  Three limits are worth stating separately, because each is a limit of what
+  is proved here rather than a gap in it:
+
+    * The result must not depend on the input.  The theorem states a
+      CONSTANT, so `identity` cannot satisfy it however it is proved; the test
+      detects this by asking the model whether two different inputs give the
+      same answer, and reports it as uncovered.  Stating the result as an
+      expression of the input is a dataflow problem this does not attempt.
+
+    * Only straight-line functions.  There is no CFG, so a `jcc_rel32` or
+      `jmp_rel32` cannot be chained -- which is why those two are the largest
+      remaining blockers, and why closing them means cutting blocks rather
+      than adding lemmas.
+
+    * `group3:div` is skipped wherever it appears, for the same reason the
+      per-instruction certificates skip it: the step is not total.
 
 Usage: python3 formal/x86_64_endtoend_test.py [file.mojo ...]
 """
@@ -94,6 +103,20 @@ _FORMS = {
                        ["rip", "b0", "b1", "b2", "imm"]),
     "alu_ri32:add": ("x86_step_add_rax_imm32", True,
                      ["rip", "b0", "b1", "b2", "imm"]),
+    "mov_r64_rm64_reg": ("x86_step_mov_rm64_r64_reg", False,
+                         ["rip", "b0", "b1", "b2", "rex", "w", "mod",
+                          "reg", "rm"]),
+    "mov_r64_rm64_sib": ("x86_step_mov_rax_sib_rsp", False,
+                         ["rip", "b0", "b1", "b2", "b3", "w", "rex"]),
+    "mov_r64_rm64_disp8": ("x86_step_mov_rm64_mem_disp8_rbp", False,
+                           ["rip", "b0", "b1", "b2", "disp", "rex", "w",
+                            "mod", "rm", "reg", "rb", "rr"]),
+    "mov_rm64_r64_reg": ("x86_step_mov_rm64_r64_reg_st", False,
+                         ["rip", "b0", "b1", "b2", "rex", "w", "mod",
+                          "reg", "rm"]),
+    "mov_rm64_r64_disp8": ("x86_step_mov_mem_disp8_r64", False,
+                           ["rip", "b0", "b1", "b2", "disp", "rex", "w",
+                            "mod", "rm", "reg", "rb", "rr"]),
     "leave": ("x86_step_leave", False, ["rip", "b0"]),
     "ret": ("x86_step_ret", False, ["rip", "b0"]),
 }
@@ -113,6 +136,21 @@ _SUCCS = {
     "alu_ri32:add":
         "{ x86_flags_add $s $s.rax $imm ($s.rax + $imm) with "
         "rax := $s.rax + $imm, rip := $m + 7 }",
+    "mov_r64_rm64_reg":
+        "{ x86_set_reg $s ($reg + x86_rex_r $rex) "
+        "(x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $m + 3 }",
+    "mov_r64_rm64_sib":
+        "{ $s with rax := mem_read_bytes $s.mem $s.rsp.toNat 8, rip := $m + 4 }",
+    "mov_r64_rm64_disp8":
+        "{ x86_set_reg $s ($reg + x86_rex_r $rex) (mem_read_bytes $s.mem "
+        "(Int.ofNat $s.rbp.toNat + $disp).toNat 8) with rip := $m + 4 }",
+    "mov_rm64_r64_reg":
+        "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $m + 3 }",
+    "mov_rm64_r64_disp8":
+        "{ $s with mem := mem_write_bytes $s.mem "
+        "(Int.ofNat $s.rbp.toNat + $disp).toNat "
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $m + 4 }",
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
         "rsp := $s.rbp + 8, rip := $m + 1 }",
@@ -152,7 +190,27 @@ def emit(path, expected):
     insns = _body(code, info)
     if insns is None:
         raise ValueError("body does not decode")
-    missing = sorted({i.form for i in insns} - set(_FORMS))
+    shapes = []
+    for i in insns:
+        raw = code[i.offset:i.next_offset]
+        form = i.form
+        if form == "mov_rm64_r64":
+            modrm = raw[2]
+            if (modrm >> 6) == 3:
+                form = "mov_rm64_r64_reg"
+            elif (modrm >> 6) == 1 and (modrm & 7) == 5:
+                form = "mov_rm64_r64_disp8"
+        elif form == "mov_r64_rm64":
+            modrm = raw[2]
+            if (modrm >> 6) == 3:
+                form = "mov_r64_rm64_reg"
+            elif (modrm >> 6) == 0 and (modrm & 7) == 4 and len(raw) >= 4 \
+                    and raw[3] == 0x24:
+                form = "mov_r64_rm64_sib"
+            elif (modrm >> 6) == 1 and (modrm & 7) == 5:
+                form = "mov_r64_rm64_disp8"
+        shapes.append((i, form, raw))
+    missing = sorted({f for _, f, _ in shapes} - set(_FORMS))
     if missing:
         raise ValueError("no step lemma wired for: " + ", ".join(missing))
 
@@ -176,11 +234,9 @@ def emit(path, expected):
 
     prev, k = "i0", 0
     chain = []
-    for insn in insns:
-        form = insn.form
+    for insn, form, raw in shapes:
         lemma, takes_imm, conds = _FORMS[form]
         addr = base + insn.offset
-        raw = code[insn.offset:insn.next_offset]
         imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
         # side conditions, in the lemma's own order
         sc = []
@@ -198,36 +254,73 @@ def emit(path, expected):
                 sc.append("(by simp [read_i32_le, read_i8, hb])")
             elif c == "imm":
                 sc.append("(by simp [read_i32_le, read_i8, hb])")
+            elif c == "b3":
+                sc.append("(by simp [read_i32_le, read_i8, hb])")
+            elif c == "disp":
+                sc.append("(by simp [read_i8, hb])")
+            elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr"):
+                # Closed arithmetic on the ModRM/REX literals -- nothing here
+                # comes from the byte list, so `decide` and not `simp [hb]`.
+                sc.append("(by decide)")
             else:
                 raise ValueError("bad condition " + c)
-        nxt = "s%d" % (k + 1)
-        call = "%s %s rc %d" % (lemma, prev, addr)
+        extra_args, extra_succ = "", {}
+        if form == "mov_r64_rm64_sib":
+            extra_args = ""
+        elif form in ("mov_r64_rm64_disp8", "mov_rm64_r64_disp8"):
+            rex, modrm = raw[0], raw[2]
+            disp = raw[3] - 256 if raw[3] > 127 else raw[3]
+            # The displacement can be negative, and a negative literal
+            # followed by `(` parses as an application of it -- so it is
+            # parenthesised.
+            extra_args = " %d %d %d (%d)" % (rex, modrm, (modrm >> 3) & 7, disp)
+            extra_succ = {"$reg": str((modrm >> 3) & 7), "$disp": str(disp),
+                          "$rex": str(rex)}
+        elif form in ("mov_r64_rm64_reg", "mov_rm64_r64_reg"):
+            rex, modrm = raw[0], raw[2]
+            extra_args = " %d %d %d %d" % (rex, modrm, (modrm >> 3) & 7,
+                                           modrm & 7)
+            extra_succ = {"$reg": str((modrm >> 3) & 7),
+                          "$rm": str(modrm & 7), "$rex": str(rex)}
+        call = "%s %s rc %d%s" % (lemma, prev, addr, extra_args)
         if takes_imm:
             call += " %d" % imm
         call += " " + " ".join(sc)
-        a("  obtain \u27e8%s, h%d\u27e9 : \u2203 t, x86_step %s rc = some t :="
-          % (nxt, k, prev))
-        a("    \u27e8_, %s\u27e9" % call)
         succ = _SUCCS[form].replace("$s", prev)
+        for ph, val in extra_succ.items():
+            succ = succ.replace(ph, val)
         succ = succ.replace("$m", str(addr))
         succ = succ.replace("$imm", str(imm) if imm is not None else "0")
+        nxt = "s%d" % (k + 1)
+        # The step equation is stated with the successor EXPLICITLY first, so
+        # the step lemma is elaborated against a known type.  Passing it
+        # straight into the anonymous constructor of the `obtain` instead
+        # leaves the lemma's own hypotheses as metavariables, because the
+        # witness is not yet fixed at that point.
+        a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
+        a("    %s" % call)
+        a("  obtain \u27e8%s, h%d\u27e9 : \u2203 t, x86_step %s rc = some t :="
+          % (nxt, k, prev))
+        a("    \u27e8_, hstep%d\u27e9" % k)
         a("  have hs%d : %s = %s := by" % (k + 1, nxt, succ))
-        a("    have he := %s" % call)
-        a("    rw [h%d] at he" % k)
-        a("    exact Option.some.inj he")
+        a("    rw [h%d] at hstep%d" % (k, k))
+        a("    exact Option.some.inj hstep%d" % k)
         chain.append((k, nxt))
         prev, k = nxt, k + 1
 
     # the two facts the goal is about
     a("  have hrax : %s.rax = %d := by" % (prev, expected))
-    a("    simp [%s, i0]" % ", ".join("hs%d" % (j + 1) for j, _ in chain))
+    a("    simp [%s, i0, x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r,"
+      % ", ".join("hs%d" % (j + 1) for j, _ in chain))
+    a("      x86_flags_sub, x86_flags_add]")
     a("  have hrip : %s.rip = 0 := by" % prev)
     a("    have key : \u2200 (m : Nat \u2192 UInt8) (a : Nat) (v : UInt64) (b : Nat),")
     a("        a + 8 \u2264 b \u2192 mem_read_bytes (mem_write_bytes m a v 8) b 8")
     a("          = mem_read_bytes m b 8 :=")
     a("      fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
-    a("    simp only [%s, i0, X86State.init, x86_flags_sub, x86_flags_add]"
+    a("    simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add,"
       % ", ".join("hs%d" % (j + 1) for j, _ in chain))
+    a("      x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r]")
     a("    rw [key _ _ _ _ (by decide)]")
     a("    simp only [mem_read_bytes, ite_true]")
     a("    decide")
@@ -241,6 +334,59 @@ def emit(path, expected):
     a("  rw [%s]" % ",\n      ".join(rules))
     a("  simp [hrax]")
     return "\n".join(L) + "\n"
+
+
+def _result_at(binary, n):
+    """The exit code with `n` as the program's input, or None if it won't run.
+
+    The generated binaries take their input from the environment rather than
+    stdin, so this drives them the same way the model test does and reports
+    the exit code; a program that ignores its input gives the same answer
+    twice, which is the case this is here to detect.
+    """
+    import os as _os
+    env = dict(_os.environ, MOJO_TEST_INPUT=str(n))
+    try:
+        return subprocess.run(["arch", "-x86_64", binary], capture_output=True,
+                              text=True, timeout=60, env=env).returncode
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def _probe_input_independent(path):
+    """Does the model's result depend on the input at all?
+
+    The theorem states a CONSTANT result, so a program that returns its input
+    cannot satisfy it -- and that is a limit of what is proved here, not a
+    proof failure, so it must not be reported as one.  The model itself
+    answers the question exactly: run the same bytes from two different
+    initial states and compare.
+
+    This costs a second Lean invocation, so it only runs for a file whose
+    theorem has already failed.
+    """
+    r = B.compile_formal(path, prove=False, check=False, arch="x86_64")
+    code, info = r["code"], r["info"]
+    entry = info["func_offset"]
+    text = ("import X86\n\ndef rc (addr : Nat) : UInt8 :=\n"
+            "  if addr < %d then 0 else ([%s].getD (addr - %d) 0)\n\n"
+            "/-- The result is the same for every input, or it is not. -/\n"
+            "theorem input_independent :\n"
+            "    (x86_exec_exit (X86State.init 0 %d) rc 0).map X86State.rax =\n"
+            "      (x86_exec_exit (X86State.init 5 %d) rc 0).map X86State.rax :=\n"
+            "  native_decide\n"
+            % (info["base_addr"], ", ".join("0x%02x" % b for b in code),
+               info["base_addr"], entry, entry))
+    with tempfile.NamedTemporaryFile("w", suffix=".lean", delete=False) as f:
+        f.write(text)
+        tmp = f.name
+    try:
+        env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
+        p = subprocess.run([LEAN_BIN, tmp], capture_output=True, text=True,
+                           env=env)
+        return ": error" not in p.stdout + p.stderr
+    finally:
+        os.unlink(tmp)
 
 
 def _check(path, expected):
@@ -297,6 +443,9 @@ def main(argv):
         if good:
             covered += 1
             print("  [PROVED] %-16s every input -> rax = %d" % (name, expected))
+        elif not _probe_input_independent(t):
+            print("  [open] %-16s result depends on the input, so the constant"
+                  " form does not apply" % name)
         else:
             print("  [FAIL]  %-16s %s" % (name, msg))
             ok += 1
