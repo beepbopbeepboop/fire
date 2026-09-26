@@ -145,3 +145,212 @@ failure remains a separate blocker from the resource measurements above.
   benchmark command and hardware/environment details.
 - The four listed `.ci` divergences remain separately tracked and are not hidden
   by resource optimizations.
+
+
+## Whole-program `--dump-full fire.py` reaches ~192 GB (2026-09-26)
+
+**The memory growth is real and is the problem. The cause is NOT an
+out-of-memory kill, and this section deliberately does not claim one** — see
+"this is the second OOM misdiagnosis" below, which is the most useful thing in
+it.
+
+`make check-native-dumpfull` reports:
+
+```text
+Built: mojoc
+./mojoc fire.py --dump-full produced NO fire.ci (exit -9)
+```
+
+`exit -9` is SIGKILL. **It was killed by hand** — the run was watched and
+`kill -9`'d once it was clear the machine was in danger. The OS did not
+intervene, and this is not an OOM:
+
+- macOS does not account for this usefully. When memory runs out it does not
+  reliably choose which process to kill, so the OOM response cannot be relied
+  on to bound this run — or to be the thing that ends it.
+- `ulimit`/`rlimit` provides no usable cap here, so the test cannot be given a
+  memory budget to fail against.
+
+So the exposure is real and the process has no bound and no backstop, but
+**192 GB is a lower bound on what it wanted, not a measured peak.** It had not
+finished when it was stopped. It is not a completed 192 GB compile.
+
+### What the growth looks like against this doc's own measurements
+
+Same workload — a full native transitive `--dump-full fire.py`:
+
+| run | macOS peak footprint | result |
+|---|---:|---|
+| 2026-09-25 flag probe, `-O1` | 93.7 GB | success |
+| 2026-09-25 flag probe, `-O2` | 93.7 GB | success |
+| 2026-09-25 flag probe, `-O3` | 95.6 GB | success |
+| 2026-09-25 full `make bootstrap` (`-O0`) | ~45 GB | success (32 min) |
+| **2026-09-26 `--dump-full fire.py`** | **≥192 GB, killed by hand** | **no `fire.ci`** |
+
+The flag probe completed just under 96 GB three optimization levels in a row;
+this run passed 192 GB — **at least 2x the last known-completing footprint** —
+and was still going. Direction of travel against this doc's own success
+criterion ("peak RSS materially below 45 GB") is now ~4x the wrong way.
+
+Worth noting for whoever picks this up: the flag probe found `-O1`/`-O2`/`-O3`
+barely differ in footprint (93.7/93.7/95.6 GB), so **compiler-binary
+optimization is not the lever** that section's conclusion suggested. And
+because the run is cumulative over the transitive closure under a never-frees
+allocator, a per-module regression is a strong candidate — a modest per-module
+regression becomes a large whole-program delta, which is the shape of the 2x.
+
+### This is the second OOM misdiagnosis in this area, and that is the lesson
+
+The obvious reading of "silent death, enormous memory, no core file" is OOM. It
+has now been wrong twice here, and both times it was wrong *in the same way* —
+by inferring the cause from the symptom rather than establishing it:
+
+1. `CODEGEN_noshim_dumpfull_preexisting_divergence.md` session 4 concluded OOM
+   for a **single-module** repro and blamed the never-frees allocator. Session 5
+   corrected it: the real cause was a NULL-pointer SIGSEGV (139), and the
+   apparent silent death was an artifact of explicit `(…&)` backgrounding
+   hiding the true exit status.
+2. This one. A large, silent, uncapped run invites the same inference. Here the
+   `exit -9` is a **manual** kill, so treating it as the OS's OOM response
+   would be wrong in the same way — and the harness's own message (below)
+   actively encourages exactly that inference.
+
+**The rule this establishes: a SIGKILL here is evidence of nothing on its own.**
+A manual `kill -9` and an OS kill are the same signal. Establish which by
+running it in the foreground under a memory monitor (`memory_pressure`,
+`vmmap`, or Activity Monitor), never under `(…&)`, and record peak RSS at
+kill time rather than inferring a peak from the fact of death. The
+`ulimit`/`rlimit` route that would normally settle this is unavailable, so
+measurement is the only way.
+
+The never-frees allocator was never exonerated — it was implicated in a case
+that turned out to have a different cause, which is not the same as being
+cleared. The session-4 recommendation ("free or reuse intermediate
+allocations, or at least this walker's transient node lists, so the correct
+traversal fits in available memory") stands, and is now urgent rather than
+optional.
+
+### The harness's message names a fixed bug, and argues against the right answer
+
+Independent of the memory work, and cheap to fix:
+
+```python
+# test_native_dumpfull.py:75
+f"(exit {native_rc}) - the known original SIGBUS in "
+f"_rewrite_assign_stmt writes the correct file before crashing, "
+f"so an ABSENT file is a worse regression, not the known issue"
+```
+
+- **The SIGBUS it names is fixed.** The whole-program `EXC_BAD_ACCESS` in
+  `mojo_set_update`/`_rewrite_assign_stmt` was root-caused and fixed
+  2026-09-20 — 8 real self-hosted-only bugs, found and verified via
+  AddressSanitizer (`CLAUDE.md`, status as of 2026-09-20). Reporting a new
+  failure as a regression of a fixed bug is worse than reporting nothing.
+- **Its premise is inverted here.** "Writes the correct file before crashing,
+  so an ABSENT file is a worse regression" argues that an absent file must be a
+  *correctness* problem. This is resource exhaustion, so the message argues the
+  reader out of the right answer — and the reader has no way to tell that from
+  the text.
+- **It discards the one signal that distinguishes the cases.** `-9` from
+  SIGSEGV/SIGBUS/133, and the message collapses that difference instead of
+  reporting it. It should say: absent file + SIGKILL is a resource failure, and
+  here is the peak.
+
+### Containment landed: a 55 GB ceiling, not an opt-in
+
+`check-native-dumpfull` now runs under `tools/memcap.py`, which polls the
+process tree's RSS and SIGKILLs it at `MEMLIMIT_GB` (default **55**, the
+measured healthy peak), exiting 125:
+
+```sh
+make check-native-dumpfull                   # capped at 55 GB
+make check-native-dumpfull MEMLIMIT_GB=96    # raise it
+make check-native-dumpfull MEMLIMIT_GB=0    # NO cap; watch it
+```
+
+**A ceiling rather than a refusal**, because of the two facts above: macOS
+will not reliably pick what to kill, and `ulimit`/`RLIMIT_AS` gives no usable
+cap. What *does* work is killing the process we own — aiming the kill at a
+child we spawned is deterministic, where relying on the OS is not. The ceiling
+does not have to be tight to be worth having: the gap between a healthy peak
+(~55 GB) and the 192 GB that needed a human is ~3.5x, which is ample room to
+be conservative.
+
+Three properties of the watchdog that matter, each because the failure it
+avoids is the failure this whole area keeps making:
+
+- **It sums the process TREE.** `mojoc` spawns `gcc -fgimple` children; a cap
+  looking only at the parent would let the real cost hide in a child. Verified
+  with a synthetic two-process hog.
+- **It fails CLOSED.** If the watchdog itself throws, it kills the child rather
+  than leaving it unmonitored. This is not hypothetical: the first version had
+  exactly this bug (`out` instead of `out.stdout` on a `CompletedProcess`) and
+  left a test hog running to 3 GB after the watchdog had already died. A safety
+  tool that fails open is not a safety tool.
+- **Exit 125 is reported as a resource failure, not a verdict.** The process was
+  killed for memory *before finishing*, so the run says nothing about whether
+  the native output was correct — which is precisely the confusion the stale
+  harness message causes (above).
+
+It is still **out of `make check`**, though now for a mundane reason rather than
+a dangerous one: it is a multi-minute job that touches ~55 GB, which is a lot
+to ask of a default gate. `CLAUDE.md`'s documented full gate does list
+`check-native-dumpfull` as a required step, so restoring it is a deliberate
+call, not an oversight.
+
+`make wholeprogram-help` prints the above at the terminal.
+
+### Attribution: the absent `fire.ci` is not the formal/x86-64 work
+
+Preserved from the old `BUG.md`, which recorded this reasoning and would have
+lost it in the move. It matters because `check-native-dumpfull` failing looks
+like a codegen bug, and every one of these was checked rather than assumed:
+
+- `mojoc` was **deleted and rebuilt from current sources** and still failed, so
+  it is not a stale binary.
+- `./mojoc fire.py --dump-full` compiles `fire.py` **alone**, and `fire.py` does
+  not import `formal/`, so none of the x86-64 model / `formal/` changes are in
+  its input graph at all.
+- `git status` was clean for every `--dump-full` input (`fire.py`,
+  `gimple_codegen.py`, `module_loader.py`, `mojo_compiler.py`, `runtime/`).
+- The python3-interpreted reference still produced a correct ~37 MB `fire.ci`
+  for the same source, so the divergence is **native-codegen-only** — which is
+  the entire point of this check.
+
+Two claims from the original entry are superseded and should not be carried
+forward:
+
+- It reported the failure as **`exit 0` with nothing written**, and later as
+  **`exit -9`**. The `exit -9` was a **manual** kill (see the top of this
+  section); the `exit 0` variant is not what it is now.
+- It called the failure "the documented-in-wrong-direction" version of the
+  SIGBUS in `CODEGEN_noshim_dumpfull_preexisting_divergence.md`. That SIGBUS is
+  fixed, and an absent file here is a resource failure instead.
+
+`make bootstrap`'s `verify` step failing on ~14 files is **not** re-recorded
+here: it is already tracked, with the set shrinking over time, in
+`CODEGEN_noshim_dumpfull_preexisting_divergence.md`. The only useful detail the
+old entry added is that the set is not expected to be stable, because that doc
+records `PYTHONHASHSEED`-dependent nondeterminism in the reference path itself.
+
+### What to measure next
+
+Do not start by optimizing anything — the 2x growth is unexplained, and
+optimizing a curve whose slope is unknown optimizes the wrong term.
+
+1. **Find what grew.** Bisect by commit over the ~40 since 2026-09-25
+   (`git log --since=2026-09-25 -- mojo/ gimple_codegen.py runtime/`) using
+   *single-module* dumps as a cheap proxy. Never re-run the whole-program dump
+   unattended to do this.
+2. **Profile by phase** (this doc's existing hypothesis 1): Python reference
+   generation, `gcc -fgimple`, per-file native dumps, transitive native dump.
+   Report peak RSS per phase, and specifically whether peak is in the
+   *transitive* dump rather than per-file.
+3. **Distinguish live-set from fragmentation** — an allocation-count probe in
+   the runtime, or `leaks`/`vmmap` on the native binary. Answers whether the
+   memory is genuinely reachable objects or a leak. Cheapest and most valuable
+   of the three; do this first.
+4. Only then decide between the never-frees fix and per-phase work reuse.
+
+Peak must come back under ~96 GB (the last known-completing footprint) before
+this gate can be un-gated.

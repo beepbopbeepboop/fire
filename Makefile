@@ -66,9 +66,18 @@ demo:
 # aspirational target — `make bootstrap` — because stage 2 has a known
 # pre-existing codegen segfault (see IMPL.md); it is not gated into `check`
 # so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost check-runtimediff check-linkmode check-native-dumpfull check-no-new-casts
+#
+# `check-native-dumpfull` is ALSO not gated into `check` any more, for a
+# different reason: it is the one target here that runs the self-hosted
+# BINARY's own codegen over the whole transitive closure, and that single
+# process has been measured at ~192 GB of RAM. See the WHOLEPROGRAM_DUMP
+# guard below — it is not gated because it is slow or flaky but because
+# running it can take the machine down with it, and macOS will not
+# necessarily kill the right process when memory runs out.
+check: check-gimple check-runner check-modcache check-selfhost check-runtimediff check-linkmode check-no-new-casts
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff + link-mode + native dump-full + no-new-casts)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff + link-mode + no-new-casts)"
+	@echo "  (native dump-full NOT included: whole-program self-compile, ~192 GB — see 'make wholeprogram-help')"
 
 # Every check-* target is wrapped in checked_run.py: a check's outcome is a
 # pure function of the compiler sources + toolchain + whatever extra files it
@@ -543,8 +552,94 @@ check-ab-native: mojoc $(GIMPLE_SOURCES) test_ab_native.py
 # blind to (this happened for real 2026-09-13 - a fix that silenced a known
 # SIGBUS turned out to silently drop two compiled modules instead, and
 # every check-* target stayed green).
-check-native-dumpfull: mojoc $(GIMPLE_SOURCES) test_native_dumpfull.py
-	python3 checked_run.py check-native-dumpfull --extra test_native_dumpfull.py -- python3 test_native_dumpfull.py
+#
+# ── SAFETY: bounded by a memory ceiling, not by refusing to run ─────────────
+# The whole-transitive-closure self-compile below reached ~192 GB of RAM on
+# 2026-09-26 and had to be killed by hand, while the same workload peaked just
+# under 96 GB and completed on 2026-09-25 -- so it is growing. See
+# bugs/CODEGEN_bootstrap_resource_blowup.md. That is not a "slow" or "flaky"
+# test, it is a machine-destroying one, and it cannot be bounded from inside
+# the test:
+#
+#   * macOS does not account for it usefully. When memory runs out, the
+#     process to be killed is not reliably chosen, so the OOM response is not
+#     a dependable way to bound this -- the 192 GB figure came from watching
+#     it and killing it by hand, not from the OS intervening.
+#   * `ulimit`/`rlimit` gives no usable cap, so the test cannot simply be
+#     given a memory budget to fail against.
+#
+# What DOES work is killing the process we own, which is what tools/memcap.py
+# does: it polls the process tree's RSS and SIGKILLs it at MEMLIMIT_GB. Aiming
+# the kill ourselves is the whole trick, and it is why this is possible where
+# rlimit is not. The cap does not need to be tight to be worth having -- the
+# gap between a healthy peak (~55 GB) and the 192 GB that needed a human is
+# about 3.5x, which is plenty of room to be conservative.
+#
+#     make check-native-dumpfull                    # capped at 55 GB
+#     make check-native-dumpfull MEMLIMIT_GB=96     # raise it
+#     make check-native-dumpfull MEMLIMIT_GB=0      # NO cap; watch it
+#
+# Exit 125 from a breach is a RESOURCE failure, not a verdict on the codegen:
+# the process was killed for memory before it finished, so it says nothing
+# about whether the native output was correct.
+#
+# For the same python-vs-native question in a bounded, per-file form, use the
+# aside/bside/compare-a-b decomposition further down -- one process per file,
+# so a crash costs one file rather than the machine.
+# The ceiling, in GB, for any whole-program self-compile. 55 is the measured
+# healthy peak (2026-09-25, -O2, which completed at 55.8 GB RSS), so a healthy
+# run fits under it and a runaway cannot get near the ~192 GB that needed a
+# human watching it. Set to 0 to disable the cap and measure a real peak --
+# which is a decision to make on purpose, having watched the memory, since
+# having no backstop is the whole problem.
+MEMLIMIT_GB ?= 55
+
+# Reusable, so any future whole-transitive-closure rule gets the same ceiling
+# by using the macro rather than by remembering to add it.
+#
+# tools/memcap.py polls the whole process TREE's RSS -- mojoc spawns
+# `gcc -fgimple` children, and a cap that looked only at the parent would let
+# the real cost hide in a child -- and SIGKILLs it on breach, exiting 125. It
+# kills the process we own instead of relying on the OS to notice, which is
+# the entire point: on macOS the OOM response will not reliably pick the right
+# process, and neither ulimit nor RLIMIT_AS gives a usable cap. It also fails
+# CLOSED, killing the child if the watchdog itself throws. See its docstring.
+define WHOLEPROGRAM_DUMP_GUARD
+@if [ "$(MEMLIMIT_GB)" = "0" ]; then \
+  echo "NOTE: $@ running with NO memory ceiling (MEMLIMIT_GB=0)."; \
+  echo "  Whole-program self-compile, no backstop. Please watch it."; \
+  echo ""; \
+else \
+  echo "$@ under a $(MEMLIMIT_GB) GB ceiling (tools/memcap.py)."; \
+fi
+endef
+
+.PHONY: wholeprogram-help
+wholeprogram-help:
+	@echo "A WHOLE-PROGRAM self-compile (one process, whole transitive closure) is"
+	@echo "bounded by a MEMLIMIT_GB ceiling -- default 55 GB, the measured healthy"
+	@echo "peak -- applied by tools/memcap.py, which SIGKILLs the process tree on"
+	@echo "breach and exits 125. A ceiling rather than an opt-in because macOS will"
+	@echo "not reliably pick what to kill when memory runs out, and ulimit gives no"
+	@echo "usable cap, so the kill has to be aimed by us at a process we own."
+	@echo ""
+	@echo "  CAPPED:"
+	@echo "      make check-native-dumpfull                   # 55 GB"
+	@echo "      make check-native-dumpfull MEMLIMIT_GB=96    # raise"
+	@echo "      make check-native-dumpfull MEMLIMIT_GB=0     # no cap, watch it"
+	@echo ""
+	@echo "  NOT guarded, because you have to type its name to reach it and it is"
+	@echo "  never pulled into another target — expensive on purpose, and already"
+	@echo "  documented as ~45 GB / ~32 min:"
+	@echo "      bootstrap               3-stage self-compilation + verify"
+	@echo ""
+	@echo "Bounded per-file alternative, safe to run unattended:"
+	@echo "    make aside bside && make compare-a-b"
+
+check-native-dumpfull: mojoc $(GIMPLE_SOURCES) test_native_dumpfull.py tools/memcap.py
+	$(WHOLEPROGRAM_DUMP_GUARD)
+	$(if $(filter 0,$(MEMLIMIT_GB)),,python3 tools/memcap.py --limit-gb $(MEMLIMIT_GB) --label "check-native-dumpfull" --) \
+	  python3 checked_run.py check-native-dumpfull --extra test_native_dumpfull.py -- python3 test_native_dumpfull.py
 
 # ── aside/bside/compare-a-b: per-file self-host A/B sweep at scale ───────────
 # check-native-dumpfull's whole-transitive-closure self-compile is both the
