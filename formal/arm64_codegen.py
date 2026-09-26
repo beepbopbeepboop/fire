@@ -1291,13 +1291,14 @@ class ARM64Codegen:
 
         for i, (cond, body) in enumerate(tests):
             self.asm.label(next_labels[i])
-            self._emit_expr(cond)
-            self.asm.emit(encode_cmp_xn_imm(0, 0))
-            self._record_cond_branch()
-            self.asm.emit(encode_cbz_xn(0, 0))
             fail = next_labels[i + 1] if i + 1 < len(tests) else (
                 else_label if has_fallthrough_else else end_label)
-            self.asm.emit_label_rel(fail, here_offset=-4)
+            if not self._emit_branch_unless(cond, fail):
+                self._emit_expr(cond)
+                self.asm.emit(encode_cmp_xn_imm(0, 0))
+                self._record_cond_branch()
+                self.asm.emit(encode_cbz_xn(0, 0))
+                self.asm.emit_label_rel(fail, here_offset=-4)
             for s in body:
                 self._emit_stmt(s)
             if i < len(tests) - 1 or stmt.else_body is not None:
@@ -1346,13 +1347,31 @@ class ARM64Codegen:
         try:
             self.asm.label(start_label)
             if is_for:
-                self._emit_cmp(F.IdentExpr(target), end_val, "cc", "lt")
-            else:
+                # The old lowering called `_emit_cmp` here and never branched
+                # on the CSET it left behind: `for i in range(a, b)` computed
+                # a boolean, dropped it, and looped forever. Compare and branch
+                # on the flags directly.
+                # The comparison has to follow the step's direction, or a
+                # descending range exits immediately (and an ascending one
+                # would run away). A step whose sign is only known at runtime
+                # is refused rather than silently mis-compiled: the counter
+                # advances correctly but the loop bound would be the wrong way
+                # round, which is a wrong answer, not a slow one.
+                _down = self._for_step_sign(step_val)
+                if _down is None:
+                    raise CodegenError(
+                        f"for-range step must be a literal or a negated "
+                        f"literal, so the loop bound can be chosen at compile "
+                        f"time (got {step_val!r})")
+                _u, _sg = ("hi", "gt") if _down else ("cc", "lt")
+                self._emit_branch_unless_cmp(F.IdentExpr(target), end_val,
+                                              _u, _sg, false_label)
+            elif not self._emit_branch_unless(cond, false_label):
                 self._emit_expr(cond)
-            self.asm.emit(encode_cmp_xn_imm(0, 0))
-            self._record_cond_branch()
-            self.asm.emit(encode_cbz_xn(0, 0))
-            self.asm.emit_label_rel(false_label, here_offset=-4)
+                self.asm.emit(encode_cmp_xn_imm(0, 0))
+                self._record_cond_branch()
+                self.asm.emit(encode_cbz_xn(0, 0))
+                self.asm.emit_label_rel(false_label, here_offset=-4)
 
             for s in body:
                 self._emit_stmt(s)
@@ -1629,6 +1648,20 @@ class ARM64Codegen:
             return rargs[0], rargs[1], rargs[2]
         raise CodegenError(f"range() takes 1-3 arguments, got {len(rargs)}")
 
+    def _for_step_sign(self, step):
+        """True if `step` counts down, False if up, None if not decidable.
+
+        Mirrors the forms `_for_inc_body` accepts, so the loop test and the
+        counter advance always agree on the direction.
+        """
+        if isinstance(step, F.UnaryOp) and step.op == "-":
+            if isinstance(step.operand, F.IntLiteral):
+                return step.operand.value != 0
+            return None  # `-x`: sign depends on the runtime value
+        if isinstance(step, F.IntLiteral):
+            return step.value < 0
+        return None
+
     def _emit_for_inc(self, target: str, step) -> None:
         """Advance a for-range counter by `step`.
 
@@ -1806,11 +1839,12 @@ class ARM64Codegen:
             fn = self.func_name
             else_label = f"{fn}_tern{tid}_else"
             end_label = f"{fn}_tern{tid}_end"
-            self._emit_expr(expr.condition)
-            self.asm.emit(encode_cmp_xn_imm(0, 0))
-            self._record_cond_branch()
-            self.asm.emit(encode_cbz_xn(0, 0))
-            self.asm.emit_label_rel(else_label, here_offset=-4)
+            if not self._emit_branch_unless(expr.condition, else_label):
+                self._emit_expr(expr.condition)
+                self.asm.emit(encode_cmp_xn_imm(0, 0))
+                self._record_cond_branch()
+                self.asm.emit(encode_cbz_xn(0, 0))
+                self.asm.emit_label_rel(else_label, here_offset=-4)
             self._emit_expr(expr.then_val)
             self._emit_b_to(end_label)
             self.asm.label(else_label)
@@ -2450,6 +2484,68 @@ class ARM64Codegen:
         raise CodegenError(
             f"unsupported binary operator {op!r} on the formal arm64 path")
 
+    def _emit_cmp_flags(self, l, r, unsigned_cond: str, signed_cond: str) -> None:
+        """CMP only — no CSET.
+
+        Split out of _emit_cmp so a conditional can branch on the flags
+        directly. With the CSET in the middle, `if a < b` cost cmp + cset +
+        cbz: the boolean was materialised into a register only for the very
+        next instruction to read it back. B.cond reads the flags the compare
+        already set."""
+        self._emit_expr(l)
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._emit_expr_to(r, "X1")
+        self.asm.emit(encode_ldp_sp_post(0, 2))
+        self.asm.emit(encode_cmp_xn_xm(0, 1))
+        self._signed = cmp_signed(common_type(self._ttype(l), self._ttype(r)))
+
+    def _emit_branch_unless(self, cond, false_label: str) -> bool:
+        """Branch to `false_label` unless `cond` holds. True if it emitted.
+
+        A comparison becomes CMP + B.cond: one branch, and no boolean round
+        trip through a register. Anything else — a call, a truthiness test, a
+        short-circuit chain — is left to the caller, because those genuinely do
+        need a value.
+
+        Branching on the FALSE case keeps the shape of the old lowering: one
+        conditional branch to the same target, recorded the same way, so the
+        block structure the rest of the backend (and the proof generator's
+        `_cond_branches` filter) already expects is unchanged.
+        """
+        if not (isinstance(cond, F.BinaryOp) and cond.op in self._cmp_conds()):
+            return False
+        u, s = self._cmp_conds()[cond.op]
+        self._emit_branch_unless_cmp(cond.left, cond.right, u, s, false_label)
+        return True
+
+    def _emit_branch_unless_cmp(self, l, r, unsigned_cond: str,
+                                signed_cond: str, false_label: str) -> None:
+        """CMP + B.cond on two already-separated operands, no CSET.
+
+        The operand-level half of `_emit_branch_unless`, for the one caller
+        that has a comparison's operands without the enclosing BinaryOp: the
+        `for i in range(...)` test, which is built from the loop target and
+        the range's end bound rather than parsed from source.
+        """
+        self._emit_cmp_flags(l, r, unsigned_cond, signed_cond)
+        chosen = signed_cond if self._signed else unsigned_cond
+        self._record_cond_branch()
+        self.asm.emit(encode_b_cond(invert_cond(chosen), 0))
+        self.asm.emit_label_rel(false_label, here_offset=-4)
+        return True
+
+    def _cmp_conds(self) -> dict:
+        """Operator -> (unsigned condition, signed condition).
+
+        Hoisted out of _emit_binop so the branch path and the value path
+        cannot disagree about what `<` means. They did once, which is how a
+        comparison came to branch one way and evaluate the other."""
+        return {
+            "<=": ("ls", "le"), ">": ("hi", "gt"), "==": ("eq", "eq"),
+            ">=": ("cs", "ge"), "<": ("cc", "lt"), "!=": ("ne", "ne"),
+            "is": ("eq", "eq"), "is not": ("ne", "ne"),
+        }
+
     def _record_cond_branch(self) -> None:
         """Note that the next emitted instruction is an `if`'s own CBZ.
 
@@ -3052,11 +3148,12 @@ class ARM64Codegen:
                 self._store_var(tnames[0], 0)
 
             for cond in gen.conditions or []:
-                self._emit_expr(cond)
-                self.asm.emit(encode_cmp_xn_imm(0, 0))
-                self._record_cond_branch()
-                self.asm.emit(encode_cbz_xn(0, 0))
-                self.asm.emit_label_rel(step_label, here_offset=-4)
+                if not self._emit_branch_unless(cond, step_label):
+                    self._emit_expr(cond)
+                    self.asm.emit(encode_cmp_xn_imm(0, 0))
+                    self._record_cond_branch()
+                    self.asm.emit(encode_cbz_xn(0, 0))
+                    self.asm.emit_label_rel(step_label, here_offset=-4)
 
             self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
 

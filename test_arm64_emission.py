@@ -111,6 +111,69 @@ KEEP_BRANCHING = [
 ]
 
 
+# B.cond: a comparison should branch on the FLAGS, not materialise a boolean
+# into a register for the very next instruction to read back.
+BCOND_CASES = [
+    ("bcond_if_true", "def f(n):\n    a = 3\n    b = 9\n    if a < b:\n"
+     "        return 1\n    return 0\n", 1),
+    # The case that hung: a FALSE comparison. Before the displacement was
+    # patched, this spun on `b.ls <itself>` forever.
+    ("bcond_if_false", "def f(n):\n    a = 3\n    b = 9\n    if a > b:\n"
+     "        return 1\n    return 0\n", 0),
+    ("bcond_elif", "def f(n):\n    a = 5\n    if a > 9:\n        return 1\n"
+     "    elif a > 3:\n        return 2\n    return 0\n", 2),
+    ("bcond_while", "def f(n):\n    a = 1\n    b = 5\n    c = 0\n"
+     "    while a < b:\n        c = c + a\n        a = a + 1\n    return c\n", 10),
+    ("bcond_for_range", "def f(n):\n    s = 0\n    for i in range(3, 9):\n"
+     "        s = s + i\n    return s\n", 33),
+    # An impure arm keeps the branch (CSEL would evaluate both).
+    ("bcond_ternary", "def f(n):\n    a = 3\n    b = 9\n"
+     "    return 1 if a < b else boom()\n"
+     "def boom():\n    printf(\"BOOM\")\n    return 0\n", 1),
+    ("bcond_compr", "def f(n):\n    a = 3\n    r = [x for x in range(5) if x > a]\n"
+     "    return len(r)\n", 1),
+    # A call condition genuinely needs a value, so it must NOT become a
+    # B.cond off the flags -- there are no flags to read.
+    ("bcond_call_still_cset", "def f(n):\n    if side(1):\n        return 5\n"
+     "    return 0\ndef side(v):\n    return v\n", 5),
+]
+
+
+def self_branching(dis):
+    """Addresses of branches whose displacement resolves to themselves.
+
+    `otool -tv` prints `ADDR<TAB>MNEMONIC<TAB>TARGET` for anything with a
+    branch target, so a self-branch is visible directly in the disassembly.
+    """
+    out = []
+    for line in dis.splitlines():
+        m = re.match(r"^([0-9a-f]{8,})\t+([a-z][a-z0-9.]*)\s+0x([0-9a-f]+)$",
+                     line)
+        if m and m.group(1) == m.group(3).lstrip("0").rjust(len(m.group(1)), "0"):
+            out.append((m.group(1), m.group(2)))
+        elif m and int(m.group(1), 16) == int(m.group(3), 16):
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def test_bcond_emitted_and_patched(tmpdir, verbose):
+    for name, src, want_exit in BCOND_CASES:
+        code, dis, out = build_and_run(src, tmpdir, name)
+        check(code == want_exit,
+              f"{name}: returned {code}, expected {want_exit}")
+        ms = mnemonics(dis)
+        if name != "bcond_call_still_cset":
+            check(any(m.startswith("b.") and m != "b" for m in ms),
+                  f"{name}: no B.cond in {ms}")
+        # The check the encoder tests cannot make: they compare the four
+        # instruction BYTES against `as`, which says nothing about the
+        # displacement. `resolve()` had no B.cond case, so imm19 stayed 0 and
+        # the branch pointed at itself -- a one-instruction infinite loop.
+        bad = self_branching(dis)
+        check(not bad,
+              f"{name}: branch resolves to its own address: {bad}")
+
+
 def test_csel_emitted_and_correct(tmpdir, verbose):
     for name, src, want_exit, want_mn in CSEL_CASES:
         code, dis, out = build_and_run(src, tmpdir, name)
@@ -198,6 +261,8 @@ def test_simple_operands_avoid_the_stack(tmpdir, verbose):
 
 
 TESTS = [
+    ("B.cond is emitted, correct, and its displacement is patched",
+     test_bcond_emitted_and_patched),
     ("CSEL is emitted and computes the right value",
      test_csel_emitted_and_correct),
     ("simple CSEL operands avoid the stack",

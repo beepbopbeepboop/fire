@@ -676,6 +676,19 @@ class Assembler:
             elif (insn & 0x7e000000) == 0x35000000:
                 # CBNZ (W or X) — same imm19/Rt layout as CBZ.
                 insn = (insn & 0xff00001f) | ((offset & 0x7ffff) << 5)
+            elif (insn & 0xff000000) == 0x54000000:
+                # B.cond — imm19 at bits 5..23, cond at bits 3..0. Identified
+                # by the top byte alone: masking off the cond bits and then
+                # comparing against a zero cond can never match, which is the
+                # second version of this bug.
+                #
+                # Both fields must survive the patch — imm19 is the
+                # displacement, cond is WHICH condition is tested. Missing the
+                # case entirely is not subtle either: the instruction fell
+                # through every branch above, kept imm19 = 0, and branched to
+                # ITSELF, so `if a > b:` with a false condition hung the
+                # program in a one-instruction loop.
+                insn = (insn & 0xff00000f) | ((offset & 0x7ffff) << 5)
 
             struct.pack_into('<I', self.sections["text"], idx, insn)
         self.relocs.clear()
@@ -716,6 +729,30 @@ def _cond(cond) -> int:
         return cond
     try:
         return COND_CODES[cond]
+    except KeyError:
+        raise ValueError(f"Unknown condition: {cond!r}") from None
+
+
+# The inverse of each condition, for branching on the FALSE case. The codegen
+# always has a "jump here when the condition does not hold" target, so it needs
+# the complement of whatever the comparison computed — and computing it by hand
+# at each site is how a `<` silently becomes `<=`.
+INV_COND = {
+    'eq': 'ne', 'ne': 'eq',
+    'cs': 'cc', 'hs': 'lo', 'cc': 'cs', 'lo': 'hs',
+    'mi': 'pl', 'pl': 'mi',
+    'vs': 'vc', 'vc': 'vs',
+    'hi': 'ls', 'ls': 'hi',
+    'ge': 'lt', 'lt': 'ge',
+    'gt': 'le', 'le': 'gt',
+    'al': 'nv', 'nv': 'al',
+}
+
+
+def invert_cond(cond: str) -> str:
+    """The condition that holds exactly when `cond` does not."""
+    try:
+        return INV_COND[cond]
     except KeyError:
         raise ValueError(f"Unknown condition: {cond!r}") from None
 
