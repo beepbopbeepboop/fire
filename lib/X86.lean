@@ -962,6 +962,65 @@ theorem x86_step_test_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
         x86_rm_read,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
 
+/-! The 0x0F escape, as `x86_step_plain` dispatches it.
+
+    These are the no-REX forms, and the distinction from the REX-prefixed
+    dispatch above is not cosmetic: the plain path hardcodes `rex = 0`, and its
+    two-byte-prefix instructions are THREE bytes (`0F 9x c0`) where the REX
+    path's are four.  A successor stated with the wrong length is not a proof
+    that is hard to finish, it is a proof of a different instruction, and it
+    fails in a way (`\u22a2 False`) that does not say so.
+
+    Reaching a case means excluding the others, so both lemmas take the range
+    and exclusion facts as hypotheses rather than deriving them.  They are
+    stated separately -- not as one conjunction -- because the decoder tests
+    them as separate `&&`s and `simp` uses a hypothesis as a rewrite rule
+    instead of splitting a conjunction.  Every one is closed for a concrete
+    opcode byte, so the caller discharges each with `decide`. -/
+
+/-- `setcc r/m8` (0F 90+cc /r), general over the condition nibble and the
+    8-bit destination, which is the r/m field.  A one-byte write zero-extends,
+    so the only two values are 0 and 1. -/
+theorem x86_step_setcc_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (op2 modrm : UInt8) (cc rmv : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x0f) (h_b1 : code (m + 1) = op2)
+    (h_b2 : code (m + 2) = modrm) (h_cc : op2.toNat - 0x90 = cc)
+    (h_lo : (0x90 : UInt8) ≤ op2) (h_hi : op2 ≤ 0x9f)
+    (h_njcc_lo : ¬ ((0x80 : UInt8) ≤ op2))
+    (h_njcc_hi : ¬ (op2 ≤ 0x8f))
+    (h_nzx : ¬ (op2 = 0xb6 ∨ op2 = 0xb7 ∨ op2 = 0xbe ∨ op2 = 0xbf))
+    (h_notrex : x86_is_rex 0x0f = false) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_rm : modrm.toNat &&& 7 = rmv) (h_rb : x86_rex_b 0 = 0) :
+    x86_step s code = some
+      { x86_set_reg s rmv (if x86_cond cc s then 1 else 0) with rip := m + 3 } := by
+  simp [x86_step, x86_step_plain, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_trunc32, x86_rex_b,
+        h_rip, h_b0, h_b1, h_b2, h_cc, h_lo, h_hi, h_njcc_lo, h_njcc_hi,
+        h_nzx, h_notrex, h_mod, h_rm, h_rb]
+  -- The 1-byte write zero-extends, and the two values `setcc` ever produces
+  -- have `[simp]` facts for exactly that.  Splitting on the condition is what
+  -- applies them; `simp` alone cannot reduce `x86_trunc32` of an `if`.
+  by_cases h : x86_cond cc s = true <;> simp [h]
+
+/-- `jcc rel32` (0F 80+cc id), general over the condition nibble.  The
+    successor's `rip` is an `if` on the condition rather than a constant, which
+    is exactly what a path tree needs: it forks the chain here. -/
+theorem x86_step_jcc_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (op2 : UInt8) (cc off : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x0f) (h_b1 : code (m + 1) = op2)
+    (h_cc : op2.toNat - 0x80 = cc.toNat)
+    (h_off : read_i32_le code (m + 2) = off)
+    (h_lo : (0x80 : UInt8) ≤ op2) (h_hi : op2 ≤ 0x8f)
+    (h_nsetcc_lo : ¬ ((0x90 : UInt8) ≤ op2))
+    (h_nzx : ¬ (op2 = 0xb6 ∨ op2 = 0xb7 ∨ op2 = 0xbe ∨ op2 = 0xbf))
+    (h_notrex : x86_is_rex 0x0f = false) :
+    x86_step s code = some
+      { s with rip := if x86_cond cc.toNat s
+          then (Int.ofNat m + 6 + off).toNat else m + 6 } := by
+  simp [x86_step, x86_step_plain,
+        h_rip, h_b0, h_b1, h_cc, h_off, h_lo, h_hi, h_nsetcc_lo, h_nzx,
+        h_notrex]
+
 /-! The two register-to-register ALU forms the backend emits, general over
     both registers.  The destination is the rm field, as everywhere else; only
     the source is the reg field.  The model computes `add`'s flags through
