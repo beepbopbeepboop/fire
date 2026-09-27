@@ -518,9 +518,20 @@ int mojo_is_registered_list(int64_t addr) {
  * "high address ⇒ string", and _mojo_repr_list's registered-list probe)
  * already discriminates these two shapes everywhere else at runtime:
  * pointer-shaped AND NOT a live registered MojoList ⇒ treat as string.
- * Small values (<65536: None/small ints/bools) are not strings. */
+ * Small values (<65536: None/small ints/bools) are not strings.
+ *
+ * MUST agree with _mojo_tagged_addr_ok (defined below, forward-declared
+ * here): that predicate's floor is 2 GiB, not 64 KiB, specifically to
+ * reject the 31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags a
+ * compiled `type(node)` yields. A `v > 65536` test here classified every
+ * such tag as "definitely a string pointer" while the other predicate
+ * classified the same value as "definitely not a pointer" — the
+ * dereference below then crashed on any self-hosted struct type-tag in
+ * the 64 KiB..2 GiB range. See CRASH.md. */
+static int _mojo_tagged_addr_ok(int64_t addr);
+
 int mojo_boxed_is_str(int64_t v) {
-    return v > 65536 && !mojo_is_registered_list(v);
+    return _mojo_tagged_addr_ok(v) && !mojo_is_registered_list(v);
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal

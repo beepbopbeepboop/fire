@@ -1711,6 +1711,30 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 for a in node.args[1:]: gen.lower_expr(a)
                 return arg_type, arg_val
+            elif outer_member == 'realpath' and len(node.args) == 1:
+                # os.path.realpath(p) — real runtime support via POSIX
+                # realpath(3) (int64_t_realpath, already used by the
+                # pathlib.Path.resolve() case above — see its docstring).
+                # This os.path.* dispatch had every OTHER sibling
+                # (basename/splitext/split/.../isfile/relpath) but no case
+                # for 'realpath' at all, so it fell all the way through
+                # this whole os.path.* chain (func.obj is the MemberExpr
+                # `os.path`, not a plain IdentExpr, so the generic
+                # "module_name.method(...)" dispatch just below never
+                # matches either) to the final scalar-receiver fallback,
+                # which stubs any unrecognized method to a literal `0` --
+                # every self-hosted `os.path.realpath(x)` silently returned
+                # NULL. Root cause of BLOW.md's ~15.8 GB/180 G-instruction
+                # fixed compile-time cost: `_is_selfhost_source_dir`
+                # (mojo/backend_gimple/module_gen.py) compares two
+                # `os.path.realpath(...)` results, both of which came back
+                # 0 == 0 (trivially equal) for ANY input directory once
+                # compiled, so it always classified every compile as
+                # "compiling the compiler's own source" and re-tokenized
+                # this project's entire source tree on every invocation.
+                arg_type, arg_val = gen.lower_expr(node.args[0])
+                t = gen._call_expr('char *', 'int64_t_realpath', [(arg_type, arg_val)])
+                return 'char *', t
 
     # Handle module method calls: module_name.function(args)
     if isinstance(func.obj, gimple_ctypes.IdentExpr):

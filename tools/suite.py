@@ -369,28 +369,47 @@ test('coro', [PY, 'test_coro_runtime.py'], cache=True,
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
 #
-# The three tests that RUN such a binary all carry `expect=SELFHOST_SEGV`:
-# the compiled compiler segfaults on any input, including a two-line program
-# (`./mojoc --dump-full` on a `def main(): print("hi")` exits 139), so these
-# are red for one root cause rather than three. `mojoc` itself still builds —
-# the crash is at run time, not link time — so it is not marked. Fixing this
-# is bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md's subject; the
-# markers flip themselves to FAIL the moment the binary stops crashing, which
-# is the intended way for them to be removed.
+# `bootstrap-stage2-dumps` (below) still carries `expect=SELFHOST_SEGV`:
+# unverified this session whether the compiled compiler still segfaults on
+# arbitrary input — see BLOW.md's own segfault-fix note (fixed on this
+# branch BEFORE the 2026-09-27 session, in runtime/fire_runtime.c /
+# emit_infra.py) if re-checking. Fixing the root SIGSEGV cause is
+# bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md's subject; the
+# marker flips itself to FAIL the moment the binary stops crashing, which
+# is the intended way for it to be removed.
 SELFHOST_SEGV = ('the self-hosted compiler segfaults on ANY input (exit 139 on '
                  'a two-line program) — one root cause, see '
                  'bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md')
+# `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
+# BLOW.md §0) but are STILL red for a different, real reason: their corpora
+# legitimately trigger this compiler's self-hosting bootstrap pre-pass
+# (a genuine, do_imports=True sibling-import compile with files placed at
+# the repo root on purpose — see test_ab_native.py's DUMP_FULL_TESTS
+# docstring), and that pre-pass itself is extremely expensive per call
+# (~15-30 GB, ~15-25s — see BLOW.md §0's "NOT closed" addendum for the
+# measured repro and hot-stack profile: mojo_cstr_region_eq/
+# mojo_set_add_int/_set_grow dominating, the same signature as the original
+# bug this doc fixed, just now correctly SCOPED to only the cases that
+# should trigger it at all). Update this reason (not just delete it) once
+# that per-call cost is actually brought down — see BLOW.md for the
+# specific next-step suggestions (cross-call caching across the three
+# `_selfhost_*` seed passes within one process; degenerate-hashing check on
+# the tokenizer's `MojoSet` usage).
+SELFHOST_TOKENIZE_BLOWUP = (
+    'no longer segfaults, but the self-hosting bootstrap pre-pass this '
+    'corpus legitimately triggers costs ~15-30 GB / ~15-25s per call — see '
+    'BLOW.md §0 "NOT closed" for the measured repro and root-cause status')
 test('mojoc', ['mojoc'], driver='make', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='small',
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
-     expect=SELFHOST_SEGV,
+     expect=SELFHOST_TOKENIZE_BLOWUP,
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
      mem='program', deps=['mojoc'], excl=True, cache=True,
      extra=['test_native_dumpfull.py'],
-     expect=SELFHOST_SEGV,
+     expect=SELFHOST_TOKENIZE_BLOWUP,
      desc="the native --dump-full ARTIFACT, diffed against the reference")
 
 # ── stdlib ───────────────────────────────────────────────────────────────────

@@ -111,8 +111,20 @@ def _reset_func(gen, body: list = None, params: list = None,
     # not the variable's real one. Only the NAMES are needed, and only
     # during the reduction, so this is a reference-cheap set built once.
     gen._cur_func_params = set()
-    for _p in (params or ()):
-        gen._cur_func_params.add(_p[0] if isinstance(_p, (tuple, list)) else _p)
+    # NOT `for _p in (params or ()):` -- `params: list = None` makes the
+    # `or`'s left operand a MojoList*-or-None union against a real MojoList
+    # (the `()` literal) on the right. Self-hosted, mixed-type `or`/`and`
+    # unification has already been found to mistype the combined boolean as
+    # a bare MojoList* and feed the WRONG operand's raw value into a later
+    # `mojo_list_len` truthiness check (see emit_methods.py's `_n_kwargs`
+    # comment for the `mojo_list_len(0x1)` crash from the identical pattern,
+    # and CRASH.md for this exact call site: `_reset_func`'s param scan
+    # SIGSEGV'd on `mojo_list_len(l=0x1)` for `main()`'s params, which are a
+    # real empty list, not None). An explicit `is not None` check never
+    # participates in that unification.
+    if params is not None:
+        for _p in params:
+            gen._cur_func_params.add(_p[0] if isinstance(_p, (tuple, list)) else _p)
     # The lambda beta-reduction's cache is keyed by body IDENTITY (see
     # mojo/middle/lambdareduce.reducible_lambdas), so it deliberately
     # SURVIVES `_reset_func` — a lifted closure resets too, and a one-slot
@@ -134,8 +146,21 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Skipping the scan leaves such a lambda on the pre-existing lifted
     # path — still wrong, but unchanged and separately documented — instead
     # of making it wrong in a NEW way inside a pass that cannot represent it.
-    if body and allow_lambda_reduction:
-        gimple_lambdareduce.reducible_lambdas(gen)
+    #
+    # NOT `if body and allow_lambda_reduction:` -- `body` is MojoList*-typed
+    # and `allow_lambda_reduction` is bool/int64_t-typed, and self-hosted
+    # this mixed-type `and` was mistyped as MojoList*: the codegen tested
+    # `mojo_list_len(body)`, then (since body was truthy) CSEL-selected
+    # `allow_lambda_reduction` -- the `and`'s real second operand -- and fed
+    # THAT (a bare 0/1) into a SECOND `mojo_list_len` call to get the
+    # overall truth value, SIGSEGV'ing on `mojo_list_len(l=0x1)` (see
+    # CRASH.md and emit_methods.py's `_n_kwargs` comment for the identical
+    # pattern). Two separate, single-operand truthiness tests never enter
+    # that unification, and are equivalent to the original `and` (both
+    # operands still falsy-checked, `body`'s empty-list case included).
+    if allow_lambda_reduction:
+        if body:
+            gimple_lambdareduce.reducible_lambdas(gen)
     gen.bb_counter   = 2
     gen.temp_counter = 0
     gen.decls:       list[str]         = []
@@ -1823,7 +1848,20 @@ def _seed_mut_captured_local_types(gen, func_name: str):
     correct. See `_plan_mut_captured_params`."""
     for ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
         cap_types = dict(ci.captures)
-        for mn in ci.mut_names:
+        # SORTED, and load-bearing. `ci.mut_names` is a frozenset, so
+        # iterating it directly emitted the boxed-pointer declarations in
+        # Python string-hash order -- which changes with PYTHONHASHSEED,
+        # i.e. between processes on the same machine and the same source.
+        # Measured on stdlib test/runtime/test_locks.mojo: seeds 0/1/2/4/6/
+        # 7/10/12 emit `int64_t * _;` before `int64_t * rawCounter;` and
+        # seeds 3/5/8/9/11 emit them the other way round -- two byte-
+        # different .ci files for one module, stable only within a process.
+        # That is a reproducibility bug with teeth: it makes every
+        # "generated C is byte-identical" claim seed-dependent unless the
+        # seed was pinned, and bootstrap's stage1 == stage2 == stage3
+        # comparison is exactly the check it can silently defeat. Same
+        # reason as the sorted() in _emit_mut_local_box_allocs below.
+        for mn in sorted(ci.mut_names):
             if mn not in cap_types:
                 continue
             if mn in gen._mut_boxed_param_c:

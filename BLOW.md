@@ -1,5 +1,11 @@
 # BLOW.md — the memory blowup: a ~15.8 GB *constant*, not a growth curve
 
+**STATUS (2026-09-27): the false-positive trigger is FIXED and verified
+(§0.1-3) — a trivial/unrelated compile no longer pays this cost at all.
+The tests this originally broke (`ab-native`, `native-dumpfull`) are
+STILL RED for a real, different, unfixed reason — see §0's "NOT closed"
+addendum before assuming this doc's job is done.**
+
 Branch `crash`, at `8539ac0` plus the uncommitted segfault fix
 (`runtime/fire_runtime.c`, `mojo/backend_gimple/emit_infra.py`). Every
 number below was measured on this tree, in the foreground, with
@@ -9,6 +15,176 @@ number below was measured on this tree, in the foreground, with
 lines, incl. the ~192 GB `fire.py` run and the useful "a SIGKILL here is
 evidence of nothing" rule). **This document supersedes its framing, not
 its history** — see §4.
+
+---
+
+## 0. ROOT CAUSE, FOUND AND FIXED (2026-09-27)
+
+**Confirmed and fixed. Three real, independent self-hosted codegen bugs
+stacked on top of each other**, all inside the gate that decides whether a
+compile should re-tokenize/re-parse this project's ENTIRE own source tree
+before touching the actual input. Each was found by rebuilding `mojoc` with
+a temporary `MOJO_DEBUG_SELFHOST_SEED=1`-gated `print(..., file=sys.stderr)`
+and comparing the COMPILED binary's answer against the `python3 fire.py`
+shim's answer for the same source — this project's single most common bug
+shape (see CRASH.md, HOW-TO-DEBUG.html).
+
+1. **`os.path.realpath()` had no codegen lowering at all.**
+   `mojo/backend_gimple/emit_methods.py`'s `os.path.*` call dispatch has an
+   explicit case for every sibling (`basename`, `dirname`, `abspath`,
+   `expanduser`, `split`, `splitext`, `splitdrive`, `splitroot`, `join`,
+   `exists`, `isdir`, `isabs`, `normpath`, `isfile`, `relpath`) — but none
+   for `realpath`, even though the runtime helper it needs
+   (`int64_t_realpath` in `runtime/fire_runtime.c`, real POSIX `realpath(3)`
+   support) already existed and is already used by the neighboring
+   `pathlib.Path.resolve()` case. A call that isn't one of those `elif`s
+   falls through this entire `os.path.*` chain (its `func.obj` is the
+   `os.path` `MemberExpr`, not a plain `IdentExpr`, so the generic
+   "module.method(...)" dispatch just below doesn't catch it either) to the
+   final scalar-receiver fallback, which stubs any unrecognized method to a
+   literal `0`. **Every self-hosted `os.path.realpath(x)` call returned
+   NULL, unconditionally, for any input** — confirmed as a general,
+   self-host-independent compiler bug too: a plain compiled Mojo program
+   calling `os.path.realpath` printed `0`/`0` (`python3 fire.py run` — the
+   real interpreter — printed the correct paths; the default compile-and-
+   run path did not). Fix: added the missing `elif outer_member ==
+   'realpath'` case in `emit_methods.py`, wired to `int64_t_realpath`,
+   exactly mirroring `basename`/`splitext`/`expanduser`, plus the matching
+   `int64_t_realpath: ('char *', ['char *'])` entry in `gimple_codegen.py`'s
+   function-signature table. **This fix alone did not close the bug** — see
+   #2.
+
+2. **`_SELFHOST_DIR` itself reads back as boxed `0` cross-module,
+   self-hosted.** `mojo/backend_gimple/module_gen.py`'s
+   `_is_selfhost_source_dir(_dir)` — which gates the whole-tree re-scan —
+   compared `_dir == _SELFHOST_DIR` and `_rdir == _rsd` (realpaths of
+   both), where `_SELFHOST_DIR` is a module-level global **defined in a
+   different module** (`gimple_codegen.py`: `_SELFHOST_DIR =
+   os.path.dirname(os.path.abspath(__file__))`). Even after fixing #1, a
+   debug print showed `_SELFHOST_DIR` evaluating to the bare integer `0`
+   inside the compiled binary, not a path string — a known, separately-
+   documented class of gap (`mojo/middle/module_shared.py`'s
+   `_selfhost_modglobal_is_pathcall`/`_seed_selfhost_module_globals` exist
+   specifically to correct exactly this global's cross-module boxed
+   representation) that this exact gate function cannot use, because
+   deciding *whether to run* that correcting pre-pass is this function's
+   own job — a chicken-and-egg gap. With `_SELFHOST_DIR` reading as the
+   integer `0`, `_dir.startswith(_SELFHOST_DIR + os.sep)` became
+   `_dir.startswith(os.sep)` — trivially **True** for every absolute path.
+   Fix: stopped depending on `_SELFHOST_DIR` in this function entirely.
+   The function's own docstring already argued the sibling-file check
+   (`fire_compiler.py` living next to `_dir`, or found by walking up) is
+   the robust, path-independent signal and the `_SELFHOST_DIR` equality
+   checks are the weaker one (false for any vendored/downstream checkout)
+   — so the fix is a deletion, not a workaround: the `_SELFHOST_DIR`-based
+   disjuncts are gone, leaving only the sibling-file check + walk-up loop.
+
+3. **The walk-up loop's own top-of-root candidate.** A smaller, independent
+   latent bug found along the way: for an absolute `_rdir`
+   (`os.path.realpath` always returns one), `_rdir.split(os.sep)[:1]`
+   joined back is `''` (`'/tmp'.split('/')[:1] == ['']`), and
+   `os.path.isfile(os.path.join('', 'fire_compiler.py'))` silently degrades
+   into a **CWD-relative** check instead of a filesystem-root one — this
+   was BLOW.md's *original, incomplete* hypothesis for the whole bug (it
+   does reproduce the symptom when invoked from a CWD that has
+   `fire_compiler.py`, i.e. every dev checkout, but #2's bug caused the
+   same misclassification for literally any `_dir` regardless of CWD, so
+   fixing only this loop was not sufficient — verified: it made no
+   measured difference until #2 was also fixed). Fixed to `if not _cand:
+   _cand = os.sep` — deliberately NOT `_cand = ... or os.sep`: self-hosted
+   `str or str` on that exact line was measured to still take the
+   empty-string branch, the same `and`/`or` mixed-operand-truthiness
+   miscompilation class CRASH.md already documents.
+
+**Verified fix, direct before/after on the identical rebuilt binary and
+input** (`/tmp/tiny.mojo`, `./mojoc --dump-full`, invoked from the repo
+root — the exact §3 repro below):
+
+| | before | after |
+|---|---:|---:|
+| wall time | 13.25–14.05 s | **0.30 s** |
+| peak RSS | 15.84 GB | **13.1 MB** |
+| instructions retired | ~180 G | **101 M** |
+
+~45x faster, >1200x less memory, ~1780x fewer instructions. Re-verified on
+a second, independent rebuild after removing the debug instrumentation
+(clean tree, no env vars) — identical numbers. Also verified the gate
+still fires correctly for a genuine self-host compile
+(`./mojoc --dump-full fire_compiler.py`) so the seeding pre-pass this gate
+protects still runs when it's actually supposed to.
+
+**NOT closed. §0.1 was necessary but not sufficient — do not delete this
+doc or re-trust `ab-native`/`native-dumpfull` without reading this.**
+Re-running `python3 tools/suite.py native --no-cache` after all three fixes
+above: `ab-native` still RESOURCE-caps at **10.0 GB in 16s**,
+`native-dumpfull` still fails (exit 1, 104s, no longer a segfault — a
+different, unexamined failure). Root cause: `ab-native`'s
+`DUMP_FULL_TESTS` corpus (`test_ab_native.py`) deliberately writes its
+sibling-import test files **into the repo root** ("Files are written INTO
+the repo root (not a temp dir), same path-sensitivity reason as
+test_inline_source" — the test's own docstring), so `_is_selfhost_source_dir`
+now CORRECTLY returns True for them — this is not a false positive. Direct
+measurement of that exact, legitimately-triggered case
+(`./mojoc abfulltest_driver.mojo --dump-full` with `abfulltest_driver.mojo`
++ `abfulltest_leaf.mojo` at the repo root, mirroring the test precisely):
+**25.28 s / 32.9 GB / 360 G instructions** — worse than the original bug's
+15.8 GB, because BOTH sibling modules are in the repo root, so the
+expensive pass fires twice in one process. A `sample` profile of this run
+shows the IDENTICAL hot stack as §0's original finding
+(`mojo_cstr_region_eq` / `mojo_set_add_int` / `_set_grow` dominating), so
+this is not a new bug introduced by the §0 fixes — **it is the same
+underlying tokenize-the-whole-source-tree pass, which was always this
+expensive per legitimate call; §0 only fixed it being triggered when it
+shouldn't have been at all.** `native-dumpfull` (`--dump-full fire.py`/
+`fire_compiler.py` directly) hits the identical pass by design every time.
+
+This is, in other words, exactly `bugs/CODEGEN_bootstrap_resource_blowup.md`'s
+original subject, now correctly isolated to the ONE case where it actually
+applies (a genuine self-host compile) instead of firing on everything. §4's
+"do not go looking for the per-module leak first" guidance still holds —
+this isn't a leak, it's real per-call cost, likely the same degenerate
+`MojoSet`/tokenizer hashing hypothesis (§6.3) applied to a fixed, large-ish
+universe (this project's own ~100+ source files retokenized from scratch on
+every triggering compile, with no working cross-process cache — even the
+in-process `_SELFHOST_MODGLOBAL_CACHE` didn't save the SECOND sibling
+module's call within the same process in the measurement above, which is
+itself worth checking separately). **Next step for whoever picks this up:**
+confirm with `sample`/instrumentation whether `mojo_set_add_int`/
+`_set_grow`'s cost is genuinely O(n²) (hash collisions) or O(n·k) for a
+large constant k, on the exact `py_tokenize` call inside
+`_selfhost_struct_dict_field_val_types`/`_selfhost_module_scalar_globals`/
+`_selfhost_homogeneous_tuple_ret_funcs` (all three run the same tokenize
+loop over the same file list, uncached across each other within one
+process — check whether that tripling is itself fixable first, independent
+of the deeper hashing question).
+
+`ab-native`'s and `native-dumpfull`'s `expect=SELFHOST_SEGV` markers (§5)
+are stale in their STATED REASON (neither test segfaults anymore — the
+original SIGSEGV is fixed) but the tests themselves are still red for the
+reason above, so **do not just delete the markers** — update the reason
+string to point at this section instead, or a new bug doc for the
+tokenize-cost issue once it's actually fixed. Per CLAUDE.md's anti-rot
+rule, a marker whose stated reason has gone stale but whose test still
+fails needs its STRING corrected, not its presence removed.
+
+Method notes for whoever picks this up next: lldb's `malloc`-breakpoint
+approach (§7's original plan) was a dead end — a *conditional* breakpoint
+on `malloc` stops the whole process on every single call system-wide to
+evaluate the condition, and this workload makes enough malloc calls that
+it would never have finished in practice. What worked: `sample <pid> <N>`
+(macOS's built-in sampling profiler, zero ptrace stop-the-world overhead)
+against a natively-running, un-instrumented `mojoc`, which named the hot
+call stack (`_seed_selfhost_struct_dict_field_types` → `py_tokenize`) in
+one 5-second sample. From there, a one-line CWD change
+(`cd /tmp && ./mojoc --dump-full /tmp/tiny.mojo`, 0.01 s / 14.9 MB vs.
+13.25 s / 15.84 GB from the repo root) was the confirming experiment that
+pinned the gate function, and a plain `print(..., file=sys.stderr)` behind
+an env var (rebuilding `mojoc` each time to see the COMPILED behavior, not
+just the shim's) walked the rest of the way down to the exact broken
+comparison. The shim and the compiled binary disagreeing on the same
+source is this project's single most common bug shape (see CRASH.md,
+HOW-TO-DEBUG.html) — confirm against both whenever a self-host-gated code
+path is suspect.
 
 ---
 

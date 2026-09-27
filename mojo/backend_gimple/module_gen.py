@@ -98,21 +98,55 @@ def _is_selfhost_source_dir(_dir: str) -> bool:
     than working around it."""
     if not _dir:
         return False
-    _rdir = os.path.realpath(_dir)
-    _rsd = os.path.realpath(_SELFHOST_DIR)
-    if (_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
-            or _rdir == _rsd or _rdir.startswith(_rsd + os.sep)
-            or os.path.isfile(os.path.join(_dir, 'fire_compiler.py'))):
+    # NOT `_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
+    # or ...`: this function's docstring already argues this equality-
+    # against-`_SELFHOST_DIR` signal is the WEAKER, position-dependent one
+    # (false for any vendored/downstream checkout) versus the sibling-file
+    # check below — and it is now additionally, actively BROKEN when this
+    # function itself runs self-hosted (i.e. compiled INTO `mojoc`, not run
+    # under the `python3 fire.py` shim). `_SELFHOST_DIR` is a module-level
+    # global defined in gimple_codegen.py; every cross-module *read* of a
+    # self-hosted module-level global falls back to its boxed int64_t
+    # "home" representation unless a separate pre-pass
+    # (`_seed_selfhost_module_globals`, gated by THIS function's own
+    # result) has already corrected its type for this call site — a
+    # chicken-and-egg gap this function cannot use to decide whether to run
+    # that very pre-pass. Confirmed via a direct debug print built into a
+    # rebuilt `mojoc`: reading `_SELFHOST_DIR` here evaluated to the bare
+    # integer `0`, not a path string, so `_dir.startswith(_SELFHOST_DIR +
+    # os.sep)` was really `_dir.startswith('0' + os.sep)`... and even after
+    # fixing `os.path.realpath` (BLOW.md's originally-suspected sole cause
+    # — real, but not sufficient) `_SELFHOST_DIR` still read back as the
+    # bare integer `0`, which Python's `+` coerces jointly with `os.sep`
+    # into `_dir.startswith(os.sep)` — trivially TRUE for every absolute
+    # path. Dropping the `_SELFHOST_DIR`-dependent checks entirely sidesteps
+    # this whole cross-module global-boxing gap rather than chasing it
+    # further; the sibling-file check the docstring already prefers needs
+    # no module-level global at all.
+    if os.path.isfile(os.path.join(_dir, 'fire_compiler.py')):
         return True
     # A subdirectory (`mojo/middle`, `mojo/backend_gimple`) of a genuine
     # compiler-source tree: walk up to find the `fire_compiler.py` that
-    # marks the tree's root. This is what tells apart a vendored copy
-    # compiled via a SYMLINKED path (`_dir` = `/…/fire/fire/mojo/middle`)
-    # from the tree's own `_SELFHOST_DIR` (`os.path.realpath` resolves to
-    # `/…/.mojo/fire/.fire-fire`), where neither the raw nor the realpath
-    # prefix test matches because only the LEAF path was symlinked.
+    # marks the tree's root.
+    #
+    # `if not _cand: _cand = os.sep` (not `_cand = ... or os.sep`): for an
+    # absolute `_rdir` (`os.path.realpath` always returns one),
+    # `_rdir.split(os.sep)[:1]` joined back is `''` (`'/tmp'.split('/')[:1]
+    # == ['']`), and `os.path.isfile(os.path.join('', 'fire_compiler.py'))`
+    # silently degrades into a CWD-relative check instead of the intended
+    # filesystem-root one — invoking `./mojoc` from a CWD that happens to
+    # hold a `fire_compiler.py` (true for every dev checkout) would
+    # spuriously match here for an unrelated `_dir`. This was the
+    # mechanism BLOW.md originally (and incompletely) blamed; see the
+    # module docstring above and BLOW.md §0 for the fuller chain. The
+    # explicit `if not _cand:` (not `or os.sep`) deliberately avoids
+    # self-hosted `or` on strings — see CRASH.md's `and`/`or`
+    # mixed-operand miscompilation class.
+    _rdir = os.path.realpath(_dir)
     for _p in range(len(_rdir.split(os.sep)), 0, -1):
         _cand = os.sep.join(_rdir.split(os.sep)[:_p])
+        if not _cand:
+            _cand = os.sep
         if os.path.isfile(os.path.join(_cand, 'fire_compiler.py')):
             return True
     return False
