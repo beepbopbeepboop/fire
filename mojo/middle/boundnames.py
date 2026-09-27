@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from fire_compiler import (
     AssignStmt, AugAssignStmt, Comprehension, ForStmt, GlobalStmt,
+    NonlocalStmt,
     IdentExpr, IfStmt, ListExpr, MultiAssignStmt, TryStmt, TupleExpr,
     VarDecl, WhileStmt, WithStmt, _as_str,
 )

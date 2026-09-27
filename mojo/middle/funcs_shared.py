@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node
 import ast_rewriter
 import regex_compile
 import mlir
@@ -299,6 +299,29 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # `strlen()` the struct (non-deterministic length). An explicit
         # annotation still takes precedence (ptype is not None there).
         ctype = 'MojoBytes *'
+    elif (ptype is None and ctype == 'int64_t'
+          and isinstance(_pdflt, DictExpr)):
+        # The CONTAINER-literal half of the rule the two branches above
+        # state for strings: an unannotated parameter whose declared
+        # default is a `{}` / `[]` / `set()` literal IS a container
+        # parameter, by exactly the same "the default expression is type
+        # evidence as strong as an annotation" argument (an omitted
+        # argument gets the literal itself padded in, and the literal has
+        # an unambiguous C representation).
+        #
+        # Without it the param stays the generic `int64_t` box and every
+        # real container operation on it is either a coercion of a
+        # pointer through a scalar (silently wrong) or a hard error --
+        # `def updated_env(updates={})` in
+        # `Tools/wasm/wasi/__main__.py` fed that box straight into
+        # `mojo_dict_union(env_defaults | os.environ | updates)` as
+        # argument 2, an `int64_t` where a `MojoDict *` is expected.
+        #
+        # Fires ONLY on the unresolved generic box (`ctype ==
+        # 'int64_t'`), so an explicit annotation and any usage- or
+        # cross-call-inferred type keep their existing precedence --
+        # same guard the `StringLiteral` branch above uses.
+        ctype = 'MojoDict *'
     # Compile-time string types (StaticString, StringLiteral, StringRef,
     # StringSlice) are REAL strings in this codegen — a NUL-terminated
     # `char *`. The general resolver boxes them as opaque int64_t handles

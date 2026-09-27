@@ -1,30 +1,48 @@
-# CODEGEN_arm64_cmp_flags_and_loop_signedness: arm64 conditional/loop codegen, and the signedness of unannotated `int`
+## Status (2026-09-27 — NOT ATTEMPTED: the only remaining work here is `formal/`, and that was out of scope this session)
 
-Consolidated report for the arm64 formal backend's conditional and loop
-lowering, and for the signedness model underneath it. Part of a three-document split of what used to live in the root
-`BUG.md` (deleted 2026-09-26): this document owns what is **open** in the
-conditional/loop codegen and the signedness model;
-`FORMAL_arm64_known_proof_gaps.md` owns the three unproved examples; and
-`FORMAL_arm64_instruction_coverage.md` owns the encoder survey, the measured
-codegen wins, and two test-design lessons worth not relearning.
+Recorded so the next session with a `formal/` budget does not re-derive this.
 
-## Status (2026-09-26 — conditional/loop selection LANDED; signedness PARTIAL; proof work PARKED)
+"Still open 3" (below) is **entirely** inside `formal/`: the `dec`-while
+and `range` loop MODELS, `prog_correct`'s induction split, and two
+`sum_range` holes. Nothing in the compiler, the runtime, the interpreter
+or the test suites is outstanding for this document — the CODEGEN half
+and the 13-case runtime matrix were both complete before this session
+(see the 2026-09-26 entry above).
+
+**Not verified this session:** `test_formal.py` was deliberately NOT run
+(it is what deadlocked the machine earlier on 2026-09-27, orphaning
+`fire.py build --formal` workers on `lib/ProofLib.olean.buildlock`), and
+no Lean proof was written or chased. The 91/91 `test_formal_run.py` and
+the 38/5/0 arm64 proof census above are the 2026-09-26 numbers, carried
+forward unverified.
+
+The next action is unchanged and is the "Optimization"-free part of the
+plan recorded below: the `Nat`-to-two's-complement signed-order lemma in
+ProofLib, then `pred_iff`/`countdown_go`, then `prog_correct`'s step
+case, then `sum_range_loop_cond_flag`.
+
+## Status (2026-09-26 — BOTH halves landed; the loop MODELS are the one remaining gap)
 
 | area | state |
 |---|---|
-| `B.cond` at every conditional site | landed, all runtime suites green |
-| `for i in range(...)` loop exits | landed (they were absent entirely) |
-| Spill-slot displacement sign | landed (was corrupting the caller's frame) |
-| arm64 formal proofs | **40 pass / 3 known-gap / 0 fail** (was 30/3/10) |
-| x86-64 formal proofs | 43/43, unchanged throughout |
-| Negative-literal comparisons | **partially** fixed; see "still open" |
-| Remaining formal sorries | 13, in 9 of 43 proofs; both sites have a known cause |
+| `B.cond` at every conditional site | landed |
+| `for i in range(...)` loop exits | landed |
+| Spill-slot displacement sign | landed |
+| `while_dec_exit_contract` / `while_lt_exit_contract` parameterised over the loop TEST | **landed** — the register-shaped `cr` is gone |
+| The 8 loop-contract `sorry`s (4 files) | **closed** — 0 remaining in those proofs |
+| arm64 formal proofs | 38 pass / 5 known-gap / 0 fail (was 40/3/0; the 2 extra known-gaps are new and named below) |
+| arm64 `sorry` census | 7 declarations (was 5): the 5 pre-existing `*_compiles_correctly_universal` run-test leaves, plus 2 in `sum_range` |
+| x86-64 formal proofs | 43/43, unchanged |
+| `test_formal_run.py` | 91/91 (was 33/33) — 15 signedness cases added |
+| Unannotated `int` | **now SIGNED**, and `common_type` is signed-wins |
+| Loop MODELS (`dec`-while, `range`) still assume a non-negative counter | **OPEN — see "Still open 3"** |
 
-Runtime: `test_formal_run.py` 33/33, `test_arm64_emission.py` 5/5,
-`test_arm64_encoders.py` 221/221, `test_formal_imports.py` 11/11,
-`test_formal_dylib.py` 9/9.
+Both halves of this document's "Done when" are met for the CODEGEN and the
+13-case runtime matrix; the formal side has two newly-recorded known-gaps, and
+they are recorded because the obligation is genuinely unprovable, not merely
+unproved (see "Still open 3").
 
-## Still open 1: signedness only when BOTH operands are typeless literals
+## FIXED 1: signedness — `DEFAULT_INT_TYPE` is signed and `common_type` is signed-wins
 
 `formal/types.py` reports a negated literal as `IntType(64, True)`, because a
 negative value cannot be an unsigned one. That fixes literal-vs-literal, and
@@ -146,3 +164,94 @@ the two will drift.
   exit status is 8 bits; comparing an 8-bit code against a wider sum produced a
   convincing phantom "14+ spilled locals" bug that cost real time; that retraction is
   summarised in `FORMAL_arm64_instruction_coverage.md`.
+
+## FIXED 2: the 13 loop-contract `sorry`s (the count was 8, in 4 files, not 13 in 9)
+
+The census this document used was wrong, and the way it was wrong is the useful
+part. It counted the WORD `sorry` in the generated proofs, which counts
+*hypothetical* holes: every `all_goals (first | … | sorry)` fallback keeps the
+word even when an earlier alternative won, so the textual count cannot go down.
+Worse, the doc counted greps of a plain `lean` run, and a plain run reports
+nothing when Lean serves a cached verdict. The real number — declarations Lean
+itself reports as "uses `sorry`" — was **8, in 4 files** (`countdown`,
+`sum_range`, `wdiff`, `wge`): 4 `loop_cond_flag` register halves and 4 loop-test
+`hstep` obligations. The other 5 real holes (`count`, `fact`, `pow2`, `sqsum`,
+`sum`, one `*_compiles_correctly_universal` each) are a different root cause and
+are still open.
+
+`formal/lean.py::_run_lean` now counts `declaration uses` in the real Lean
+output and `check_proof_cached` returns it (4th element; the verdict key moved
+to `formal-proof-verdict-v2` because the stored body changed shape).
+`test_formal.py` reports the census after every run, so the number is always
+authoritative and the loop contract's holes are visible in the tally rather than
+in a hand-run grep.
+
+**What closed them**, in `lib/ProofLib.lean` + `formal/arm64_proof_gen.py`:
+
+- `while_dec_exit_contract` and `while_lt_exit_contract` are parameterised over
+  `q : Arm64State → Bool` (`true` = leave the loop) instead of a register index
+  `cr`. The register shape described the old `CSET`-then-`CBZ` lowering; the
+  current lowering branches on the `CMP`'s flags and writes no register, so the
+  obligation asked for a value-flow fact no instruction produces.
+  `loop_test_def` emits one `def <name>_loop_q` per example, so the `refine`,
+  the `hstep` tactic and the `cond_flag` lemma quote one symbol rather than three
+  copies of the same expression.
+- `_cond_flag_lines` + `_COND_ARITH` close the `cond_flag` leaf: unfold `q`,
+  unfold the condition block's state chain, resolve the STP/LDP pair, rewrite
+  with the flag lemma for the raw condition code (`_COND_LEMMA`, which already
+  covered all ten), then close the arithmetic. The default closer is
+  `decide | omega | grind`, which is enough for every shape the 43 examples
+  contain.
+- `_cond_step_tactic` is now a `by_cases` on `<name>_loop_q s = true` followed
+  by `simp [<name>_loop_q, hs, hc]`, and it closes. Nothing is admitted.
+- `while_dec_exit_contract`'s induction was also generalised, because a signed
+  `int` means a NEGATIVE counter also leaves the loop: `hcondFlag`'s
+  `q = true ↔ x19 = 0` became `hcondZero` (`x19 = 0 → q = true`) +
+  `hcondStep` (`q ≠ true → x19 ≠ 0`) + `hcondDone` (`q = true → exit x0 = done
+  x19`), and the step case splits on the test rather than deriving `¬q` from
+  `x19 ≠ 0`. `hcondDone` is a real new obligation — before, the exit block's x0
+  was pinned by `hexX0` under `x19 = 0`, which a loop that exits with a nonzero
+  counter never satisfies.
+- The generator's `loop_exit_x0` lost its `hpc` hypothesis: the obligation is
+  pure value flow, its proof never reads `s.pc`, and once the contract was
+  parameterised the caller holds the condition block's post-state, whose pc is
+  the loop test and NOT the exit branch's target — so the hypothesis was not
+  merely unused but unsatisfiable.
+
+## Still open 3: the generated loop MODELS assume a non-negative counter
+
+This is what the signed default exposes, and it is the one thing from this
+document that is not done. With a signed `int`, `while n > 0: n -= 1` on
+`n = -1` must return `-1` — the loop never runs. Two things still believe
+otherwise, and both are the MODEL, not the machine:
+
+1. `_gen_dec_while_block` (`formal/arm64_proof_gen.py`) emits `pred_iff` as the
+   UNSIGNED `0 < UInt64.ofNat m`, and the model `countdown_go : Nat → UInt64`
+   is `| 0 => 0 | k+1 => countdown_go k`, i.e. it returns 0 for every input. For
+   `m >= 2^63` the loop test is false, so both statements are false, and
+   `prog_correct`'s induction (which splits only on `m % 2^64 = 0` vs
+   `0 < m % 2^64`) has no case for it. `wdiff` (`while n != 0`) is unaffected —
+   equality is signedness-independent and the loop always reaches 0 — and still
+   proves.
+2. `sum_range`'s `loop_cond_flag` states the exit condition as the UNSIGNED
+   `¬ (i < bound)`, so for a negative bound it is false and the leaf falls to
+   the `sorry` (`rw [arm64_flag_ge_s]` rewrites the flag to a SIGNED `≥`, which
+   is not what the statement says). Two holes there, up from zero.
+
+Both are recorded rather than hidden: `countdown` and `wge` are in
+`test_formal.py`'s `EXPECTED_FAILURES` with the reason, and `test_formal.py`
+reports a stale entry as a failure if either starts passing. The fix is a model
+change in two places, not a tactic:
+
+- `pred_iff` becomes the signed test related to the Nat value with the
+  `m < 2^63` conjunct the sign bit forces, proved from `UInt64.ofNat m`'s
+  `m % 2^64`; the model becomes `if n < 2^63 then 0 else UInt64.ofNat (n % 2^64)`;
+  and `prog_correct`'s step case splits on `m % 2^64 < 2^63` as well as on
+  `eq_zero_or_pos`, with the new branch being one `runF_while_false` step.
+- `sum_range_loop_cond_flag` is restated as `¬ (signed i < signed bound)` and
+  `_gen_range_loop_model` is given the same `n < 2^63` split.
+
+A signed `runF` arithmetic lemma pair (`sKey`-based order on `UInt64.ofNat`)
+would be the reusable piece for both; ProofLib's `sKey` and its
+`arm64_flag_*_s` lemmas are already the right shape, they just need the bridge
+from `Nat` to the two's-complement word.

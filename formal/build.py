@@ -892,9 +892,11 @@ def compile_formal(source_path: str, output: str = None,
         if check:
             from formal.lean import check_proof_cached
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            ok, detail, cached = check_proof_cached(proof_path, repo_root=repo_root)
+            ok, detail, cached, n_sorries = check_proof_cached(
+                proof_path, repo_root=repo_root)
             result["proof_checked"] = ok
             result["proof_cached"] = cached
+            result["proof_sorries"] = n_sorries
             if not ok:
                 raise FormalBuildError(f"proof check failed: {detail}")
 
@@ -3052,9 +3054,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         if check:
             from formal.lean import check_proof_cached
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            ok, detail, cached = check_proof_cached(proof_path, repo_root=repo_root)
+            ok, detail, cached, n_sorries = check_proof_cached(
+                proof_path, repo_root=repo_root)
             result["proof_checked"] = ok
             result["proof_cached"] = cached
+            result["proof_sorries"] = n_sorries
             if not ok:
                 raise FormalBuildError(f"proof check failed: {detail}")
     return result

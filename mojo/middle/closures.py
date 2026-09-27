@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
-    IdentExpr, IfStmt, LambdaExpr, MemberExpr, StructDef, TryStmt, VarDecl,
+    IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, StructDef,
+    TryStmt, VarDecl,
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list,
 )
 from mojo.middle.types import _declared_vars_body, _mojo_type, _used_idents_node
@@ -223,10 +224,22 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
             for body_node in inner_body:
                 for _ui in _used_idents_node(body_node):
                     used.add(_as_str(_ui))
+            # Names this function declares `nonlocal`. They are NOT its own
+            # variables: the assignment that follows the declaration rebinds
+            # the ENCLOSING function's cell, so they have to come out of
+            # `inner_declared` below or the capture analysis would classify
+            # them as locals and the write would be invisible outside. Python's
+            # rule is the same — a `nonlocal` name is free in this function.
+            _inner_nonlocals: set = set()
+            for bstmt in _gmi_all_stmts_nonfunc(inner_body):
+                if isinstance(bstmt, NonlocalStmt):
+                    for _nl in bstmt.names:
+                        _inner_nonlocals.add(_as_str(_nl))
             inner_assign_targets = set()
             for bstmt in _gmi_all_stmts_nonfunc(inner_body):
                 if isinstance(bstmt, AssignStmt) and isinstance(bstmt.target, IdentExpr):
-                    inner_assign_targets.add(bstmt.target.name)
+                    if bstmt.target.name not in _inner_nonlocals:
+                        inner_assign_targets.add(bstmt.target.name)
                 elif isinstance(bstmt, ForStmt):
                     tgt = bstmt.target
                     if isinstance(tgt, str):
@@ -262,7 +275,8 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
             for _idv in (_ipn
                          | _declared_vars_body(inner_body)
                          | inner_assign_targets):
-                inner_declared.add(_as_str(_idv))
+                if _as_str(_idv) not in _inner_nonlocals:
+                    inner_declared.add(_as_str(_idv))
             outer_params: set = set()
             for _op in outer_scope.keys():
                 outer_params.add(_as_str(_op))
@@ -526,6 +540,38 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                             _ci_captures_dict[_sv] = _st
                             if not _ci.env_struct:
                                 _ci.env_struct = f"{_ci.lifted_name}_env"
+                            _changed = True
+                        # BY-REFERENCE-ness has to be propagated with the
+                        # capture, not just the name. A grandchild closure
+                        # that reassigns a `nonlocal`/`{mut}` name holds a
+                        # POINTER to the owner's box (`mut_names` widens
+                        # the env field to `T *`); if the INTERMEDIATE
+                        # closure captured the same name by value, its env
+                        # field is a plain `T` and the grandchild's seeding
+                        # became `_env_grandchild->x = _env->x;` — an
+                        # `int64_t` stored into an `int64_t *` field, a
+                        # hard GCC `-Wint-conversion` error (the exact
+                        # failure `Tools/wasm/wasi/__main__.py`'s
+                        # `subdir` -> `decorator` -> `wrapper` chain hit).
+                        # With the name in the parent's `mut_names` too,
+                        # every level in the chain shares the ONE box the
+                        # owner allocated, which is Python's cell model.
+                        #
+                        # The propagated set is intersected with the
+                        # parent's own captures: `mut_names` is only ever
+                        # read as `name in ci.mut_names` alongside a
+                        # `name in ci.captures` check (the env-struct
+                        # field emission, the seeding in
+                        # `_gen_stmt_FunctionDef`, the `_mutptr_` preload
+                        # in `_gen_lifted_closure`, and
+                        # `_seed_mut_captured_local_types`), so a name the
+                        # parent does not capture has no meaning there
+                        # and must not linger in the set.
+                        if (_sv in _sub_ci.mut_names
+                                and _sv in _ci_captures_dict
+                                and _sv not in _ci.mut_names):
+                            _ci.mut_names = frozenset(
+                                list(_ci.mut_names) + [_sv])
                             _changed = True
 
     return ctx._all_closures

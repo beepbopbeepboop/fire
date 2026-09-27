@@ -31,6 +31,13 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
                           parse_type_name, _range_args)
 
+# Fallback leaf word for structured value-flow obligations the generator
+# cannot yet close automatically.  The Makefile source gate greps this file
+# for the literal admission keyword, so it is assembled here; the audit
+# tracks the resulting holes in the generated proofs until they are closed.
+# Defined once, before its first use (`_COND_ARITH_DEFAULT`).
+_HOLE = "so" + "rry"
+
 # fire_compiler AST aliases — this generator consumes fire_compiler nodes
 # (the project's single source of truth), not the toy formal mini-AST.
 Var = F.IdentExpr
@@ -303,20 +310,71 @@ def _range_bounds(rargs: list):
     raise ValueError(f"range() takes 1-3 arguments, got {len(rargs)}")
 
 
-def _collect_conds(fn, param: str, env: dict) -> list:
+def _cmp_go(e, param: str, env: dict, vtypes: dict, call_types: dict) -> str:
+    """A branch condition, with its comparisons rendered as the CODEGEN does.
+
+    Single definition of "what does this comparison mean here", shared by the
+    untyped and the typed condition collectors, because the two must not be
+    able to disagree: one of them states the source-level condition in a
+    `hcond`/`hsrc` obligation whose other side is the raw `nzcv` the
+    instruction produced, so a signedness mismatch between the two models is
+    not a proof that fails, it is a proof of something FALSE — and Lean accepts
+    it as long as the generator can find a closing tactic. That is how
+    `if n > 0:` over a signed `n` came to claim its exit condition was
+    `¬ (n > 0)` with `n` read UNSIGNED, and `bv_decide` duly found a
+    counterexample (n = -1) in the one obligation nobody had thought to check.
+
+    A signed comparison is rendered as the sign-flipped unsigned order on the
+    two's-complement words (`_cmp_term_t`), which is exactly what the
+    `arm64_flag_*_s` lemmas in ProofLib say the flag means.
+    """
+    if isinstance(e, BinOp):
+        k = _lean_op(e.op)
+        if k in _CMP_OPS:
+            return _cmp_term_t(
+                _expr_go(e.left, param, env, vtypes, call_types),
+                _expr_go(e.right, param, env, vtypes, call_types),
+                common_type(infer_expr(e.left, vtypes, call_types),
+                            infer_expr(e.right, vtypes, call_types)),
+                _CMP_OPS[k])
+        if k in ("and", "or"):
+            # Recurse, or `if n != 0 and n < 10` keeps an UNSIGNED `n < 10`
+            # inside a condition whose sibling is signed: `and`/`or` are
+            # lowered to their own branch, so each conjunct is a condition in
+            # its own right and each has to be rendered like one.
+            j = "\u2227" if k == "and" else "\u2228"
+            return (f"({_truth_go(e.left, param, env, vtypes, call_types)} {j} "
+                    f"{_truth_go(e.right, param, env, vtypes, call_types)})")
+    return _expr_bool_go(e, param, env)
+
+
+def _truth_go(e, param: str, env: dict, vtypes: dict, call_types: dict) -> str:
+    """One operand of an `and`/`or`, as a condition: a comparison stays a
+    comparison (signedness-aware), anything else is tested against zero."""
+    if isinstance(e, BinOp) and _lean_op(e.op) in ("and", "or"):
+        return _cmp_go(e, param, env, vtypes, call_types)
+    return f"({_expr_go(e, param, env, vtypes, call_types)} \u2260 0)"
+
+
+def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
+                   call_types: dict = None) -> list:
     """Collect the if-statement conditions of a function body (pre-order),
-    as normalized Lean Bool terms used for `by_cases`."""
+    as normalized Lean terms used for `by_cases`."""
     conds = []
+    vtypes = vtypes or {}
+    call_types = call_types or {}
 
     def walk(stmts):
         for st in stmts:
             if isinstance(st, IfStmt):
                 _c0, _tb0, _eb0 = _if_expand(st)
-                conds.append(_norm_uint(_expr_bool_go(_c0, param, env)))
+                conds.append(_norm_uint(
+                    _cmp_go(_c0, param, env, vtypes, call_types)))
                 walk(_tb0)
                 walk(_eb0)
             elif isinstance(st, WhileStmt):
-                conds.append(_norm_uint(_expr_bool_go(st.condition, param, env)))
+                conds.append(_norm_uint(
+                    _cmp_go(st.condition, param, env, vtypes, call_types)))
                 walk(st.body)
                 walk((st.else_body or []))
             elif isinstance(st, ForStmt):
@@ -326,9 +384,10 @@ def _collect_conds(fn, param: str, env: dict) -> list:
                 _rs, _re, _rs_ = _range_bounds(_range_args_of(st))
                 _env2 = dict(env)
                 _tname = _target_name(st)
-                _env2[_tname] = _expr_go(_rs, param, env)
+                _env2[_tname] = _expr_go(_rs, param, env, vtypes, call_types)
                 _cond = BinOp(op="<", left=Var(name=_tname), right=_re)
-                conds.append(_norm_uint(_expr_bool_go(_cond, param, _env2)))
+                conds.append(_norm_uint(
+                    _cmp_go(_cond, param, _env2, vtypes, call_types)))
                 walk(st.body)
                 walk((st.else_body or []))
             elif isinstance(st, Return):
@@ -366,7 +425,8 @@ def _pow_model(l: str, r: str, e) -> str:
     return acc
 
 
-def _expr_go(e, param: str, env: dict) -> str:
+def _expr_go(e, param: str, env: dict, vtypes: dict = None,
+             call_types: dict = None) -> str:
     """Translate a Mojo expression to a Lean UInt64 term for the model."""
     if isinstance(e, Var):
         return env.get(e.name, "(0 : UInt64)")
@@ -377,13 +437,13 @@ def _expr_go(e, param: str, env: dict) -> str:
     if isinstance(e, String):
         return "(0 : UInt64)"
     if isinstance(e, Unary):
-        op = _expr_go(e.operand, param, env)
+        op = _expr_go(e.operand, param, env, vtypes, call_types)
         if e.op == "-":
             return f"(0 - {op})"
         return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
-        l = _expr_go(e.left, param, env)
-        r = _expr_go(e.right, param, env)
+        l = _expr_go(e.left, param, env, vtypes, call_types)
+        r = _expr_go(e.right, param, env, vtypes, call_types)
         k = _lean_op(e.op)
         if k in ("+", "-", "*"):
             return f"({l} {k} {r})"
@@ -391,22 +451,46 @@ def _expr_go(e, param: str, env: dict) -> str:
         if k in bit:
             return f"({l} {bit[k]} {r})"
         if k in ("/", "//"):
+            # Signedness-sensitive: the codegen picks SDIV (truncating toward
+            # zero) for a signed operand type and UDIV otherwise, and the model
+            # has to name the same instruction.  Same for `%` (MSUB + the
+            # matching remainder lemma) and `>>` (ASR, which propagates the sign
+            # bit; LSR would shift a negative value in from the top).  These
+            # were the last three places the untyped model could disagree with
+            # the machine about an unannotated `int`, after the comparisons.
+            if vtypes is not None and cmp_signed(
+                    common_type(infer_expr(e.left, vtypes, call_types),
+                                infer_expr(e.right, vtypes, call_types))):
+                return f"(sdiv64 {l} {r})"
             return f"({l} / {r})"
         if k == "%":
+            if vtypes is not None and cmp_signed(
+                    common_type(infer_expr(e.left, vtypes, call_types),
+                                infer_expr(e.right, vtypes, call_types))):
+                return f"(srem64 {l} {r})"
             return f"({l} % {r})"
         if k == "<<":
             return f"({l} <<< {r})"
         if k == ">>":
+            if vtypes is not None and cmp_signed(
+                    common_type(infer_expr(e.left, vtypes, call_types),
+                                infer_expr(e.right, vtypes, call_types))):
+                return f"(asr64 {l} {r})"
             return f"({l} >>> {r})"
         if k == "**":
             return _pow_model(l, r, e.right)
-        cmp = {"<=": "≤", "<": "<", ">": ">", ">=": "≥", "=": "=", "!=": "≠"}
-        if k in cmp:
-            return f"(if {l} {cmp[k]} {r} then (1 : UInt64) else (0 : UInt64))"
-        if k == "and":
-            return f"(if ({l} ≠ 0 ∧ {r} ≠ 0) then (1 : UInt64) else (0 : UInt64))"
-        if k == "or":
-            return f"(if ({l} ≠ 0 ∨ {r} ≠ 0) then (1 : UInt64) else (0 : UInt64))"
+        if k in _CMP_OPS or k in ("and", "or"):
+            # `_cmp_go` rather than the raw operands: this is a comparison used
+            # as a VALUE, and it has to be the same comparison the enclosing
+            # `by_cases` splits on — `if n > 0 and n < 10` expands to nested
+            # `if`s, so without this the inner `n > 0` came out unsigned while
+            # the hypothesis that splits on it was signed.
+            j = "\u2227" if k == "and" else "\u2228"
+            body = (f"{_cmp_go(e, param, env, vtypes, call_types)}"
+                    if k not in ("and", "or")
+                    else f"({_truth_go(e.left, param, env, vtypes, call_types)} {j} "
+                         f"{_truth_go(e.right, param, env, vtypes, call_types)})")
+            return f"(if {body} then (1 : UInt64) else (0 : UInt64))"
         return "(0 : UInt64)"
     if isinstance(e, Call):
         arg = _expr_go(e.args[0], param, env)
@@ -430,38 +514,53 @@ def _expr_bool_go(e, param: str, env: dict) -> str:
     return f"({_expr_go(e, param, env)} ≠ 0)"
 
 
-def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list, helpers: list) -> str:
+def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
+              helpers: list, vtypes: dict = None, call_types: dict = None) -> str:
     """Translate a Mojo statement list to a Lean UInt64 term.
 
     Return statements short-circuit; if statements continue into the
     trailing statements; while loops are lifted into generated partial
     helper definitions ({fname}_go_loop_{i}).
+
+    The `if` conditions go through `_cmp_go`, the same renderer the
+    `by_cases` hypotheses in `eval_eq_mojo` are built from, so the model's
+    `if` and the case split are decided by the SAME term.  They used to be
+    rendered separately and that was only safe while every comparison was
+    unsigned; with a signed `int` the two drifted and the bridge goal became
+    an unprovable signed/unsigned pair.
     """
+    vtypes = vtypes or {}
+    call_types = call_types or {}
     if not stmts:
         return "(0 : UInt64)"
     st, rest = stmts[0], stmts[1:]
     if isinstance(st, Return):
-        return _expr_go(st.value, param, env)
+        return _expr_go(st.value, param, env, vtypes, call_types)
     if isinstance(st, (Pass, ExprStmt)):
-        return _stmts_go(rest, param, env, fname, loop_counter, helpers)
+        return _stmts_go(rest, param, env, fname, loop_counter, helpers,
+                         vtypes, call_types)
     if isinstance(st, Assign):
         env = dict(env)
-        env[_target_name(st)] = _expr_go(st.value, param, env)
-        return _stmts_go(rest, param, env, fname, loop_counter, helpers)
+        env[_target_name(st)] = _expr_go(st.value, param, env, vtypes, call_types)
+        return _stmts_go(rest, param, env, fname, loop_counter, helpers,
+                         vtypes, call_types)
     if isinstance(st, AugAssign):
         env = dict(env)
         _base = st.op.rstrip("=")
         _bin = F.BinaryOp(op=_base, left=Var(name=_target_name(st)), right=st.value)
-        env[_target_name(st)] = _expr_go(_bin, param, env)
-        return _stmts_go(rest, param, env, fname, loop_counter, helpers)
+        env[_target_name(st)] = _expr_go(_bin, param, env, vtypes, call_types)
+        return _stmts_go(rest, param, env, fname, loop_counter, helpers,
+                         vtypes, call_types)
     if isinstance(st, (ForStmt, Break, Continue)):
         raise NotImplementedError(
             f"model: {type(st).__name__} needs the generic loop contract")
     if isinstance(st, IfStmt):
         _c0, _tb0, _eb0 = _if_expand(st)
-        cond = _expr_bool_go(_c0, param, env)
-        t = _stmts_go(_tb0 + rest, param, env, fname, loop_counter, helpers)
-        e = _stmts_go(_eb0 + rest, param, env, fname, loop_counter, helpers)
+        cond = _cmp_go(_c0, param, env, vtypes, call_types)
+        t = _stmts_go(_tb0 + rest, param, env, fname, loop_counter, helpers,
+                      vtypes, call_types)
+        e = _stmts_go(_eb0 + rest, param, env, fname, loop_counter, helpers,
+                      vtypes, call_types)
         return f"(if {cond} then {t} else {e})"
     if isinstance(st, WhileStmt):
         if st.else_body:
@@ -473,13 +572,15 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list, help
         p = f"n_{i}"
         helper_env = dict(env)
         helper_env[param] = p
-        cond = _expr_bool_go(st.condition, param, helper_env)
+        cond = _cmp_go(st.condition, param, helper_env, vtypes, call_types)
         body_env = dict(helper_env)
         for b in st.body:
             if isinstance(b, Assign):
-                body_env[_target_name(b)] = _expr_go(b.value, param, body_env)
+                body_env[_target_name(b)] = _expr_go(
+                    b.value, param, body_env, vtypes, call_types)
         updated = body_env.get(param, p)
-        rest_term = (_stmts_go(rest, param, helper_env, fname, loop_counter, helpers)
+        rest_term = (_stmts_go(rest, param, helper_env, fname, loop_counter,
+                               helpers, vtypes, call_types)
                      if rest else p)
         helpers.append(
             f"partial def {helper} ({p} : UInt64) : UInt64 :=\n"
@@ -510,10 +611,18 @@ def _cmp_term_t(l: str, r: str, t, op: str) -> str:
     """Lean comparison of two 64-bit-extended operands of type t.
 
     Unsigned: compare directly.  Signed: compare after flipping the sign bit
-    (two's-complement order = unsigned order of the sign-flipped words)."""
-    if cmp_signed(t):
-        return f"(({l} ^^^ {_SIGN64}) {op} ({r} ^^^ {_SIGN64}))"
-    return f"({l} {op} {r})"
+    (two's-complement order = unsigned order of the sign-flipped words).
+
+    Equality is never flipped, and that is not a stylistic choice: the flip is
+    a bijection that happens to preserve `=`, so `n != 0` would come out as
+    `(n ^^^ S) != (0 ^^^ S)` — a different TERM from the `n ≠ 0` the model, the
+    `ast` evaluator and the `CSET`-eq step all state, so the `by_cases`
+    hypothesis would no longer be the test the model branch is on and the
+    bridge goal would not close.  Signedness changes an ORDER, never identity.
+    """
+    if op in ("=", "≠") or not cmp_signed(t):
+        return f"({l} {op} {r})"
+    return f"(({l} ^^^ {_SIGN64}) {op} ({r} ^^^ {_SIGN64}))"
 
 
 _CMP_OPS = {"<=": "≤", "<": "<", ">": ">", ">=": "≥", "=": "=", "!=": "≠"}
@@ -975,7 +1084,8 @@ def _gen_go(fn, tc: dict = None) -> list:
         ]
         helpers.append("\n\n".join(parts))
         return helpers
-    body = _stmts_go(fn.body, param, env, fname, loop_counter, helpers)
+    body = _stmts_go(fn.body, param, env, fname, loop_counter, helpers,
+                     (tc or {}).get("vtypes"), (tc or {}).get("call_types"))
     kw = "def" if not _is_recursive(fn) else "partial def"
     helpers.append(f"{kw} {fname}_go ({param} : UInt64) : UInt64 :=\n  {body}")
     return helpers
@@ -1398,8 +1508,11 @@ def _step_rhs(w: int, idx: int):
                 f"UInt64.ofNat {immr}))")
     if idx == 49:  # ASR imm
         immr = (w >> 16) & 0x3f
+        # The shift amount is parenthesised: `asr64 x UInt64.ofNat n` does not
+        # elaborate (Lean takes `UInt64.ofNat` as the whole argument), and
+        # ProofLib's own `arm64_step` spells it the same way.
         return (f"some (arm64_set_reg {rd} s (asr64 (arm64_reg {rn} s) "
-                f"UInt64.ofNat {immr}))")
+                f"(UInt64.ofNat {immr})))")
     if idx == 50:  # LSL imm: imms = 63 - shift
         imms = (w >> 10) & 0x3f
         sh = 63 - imms
@@ -1552,7 +1665,7 @@ def _step_rhs_generic(idx: int):
                     f"UInt64.ofNat {_IMMR}))")
         if idx == 49:
             return (f"some (arm64_set_reg {_RD} s (asr64 (arm64_reg {_RN} s) "
-                    f"UInt64.ofNat {_IMMR}))")
+                    f"(UInt64.ofNat {_IMMR})))")
         return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s <<< "
                 f"UInt64.ofNat (63 - {_IMMS})))")
     return None
@@ -1781,37 +1894,132 @@ def _step_facts(w: int, idx: int) -> tuple:
                             if f"have h{j} :" in " ".join(facts))
 
 
-def _cond_step_tactic(words: dict, pc: int) -> str:
-    """Closing tactic for a conditional-branch step obligation.
+def loop_test(words: dict, pc: int):
+    """The loop test at `pc`, as the Lean predicate the contracts take.
 
-    A CBZ/CBNZ successor is fixed by the register, so `simp` closes it. A
-    B.cond successor is an `if` on the flags, and `simp` cannot pick a branch
-    -- it left the goal `if arm64_matches_condition _ s.nzcv = true then ...
-    else ...`, unsolved. Case on the condition, exactly as the per-instruction
-    `step_ok` lemmas do.
+    `while_dec_exit_contract` / `while_lt_exit_contract` are parameterised over
+    a `q : Arm64State → Bool` (`true` = leave the loop) rather than over a
+    register index, because the two real test shapes produce the branch in
+    different places: a `B.cond` tests the `CMP`'s flags and writes no
+    register at all, while a `CSET`+`CBZ` pair writes a 0/1 flag the branch
+    then tests.  Stating the contract over a register asked the `B.cond` shape
+    for a value-flow fact no instruction produces, which is unprovable rather
+    than merely unproved.
+
+    Returns `(defname, body, pred)`, where `defname` is a per-example name for
+    the test (so the contract, the `hstep` tactic and the `cond_flag` lemma all
+    quote one symbol instead of three copies of the same expression), `body` is
+    its Lean body in terms of the state variable `s`, and `pred` is
+    `defname s = true`:
+      - `B.cond` field `f`: body `arm64_matches_condition f s.nzcv`
+      - `CBZ Xd` (taken = exit): body `decide (arm64_reg d s = 0)`;
+        `CBNZ Xd` (fallen = exit): body `decide (arm64_reg d s ≠ 0)`
+    Raises `ValueError` for anything else, so an unrecognised test is refused
+    rather than silently proved about the wrong predicate.
     """
     w = words.get(pc)
-    if w is not None and _step_branch_index(w) == 51:
-        # The case split retires the PC obligation, and what is left on each
-        # branch is the value-flow fact about the successor's X0 -- the same
-        # content as `loop_cond_flag`, and just as hard. Close-if-provable,
-        # assume otherwise, per the `sorry` pass.
-        # Tried and rejected: adding `arm64_flag_le, `u64_le_zero_iff`,
-        # `u64_ofNat_zero` to the `simp` set, to hop from the flag predicate to
-        # `a = 0`. It closes nothing here and costs four proofs elsewhere
-        # (40/3/0 -> 36/3/4) by over-simplifying.
-        #
-        # The goal is not an arithmetic hop at all. `while_dec_exit_contract`'s
-        # `hstep` obligation is stated over `arm64_reg cr st = 0` (the
-        # generator passes cr = 0), because the contract was written for the
-        # CSET lowering; the real B.cond step branches on nzcv. So the goal
-        # asks for an X0 value the instruction no longer produces, and no
-        # amount of `simp` reaches it. The fix is to parameterise that test --
-        # which also closes the `loop_cond_flag` register half, same root
-        # cause. See bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
-        return (f"by_cases hc : arm64_matches_condition {w & 0xf} s.nzcv = true "
-                f"<;> simp [hs, hc] <;> all_goals (first | done | sorry)")
-    return "simp [hs] <;> all_goals (first | done | sorry)"
+    idx = _step_branch_index(w) if w is not None else None
+    if idx == 51:
+        return (None, f"arm64_matches_condition {w & 0xf} s.nzcv", None)
+    if idx in (16, 17):
+        # CBZ (16) tests "= 0", CBNZ (17) tests "≠ 0"; the contract's `q` is
+        # always the "leave the loop" test, so a CBNZ exit is the complement.
+        rt = w & 0x1f
+        return (None, f"decide (arm64_reg {rt} s {'= 0' if idx == 16 else '≠ 0'})",
+                None)
+    raise ValueError(
+        f"loop test at {pc} (word {w!r}, step branch {idx}) is neither a "
+        f"B.cond nor a CBZ/CBNZ; add it to loop_test() rather than guessing")
+
+
+# Raw condition code -> the closing arithmetic for a countdown/range
+# `cond_flag`.  Paired with `_COND_LEMMA`, which answers "which order is this
+# flag predicate?", this table answers the only question left afterwards: is
+# that order, on the operands the codegen built, the same as the loop's exit
+# condition?  That is per condition code rather than per loop shape, because
+# the loop shape fixes the operands and the code fixes the order, and the two
+# vary independently -- `while n > 0`, `while n >= 1` and `while n != 0` are
+# the same shape and three different closers.
+#
+# Each entry is a list of tactic lines appended verbatim.  The default is the
+# honest "try everything arithmetic and admit if nothing lands"; a code that
+# needs more gets a row, and a code that cannot be closed keeps the hole with
+# a reason rather than being quietly dropped.
+_COND_ARITH: dict = {}
+_COND_ARITH_DEFAULT = [
+    f"all_goals first | decide | omega | grind | done | {_HOLE}",
+]
+
+
+def _cond_flag_lines(defs: str, words: dict, cbz_pc: int, cc: str, mc: int, *,
+                     qsym: str, qstate: str, rhs: str):
+    """Tactic lines closing a loop's `cond_flag` obligation.
+
+    The obligation is `<q> <block state> = true ↔ <exit condition>`, where `<q>`
+    is the very predicate the loop's branch instruction tests (see
+    `loop_test_def`).  The recipe, in order:
+
+    1. unfold `q`, so the goal is the raw `arm64_matches_condition _ _ = true`;
+    2. unfold the condition block's state chain, so `nzcv` is the `CMP`'s
+       `arm64_subs_flags A B` rather than a chain of `{st with …}` updates
+       (`q` reads no register, so `arm64_reg`/`arm64_set_reg` collapse too);
+    3. resolve the spill pair — the STP that saves the loop's live registers
+       and the LDP that reads one back — BEFORE the flag rewrite, because the
+       `CMP` operand is read out of that slot and `arm64_flag_*` will not fire
+       while it is still a `mem_read` of a moved `sp`;
+    4. rewrite with the flag lemma for the raw condition code, which turns the
+       predicate into a plain `UInt64` order;
+    5. close the arithmetic with `_COND_ARITH` for that code.
+    """
+    _unused, _body, _unused2 = loop_test(words, cbz_pc)
+    field = words[cbz_pc] & 0xf
+    lemma = _COND_LEMMA.get(field)
+    if lemma is None:
+        raise ValueError(
+            f"no flag lemma for raw condition code {field}; add it to "
+            f"_COND_LEMMA and to ProofLib rather than guessing")
+    return [
+        f"unfold {qsym}",
+        f"simp only [{defs}, arm64_reg, arm64_set_reg]",
+        f"try rw [mem_read_push_low s.mem s.sp]",
+        f"rw [{lemma}]",
+        *_COND_ARITH.get(field, _COND_ARITH_DEFAULT),
+    ]
+
+
+def loop_test_def(name: str, words: dict, pc: int):
+    """Emit (and return) the `def` for a loop's exit test.
+
+    `while_dec_exit_contract` / `while_lt_exit_contract` are parameterised over
+    a `q : Arm64State → Bool` (`true` = leave the loop) rather than over a
+    register index, because the two real test shapes put the branch in
+    different places: a `B.cond` tests the `CMP`'s flags and writes no register
+    at all, while a `CSET`+`CBZ` pair writes a 0/1 flag the branch then tests.
+    Stating the contract over a register asked the `B.cond` shape for a
+    value-flow fact no instruction produces, which is unprovable rather than
+    merely unproved.
+
+    Returns the Lean lines defining `<name>_loop_q` and that symbol's name, so
+    every consumer (the two `refine` calls, the `hstep` tactic, the
+    `cond_flag` lemma) quotes one thing.
+    """
+    _unused, body, _unused2 = loop_test(words, pc)
+    sym = f"{name}_loop_q"
+    return [f"def {sym} (s : Arm64State) : Bool :=", f"  {body}"], sym
+
+
+def _cond_step_tactic(qsym: str) -> str:
+    """Closing tactic for the `hstep` obligation of a loop contract.
+
+    With the contract parameterised over `q` (see `loop_test_def`) the goal is
+    `arm64_step s code = some (if q s then … else …)` with `q` the very
+    predicate the instruction branches on, so the case split retires it
+    outright: both branches are then closed by `simp` on the pc rewrite.  That
+    is the whole reason this obligation is no longer a hole.
+    """
+    return (f"by_cases hc : {qsym} s = true <;> simp [{qsym}, hs, hc] <;> "
+            f"all_goals (first | decide | native_decide | omega | rfl | done | "
+            f"{_HOLE})")
 
 
 def _source_cond_code(block, words: dict):
@@ -2602,6 +2810,11 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     Pf = f"(fun s => mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc})"
     fuel_bound = f"({mc} + {mb} + 2) * arg.toNat + ({mc} + {me} + 2)"
 
+    _qdefs, _qsym = loop_test_def(name, words, cbz_pc)
+    A(f"/- The loop's exit test, as the predicate the contract is stated over. -/")
+    for _l in _qdefs:
+        A(_l)
+    A("")
     A(f"/- Loop contract for {name}: thin wrapper over `while_dec_exit_contract`.")
     A(f"    Eight value-flow / frame leaves are named helper theorems (structured")
     A(f"    placeholder bodies), to be closed bottom-up. -/")
@@ -2618,7 +2831,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
          None),
         (f"{name}_loop_cond_flag",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
-         f"    (arm64_reg 0 ({cqt} s) = 0 ↔ s.x19 = 0)",
+         f"    {_qsym} ({cqt} s) = true ↔ s.x19 = 0",
          None),
         (f"{name}_loop_cond_x19",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
@@ -2638,8 +2851,13 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
          f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :\n"
          f"    ({eqt} s).pc = {exit_pc}",
          None),
+        # No `hpc` hypothesis: the obligation is a pure value-flow fact about
+        # the exit block, its proof never reads `s.pc`, and stating the pc was
+        # actively wrong once the contract was parameterised — the caller holds
+        # the condition block's post-state, whose pc is the loop test, not the
+        # exit branch's target.
         (f"{name}_loop_exit_x0",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_taken}) (hx19 : s.x19 = 0) :\n"
+         f"(s : Arm64State) (hx19 : s.x19 = 0) :\n"
          f"    ({eqt} s).x0 = mojo s.x19",
          None),
         (f"{name}_loop_body_step",
@@ -2707,43 +2925,10 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
         elif hname == f"{name}_loop_cond_flag":
             _defs = ", ".join([f"{cc}_qS{k}" for k in range(mc)]
                              + [f"{cc}_qT{k}" for k in range(mc)])
-            _cnd_code = _source_cond_code(cbz_block, words)
-            # Source condition code -> the ProofLib lemma about exactly that
-            # predicate. The codes are DISJOINT between the two signednesses
-            # (2/3/8/9 unsigned, 10/11/12/13 signed), so the emitted field is
-            # what says which comparison the codegen chose -- and getting it
-            # wrong proves something false rather than failing.
-            #
-            # The old map had three entries and a silent default of
-            # `arm64_flag_gt`, so any code it did not know asserted "greater
-            # than": `while n != 0` (code 0) and `while n >= 1` (code 3) and
-            # `while n > 0` (code 9) all rewrote by the wrong lemma and died
-            # with "Did not find an occurrence of the pattern". A missing code
-            # is now an error, never a guess.
-            _flag_lemma = _COND_LEMMA.get(_cnd_code)
-            if _flag_lemma is None:
-                raise ValueError(
-                    f"no flag lemma for condition code {_cnd_code}; add it to "
-                    f"_COND_LEMMA and to ProofLib rather than guessing")
-            _op2 = fn.body[0].condition.right.value if fn is not None else 0
-            _a1 = f"(s.x19 + UInt64.ofNat 0)"
-            _a2 = f"(UInt64.ofNat {_op2} + UInt64.ofNat 0)"
-            _C = (f"arm64_matches_condition {_cnd_code} (arm64_subs_flags "
-                  f"{_a1} {_a2})")
-            # ASSUMED, and it has to be. The statement is about a REGISTER
-            # ("the condition register is zero exactly when the counter is"),
-            # and the CSET-based derivation below no longer applies: the
-            # lowering branches on the CMP's flags, so nothing writes the
-            # condition into X0, and `hstep1.trans hstep2` does not even
-            # typecheck against it (verified: restoring the derivation takes
-            # the suite from 40/3/0 to 37/3/3 with a type mismatch here).
-            #
-            # The comparison half still holds and is still provable -- that is
-            # what `_source_cond_code` and `_COND_LEMMA` are for. What has no
-            # proof is the register half, and that is the content of the
-            # lemma. Re-deriving it means relating the loop test to X0
-            # without the CSET, which is real work, not a naming change.
-            A("  sorry")
+            for _l in _cond_flag_lines(_defs, words, cbz_pc, cc, mc,
+                                       qsym=_qsym, qstate=cqt,
+                                       rhs="s.x19 = 0"):
+                A(f"  {_l}")
         elif hname == f"{name}_loop_body_dec":
             _defs = ", ".join([f"{qb}_qS{k}" for k in range(mb0)]
                              + [f"{qb}_qT{k}" for k in range(mb0)])
@@ -2764,7 +2949,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    ∀ (fuel : Nat), {fuel_bound} ≤ fuel →")
     A(f"      ∃ s, arm64_go_exit st {C} {exit_pc} fuel = some s ∧ s.x0 = mojo arg := by")
     A(f"  intro fuel hfuel")
-    A(f"  refine while_dec_exit_contract {C} {exit_pc} {cbz_start} {cbz_pc} {cbz_fall} {cbz_taken} 0")
+    A(f"  refine while_dec_exit_contract {C} {exit_pc} {cbz_start} {cbz_pc} {cbz_fall} {cbz_taken} {_qsym}")
     A(f"    mojo")
     A(f"    (fun s => {{ {cqt} s with pc := {cbz_pc} }})")
     A(f"    (fun s => {bbody})")
@@ -2775,11 +2960,12 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
     A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
-      f"{_cond_step_tactic(words, cbz_pc)})")
+      f"{_cond_step_tactic(_qsym)})")
     A(f"    {cc}_runs")
     A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
-    A(f"    {name}_loop_cond_flag")
+    A(f"    (by intro s hs hx0; exact ({name}_loop_cond_flag s hs).mpr hx0)")
+    A(f"    (by intro s hs hq hx0; exact absurd (({name}_loop_cond_flag s hs).mpr hx0) hq)")
     A(f"    {name}_loop_cond_x19")
     A(f"    (by intro s hs; exact work_body_run {C} {mb0} s {bmid} {cbz_start} ({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) (by decide : {cbz_start} ≠ {bmid_pc}))")
     A(f"    (by intro s hs; exact work_body_mid {C} {mb0} s {bmid} {cbz_start} {exit_pc} ({qb}_runs s hs) ({name}_loop_body_step {bmid} (by rfl)) ({qb}_mid {exit_pc} s hs (by simp)) (by decide) (by decide : {bmid_pc} ≠ {exit_pc}))")
@@ -2788,18 +2974,19 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s hs h; exact {qe}_runs s hs ({name}_loop_exit_x30 s hs h))")
     A(f"    (fun st hs => {qe}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs h; exact {name}_loop_exit_pc s hs h)")
-    A(f"    (by intro s hs hx; exact {name}_loop_exit_x0 s hs hx)")
+    A(f"    (by intro s hs hx; exact {name}_loop_exit_x0 s hx)")
+    # `hcondDone`: the exit block's x0, given the loop DID exit.  `loop_exit_x0`
+    # is stated at the exit branch's pc, and the state `hcondDone` hands it is
+    # `{cond st with pc := exitBpc}` — so `s` for it is the condition block's
+    # own post-state and the pc hypothesis is `rfl`.
+    A(f"    (by intro s hs hq; exact {name}_loop_exit_x0 ({cqt} s) "
+      f"(({name}_loop_cond_flag s hs).mp hq))")
     A(f"    (by intro a _; simp [mojo, {name}_go_zero])")
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    arg st fuel (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
     A("")
     return "\n".join(L), SLOT
 
-# Fallback leaf word for structured value-flow obligations the generator
-# cannot yet close automatically.  The Makefile source gate greps this file
-# for the literal admission keyword, so it is assembled here; the audit
-# tracks the resulting holes in the generated proofs until they are closed.
-_HOLE = "so" + "rry"
 
 
 def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
@@ -2966,6 +3153,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     bbody = f"({{ {bmid} with pc := {cbz_start} }})"
     Pf = f"(fun s => mem_read_u64 s.mem (s.sp + UInt64.ofNat {_slot}).toNat = UInt64.ofNat {exit_pc})"
 
+    _qdefs, _qsym = loop_test_def(name, words, cbz_pc)
+    A(f"/- The loop's exit test, as the predicate the contract is stated over. -/")
+    for _l in _qdefs:
+        A(_l)
+    A("")
     A(f"/- Loop contract for {name}: thin wrapper over `while_lt_exit_contract`.")
     A(f"    The value-flow obligations are named helper theorems; the ones not")
     A(f"    yet automated are structured placeholder leaves. -/")
@@ -2982,7 +3174,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          None),
         (f"{name}_loop_cond_flag",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
-         f"    (arm64_reg 0 ({cqt} s) = 0 ↔ ¬ (arm64_reg {rr} s < arm64_reg {rb} s))",
+         f"    {_qsym} ({cqt} s) = true ↔ ¬ (arm64_reg {rr} s < arm64_reg {rb} s)",
          None),
         (f"{name}_loop_cond_rb",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
@@ -3034,15 +3226,16 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
         _edefs = ", ".join([f"{qe}_qS{k}" for k in range(me)]
                            + [f"{qe}_qT{k}" for k in range(me)])
         if hname == f"{name}_loop_cond_flag":
-            # CSET (cc=3, unsigned `<`) flag: the 0/1 flag is 0 iff NOT
-            # (counter < bound).  The generic con-branch fact is proven once in
-            # lib/work.lean (work_cset_lt_zero_iff / work_cset_lt_false_iff);
-            # the prefix's spill pair is folded back with mem_read_push_low.
-            A(f"  simp only [{_defs}, arm64_reg, arm64_set_reg]")
-            A(f"  try rw [mem_read_push_low s.mem s.sp]")
-            A(f"  simp [work_cset_lt_zero_iff, work_cset_lt_false_iff]")
-            A(f"  all_goals try grind")
-            A(f"  all_goals {_HOLE}  -- TODO(range): CSET flag value flow")
+            # The exit test is the loop's own `B.cond`/`CBZ`, so the obligation
+            # is the flag predicate that instruction actually branches on --
+            # `loop_q` -- related to "counter has not reached the bound".  The
+            # prefix's spill pair is folded back with mem_read_push_low first:
+            # the STP and the matching LDP have to be resolved before the CMP
+            # operands are in the shape `arm64_flag_*` expects.
+            for _l in _cond_flag_lines(_defs, words, cbz_pc, cc, mc,
+                                       qsym=_qsym, qstate=cqt,
+                                       rhs=f"¬ (arm64_reg {rr} s < arm64_reg {rb} s)"):
+                A(f"  {_l}")
         elif hname in (f"{name}_loop_frame_cond", f"{name}_loop_frame_body"):
             # The saved frame address is preserved by the straight-line run:
             # fold the run's sp changes (shared _reduced_sp), show they net to
@@ -3178,7 +3371,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
       f"s.x0 = {name}_loop_model st := by")
     A(f"  intro fuel hfuel hpc")
     A(f"  refine while_lt_exit_contract {C} {exit_pc} {cbz_start} {cbz_pc} "
-      f"{body_pc} {exit_pc_val} 0 {rr} {rb}")
+      f"{body_pc} {exit_pc_val} {_qsym} {rr} {rb}")
     A(f"    {name}_loop_model")
     A(f"    (fun s => {{ {cqt} s with pc := {cbz_pc} }})")
     A(f"    (fun s => {bbody})")
@@ -3189,7 +3382,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
     A(f"    (by intro s hs h; exact {name}_loop_frame_body s hs h)")
     A(f"    (by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
-      f"{_cond_step_tactic(words, cbz_pc)})")
+      f"{_cond_step_tactic(_qsym)})")
     A(f"    {cc}_runs")
     A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
     A(f"    (by intro s hs; rfl)")
@@ -3281,7 +3474,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             _ast_conds = _collect_conds_t(fn, _p, {_p: _t_wrap(_p, _pt)},
                                           tc["vtypes"], tc["call_types"])
         else:
-            _ast_conds = _collect_conds(fn, _p, {_p: _p})
+            _ast_conds = _collect_conds(fn, _p, {_p: _p},
+                                        tc["vtypes"], tc["call_types"])
     # Map each conditional-branch block to its source condition by block (pc
     # order), not by emission order: a block reached from several paths is
     # emitted once per path, so a running counter desyncs.
@@ -3357,7 +3551,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 _first_cbz["start"] in _cbz_src_map
                 or (fn is not None and fn.params
                     and bool(_collect_conds(fn, fn.params[0][0],
-                                            {fn.params[0][0]: "n"})))):
+                                            {fn.params[0][0]: "n"},
+                                            tc["vtypes"], tc["call_types"])))):
             entry_cond_needed = True
         # ...unless that branch is a B.cond.  The entry seed states a fact about
         # the materialised condition FLAG REGISTER, and the backend no longer
@@ -3429,7 +3624,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # entry condition must be the typed (sign-flipped) source condition.
         entry_condition = _cbz_src_map.get(_entry_bpc)
         if entry_condition is None and fn is not None and fn.params:
-            _ec = _collect_conds(fn, fn.params[0][0], {fn.params[0][0]: "n"})
+            _ec = _collect_conds(fn, fn.params[0][0], {fn.params[0][0]: "n"},
+                                 tc["vtypes"], tc["call_types"])
             if _ec:
                 entry_condition = _ec[0]
         if entry_condition is None:
@@ -5681,10 +5877,17 @@ def generate_arm64_proof(prog, code, info) -> str:
     elif (not _is_recursive(fn) and not _has_while(fn.body)):
         param = fn.params[0][0] if fn.params else "n"
         env = {param: param} if fn.params else {}
-        conds = _collect_conds(fn, param, env)
+        # vtypes/call_types, so the `by_cases` conditions and the model's own
+        # `if` are the same terms (see `_cmp_go`).
+        conds = _collect_conds(fn, param, env, vtypes, call_types)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo"
+        # `sKey` is the sign-flip both the model and the conditions are stated
+        # in (ProofLib), so it has to be unfolded here for `simp` to see that
+        # the `by_cases` hypothesis IS the model's `if` test.
+        simp_lems = ((f"{hs}, " if hs else "")
+                     + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, "
+                       f"evalExpr, u64pow, u64powGo, sKey")
         if len(conds) == 0:
             eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
         else:

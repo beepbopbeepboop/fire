@@ -36,6 +36,74 @@ compared independently after the resource issue is understood. The earlier
 divergence investigation remains in
 `CODEGEN_noshim_dumpfull_preexisting_divergence.md`.
 
+## Status (2026-09-27 — the SIGTRAP is currently UNREACHABLE, and it is NOT the same root cause as the three expected failures)
+
+Fresh measurement, both from a `-O2` build of `fire.py`:
+
+```
+$ ./mojoc /tmp/tiny.mojo --dump          # a TWO-LINE program
+Segmentation fault: 11                    # exit 139
+```
+
+`mojoc` crashes on *any* input, including a two-line program, so the
+"large transitive dump SIGTRAPs" this document is about **cannot be
+reached at all right now** — the run dies in `_walk_ast` at
+`module_gen.py:860`, before any per-module work and long before the
+transitive closure is walked. The `bootstrap` bucket reflects this
+structurally: `bootstrap-stage2-dumps` is `expect=`-marked, and the four
+steps that depend on it (`bootstrap-stage2-transitive` through
+`bootstrap-verify`) are the gate's five "dependency did not pass" skips.
+
+### Are they the same root cause? No — and the distinction matters
+
+| | this doc's SIGTRAP | the three expected failures |
+|---|---|---|
+| exit | 133 (SIGTRAP) | 139 (SIGSEGV) |
+| when recorded | 2026-09-25, on that day's binary | current, reproduced today |
+| trigger | the LARGE transitive dump, path/state dependent | a TWO-LINE program |
+| reproducibility | intermittent; the same binary completed under a debugger | 100% |
+
+Different signal, different trigger, different reproducibility. A crash
+on every input is strictly *earlier* than a crash on one large input, so
+the current SIGSEGV masks this document's SIGTRAP rather than explaining
+it. **This document's own measurements are therefore not currently
+obtainable at all**, and none of them should be re-derived until the
+binary survives a two-line program.
+
+### What WAS established, and is the useful part of this entry
+
+The SIGSEGV that masks it is now root-caused to one runtime predicate and
+written up in full — three-link chain, lldb frames, measured faulting
+address, and the candidate one-place fix — in
+`CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s 2026-09-27 entry.
+Summary: `exprtypes.py:61`'s `_WALK_FIELD_NAMES_CACHE.get(type(node))`
+lowers to a dict lookup whose KEY is `mojo_cstr_or_int_str(tag)`, and
+`mojo_boxed_is_str`'s `v > 65536` threshold is far below the 2GiB
+boundary its neighbour `mojo_read_type_tag_safe` already refuses to
+dereference, so a 31-bit type tag is handed to `_str_hash` as a `char *`.
+
+That fix is deliberately NOT applied (the `expect=` anti-rot rule would
+turn three marked-for-failure steps into gate failures, and nothing
+behind the first AST walk is measured). It is a prerequisite for this
+document's work, not a substitute for it.
+
+### The next bounded action, unchanged and still correct
+
+Everything in "What to measure next" below still holds, and the order is
+still right — with one amendment. The first step is now **"make the
+binary survive a two-line program"**, not "bisect by commit":
+
+1. Apply the `mojo_boxed_is_str` 31-bit-tag-range guard, and treat the
+   resulting SELFHOST-CRASHED set as the real remaining work.
+2. Only then re-take this document's phase profile. Note that its
+   ~45 GB / ~32 min `make bootstrap` baseline is a **2026-09-25
+   measurement taken on a binary that ran**; it is not the current
+   machine's ceiling and not a pass/fail criterion anyone can check today.
+3. The memory growth itself is still unexplained, and the
+   flag-probe section's own conclusion stands: `-O1`/`-O2`/`-O3` barely
+   differed in footprint (93.7/93.7/95.6 GB), so compiler-binary
+   optimization is not the lever.
+
 ## Optimization hypotheses to evaluate
 
 1. Measure the current phase boundaries separately: Python reference generation,

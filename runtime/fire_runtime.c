@@ -2611,6 +2611,56 @@ char *mojo_c_getenv(char *name) {
     return getenv(name);
 }
 
+/* `os.environ` as a VALUE -- the bare mapping, not the per-key
+ * `os.environ.get(k)` / `os.environ[k]` / `k in os.environ` idioms, which
+ * ast_rewriter.py already lowers to `mojo_c_getenv`. Those rewrites are
+ * what the overwhelming majority of real code uses, and they work with no
+ * runtime object behind them at all; this exists for the value-position
+ * read that has no such lowering: `env_defaults | os.environ | updates`
+ * (Tools/wasm/wasi/__main__.py's `updated_env`) is a genuine `dict |`
+ * union and previously typed `os.environ` as an opaque `int64_t`, so the
+ * union call received an integer where it expected `MojoDict *` -- a hard
+ * `-Wint-conversion` error, and an honest refusal rather than a silent
+ * wrong answer.
+ *
+ * A PROCESS-WIDE SINGLETON, built once, mirroring `mojo_get_argv`: Python
+ * guarantees `os.environ is os.environ`, and a per-read fresh dict would
+ * break both that identity and any `os.environ['X'] = v` write-then-read
+ * in the same program. The strings are the C runtime's own `environ`
+ * slots (not copies) and the dict is never freed, both deliberate: a
+ * compiled program here has no interpreter shutdown, and the same
+ * "elements commonly still referenced" reasoning as
+ * `mojo_replace_argv` applies.
+ *
+ * SCOPE, stated honestly: a `d[k] = v` / `del d[k]` through this dict
+ * mutates the mapping but does NOT call `putenv`/`unsetenv`, so a later
+ * `getenv()` in C, or a child process, does not see it. Only
+ * `os.environ` reads are faithful. `environ` is declared `extern` here
+ * rather than via `environ()` because this runtime targets POSIX
+ * (see mojo_platform_system), and the NULL-vs-empty distinction does not
+ * matter: an empty environment and an unset `environ` both yield an empty
+ * mapping, which is what Python reports for `dict(os.environ)`. */
+extern char **environ;
+static MojoDict *_mojo_environ_dict = NULL;
+
+MojoDict *mojo_environ_dict(void) {
+    if (_mojo_environ_dict) return _mojo_environ_dict;
+    _mojo_environ_dict = mojo_dict_new();
+    if (environ) {
+        for (char **e = environ; *e; e++) {
+            char *eq = strchr(*e, '=');
+            /* A malformed entry with no '=' has no key to split on; Python's
+             * own os.environ decoding skips it too (posix puts it in
+             * os.environb only as an undecodable-name entry). */
+            if (!eq) continue;
+            *eq = '\0';
+            mojo_dict_set_str(_mojo_environ_dict, *e, eq + 1);
+            *eq = '=';
+        }
+    }
+    return _mojo_environ_dict;
+}
+
 /* Python str truthiness: "" is falsy, NULL is falsy, anything else truthy.
  * Used by _ensure_bool_cond so `if some_char_star:` matches Python semantics
  * (a pointer-nullity check alone treats a non-null empty string as truthy). */

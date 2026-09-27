@@ -31,6 +31,7 @@ gimple_cpp_* C++20-coroutine path -- incremental cutover.
 """
 from __future__ import annotations
 import copy
+import dataclasses
 
 import os
 
@@ -64,6 +65,7 @@ def _cm_as_str(x) -> str:
 # duplicates" convention.
 from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call
 import mojo.middle.types as gimple_ctypes
+import mojo.middle.exprtypes as gimple_exprtypes
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
 _OLD_MODE = 'cpp'
@@ -736,14 +738,20 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     # is an opaque, never-read int64_t placeholder slot -- the same ABI
     # the cpp path used and the call-site machinery in
     # gimple_gen_methods.py already resolves, both for `Cls.gen(...)` and
-    # `cls.gen(...)`). Any other decorator, or a @classmethod on a plain
+    # `cls.gen(...)`). A @staticmethod generator METHOD is accepted for the
+    # mirror-image reason: it has NO receiver slot at all, so there is
+    # nothing about it this backend cannot already express, and `_lower_one`
+    # reads the same `N.method_receiver_kind` verdict to leave the leading
+    # parameter alone. Any other decorator, or either of these on a plain
     # (non-method) generator, still falls through.
     if _decos:
-        if struct_name is not None and _decos == ['classmethod']:
+        if struct_name is not None and _decos in (['classmethod'], ['staticmethod']):
             if any(isinstance(n, (N.IdentExpr, N.MemberExpr))
                    and getattr(n, 'name', None) == 'cls'
                    for n in _walk(fn)):
-                return False, 'classmethod generator body references `cls` (v0)'
+                return False, ('classmethod generator body references `cls` (v0)'
+                               if _decos == ['classmethod'] else
+                               'a @staticmethod generator has no `cls` to reference')
         else:
             return False, 'decorated'
     if not _yield_from_ok(fn):
@@ -754,12 +762,23 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'calls the result of a @property getter (v0)'
     params = fn.params
     _is_cm = False
+    _is_static = False
     if struct_name is not None:
-        _is_cm = _decos == ['classmethod']
-        _want = 'cls' if _is_cm else 'self'
-        if not params or params[0][0] != _want:
-            return False, f'generator method without a plain `{_want}` first param (v0)'
-        params = params[1:]   # self/cls is handled by the codegen
+        # `N.method_receiver_kind` is the single rule, shared with the cpp
+        # emitter and the api-entry registration: decorator first, first
+        # parameter's name second. A @staticmethod has NO receiver, so its
+        # first parameter is a real one and must NOT be stripped — the old
+        # `params[0][0] != 'self'` test refused every staticmethod generator
+        # method outright.
+        _rcv = N.method_receiver_kind(fn)
+        _is_cm = (_rcv == 'cls')
+        _is_static = (_rcv == '' and bool(_decos)
+                      and 'staticmethod' in [d for d in _decos])
+        if not _is_static:
+            if not params or params[0][0] != ('cls' if _is_cm else 'self'):
+                return False, (f'generator method without a plain '
+                               f'{"cls" if _is_cm else "self"} first param (v0)')
+            params = params[1:]   # self/cls is handled by the codegen
     if _is_cm:
         # The newly-accepted @classmethod path is deliberately narrower
         # than the long-standing `self`/free-function one: a `str`/`String`
@@ -882,6 +901,18 @@ _TASK_VARS: set = set()
 # be recognised as an async-method await (constructed via the struct's own
 # __mgco_<Struct>_<name>_start, driven by the generic await drive loop).
 _ASYNC_METHOD_NAMES: set = set()
+
+# Bare names of top-level `async def` functions in the module currently being
+# lowered that PASSED async (or async-generator) eligibility -- populated
+# fresh at the top of each lower() call, from the same `_eligible_async*`
+# verdicts that decide whether the function is lowered at all. This is the
+# static evidence `_scan_handle_vars` uses to know that `var c = f(...)`
+# binds a real coroutine handle: only a function this module actually
+# compiled has a `__mgco_<name>_start` for the ordinary call path to reach,
+# so a name bound from any other call is not a handle. Deliberately
+# same-module only -- a cross-module `async def` callee is not visible to
+# this pass, so a var bound from one is still refused rather than guessed.
+_ASYNC_FN_NAMES: set = set()
 
 # Names of every StructDef in the module currently being lowered --
 # populated fresh at the top of each lower() call. Lets a struct-typed
@@ -1137,7 +1168,13 @@ def _await_stmt_ok(s, task_vars: set) -> bool:
 
 def _scan_task_vars(fn: N.FunctionDef) -> set:
     """Local vars this function's own body binds from `create_task`/
-    `create_raising_task` -- the only handles `await <var>^` may target."""
+    `create_raising_task` -- the only handles `await <var>^` may target.
+
+    The `isinstance(s.target, ...)` half of the name extraction used to test
+    the STATEMENT instead, so a bare `task = create_task(f())` with no `var`
+    keyword never registered and `<task>.wait()` was refused for a shape it
+    supports. Same one-token class as the identical line in
+    `_scan_handle_vars`; both fixed together."""
     tv = set()
     for s in _walk(fn):
         if (isinstance(s, (N.AssignStmt, N.VarDecl))
@@ -1147,6 +1184,334 @@ def _scan_task_vars(fn: N.FunctionDef) -> set:
             if name:
                 tv.add(name)
     return tv
+
+
+def _scan_handle_vars(fn: N.FunctionDef, coro_names: set) -> set:
+    """Local vars this function's own body binds to a LIVE coroutine handle:
+    from `create_task(...)`/`create_raising_task(...)`, or from a bare call to
+    a supported compiled `async def` in the SAME module (`var c = work(5)`).
+
+    That second form is what `asyncio.run(c)` needs: the call is already
+    lowered to `__mgco_<name>_start(...)` by the ordinary call path (it is
+    registered in `_async_api`), so `c` genuinely holds a handle by the time
+    the `asyncio.run` statement is reached — the static evidence needed is
+    just that this function binds the name from such a call, which is exactly
+    what this pre-scan establishes. A name bound from anything else (a
+    literal, a parameter, an arbitrary expression, a call to a function that
+    is NOT in `coro_names`) is deliberately NOT here: driving a non-handle is
+    a reinterpret-cast of an arbitrary int64_t as `MojoGen *`, which is the
+    silent miscompile the existing non-call refusal exists to prevent.
+
+    Kept separate from `_scan_task_vars` on purpose: `.wait()` on a var bound
+    from `create_task` is the supported shape, and `.wait()` on a plain
+    coroutine handle is not a thing in either Python or this codegen, so
+    widening that set here would not be an improvement.
+    """
+    hv = set()
+    for s in _walk(fn):
+        val = getattr(s, 'value', None)
+        if not isinstance(s, (N.AssignStmt, N.VarDecl)) or not isinstance(val, N.CallExpr):
+            continue
+        if not (_is_create_task_call(val)
+                or (isinstance(val.func, N.IdentExpr) and val.func.name in coro_names)):
+            continue
+        # `isinstance(s.target, ...)` -- testing the STATEMENT was the bug:
+        # a bare `c = work(5)` (no `var`) is an AssignStmt, so the check
+        # never held and the name was dropped, refusing exactly the shape
+        # this function exists to accept.
+        name = s.name if isinstance(s, N.VarDecl) else (
+            s.target.name if isinstance(s.target, N.IdentExpr) else None)
+        if name:
+            hv.add(name)
+    return hv
+
+
+
+# ── `await` nested inside a call's argument list ────────────────────────────
+# Shared by BOTH coroutine backends (the A3 stack-switch pass below and the
+# C++20-coroutine emitter in mojo/backend_gimple/cpp_async.py, which imports
+# these from here). Both are STATEMENT emitters -- neither can suspend from
+# the middle of a C expression -- so an `await` in argument position has to
+# be hoisted into its own statement before either can lower the function.
+
+
+def _has_call_outside(node, keep_ids) -> bool:
+    """True iff a `CallExpr` appears anywhere under `node` whose id is not
+    in `keep_ids`."""
+    for n in gimple_exprtypes._walk_ast(node):
+        if id(n) in keep_ids:
+            continue
+        if isinstance(n, gimple_ctypes.CallExpr):
+            return True
+    return False
+
+
+def _is_simple_await_target(expr) -> bool:
+    """True for the awaited expressions this hoist is willing to move: a
+    call, a bare name, or an attribute chain over those. Anything else
+    could have an evaluation order of its own inside it."""
+    if isinstance(expr, (gimple_ctypes.CallExpr, gimple_ctypes.IdentExpr)):
+        return True
+    if isinstance(expr, gimple_ctypes.MemberExpr):
+        return isinstance(expr.obj, (gimple_ctypes.IdentExpr,
+                                     gimple_ctypes.MemberExpr))
+    return False
+
+
+def _sole_await_arg(call):
+    """The single `AwaitExpr` among `call`'s argument VALUES when the await
+    is the call's SOLE argument (positional or keyword), else None. Two
+    arguments where one is an await is deliberately not matched: hoisting
+    the second would jump it ahead of the first's evaluation."""
+    _found = [a for a in call.args if isinstance(a, gimple_ctypes.AwaitExpr)]
+    if call.args and len(call.args) != 1:
+        return None
+    for _kn, kv in (getattr(call, 'kwargs', None) or []):
+        if isinstance(kv, gimple_ctypes.AwaitExpr):
+            _found.append(kv)
+    return _found[0] if len(_found) == 1 else None
+
+
+def _copy_call_with_replaced_arg(call, aw, tmp):
+    """A shallow copy of `call` with the sole `AwaitExpr` argument `aw`
+    replaced by `IdentExpr(tmp)`. Copies rather than mutates so anything
+    still holding a reference to the original is unaffected; every node
+    here is a plain dataclass, so a field-wise copy is exact."""
+    import copy
+    new = copy.copy(call)
+    repl = gimple_ctypes.IdentExpr(name=tmp)
+    new.args = [repl if a is aw else a for a in call.args]
+    new.kwargs = [(_kn, repl if kv is aw else kv)
+                  for _kn, kv in (getattr(call, 'kwargs', None) or [])]
+    return new
+
+
+# Monotonic counter behind the `await_tmp_<n>` temporaries this file's hoist
+# introduces (see `_hoist_awaits_from_call_args`'s docstring — including why
+# the name must NOT carry a leading underscore). Module level, like this
+# module's other compile-time rewrite state (`_AW_COUNTER` / `_CVAR` /
+# `_TASK_VARS`), because `_hoist_stmt` — the recursive per-statement worker
+# — needs it too; reset at the start of every top-level call, so the names
+# are deterministic per function body.
+_AWAIT_TMP = [0]
+
+
+def _hoist_awaits_from_call_args(body: list) -> list:
+    """Hoist an `await` out of a CALL'S ARGUMENT LIST into a preceding
+    assignment, so the compiled coroutine emitter only ever sees an
+    `await` in statement position.
+
+        out.append(await step1(i))      #  ->  await_tmp_1 = await step1(i)
+                                       #      out.append(await_tmp_1)
+
+    A narrow, DOCUMENTED source-level simplification in the same family as
+    `_inline_single_use_task_composition` (which inlines a single-use
+    `create_task(f(...))` into `await f(...)`). Both exist because this
+    codegen's coroutine body model is a STATEMENT emitter with no way to
+    suspend from the middle of a C++ expression.
+
+    An `await` in argument position was refused outright, at any nesting
+    depth, which made a very ordinary async accumulation loop
+    uncompilable: `for i in range(3): results.append(await fetch(i))`.
+    Splitting the statement by hand (`v = await fetch(i);
+    results.append(v)`) compiled fine, so the gap is purely the nesting
+    and not the loop, the method call, or the container.
+
+    **Only provably order-preserving cases are rewritten.** Hoisting moves
+    the awaited expression to BEFORE the rest of its statement, so it is
+    safe exactly when nothing else in that statement has an evaluation
+    order the move could disturb. Three conditions encode that:
+
+    1. the `await` is the SOLE argument of its immediate enclosing call
+       (`_sole_await_arg`) — no earlier sibling argument to jump ahead of;
+    2. **condition 1's enclosing call is the only `CallExpr` anywhere in
+       the whole top-level statement** — no later sibling call either.
+       Since the awaited sub-expression's own callee is a call, this is
+       also what guarantees nothing else inside the statement is a call;
+    3. the awaited expression is a call, a bare name, or an attribute
+       chain over those (`_is_simple_await_target`) — nothing else inside
+       it can have an order of its own.
+
+    A statement matching all three is replaced by the `await` assignment
+    followed by the rewritten statement. Anything else is left
+    COMPLETELY untouched, and the un-hoisted `await` then fails the
+    ordinary eligibility check, so the function falls back to the honest
+    whole-module refusal exactly like any other not-yet-supported shape.
+    This is never a silent-miscompilation risk: either the
+    provably-equivalent shape is detected and hoisted, or nothing changes
+    at all.
+
+    Multiple awaits in one statement are hoisted LEFT TO RIGHT into
+    `_t0, _t1, ...`, which is their Python evaluation order, and the
+    assignments are emitted in that order ahead of the statement.
+
+    Idempotent: after a pass no `AwaitExpr` remains inside any call
+    argument, so a second call finds nothing and is a no-op.
+
+    The temporaries are named `await_tmp_<n>` from a per-call counter.
+
+    **Plainly, with no leading underscore, and that is load-bearing.**
+    This started out as `__await_tmp_<n>`, matching this module's other
+    private-name convention (`_AW_COUNTER`, `_CVAR`, `_TASK_VARS`), and
+    the A3 stack-switch backend silently produced
+    `/* ct param or undeclared: __await_tmp_1 */` — a constant 0 read
+    instead of the awaited value. A name with a leading double underscore
+    is not resolvable as a local there; `await_tmp_1` (and every other
+    plain-identifier spelling tried) is. The failure was SILENT: the
+    program compiled, linked and ran, and printed 0 where the awaited
+    value belonged.
+
+    The name is deliberately NOT added to any scope table, because the
+    emitter only ever sees the rewritten statement, and the counter makes
+    it unique within the function body, so it cannot shadow or collide
+    with a user identifier.
+    """
+    global _AWAIT_TMP
+    _AWAIT_TMP = [0]
+    result = []
+    for st in body:
+        result.extend(_hoist_stmt(st))
+    return result
+
+
+def _hoist_stmt(st):
+    """Hoist within one top-level statement's own `.value`, then recurse
+    into every nested block it owns. Returns a LIST because a hoisted
+    `await` becomes statements of its own, which must precede `st`.
+
+    Recursion covers exactly the statement kinds that own a body list --
+    `if`/`elif`/`else`, `for`/`while` (+ `else`), `with`, `try`
+    (`body`/`handlers`/`else`/`finally`) -- because an `await` nested in a
+    call argument can sit at any depth, and `async def` bodies put
+    suspension points inside loops constantly
+    (`for i in range(n): results.append(await fetch(i))` is the shape this
+    exists for). A nested `FunctionDef` is NOT descended into: it is
+    lowered by its own pass, which applies this same transform to its own
+    body."""
+    # Nested blocks this statement owns, as `(owner, attr, index)` triples
+    # with `index = -1` for a plain attribute. A descriptor list rather
+    # than a list of lambdas or a (getter, setter) table: this function is
+    # compiled BY this compiler during self-host, where a nested closure
+    # inside a nested closure does not link ("undefined symbol
+    # __hoist_stmt__blocks_lambda_N"). The `elifs` arms need an index
+    # because `elifs` is a list of `(condition, body)` PAIRS rather than
+    # of statement objects.
+    def _blocks(node):
+        _out = []
+        if isinstance(node, gimple_ctypes.IfStmt):
+            _out.append((node, 'then_body', -1))
+            for _i in range(len(getattr(node, 'elifs', None) or [])):
+                _out.append((node, 'elifs', _i))
+            if node.else_body:
+                _out.append((node, 'else_body', -1))
+        elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
+            _out.append((node, 'body', -1))
+            if getattr(node, 'else_body', None):
+                _out.append((node, 'else_body', -1))
+        elif isinstance(node, gimple_ctypes.WithStmt):
+            _out.append((node, 'body', -1))
+        elif isinstance(node, gimple_ctypes.TryStmt):
+            _out.append((node, 'body', -1))
+            for _i in range(len(getattr(node, 'handlers', None) or [])):
+                _h = (getattr(node, 'handlers', None) or [])[_i]
+                # Guard on the shape: `handlers` is normally a list of
+                # handler objects, but this module is defensive elsewhere
+                # about a differently-shaped element reaching it, and a
+                # `setattr` on a tuple would raise deep inside an
+                # unrelated file's compile.
+                if dataclasses.is_dataclass(_h) and hasattr(_h, 'body'):
+                    _out.append((_h, 'body', -1))
+            if getattr(node, 'else_body', None):
+                _out.append((node, 'else_body', -1))
+            if getattr(node, 'finally_body', None):
+                _out.append((node, 'finally_body', -1))
+        return _out
+
+    def _rewrite_elif(if_stmt, idx, pair):
+        if not (isinstance(pair, tuple) and len(pair) == 2):
+            return
+        _cur = list(getattr(if_stmt, 'elifs', None) or [])
+        if idx >= len(_cur):
+            return
+        _cur[idx] = (pair[0], _hoist_all(pair[1]))
+        if_stmt.elifs = _cur
+
+    def _hoist_all(stmts):
+        _new = []
+        for _el in (stmts or []):
+            if dataclasses.is_dataclass(_el):
+                _new.extend(_hoist_stmt(_el))
+            else:
+                _new.append(_el)
+        return _new
+
+    pre = []
+    root = getattr(st, 'value', None)
+    if isinstance(root, gimple_ctypes.CallExpr):
+        _awaits = [n for n in gimple_exprtypes._walk_ast(root)
+                   if isinstance(n, gimple_ctypes.AwaitExpr)]
+        if not _awaits:
+            pass
+        # Per-await admissibility, decided against the WHOLE statement.
+        _plan = []
+        for aw in _awaits:
+            _parent = None
+            for n in gimple_exprtypes._walk_ast(root):
+                if not isinstance(n, gimple_ctypes.CallExpr):
+                    continue
+                if aw in (n.args or []) or any(
+                        kv is aw for _kn, kv in (getattr(n, 'kwargs', None) or [])):
+                    _parent = n
+                    break
+            if _parent is None:
+                continue
+            if _sole_await_arg(_parent) is not aw:
+                continue
+            if not _is_simple_await_target(aw.value):
+                continue
+            _inner = {id(x) for x in gimple_exprtypes._walk_ast(aw.value)}
+            _inner.add(id(aw))
+            if _has_call_outside(root, _inner | {id(_parent)}):
+                continue
+            _plan.append((aw, _parent))
+        if _plan:
+            _plan.sort(key=lambda _p: _awaits.index(_p[0]))
+            for aw, _parent in _plan:
+                _AWAIT_TMP[0] += 1
+                _tmp = f"await_tmp_{_AWAIT_TMP[0]}"
+                pre.append(gimple_ctypes.VarDecl(
+                    name=_tmp, type_ann=None,
+                    value=gimple_ctypes.AwaitExpr(value=aw.value)))
+                st.value = _copy_call_with_replaced_arg(st.value, aw, _tmp)
+    # Recurse into every block this statement owns. Done AFTER the
+    # statement's own `.value` so the hoisted temporaries (which are
+    # plain VarDecls in the SAME block) are not themselves rescanned.
+    for _owner, _attr, _idx in _blocks(st):
+        if _attr == 'elifs':
+            _cur_arms = list(getattr(_owner, 'elifs', None) or [])
+            if _idx < len(_cur_arms):
+                _rewrite_elif(_owner, _idx, _cur_arms[_idx])
+            continue
+        setattr(_owner, _attr, _hoist_all(getattr(_owner, _attr, None)))
+    return pre + [st]
+
+
+def hoist_awaits_from_call_args(fn: N.FunctionDef) -> None:
+    """Apply `_hoist_awaits_from_call_args` to `fn`'s own top-level body
+    and write the result BACK onto `fn.body`, in place. Called by both
+    backends' eligibility decisions before they judge or lower the body
+    (see that function's docstring for what it rewrites and why only
+    provably order-preserving cases qualify).
+
+    The write-back is load-bearing: a hoisted `await` becomes an EXTRA
+    statement, so the transform returns a longer list. Discarding it (an
+    earlier version of this function called the transform and dropped the
+    return) still rewrote each statement's own `.value` in place, so the
+    body ended up reading a temporary that was never declared -- the A3
+    backend emitted `/* ct param or undeclared: await_tmp_1 */`, i.e. a
+    constant 0, and the SUSPENSION POINT VANISHED with it. The program
+    compiled, linked, ran, and printed the wrong answer."""
+    fn.body = _hoist_awaits_from_call_args(fn.body)
 
 
 def _async_awaits_ok(fn: N.FunctionDef) -> bool:
@@ -1239,6 +1604,18 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False,
             return False, f'param {pname!r} type {pann!r} (v0 scalar / struct only)'
     if getattr(fn, 'kwonly', None):
         return False, 'kwonly params (v0)'
+    # NORMALIZE, then judge. `_async_awaits_ok` below only accepts an
+    # `AwaitExpr` in STATEMENT position, so an `await` nested inside a
+    # call's argument list would otherwise make the function ineligible
+    # even though the hoist can rewrite it into exactly that shape. The
+    # transform is idempotent and provably equivalent, so running it from
+    # inside this decision function is safe even for the speculative
+    # `_eligible_async(...)[0]` filter call sites; and doing it HERE, in
+    # the single shared eligibility chokepoint, is what guarantees the
+    # C++20-coroutine backend (cpp_async.py, which imports this function)
+    # gets the same normalization rather than re-implementing or missing
+    # it.
+    hoist_awaits_from_call_args(fn)
     if not _async_awaits_ok(fn):
         return False, 'await in an unhandled shape (v0)'
     if not _async_for_ok(fn):
@@ -1711,7 +2088,8 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     return body_fd
 
 
-def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict | None = None):
+def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict | None = None,
+                         handle_vars=None):
     """Whole-module expression rewrite for the three ways ordinary code
     drives a compiled coroutine to completion and blocks for its result:
       - `asyncio.run(f(...))`
@@ -1748,12 +2126,14 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             # dispatch entirely (two different enclosing functions may
             # each have their own same-named nested helper) and call its
             # qualified _start directly.
-            args = [_rewrite_asyncio_run(a, cvar, task_vars, local_map)[0] for a in inner.args]
+            args = [_rewrite_asyncio_run(a, cvar, task_vars, local_map, handle_vars)[0]
+                     for a in inner.args]
             return _call(f'{local_map[inner.func.name]}_start', args), []
-        return _rewrite_asyncio_run(inner, cvar, task_vars, local_map)
+        return _rewrite_asyncio_run(inner, cvar, task_vars, local_map, handle_vars)
     if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) \
             and node.func.name in local_map:
-        args = [_rewrite_asyncio_run(a, cvar, task_vars, local_map)[0] for a in node.args]
+        args = [_rewrite_asyncio_run(a, cvar, task_vars, local_map, handle_vars)[0]
+                 for a in node.args]
         return _call(f'{local_map[node.func.name]}_start', args), []
     pre = []
     for k, v in list(vars(node).items()):
@@ -1763,14 +2143,14 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             newv = []
             for x in v:
                 if hasattr(x, '__dict__'):
-                    nx, npre = _rewrite_asyncio_run(x, cvar, task_vars, local_map)
+                    nx, npre = _rewrite_asyncio_run(x, cvar, task_vars, local_map, handle_vars)
                     pre.extend(npre)
                     newv.append(nx)
                 else:
                     newv.append(x)
             setattr(node, k, newv)
         elif hasattr(v, '__dict__'):
-            nv, npre = _rewrite_asyncio_run(v, cvar, task_vars, local_map)
+            nv, npre = _rewrite_asyncio_run(v, cvar, task_vars, local_map, handle_vars)
             pre.extend(npre)
             setattr(node, k, nv)
     if _is_asyncio_run_call(node) or _is_task_wait_call(node, task_vars):
@@ -1778,28 +2158,51 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
         h = f'__arun{_AW_COUNTER[0]}'
         rv = f'__arunv{_AW_COUNTER[0]}'
         if _is_asyncio_run_call(node):
-            # `asyncio.run(...)` only has a defined meaning for a BARE CALL
-            # to a supported compiled async function -- anything else (a
-            # plain variable, a literal, an arbitrary expression) has no
-            # generator/coroutine handle to drive. Without this check, a
-            # non-call argument passed straight through the generic
-            # recursive rewrite below unchanged, and got wrapped as if it
-            # WERE a real handle (`__arun1 = x; __mojo_async_run_gen
-            # (__arun1);`) -- a genuine silent miscompile (the raw int/
-            # whatever value reinterpreted as a `MojoGenerator *` at
-            # runtime), not merely a test-expectation mismatch. Refuse
-            # honestly instead, matching every other unsupported shape in
-            # this file's own "cannot compile module" convention.
-            if not isinstance(node.args[0], N.CallExpr):
+            # `asyncio.run(...)` has a defined meaning only for something
+            # that really is a coroutine handle. Two forms qualify:
+            #
+            #   * a BARE CALL to a supported compiled async function -- the
+            #     call is left in place and its result temp becomes the
+            #     handle; and
+            #   * a bare NAME this function's own body binds from such a call
+            #     (`var c = work(5); asyncio.run(c)`), which is already a
+            #     live handle by the time the statement is reached. The
+            #     binding is established by `_scan_handle_vars` (create_task
+            #     OR a call to a name in `_ASYNC_FN_NAMES`), threaded here as
+            #     `handle_vars`; the runtime half of the same contract is
+            #     `__mojo_async_run_gen`'s handle check, which raises the
+            #     Python-faithful ValueError instead of reinterpreting an
+            #     arbitrary int64_t as a `MojoGen *`.
+            #
+            # Anything else (a literal, a parameter, an arbitrary expression)
+            # is still refused, because wrapping it as if it WERE a handle is
+            # a genuine silent miscompile -- the raw int/whatever value
+            # reinterpreted as a `MojoGenerator *` at runtime, not merely a
+            # test-expectation mismatch. That refusal is honest, matching
+            # every other unsupported shape in this file's own "cannot
+            # compile module" convention.
+            _arg = node.args[0]
+            if isinstance(_arg, N.CallExpr):
+                call_expr, cpre = _rewrite_asyncio_run(_arg, cvar, task_vars, local_map,
+                                                       handle_vars)
+                pre.extend(cpre)
+                pre.append(N.VarDecl(name=h, type_ann=None, value=call_expr))
+                pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
+            elif isinstance(_arg, N.IdentExpr) and _arg.name in (handle_vars or ()):
+                # The name IS the handle: no `_start` call to emit, so
+                # introduce the temp the way the `.wait()` branch below does
+                # (reuse the already-live var rather than a redundant copy's
+                # worth of a second binding).
+                pre.append(N.VarDecl(name=h, type_ann=None, value=_c_ident(_arg.name)))
+                pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
+            else:
                 raise RuntimeError(
-                    "cannot compile module: asyncio.run(...) requires a "
-                    "bare call to a supported compiled async function as "
-                    "its argument -- got a non-call expression, which has "
-                    "no coroutine handle to drive")
-            call_expr, cpre = _rewrite_asyncio_run(node.args[0], cvar, task_vars, local_map)
-            pre.extend(cpre)
-            pre.append(N.VarDecl(name=h, type_ann=None, value=call_expr))
-            pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
+                    "cannot compile module: asyncio.run(...) requires either "
+                    "a bare call to a supported compiled async function, or a "
+                    "name this function binds from such a call, as its "
+                    "argument -- got a non-call expression that is not a "
+                    "known coroutine handle, and driving it would reinterpret "
+                    "an arbitrary value as a coroutine handle")
         else:
             # `<task>.wait()` -- task_expr is already a live handle (the
             # var create_task's passthrough left it bound to); reuse it
@@ -1814,14 +2217,21 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
 
 
 def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | None = None,
-                               local_map: dict | None = None, local_maps: dict | None = None) -> list:
+                               local_map: dict | None = None, local_maps: dict | None = None,
+                               handle_vars: set | None = None) -> list:
     lmaps = local_maps or {}
     lm = local_map or {}
+    hv = handle_vars or set()
     out = []
     for s in stmts:
         if isinstance(s, N.FunctionDef):
             fn_ordinary = not getattr(s, 'is_generator', False) and not getattr(s, 'is_async', False)
             fn_task_vars = _scan_task_vars(s) if fn_ordinary else set()
+            # The WIDER set `asyncio.run(<var>)` accepts: task vars PLUS vars
+            # this body binds from a bare call to a supported compiled async
+            # function (`var c = work(5)`). See _scan_handle_vars.
+            fn_handle_vars = (frozenset(fn_task_vars) | _scan_handle_vars(s, _ASYNC_FN_NAMES)) \
+                if fn_ordinary else frozenset()
             # Merge the ENCLOSING scope's already-active local_map (`lm`)
             # under this function's own entry, rather than discarding it --
             # a hoisted nested async def (`inc`) defined in one function is
@@ -1831,7 +2241,8 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             # qualified-`{base}_start` rename. Matches real Python lexical
             # scoping (an inner def sees every enclosing scope's bindings).
             fn_lm = {**lm, **lmaps.get(s.name, {})} if fn_ordinary else {}
-            s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars, fn_lm, lmaps)
+            s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars, fn_lm,
+                                                  lmaps, fn_handle_vars)
             out.append(s)
             continue
         tv = task_vars or set()
@@ -1844,7 +2255,7 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             # bypassed that and let a bare `wrapper()` fall through to the
             # global _generator_api dispatch instead, which collides
             # across scopes for same-named nested helpers.)
-            new_val, pre = _rewrite_asyncio_run(s.value, cvar, tv, lm)
+            new_val, pre = _rewrite_asyncio_run(s.value, cvar, tv, lm, handle_vars=hv)
             out.extend(pre)
             if isinstance(s, N.VarDecl):
                 out.append(N.VarDecl(name=s.name, type_ann=None, value=new_val))
@@ -1866,19 +2277,19 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             if k in ('line', 'col'):
                 continue
             if isinstance(v, list) and v and _looks_like_stmt_list(v):
-                setattr(s, k, _rewrite_asyncio_run_stmts(v, cvar, tv, lm, lmaps))
+                setattr(s, k, _rewrite_asyncio_run_stmts(v, cvar, tv, lm, lmaps, hv))
             elif isinstance(v, list):
                 newv = []
                 for x in v:
                     if hasattr(x, '__dict__'):
-                        nx, pre = _rewrite_asyncio_run(x, cvar, tv, lm)
+                        nx, pre = _rewrite_asyncio_run(x, cvar, tv, lm, handle_vars=hv)
                         out.extend(pre)
                         newv.append(nx)
                     else:
                         newv.append(x)
                 setattr(s, k, newv)
             elif hasattr(v, '__dict__'):
-                nv, pre = _rewrite_asyncio_run(v, cvar, tv, lm)
+                nv, pre = _rewrite_asyncio_run(v, cvar, tv, lm, handle_vars=hv)
                 out.extend(pre)
                 setattr(s, k, nv)
         out.append(s)
@@ -2072,6 +2483,7 @@ _STMT_TYPES = tuple(
         'ReturnStmt', 'RaiseStmt', 'BreakStmt', 'ContinueStmt', 'PassStmt',
         'AssertStmt', 'IfStmt', 'WhileStmt', 'ForStmt', 'WithStmt', 'TryStmt',
         'MatchStmt', 'FunctionDef', 'ImportStmt', 'FromImportStmt', 'GlobalStmt',
+        'NonlocalStmt',
         'DelStmt', 'StructDef',
     ) if hasattr(N, nm)
 )
@@ -2207,6 +2619,7 @@ def lower(stmts: list) -> tuple[list, list]:
         return stmts, []
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
+    _ASYNC_FN_NAMES.clear()
     _STRUCT_NAMES.clear()
     _BOX_STRUCT_OF.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
@@ -2261,11 +2674,13 @@ def lower(stmts: list) -> tuple[list, list]:
                 and any(isinstance(n, N.YieldExpr) for n in _walk(s)):
             ok, _why = _eligible_async_gen(s)
             if ok:
+                _ASYNC_FN_NAMES.add(_cm_as_str(s.name))
                 out.append(_lower_one_async_gen(s, meta))
                 continue
         elif isinstance(s, N.FunctionDef) and getattr(s, 'is_async', False):
             ok, _why = _eligible_async(s)
             if ok:
+                _ASYNC_FN_NAMES.add(_cm_as_str(s.name))
                 out.append(_lower_one_async(s, meta))
                 continue
         if isinstance(s, N.StructDef):
@@ -2986,8 +3401,17 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     # -- but the trampoline / body have NO `{Struct} *` param, so for
     # emit_c/body purposes this behaves like a free-function generator
     # with one extra leading (ignored) int64_t arg slot.
-    is_classmethod = is_method and (getattr(fn, 'decorators', None) or []) == ['classmethod']
-    has_self = is_method and not is_classmethod
+    #
+    # A @staticmethod generator method is receiver-less on BOTH counts: no
+    # placeholder slot and, crucially, NO leading parameter to strip. It used
+    # to be classified as an instance method here (only classmethod was
+    # special-cased), so `_lower_one` declared a `{Struct} *` self the caller
+    # never passed AND dropped the method's first REAL parameter from
+    # `real_params` -- every staticmethod generator method was miscompiled.
+    # `N.method_receiver_kind` is the one rule (see fire_compiler).
+    _rcv_kind = N.method_receiver_kind(fn) if is_method else ''
+    is_classmethod = is_method and _rcv_kind == 'cls'
+    has_self = is_method and _rcv_kind == 'self'
     base = (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
             else f'__mgco_{_cm_as_str(fn.name)}')
     body_name = f'{base}_body'
@@ -2995,10 +3419,11 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     kind, _ = _generator_value_kind(fn, env, _delegated_yield_kind)
     kind = kind or 'i'
 
-    real_params = fn.params[1:] if is_method else fn.params
-    # arg 0 is `self`/`cls` (a method), so ordinary params start at
-    # __mojo_gen_arg index 1; a plain function starts at 0.
-    arg_base = 1 if is_method else 0
+    # A method with a receiver declares it as arg 0, so ordinary params start
+    # at __mojo_gen_arg index 1; a plain function — and a @staticmethod
+    # method, which has none — starts at 0.
+    real_params = fn.params[1:] if (is_method and _rcv_kind) else fn.params
+    arg_base = 1 if (is_method and _rcv_kind) else 0
     # Per-real-param yield C kind: the param's own annotation first, then
     # the unanimous cross-call-site contract (env, populated by
     # _scan_callsite_param_kinds). A 'd' (double) param can't round-trip
@@ -3331,6 +3756,17 @@ def register(gen, meta: list) -> None:
             'base': m['base'],
             'value_ctype': m['value_ctype'],
             'params': m['params'],
+            # Which SOURCE parameter, if any, is the receiver slot the
+            # caller must fill: 'self' for an instance method, 'cls' for a
+            # @classmethod (whose receiver is this codegen's opaque
+            # `int64_t` class placeholder, passed positionally and never
+            # dereferenced), '' for a @staticmethod, which has none. The
+            # registered `params` are bare ctype strings with the names
+            # stripped, so a consumer cannot recover this from them --
+            # and GimpleGen._cpp_yield_from's `yield from cls.<gen>(...)`
+            # branch needs it to get the call arity right.
+            'receiver': ('cls' if m.get('is_classmethod')
+                         else 'self' if m.get('has_self') else ''),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
             'has_return_value': True,

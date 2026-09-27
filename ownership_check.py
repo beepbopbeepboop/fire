@@ -569,7 +569,7 @@ def _check_stmt(stmt, state, diags, funcs, methods):
         return
 
     if isinstance(stmt, (N.PassStmt, N.BreakStmt, N.ContinueStmt,
-                          N.GlobalStmt, N.ImportStmt, N.FromImportStmt)):
+                          N.GlobalStmt, N.NonlocalStmt, N.ImportStmt, N.FromImportStmt)):
         return
 
     # Generic fallback (comptime-only statement shapes etc.) — visit any

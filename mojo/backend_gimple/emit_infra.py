@@ -24,7 +24,7 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range,
@@ -165,6 +165,15 @@ def _reset_func(gen, body: list = None, params: list = None,
     # only its (separately allocated) pointee is ever accessed
     # in-place.
     gen._boxed_mut_locals: dict[str, str] = {}
+    # PARAMETERS of this function that some nested closure captures BY
+    # REFERENCE (mojo-level name -> the C identifier the incoming
+    # parameter is actually declared under) -- see
+    # `_plan_mut_captured_params`. Populated BEFORE the parameter list
+    # is turned into a C signature (that is the whole point: the
+    # parameter must be declared under a different C name so the
+    # heap-boxed pointer local can carry the source-level name).
+    # Reset per function for the same reason as the two dicts above.
+    gen._mut_boxed_param_c: dict[str, str] = {}
     # Scalar locals/parameters whose address gets taken somewhere in this
     # function via `UnsafePointer(to=x)` / `Pointer(to=x)` (see
     # `_lower_call`'s handling of that plain-call keyword shape) --
@@ -404,6 +413,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen._except_as_names: set          = set()
     # Names declared `global` inside this function — reads/writes route to module struct
     gen._func_declared_globals: set    = set()
+    # Names declared `nonlocal` inside this function. Same scoping discipline as
+    # `_func_declared_globals` (save/restore around a nested body, or a
+    # declaration inside an inner function would leak into its parent), but the
+    # consequence is different: the names must be captured FROM the enclosing
+    # function rather than from the module.
+    gen._func_declared_nonlocals: set = set()
     # True only while generating a module's own _toplevel()/_{module}_toplevel()
     # body (see _gen_toplevel) — distinguishes genuine module-scope statements
     # (whose assignments must persist to that module's globals struct) from a
@@ -918,6 +933,66 @@ def _elem_of(gen, name: str) -> str:
 def _dict_val_of(gen, name: str) -> str:
     """Value C type for a dict variable."""
     return gen._dict_val_types.get(name, 'int64_t')
+
+
+_CAST_ONLY_RE = re.compile(r'^\(\s*[A-Za-z_][A-Za-z0-9_ ]*\*?\s*\)\s*\(?\s*'
+                           r'([A-Za-z_][A-Za-z0-9_]*)\s*\)?$')
+
+
+def _dict_val_of_expr(gen, expr) -> str:
+    """The recorded dict VALUE type of an already-emitted operand EXPRESSION,
+    or None when nothing is recorded for it.
+
+    `_dict_val_of` keys on a source-level name, which is all a subscript's
+    receiver ever is. A binary operator's operands are expressions — the
+    `mojo_environ_dict ()` call, a cast of a variable to the dict pointer type
+    — so unwrap the pointer casts the operator lowering wraps around them
+    before giving up. Returns None rather than the `int64_t` default on
+    purpose: "not recorded" and "recorded as int64_t" are different facts,
+    and the caller (the dict-union value-type join) must not confuse them.
+    """
+
+    if not isinstance(expr, str):
+        return None
+    seen = expr
+    for _ in range(4):
+        hit = gen._dict_val_types.get(seen)
+        if hit is not None:
+            return hit
+        m = _CAST_ONLY_RE.match(seen)
+        if m is None:
+            return None
+        seen = m.group(1)
+    return None
+
+
+def _dict_union_val_type(gen, lv, rv) -> str:
+    """Value C type of `lv | rv` when both operands are dicts, else ''.
+
+    `a | b` allocates a NEW dict, so its value type is not recorded anywhere
+    by the assignment that follows — and with no record, every later read
+    dispatches to `mojo_dict_get_int` and hands back the stored pointer's bit
+    pattern. That is why `merged.get(k)` on `env_defaults | os.environ |
+    updates` printed an address while `merged[k]` (which reads the same slot
+    through the SUBSCRIPT path, fed by the same `_dict_val_types` but keyed
+    off the operand) printed the string.
+
+    The join is deliberately NOT TypeLattice.join, which resolves
+    int64_t-vs-char* to `char *` and would then truncate every integer the
+    union inherited from the other side. Only an AGREEMENT propagates; a
+    disagreement means the merged dict is genuinely heterogeneous (Python:
+    `{'x': 1} | {'y': 's'}` has mixed value types), and this dict
+    representation has one int64_t slot plus a `kind` tag and no static type
+    for "either", so those stay unrecorded — the pre-existing behaviour —
+    rather than becoming a new silent miscompile. See
+    bugs/BUGFIX_ROADMAP.md item 2 for that remaining gap.
+    """
+    lvt = _dict_val_of_expr(gen, lv)
+    if lvt is None:
+        return ''
+    if lvt == _dict_val_of_expr(gen, rv):
+        return lvt
+    return ''
 
 
 def _scalar_arg_is_addressable_local(gen, aval) -> bool:
@@ -1669,6 +1744,45 @@ def _write_dest(gen, name: str) -> str:
 
 
 
+def _plan_mut_captured_params(gen, node, func_name: str):
+    """Record which PARAMETERS of `func_name` a nested closure captures
+    BY REFERENCE, and mint the C identifier each one is declared under.
+
+    Runs BEFORE the parameter list is turned into a C signature, which is
+    the entire reason it is separate from `_seed_mut_captured_local_types`:
+    a by-reference capture needs a heap BOX, and a box is a pointer local
+    that has to carry the SOURCE-LEVEL name (`_boxed_mut_locals` keys
+    every later read/write/dereference off that name, and the closure
+    seeding stores `_cname(name)` into the env field). A parameter is
+    already declared under that name, so the incoming parameter has to be
+    declared under a different C identifier and the box local seeded from
+    it in the prologue.
+
+    Without this, a mut-captured parameter kept its plain scalar
+    declaration (`_seed_mut_captured_local_types` skips any name already
+    in `var_types`, and a parameter always is) while the closure it feeds
+    declares a POINTER env field -- so the seeding stored an `int64_t`
+    into an `int64_t *` field: a hard `-Wint-conversion` error. Real
+    repro: `Tools/wasm/wasi/__main__.py`'s
+    `def subdir(working_dir, *, clean_ok=False)`, whose doubly-nested
+    `wrapper` declares `nonlocal working_dir`.
+
+    Only PLAIN parameters qualify. A `*args`/`**kwargs` parameter is
+    already a pointer in its own right, and boxing one would change the
+    function's ABI for no gain (its captured type is the container, and a
+    `MojoList *`/`MojoDict *` box holds it correctly without one)."""
+    for _ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
+        _cap_types = dict(_ci.captures)
+        for _mn in _ci.mut_names:
+            if _mn not in _cap_types or _mn in gen._mut_boxed_param_c:
+                continue
+            for _pn, _pt in (node.params or []):
+                if _pn != _mn or _pn.startswith('*'):
+                    continue
+                gen._mut_boxed_param_c[_mn] = f"_mutbox_{gen._param_safe_name(_mn)}"
+                break
+
+
 def _seed_mut_captured_local_types(gen, func_name: str):
     """For every local of `func_name` that some nested closure captures
     BY REFERENCE (ClosureInfo.mut_names), declare it as a heap-boxed
@@ -1698,11 +1812,27 @@ def _seed_mut_captured_local_types(gen, func_name: str):
     `_gen_stmt_VarDecl`/`_lower_IdentExpr`/`_write_dest`/`_type_of`
     each consult `self._boxed_mut_locals` to malloc the box at
     declaration time and route every later read/write through a
-    dereference instead of a bare identifier."""
+    dereference instead of a bare identifier.
+
+    A mut-captured PARAMETER takes the same treatment, with two
+    differences forced by it already having a declaration: the
+    declaration is emitted directly (`_declare_var` is a no-op for a
+    name `var_types` already holds) and OVERWRITES the parameter's
+    recorded `var_types` entry with the pointer ctype, because that
+    entry is what `_type_of`'s own boxed-local branch exists to
+    correct. See `_plan_mut_captured_params`."""
     for ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
         cap_types = dict(ci.captures)
         for mn in ci.mut_names:
-            if mn in cap_types and mn not in gen.var_types:
+            if mn not in cap_types:
+                continue
+            if mn in gen._mut_boxed_param_c:
+                ctype = cap_types[mn]
+                gen._boxed_mut_locals[mn] = ctype
+                gen.decls.append(f"  {ctype} * {gen._cname(mn)};")
+                gen.var_types[mn] = f"{ctype} *"
+                continue
+            if mn not in gen.var_types:
                 ctype = cap_types[mn]
                 gen._boxed_mut_locals[mn] = ctype
                 # _declare_var (not a bare var_types assignment): must
@@ -1752,6 +1882,17 @@ def _emit_mut_local_box_allocs(gen):
         cname = gen._cname(mn)
         vp = gen._new_val('void *', f"malloc ({gimple_codegen._SCALAR_CTYPE_SIZE.get(ctype, 8)})")
         gen._emit(f"  {cname} = ({ctype} *) {vp};")
+        _box_param_c = gen._mut_boxed_param_c.get(mn)
+        if _box_param_c:
+            # A mut-captured PARAMETER: the box is fresh, so copy the
+            # incoming value in through a register temp. `-fgimple`
+            # rejects a cast expression's result being stored directly
+            # through an INDIRECT_REF (see the identical treatment in
+            # `_rewrite_assign_stmt`'s `is_deref` case), and the temp is
+            # needed for the plain-pointer case too so the store is a
+            # bare `*name = tmp;` with no embedded cast.
+            pv = gen._new_val(ctype, _box_param_c)
+            gen._emit(f"  *{cname} = {pv};")
 
 
 def _new_jbp_temp(gen) -> str:

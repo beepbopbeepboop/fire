@@ -345,6 +345,286 @@ BUILTIN_PROGRAMS = {
             print(greet())
             print(greet("mojo"))
     """),
+    # `os.environ` as a WHOLE VALUE. The per-key idioms (`os.environ.get(k)`,
+    # `os.environ[k]`, `k in os.environ`) are lowered to `mojo_c_getenv` by
+    # ast_rewriter.py and always worked; a bare value read did not, and fell
+    # through to the generic dynamic-getattr dispatch, which typed it
+    # `int64_t`. Any `dict |` union over it then passed an integer to
+    # `mojo_dict_union` — a hard `-Wint-conversion` error, which is how
+    # `Tools/wasm/wasi/__main__.py`'s `env_defaults | os.environ | updates`
+    # surfaced it. Asserts a real, environment-dependent property: the
+    # process's own PATH must be reachable, the union must be bigger than
+    # the one-entry dict it started from, and the dict's own entry must
+    # survive the union.
+    #
+    # Deliberately NOT `merged.get(...)`: `.get()` on a `dict | dict` result
+    # used to dispatch on a value type the union lowering did not propagate,
+    # so it returned the stored pointer's bit pattern. That gap is FIXED
+    # (`mojo_dict_union`'s lowering now carries the operands' agreed value
+    # type onto the result — see `dict_union_get_value_type` below, which is
+    # the case that covers it), so a subscript read is no longer the only
+    # form that can be asserted here; both are kept, since they take
+    # different lowering paths (`_lower_SubscriptExpr` vs the `.get` method
+    # dispatch) and a fix to one would not have caught the other.
+    "os_environ_value": textwrap.dedent("""\
+        def main():
+            merged = {"MOJO_MARKER": "1"} | os.environ
+            print(len(merged) > 1)
+            print("PATH" in os.environ)
+            print(merged["MOJO_MARKER"] == "1")
+            print(merged.get("MOJO_MARKER") == "1")
+    """),
+    # A function that returns a LOCAL container. `return env` for a local
+    # built from a `{}` literal used to infer the scalar `int64_t` (the
+    # local is not in `var_types` yet at return-inference time), so the body
+    # laundered the real `MojoDict *` through a scalar and every CALLER got
+    # an `int64_t` where a `MojoDict *` was declared. The caller's `|` here
+    # is what turned that into a compile error; the assertions are on the
+    # VALUE (length, membership, a subscript read, and the union's length),
+    # which also catch a laundered pointer that happened to survive.
+    "return_local_container": textwrap.dedent("""\
+        def build(k):
+            env = {"A": "1", "B": "2"}
+            env["C"] = k
+            return env
+
+        def main():
+            d = build("3")
+            print(len(d))
+            print("C" in d)
+            print(d["C"] == "3")
+            print(len({"Z": "9"} | d))
+    """),
+    # An unannotated parameter whose DEFAULT is a container literal is a
+    # container parameter: `def updated_env(updates={})` in
+    # `Tools/wasm/wasi/__main__.py` kept the generic `int64_t` box and fed
+    # it straight into `mojo_dict_union` as argument 2. The default
+    # expression is type evidence exactly as strong as an annotation, by the
+    # same argument the existing `StringLiteral`-default rule already states.
+    #
+    # Shaped exactly like the real function -- `updates`'s ONLY use is the
+    # union -- on purpose. A variant that also does `out.update(extra)` is
+    # rescued by usage inference (`_inferred_param_types` sees a dict) and
+    # passed even before this rule existed, so it would not have been a
+    # regression for anything. Both the omitted and the passed case, so a
+    # fix that only handled one is caught.
+    "container_literal_default": textwrap.dedent("""\
+        def updated_env(updates={}):
+            env_defaults = {"MOJO_A": "1"}
+            environment = env_defaults | updates
+            return environment
+
+        def main():
+            print(len(updated_env()))
+            e = updated_env({"MOJO_B": "2"})
+            print(len(e))
+            print(e["MOJO_A"] == "1")
+    """),
+    # `.get()` on a `dict | dict` result. `a | b` allocates a NEW dict, so
+    # nothing downstream recorded its value type and every read dispatched to
+    # `mojo_dict_get_int` — handing back the stored `char *` as a pointer
+    # decimal (a real address, so the program exited 0 with garbage). The
+    # SUBSCRIPT form of the same read always worked, which is why
+    # `os_environ_value` above used `merged["MOJO_MARKER"]` and carried a
+    # comment explaining why it could not use `.get()`; that comment is now
+    # obsolete and the case below is the replacement.
+    #
+    # All-string dicts on purpose: that is the only case with a sound static
+    # answer, and it is the shape real code has
+    # (`env_defaults | os.environ | updates` in
+    # `Tools/wasm/wasi/__main__.py`). A `dict | dict` whose two sides
+    # DISAGREE on value type is genuinely heterogeneous in Python
+    # (`{'x': 1} | {'y': 's'}`), which this dict representation — one
+    # int64_t slot plus a `kind` tag — has no static type for; those stay
+    # unrecorded rather than being mis-typed, and that gap is tracked in
+    # bugs/BUGFIX_ROADMAP.md item 2.
+    "dict_union_get_value_type": textwrap.dedent("""\
+        def main():
+            a = {"A": "1"}
+            b = {"B": "2"}
+            m = a | b
+            print(m.get("A"))
+            print(m.get("B"))
+            print((a | b).get("B"))
+            print(m.get("A", "dflt"))
+    """),
+    # `@classmethod` binds the CLASS. The interpreter had NO classmethod
+    # support at all: `C.m(...)` returned the raw unbound MojoFunction, so
+    # the call bound the first REAL ARGUMENT to the `cls` parameter —
+    # `C.gen(5)` made `cls == 5`, and `cls.tag` then raised
+    # "'int' object has no attribute 'tag'". That is an ORACLE bug, and the
+    # worst kind: the compiled path passes a receiver correctly, so a
+    # compiled-path bug on this shape would have agreed with the wrong
+    # answer instead of showing up as a diff. See
+    # bugs/COMPILE_FAIL_importlib_resources_readers.md's
+    # `yield from cls.<sibling generator>(...)`, which is the real code
+    # that needs it.
+    #
+    # `C()` (instance) access is included because it takes a different
+    # interpreter path (`_eval_member_of`'s MojoInstance branch, not
+    # `MojoClass.__getattr__`) and must bind the class too.
+    "classmethod_binds_cls": textwrap.dedent("""\
+        class Paths:
+            tag = 7
+
+            @classmethod
+            def who(cls):
+                return cls.tag
+
+            @classmethod
+            def gen(cls, n):
+                yield cls.tag
+                yield n
+
+        def main():
+            print(Paths.who())
+            print(Paths().who())
+            for v in Paths.gen(5):
+                print(v)
+    """),
+    # A @classmethod generator delegating to a @staticmethod generator of
+    # the same class — the exact `readers.py` shape
+    # (`_candidate_paths` doing `yield from cls._resolve_zip_path(...)`).
+    # Exercises the interpreter's classmethod receiver, the receiver-LESS
+    # staticmethod callee on both compiled backends, and the delegation
+    # itself, and asserts CPython's own output.
+    "classmethod_yield_from_staticmethod_generator": textwrap.dedent("""\
+        class MP:
+            @staticmethod
+            def resolve_zip_path(p: Int):
+                yield p + 10
+                yield p + 20
+
+            @classmethod
+            def candidate_paths(cls, p: Int):
+                yield p
+                yield from cls.resolve_zip_path(p)
+
+        def main():
+            for v in MP.candidate_paths(1):
+                print(v)
+    """),
+    # A SIBLING closure called with KEYWORD arguments, from inside another
+    # lifted closure. `_lower_outer_closure_call` built its argument list from
+    # `node.args` alone, so every keyword was dropped and the callee silently
+    # used its own defaults — the C prototype carries no defaults, so nothing
+    # failed to compile. `deep_str=True, prefer_refined_param=True` in
+    # `module_gen.py`'s `_collect_method_scalar_obs` is the real instance.
+    # Both keywords AND the positional/default mix are covered: the second
+    # program passes only the first keyword, so a fix that shifted values
+    # into the wrong slots would show up as the wrong branch being taken.
+    # An `await` nested inside a CALL'S ARGUMENT LIST. Both coroutine
+    # backends are statement emitters and cannot suspend from the middle
+    # of a C expression, so `results.append(await fetch(i))` was refused
+    # at any nesting depth -- which made the most ordinary async
+    # accumulation loop uncompilable, while the hand-split form
+    # (`v = await fetch(i); results.append(v)`) compiled fine.
+    # `gimple_gen_coro.hoist_awaits_from_call_args` rewrites the provably
+    # order-preserving shape into exactly that. Four placements covered:
+    # top level, and inside `if` / `while` / `for`. The value assertions
+    # (not just "it compiled") are what make this a real check that the
+    # hoist preserved evaluation order and did not drop a suspension
+    # point.
+    "await_inside_call_argument": textwrap.dedent("""\
+        import asyncio
+
+        async def step1(n):
+            await asyncio.sleep(0)
+            return n * 2
+
+        async def top_level(n):
+            out = []
+            out.append(await step1(3))
+            return out[0]
+
+        async def in_if(n):
+            out = []
+            if n:
+                out.append(await step1(4))
+            return out[0]
+
+        async def in_while(n):
+            out = []
+            i = 0
+            while i < 2:
+                out.append(await step1(i))
+                i = i + 1
+            return out[0] + out[1]
+
+        async def in_for(n):
+            out = []
+            for i in range(3):
+                out.append(await step1(i))
+            return out[0] + out[1] + out[2]
+
+        def main():
+            print(asyncio.run(top_level(0)))
+            print(asyncio.run(in_if(1)))
+            print(asyncio.run(in_while(0)))
+            print(asyncio.run(in_for(0)))
+    """),
+    # `asyncio.run(x)` where `x` is a NAME, not a bare call. The rewrite
+    # refused every non-call argument, so the two-step idiom every larger
+    # `main` actually uses — build the coroutine, then run it — did not
+    # compile. The static half is `mojo/middle/coro.py`'s
+    # `_scan_handle_vars`: the name must be bound by THIS function from
+    # `create_task(...)` or from a call to an `async def` this module
+    # actually compiled, and a name bound from anything else is still
+    # refused (driving it would reinterpret an arbitrary int64_t as a
+    # coroutine handle).
+    #
+    # The RUNTIME half is `__mojo_async_run_gen`'s live-handle check, which
+    # raises the Python-faithful ValueError rather than trusting the static
+    # inference. That half is not reachable through the compiler — every
+    # shape the compiler can get wrong is already refused statically — so it
+    # is asserted directly in runtime/test_fire_coro_gen.c
+    # (`test_run_gen_rejects_non_handle`), which `coro` runs.
+    #
+    # `rebound` deliberately re-binds a handle name to a plain integer AFTER
+    # the coroutine was created: Python would raise here
+    # ("a coroutine was expected"), and the compiled path refuses to compile
+    # it rather than pretending, which is the honest outcome and is asserted
+    # as a compile-time refusal by a separate case below.
+    "asyncio_run_of_a_name": textwrap.dedent("""\
+        import asyncio
+
+        async def work(n):
+            await asyncio.sleep(0)
+            return n * 3
+
+        def main():
+            c = work(5)
+            print(asyncio.run(c))
+            print(asyncio.run(work(7)))
+    """),
+    "sibling_closure_kwargs": textwrap.dedent("""\
+        def outer(flag):
+            def probe(a, deep=False, refine=False):
+                if deep:
+                    return 1
+                if refine:
+                    return 2
+                return 3
+
+            def runner(items):
+                total = 0
+                for v in items:
+                    if flag:
+                        total = total + probe(v, deep=True, refine=True)
+                return total
+
+            def runner2(items):
+                total = 0
+                for v in items:
+                    if flag:
+                        total = total + probe(v, deep=True)
+                return total
+
+            return runner([1, 2]) * 10 + runner2([1, 2])
+
+        def main():
+            print(outer(True))
+    """),
 }
 
 

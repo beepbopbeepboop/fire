@@ -15,7 +15,7 @@ import re
 import sys
 import zlib
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -632,6 +632,42 @@ _CPP_KEYWORD_FIELDS = frozenset({'operator', 'new', 'delete', 'class', 'template
 _C_PARAM_EXTRA_KEYWORDS = frozenset({'asm', '__asm__', 'typeof', '__typeof__'})
 _C_MACRO_NAMES = frozenset({'true', 'false', 'NULL', 'EOF', 'SEEK_SET', 'SEEK_CUR', 'SEEK_END', 'TMP_MAX', 'FILENAME_MAX', 'FOPEN_MAX', 'BUFSIZ', 'L_tmpnam', 'L_ctermid', 'stdin', 'stdout', 'stderr'})
 _PSEUDO_DUNDER_ATTRS = frozenset({'__class__', '__dict__', '__module__', '__name__', '__qualname__', '__doc__', '__bases__', '__base__', '__mro__', '__annotations__', '__slots__', '__weakref__', '__flags__', '__basicsize__', '__dictoffset__'})
+
+
+# Module attributes that have a real, CONTAINER or string C representation
+# (as opposed to the scalar `int64_t` the generic dynamic-getattr dispatch
+# reports for an attribute read on an unresolved module marker).
+#
+# Why this table exists at all, and why it is keyed here rather than left
+# implicit in the two consumers: `_quick_type` (a static estimate consumed
+# by return-type inference, call-site typing, and the `and`/`or` type
+# join) and `_lower_MemberExpr` (the actual lowering) MUST agree about an
+# expression's C type. When they disagree the result is not a clean error
+# but a coercion of a real pointer through a scalar slot -- same bit
+# pattern, no crash, silently wrong. Each has grown its own ad-hoc cases
+# (see `_lower_MemberExpr`'s `sys.argv`, `os.sep`, `signal.SIGTERM` arms);
+# an entry belongs HERE whenever the case is a plain "this attribute is
+# this ctype" fact that both need, so neither restates it.
+#
+# Keys are `(module_name, member)`. Add an entry only when BOTH the type
+# AND the emitted expression are settled; a case needing its own emit logic
+# (a list built element-by-element, a call, a computed constant) stays in
+# `_lower_MemberExpr` and must be given a matching `_quick_type` arm.
+_MODULE_ATTR_CTYPES: dict = {
+    # `os.environ` as a whole mapping. Lowered to a runtime call
+    # (`mojo_environ_dict()`, a process-wide singleton) -- see
+    # `_lower_MemberExpr`'s own comment for why this is NOT an
+    # `ast_rewriter` rule. The per-key idioms are rewritten away before
+    # either consumer sees them.
+    ('os', 'environ'): 'MojoDict *',
+}
+
+
+def _module_attr_ctype(module_name, member) -> str:
+    """The agreed C type of a modelled module attribute, or `''`."""
+    if not module_name or not member:
+        return ''
+    return _MODULE_ATTR_CTYPES.get((module_name, member), '')
 
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or

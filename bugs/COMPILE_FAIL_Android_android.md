@@ -1,5 +1,195 @@
 # COMPILE_FAIL: Android/android.py
 
+## Status (2026-09-27, later — the `asyncio.run(<non-literal>)` bridge is built: BOTH halves, the static inference and the checked runtime entry point)
+
+The entry below correctly identified that this needed two halves and that
+"either half alone would be a guess". Both are landed.
+
+### Half 1 — static inference (`mojo/middle/coro.py`)
+
+`asyncio.run(x)` now also accepts a **name** this function's own body binds
+from a coroutine-producing call, not just a bare call. The evidence is a new
+`_scan_handle_vars(fn, coro_names)`: a name bound from `create_task(...)` /
+`create_raising_task(...)`, or from a bare call to an `async def` this module
+actually compiled (a new `_ASYNC_FN_NAMES` registry, filled from the same
+`_eligible_async*` verdicts that decide whether the function is lowered at
+all — so "this module compiled it" and "a `__mgco_<name>_start` exists for
+the ordinary call path to reach" are the same fact by construction).
+
+Everything else is still refused, and that refusal is the load-bearing part:
+a literal, a parameter, a name bound from an arbitrary expression, and a name
+bound from a call to a function that is *not* in `_ASYNC_FN_NAMES` all keep
+the honest "cannot compile module" error, because driving them would
+reinterpret an arbitrary int64_t as a `MojoGen *`. Deliberately same-module
+only: a cross-module `async def` callee is not visible to this pass, so a var
+bound from one is still refused rather than guessed.
+
+The two-step idiom this unlocks is the one `android.py` actually uses:
+
+```python
+c = work(5)          # already lowered to __mgco_work_start(...) by the
+print(asyncio.run(c))   # ordinary call path; `c` really is a live handle
+```
+
+Also fixed in the same code, a one-token latent bug in the neighbouring
+`_scan_task_vars`: the name-extraction line tested `isinstance(s.target, ...)`
+against the **statement**, so a bare `task = create_task(f())` with no `var`
+keyword never registered and `<task>.wait()` was refused for a shape it
+supports.
+
+### Half 2 — the checked runtime entry point (`runtime/fire_coro_gen.c`)
+
+`__mojo_async_run_gen` no longer trusts its caller. A new live-handle
+registry — added at the single allocation site (`mgen_new_impl`) and removed
+at the single free site (`__mojo_gen_destroy`), so it describes exactly the
+live handles and a recycled address cannot be mistaken for a stale one — backs
+a check at the top of the function. A value that is not a live handle raises
+`ValueError: a coroutine was expected`, Python's own answer for
+`asyncio.run(<not a coroutine>)`, with the exception tag spelled as the number
+`663468903` so a compiled `except ValueError:` actually catches it. Before
+this, the value was cast straight to `MojoGen *` and `->done` was read out of
+whatever memory the integer pointed at.
+
+The registry is a hand-rolled chained set, not `mojo_set_*`: that translation
+unit deliberately does not include `fire_runtime.h` (see its own header
+comment), and the population is one node per live coroutine handle.
+
+### Regression
+
+- **Compiler level**, `test_runtime_diff.py`'s `asyncio_run_of_a_name` (a
+  registered test, interp-vs-JIT): both spellings, `asyncio.run(work(7))` and
+  `asyncio.run(c)`, asserting the real return value.
+- **Runtime boundary**, `runtime/test_fire_coro_gen.c`'s
+  `test_run_gen_rejects_non_handle`, driven directly by the `coro` test
+  (20/20 across both Layer-3 backends at -O0 and -O2). It has to be driven at
+  the C level: every shape the compiler can get wrong is *already* refused
+  statically, so a test through the compiler could only ever exercise the
+  already-correct path. It checks three non-handle shapes (NULL, a small
+  integer, a plausible heap address) and asserts both the exception type and
+  its message.
+
+### What is still open for this file
+
+`_async_quick_eligible` still refuses all 9 remaining async functions
+(`async_process`, `async_check_output`, `list_devices`, `find_device`,
+`find_pid`, `logcat_task`, `read_logcat`, `gradle_task`, `run_testbed`),
+because their `await` targets are `asyncio.create_subprocess_exec(...)`,
+`process.communicate()`, `process.wait()`, `stream.readexactly(...)` and a
+local `wait_for` helper. That remains the feature-sized work (a real
+async-subprocess/stream composition layer, the same project
+`COMPILE_FAIL_asyncio_queues.md` describes), and **this doc does not claim
+otherwise**. The bridge above does not move that frontier: `android.py`'s own
+`result` comes from `dispatch[context.subcommand](context)`, a
+dynamically-obtained coroutine with no statically-named callee, so it is
+still (correctly) refused by half 1.
+
+## Status (2026-09-27 — the async SUBSET is now inventoried by measurement, and one real gap in it is closed; the file's first blocker has MOVED and is new)
+
+Every prior entry in this doc is a "verified unchanged, not attempted"
+re-verification. This entry replaces that with measured data, because the
+frontier has genuinely moved and the recorded blocker text no longer
+describes what actually stops the file.
+
+### The file's FIRST blocker is no longer the async await shapes
+
+`python3 fire.py build .../Android/android.py` now fails with:
+
+```
+cannot compile module: asyncio.run(...) requires a bare call to a
+supported compiled async function as its argument -- got a non-call
+expression, which has no coroutine handle to drive
+```
+
+`android.py:1026` is `asyncio.run(result)`, where `result` came from
+`dispatch[context.subcommand](context)` — a dynamically-obtained
+coroutine, not a bare call. `gimple_gen_coro._rewrite_asyncio_run`
+refuses this on purpose (the argument would otherwise be passed through
+and reinterpreted as a `MojoGenerator *` — a real silent miscompile the
+check was added to prevent), and the doc had no entry for it because
+until now the 10 async functions were refused EARLIER, at a
+whole-module stage that fired first.
+
+**It is genuinely not a one-liner.** The guard is correct as written:
+`asyncio.run(x)`'s runtime bridge drives a coroutine handle, and
+`result` here may or may not BE one (`if asyncio.iscoroutine(result):`
+two lines above). Accepting a non-literal needs (a) a static type
+inference for "this local holds a coroutine handle", which
+`dispatch[context.subcommand](context)` does not provide, and (b) a
+CHECKED runtime entry point that is safe on a non-coroutine value, which
+`__mojo_async_run_gen` is not. Either half alone would be a guess.
+
+### The async subset, measured
+
+`_async_quick_eligible` still refuses all 9 remaining async functions
+(`async_process`, `async_check_output`, `list_devices`, `find_device`,
+`find_pid`, `logcat_task`, `read_logcat`, `gradle_task`, `run_testbed`)
+— the doc's recorded list is accurate — and they are refused for the
+documented reason: their `await` targets are
+`asyncio.create_subprocess_exec(...)`, `process.communicate()`,
+`process.wait()`, `stream.readexactly(...)` and a local `wait_for`
+helper, none of which is in the whitelist. That remains the
+feature-sized work (a real async-subprocess/stream composition layer, the
+same project `COMPILE_FAIL_asyncio_queues.md` describes). **This doc does
+not claim otherwise.**
+
+What the subset *does* support, each verified by building and running a
+minimal program (not by reading the whitelist):
+
+| supported | notes |
+|---|---|
+| `await asyncio.sleep(<scalar>)` | |
+| `await <sibling compiled async fn>(...)`, with arguments | source order required |
+| `asyncio.create_task(...)` + `await <task>` | |
+| `await` under `if` / `while` / `for` / `try` | at any nesting depth |
+| `asyncio.run(<bare call>)` | |
+| **`await` nested inside a call's argument list** | **closed 2026-09-27, see below** |
+
+### CLOSED: an `await` inside a call's argument list
+
+`for i in range(3): results.append(await fetch(i))` was refused at ANY
+nesting depth, on both coroutine backends — both are STATEMENT emitters
+and cannot suspend from the middle of a C expression. The hand-split
+form (`v = await fetch(i); results.append(v)`) compiled fine, so the gap
+was purely the nesting and not the loop, the method call, or the
+container.
+
+`mojo/middle/coro.py`'s new `hoist_awaits_from_call_args` rewrites the
+provably order-preserving shape into exactly that, and is called from the
+ONE shared eligibility chokepoint (`_eligible_async_common`) so the A3
+and C++20-coroutine backends cannot drift. Only three conditions
+qualify, and they exist because hoisting moves the awaited expression
+earlier in its statement: the `await` must be the SOLE argument of its
+enclosing call, that call must be the only `CallExpr` in the whole
+statement, and the awaited expression must be a call / bare name /
+attribute chain. Anything else is left completely untouched and falls
+back to the honest whole-module refusal. Regression:
+`test_runtime_diff.py`'s `await_inside_call_argument`, four placements
+(top level, `if`, `while`, `for`) asserting real VALUES, not just
+compilation; it fails at `435cc71`.
+
+Two things that transform got wrong first, both worth recording because
+both failed SILENTLY (compiled, linked, ran, printed the wrong answer)
+and both are now guarded by comments in the code:
+
+- the temporary must be named with a plain identifier; a leading
+  double underscore (`__await_tmp_1`) is not resolvable as a local by
+  the A3 backend and became a constant 0;
+- the rewritten statement list MUST be written back onto `fn.body`. The
+  transform returns a LONGER list; dropping the return value still
+  rewrote each statement's own `.value` in place, so the body read a
+  temporary that was never declared — and because the suspension point
+  was inside that missing statement, the await VANISHED rather than
+  erroring.
+
+### Next bounded action
+
+Unchanged in direction, now with a measured floor:
+
+1. The checked `asyncio.run(<non-literal>)` bridge (a coroutine-or-not
+   test at the runtime boundary plus the static inference to feed it).
+2. Then the async-subprocess/stream composition layer, which is the real
+   blocker for all 9 functions and is not attempted here.
+
 ## Status (re-verified 2026-08-26, this session, master fast-forwarded to `9c0e7a8` — DOCUMENTED-NOT-FIXED, unchanged)
 
 Fresh isolated `compile_to_gimple_with_cpp` probe (post this session's own

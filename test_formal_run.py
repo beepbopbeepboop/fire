@@ -50,6 +50,58 @@ CASES = [
      "    return 0\n", 1, None),
     ("pos_cmp_still_false", "def f(n):\n    a = 3\n    if a < 2:\n"
      "        return 1\n    return 0\n", 0, None),
+    # ── the SIGNEDNESS matrix (bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness) ──
+    #
+    # Unannotated `int` used to be modelled as UInt64 and `common_type`
+    # resolved a mixed signed/unsigned pair to unsigned, so any comparison
+    # involving a negative value and a VARIABLE read the negative as a huge
+    # positive number.  The two cases the previous fix (negated literal vs
+    # literal) did not reach are the two that mattered: a negative produced by
+    # arithmetic (`0 - 3`, a BinaryOp, so typeless) and a negative against an
+    # unannotated local.  Every row below is a real build + run; the exit status
+    # is the program's answer and must be 1.
+    #
+    # The unsigned control cases are here on purpose: a signed default must not
+    # quietly turn an `UInt32` comparison into a signed one, so `pos_still_works`
+    # and `uint_still_unsigned` are the rows that would catch an over-correction.
+    ("binop_neg_vs_lit",
+     "def main(n):\n    a = 0 - 3\n    if a < 2:\n        return 1\n    return 0\n", 1, None),
+    ("neg_lit_vs_var",
+     "def main(n):\n    a = -3\n    b = 2\n    if a < b:\n        return 1\n    return 0\n", 1, None),
+    # The INVERSION: the same pair the other way round. A fix that made `<`
+    # signed without touching `>` would pass the row above and fail this one.
+    ("neg_lit_vs_var_gt",
+     "def main(n):\n    a = -3\n    b = 2\n    if a > b:\n        return 1\n    return 0\n", 0, None),
+    ("var_vs_neg_lit",
+     "def main(n):\n    b = 2\n    if b > -3:\n        return 1\n    return 0\n", 1, None),
+    ("neg_vs_neg",
+     "def main(n):\n    a = -7\n    b = -9\n    if a > b:\n        return 1\n    return 0\n", 1, None),
+    # Narrow signed types, against an unannotated local: the width is not the
+    # issue, the signedness is, and a per-width annotation must not fall back to
+    # the (formerly unsigned) default.
+    ("int8_neg_vs_var",
+     "def main(n):\n    a: Int8 = -3\n    b = 2\n    if a < b:\n        return 1\n    return 0\n", 1, None),
+    ("int16_neg_vs_var",
+     "def main(n):\n    a: Int16 = -3\n    b = 2\n    if a < b:\n        return 1\n    return 0\n", 1, None),
+    ("int32_neg_vs_var",
+     "def main(n):\n    a: Int32 = -3\n    b = 2\n    if a < b:\n        return 1\n    return 0\n", 1, None),
+    # The three other signedness-sensitive operations, not just the comparison:
+    # an arithmetic shift, a truncating division/remainder pair, and the format
+    # a negative value prints with. Each of these read the value through the
+    # signedness decision too, and each was unsigned before.
+    ("arith_shift_negative",
+     "def main(n):\n    a = -8\n    b = a >> 2\n    if b == 0 - 2:\n        return 1\n    return 0\n", 1, None),
+    ("print_negative",
+     "def main(n):\n    a = -7\n    printf(\"%d\\n\", a)\n    return 3\n", 3, "-7"),
+    ("neg_div_rem",
+     "def main(n):\n    a = 0 - 7\n    if a / 2 == 0 - 3 and a % 2 == 0 - 1:\n        return 1\n    return 0\n", 1, None),
+    ("neg_mod",
+     "def main(n):\n    a = 0 - 7\n    b = a % 3\n    if b == 0 - 1:\n        return 1\n    return 0\n", 1, None),
+    # Controls.
+    ("pos_still_works",
+     "def main(n):\n    a = 3\n    b = 2\n    if a > b:\n        return 1\n    return 0\n", 1, None),
+    ("uint_still_unsigned",
+     "def main(n):\n    a: UInt32 = 7\n    b: UInt32 = 2\n    if a > b:\n        return 1\n    return 0\n", 1, None),
     # Counted, not summed: the sum is -5, and every expected value in this
     # suite must fit in a byte (see the retraction in BUG.md).
     ("range_neg_bounds", "def f(n):\n    s = 0\n    c = 0\n"

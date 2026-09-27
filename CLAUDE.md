@@ -23,8 +23,16 @@ work in this project. Rules:
 - If two files do the same thing, merge them — don't symlink, don't copy-paste.
 
 ## AST Nodes
-- `mojo_compiler.py` is the single source of truth for all AST node definitions.
-- `myinterpreter.py` imports AST nodes as `import mojo_compiler as N`.
+- `fire_compiler.py` is the single source of truth for all AST node definitions.
+  (It was `mojo_compiler.py` until the 2026-09-26 rename; that file no longer
+  exists, and any doc still naming it is stale.)
+- `myinterpreter.py` imports AST nodes as `import fire_compiler as N`, and so
+  does every module in `mojo/middle/` and `mojo/backend_gimple/`. The middle
+  tier re-exports them with `from mojo.middle.types import *` /
+  `from mojo.middle.types import IdentExpr, ...` and reaches them as
+  `gimple_ctypes.FunctionDef` etc. — that re-export is deliberate (it is what
+  lets the self-hosted compiled path see real node classes instead of boxed
+  values), so do not "tidy" those call sites back to a direct import.
 - `ast_nodes.py` is dead and should not exist.
 
 ## Bug-fixing sessions — no time-boxing, no re-verify-and-stop, amortize the gate
@@ -166,7 +174,7 @@ run `gate` once, at the end, over everything that has accumulated.
 
 ### Before considering a compiled-path change done
 
-Anything touching `mojo_compiler.py` (the shared parser/AST),
+Anything touching `fire_compiler.py` (the shared parser/AST),
 `gimple_codegen.py`, `module_loader.py`, `mojo/backend_gimple/*` or
 `mojo/middle/*` — including subagent work — owes a full `make gate`. This is
 not "extra"; it is the definition of done for that class of change. A change
@@ -273,6 +281,15 @@ cases had been failing to compile and the suite had been reporting 0/20
 since the rename. Nothing was expected, nothing was reported, and the
 coroutine runtime was untested. Fix the test; if a subject really is broken,
 mark it with a reason and a bug-doc link.
+- `test_runtime_diff.py` compares the two **engines** with each other, which
+  structurally cannot catch a bug they SHARE. `test_interp_oracle.py`
+  (`interporacle`) closes that: it runs each program through both
+  `python3 fire.py run` and `python3` on the *same* text and requires
+  identical stdout and exit code. Two real interpreter bugs went unnoticed for
+  exactly that reason — a `@classmethod`'s `cls` binding the first real
+  ARGUMENT, and `@deco` being parsed and then never applied at all (the
+  compiled path ignored decorators too, so the diff was clean). A new
+  interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
 Current `EXPECTED` entries, all one root cause — the self-hosted binary
 segfaults on any input, including a two-line program (`./mojoc --dump-full`
@@ -288,7 +305,7 @@ Tracked in `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`. They
 flip themselves to FAIL the moment the binary stops crashing, which is the
 intended way for them to be retired.
 
-**The gate is otherwise clean**: `check` 7/7, `coro` 20/20, `stdlib` 2/2,
+**The gate is otherwise clean**: `check` 11/11, `coro` 20/20, `stdlib` 2/2,
 `mojoc` builds, `bootstrap` green through `stage2-cc`.
 
 ## Bug docs

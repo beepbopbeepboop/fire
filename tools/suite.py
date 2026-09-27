@@ -105,6 +105,12 @@ CORO_RUNTIME = [
     'runtime/fire_coro_gen.c', 'runtime/fire_async_sched.c',
     'runtime/test_fire_coro.c', 'runtime/test_fire_coro_ctx.c',
     'runtime/test_fire_coro_exc_stub.c',
+    # test_coro_runtime.py's own remaining two subjects. They were missing
+    # here, so `coro`'s checked_run cache key did not cover them: editing
+    # either one replayed a recorded PASS instead of re-running it, which is
+    # the same class of hole as the two unregistered generator suites.
+    'runtime/test_fire_coro_gen.c', 'runtime/test_fire_async_sched.c',
+    'runtime/test_fire_future.c',
 ]
 MOJO_MAIN = 'fire.py'
 PY_FILES = ['fire.py', 'fire_compiler.py', 'myinterpreter.py',
@@ -292,6 +298,51 @@ test('linkmode', [PY, 'test_link_mode.py'], cache=True,
 test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
      desc='grow-only allowlist on ad-hoc container casts (text scan)')
+# `nonlocal` on both execution paths. Its own test because the feature spans
+# the parser (a new statement node), the interpreter (scope resolution) and
+# the closure-capture pass (by-reference capture), and a regression in any one
+# of the three is a SILENT wrong answer rather than a build failure — the
+# compiled program used to exit 0 with the pre-`nonlocal` value.
+test('nonlocal', [PY, 'test_nonlocal.py'], cache=True,
+     extra=GIMPLE_SOURCES + ['test_nonlocal.py', 'myinterpreter.py',
+                             'fire.py', 'fire_main.py', 'driver.py',
+                             RUNTIME_SRC, RUNTIME_HDR],
+     desc='nonlocal: interpreter and compiled paths agree with CPython')
+# The two COMPILE-AND-RUN suites over generated C. They were unregistered,
+# which is why the round-1 `yield from cls.<generator>` regression in
+# `test_gimple_generator_runner.py` never ran in the gate at all: a real
+# regression was invisible. `test_gimple` (above) is a UNIT suite — it
+# inspects emitted text — and neither of these is covered by anything else in
+# the registry, so each is its own test with its own input list.
+#
+# `extra` is the union of what can change their verdicts: the codegen sources
+# (they drive codegen in-process), `build_config` (they pick the compiler),
+# and — for the generator suite — the coroutine runtime sources it links
+# against, which CORO_RUNTIME already enumerates. Both use `driver='cmd'`,
+# not `'mem'`: they invoke gcc directly on a snippet-sized translation unit,
+# the same `small`-workload shape `test_gimple.py` is, and a cap on a job
+# that never loads the whole closure buys nothing (see the MEMCLASS note).
+test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
+     extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
+                             RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
+     desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
+test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
+     extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py',
+                             'build_config.py', RUNTIME_SRC, RUNTIME_HDR]
+         + CORO_RUNTIME,
+     desc='compile-and-execute: every generator/coroutine shape, both backends')
+# The ORACLE's own suite: myinterpreter vs CPython, on programs written in the
+# subset of syntax that is valid Mojo AND valid Python. Its own test because
+# every other parity test here compares the two ENGINES with each other, which
+# structurally cannot catch a bug they share — and a shared wrong answer is
+# exactly what an interpreter bug produces. Two real ones went unnoticed for
+# exactly that reason: a `@classmethod`'s `cls` binding the first real
+# ARGUMENT, and `@deco` being parsed and then never applied at all (the
+# compiled path ignored decorators too, so the diff was clean).
+test('interporacle', [PY, 'test_interp_oracle.py'], cache=True,
+     extra=['test_interp_oracle.py', 'fire_compiler.py', 'myinterpreter.py',
+            'fire.py', 'fire_main.py'],
+     desc='the interpreter oracle itself, diffed against CPython')
 
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
@@ -515,7 +566,8 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
-              'linkmode', 'no-new-casts'],
+              'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
+              'gimplegenerators', 'interporacle'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

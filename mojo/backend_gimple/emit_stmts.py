@@ -24,7 +24,7 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     _as_str, _pair_key,
@@ -167,6 +167,8 @@ def gen_stmt(gen, node):
         gen._gen_stmt_ComptimeVarStmt(node)
     elif isinstance(node, gimple_ctypes.GlobalStmt):
         gen._gen_stmt_GlobalStmt(node)
+    elif isinstance(node, NonlocalStmt):
+        gen._gen_stmt_NonlocalStmt(node)
     elif isinstance(node, gimple_ctypes.MatchStmt):
         gen._gen_stmt_MatchStmt(node)
     elif isinstance(node, gimple_ctypes.DelStmt):

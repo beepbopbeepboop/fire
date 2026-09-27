@@ -1,5 +1,193 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (2026-09-27, later — the `@staticmethod`-generator blocker is FIXED on both backends; the file now gets all the way to gcc and fails on two DIFFERENT things)
+
+The feature the previous entry identified as this file's first blocker — a
+`@staticmethod` generator method — is implemented, on both coroutine backends,
+and the delegation machinery from the entry before it keeps working. The
+compilation no longer refuses this module at all.
+
+### The feature, and the three places that had to agree
+
+A generator METHOD with no receiver is a shape all three layers disagreed
+about, and each disagreed in a way that made the *unit* wrong rather than
+refusing it:
+
+1. **`fire_compiler.method_receiver_kind(m)` — new, and now the single rule.**
+   `'self'` / `'cls'` / `''`, decorator FIRST and the first parameter's name
+   second. The name-only rule every consumer used is what let a
+   `@staticmethod def gen(n)` through as receiver-less: its first parameter
+   is a REAL argument, so the old test read "not a method".
+2. **`module_gen.py`'s free-function generator loops** (the initial pass and
+   the fixed-point retry pass) skipped a generator whose `params[0][0]` was
+   `self`/`cls` — a proxy for "is a method" that a `@staticmethod` does not
+   satisfy. The method's coroutine unit was therefore emitted under the
+   **free-function** symbol `_mojogen_<name>` and registered in
+   `_generator_api` under its BARE name, while the real call sites
+   (`MP.candidate_paths(...)`, and the consumer path that looks the callee up
+   in `_generator_method_api` under a `(struct, name)` key) never found it.
+   `C.gen(5)` was not a generator call at all: it lowered to an ordinary
+   int64_t call, and the `for` loop over its "result" raised
+   `mojo_unsupported_iter` at run time. Both loops now skip by **membership**
+   (`_struct_method_ids`, collected next to `_generator_fns` from
+   `_walk_ast`), which is the honest test.
+3. **`coro.py`'s A3 eligibility and `_lower_one`**: `@classmethod` was
+   special-cased and everything else was an instance method, so a
+   `@staticmethod` got a `{Struct} *` self the caller never passed *and* had
+   its first real parameter stripped from `real_params`. Both read
+   `method_receiver_kind` now.
+4. **`emit_methods.py`'s generator-method call site**: it unconditionally
+   prepended the receiver. It now reads the api entry's `receiver` key (which
+   `_cpp_method_receiver_name` records, and which a MISSING key refuses
+   rather than guesses) and prepends nothing for `''`. The
+   `yield from cls.<gen>(...)` path in `cpp_core.py` already handled `''`.
+
+Regression: three new compile-AND-RUN cases in
+`test_gimple_generator_runner.py` (now registered as `gimplegenerators`) —
+`staticmethod_generator_method`, `staticmethod_generator_multi_param` (two
+parameters, so a still-prepended receiver shifts both and cannot accidentally
+come out right), and
+`classmethod_generator_yield_from_staticmethod_generator`, which is this
+file's exact shape. All three fail at `435cc71` with the refusals above.
+
+### What the file fails on NOW (measured, not inferred)
+
+`python3 fire.py build .../Lib/importlib/resources/readers.py` now runs the
+whole closure through codegen and into gcc. `readers.py` itself has exactly
+**two** remaining errors, and neither is a generator problem any more:
+
+```
+readers.py:118:10: error: implicit declaration of function '__itertools_only_37bd8e';
+                               did you mean '_itertools_only_37bd8e'?
+readers.py:172:9:  error: implicit declaration of function 're_finditer_37bd8e'
+```
+
+1. **A cross-module symbol-name mismatch** for an imported `itertools`
+   function: the definition is emitted as `_itertools_only_<hash>` and the
+   call site as `__itertools_only_<hash>` — a leading-underscore
+   disagreement between the two naming conventions. Small and worth its own
+   bug doc; it is a shared-machinery naming bug, not a `readers.py` shape.
+2. **`re_finditer`** — the `re` module falls back to source interpretation
+   during the build, so `re.finditer(...)` inside a coroutine body has no
+   compiled symbol. Same class as the previously documented `re.Match` gap:
+   there is no compiled representation of CPython's C-extension `_sre`
+   objects anywhere in this pipeline, and the scalar-only coroutine value
+   model has no place to put one.
+
+`_resolve_zip_path`'s own body — the one the previous entry called out as
+refusing independently — now compiles. The `with contextlib.suppress(...)`
+body is still ELIDED by the plain-generator path (documented convention).
+
+The rest of the closure fails too, in fifteen other modules, so the file is
+**not** close to building: `pathlib` (19 errors), `importlib/_bootstrap_external`
+(15), `pathlib/_os` (10), `tokenize` (8), `glob` (7), `statistics` (6),
+`importlib/resources/_common` (6), `random` (4), `numbers` (4),
+`importlib/resources/_functional` (4), `tempfile` (2),
+`importlib/resources/_adapters` (2), `importlib/_bootstrap` (1),
+`fractions` (1) — plus one module-level refusal upstream of all of them
+(`shutil`: `'open' is ambiguous`). None of those is this doc's subject; they
+are listed so the next session does not re-derive that "the generator
+machinery is done" does not mean "the file builds".
+
+**Do not read this file as green.** The two generator gaps this doc was
+opened for are closed and covered; what remains is a naming bug, a
+`re`-module fallback, and fifteen sibling modules.
+
+## Status (2026-09-27 — the `yield from cls.<generator>` gap is FIXED with synthetic coverage; the file is still open, on a DIFFERENT and now-better-characterised blocker)
+
+The `cls`-receiver/delegation gap this doc's headline blocker named is
+closed. `test_gimple_generator_runner.py`'s new
+`yield_from_cls_generator_method_delegation` compiles and RUNS a
+`@classmethod` generator doing `yield from cls.<sibling generator>(...)`
+and asserts CPython's own stdout; it fails at HEAD with exactly the
+refusal message below. Four pieces were needed, and none existed:
+
+1. **`_cls_refs_supported` accepted a `cls.<generator method>(...)` call.**
+   It deliberately excluded *every* compiled generator method, because
+   the ORDINARY-call lowering has no receiver convention for one — a
+   correct exclusion for a call that is genuinely ordinary, and the wrong
+   test for a `yield from` DELEGATION, which supplies its own.
+2. **`_cpp_yield_from` resolved the callee** through
+   `_generator_method_api` (the same dict the `for ... in self.<method>
+   (...)` consuming path uses, so the two forms of the same callee
+   cannot drift) and passed the `cls` receiver positionally. `cls` in a
+   compiled `@classmethod` generator body is an opaque, never-dereferenced
+   `int64_t` placeholder, so nothing reads it — the receiver is threaded
+   purely to keep the arity right, exactly as the ordinary
+   `cls.method(...)` lowering already does.
+3. **`_yield_from_delegate_ctype` resolved the same callee for TYPE
+   inference.** Without it the delegation fell through to a `char *`
+   default, so a delegating generator that also does `yield 1` was
+   refused for "yields conflicting types" — a refusal for a shape the
+   emitter can compile.
+4. **A forward declaration of the callee's four `extern "C"` wrappers.**
+   `readers.py` defines `_candidate_paths` BEFORE
+   `_resolve_zip_path`, so the two-pass method retry makes the callee
+   *registered* in time but its `.cpp` unit is still emitted after the
+   delegating one — g++ reported all four names as undeclared. Same
+   problem `_cpp_gen_self_recursed` already solved for self-recursion,
+   generalised here to any delegated-to generator (a repeated matching
+   declaration is legal C++, and a disagreement is a hard error rather
+   than a silent miscompile).
+
+The receiver arity itself comes from a new `receiver` key on the
+registered generator-method api entry (`'self'` / `'cls'` / `''`), read
+from the callee's own first source parameter at registration by
+`_cpp_method_receiver_name` — the registered `params` are bare ctype
+strings with the names stripped, so a consumer cannot recover it from
+them, and a MISSING key is refused rather than guessed.
+
+### The file itself is still open, and the remaining blocker is now precise
+
+`readers.py` still fails with the identical refusal message. The reason
+has changed, and the change is worth recording because it is a NEW,
+separately-fixable gap this investigation surfaced:
+
+- **`_resolve_zip_path` is a `@staticmethod` generator, and staticmethod
+  generators do not compile at all** — on either backend. It is not the
+  only blocker, but it is the FIRST one, and it is what keeps
+  `_candidate_paths` refused: the delegation branch correctly requires a
+  callee this compile has actually translated, and this one never is.
+  `_gen_cpp_generator_unit`'s method path opens with `if not fn_params or
+  fn_params[0][0] not in ('self', 'cls')` → refuse, which a
+  `@staticmethod` (first parameter is the real first argument) cannot
+  satisfy. The A3 path accepts it and then the CALL SITE does not treat
+  it as a generator at all — a `C.inner(5)` call lowered to an ordinary
+  int64_t call, and consuming its result raised
+  `mojo_unsupported_iter` at runtime. The fix is the same shape as the
+  `receiver` key already added: let a method whose first parameter is
+  neither `self` nor `cls` compile with NO receiver, on both backends, and
+  teach the call sites to route `Class.static_gen(...)` through the
+  generator-start convention.
+- **`_resolve_zip_path`'s own body still refuses**, independently:
+  `for match in reversed(list(re.finditer(r'[\\/]', path_str)))` is a
+  `CallExpr` for-loop iterable, and beneath that `match.end()` /
+  `match.start()` are calls on `re.Match` objects produced by CPython's
+  C-extension `_sre` engine — there is no compiled representation of them
+  anywhere in this pipeline. The `with contextlib.suppress(...)` body is
+  ELIDED by the plain-generator path (documented convention), acceptable
+  only because nothing there can represent the suppressed exceptions
+  anyway.
+
+So: **do not read this file as green.** The `cls` delegation machinery
+works; this file needs the staticmethod-generator feature and then the
+`re.Match` / `reversed(list(...))` work on top of it.
+
+### A second, smaller gap this work uncovered
+
+`test_gimple_generator_runner.py`'s build helper gated on
+`'__mgco_' in c_code`, which is the A3 stack-switch marker, and sent
+the whole module down the pure-A3 link — never compiling `prog_gen.cpp`.
+A module whose generators are split across the two backends (the new
+`cls` case is the first) therefore had one backend's bodies silently
+dropped and failed to link with undefined symbols. The two body kinds
+are now detected SEPARATELY (`'__mgco_'` vs `'_mojogen_'`) and the
+link gets exactly the runtimes each needs: the `.cpp` is compiled
+whenever either kind is present, the A3 runtime objects are linked for
+an A3 body and `fire_runtime.c` otherwise, and the link driver is g++
+whenever a cpp body is present. One path now covers pure-A3, pure-cpp
+and mixed modules.
+
 ## Status (updated 2026-08-26 — fresh deep-dive per task request; doc remains OPEN, but the documented blocker text is now substantially stale and the remaining gap is precisely characterized)
 
 Fresh investigation this session, as explicitly requested (the recent

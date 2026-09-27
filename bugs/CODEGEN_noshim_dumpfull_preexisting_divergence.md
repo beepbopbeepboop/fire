@@ -3569,3 +3569,119 @@ driver matches the reference, and real `Python-3.14.6/Lib/modulefinder.py`
 compiles + links. `check-native-dumpfull` still the known pre-existing
 SIGSEGV (NO fire.ci, exit 139); `make bootstrap` still the documented Stage 2
 failure (skipped this session — another agent is on it).
+
+## Status (2026-09-27 — the "segfaults on ANY input" root cause is now PINNED to one line; NOT fixed here, deliberately)
+
+`tools/suite.py`'s three `expect=` markers name this root cause as "the
+self-hosted compiler segfaults on ANY input (exit 139 on a two-line
+program)". Until now that was a *symptom* record. It is now a fully
+determined causal chain, captured under lldb on a `-O2` build of
+`fire.py` (both `HEAD` `435cc71` and the session's tree crash
+byte-identically, so this predates and is unaffected by every change in
+the 2026-09-27 batch).
+
+### The crash, exactly
+
+`./mojoc /tmp/tiny.mojo --dump` on a two-line program:
+
+```
+EXC_BAD_ACCESS (code=1, address=0x6f6490ed)
+  #0 _str_hash(s="")                        runtime/fire_runtime.c:3037
+  #1 _dict_lookup_k(d=0xaa8c650a0, key=..., keykind=0)  fire_runtime.c:3241
+  #2 _dict_lookup(...)                      fire_runtime.c:3252
+  #3 mojo_dict_get_int(d=..., key=...)      fire_runtime.c:3256
+  #4 mojo_middle_exprtypes__walk_ast_into_37bd8e(node=45785024896, ...)  exprtypes.py:61
+  #5-7 _walk_ast_into ... (from module_gen.py:860, `for n in _walk_ast(stmts)`)
+  #9  gen_module_impl_7e9a9f ... module_gen.py:860
+  #11 _run_pipeline ... gimple_codegen.py:4634
+```
+
+`exprtypes.py:61` is one line:
+
+```python
+fnames = _WALK_FIELD_NAMES_CACHE.get(type(node))
+```
+
+and the generated C for it (`mojo/middle/exprtypes.py --dump`, line 61)
+is:
+
+```c
+_t75 = (int64_t)node;
+_t76 = mojo_read_type_tag_safe (_t75);   /* reads the int64_t at node[0] */
+_t77 = mojo_cstr_or_int_str (_t76);      /* <-- here                    */
+_t78 = mojo_dict_get_int (_t74, _t77);
+```
+
+### The chain, in three links
+
+1. **`type(node)` is not a class object on the compiled path.** It lowers
+   to `mojo_read_type_tag_safe(node)`, i.e. the `int64_t` stored at
+   offset 0 of the node. Measured at the crash: `key == 0x6f6490ed`
+   (lldb: `(char *) 0x000000006f6490ed`), a 31-bit word.
+
+2. **`mojo_cstr_or_int_str` mislabels that 31-bit word as a `char *`.**
+   ```c
+   char *mojo_cstr_or_int_str(int64_t v) {
+       if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;   /* <-- taken */
+       return mojo_str_from_int(v);
+   }
+   int mojo_boxed_is_str(int64_t v) {
+       return v > 65536 && !mojo_is_registered_list(v);
+   }
+   ```
+   `0x6f6490ed` is ~1.87e9, so `v > 65536` is comfortably true, and it
+   is not a registered list, so `mojo_boxed_is_str` returns true and the
+   integer is handed back as a pointer.
+
+3. **`mojo_dict_get_int` then `_str_hash`es that pointer** and
+   dereferences address 0x6f6490ed.
+
+### Why this is the *right* diagnosis, and not another guess
+
+`mojo_read_type_tag_safe`'s own comment, twenty lines above the crash
+site's callee, already states the rule this violates:
+
+> Also reject the whole 31-bit range the struct type-tags themselves
+> occupy (`zlib.crc32(name) & 0x7fffffff`): a compiled `type(node)`
+> yields such a tag rather than a class object … On every platform this
+> runtime targets a genuine heap/stack/static address is far above 2GiB,
+> so nothing legitimate is lost.
+
+`mojo_boxed_is_str`'s threshold is `< 65536`, three orders of magnitude
+lower than the 2GiB boundary the same file uses two functions away, and
+it applies **no 31-bit-range guard at all**. The measured `key` sits
+squarely in the range the neighbouring function refuses to dereference.
+This is the same "small int mistaken for a pointer" family the
+`_walk_ast_into` comment two lines above `exprtypes.py:61` documents for
+the `isinstance(node, str/int/float/bool)` arm — the fix for that arm
+(`dataclasses.is_dataclass` walked FIRST) is in this file; the
+`type(...)`-as-dict-key arm is a different instance of the same shape
+and was not covered by it.
+
+### The candidate fix, and why it is NOT applied here
+
+`mojo_boxed_is_str` rejecting the 31-bit tag range (the guard
+`mojo_read_type_tag_safe` already applies, factored into a shared
+`_mojo_tagged_addr_ok`-style predicate) is the smallest change that
+addresses the observed failure, and it is a RUNTIME-only change.
+
+It is deliberately not applied in this session, for a reason that has
+nothing to do with its correctness:
+
+- The three `expect=`-marked steps are `ab-native`, `native-dumpfull`
+  and `bootstrap-stage2-dumps`, and the runner's anti-rot rule reports
+  an `expect=` marker whose test now PASSES as a **FAILURE**. This crash
+  is the FIRST thing every self-hosted run does (`_walk_ast` is called
+  at `module_gen.py:860`, before any per-module work), so lifting it
+  does not make those three pass — it makes them fail *earlier and
+  differently*, turning a green gate red unless the whole self-hosted
+  path also comes up, which is the large separate project this document
+  exists to track.
+- Nothing behind it is bounded. Everything downstream of the first AST
+  walk is currently unmeasured, so a fix here buys a new, unknown
+  failure rather than a known-good state.
+
+Whoever takes the self-hosted path should apply the guard, then re-run
+`tools/suite.py native` and treat the resulting SELFHOST-CRASHED set as
+the real remaining work — which is the state this document's tenth entry
+had already driven to zero for a different crash class.

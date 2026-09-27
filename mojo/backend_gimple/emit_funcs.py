@@ -96,7 +96,31 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         gen._declare_var(env_var, f"{ci.env_struct} *")
         gen._emit(f"  {env_var} = {alloc_fn} ();")
         for vname, vtype in ci.captures:
-            if vname in ci.mut_names and not (vname in gen._captures and gen._env_param):
+            _own_mut_ptr = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
+            if vname in ci.mut_names and _own_mut_ptr:
+                # DOUBLY-NESTED by-reference capture. This function is
+                # ITSELF a lifted closure that captured `vname` by
+                # reference (`_gen_lifted_closure` preloaded the box
+                # pointer into `_mutptr_<name>`), and the closure it is
+                # building right now ALSO captures it by reference. Hand
+                # the grandchild the SAME box pointer, so the whole chain
+                # of levels shares the one cell the owner allocated —
+                # Python's cell model, and the only way a write three
+                # levels down is visible back in the owner.
+                #
+                # Storing `gen._cname(vname)` here (the by-value seed
+                # below, or the `&`-style address the `{mut}` draft
+                # first used) is what this branch replaced. Both were
+                # wrong in the same way: the intermediate holds a
+                # POINTER, not the value, so seeding a value into a
+                # pointer field is a hard `int64_t` -> `int64_t *`
+                # `-Wint-conversion` error (hit for real by
+                # `Tools/wasm/wasi/__main__.py`'s
+                # `subdir` -> `decorator` -> `wrapper` chain, whose
+                # `wrapper` declares `nonlocal working_dir`).
+                gen._emit(
+                    f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {_own_mut_ptr};")
+            elif vname in ci.mut_names and not (vname in gen._captures and gen._env_param):
                 # `{mut}`-capture-spec closure (ClosureInfo.mut_names):
                 # store the local's own POINTER (not its dereferenced
                 # value) so a write inside the nested closure's body is
@@ -114,11 +138,13 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 #
                 # A capture that's ALSO already captured (by reference)
                 # in the CURRENT function's own env is a doubly-nested
-                # closure -- not yet supported transitively (see
-                # bugs/CODEGEN_comptime_bracket_parametrized_function_
-                # calls_silently_wrong.md's gap 3); falls through to
-                # the by-value branch below rather than emit something
-                # silently wrong.
+                # closure; it is handled by the branch immediately above
+                # (which hands the grandchild the same box pointer), and
+                # only a name the enclosing function captures by VALUE
+                # despite this closure wanting it by reference -- which
+                # `discover_closures`'s transitive fixup now rules out --
+                # falls through to the by-value branch below rather than
+                # emit something silently wrong.
                 ptr_val = gen._new_val(f"{vtype} *", gen._cname(vname))
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {ptr_val};")
             # If vname is captured in the current function's own env, read from _env->vname.
@@ -643,6 +669,19 @@ def _gen_stmt_GlobalStmt(gen, node):
         # is checked before var_types in the IdentExpr read/write paths.
         if name in gen._global_var_types and name not in gen.var_types:
             gen.var_types[name] = gen._global_var_types[name]
+
+
+def _gen_stmt_NonlocalStmt(gen, node):
+    # A `nonlocal` DECLARATION. Like `global` it is a statement that changes no
+    # value; unlike `global` it does not name a module-level binding, so the
+    # work it asks for is in the closure pass: the declared names must be
+    # treated as FREE variables of this function (so they are captured from the
+    # enclosing frame) and, because the function rebinds them, as
+    # by-REFERENCE captures (so the write reaches that frame). Recording the
+    # names here is what lets `discover_closures` do that; see
+    # `mojo/middle/closures.py`.
+    for name in node.names:
+        gen._func_declared_nonlocals.add(name)
 
 
 def _gen_stmt_ComptimeForStmt(gen, node):
@@ -2301,6 +2340,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
     gen._struct_layout = solver.solve(node.params, node.body)
 
+    # Which parameters a nested closure captures BY REFERENCE has to be
+    # known BEFORE `param_strs` is built: such a parameter is declared
+    # under a second C name so the heap box can carry the source-level
+    # one. See _plan_mut_captured_params.
+    ginf._plan_mut_captured_params(gen, node, node.name)
+
     param_strs = []
     has_varargs = gimple_ctypes._params_have_vararg(node.params)
     seen_varargs = False
@@ -2335,7 +2380,14 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         if safe_bare != bare:
             gen.var_types[safe_bare] = ctype
             gen._c_names[bare] = safe_bare
-        param_strs.append(f"{ctype} {safe_bare}")
+        # A parameter some nested closure captures BY REFERENCE is declared
+        # under a SECOND C name: the heap box (`_boxed_mut_locals`, seeded
+        # from `_plan_mut_captured_params`) has to carry the source-level
+        # name, because every read/write of it, and the env-field store
+        # that hands it to the closure, resolve through `_cname(bare)`.
+        param_strs.append(
+            f"{ctype} {gen._mut_boxed_param_c[bare]}"
+            if bare in gen._mut_boxed_param_c else f"{ctype} {safe_bare}")
 
     # A param typed `MojoGenerator *` by the cross-call generator-value
     # contract (Pass 1.3f-gen) needs its generator's base/value_ctype
@@ -3467,6 +3519,11 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     solver = gimple_solvers.LayoutSolver(gen.struct_field_types)
     gen._struct_layout = solver.solve(node.params, node.body)
 
+    # See the free-function path's identical call: a by-reference capture
+    # target among this method's parameters must be declared under a second
+    # C name, and that has to be decided before `param_strs` is built.
+    ginf._plan_mut_captured_params(gen, node, gen.current_func_name)
+
     method_full_name = f"{struct_name}_{node.name}"
     has_varargs = gimple_ctypes._params_have_vararg(node.params)
     param_strs = []
@@ -3546,7 +3603,12 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
         if safe_bare != bare:
             gen._c_names[bare] = safe_bare
             gen.var_types[safe_bare] = ctype
-        param_strs.append(f"{ctype} {safe_bare}")
+        # See the free-function path's identical branch: a by-reference
+        # capture target is declared under a second C name so its heap box
+        # can carry the source-level one.
+        param_strs.append(
+            f"{ctype} {gen._mut_boxed_param_c[bare]}"
+            if bare in gen._mut_boxed_param_c else f"{ctype} {safe_bare}")
 
     # Thread any function-typed, actually-used comptime bracket
     # parameter(s) through as ordinary trailing C parameters (opaque

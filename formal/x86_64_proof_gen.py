@@ -210,10 +210,17 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
         return None       # caller emits the `sorry` form
     param = fn.params[0][0] if fn.params else "n"
     env = {param: param} if fn.params else {}
-    conds = AP._collect_conds(fn, param, env)
+    # vtypes/call_types, so the `by_cases` conditions and the model's own `if`
+    # are the same term, and `sKey` (ProofLib's sign-flip, which is how both
+    # render a signed comparison) in the simp set so `simp` sees that the
+    # hypothesis IS the model's `if` test.  Same two facts the arm64
+    # `eval_eq_mojo` needs; see `_cmp_go`.
+    vtypes = function_var_types(fn)
+    call_types = {}
+    conds = AP._collect_conds(fn, param, env, vtypes, call_types)
     simp_lems = ", ".join(["mojo", "%s_go" % func_name, "ast", "evalFunc",
                            "evalBody", "evalBodyEnv", "evalExpr", "u64pow",
-                           "u64powGo"] + list(go_lemmas or []))
+                           "u64powGo", "sKey"] + list(go_lemmas or []))
     if not conds:
         proof = f"simp +decide [{simp_lems}]"
     else:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import determinism_trace as _dtrace
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -437,6 +437,18 @@ def _quick_type(gen, node) -> str:
                 and gen._quick_type(node.func.obj) == 'char *'):
             return 'char *'
     if isinstance(node, gimple_ctypes.MemberExpr):
+        # A modelled module attribute (see _MODULE_ATTR_CTYPES's docstring
+        # for why this lookup is shared with the lowering) has a settled
+        # ctype. Checked BEFORE the generic struct-field path: the
+        # receiver is a module marker, so `sn` is empty, `_fields` is
+        # empty, and the fallthrough would report the scalar `int64_t`
+        # while the lowering produced a real `MojoDict *` / `MojoList *`.
+        _mat = gimple_ctypes._module_attr_ctype(
+            gimple_ctypes._as_str(node.obj.name)
+            if isinstance(node.obj, gimple_ctypes.IdentExpr) else '',
+            _as_str(node.member))
+        if _mat:
+            return _mat
         ot: str
         ot = gen._quick_type(node.obj)
         sn: str

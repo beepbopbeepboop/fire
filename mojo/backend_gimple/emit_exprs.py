@@ -24,7 +24,7 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
@@ -1146,11 +1146,35 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
 
         # Special handling for os.path attribute access
         if module_name == 'os' and node.member == 'path':
-            # os.path is a marker - return a special value indicating path module
             # The actual function call will be handled at the call site
             t = gen._new_temp('int')
             gen._emit(f"  {t} = 0;  /* os.path module marker */")
             return 'int', t
+
+        # `os.environ` as a VALUE (the whole mapping). The per-key idioms
+        # -- `os.environ.get(k)`, `os.environ[k]`, `k in os.environ`,
+        # `os.environ[k] = v` -- never reach here: ast_rewriter.py
+        # lowers each of them to `mojo_c_getenv` (and the assign form to
+        # `mojo_c_setenv`) before codegen sees them, so any `os.environ`
+        # MemberExpr still standing IS a value-position read. Previously
+        # that fell through to the generic dynamic-getattr dispatch,
+        # which typed it `int64_t`, so a genuine `dict |` union over it
+        # (`env_defaults | os.environ | updates`,
+        # Tools/wasm/wasi/__main__.py's `updated_env`) passed an integer
+        # where `mojo_dict_union` expects `MojoDict *` -- a hard
+        # `-Wint-conversion` error.
+        #
+        # Why here and not as an `ast_rewriter` rule: that rewriter walks
+        # BOTTOM-UP (`_rewrite_node` recurses into children before trying
+        # the node itself), so a rule on the bare `os.environ` MemberExpr
+        # would rewrite the RECEIVER of every `os.environ.get(k)` before
+        # the CallExpr-level rule ever got to match, silently disabling
+        # all four existing rewrites. Codegen sees the post-rewrite tree,
+        # so this case is unambiguous by construction.
+        if module_name == 'os' and node.member == 'environ':
+            t = gen._new_val('MojoDict *', 'mojo_environ_dict ()')
+            gen._dict_val_types[t] = 'char *'
+            return gimple_ctypes._module_attr_ctype(module_name, node.member), t
 
         # os.sep / os.pathsep / os.curdir / os.pardir / os.linesep —
         # this platform is always POSIX ('/'), so all five are genuine
@@ -3053,10 +3077,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # the class of container-kind cast DESIGN.html's R3 flags (confirmed via
     # test_dict.mojo's `orig |= new` where both are Dict[String, Int]).
     if op == '|' and (lt == 'MojoDict *' or rt == 'MojoDict *') and 'MojoSet *' not in (lt, rt):
-        return 'MojoDict *', gen._call_expr(
+        _lu = gen._ensure_local(lt, lv)
+        _ru = gen._ensure_local(rt, rv)
+        t = gen._call_expr(
             'MojoDict *', 'mojo_dict_union',
-            [('MojoDict *', _as_str(gen._ensure_local(lt, lv))),
-             ('MojoDict *', _as_str(gen._ensure_local(rt, rv)))])
+            [('MojoDict *', _as_str(_lu)), ('MojoDict *', _as_str(_ru))])
+        # The union allocates a fresh dict, so nothing else will ever record
+        # its value type: carry it over from the operands here or every later
+        # `.get()`/subscript on the result degrades to `mojo_dict_get_int`
+        # and yields the stored pointer's bits. See ginf._dict_union_val_type.
+        _vt = gen._dict_union_val_type(lv, rv)
+        if _vt:
+            gen._dict_val_types[t] = _vt
+        # A dict-of-dict value needs its OWN nested value type carried too, or
+        # `merged[k][k2]` loses one level (same reason as above, one level in).
+        _ln = gen._dict_nested_val_types.get(_lu if isinstance(_lu, str) else lv)
+        if _ln and _ln == gen._dict_nested_val_types.get(
+                _ru if isinstance(_ru, str) else rv):
+            gen._dict_nested_val_types[t] = _ln
+        return 'MojoDict *', t
     # For | on set/list/dict pointer types, use runtime union, not C bitwise |.
     # An empty `{}` operand lowers to MojoDict*; coerce such pointer operands
     # to MojoSet* so GIMPLE's strict pointer typing accepts the call.

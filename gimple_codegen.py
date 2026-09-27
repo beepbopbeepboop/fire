@@ -25,7 +25,7 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node,
@@ -3386,6 +3386,9 @@ class GimpleGen:
         return gfn._gen_stmt_ComptimeVarStmt(self, node)
     def _gen_stmt_GlobalStmt(self, node):
         return gfn._gen_stmt_GlobalStmt(self, node)
+
+    def _gen_stmt_NonlocalStmt(self, node):
+        return gfn._gen_stmt_NonlocalStmt(self, node)
     def _gen_stmt_ComptimeForStmt(self, node):
         return gfn._gen_stmt_ComptimeForStmt(self, node)
     def _signature_ctypes(self, params, node, self_struct=None, sentinel='...') -> list:
@@ -3858,6 +3861,10 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
+    def _dict_val_of_expr(self, expr) -> str:
+        return ginf._dict_val_of_expr(self, expr)
+    def _dict_union_val_type(self, lv, rv) -> str:
+        return ginf._dict_union_val_type(self, lv, rv)
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
         return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs)
     def _declared_int_ctype(self, val: str) -> str | None:
@@ -3877,6 +3884,8 @@ class GimpleGen:
         return ginf._write_dest(self, name)
     def _seed_mut_captured_local_types(self, func_name: str):
         return ginf._seed_mut_captured_local_types(self, func_name)
+    def _plan_mut_captured_params(self, node, func_name: str):
+        return ginf._plan_mut_captured_params(self, node, func_name)
     def _seed_addressed_locals(self, body: list):
         return ginf._seed_addressed_locals(self, body)
     def _emit_mut_local_box_allocs(self):

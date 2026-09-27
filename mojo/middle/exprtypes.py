@@ -639,7 +639,7 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
         return 'char *'
     return ctype
 
-def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None) -> str | None:
+def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None) -> str | None:
     """The C type a `yield from <expr>` site contributes to its enclosing
     generator's overall yield-value type, for _generator_yield_ctype's
     same-type-everywhere check — None if `<expr>` isn't a bare call to a
@@ -667,6 +667,25 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         _inner_yf = YieldFromExpr(value=_inner) if not isinstance(_inner, YieldFromExpr) else _inner
         _inner_ctype = _yield_from_delegate_ctype(_inner_yf, generator_api)
         return _inner_ctype if _inner_ctype not in (None, 'char *') else 'int64_t'
+    # `yield from cls.<generator>(...)` -- a @classmethod generator
+    # delegating to a SIBLING generator method of the same class. Resolved
+    # from the same `generator_method_api` the body-emission side reads
+    # (see GimpleGen._cpp_yield_from's own `cls.<method>` branch), keyed
+    # `(struct_name, method_name)`; the receiver is the literal `cls`, and
+    # `self_struct_name` is the enclosing class this body was compiled for
+    # (the `cls` of a @classmethod generator). Without this the call fell
+    # through to the `return 'char *'` default below, so a delegating
+    # classmethod generator that yields int64_t was typed `char *` and
+    # then refused the "yields conflicting types" check against its own
+    # `yield 1` -- a refusal for a shape the emitter CAN now compile.
+    if (generator_method_api is not None and self_struct_name
+            and isinstance(call, CallExpr)
+            and isinstance(call.func, MemberExpr)
+            and isinstance(call.func.obj, IdentExpr)
+            and call.func.obj.name == 'cls'):
+        _mapi = generator_method_api.get((self_struct_name, call.func.member))
+        if _mapi is not None:
+            return _mapi.get('value_ctype')
     if generator_api is None:
         return None
     if isinstance(call, CallExpr) and isinstance(call.func, IdentExpr):
@@ -843,7 +862,7 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
             slots = merged
     return (found, slots)
 
-def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None) -> str | None:
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -919,7 +938,10 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
         elif isinstance(n, YieldFromExpr):
             if isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name == fn.name):
                 continue
-            t = _yield_from_delegate_ctype(n, generator_api, field_elem_types, local_elem_types)
+            t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
+                                           local_elem_types,
+                                           generator_method_api,
+                                           self_struct_name)
             if t is None:
                 return None
             if ctype is None:

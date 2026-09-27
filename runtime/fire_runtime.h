@@ -370,6 +370,7 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
 MojoList *mojo_str_partition(char *s, char *sep);
 MojoList *mojo_str_rpartition(char *s, char *sep);
 char *mojo_c_getenv(char *name);
+
 int mojo_truthy_cstr(char *s);
 int64_t mojo_strlen(char *s);
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
@@ -587,6 +588,14 @@ typedef struct {
 } MojoDict;
 
 MojoDict   *mojo_dict_new(void);
+/* `os.environ` as a VALUE (the mapping). The per-key idioms
+ * (`os.environ.get(k)`, `os.environ[k]`, `k in os.environ`,
+ * `os.environ[k] = v`) are lowered to mojo_c_getenv by ast_rewriter.py
+ * and do not go through this; see mojo_environ_dict's own comment in
+ * fire_runtime.c for the singleton semantics and the honest, putenv-free
+ * scope of writes. Declared HERE rather than beside mojo_c_getenv
+ * because it is the first helper to return a container. */
+MojoDict   *mojo_environ_dict(void);
 int64_t    *mojo_dict_order_indices(MojoDict *d);
 void        mojo_dict_free(MojoDict *d);
 /* mojo_dict_init/mojo_dict_destroy: see mojo_list_init/mojo_list_destroy's

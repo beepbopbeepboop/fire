@@ -69,6 +69,74 @@ mgen_thunk(MojoCoro *c, void *env)
     }
 }
 
+/* ── live-handle registry ─────────────────────────────────────────────────
+ * `asyncio.run(x)` accepts a NAME this function bound from a coroutine-
+ * producing call, and the static inference behind that
+ * (`mojo/middle/coro.py`'s `_scan_handle_vars`) deliberately sees only
+ * same-module, statically-named callees. The runtime boundary therefore has
+ * to be able to answer "that is NOT a coroutine" by itself: without this,
+ * `__mojo_async_run_gen` casts whatever int64_t it was handed to
+ * `MojoGen *` and reads `->done` out of it — a wild read on a plain integer
+ * or a string pointer. With it, the same call raises the ValueError Python
+ * raises for `asyncio.run(<not a coroutine>)`.
+ *
+ * Entries are added by `mgen_new_impl` (the single allocation site) and
+ * removed by `__mojo_gen_destroy` (the single free site), so the set
+ * describes exactly the live handles and a recycled address can never be
+ * mistaken for a stale one.
+ *
+ * A hand-rolled chained set, not `mojo_set_*`: this translation unit
+ * deliberately does not include fire_runtime.h (see the header comment),
+ * and the population is tiny (one node per live coroutine handle).
+ */
+#define MGEN_REG_BUCKETS 1024
+typedef struct MGenReg { struct MGenReg *next; int64_t h; } MGenReg;
+static MGenReg *_mgen_reg[MGEN_REG_BUCKETS];
+
+static void
+mgen_reg_add(int64_t h)
+{
+    if (h <= 0) return;
+    unsigned b = (unsigned)(((uint64_t)h >> 4) % MGEN_REG_BUCKETS);
+    for (MGenReg *p = _mgen_reg[b]; p; p = p->next)
+        if (p->h == h) return;
+    MGenReg *n = (MGenReg *)malloc(sizeof *n);
+    if (!n) return;                     /* a miss means the check below says
+                                         * "not a handle": the honest refusal
+                                         * path, not a crash */
+    n->h = h;
+    n->next = _mgen_reg[b];
+    _mgen_reg[b] = n;
+}
+
+static int
+mgen_reg_del(int64_t h)
+{
+    if (h <= 0) return 0;
+    unsigned b = (unsigned)(((uint64_t)h >> 4) % MGEN_REG_BUCKETS);
+    MGenReg **pp = &_mgen_reg[b];
+    while (*pp) {
+        if ((*pp)->h == h) {
+            MGenReg *dead = *pp;
+            *pp = dead->next;
+            free(dead);
+            return 1;
+        }
+        pp = &(*pp)->next;
+    }
+    return 0;
+}
+
+static int
+mgen_reg_has(int64_t h)
+{
+    if (h <= 0) return 0;
+    unsigned b = (unsigned)(((uint64_t)h >> 4) % MGEN_REG_BUCKETS);
+    for (MGenReg *p = _mgen_reg[b]; p; p = p->next)
+        if (p->h == h) return 1;
+    return 0;
+}
+
 static int64_t
 mgen_new_impl(void (*body)(int64_t), const int64_t *args, int n, int is_method)
 {
@@ -80,6 +148,7 @@ mgen_new_impl(void (*body)(int64_t), const int64_t *args, int n, int is_method)
     for (int i = 0; i < n && i < MOJO_GEN_MAX_ARGS; i++) g->args[i] = args[i];
     g->coro = __mojo_coro_new(mgen_thunk, g, 0);
     if (!g->coro) { free(g); return 0; }
+    mgen_reg_add((int64_t)(uintptr_t)g);
     return (int64_t)(uintptr_t)g;
 }
 
@@ -370,6 +439,7 @@ __mojo_gen_destroy(int64_t gen)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)gen;
     if (!g) return;
+    mgen_reg_del(gen);
     __mojo_coro_destroy(g->coro);
     free(g);
 }
@@ -389,6 +459,11 @@ __mojo_gen_destroy(int64_t gen)
    the generator, it does not invalidate the caller's reference to it — the
    same distinction __mojo_gen_destroy (a real free) draws. */
 extern void mojo_exc_type_set(int64_t);
+extern void mojo_exc_msg_set(char *);
+/* `mojo_raise` itself is declared further down with the exception-tag block;
+ * C needs it before first use, so forward-declare it here too (a repeated
+ * `extern` declaration of the same function is legal C). */
+extern void mojo_raise(void);
 extern void mojo_exc_msg_set(char *);
 extern void mojo_exc_obj_set(void *);
 extern void mojo_exc_pending_set(int);
@@ -595,7 +670,29 @@ void
 __mojo_async_run_gen(int64_t genHandle)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)genHandle;
-    if (!g || g->done) return;
+    /* Coroutine-or-not, decided HERE rather than trusted from the caller.
+     * `asyncio.run(x)` lowers to this call for a bare call AND for a name
+     * the enclosing function bound from a coroutine-producing call; the
+     * static inference for the second form (`_scan_handle_vars`) covers
+     * same-module, statically-named callees only, so this is the half that
+     * makes the whole bridge safe rather than merely usually-right. Before
+     * the live-handle registry existed, a non-handle integer or string
+     * pointer was cast straight to `MojoGen *` and `g->done` read out of
+     * arbitrary memory. Python's own answer for a non-coroutine argument is
+     * `ValueError: a coroutine was expected`; match it, so a program that
+     * passes the wrong thing fails the same way on both paths. */
+    if (!g || !mgen_reg_has(genHandle)) {
+        /* 663468903 == gimple_codegen's `_exc_type_id('ValueError')` --
+           `_crc32_str("ValueError") & 0x7fffffff`. Spelled as the number
+           because this file cannot call the codegen's own hash, and the
+           value has to match exactly for a compiled `except ValueError:` to
+           catch this. Same convention as the MOJO_EXC_TAG_* block below. */
+        mojo_exc_type_set(663468903);
+        mojo_exc_msg_set("a coroutine was expected");
+        mojo_raise();
+        return;
+    }
+    if (g->done) return;
     if (__mojo_async_task_is_registered(genHandle)) {
         /* Eagerly scheduled at create_task() time -- it is already on the
            scheduler's ready queue. Just drain the loop (which also drives

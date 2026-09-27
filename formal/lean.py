@@ -280,7 +280,9 @@ def lean_version(lean: str, timeout: int = 120) -> str:
 
 def proof_verdict_key(proof_path: str, lib_dir: str, lean: str) -> str:
     import cas
-    parts = [b"formal-proof-verdict-v1", lean_version(lean).encode()]
+    # v2 added the `n_sorries` line to the stored body, so the key changes
+    # rather than a v1 entry being read as a count of zero.
+    parts = [b"formal-proof-verdict-v2", lean_version(lean).encode()]
     for stem in LIBRARY_MODULES:
         parts.append(stem.encode())
         olean = os.path.join(lib_dir, stem + ".olean")
@@ -291,48 +293,67 @@ def proof_verdict_key(proof_path: str, lib_dir: str, lean: str) -> str:
 
 
 def check_proof_cached(proof_path: str, repo_root: str | None = None,
-                       timeout: int = 1200) -> tuple[bool, str, bool]:
+                       timeout: int = 1200) -> tuple[bool, str, bool, int]:
     """check_proof, memoised on the exact inputs. Third element is True on a
-    cache hit (nothing was run). Both verdicts are cached: a known-failing
-    example is just as deterministic as a passing one, and re-deriving it with
-    a multi-minute Lean run is what made iterating on the suite painful."""
+    cache hit (nothing was run); fourth is the number of declarations that
+    admitted a `sorry` (see `_run_lean`). Both verdicts are cached: a
+    known-failing example is just as deterministic as a passing one, and
+    re-deriving it with a multi-minute Lean run is what made iterating on the
+    suite painful."""
     import cas
     root = repo_root or _default_root()
     lib_dir = os.path.join(root, "lib")
     lean = find_lean(root)
     if not lean:
-        return False, "lean not found", False
+        return False, "lean not found", False, 0
     try:
         ensure_library(lean, lib_dir, timeout)
     except Exception as e:
-        return False, f"proof library build failed: {e}", False
+        return False, f"proof library build failed: {e}", False, 0
     try:
         key = proof_verdict_key(proof_path, lib_dir, lean)
     except OSError as e:
-        return False, f"proof file unreadable: {e}", False
+        return False, f"proof file unreadable: {e}", False, 0
     stored = cas.lookup(key, VERDICT_EXT)
     if stored:
         with open(stored, "rb") as f:
             body = f.read().decode("utf-8", "replace")
-        ok, _, detail = body.partition("\n")
-        return ok == "ok", detail.strip("\n"), True
-    ok, detail = _run_lean(proof_path, lib_dir, lean, timeout)
+        # `partition` excludes the separator from its third field, so the
+        # count line is the HEAD of that field, not the separator itself.
+        ok, _, rest = body.partition("\n")
+        n_sorries, _, detail = rest.partition("\n")
+        return ok == "ok", detail.strip("\n"), True, int(n_sorries or 0)
+    ok, detail, n_sorries = _run_lean(proof_path, lib_dir, lean, timeout)
     try:
         cas.publish(key, VERDICT_EXT,
-                    (("ok\n" if ok else "fail\n") + detail + "\n").encode())
+                    (("ok" if ok else "fail") + f"\n{n_sorries}\n"
+                     + detail + "\n").encode())
     except OSError:
         pass  # a cache that cannot be written must not fail the check
-    return ok, detail, False
+    return ok, detail, False, n_sorries
 
 
 def check_proof(proof_path: str, repo_root: str | None = None,
                 timeout: int = 1200) -> tuple[bool, str]:
-    ok, detail, _ = check_proof_cached(proof_path, repo_root, timeout)
+    ok, detail, _, _ = check_proof_cached(proof_path, repo_root, timeout)
     return ok, detail
 
 
 def _run_lean(proof_path: str, lib_dir: str, lean: str,
-              timeout: int) -> tuple[bool, str]:
+              timeout: int) -> tuple[bool, str, int]:
+    """`(ok, detail, n_sorries)`.
+
+    `n_sorries` is the number of declarations Lean reports as "uses `sorry`" —
+    the ONLY sound way to count holes, and the reason this census is worth
+    carrying.  Grepping the generated source for the word counts a
+    `all_goals first | … | sorry` fallback that was never reached (a tactic
+    alternative that loses is still text), so a textual count is a count of
+    *hypothetical* holes and never goes down.  Worse, the doc this replaces
+    counted the greps of a plain `lean` run, which reports nothing at all when
+    Lean serves a cached verdict — hence a figure that was neither the
+    baseline nor the current state.  Lean emits the warning on stderr during
+    elaboration, once per declaration that actually admitted a hole.
+    """
     env = os.environ.copy()
     env["LEAN_PATH"] = os.pathsep.join(
         (os.path.dirname(os.path.abspath(proof_path)), lib_dir))
@@ -343,7 +364,10 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str,
             cwd=os.path.dirname(os.path.abspath(proof_path)),
         )
     except subprocess.TimeoutExpired:
-        return False, "lean timed out"
+        return False, "lean timed out", 0
+    out = (result.stdout or "") + (result.stderr or "")
+    n_sorries = sum(1 for line in out.splitlines()
+                    if "declaration uses" in line and "sorry" in line)
     if result.returncode != 0:
-        return False, (result.stderr or result.stdout or "lean failed").strip()
-    return True, ""
+        return False, (result.stderr or result.stdout or "lean failed").strip(), n_sorries
+    return True, "", n_sorries

@@ -84,6 +84,20 @@ class Scope:
     def __init__(self, parent=None):
         self.parent = parent
         self.vars = {}
+        # Names this scope's function declared `nonlocal`. A declaration
+        # changes no value, so it belongs on the scope rather than in a
+        # side table: a plain `x = ...` in a nested function is LOCAL by
+        # default (Python's own rule, and this interpreter's long-standing
+        # behaviour), and `nonlocal x` is exactly the statement that says
+        # "except for this one". The assignment then writes the nearest
+        # ENCLOSING binding instead of creating a local.
+        self.nonlocals: set = set()
+
+    def declare_nonlocal(self, name: str) -> None:
+        self.nonlocals.add(name)
+
+    def is_nonlocal(self, name: str) -> bool:
+        return name in self.nonlocals
 
     def define(self, name: str, value):
         self.vars[name] = value
@@ -1125,6 +1139,46 @@ class BoundMethod:
         return self
 
 
+class BoundClassMethod:
+    """A `@classmethod` with the CLASS already filled in under the source-level
+    name `cls` — the classmethod counterpart of `BoundMethod`.
+
+    Before this, a `@classmethod` had NO representation at all: `C.m(...)`
+    returned the raw unbound `MojoFunction`, so the call bound the FIRST REAL
+    ARGUMENT to the `cls` parameter (`C.gen(5)` made `cls == 5`, and
+    `cls.<attr>` then raised "'int' object has no attribute ..."). That made
+    the ORACLE disagree with the compiled path, which does pass a receiver,
+    on a shape real code uses (see
+    bugs/COMPILE_FAIL_importlib_resources_readers.md's
+    `yield from cls.<sibling generator>(...)`).
+
+    A separate class rather than a second receiver kind inside `BoundMethod`:
+    this receiver is a `MojoClass *` where `BoundMethod`'s is a
+    `MojoInstance *`, and the self-hosted compiler gives every struct field
+    ONE C type. Erasing both to one `void *` would buy a single class at the
+    price of a cast at each of this one's use sites; two small classes with
+    homogeneous fields costs one extra `struct_field_types` entry and reads
+    more plainly.
+    """
+    def __init__(self, bound_func, cls, interpreter):
+        self.bound_func = bound_func
+        self.cls = cls
+        self.interpreter = interpreter
+
+    def __call__(self, *args, **kwargs):
+        f = self.bound_func
+        old_scope = self.interpreter.scope
+        self.interpreter.scope = Scope(parent=self.interpreter.scope)
+        self.interpreter.scope.define('cls', self.cls)
+        try:
+            return f(self.interpreter, self.cls, *args, **kwargs)
+        finally:
+            self.interpreter.scope = old_scope
+
+    def __getitem__(self, key):
+        return self
+
+
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
     _ARRAY_TYPE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\[([A-Za-z_][A-Za-z0-9_]*|\d+)\]$')
@@ -1134,7 +1188,8 @@ class MojoClass:
     }
 
     def __init__(self, name, fields, methods, interpreter, bases=None,
-                 comptime_aliases=None, static_methods=None, def_scope=None):
+                 comptime_aliases=None, static_methods=None, class_methods=None,
+                 def_scope=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
@@ -1154,6 +1209,15 @@ class MojoClass:
         # can hand back the raw MojoFunction (no instance to bind) instead
         # of wrapping it in a BoundMethod.
         self.static_methods = static_methods or set()
+        # Names of `@classmethod` methods, the mirror image: __getattr__ wraps
+        # one in a BoundMethod bound to THIS class under the name `cls`, so
+        # `C.m(x)` and `C().m(x)` both deliver the class as the first
+        # argument. Inherited from a base like static_methods is, and an
+        # override in a subclass rebinds `cls` to the SUBCLASS — which is
+        # exactly Python's rule, and is what makes `yield from
+        # cls.<sibling>()` inside a generator resolve against the class the
+        # call was actually made on.
+        self.class_methods = class_methods or set()
 
     def __getattr__(self, name):
         # Only called when normal attribute lookup (real fields set in
@@ -1165,11 +1229,18 @@ class MojoClass:
             return self.comptime_aliases[name]
         if name in self.methods:
             # A method looked up on the class itself (StructType.method),
-            # not an instance — return the raw MojoFunction unbound.
-            # `@staticmethod`s are meant to be called this way; a regular
-            # method returned this way just requires the caller to pass
-            # `self` explicitly, matching Python's own unbound-method rule.
-            return self.methods[name]
+            # not an instance — return the raw MojoFunction unbound, EXCEPT
+            # for a `@classmethod`, which is exactly the case where the
+            # receiver IS the class: bind it and the call is correct on the
+            # first argument, with no call-site knowledge of the decorator.
+            # `@staticmethod`s keep the unbound raw function (nothing to
+            # bind); a regular method returned this way still just requires
+            # the caller to pass `self` explicitly, matching Python's own
+            # unbound-method rule.
+            method = self.methods[name]
+            if name in self.class_methods:
+                return BoundClassMethod(method, self, self.interpreter)
+            return method
         if name == '__name__':
             # Real Python classes carry their own name here; a MojoClass
             # instance passed into a real Python function (e.g. ctypes'
@@ -3301,7 +3372,91 @@ class Interpreter:
                              is_generator=getattr(node, 'is_generator', False),
                              is_async=getattr(node, 'is_async', False))
         spec = self._classify_params(node)
-        return self._register_function(self.scope.vars, node.name, func, spec)
+        bound = self._register_function(self.scope.vars, node.name, func, spec)
+        # The rebinding a decorator IS: the decorated value replaces the
+        # function in the module scope under its own name. Written through
+        # `vars` directly, not `Scope.set`, because `set` looks for an
+        # ENCLOSING binding — that is the `nonlocal` rule and wrong here.
+        self.scope.vars[node.name] = self._apply_function_decorators(node, bound)
+        return self.scope.vars[node.name]
+
+    # Decorators the COMPILER consumes structurally — they select a calling
+    # convention, a binding rule, or a lowering mode, and there is no
+    # user-level function to call. Applying any of them as a runtime
+    # decorator would be a NameError or, worse, a call into something
+    # unrelated. Every one of these is read by name elsewhere in the tree
+    # (`staticmethod`/`classmethod` in execute_StructDef and
+    # fire_compiler.method_receiver_kind, `property` in the generator
+    # eligibility passes, `export` in module_gen, `parameter` in coro.py's
+    # nested-async eligibility, the trait-conformance names in StructDef
+    # handling), so this list is a name set, not a second mechanism.
+    _COMPILE_TIME_DECORATORS = frozenset({
+        'staticmethod', 'classmethod', 'property', 'export', 'parameter',
+        'fieldwise_init', 'always_inline', 'inline', 'unroll', 'comptime',
+        'Copyable', 'Movable', 'ImplicitlyCopyable', 'ExplicitlyCopyable',
+        'Writable', 'Sized', 'Boolable', 'Stringable', 'Hashable',
+        'AnyType', '__allow_legacy_any_origin_fields',
+    })
+
+    def _apply_function_decorators(self, node, bound):
+        """`@deco def f` is `f = deco(f)`, applied bottom-up, in the scope the
+        `def` executed in. RETURNS the resulting value; the caller stores it
+        wherever the function was registered (module scope for a free
+        function, the class's `methods` dict for a method) — this used to
+        write the module scope itself, which silently discarded a decorated
+        METHOD's replacement while leaving a stray name at module level.
+
+        This was MISSING, not merely wrong: `FunctionDef.decorators` was
+        parsed and then never read by this interpreter, so a decorated
+        function was registered raw and every later call reached the
+        undecorated body. Because the interpreter is the documented oracle
+        for "the compiled path is wrong", that made the whole class of
+        decorator bugs invisible — the two engines agreed on the wrong
+        answer. See bugs/COMPILE_FAIL_decorator_application_dropped.md.
+
+        Bottom-up because that is Python's order: `@a` above `@b` above
+        `def f` means `f = a(b(f))`. A decorator whose application raises is
+        NOT caught here: a failing decorator is a real error and must reach
+        the user, exactly as it would in CPython.
+        """
+        decs = getattr(node, 'decorators', None) or []
+        for d in reversed(decs):
+            if isinstance(d, str):
+                if d in self._COMPILE_TIME_DECORATORS:
+                    continue
+                # `@deco` -- the decorator is the name's value.
+                decorator = self.eval_expr(N.IdentExpr(name=d))
+            elif isinstance(d, N.CallExpr):
+                # `@deco(x, k=1)` is `@deco(x, k=1)` applied to f, i.e. TWO
+                # evaluations: the CallExpr produces the decorator (calling
+                # `deco` with its own arguments, which is what returns the
+                # real decorator in the factory idiom), and THAT is then
+                # called with f. Collapsing them into one call is what made
+                # `name` bind to the function instead of to "A" above.
+                # The parser records this as a real CallExpr — it used to
+                # discard the argument list, so a parameterised decorator and
+                # a bare one were the same node and both did nothing.
+                decorator = self.eval_expr(d)
+            else:
+                raise SyntaxError(
+                    f"unsupported decorator on {node.name!r}: {d!r} (expected a "
+                    f"name or a call)")
+            try:
+                # `self.invoke`, not `decorator(...)`: a Mojo-defined
+                # decorator needs the interpreter threaded through as its
+                # first argument, and this is the same entry point
+                # eval_CallExpr uses, so generator/async callees and the
+                # coroutine thread-bounce behave identically here. No
+                # star-args: a parameterised decorator's own arguments were
+                # already consumed by the `eval_expr(d)` above, so the
+                # application itself is always exactly one argument -- which
+                # is also the only shape the self-hosted compiler's inferred
+                # arity for `Interpreter.invoke` can express.
+                bound = self.invoke(decorator, bound)
+            except TypeError as e:
+                raise TypeError(
+                    f"applying decorator to {node.name!r} failed: {e}") from e
+        return bound
 
     def execute_StructDef(self, node: N.StructDef):
         """Execute struct/class definition.
@@ -3318,6 +3473,7 @@ class Interpreter:
         merged_fields = []
         comptime_aliases = {}
         static_methods = set()
+        class_methods = set()
         from_base = set()
         for base_name in base_names:
             try:
@@ -3330,6 +3486,7 @@ class Interpreter:
                 methods.update(base_cls.methods)
                 comptime_aliases.update(base_cls.comptime_aliases)
                 static_methods.update(base_cls.static_methods)
+                class_methods.update(base_cls.class_methods)
                 from_base.update(base_cls.methods.keys())
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
@@ -3345,8 +3502,20 @@ class Interpreter:
                 methods[m.name] = method_func
             else:
                 self._register_function(methods, m.name, method_func, spec)
-            if 'staticmethod' in (getattr(m, 'decorators', None) or []):
+            _decs = getattr(m, 'decorators', None) or []
+            if 'staticmethod' in _decs:
                 static_methods.add(m.name)
+            if 'classmethod' in _decs:
+                class_methods.add(m.name)
+            # A plain `@deco` on a METHOD is the same rebinding as on a free
+            # function (`method = deco(method)`), applied before the class
+            # body finishes so a sibling method can call the decorated form.
+            # Runs for static/class methods too: those two names are in the
+            # compile-time set, so what is left here is exactly the
+            # user-level decorators, and the receiver-binding sets recorded
+            # above are keyed by NAME, so a decorator that replaces the method
+            # with a plain function still binds correctly.
+            methods[m.name] = self._apply_function_decorators(m, methods[m.name])
         # `comptime NAME: Type = value` struct members — evaluated once,
         # here, at struct-definition time, not lazily per access.
         for alias_name, alias_expr in (getattr(node, 'comptime_aliases', None) or {}).items():
@@ -3395,7 +3564,7 @@ class Interpreter:
         fields = merged_fields + actual_fields
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
                          comptime_aliases=comptime_aliases, static_methods=static_methods,
-                         def_scope=self.scope)
+                         class_methods=class_methods, def_scope=self.scope)
         self.scope.define(node.name, cls)
         return cls
 
@@ -3751,7 +3920,13 @@ class Interpreter:
                 while scope.parent:
                     scope = scope.parent
                 scope.define(target.name, value)
-            elif augassign:
+            elif augassign or self.scope.is_nonlocal(target.name):
+                # `augassign` is the `{mut}`-capture idiom; `nonlocal` is its
+                # explicit spelling. Both want the ENCLOSING binding, and
+                # `Scope.set` walks up to the nearest existing one — which for
+                # a `nonlocal` name is by construction an enclosing FUNCTION's
+                # binding (Python rejects the program otherwise), so this is
+                # Python's own rule and not an approximation of it.
                 self.scope.set(target.name, value)
             else:
                 self.scope.define(target.name, value)
@@ -4009,6 +4184,26 @@ class Interpreter:
         if not cond:
             msg = self.eval_expr(node.msg) if getattr(node, 'msg', None) is not None else None
             raise AssertionError(f"{self._loc(node)}{msg if msg is not None else 'assert failed'}")
+        return None
+
+    def execute_NonlocalStmt(self, node):
+        """Execute a `nonlocal a, b` declaration.
+
+        Records the names on the running function's scope and changes no value,
+        which is all a `nonlocal` statement IS: it says "when this function
+        later assigns to `a`, write the enclosing binding, not a local". The
+        assignment itself then goes through `Scope.set` (see
+        `_assign_target`) instead of `Scope.define`.
+
+        The compiled path needs the mirror image of this: its closure env is a
+        struct passed by pointer, so the write is only visible outside if the
+        name is captured BY REFERENCE — which is what
+        `mojo/middle/closures.py` now arranges. The two halves are the same
+        rule in two representations, which is why the declaration is a real
+        node on both paths rather than being parsed away on one.
+        """
+        for name in (getattr(node, 'names', None) or ()):
+            self.scope.declare_nonlocal(name)
         return None
 
     def execute_GlobalStmt(self, node):
@@ -5050,6 +5245,20 @@ class Interpreter:
                 return obj.__dict__[expr.member]
             method = obj._mojo_class.methods.get(expr.member)
             if method is not None:
+                if expr.member in obj._mojo_class.static_methods:
+                    # A `@staticmethod` reached THROUGH AN INSTANCE still
+                    # binds nothing — `K().s(1)` is `K.s(1)`. The
+                    # `static_methods` set was only consulted on the CLASS
+                    # lookup path (`MojoClass.__getattr__`), so this branch
+                    # wrapped one in a BoundMethod and passed the instance as
+                    # a first positional argument: `K().s(1)` bound the
+                    # instance to `s`'s first parameter and then failed on
+                    # `instance + int`.
+                    return method
+                if expr.member in obj._mojo_class.class_methods:
+                    # `instance.classmethod(...)` — the receiver is still the
+                    # CLASS, not the instance (Python's own rule).
+                    return BoundClassMethod(method, obj._mojo_class, self)
                 return BoundMethod(method, obj, self)
             if expr.member in obj._mojo_class.comptime_aliases:
                 return obj._mojo_class.comptime_aliases[expr.member]

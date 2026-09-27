@@ -71,49 +71,70 @@ def _build_generator_program(mojo_src: str) -> str:
         f.write(c_code)
     exe = os.path.join(wd, 'prog.exe')
 
-    if '__mgco_' in c_code:
-        r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w', '-c', '-o',
-                            os.path.join(wd, 'prog.o'), c_path],
-                            capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
-        objs = [os.path.join(wd, 'prog.o')] + _ss_runtime_objs(wd)
-        r = subprocess.run([GCC, '-o', exe, *objs], capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            raise RuntimeError(f"link failed: {r.stderr}")
-        os.chmod(exe, 0o755)
-        return exe
-
-    if not cpp_code:
+    # A module can legitimately contain generators the two backends lower
+    # DIFFERENTLY, and BOTH kinds of body land in the generated .cpp:
+    # the A3 stack-switch pass emits `__mgco_<X>_*` (its runtime entry
+    # points, `runtime/fire_coro_gen.c`), the cpp C++20-coroutine pass
+    # emits the `_mojogen_<X>_*` C++ class family. A first real case is
+    # `yield_from_cls_generator_method_delegation`, where A3 lowers the
+    # delegating `@classmethod` generator and the cpp path lowers the
+    # sibling it delegates to.
+    #
+    # The original gate -- `'__mgco_' in c_code` -- sent that module down
+    # the pure-A3 branch, which links `prog.o` + the A3 runtime objects
+    # and never compiles `prog_gen.cpp` at all. The cpp backend's own body
+    # was silently dropped and the link failed with undefined
+    # `_mojogen_<X>_*` symbols.
+    #
+    # So the two body kinds are detected SEPARATELY and the link gets
+    # exactly what each needs: the .cpp is compiled whenever EITHER kind
+    # is present; the A3 runtime objects are linked for an A3 body and
+    # `fire_runtime.c` otherwise; and the link driver is g++ whenever a
+    # cpp body is present (a C++ translation unit needs a C++ driver).
+    # One code path covers pure-A3, pure-cpp and mixed modules, and
+    # cannot silently drop a backend's bodies again.
+    _blob = f"{c_code}\n{cpp_code}"
+    _has_a3_bodies = '__mgco_' in _blob
+    _has_cpp_bodies = '_mojogen_' in _blob
+    if not (_has_a3_bodies or _has_cpp_bodies):
         raise RuntimeError(
             "expected a non-empty generated .cpp — this source doesn't "
             "actually contain a supported generator (neither stack-switch "
             "nor cpp path lowered it)")
-    cpp_path = os.path.join(wd, 'prog_gen.cpp')
-    with open(cpp_path, 'w') as f:
-        f.write(cpp_code)
-    r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o',
+
+    r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w', '-c', '-o',
                         os.path.join(wd, 'prog.o'), c_path],
                         capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}")
-    r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o',
-                        os.path.join(wd, 'prog_gen.o'), cpp_path],
-                        capture_output=True, text=True, timeout=30)
+        raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
+    objs = [os.path.join(wd, 'prog.o')]
+    if _has_a3_bodies:
+        objs += _ss_runtime_objs(wd)
+    else:
+        runtime_o = os.path.join(wd, 'fire_runtime.o')
+        r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o,
+                            os.path.join(RUNTIME_DIR, 'fire_runtime.c')],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
+        objs.append(runtime_o)
+    if _has_cpp_bodies:
+        cpp_path = os.path.join(wd, 'prog_gen.cpp')
+        with open(cpp_path, 'w') as f:
+            f.write(cpp_code)
+        r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o',
+                            os.path.join(wd, 'prog_gen.o'), cpp_path],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}")
+        objs.append(os.path.join(wd, 'prog_gen.o'))
+    if _has_cpp_bodies:
+        import fire
+        r = fire.link_executable(objs, exe, cxx=True)
+    else:
+        r = subprocess.run([GCC, '-o', exe, *objs], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}")
-    runtime_o = os.path.join(wd, 'fire_runtime.o')
-    r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o,
-                        os.path.join(RUNTIME_DIR, 'fire_runtime.c')],
-                        capture_output=True, text=True, timeout=30)
-    if r.returncode != 0:
-        raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
-    import fire
-    r = fire.link_executable(
-        [os.path.join(wd, 'prog.o'), os.path.join(wd, 'prog_gen.o'), runtime_o],
-        exe, cxx=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"link_executable(cxx=True) failed: {r.stderr}")
+        raise RuntimeError(f"link failed: {r.stderr}")
     os.chmod(exe, 0o755)
     return exe
 
@@ -789,7 +810,125 @@ def main():
         print(x)
 """, "1\n2\n3\n4\n")
 
-    # Parameterized delegation: BOTH the delegating (`outer`) and the
+    # `yield from cls.<generator>(...)` -- a @classmethod generator
+    # DELEGATING to a sibling generator method of the same class
+    # (Lib/importlib/resources/readers.py's
+    # `MultiplexedPath._candidate_paths` doing
+    # `yield from cls._resolve_zip_path(path_str)`). This needs four
+    # separate pieces, none of which existed:
+    #   * `_cls_refs_supported` admitted a `cls.<generator method>(...)`
+    #     call (it deliberately excluded every compiled generator method,
+    #     because the ORDINARY-call lowering has no receiver convention
+    #     for one);
+    #   * `_cpp_yield_from` resolved the callee through
+    #     `_generator_method_api` and passed the `cls` receiver positionally
+    #     (the opaque, never-dereferenced placeholder), since a
+    #     `@staticmethod` callee has no receiver parameter at all;
+    #   * `_yield_from_delegate_ctype` resolved the same callee for TYPE
+    #     inference -- without it the delegation contributed a `char *`
+    #     and the enclosing generator's own `yield 1` tripped the
+    #     conflicting-types refusal;
+    #   * a FORWARD declaration of the callee's four `extern "C"`
+    #     wrappers, because the callee is defined LATER in the class (the
+    #     two-pass method retry makes it *registered* in time, but its
+    #     .cpp unit is still emitted after the delegating one).
+    #
+    # The callee is deliberately defined AFTER the delegator -- the shape
+    # that forced the forward declaration, and what `readers.py` does.
+    # The expected stdout is CPython's answer for this program; the
+    # interpreter cannot be the oracle here because it has no
+    # `@classmethod` binding at all (it hands the classmethod generator's
+    # first argument through as `cls`, so `cls.inner` is an int), which is
+    # a separate, still-open interpreter gap.
+    test_generator_stdout("yield_from_cls_generator_method_delegation", """\
+class Paths:
+    @classmethod
+    def outer(cls, n):
+        yield 1
+        yield from cls.inner(n)
+
+    @classmethod
+    def inner(cls, n):
+        yield n
+        yield n + 1
+
+def main():
+    for v in Paths.outer(5):
+        print(v)
+""", "1\n5\n6\n")
+
+    # A @staticmethod GENERATOR, called as `Class.gen(...)` and consumed
+    # directly by the `for` loop. This shape did not compile on EITHER
+    # backend before, for two independent reasons that both had to be fixed:
+    #
+    #   * the free-function generator loop's "is this a method?" filter was
+    #     "does its first parameter look like `self`/`cls`", which a
+    #     @staticmethod (first parameter a REAL argument) does not satisfy —
+    #     so the method's coroutine unit was emitted under the free-function
+    #     symbol `_mojogen_gen_*` and registered in the FREE-function api
+    #     table. `Class.gen(...)` was then not a generator call at all: it
+    #     lowered to an ordinary int64_t call, and the `for` loop raised
+    #     `mojo_unsupported_iter` at run time. Real:
+    #     `Lib/importlib/resources/readers.py`'s `_resolve_zip_path`.
+    #   * the A3 stack-switch backend classified a @staticmethod as an
+    #     INSTANCE method, so it declared a `{Struct} *` self the caller
+    #     never passed AND dropped the method's first real parameter.
+    #
+    # Asserts the real values, not just that it linked: the first yield is a
+    # literal, the second is the parameter, so a dropped parameter shows up
+    # as a wrong number rather than as a compile error.
+    test_generator_stdout("staticmethod_generator_method", """\
+class Emitter:
+    @staticmethod
+    def gen(n: Int):
+        yield 1
+        yield n
+
+def main():
+    for v in Emitter.gen(5):
+        print(v)
+""", "1\n5\n")
+
+    # A @staticmethod generator that takes MORE than one parameter, so a
+    # receiver still wrongly prepended (the previous bug) shifts BOTH and
+    # cannot accidentally produce the right answer.
+    test_generator_stdout("staticmethod_generator_multi_param", """\
+class Emitter:
+    @staticmethod
+    def gen(a: Int, b: Int):
+        yield a
+        yield b
+        yield a + b
+
+def main():
+    for v in Emitter.gen(3, 4):
+        print(v)
+""", "3\n4\n7\n")
+
+    # The exact `readers.py` shape: a @classmethod generator delegating with
+    # `yield from cls.<@staticmethod generator>(...)`. Both the delegation
+    # and the receiver-less callee have to be right for this to produce
+    # CPython's output — the round-1 fix covered the `cls.`-receiver
+    # delegation, this adds the receiver-less callee it delegates to.
+    test_generator_stdout("classmethod_generator_yield_from_staticmethod_generator", """\
+class MP:
+    @staticmethod
+    def resolve_zip_path(p: Int):
+        yield p + 10
+        yield p + 20
+
+    @classmethod
+    def candidate_paths(cls, p: Int):
+        yield p
+        yield from cls.resolve_zip_path(p)
+
+def main():
+    for v in MP.candidate_paths(1):
+        print(v)
+    for v in MP.resolve_zip_path(100):
+        print(v)
+""", "1\n11\n21\n110\n120\n")
+
     # delegated-to (`inner`) generator take parameters, and `outer` passes
     # an expression (not just a bare literal) built from its own parameter
     # as one of `inner`'s arguments -- confirms parameter support (from the

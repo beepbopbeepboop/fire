@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node
 import regex_compile
 import mlir
 import ownership_destruct
@@ -1290,11 +1290,119 @@ def _collect_return_types(gen, stmts: list, acc: list):
         elif isinstance(node, gimple_ctypes.WithStmt):
             gen._collect_return_types(node.body, acc)
 
-def _infer_return_type(gen, body: list) -> str:
+def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
     gen._collect_return_types(body, acc)
     return gimple_ctypes.TypeLattice.join_all(acc) if acc else 'void'
+
+# A local bound to a CONTAINER LITERAL, and the ctype that literal is.
+# Deliberately only these four node types: a container is a real pointer,
+# so guessing wrong is not a small imprecision but a pointer coerced
+# through a scalar slot (same bit pattern on this target, no crash, and a
+# caller that treats the value as a scalar gets an address). Scalars are
+# NOT included -- they are what the int64_t default is for, and adding
+# them would change many existing signatures for no bug fix.
+_CONTAINER_LITERAL_CTYPES: dict = {
+    'DictExpr': 'MojoDict *',
+    'ListExpr': 'MojoList *',
+    'SetExpr': 'MojoSet *',
+    'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
+}
+
+def _container_literal_locals(body: list) -> dict:
+    """`{local name: ctype}` for every local in `body` whose FIRST binding
+    is a container literal, recursing through control flow but never into
+    a nested `FunctionDef` (which has its own locals and its own return
+    inference -- the same boundary `mutated_free_names` uses).
+
+    First-binding-wins, matching this codegen's `_declare_var`
+    first-decl-wins rule. A later rebinding to a DIFFERENT kind therefore
+    keeps the first container type, which is the same answer the
+    declaration itself will give at codegen time, so the estimate and the
+    body agree."""
+    out: dict = {}
+    def note(n):
+        if not isinstance(n, gimple_ctypes.AssignStmt):
+            return
+        if not isinstance(n.target, gimple_ctypes.IdentExpr):
+            return
+        name = _as_str(n.target.name)
+        if name in out:
+            return
+        t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+        if t:
+            out[name] = t
+    def walk(stmts):
+        for s in (stmts or []):
+            if isinstance(s, gimple_ctypes.FunctionDef):
+                continue
+            note(s)
+            if isinstance(s, gimple_ctypes.IfStmt):
+                walk(s.then_body)
+                if s.else_body:
+                    walk(s.else_body)
+                for _cond, _eb in (getattr(s, 'elifs', None) or []):
+                    walk(_eb)
+            elif isinstance(s, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
+                walk(s.body)
+                if getattr(s, 'else_body', None):
+                    walk(s.else_body)
+            elif isinstance(s, gimple_ctypes.WithStmt):
+                walk(s.body)
+            elif isinstance(s, gimple_ctypes.TryStmt):
+                walk(s.body)
+                for h in (getattr(s, 'handlers', None) or []):
+                    walk(getattr(h, 'body', None))
+                if s.else_body:
+                    walk(s.else_body)
+                if getattr(s, 'finally_body', None):
+                    walk(s.finally_body)
+    walk(body)
+    return out
+
+def _infer_return_type_with_locals(gen, body: list) -> str:
+    """`_infer_return_type`, but with the body's own container-literal
+    locals visible to it.
+
+    Needed because `_collect_return_types` types each `return` expression
+    with `_quick_type`, which resolves a bare `IdentExpr` through
+    `gen.var_types` -- and at return-inference time that table holds only
+    what earlier passes seeded, NOT this function's locals (they are
+    declared by their own statements later, during body codegen). So
+    `return env` for a local built from a `{}` literal inferred the scalar
+    `int64_t`, and the body then emitted
+    `_t = (void *)env; _t2 = (int64_t)_t; return _t2;` -- a real pointer
+    laundered through a scalar. That happens to survive on a 64-bit
+    target and is genuinely wrong: it made `wasi_sdk_env(context)` return
+    an `int64_t` where a `MojoDict *` was expected, and the caller's
+    `env_additions | wasi_sdk_env(context)` then passed an integer to
+    `mojo_dict_union` (a hard `-Wint-conversion` error in
+    `Tools/wasm/wasi/__main__.py`).
+
+    The overlay is temporary and additive: a name already in `var_types`
+    keeps the type an earlier pass decided for it."""
+    _locals = _container_literal_locals(body)
+    if not _locals:
+        return _infer_return_type_core(gen, body)
+    _saved = gen.var_types
+    _merged = dict(_saved)
+    for _n, _t in _locals.items():
+        if _n not in _merged:
+            _merged[_n] = _t
+    gen.var_types = _merged
+    try:
+        return _infer_return_type_core(gen, body)
+    finally:
+        gen.var_types = _saved
+
+
+def _infer_return_type(gen, body: list) -> str:
+    """`gen`'s public return-type inference: the core scan, with the
+    body's own container-literal locals made visible to it. Every consumer
+    (free functions, struct methods, lifted closures, lambdas) goes
+    through this one entry point, so the fix cannot be half-applied."""
+    return _infer_return_type_with_locals(gen, body)
 
 def _prepass_list_elem(gen, elements) -> str:
     """Element type of a container literal for the pre-pass. Mirrors

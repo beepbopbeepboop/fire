@@ -25,7 +25,7 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
@@ -38,6 +38,7 @@ import regex_compile
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.coro as gimple_gen_coro
 from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -51,7 +52,7 @@ from mojo.middle.module_shared import *  # noqa: F401,F403
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _SELFHOST_MODGLOBAL_CACHE, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
-    _collect_import_modules, _collect_import_modules_rec, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
+    _collect_import_modules, _collect_import_modules_rec, _cpp_method_receiver_name, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
     _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime,
     _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
@@ -858,6 +859,31 @@ def gen_module_impl(self, stmts):
         if isinstance(n, FunctionDef):
             if n.is_generator: _generator_fns[id(n)] = n
             if n.is_async: _async_fns[id(n)] = n
+    # The node ids of every FunctionDef that is a STRUCT METHOD. The
+    # free-function generator loops below iterate `_generator_fns` (built
+    # from `_walk_ast`, so it necessarily includes methods) and must not
+    # claim a method: a method's coroutine unit is namespaced
+    # `_mojogen_<Struct>_<name>` and registered in `_generator_method_api`
+    # under a `(struct, name)` key, while a free function's is
+    # `_mojogen_<name>` registered in `_generator_api` under the bare name.
+    # The old filter — skip a generator whose `params[0][0]` is `self`/`cls` —
+    # was a proxy for "is a method" that a `@staticmethod` (whose first
+    # parameter is a REAL argument) does not satisfy, so a staticmethod
+    # generator was registered as a free function under its bare name and
+    # its call sites (`C.gen(...)`) were never recognised as generator calls:
+    # `C.gen(5)` lowered to an ordinary int64_t call and consuming the
+    # "result" raised `mojo_unsupported_iter` at run time. Real:
+    # `Lib/importlib/resources/readers.py`'s `@staticmethod` generator
+    # `_resolve_zip_path`. Membership is the honest test, and
+    # `_method_receiver_kind` (not the parameter name) then decides whether
+    # the method has a receiver at all.
+    _struct_method_ids: set = set()
+    for _s in stmts:
+        if not isinstance(_s, StructDef):
+            continue
+        for _m in (getattr(_s, 'methods', None) or []):
+            if isinstance(_m, FunctionDef):
+                _struct_method_ids.add(id(_m))
     self._all_generator_names: set = {n.name for n in _generator_fns.values()}
     self._all_async_fn_names: set[str] = {n.name for n in _async_fns.values()}
 
@@ -1540,6 +1566,13 @@ def gen_module_impl(self, stmts):
             'bases': 'MojoList *',
             'comptime_aliases': 'MojoDict *',
             'static_methods': 'MojoSet *',
+            # `class_methods` is the @classmethod set, the mirror of
+            # `static_methods` above. Read by myinterpreter's
+            # `MojoClass.__getattr__` and `_eval_member_of` to decide that a
+            # method's receiver is the CLASS; a hardcoded layout entry is
+            # required because the self-hosted compiler has no other way to
+            # know this struct's field types.
+            'class_methods': 'MojoSet *',
             'def_scope': 'Scope *',
         }
         self.struct_field_types['MojoInstance'] = {
@@ -1548,6 +1581,15 @@ def gen_module_impl(self, stmts):
         self.struct_field_types['BoundMethod'] = {
             'bound_func': 'MojoFunction *',
             'instance': 'MojoInstance *',
+            'interpreter': 'Interpreter *',
+        }
+        # The @classmethod counterpart (myinterpreter.py's BoundClassMethod).
+        # A separate struct, not a second field kind on BoundMethod: the
+        # receiver here is a `MojoClass *` where that one's is a
+        # `MojoInstance *`, and every struct field gets exactly ONE C type.
+        self.struct_field_types['BoundClassMethod'] = {
+            'bound_func': 'MojoFunction *',
+            'cls': 'MojoClass *',
             'interpreter': 'Interpreter *',
         }
         self.struct_field_types['MojoOverloadSet'] = {
@@ -4606,8 +4648,8 @@ def gen_module_impl(self, stmts):
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):
             continue
-        if s.params and s.params[0][0] in ('self', 'cls'):
-            continue
+        if id(s) in _struct_method_ids:
+            continue                    # a METHOD: see _struct_method_ids
         if not _generator_quick_eligible(s):
             continue
         try:
@@ -4649,8 +4691,8 @@ def gen_module_impl(self, stmts):
         for _gm_id, s in list(_generator_fns.items()):
             if _gm_id in _async_fns:
                 continue
-            if s.params and s.params[0][0] in ('self', 'cls'):
-                continue
+            if _gm_id in _struct_method_ids:
+                continue                # a METHOD: see _struct_method_ids
             if not _generator_quick_eligible(s):
                 continue
             try:
@@ -4729,6 +4771,15 @@ def gen_module_impl(self, stmts):
                 and id(s) not in _generator_fns):
             continue
         s.body = self._inline_single_use_task_composition(s.body)
+        # Hoist any `await` still nested inside a call's argument list
+        # into statement position. The A3 stack-switch backend normalizes
+        # the same shape from its own shared eligibility chokepoint
+        # (`gimple_gen_coro._eligible_async_common`, which calls
+        # `hoist_awaits_from_call_args` on the same AST node in place);
+        # this call is the C++20-coroutine backend's own explicit one, so
+        # this pass does not depend on the A3 pass having run first.
+        # Idempotent, so a double application is a no-op.
+        gimple_gen_coro.hoist_awaits_from_call_args(s)
         self._normalize_await_kwargs(s.body)
         if not _async_quick_eligible(s, frozenset(self._async_api.keys())):
             continue
@@ -4772,6 +4823,7 @@ def gen_module_impl(self, stmts):
             if _gm_id in _nested_in_fn_ids:
                 continue  # nested-in-function — Step I/closure pass's job
             s.body = self._inline_single_use_task_composition(s.body)
+            gimple_gen_coro.hoist_awaits_from_call_args(s)
             self._normalize_await_kwargs(s.body)
             if not _async_quick_eligible(s, frozenset(self._async_api.keys())):
                 continue
@@ -4818,6 +4870,12 @@ def gen_module_impl(self, stmts):
             self._supported_generator_methods[key] = m
             self._generator_method_api[key] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                # Which SOURCE parameter, if any, is the receiver slot a
+                # caller must fill -- see mojo/middle/coro.py's identical
+                # key for why the registered `params` (bare ctype strings)
+                # cannot carry it. `m.params[0][0]` is the only place the
+                # name survives, so it is read here, at registration.
+                'receiver': (_cpp_method_receiver_name(m)),
                 'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
@@ -4849,6 +4907,12 @@ def gen_module_impl(self, stmts):
             self._supported_generator_methods[key] = m
             self._generator_method_api[key] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                # Which SOURCE parameter, if any, is the receiver slot a
+                # caller must fill -- see mojo/middle/coro.py's identical
+                # key for why the registered `params` (bare ctype strings)
+                # cannot carry it. `m.params[0][0]` is the only place the
+                # name survives, so it is read here, at registration.
+                'receiver': (_cpp_method_receiver_name(m)),
                 'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
@@ -6948,9 +7012,33 @@ def gen_module_impl(self, stmts):
             elif isinstance(value.func, IdentExpr):
                 ret = self.func_return_types.get(value.func.name, '')
                 if ret.endswith(' *'):
-                    global_decls.append(f"{ret} {gname};")
+                    if ret in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                        # A CONTAINER global is BOXED at the C level
+                        # (`int64_t`, semantic type kept in
+                        # `_global_var_types`) -- the same convention the
+                        # DictExpr/ListExpr/SetExpr rows above follow, and
+                        # the one `_lower_IdentExpr`'s global read path
+                        # assumes ("globals are stored at C level as
+                        # int64_t (boxed pointers) except for char * and
+                        # simple int globals"). Declaring the field as a
+                        # bare `MojoList *` here made it the ONE container
+                        # global with an unboxed field, which only shows up
+                        # as an error when something writes it through a
+                        # path that boxes: `ownership_check.py`'s
+                        # `check_module` has a LOCAL `diags` and a
+                        # module-level `diags = check_module(stmts)`, and
+                        # the local-vs-global name collision routes the
+                        # local's writes to the global field (see
+                        # `_gen_stmt_AssignStmt`'s own BUG-2026-018
+                        # branch), so the boxed `int64_t` store landed in an
+                        # unboxed `MojoList *` field -- a hard
+                        # `-Wint-conversion` on four lines.
+                        global_decls.append(f"int64_t {gname};  /* {ret} */")
+                        self._global_c_decl_types[gname] = 'int64_t'
+                    else:
+                        global_decls.append(f"{ret} {gname};")
+                        self._global_c_decl_types[gname] = ret
                     self._global_var_types[gname] = ret
-                    self._global_c_decl_types[gname] = ret
                 else:
                     # Final fallback consults the shared Phase 1.7 RHS-type
                     # table (same consolidation precedent as the MemberExpr
@@ -7116,9 +7204,16 @@ def gen_module_impl(self, stmts):
                     # 'World *'" (box.3d/game's engine_create_world()).
                     _ret = self.func_return_types.get(_gv.func.name, '')
                     if _ret.endswith(' *'):
-                        global_decls.append(f"{_ret} {gname};")
+                        if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                            # Boxed, for the same reason and with the same
+                            # convention as _gscan_declare_global's identical
+                            # IdentExpr-callee branch just above.
+                            global_decls.append(f"int64_t {gname};  /* {_ret} */")
+                            self._global_c_decl_types[gname] = 'int64_t'
+                        else:
+                            global_decls.append(f"{_ret} {gname};")
+                            self._global_c_decl_types[gname] = _ret
                         self._global_var_types[gname] = _ret
-                        self._global_c_decl_types[gname] = _ret
                     else:
                         # Same shared-table fallback as _gscan_declare_global's
                         # IdentExpr-callee branch just above: the Phase 1.7

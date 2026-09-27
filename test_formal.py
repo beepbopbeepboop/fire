@@ -86,6 +86,25 @@ EXPECTED_FAILURES = {
     "fib": "tree-recursion FrameOk window read over a store stack whose "
            "addresses u64_sub_add splits into sp - (K - 8); the peel needs a "
            "collapse at data-dependent nesting depth",
+    # The two decrement-while shapes whose loop test is an ORDER on the counter
+    # (`while n > 0`, `while n >= 1`), as opposed to `while n != 0`
+    # (`wdiff`, which passes).  Both are sound CODEGEN now — a signed `int`
+    # means a negative counter leaves the loop, which is what Python says —
+    # and both are refused because the generated MODEL still assumes the
+    # counter is a non-negative magnitude: `_gen_dec_while_block`'s
+    # `pred_iff` states the loop's "keep going" test as the UNSIGNED
+    # `0 < UInt64.ofNat m`, which is false for `m >= 2^63`, and the model
+    # itself returns 0 where a negative counter must be returned unchanged.
+    # So the obligation is genuinely unprovable, not merely unproved — which is
+    # the honest shape for a known gap and why the fix is a model change, not a
+    # tactic.  Same root cause as the two new holes `sum_range` reports (its
+    # `loop_cond_flag` has the same unsigned `¬ (i < bound)` on the exit side).
+    # See bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
+    "countdown": "the decrement-while runF model treats the counter as a "
+                 "non-negative magnitude; a signed `int` means `n <= 0` exits "
+                 "immediately and returns n unchanged, which pred_iff and the "
+                 "model both deny",
+    "wge": "same as countdown, for the `n >= 1` spelling",
 }
 
 
@@ -144,6 +163,31 @@ def run_group(argv, timeout, cwd=None):
     return proc.returncode, out, err
 
 
+# Filled by `run_one`: stem -> number of declarations that admitted a `sorry`.
+# Reported by `main` as a census, because "how many holes are left" is a
+# number this project has to be able to state honestly and has twice stated
+# wrongly: counting the word `sorry` in the generated source counts tactic
+# alternatives that were never taken (a losing `first | … | sorry` is still
+# text), and reading it out of a `lean` run counts nothing at all when Lean
+# serves a cached verdict.  `formal/lean.py::_run_lean` counts what Lean
+# itself reports, so this is the real figure and it goes DOWN as holes close.
+SORRY_CENSUS: dict = {}
+
+
+def _sorries_in(proof_path):
+    """Declarations in `proof_path` that admitted a `sorry`, or None.
+
+    Re-uses the build's own verdict rather than running Lean a second time:
+    `check_proof_cached` stores the count beside the verdict, keyed on the
+    proof's exact bytes, so this is a hash and a small read.
+    """
+    try:
+        from formal.lean import check_proof_cached
+        return check_proof_cached(proof_path, repo_root=HERE)[3]
+    except Exception:
+        return None
+
+
 def run_one(stem, backend="arm64", outdir=None):
     """build --formal (which generates and checks the proof), or fail."""
     outdir = outdir or OUTDIR
@@ -163,6 +207,9 @@ def run_one(stem, backend="arm64", outdir=None):
             return False, f"build/proof failed: {err[-300:]}"
         if not os.path.isfile(proof):
             return False, "build ok but proof file missing"
+        n = _sorries_in(proof)
+        if n is not None:
+            SORRY_CENSUS[stem] = n
         return True, ""
     except subprocess.TimeoutExpired:
         return False, "timed out"
@@ -259,6 +306,14 @@ def main():
 
     print(f"\nResults for {backend} formal proofs: PASS={ok} "
           f"KNOWN-GAP={len(expected_failed)} FAIL={len(unexpected_failed)}")
+    if SORRY_CENSUS:
+        total = sum(SORRY_CENSUS.values())
+        worst = sorted(SORRY_CENSUS.items(), key=lambda kv: (-kv[1], kv[0]))
+        with_holes = [(s, n) for s, n in worst if n]
+        print(f"sorry census: {total} declaration(s) still admit a sorry, "
+              f"in {len(with_holes)} of {len(SORRY_CENSUS)} proof(s) checked")
+        for s, n in with_holes:
+            print(f"  {s}: {n}")
     if stale_expected:
         print("\nSTALE expected-failure entries (now passing — remove them):")
         for s in stale_expected:

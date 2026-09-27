@@ -6,7 +6,9 @@ single source of truth).
 
 Int8/Int16/Int32/Int64 and UInt8/UInt16/UInt32/UInt64 wrap modulo 2^w.
 Values live in 64-bit registers: signed types sign-extended, unsigned
-zero-extended. The unannotated `int` is UInt64.
+zero-extended. The unannotated `int` is Int64 — Python and Mojo integers are
+signed, and modelling them as unsigned is a silent miscompile rather than a
+conservative choice (see `DEFAULT_INT_TYPE`).
 """
 
 from dataclasses import dataclass
@@ -30,10 +32,24 @@ class IntType:
         return ("Int" if self.signed else "UInt") + str(self.width)
 
 
-DEFAULT_INT_TYPE = IntType(64, False)
+# The unannotated `int`, i.e. the type of every local, parameter and bare
+# literal in a source that does not say. It is SIGNED, because that is what
+# the language means: `-3` is negative, not `0xFFFFFFFFFFFFFFFD`, and a
+# comparison of a negative quantity against a variable has to come out the way
+# Python says it does. It was `IntType(64, False)` — a "legacy" unsigned 64 —
+# which made every such comparison wrong, and wrong *silently*: the emitted
+# condition code was correct for the type it was given, and the type was a lie
+# (`a = 0 - 3; if a < 2:` was false, because the counter read as a huge
+# unsigned number). Nothing downstream could notice, which is why the model
+# has to agree with the language here rather than with C.
+#
+# Changing it moves the truncator helpers, the CSET width, the shift mnemonics
+# and the comparison mnemonics at once, so it is one line with a full gate
+# behind it, not a spot fix.
+DEFAULT_INT_TYPE = IntType(64, True)
 
 TYPE_NAMES = {
-    "int": IntType(64, False),   # legacy unannotated type (unsigned 64-bit)
+    "int": IntType(64, True),    # the unannotated type: Python's signed int
     "Int": IntType(64, True),    # Mojo `Int` = Int64
     "Int8": IntType(8, True),
     "Int16": IntType(16, True),
@@ -75,15 +91,30 @@ def resolve(t) -> IntType:
 
 
 def common_type(a, b):
-    """C-style promotion: the wider of the two types; signed only when both
-    are signed (mixed signed/unsigned is unsigned).  Flex (None) is neutral."""
+    """Promotion: the wider of the two types, and SIGNED if either is.
+
+    C resolves a mixed signed/unsigned pair to unsigned, and this used to copy
+    that. It is the wrong rule here, and wrong in the same direction as the
+    default above: this language has no unsigned integer type that "wins" a
+    mix — `int` is signed, and Python promotes a mixed expression to a signed
+    type too. Under the C rule, one `UInt32` in an expression was enough to make
+    every operand of it read as unsigned, so a negative value anywhere in the
+    expression compared wrong. Signed-wins is also the rule that makes the two
+    halves of the model agree: `infer_expr` reports a negative literal as
+    signed because a negative value cannot be unsigned, and under C promotion
+    that fact was immediately thrown away again by the promotion with its
+    unsigned context.
+
+    Flex (None) is neutral, which is what lets a bare literal take the type of
+    its context without deciding anything.
+    """
     if a is None:
         return b
     if b is None:
         return a
     if a == b:
         return a
-    return IntType(max(a.width, b.width), a.signed and b.signed)
+    return IntType(max(a.width, b.width), a.signed or b.signed)
 
 
 def infer_expr(e, vtypes: dict, call_types: dict = None):

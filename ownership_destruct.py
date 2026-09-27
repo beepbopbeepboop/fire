@@ -395,7 +395,7 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
                 _scan_expr(t, facts, funcs, methods)
         return
 
-    if isinstance(stmt, N.GlobalStmt):
+    if isinstance(stmt, (N.GlobalStmt, N.NonlocalStmt)):
         for n in (stmt.names or []):
             facts.disqualify(n)
         return

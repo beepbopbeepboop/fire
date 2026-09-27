@@ -606,6 +606,21 @@ class GlobalStmt:
     col: int = 0
 
 @dataclass
+class NonlocalStmt:
+    """`nonlocal a, b` — bind these names to the ENCLOSING function's cell.
+
+    A declaration only; the assignment that follows is what rebinds. The
+    difference from `GlobalStmt` is which cell: `global` names a module-level
+    global, `nonlocal` names a local of a lexically enclosing function, and
+    therefore needs by-REFERENCE capture in the closure env so the write is
+    visible to the enclosing frame (the interpreter needs nothing — its scopes
+    are already shared).
+    """
+    names: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class DelStmt:
     """`del a`, `del a, b`, `del d["k"]`, `del obj.attr` — one AST node
     per comma-separated target, each an arbitrary expression (IdentExpr,
@@ -755,7 +770,7 @@ class ComptimeVarStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del'}
+_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal'}
 
 _TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<SEMICOLON>;)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -2320,6 +2335,59 @@ def _as_int(e: object) -> int:
     return e
 
 
+def method_receiver_kind(m: object) -> str:
+    """Which receiver, if any, a struct METHOD's node declares: 'self',
+    'cls', or '' (none).
+
+    The single definition of the rule, in the parser that produces the
+    nodes, because three independent consumers need to agree on it and
+    disagreed before: the A3 stack-switch lowering (`mojo/middle/coro.py`'s
+    `_lower_one`), the C++20 coroutine emitter
+    (`mojo/backend_gimple/cpp_async.py`'s `_gen_cpp_generator_unit`), and
+    the receiver bookkeeping both register on the api entry
+    (`mojo/middle/module_shared.py`). Reading only the first parameter's
+    NAME is what let a `@staticmethod` through as a receiver-less method
+    whose unit was then emitted under the free-function symbol
+    `_mojogen_<name>` and registered in the free-function table, so
+    `C.gen(...)` was never recognised as a generator call at all.
+
+    Decorator first, because it is the only thing that says whether the
+    first parameter is a receiver AT ALL; the parameter name is the
+    fallback for the undecorated (ordinary instance method) case. A
+    `@staticmethod` is receiver-less even if its first parameter is
+    unusually named `self`. A method with no decorator whose first
+    parameter is neither `self` nor `cls` is genuinely ambiguous and is
+    reported as receiver-less, which is what the name-only rule always did.
+
+    Plain loops, no comprehension: this file is itself compiled by the
+    self-hosted path, where a comprehension's tuple-unpacked element can
+    erase to int64_t.
+    """
+    _decs = getattr(m, 'decorators', None) or []
+    _has_cls = False
+    _has_static = False
+    for _d in _decs:
+        _ds = _as_str(_d)
+        if _ds == 'classmethod':
+            _has_cls = True
+        elif _ds == 'staticmethod':
+            _has_static = True
+    if _has_cls:
+        return 'cls'
+    if _has_static:
+        return ''
+    try:
+        _ps = getattr(m, 'params', None) or []
+        if not _ps:
+            return ''
+        _first = _as_str(_ps[0][0])
+    except Exception:
+        return ''
+    if _first == 'self' or _first == 'cls':
+        return _first
+    return ''
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
@@ -2591,6 +2659,71 @@ class Parser:
         while self._peek().kind == "DOT":
             self._advance(); name += "." + self._ident()
         return name
+
+    def _dotted_name_expr(self, dotted: str):
+        """The AST for a dotted name string, as nested IdentExpr/MemberExpr.
+
+        The inverse of `_parse_dotted_name`, needed because a decorator with
+        arguments (`@functools.lru_cache(maxsize=8)`) has to be recorded as a
+        real CallExpr rather than as a bare name: the argument list is
+        discarded by the name-only form, so `@deco` and `@deco(x)` were
+        indistinguishable in the AST, and both silently did nothing."""
+        parts = dotted.split('.')
+        node = IdentExpr(name=parts[0])
+        for p in parts[1:]:
+            node = MemberExpr(obj=node, member=p)
+        return node
+
+    def _parse_paren_args(self):
+        """Parse a call's argument list, with LPAREN already current. Returns
+        `(args, kwargs)` where `kwargs` is the `(name, expr)` list shape
+        `CallExpr.kwargs` holds.
+
+        Extracted from `_parse_expr`'s postfix loop so a decorator's argument
+        list can be parsed by exactly the same rules as any other call's --
+        before, `@deco(x)` skipped the tokens instead, so the AST could not
+        tell it from a bare `@deco` and every parameterised decorator was
+        silently inert."""
+        self._advance()          # skip LPAREN
+        args = []
+        keywords = {}
+        while self._peek().kind != "RPAREN":
+            # Handle unpacking (*expr / **expr). Don't consume the
+            # star(s) here — let _parse_expr (via _parse_unary) wrap
+            # the operand in UnaryOp(op='*'/'**', operand=...) so the
+            # marker survives into the AST. The interpreter's call
+            # evaluation (myinterpreter.py) detects that wrapper and
+            # splices the iterable's elements/mapping's items into
+            # the flat arg/kwargs lists at call time, instead of
+            # treating the whole expression as one ordinary
+            # positional argument value.
+            if self._peek().kind == "OP" and self._peek().value in ("*", "**"):
+                args.append(self._parse_expr(0))
+            # Handle keyword arguments (name=value) — name can be NAME or KW token
+            elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
+                keyword_name = self._advance().value  # get keyword name
+                self._advance()  # skip =
+                keywords[keyword_name] = self._parse_expr(0)  # parse and store value
+            else:
+                first = self._parse_expr(0)
+                if self._is_kw("for"):
+                    gens = self._parse_generators()  # allow chained for-clauses
+                    args = [Comprehension(kind="generator", element=first, generators=gens)]
+                    continue
+                args.append(first)
+            if self._peek().kind == "COMMA": self._advance()
+        self._expect("RPAREN")
+        # Convert keywords dict to list of (name, expr) tuples for
+        # CallExpr.kwargs. Explicit accumulation loop, NOT the
+        # `[(k, v) for k, v in keywords.items()]` comprehension — a
+        # list comprehension over dict items is the established
+        # self-hosted trap (same family as `''.join(<genexpr>)`):
+        # the compiled result erased to the garbage non-list 1.
+        kwargs_list = []
+        for _kw_name, _kw_val in keywords.items():
+            kwargs_list.append((_kw_name, _kw_val))
+        return args, kwargs_list
+
 
     def _skip_newlines(self):
         while self._peek().kind == "NEWLINE": self._advance()
@@ -2894,6 +3027,7 @@ class Parser:
             if t.value == 'continue': return self._parse_continue()
             if t.value == 'assert': return self._parse_assert()
             if t.value == 'global': return self._parse_global()
+            if t.value == 'nonlocal': return self._parse_nonlocal()
             if t.value == 'del': return self._parse_del()
         # Handle __mlir_attr and other MLIR/special forms as opaque no-ops.
         # NOT __mlir_region (handled below) and NOT __mlir_op: a bare __mlir_op
@@ -2949,16 +3083,25 @@ class Parser:
                 # the earlier `from X import ref` fix, instead of
                 # _expect("NAME") which only accepts a real NAME token.
                 dec_name = self._parse_dotted_name()
-                # Handle decorator with arguments: @decorator(args)
+                # Handle decorator with arguments: @decorator(args).
+                #
+                # The argument list used to be SKIPPED token by token, so
+                # `@deco` and `@deco(x)` produced the identical AST node --
+                # the arguments were unrecoverable, which is part of why a
+                # decorator could be dropped without anything noticing. The
+                # call is now parsed into a real CallExpr and stored in place
+                # of the bare name, so the two are distinguishable and
+                # `dumps` (which prints `node.decorators` verbatim) no longer
+                # loses the arguments. A bare `@deco` still stores the plain
+                # string, so every existing `X in decorators` check -- the
+                # `staticmethod`/`classmethod`/`property`/`export`/`parameter`
+                # readers across the tree -- is unaffected.
                 if self._peek().kind == "LPAREN":
-                    self._advance()  # skip LPAREN
-                    depth = 1
-                    while depth > 0:
-                        t = self._peek()
-                        if t.kind == "LPAREN":
-                            depth += 1
-                        elif t.kind == "RPAREN": depth -= 1
-                        self._advance()
+                    dec_args, dec_kwargs = self._parse_paren_args()
+                    decs.append(CallExpr(func=self._dotted_name_expr(dec_name),
+                                         args=dec_args, kwargs=dec_kwargs))
+                    self._skip_newlines()
+                    continue
                 decs.append(dec_name)
                 self._skip_newlines()
             kw = self._peek()
@@ -4395,6 +4538,18 @@ class Parser:
             names.append(self._expect("NAME").value)
         return GlobalStmt(names=names, line=t.line, col=t.col)
 
+    def _parse_nonlocal(self):
+        """`nonlocal a, b` — see `NonlocalStmt`. Mirrors `_parse_global`."""
+        t = self._peek()
+        self._expect("KW", 'nonlocal')
+        names = [self._expect("NAME").value]
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                break
+            names.append(self._expect("NAME").value)
+        return NonlocalStmt(names=names, line=t.line, col=t.col)
+
     def _parse_del(self):
         """`del a`, `del a, b`, `del d["k"]`, `del obj.attr` — each
         comma-separated target is an arbitrary expression, not just a name."""
@@ -4702,44 +4857,7 @@ class Parser:
                         else:
                             expr = SubscriptExpr(obj=expr, index=TupleExpr(elements=items))
             elif t.kind == "LPAREN":
-                self._advance()
-                args = []
-                keywords = {}
-                while self._peek().kind != "RPAREN":
-                    # Handle unpacking (*expr / **expr). Don't consume the
-                    # star(s) here — let _parse_expr (via _parse_unary) wrap
-                    # the operand in UnaryOp(op='*'/'**', operand=...) so the
-                    # marker survives into the AST. The interpreter's call
-                    # evaluation (myinterpreter.py) detects that wrapper and
-                    # splices the iterable's elements/mapping's items into
-                    # the flat arg/kwargs lists at call time, instead of
-                    # treating the whole expression as one ordinary
-                    # positional argument value.
-                    if self._peek().kind == "OP" and self._peek().value in ("*", "**"):
-                        args.append(self._parse_expr(0))
-                    # Handle keyword arguments (name=value) — name can be NAME or KW token
-                    elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
-                        keyword_name = self._advance().value  # get keyword name
-                        self._advance()  # skip =
-                        keywords[keyword_name] = self._parse_expr(0)  # parse and store value
-                    else:
-                        first = self._parse_expr(0)
-                        if self._is_kw("for"):
-                            gens = self._parse_generators()  # allow chained for-clauses
-                            args = [Comprehension(kind="generator", element=first, generators=gens)]
-                            continue
-                        args.append(first)
-                    if self._peek().kind == "COMMA": self._advance()
-                self._expect("RPAREN")
-                # Convert keywords dict to list of (name, expr) tuples for
-                # CallExpr.kwargs. Explicit accumulation loop, NOT the
-                # `[(k, v) for k, v in keywords.items()]` comprehension — a
-                # list comprehension over dict items is the established
-                # self-hosted trap (same family as `''.join(<genexpr>)`):
-                # the compiled result erased to the garbage non-list 1.
-                kwargs_list = []
-                for _kw_name, _kw_val in keywords.items():
-                    kwargs_list.append((_kw_name, _kw_val))
+                args, kwargs_list = self._parse_paren_args()
                 expr = CallExpr(func=expr, args=args, kwargs=kwargs_list, line=line, col=col)
             elif t.kind == "OP" and t.value == "^":
                 # Check if ^ is postfix (ownership transfer) or binary (XOR)

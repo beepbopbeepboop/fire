@@ -24,7 +24,7 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     _as_str, _sms_key, _as_ident_node,
@@ -3339,6 +3339,11 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
     lifted    = ci.lifted_name
     ret_type  = gen.func_return_types.get(lifted, 'int64_t')
     arg_pairs = [gen.lower_expr(a) for a in node.args]
+    # Keyword arguments and omitted-with-default parameters bind here too,
+    # through the same helper the direct closure-call path uses -- see
+    # _bind_closure_kwargs's docstring for what silently went wrong when
+    # this line stood alone.
+    arg_pairs = _bind_closure_kwargs(gen, ci, node, arg_pairs)
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
         _cur_env = getattr(gen, '_env_param', '')
@@ -3366,6 +3371,93 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
     return ret_type, gen._call_expr(ret_type, fname_c, full_arg_pairs)
 
 
+def _bind_closure_kwargs(gen, ci, node, arg_pairs):
+    """Fill a lifted closure call's MISSING positional slots from the call's
+    keyword arguments and the closure's own declared defaults.
+
+    ONE implementation for both closure-call paths. It used to live only
+    inline in `_lower_closure_call` (the direct path, where the call site
+    sits in the closure's own enclosing function), which left
+    `_lower_outer_closure_call` -- a call to a SIBLING closure from inside
+    another lifted closure -- building its argument list from `node.args`
+    alone and SILENTLY DROPPING every keyword argument. That is not a
+    compile error: the callee's C prototype carries no defaults, so the
+    omitted trailing parameters simply receive whatever happened to be in
+    the argument registers and the callee falls back to its own defaults.
+    Real: `module_gen.py`'s `_collect_method_scalar_obs` calling
+    `_arg_scalar_type(caller_name, a, deep_str=True,
+    prefer_refined_param=True)` observed neither flag -- and the
+    resulting call, having three arguments against a six-parameter
+    prototype, is only diagnosed by GCC at all when the CALLER's own
+    return type is a pointer (GIMPLE's call check rides on that path), so
+    it can sit here silently for a long time.
+
+    `param_names` is the callee's OWN parameter names in declaration order
+    (its `FunctionDef.params`, star prefixes stripped), which is what makes
+    the name-keyed lookup below correct: `_func_param_defaults[lifted]`
+    holds an entry only for the parameters that HAVE a default and starts
+    at the first defaulted position, so indexing it by the call's absolute
+    argument position silently mis-binds every default that follows a
+    required parameter -- `def inner(a, deep=False, refine=False)` called
+    `inner(x, deep=True, refine=True)` bound `refine`'s value to `deep` and
+    passed a hard 0 for `refine`. The previous positional indexing was
+    right only when the defaulted parameters happened to start at slot 0.
+
+    `arg_pairs` is mutated in place and returned. An env-struct pointer
+    prepended to `arg_pairs` by the caller is NOT one of the closure's own
+    parameters, so callers must pass the argument list WITHOUT it (both
+    call sites do: each prepends its env only after this returns).
+    """
+    param_names = _closure_param_names(ci)
+    lifted = ci.lifted_name
+    user_param_count = len(param_names)
+    if user_param_count <= len(arg_pairs):
+        return arg_pairs
+    kwargs = getattr(node, 'kwargs', []) or []
+    kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
+    _dflt_by_name = {}
+    for _dpn, _ddv in (gen._func_param_defaults.get(lifted) or []):
+        _dflt_by_name[_dpn] = _ddv
+    while len(arg_pairs) < user_param_count:
+        _pname = param_names[len(arg_pairs)]
+        if _pname in kwarg_dict:
+            arg_pairs.append(kwarg_dict[_pname])
+        elif _pname in _dflt_by_name:
+            # Evaluate the default AST directly (self.lower_expr), not the
+            # literal-only _default_expr_to_pair used for top-level free
+            # functions: the extremely common
+            # `def _inject(iterator=iterator, suffix=suffix): ...` idiom
+            # binds the OUTER function's own live variable as the default,
+            # and that variable is still in scope at the call site.
+            arg_pairs.append(gen.lower_expr(_dflt_by_name[_pname]))
+        else:
+            arg_pairs.append(('int', '0'))
+    return arg_pairs
+
+
+def _closure_param_names(ci) -> list:
+    """The callee closure's own parameter names, in declaration order, with
+    `*`/`**` prefixes stripped (`_as_str` on each: the self-hosted backend
+    erases a bare list-of-tuples element to a boxed int64_t, and a boxed
+    name would miss every dict lookup in `_bind_closure_kwargs`).
+    Non-`*args`/`**kwargs` positions only -- those are packed into a single
+    trailing slot by `_gen_lifted_closure`'s own signature builder, so
+    counting them as fillable positional slots would fabricate arguments.
+    Falls back to an empty list, which makes the caller emit exactly the
+    positional arguments it has, i.e. this helper's absence is never worse
+    than the behaviour it replaces."""
+    _names = []
+    try:
+        for _pp in (getattr(ci.inner_def, 'params', None) or []):
+            _raw = gimple_ctypes._as_str(_pp[0])
+            if _raw.startswith('*'):
+                break
+            _names.append(_raw.lstrip('*'))
+    except Exception:
+        return []
+    return _names
+
+
 def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     lifted   = f'{gen.current_func_name}_{fname_raw}'
     env_var  = gen._closure_envs[fname_raw]
@@ -3377,35 +3469,14 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
     # the closure-scan pass (Pass 3) for why nested closures need
     # their own entry here rather than sharing the top-level
     # free-function one.
-    expected_params = gen.func_param_types.get(lifted, [])
     # `len(env_var) > 0`, not a bare `if env_var`: a NON-capturing nested
     # closure has `_closure_envs[name] == ''`, and an empty C string is a
     # non-null pointer -> truthy in the self-hosted backend, so a bare
     # check wrongly prepended an empty env arg (`outer_inner (, x)`).
     _has_env = len(env_var) > 0
-    user_param_count = len(expected_params) - (1 if _has_env and expected_params else 0)
-    if user_param_count > len(arg_pairs):
-        kwargs = getattr(node, 'kwargs', []) or []
-        kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
-        _dflts = gen._func_param_defaults.get(lifted) or []
-        while len(arg_pairs) < user_param_count:
-            _pos = len(arg_pairs)
-            _pname = _dflts[_pos][0] if _pos < len(_dflts) else None
-            if _pname is not None and _pname in kwarg_dict:
-                arg_pairs.append(kwarg_dict[_pname])
-            elif _pos < len(_dflts):
-                # Evaluate the default AST directly (self.lower_expr),
-                # not the literal-only _default_expr_to_pair used for
-                # top-level free functions: the extremely common
-                # `def _inject(iterator=iterator, suffix=suffix): ...`
-                # idiom binds the OUTER function's own live variable as
-                # the default, and we're generating code for THIS call
-                # site while still inside that outer function's own
-                # body, so its scope (self.var_types) is exactly the
-                # right context to resolve the identifier in.
-                arg_pairs.append(gen.lower_expr(_dflts[_pos][1]))
-            else:
-                arg_pairs.append(('int', '0'))
+    _ci_here = (gen._all_closures.get(gen.current_func_name, {}) or {}).get(fname_raw)
+    if _ci_here is not None:
+        arg_pairs = _bind_closure_kwargs(gen, _ci_here, node, arg_pairs)
     fname_c  = gimple_ctypes._safe_name(lifted)
     if _has_env:
         # No slice inside the f-string: the self-hosted f-string parser
@@ -3708,6 +3779,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     saved_loop_depth     = gen._loop_depth
     saved_closure_envs   = dict(gen._closure_envs)
     saved_func_decl_glob = set(gen._func_declared_globals)
+    saved_func_decl_nonlocal = set(gen._func_declared_nonlocals)
 
     # Expose outer closure info so the lambda body can resolve calls to parent
     # nested functions (e.g. compile_one_object) via their lifted C names with
@@ -3814,6 +3886,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen._loop_depth             = saved_loop_depth
     gen._closure_envs           = saved_closure_envs
     gen._func_declared_globals  = saved_func_decl_glob
+    gen._func_declared_nonlocals = saved_func_decl_nonlocal
 
     gen._lambda_parts.append(body_code)
     gen._lambda_parts.append('')

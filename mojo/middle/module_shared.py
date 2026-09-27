@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range, _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range, _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal, method_receiver_kind
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -841,6 +841,35 @@ def _gmi_global_init_code(value) -> str:
     if isinstance(value, BoolLiteral):
         return '1' if _as_boollit_node(value).value else '0'
     return _extract_init_expr(value)
+
+def _method_receiver_kind(m) -> str:
+    """Which receiver, if any, a struct METHOD `m` takes: 'self', 'cls', or
+    '' (none). Delegates to fire_compiler.method_receiver_kind, which owns
+    the rule (decorator first, first parameter's name second) and documents
+    why the name alone was not enough — a `@staticmethod def gen(n)` has a
+    REAL first parameter, so a name-only test read it as receiver-less and
+    the method was emitted under the free-function symbol
+    `_mojogen_<name>`, leaving `C.gen(...)` unrecognised as a generator
+    call."""
+    return method_receiver_kind(m)
+
+
+def _cpp_method_receiver_name(m) -> str:
+    """Which SOURCE parameter of a generator METHOD `m`, if any, is the
+    receiver slot every caller must fill: 'self' for an instance method,
+    'cls' for a @classmethod, '' for a @staticmethod (which has none).
+
+    Read from the decorator first and the first parameter's name second —
+    see `_method_receiver_kind`, which this now delegates to, and which
+    documents why the name alone was not enough. Recorded into
+    `_generator_method_api[key]['receiver']` at every registration site so a
+    consumer can get a cross-method `cls.<gen>(...)` call's arity right; see
+    GimpleGen._cpp_yield_from's `is_cls_gen_call` branch. An empty
+    parameter list (a generator method with no parameters at all) yields
+    '' -- there is no receiver, and passing one would be a wrong-arity
+    call."""
+    return _method_receiver_kind(m)
+
 
 def _gmi_collect_global_stmts(stmt_list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_

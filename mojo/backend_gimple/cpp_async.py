@@ -24,10 +24,12 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
+    method_receiver_kind,
 )
+import fire_compiler as N
 import regex_compile
 import mlir
 import mojo.middle.types as gimple_ctypes
@@ -428,11 +430,23 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             "this cannot be represented without silently truncating a "
             "float to int64_t or printing a string as its address)")
     if struct_name is not None:
-        if not fn_params or fn_params[0][0] not in ('self', 'cls'):
+        # Which receiver, if any, this method takes. Decorator-first: a
+        # `@staticmethod`'s first parameter is a REAL argument, so the old
+        # "`params[0][0]` must be self/cls" test refused every staticmethod
+        # generator outright (Lib/importlib/resources/readers.py's
+        # `_resolve_zip_path`), and the earlier free-function filter that
+        # was supposed to route it here could not recognise it either. Only a
+        # method with NO decorator and a first parameter that is neither
+        # `self` nor `cls` remains ambiguous, and is still refused.
+        _rcv_kind = method_receiver_kind(fn)
+        if _rcv_kind == '' and (getattr(fn, 'decorators', None) or []) \
+                and 'staticmethod' not in [
+                    gimple_ctypes._as_str(d)
+                    for d in (getattr(fn, 'decorators', None) or [])]:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"{fn.name}: a generator method must take `self` or "
-                "`cls` as its first parameter")
-        if fn_params[0][0] == 'cls':
+                f"{fn.name}: a generator method must take `self` or `cls` "
+                "as its first parameter, or be a @staticmethod")
+        if _rcv_kind == 'cls':
             # @classmethod generator (conventionally-named `cls` first
             # param, same name-convention basis the ordinary compiled
             # path already uses for `cls.method(...)` resolution — see
@@ -480,13 +494,18 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # what this parameter's name or real value is) without
             # inventing any new class-object representation.
             param_ctypes.append(('cls', 'int64_t'))
-        else:
+        elif _rcv_kind == 'self':
             # Mirrors _gen_struct_method's own convention exactly (see that
             # method's `self.var_types['self'] = f"{struct_name} *"`) — the
             # SAME pointer type an ordinary compiled method's `self` already
             # uses, not a new one.
             param_ctypes.append(('self', f"{struct_name} *"))
-        fn_params = fn_params[1:]
+        # `_rcv_kind == ''` (a @staticmethod): NO receiver slot at all, and
+        # nothing stripped — every declared parameter is a real one. The
+        # registered `receiver` key is '' for exactly this case, and the
+        # call-site lowering reads it to know not to prepend a receiver.
+        if _rcv_kind:
+            fn_params = fn_params[1:]
     for pn, pt in fn_params:
         if pn.startswith('**'):
             # **kwargs: represent as a MojoDict* of keyword args
@@ -673,6 +692,21 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `impl` further down in this same method's returned `lines` —
     # `_cpp_gen_self_recursed` is that signal.
     gen._cpp_gen_self_recursed = False
+    # The SAME problem, for a callee that is NOT this unit: a `yield
+    # from <other-generator>(...)` emits calls to that other generator's
+    # four `extern "C"` wrappers, which are DEFINED only in the callee's
+    # own unit. When the callee's unit is textually earlier in this .cpp
+    # (the ordinary source-order case) the definitions are already in
+    # scope and nothing is needed; when it is LATER, g++ reports
+    # "'<base>_start' was not declared in this scope" for all four.
+    # `_cpp_yield_from` records the callee here (as
+    # `(base, cpp_sig, cpp_value_ctype)`) the moment it emits such a
+    # delegation, and the forward-declaration block below emits one
+    # declaration set per recorded callee. Redundant when the definition
+    # already precedes `impl` — a repeated matching declaration is legal
+    # C++ and, if the two ever DISAGREE, a hard compile error rather than
+    # a silent miscompile.
+    gen._cpp_fwd_gen_delegates: list = []
     func_decls: list[str] = []
     gen._cpp_func_scope_decls = []
     # Pre-body-emission tuple-slot arity pass: `_cpp_yield_tuple` runs
@@ -819,6 +853,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             field_elem_types=_field_elem_types,
             local_elem_types=getattr(gen, '_cpp_list_local_elem_types', None),
             include_returns=False,
+            generator_method_api=gen._generator_method_api,
+            self_struct_name=struct_name,
             self_struct_ctype=(f"{struct_name} *" if struct_name else None))
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
@@ -839,6 +875,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
+        fwd_delegates = list(gen._cpp_fwd_gen_delegates)
     finally:
         gen._cpp_pending_tuple_slots = None
         gen._cpp_pending_return_store = None
@@ -853,6 +890,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
         gen._cpp_gen_self_recursed = None
+        gen._cpp_fwd_gen_delegates = None
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "
@@ -969,6 +1007,17 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
            f"extern \"C\" {cpp_value_ctype} {base}_value (MojoGenerator *g);",
            f"extern \"C\" void {base}_destroy (MojoGenerator *g);"]
           if self_recursed else []),
+        # Forward declarations for `yield from <other-generator>(...)`
+        # callees whose own unit comes LATER in this .cpp -- see
+        # `_cpp_fwd_gen_delegates`'s own comment at its initialisation
+        # above. One four-declaration set per recorded callee, each
+        # carrying that callee's OWN signature and value type (both
+        # resolved from its registered api entry, not from this unit's).
+        *([d for _fd in fwd_delegates
+           for d in (f"extern \"C\" MojoGenerator *{_fd[0]}_start ({_fd[1]});",
+                     f"extern \"C\" {cpp_bool} {_fd[0]}_resume (MojoGenerator *g);",
+                     f"extern \"C\" {_fd[2]} {_fd[0]}_value (MojoGenerator *g);",
+                     f"extern \"C\" void {_fd[0]}_destroy (MojoGenerator *g);")]),
         # Value-carrying `return` channel (see the eligibility
         # computation above): one extern "C" global per unit, written by
         # the body's valued `return` right before co_return and read by

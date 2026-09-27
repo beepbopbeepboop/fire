@@ -741,6 +741,57 @@ def u64powGo (base exp acc : UInt64) (fuel : Nat) : UInt64 :=
 
 def u64pow (base exp : UInt64) : UInt64 := u64powGo base exp 1 64
 
+-- MOVED HERE, not left next to `arm64_step`: the AST-eval model below is a
+-- model of the SOURCE language, and the source language's `/`, `%` and
+-- `>>` on a signed `int` are exactly these three functions.  Defining
+-- them here rather than above is what lets the model name the machine's
+-- own terms -- so the source model and the value flow cannot drift, which
+-- is the entire point of the model.
+/-- Signed interpretation of a 64-bit pattern as an Int (two's complement). -/
+def u64_toS64 (x : UInt64) : Int :=
+  if (x >>> 63) = 1 then (Int.ofNat x.toNat) - (2^64 : Int) else Int.ofNat x.toNat
+
+/-- Re-encode an Int as a 64-bit pattern (mod 2^64). -/
+def s64_to_u64 (x : Int) : UInt64 :=
+  UInt64.ofNat (x.emod (2^64 : Int)).toNat
+
+/-- Signed 64-bit division truncating toward 0; 0 when divisor is 0 (UDIV/SDIV
+    architectural behaviour — codegen's CBZ div0 path traps before this). -/
+def sdiv64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0
+  else s64_to_u64 (Int.tdiv (u64_toS64 a) (u64_toS64 b))
+
+/-- Signed 64-bit remainder truncating toward 0; 0 when divisor is 0.
+    Matches MSUB after SDIV: a - (a / b) * b. -/
+def srem64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0
+  else s64_to_u64 (Int.tmod (u64_toS64 a) (u64_toS64 b))
+
+/-- Arithmetic (sign-extending) shift right of a 64-bit pattern by `sh` (mod 64). -/
+def asr64 (x : UInt64) (sh : UInt64) : UInt64 :=
+  let s := sh.toNat % 64
+  if s = 0 then x
+  else if (x >>> 63) = 1 then
+    (x >>> UInt64.ofNat s) ||| ((0xffffffffffffffff : UInt64) <<< UInt64.ofNat (64 - s))
+  else x >>> UInt64.ofNat s
+
+/-- **Signed order on two's-complement 64-bit words.**
+
+The AST-eval model below is a model of the SOURCE language, and the source
+language's `int` is signed: `if n > 0` is false for every negative `n`. Reading
+the comparison as an unsigned `UInt64` order would model the opposite language,
+and the model's whole job is to rule out exactly that misreading — so the
+comparison goes through here.
+
+The sign-flip is the identity the arm64 signed condition codes are built on
+(`arm64_flag_*_s` in this file, and `_cmp_term_t` in the generator): flipping
+the top bit of a two's-complement word turns signed order into unsigned order.
+Using the same key on both sides is what lets a `by_cases` hypothesis stated by
+the generator and an `if` decided by the model be the *same term*, so `simp`
+closes the bridge instead of leaving a signed/unsigned pair to be noticed by
+`bv_decide` as a "spurious counterexample". -/
+def sKey (x : UInt64) : UInt64 := x ^^^ 0x8000000000000000
+
 /-- Source semantics: evaluate expressions with a call handler for recursion -/
 def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) : UInt64 :=
   match e with
@@ -753,10 +804,10 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   | MojoExpr.binop "+" l r => evalExpr callFunc l env + evalExpr callFunc r env
   | MojoExpr.binop "-" l r => evalExpr callFunc l env - evalExpr callFunc r env
   | MojoExpr.binop "*" l r => evalExpr callFunc l env * evalExpr callFunc r env
-  | MojoExpr.binop "<=" l r => if evalExpr callFunc l env ≤ evalExpr callFunc r env then 1 else 0
-  | MojoExpr.binop "<" l r => if evalExpr callFunc l env < evalExpr callFunc r env then 1 else 0
-  | MojoExpr.binop ">" l r => if evalExpr callFunc l env > evalExpr callFunc r env then 1 else 0
-  | MojoExpr.binop ">=" l r => if evalExpr callFunc l env ≥ evalExpr callFunc r env then 1 else 0
+  | MojoExpr.binop "<=" l r => if sKey (evalExpr callFunc l env) ≤ sKey (evalExpr callFunc r env) then 1 else 0
+  | MojoExpr.binop "<" l r => if sKey (evalExpr callFunc l env) < sKey (evalExpr callFunc r env) then 1 else 0
+  | MojoExpr.binop ">" l r => if sKey (evalExpr callFunc l env) > sKey (evalExpr callFunc r env) then 1 else 0
+  | MojoExpr.binop ">=" l r => if sKey (evalExpr callFunc l env) ≥ sKey (evalExpr callFunc r env) then 1 else 0
   | MojoExpr.binop "=" l r => if evalExpr callFunc l env = evalExpr callFunc r env then 1 else 0
   | MojoExpr.binop "!=" l r => if evalExpr callFunc l env ≠ evalExpr callFunc r env then 1 else 0
   | MojoExpr.binop "and" l r => if (evalExpr callFunc l env ≠ 0 ∧ evalExpr callFunc r env ≠ 0) then 1 else 0
@@ -764,11 +815,16 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   | MojoExpr.binop "&" l r => evalExpr callFunc l env &&& evalExpr callFunc r env
   | MojoExpr.binop "|" l r => evalExpr callFunc l env ||| evalExpr callFunc r env
   | MojoExpr.binop "^" l r => evalExpr callFunc l env ^^^ evalExpr callFunc r env
-  | MojoExpr.binop "/" l r => evalExpr callFunc l env / evalExpr callFunc r env
-  | MojoExpr.binop "//" l r => evalExpr callFunc l env / evalExpr callFunc r env
-  | MojoExpr.binop "%" l r => evalExpr callFunc l env % evalExpr callFunc r env
+  -- Signed, because the language's `int` is: `sdiv64`/`srem64` truncate toward
+  -- zero and `asr64` propagates the sign bit, and those are the very terms the
+  -- machine's SDIV/MSUB/ASR steps compute (see `arm64_step`), so the source
+  -- model and the value flow cannot drift.  Reading `/` as UInt64's would make
+  -- `-7 / 2` a huge positive number, which is a model of a different language.
+  | MojoExpr.binop "/" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "//" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "%" l r => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "<<" l r => evalExpr callFunc l env <<< evalExpr callFunc r env
-  | MojoExpr.binop ">>" l r => evalExpr callFunc l env >>> evalExpr callFunc r env
+  | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop _ l r => evalExpr callFunc l env
   | MojoExpr.call name arg => callFunc name (evalExpr callFunc arg env)
@@ -854,10 +910,10 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
   | "+" => evalExpr callFunc l env + evalExpr callFunc r env
   | "-" => evalExpr callFunc l env - evalExpr callFunc r env
   | "*" => evalExpr callFunc l env * evalExpr callFunc r env
-  | "<=" => if evalExpr callFunc l env ≤ evalExpr callFunc r env then 1 else 0
-  | "<" => if evalExpr callFunc l env < evalExpr callFunc r env then 1 else 0
-  | ">" => if evalExpr callFunc l env > evalExpr callFunc r env then 1 else 0
-  | ">=" => if evalExpr callFunc l env ≥ evalExpr callFunc r env then 1 else 0
+  | "<=" => if sKey (evalExpr callFunc l env) ≤ sKey (evalExpr callFunc r env) then 1 else 0
+  | "<" => if sKey (evalExpr callFunc l env) < sKey (evalExpr callFunc r env) then 1 else 0
+  | ">" => if sKey (evalExpr callFunc l env) > sKey (evalExpr callFunc r env) then 1 else 0
+  | ">=" => if sKey (evalExpr callFunc l env) ≥ sKey (evalExpr callFunc r env) then 1 else 0
   | "=" => if evalExpr callFunc l env = evalExpr callFunc r env then 1 else 0
   | "!=" => if evalExpr callFunc l env ≠ evalExpr callFunc r env then 1 else 0
   | "and" => if (evalExpr callFunc l env ≠ 0 ∧ evalExpr callFunc r env ≠ 0) then 1 else 0
@@ -865,11 +921,11 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
   | "&" => evalExpr callFunc l env &&& evalExpr callFunc r env
   | "|" => evalExpr callFunc l env ||| evalExpr callFunc r env
   | "^" => evalExpr callFunc l env ^^^ evalExpr callFunc r env
-  | "/" => evalExpr callFunc l env / evalExpr callFunc r env
-  | "//" => evalExpr callFunc l env / evalExpr callFunc r env
-  | "%" => evalExpr callFunc l env % evalExpr callFunc r env
+  | "/" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "//" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "%" => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "<<" => evalExpr callFunc l env <<< evalExpr callFunc r env
-  | ">>" => evalExpr callFunc l env >>> evalExpr callFunc r env
+  | ">>" => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "**" => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
   | _ => evalExpr callFunc l env := by
   by_cases h : op = "+"; · subst h; rfl
@@ -1365,34 +1421,6 @@ theorem t32s_t8s (x : UInt64) : t32s (t8s x) = t8s x := by
 theorem t32s_t16s (x : UInt64) : t32s (t16s x) = t16s x := by
   unfold t32s t16s
   bv_decide
-
-/-- Signed interpretation of a 64-bit pattern as an Int (two's complement). -/
-def u64_toS64 (x : UInt64) : Int :=
-  if (x >>> 63) = 1 then (Int.ofNat x.toNat) - (2^64 : Int) else Int.ofNat x.toNat
-
-/-- Re-encode an Int as a 64-bit pattern (mod 2^64). -/
-def s64_to_u64 (x : Int) : UInt64 :=
-  UInt64.ofNat (x.emod (2^64 : Int)).toNat
-
-/-- Signed 64-bit division truncating toward 0; 0 when divisor is 0 (UDIV/SDIV
-    architectural behaviour — codegen's CBZ div0 path traps before this). -/
-def sdiv64 (a b : UInt64) : UInt64 :=
-  if b = 0 then 0
-  else s64_to_u64 (Int.tdiv (u64_toS64 a) (u64_toS64 b))
-
-/-- Signed 64-bit remainder truncating toward 0; 0 when divisor is 0.
-    Matches MSUB after SDIV: a - (a / b) * b. -/
-def srem64 (a b : UInt64) : UInt64 :=
-  if b = 0 then 0
-  else s64_to_u64 (Int.tmod (u64_toS64 a) (u64_toS64 b))
-
-/-- Arithmetic (sign-extending) shift right of a 64-bit pattern by `sh` (mod 64). -/
-def asr64 (x : UInt64) (sh : UInt64) : UInt64 :=
-  let s := sh.toNat % 64
-  if s = 0 then x
-  else if (x >>> 63) = 1 then
-    (x >>> UInt64.ofNat s) ||| ((0xffffffffffffffff : UInt64) <<< UInt64.ofNat (64 - s))
-  else x >>> UInt64.ofNat s
 
 /-- ARM64 step function: decode and execute one instruction. -/
 def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
@@ -2886,20 +2914,32 @@ the generator only emits a thin instantiation. -/
 
 /-- **Generic countdown-style while-loop contract.**
 
-`checkPc` is the loop header; `cond` is the condition block (ending in a `cbz`
-on register `cr` at `cbzPc`) that falls to `bodyPc` and exits to `exitBpc`;
-`body` is the body block, which runs back to `checkPc`; `ex` is the exit block,
-which runs to `exit`.  The loop counter is `x19`; the `cbz` tests it against
-zero (`hcondFlag`).  With `x19 = arg` at the header, the exit-mode interpreter
-reaches `exit` with `x0 = done arg`, provided `done` is constant along the
-countdown (`hmojo`).
+`checkPc` is the loop header; `cond` is the condition block (ending in the
+loop test at `cbzPc`) that falls to `bodyPc` and exits to `exitBpc`; `body` is
+the body block, which runs back to `checkPc`; `ex` is the exit block, which runs
+to `exit`.  The loop counter is `x19`, and `q : Arm64State → Bool` is the
+loop test itself — `q st = true` means "leave the loop" (`hstep`), and
+`hcondFlag` relates it to the counter.  With `x19 = arg` at the header, the
+exit-mode interpreter reaches `exit` with `x0 = done arg`, provided `done` is
+constant along the countdown (`hmojo`).
+
+`q` is a predicate over the state, not a register index, on purpose.  The test
+was originally stated as "register `cr` reads zero", which described the old
+`CSET`-then-`CBZ` lowering; the current lowering branches on the `CMP`'s flags
+and writes no register, so a register-shaped test asks for a fact no
+instruction produces and the obligation is unprovable rather than merely
+unproved.  Callers pass whichever they actually have: `arm64_matches_condition
+<field> st.nzcv` for the `B.cond` path, `decide (arm64_reg cr st = 0)` for a
+genuine `CBZ`.  Both are closed by the same `go_exit_cbz_*` lemmas, which are
+already generic over a decidable `C`.
 
 `P` is the frame invariant the loop maintains (for the compiler.s loops it is
 the return-address slot read-back that the callee-saved epilogue consumes).  It
 is preserved by the condition and body blocks (`hP_cond`, `hP_body`), moved past
 `pc`-updates (`hP_pc`), and implies the epilogue.s return target (`hexPc`). -/
 theorem while_dec_exit_contract
-    (code : Nat → UInt8) (exit checkPc cbzPc bodyPc exitBpc : Nat) (cr : Nat)
+    (code : Nat → UInt8) (exit checkPc cbzPc bodyPc exitBpc : Nat)
+    (q : Arm64State → Bool)
     (done : UInt64 → UInt64)
     (cond body ex : Arm64State → Arm64State)
     (mc mb me : Nat)
@@ -2908,13 +2948,14 @@ theorem while_dec_exit_contract
     (hP_cond : ∀ st, st.pc = checkPc → P st → P (cond st))
     (hP_body : ∀ st, st.pc = bodyPc → P st → P (body st))
     (hstep : ∀ st, st.pc = cbzPc →
-      arm64_step st code = some (if arm64_reg cr st = 0 then
+      arm64_step st code = some (if q st then
         ({ st with pc := exitBpc } : Arm64State) else ({ st with pc := bodyPc } : Arm64State)))
     (hcondRun : ∀ st, st.pc = checkPc → arm64_runs code mc st = some (cond st))
     (hcondMid : ∀ st, st.pc = checkPc →
       ∀ u, u < mc → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
     (hcondPc : ∀ st, st.pc = checkPc → (cond st).pc = cbzPc)
-    (hcondFlag : ∀ st, st.pc = checkPc → (arm64_reg cr (cond st) = 0 ↔ st.x19 = 0))
+    (hcondZero : ∀ st, st.pc = checkPc → st.x19 = 0 → q (cond st) = true)
+    (hcondStep : ∀ st, st.pc = checkPc → q (cond st) ≠ true → st.x19 ≠ 0)
     (hcondX19 : ∀ st, st.pc = checkPc → (cond st).x19 = st.x19)
     (hbodyRun : ∀ st, st.pc = bodyPc → arm64_runs code mb st = some (body st))
     (hbodyMid : ∀ st, st.pc = bodyPc →
@@ -2926,6 +2967,8 @@ theorem while_dec_exit_contract
       ∀ u, u < me → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
     (hexPc : ∀ st, st.pc = exitBpc → P st → (ex st).pc = exit)
     (hexX0 : ∀ st, st.pc = exitBpc → st.x19 = 0 → (ex st).x0 = done st.x19)
+    (hcondDone : ∀ st, st.pc = checkPc → q (cond st) = true →
+      (ex { cond st with pc := exitBpc } : Arm64State).x0 = done st.x19)
     (hmojo : ∀ (a : UInt64), a ≠ 0 → done (a - 1) = done a)
     (hcbzExit : cbzPc ≠ exit) (hExitBpc : exitBpc ≠ cbzPc) (hBodyPc : bodyPc ≠ cbzPc) :
     ∀ (arg : UInt64) (st : Arm64State) (fuel : Nat),
@@ -2948,12 +2991,12 @@ theorem while_dec_exit_contract
       rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
       rw [hglue1]
       have hcp := hcondPc st hpc
-      have hflag : arm64_reg cr (cond st) = 0 := (hcondFlag st hpc).mpr hx19_0
+      have hflag : q (cond st) = true := hcondZero st hpc hx19_0
       have hjump : ({ cond st with pc := exitBpc } : Arm64State).pc ≠ (cond st).pc := by
         rw [hcp]; exact hExitBpc
       have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
       have hcbz := go_exit_cbz_taken (cond st) code exit (fuel - mc - 1)
-        (arm64_reg cr (cond st) = 0)
+        (q (cond st) = true)
         ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
         (hstep (cond st) hcp) hflag hjump hpcne
       rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
@@ -2967,66 +3010,86 @@ theorem while_dec_exit_contract
       rw [hglue3]
       have hexpc : (ex { cond st with pc := exitBpc }).pc = exit := hexPc _ (by rfl) hPe
       rw [arm64_go_exit_hit _ code exit (fuel - mc - 1 - me) (by omega) hexpc]
-      have hzero : ({ cond st with pc := exitBpc } : Arm64State).x19 = 0 := by
-        change (cond st).x19 = 0
-        rw [hcondX19 st hpc, hx19_0]
-      have hx0ex : (ex { cond st with pc := exitBpc }).x0 = done st.x19 := by
-        rw [hexX0 _ (by rfl) hzero]
-        rw [show ({ cond st with pc := exitBpc } : Arm64State).x19 = st.x19 from by
-          change (cond st).x19 = st.x19
-          exact hcondX19 st hpc]
-      exact ⟨ex { cond st with pc := exitBpc }, rfl, hx0ex⟩
+      exact ⟨ex { cond st with pc := exitBpc }, rfl,
+        hcondDone st hpc (hcondZero st hpc hx19_0)⟩
     | succ k ih =>
       intro st hpc hk hPst fuel hfuel
       rw [Nat.mul_succ] at hfuel
-      have hne : st.x19 ≠ 0 := by intro h; rw [h] at hk; simp at hk
       have hglue1 := rec1_glue_gen code exit mc (fuel - mc) st (cond st)
         (hcondRun st hpc) (hcondMid st hpc)
       rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
       rw [hglue1]
       have hcp := hcondPc st hpc
-      have hflag : ¬ (arm64_reg cr (cond st) = 0) :=
-        fun h0 => hne ((hcondFlag st hpc).mp h0)
-      have hjump : ({ cond st with pc := bodyPc } : Arm64State).pc ≠ (cond st).pc := by
-        rw [hcp]; exact hBodyPc
-      have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
-      have hcbz := go_exit_cbz_fall (cond st) code exit (fuel - mc - 1)
-        (arm64_reg cr (cond st) = 0)
-        ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
-        (hstep (cond st) hcp) hflag hjump hpcne
-      rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
-      rw [hcbz]
-      have hglue2 := rec1_glue_gen code exit mb (fuel - mc - 1 - mb)
-        ({ cond st with pc := bodyPc }) (body { cond st with pc := bodyPc })
-        (hbodyRun _ (by rfl)) (hbodyMid _ (by rfl))
-      rw [show mb + (fuel - mc - 1 - mb) = fuel - mc - 1 from by omega] at hglue2
-      rw [hglue2]
-      have hbpc : (body { cond st with pc := bodyPc }).pc = checkPc := hbodyPc _ (by rfl)
-      have hcin : ({ cond st with pc := bodyPc } : Arm64State).x19 = st.x19 := by
-        change (cond st).x19 = st.x19
-        exact hcondX19 st hpc
-      have hbdec : (body { cond st with pc := bodyPc }).x19 = st.x19 - 1 := by
-        have h := hbodyDec ({ cond st with pc := bodyPc }) (by rfl)
-        rwa [hcin] at h
-      have hbtoNat : (body { cond st with pc := bodyPc }).x19.toNat = k := by
-        rw [hbdec, toNat_sub_one st.x19 hne, hk]; omega
-      have hPc' : P ({ cond st with pc := bodyPc } : Arm64State) :=
-        hP_pc (cond st) bodyPc (hP_cond st hpc hPst)
-      have hPb : P (body { cond st with pc := bodyPc }) := hP_body _ (by rfl) hPc'
-      have hfuel' : (mc + mb + 2) * k + (mc + me + 2) ≤ fuel - mc - 1 - mb := by omega
-      obtain ⟨s, hs, hx0⟩ := ih _ hbpc hbtoNat hPb _ hfuel'
-      refine ⟨s, hs, ?_⟩
-      rw [hx0, hbdec]
-      exact hmojo st.x19 hne
+      -- The test is NOT "the counter is zero" any more: with a signed `int` a
+      -- NEGATIVE counter also leaves the loop, and the induction has to allow
+      -- that, because the loop may now exit without the counter ever reaching
+      -- 0.  So the step case splits on the TEST itself — exit (the exit
+      -- block's x0 is `done x19`, by `hcondDone`) or continue (and `hcondStep`
+      -- supplies the `x19 ≠ 0` that `toNat (x19 - 1)` needs to decrease).
+      by_cases hq : q (cond st) = true
+      · have hjump : ({ cond st with pc := exitBpc } : Arm64State).pc ≠ (cond st).pc := by
+          rw [hcp]; exact hExitBpc
+        have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
+        have hcbz := go_exit_cbz_taken (cond st) code exit (fuel - mc - 1)
+          (q (cond st) = true)
+          ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
+          (hstep (cond st) hcp) hq hjump hpcne
+        rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
+        rw [hcbz]
+        have hPe : P ({ cond st with pc := exitBpc } : Arm64State) :=
+          hP_pc (cond st) exitBpc (hP_cond st hpc hPst)
+        have hglue3 := rec1_glue_gen code exit me (fuel - mc - 1 - me)
+          ({ cond st with pc := exitBpc }) (ex { cond st with pc := exitBpc })
+          (hexRun _ (by rfl) hPe) (hexMid _ (by rfl))
+        rw [show me + (fuel - mc - 1 - me) = fuel - mc - 1 from by omega] at hglue3
+        rw [hglue3]
+        have hexpc : (ex { cond st with pc := exitBpc }).pc = exit := hexPc _ (by rfl) hPe
+        rw [arm64_go_exit_hit _ code exit (fuel - mc - 1 - me) (by omega) hexpc]
+        exact ⟨ex { cond st with pc := exitBpc }, rfl, hcondDone st hpc hq⟩
+      · have hflag : q (cond st) = false := by
+          cases hb : q (cond st) <;> simp_all
+        have hjump : ({ cond st with pc := bodyPc } : Arm64State).pc ≠ (cond st).pc := by
+          rw [hcp]; exact hBodyPc
+        have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
+        have hcbz := go_exit_cbz_fall (cond st) code exit (fuel - mc - 1)
+          (q (cond st) = true)
+          ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
+          (hstep (cond st) hcp) (by simpa using hflag) hjump hpcne
+        rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
+        rw [hcbz]
+        have hglue2 := rec1_glue_gen code exit mb (fuel - mc - 1 - mb)
+          ({ cond st with pc := bodyPc }) (body { cond st with pc := bodyPc })
+          (hbodyRun _ (by rfl)) (hbodyMid _ (by rfl))
+        rw [show mb + (fuel - mc - 1 - mb) = fuel - mc - 1 from by omega] at hglue2
+        rw [hglue2]
+        have hbpc : (body { cond st with pc := bodyPc }).pc = checkPc := hbodyPc _ (by rfl)
+        have hcin : ({ cond st with pc := bodyPc } : Arm64State).x19 = st.x19 := by
+          change (cond st).x19 = st.x19
+          exact hcondX19 st hpc
+        have hbdec : (body { cond st with pc := bodyPc }).x19 = st.x19 - 1 := by
+          have h := hbodyDec ({ cond st with pc := bodyPc }) (by rfl)
+          rwa [hcin] at h
+        have hbtoNat : (body { cond st with pc := bodyPc }).x19.toNat = k := by
+          rw [hbdec, toNat_sub_one st.x19 (hcondStep st hpc (by simpa using hflag)), hk]; omega
+        have hPc' : P ({ cond st with pc := bodyPc } : Arm64State) :=
+          hP_pc (cond st) bodyPc (hP_cond st hpc hPst)
+        have hPb : P (body { cond st with pc := bodyPc }) :=
+          hP_body _ (by rfl) hPc'
+        have hfuel' : (mc + mb + 2) * k + (mc + me + 2) ≤ fuel - mc - 1 - mb := by omega
+        obtain ⟨s, hs, hx0⟩ := ih _ hbpc hbtoNat hPb _ hfuel'
+        refine ⟨s, hs, ?_⟩
+        rw [hx0, hbdec]
+        exact hmojo st.x19 (hcondStep st hpc (by simpa using hflag))
   intro arg st fuel hfuel hpc hx19 hPst
   simpa [hx19] using key arg.toNat st hpc (by rw [hx19]) hPst fuel (by simpa using hfuel)
 
 /-- Generic count-up loop contract: the `for i in range (start, end)` shape.
 
     `checkPc` is the loop top (start of the condition-test block), `cbzPc` the
-    CBZ inside it, `bodyPc` the CBZ fall (loop body), `exitBpc` the CBZ taken
-    (exit path).  `cr` is the register the CBZ tests (the CSET result); `r` is
-    the counter register (loop variable); `b` the bound register.
+    loop test inside it, `bodyPc` its fall (loop body), `exitBpc` its taken
+    (exit path).  `q` is that test, as a predicate over the state (see
+    `while_dec_exit_contract` for why it is not a register index); `r` is the
+    counter register (loop variable); `b` the bound register.
 
     Inducts on the remaining iterations `(b - r).toNat`:
     - base (`b ≤ r`): condition false, exit path, `x0 = model st` (the
@@ -3040,7 +3103,7 @@ theorem while_dec_exit_contract
     `r = 0 → done` special case with a constant model). -/
 theorem while_lt_exit_contract
     (code : Nat → UInt8) (exit checkPc cbzPc bodyPc exitBpc : Nat)
-    (cr r b : Nat)
+    (q : Arm64State → Bool) (r b : Nat)
     (model : Arm64State → UInt64)
     (cond body ex : Arm64State → Arm64State)
     (mc mb me : Nat)
@@ -3049,14 +3112,14 @@ theorem while_lt_exit_contract
     (hP_cond : ∀ st, st.pc = checkPc → P st → P (cond st))
     (hP_body : ∀ st, st.pc = bodyPc → P st → P (body st))
     (hstep : ∀ st, st.pc = cbzPc →
-      arm64_step st code = some (if arm64_reg cr st = 0 then
+      arm64_step st code = some (if q st then
         ({ st with pc := exitBpc } : Arm64State) else ({ st with pc := bodyPc } : Arm64State)))
     (hcondRun : ∀ st, st.pc = checkPc → arm64_runs code mc st = some (cond st))
     (hcondMid : ∀ st, st.pc = checkPc →
       ∀ u, u < mc → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
     (hcondPc : ∀ st, st.pc = checkPc → (cond st).pc = cbzPc)
     (hcondFlag : ∀ st, st.pc = checkPc →
-      (arm64_reg cr (cond st) = 0 ↔ ¬ (arm64_reg r st < arm64_reg b st)))
+      (q (cond st) = true ↔ ¬ (arm64_reg r st < arm64_reg b st)))
     (hcondRB : ∀ st, st.pc = checkPc →
       arm64_reg r (cond st) = arm64_reg r st ∧ arm64_reg b (cond st) = arm64_reg b st)
     (hcondModel : ∀ st, st.pc = checkPc → model (cond st) = model st)
@@ -3107,12 +3170,12 @@ theorem while_lt_exit_contract
       rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
       rw [hglue1]
       have hcp := hcondPc st hpc
-      have hflag : arm64_reg cr (cond st) = 0 := (hcondFlag st hpc).mpr hge
+      have hflag : q (cond st) = true := (hcondFlag st hpc).mpr hge
       have hjump : ({ cond st with pc := exitBpc } : Arm64State).pc ≠ (cond st).pc := by
         rw [hcp]; exact hExitBpc
       have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
       have hcbz := go_exit_cbz_taken (cond st) code exit (fuel - mc - 1)
-        (arm64_reg cr (cond st) = 0)
+        (q (cond st) = true)
         ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
         (hstep (cond st) hcp) hflag hjump hpcne
       rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz
@@ -3149,14 +3212,14 @@ theorem while_lt_exit_contract
       rw [show mc + (fuel - mc) = fuel from by omega] at hglue1
       rw [hglue1]
       have hcp := hcondPc st hpc
-      have hflag : ¬ (arm64_reg cr (cond st) = 0) := by
+      have hflag : ¬ (q (cond st) = true) := by
         intro hcr
         exact (hcondFlag st hpc).mp hcr hlt
       have hjump : ({ cond st with pc := bodyPc } : Arm64State).pc ≠ (cond st).pc := by
         rw [hcp]; exact hBodyPc
       have hpcne : (cond st).pc ≠ exit := by rw [hcp]; exact hcbzExit
       have hcbz := go_exit_cbz_fall (cond st) code exit (fuel - mc - 1)
-        (arm64_reg cr (cond st) = 0)
+        (q (cond st) = true)
         ({ cond st with pc := exitBpc }) ({ cond st with pc := bodyPc })
         (hstep (cond st) hcp) hflag hjump hpcne
       rw [show (fuel - mc - 1) + 1 = fuel - mc from by omega] at hcbz

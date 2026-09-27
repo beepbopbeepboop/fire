@@ -24,7 +24,7 @@ from fire_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt, MatchStmt,
+    GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     _sms_key, _as_str,
@@ -46,6 +46,12 @@ from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _sms_key
 )
+
+# Sentinel for "this api entry has no `receiver` key at all", so a
+# missing key is distinguishable from a recorded empty string (which is a
+# real, meaningful verdict: a @staticmethod generator method has no receiver).
+# Same object identity the sibling consumer in cpp_core.py uses.
+_MISSING = object()
 
 
 # Module aliases bound in this compiler's own backend sources that name a
@@ -2598,6 +2604,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _gm_api = gen._generator_method_api.get((func.obj.name, method))
     if _gm_api is not None:
         arg_pairs = [gen.lower_expr(a) for a in node.args]
+        # A compiled @staticmethod GENERATOR has NO receiver slot: its start
+        # signature's slot 0 is the method's first REAL parameter, so
+        # prepending the class-ref here (which every other receiver-carrying
+        # generator method needs) is a wrong-arity call. The api entry's
+        # `receiver` key — fire_compiler.method_receiver_kind's verdict,
+        # recorded at registration — is the authority; a MISSING key is
+        # refused rather than guessed, because guessing wrong here is a
+        # silent argument shift.
+        _gm_rcv = _gm_api.get('receiver', _MISSING)
+        if _gm_rcv is _MISSING:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"generator method {method!r} has no recorded `receiver` in "
+                "its api entry, so its call arity cannot be determined")
+        if _gm_rcv == '':
+            all_args = list(arg_pairs)
         # A compiled @classmethod GENERATOR's start function declares its
         # receiver slot as an opaque, never-read int64_t `cls` placeholder
         # (see gimple_cpp_async.py's param_ctypes cls handling — the unit
@@ -2619,9 +2640,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # receiver to int64_t so this swap is a no-op there, and a genuine
         # instance receiver (`obj.split(data)`) keeps the struct-pointer
         # pair below, whose ptr->int64_t coercion is legal C.
-        if (_recv_ot_raw in ('int', 'int64_t')
-                and _gm_api.get('params')
-                and _gm_api['params'][0] == 'int64_t'):
+        elif (_recv_ot_raw in ('int', 'int64_t')
+              and _gm_api.get('params')
+              and _gm_api['params'][0] == 'int64_t'):
             all_args = [('int64_t', _recv_ov_raw)] + arg_pairs
         else:
             all_args = [(ot, ov)] + arg_pairs
