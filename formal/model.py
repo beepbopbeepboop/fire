@@ -23,6 +23,8 @@ leading arguments on BOTH paths, so the caller and callee must agree on that
 order in one place, not twice.
 """
 
+import os
+
 import fire_compiler as F
 
 
@@ -114,6 +116,193 @@ def static_key_elements(needle):
 def key_compare_is_structural(needle) -> bool:
     """True when `needle` compares element-wise rather than as a raw word."""
     return static_key_elements(needle) is not None
+
+
+# ── A subscript with more than one index ──────────────────────────────────
+#
+# `x[a, b]` parses as a SubscriptExpr whose index is a TUPLE (`TupleExpr`;
+# `fire_compiler.py`'s `Parser` builds one for any bracketed comma list, so
+# `x[a]` is a plain index and only the comma makes it a tuple). It is NOT a
+# two-dimensional subscript, and the corpus says so unambiguously: across the
+# 294 stdlib files and every source in this repository there is not one
+# instance whose base is a value. Every one names a generic — `SIMD[dtype,
+# width]`, `size_of[type, target]`, `external_call["sym", RetType]`,
+# `UnsafePointer[NoneType, MutAnyOrigin]` — or is an `__mlir_attr[...]`
+# template. Those are COMPILE-TIME EXPLICIT-PARAMETER LISTS: they select an
+# instantiation and hand it a type or a comptime value, and no runtime word
+# corresponds to any of them.
+#
+# So the four readings this construct could have are settled by the source
+# that uses it, and none of them is "index a flat buffer at i*stride + j":
+#   * a comptime parameter list — what every corpus instance is. Lowering it
+#     means resolving the parameter binding, which needs the callee's type
+#     table; there is none here, and guessing a value (e.g. claiming
+#     `size_of[DType.int]` is 8) would be a fabricated answer.
+#   * an MLIR attribute template — what `__mlir_attr[...]` is. Not a value at
+#     all on this path.
+#   * a dict keyed by tuples — real, and the ONE case lowered, by the
+#     element-wise key comparison above. It requires a KNOWN DICT base, which
+#     only the backend knows; `multi_index_kind` takes that as an argument.
+#   * a 2-D index into a flat buffer — needs a row stride. The source never
+#     states one, so any stride would be invented.
+#
+# Therefore every non-dict case is refused, and `multi_index_refusal` says
+# which of the above it is so the diagnostic names the construct rather than
+# the symptom. The text is deliberately ARCH-FREE: arm64 and x86-64 return the
+# same string, so the two architectures cannot drift on what a subscript means
+# (see test_formal_run.py's `refuse:` cases, which assert they do not).
+
+MULTI_INDEX_MLIR_TEMPLATE = "mlir-template"
+MULTI_INDEX_COMPTIME_PARAMS = "comptime-parameters"
+MULTI_INDEX_DATA = "data-multi-index"
+
+# The MLIR spelling forms, which take a bracketed TEMPLATE rather than an
+# index: the elements are backtick-quoted literal fragments interleaved with
+# compile-time sub-expressions, and the whole thing denotes a dialect
+# attribute. `__mlir_op` is absent on purpose — it is a real side-effecting
+# op, lowered as a call (see fire_compiler's statement parser), and its
+# bracket list is MLIR op attributes with `attrs` set, which is a different
+# (already separately refused) node.
+MLIR_TEMPLATE_NAMES = frozenset((
+    "__mlir_attr",
+    "__mlir_deferred_attr",
+    "__mlir_deferred_type",
+    "__mlir_type",
+))
+
+
+def is_multi_index(index) -> bool:
+    """True when a subscript's index is a bracketed comma list, not one value."""
+    return isinstance(index, (F.TupleExpr, F.ListExpr))
+
+
+def _base_name(obj):
+    """The bare name a subscript base spells, or None if it is not a name."""
+    if isinstance(obj, F.IdentExpr):
+        return obj.name
+    return None
+
+
+def multi_index_kind(e, base_is_dict: bool = False,
+                     generic_callee=None) -> str:
+    """What a multi-element subscript index means here. See the section note.
+
+    `e` is the whole `SubscriptExpr`, so the base is available and the answer
+    can be about the construct rather than about the index alone.
+    `base_is_dict` is the backend's knowledge (a dict literal or a name tracked
+    back to one) — the dict-keyed-by-tuples case is the only one lowered.
+    `generic_callee` is the FunctionDef the base names, when the backend has
+    one in hand and it is a generic; that is what separates a comptime
+    parameter list from a value subscript, and it is a fact the backend can
+    check rather than a guess from the spelling."""
+    if base_is_dict:
+        return None                       # the one lowered case; not a refusal
+    if _base_name(e.obj) in MLIR_TEMPLATE_NAMES:
+        return MULTI_INDEX_MLIR_TEMPLATE
+    if generic_callee is not None and is_generic(generic_callee):
+        return MULTI_INDEX_COMPTIME_PARAMS
+    return MULTI_INDEX_DATA
+
+
+def multi_index_spelling(e, limit: int = 4) -> str:
+    """How the source spelled a multi-element subscript, for a diagnostic.
+
+    `x[a, b, c, …]` past `limit` elements, so a 16-element `external_call[...]`
+    does not bury the sentence that says what is wrong with it."""
+    n = len(e.index.elements)
+    shown = ", ".join(
+        _spell(e0) for e0 in e.index.elements[:limit])
+    if n > limit:
+        shown += ", …"
+    return f"{_spell(e.obj)}[{shown}]"
+
+
+def _spell(node) -> str:
+    """A short, readable rendering of one expression, for a message."""
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    if isinstance(node, F.MemberExpr):
+        base = _spell(node.obj)
+        return f"{base}.{node.member}" if base else node.member
+    if isinstance(node, F.IntLiteral):
+        return str(node.value)
+    if isinstance(node, F.BoolLiteral):
+        return "True" if node.value else "False"
+    if isinstance(node, F.StringLiteral):
+        return repr(node.value)
+    if isinstance(node, F.CallExpr):
+        return f"{_spell(node.func)}(…)"
+    if isinstance(node, F.SubscriptExpr):
+        return f"{_spell(node.obj)}[…]"
+    if isinstance(node, F.BinaryOp):
+        return f"{_spell(node.left)} {node.op} {_spell(node.right)}"
+    if isinstance(node, F.UnaryOp):
+        return f"{node.op}{_spell(node.operand)}"
+    return type(node).__name__
+
+
+def multi_index_refusal(kind: str, spelled: str) -> str:
+    """The refusal text for a multi-element subscript, identical on both paths.
+
+    `spelled` is how the source wrote the construct, so the message points at
+    something the reader can find (`size_of[type, target]`,
+    `__mlir_attr[...]`, `a[i, j]`)."""
+    if kind == MULTI_INDEX_MLIR_TEMPLATE:
+        return (
+            f"{spelled} assembles an MLIR attribute from a template of "
+            "backtick-quoted literal fragments and compile-time "
+            "sub-expressions: it is not a subscript, and there is no MLIR on "
+            "this path for the template to become. Refused rather than "
+            "materialized as a container, which would turn an attribute into "
+            "a pointer to a frame blob and disagree with the compiler that "
+            "does have MLIR."
+        )
+    if kind == MULTI_INDEX_COMPTIME_PARAMS:
+        return (
+            f"{spelled} is a compile-time explicit-parameter list on a "
+            "generic, not a subscript: the brackets name types and comptime "
+            "values, none of which is a runtime word. This path has no type "
+            "or comptime parameter to bind, so what the call means depends "
+            "entirely on which parameters were passed. Refused rather than "
+            "read as an index — a binding for `size_of[type, target]` would "
+            "have to come from a target description this backend does not "
+            "have, and a plausible constant is a fabricated answer."
+        )
+    return (
+        f"{spelled} is a subscript whose index is a tuple. A value here is "
+        "one 64-bit word and a list is a flat blob of words, so a tuple "
+        "index has no representation on this path. It is one of two things: "
+        "a lookup keyed by the tuple, which is lowered only when the base is "
+        "a known dict and compares the key element-wise; or a "
+        "two-dimensional index, which needs a row stride the source never "
+        "states. Refused rather than computing a plausible flat index, and "
+        "rather than using the tuple blob's own address as the index — that "
+        "builds, runs, and returns an element nobody asked for."
+    )
+
+
+def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None):
+    """The refusal text for `e`, or None when it is the lowered dict-key case.
+
+    This is the ONE place either backend asks, so the two architectures
+    cannot disagree about what a multi-element subscript means — the failure
+    that was live at the time of writing: arm64 refused a computed tuple
+    index while x86-64 used the tuple blob's own frame address as the element
+    index, so `s[i, j]` segfaulted on one architecture and returned a
+    different wrong answer on the other. `callee_defs` is the backend's
+    `{name: FunctionDef}` table, consulted only to recognise a generic's
+    explicit-parameter list; a base it does not know falls through to the
+    tuple-index refusal, which is still true of it.
+
+    Called from the address computation, not from the read: that is the one
+    place a read, a store and an augmented assignment all pass through, and
+    the read-only check this replaces left `a[i, j] = v` unrefused."""
+    kind = multi_index_kind(e, base_is_dict=base_is_dict,
+                            generic_callee=(
+                                (callee_defs or {}).get(_base_name(e.obj))))
+    if kind is None:
+        return None
+    return multi_index_refusal(kind, multi_index_spelling(e))
 
 
 # ── Calling convention ────────────────────────────────────────────────────
@@ -479,6 +668,94 @@ def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
     the builtins this model represents."""
     return BUILTIN_FUNCTIONS.get(name)
+
+
+# ── Where a frame ADDRESS may be handed off, and why not ───────────────────
+#
+# A frame address is a word, so it can be passed anywhere a word can. Whether
+# that is CORRECT is a question about the callee, and the two answers are
+# different enough that one message cannot cover both — which is what the single
+# "which this module does not compile" diagnostic did. It is not merely
+# imprecise; for the larger of the two groups it named a cause that is not
+# operating, and a reader who believed it would go looking for the callee's
+# field list instead of at the thing that is actually wrong.
+#
+#   * a BUILTIN or a C library function. It is compiled, and it is compiled as
+#     an operation on a VALUE: `len(x)` reads a length out of the object, a C
+#     function takes the struct's BYTES. A frame address is neither. Handing one
+#     over is not a missing layout, it is a category error, and it would be a
+#     wrong answer even if the callee were handed the whole struct.
+#   * a function this translation unit does not compile. Here the call has
+#     nowhere to go AT ALL, whatever it is passed: the image contains one file's
+#     functions, so the symbol is unbound before the receiver's type is even a
+#     question. Saying so first is the honest order — the layout is a real
+#     second question, but it is not the one that stops this program.
+
+# Calls by bare name that the model lowers as an operation on a value, and so
+# take the VALUE rather than a pointer to it. `len` is here because it is the
+# commonest one by an order of magnitude; the others are the value/type
+# constructors and `origin_of`, which all ask what the object IS.
+FRAME_VALUE_ONLY_CALLS = {
+    "len", "origin_of", "isinstance", "issubclass", "repr", "str", "int",
+    "float", "bool", "hash", "id", "type", "String", "Pointer",
+    "UnsafePointer", "StringRef", "PointerType",
+    # The container and scalar CONSTRUCTORS, and the folds over them.  They are
+    # here for the same reason `len` is: each is lowered as an operation on the
+    # value it is handed, and each is a bare name the model compiles rather than
+    # a function, so without this row they fell into "this module does not
+    # compile" — which for `list(x)` is false in a way a reader would have to
+    # go and check.
+    "list", "dict", "set", "tuple", "slice", "range", "enumerate", "zip",
+    "sorted", "reversed", "sum", "min", "max", "abs", "round", "divmod",
+    "chr", "ord", "hex", "oct", "bin", "any", "all",
+}
+
+# Calls by bare name that reach the C library and take the struct's storage.
+FRAME_C_LIBRARY_CALLS = {
+    "fcntl", "ioctl", "write", "read", "open", "close", "readv", "writev",
+    "mmap", "memcpy", "memcmp", "qsort", "stat", "lstat", "fstat",
+}
+
+
+def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
+    """Why handing a frame ADDRESS to `callee()` is wrong, or None if it is not.
+
+    `struct_names` is what the receiver's frame could be — one name, or several
+    where the holder's type was not settled (see
+    `struct_frame_slot_candidates`). The text names the struct because a
+    refusal that does not is one the reader has to re-derive.
+
+    Returns None for a callee that is one of this module's own functions: those
+    take the receiver as their first parameter, which is the whole of the
+    by-reference design, and their frame layout is settled at compile time. The
+    CALLER decides which callees those are — it is the only side that knows
+    what it compiled — so this function is about the two cases where the answer
+    does not depend on that."""
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    if callee in FRAME_VALUE_ONLY_CALLS:
+        return (f"a {who} frame address is passed to {callee}(), which is "
+                f"lowered as an operation on a VALUE: it wants the object "
+                f"itself, and on this path a multi-field struct has no value "
+                f"form — its receiver is a pointer to a frame of 8-byte slots, "
+                f"so what would arrive is the address {callee}() would then "
+                f"dereference as one. Not a missing layout: a wrong category "
+                f"of argument. Give it a field (`{callee}(self.n)`) or copy "
+                f"the value out first")
+    if callee in FRAME_C_LIBRARY_CALLS:
+        return (f"a {who} frame address is passed to {callee}(), which is a C "
+                f"library entry point and takes the STRUCT'S BYTES by value. "
+                f"The frame holds the fields at `base + 8k`, which is not the "
+                f"struct's own layout, so the callee would read the wrong words "
+                f"and this program would return a number the source never "
+                f"wrote")
+    return (f"a {who} receiver is passed to {callee}(), which this module "
+            f"does not compile, so the call has nowhere to go at all: this "
+            f"image contains one file's functions, and the symbol is unbound "
+            f"before the receiver's layout is a question. Even with the "
+            f"callee's body in hand, a frame address is only meaningful to code "
+            f"compiled against the same field list, so this is refused rather "
+            f"than passed. bugs/FORMAL_wide_receiver_by_reference.md records "
+            f"the design and what is still open about it")
 
 
 # ── The gimple backend's C runtime, by name ────────────────────────────────
@@ -1022,7 +1299,16 @@ class ValueKinds:
         if isinstance(e, F.CompareChain):
             return INT_KIND
         if isinstance(e, F.TernaryExpr):
-            return _unify(self.kind_of(e.body), self.kind_of(e.orelse))
+            # `then_val` / `else_val`, not `body` / `orelse`: `F.TernaryExpr`
+            # (fire_compiler.py:309) has no `body` and no `orelse`, so this line
+            # raised `AttributeError` on every ternary it was ever handed.  It
+            # was unreachable until the frame pass stopped refusing a handful of
+            # files ahead of the codegen, and then twenty of them landed in
+            # `backend-crash` — a worse verdict than the refusal that used to
+            # hide it, and one this file's own arithmetic is what turned them
+            # into.  The kind of a ternary is the join of its two arms, and
+            # `_unify` is the same join every other two-armed form above uses.
+            return _unify(self.kind_of(e.then_val), self.kind_of(e.else_val))
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(e.elements))
         if isinstance(e, F.DictExpr):
@@ -1868,19 +2154,19 @@ def struct_field_summary(struct_def) -> str:
 def struct_width_cost(struct_def) -> str:
     """What closing this particular gap would take, in one clause.
 
-    Said per width rather than as one blanket "widen the model", because the
-    three cases are genuinely different problems and a refusal that treats them
-    alike hides that:
-
-      * exactly two fields is a one-word model plus a second word — an ABI
-        change, and the cheapest of the three to close;
-      * a handful is the same ABI change with a layout to invent;
-      * dozens is a categorically different thing: a register allocator and a
-        calling convention that passes aggregates, not a two-word special case.
-
-    A formal backend's diagnostic is part of its output, so it should say which
-    of those the reader is actually facing."""
+    With the by-reference receiver on (the default; see
+    `wide_receiver_by_reference`) a width above one is no longer a wall at all
+    and the text says so, because a diagnostic that describes a problem the
+    tool has already solved sends the reader looking for a bug that is not
+    there. What is still not closed is named instead: the *proof* side of a
+    wide receiver is reached only for the cases
+    `bugs/FORMAL_wide_receiver_by_reference.md` records."""
     n = struct_field_count(struct_def)
+    if wide_receiver_by_reference():
+        return (f"{n} fields is a frame of {n} 8-byte slots with a pointer "
+                f"receiver, which is the same code as any other width; what is "
+                f"still per-width is the proof (a method's callee contract is "
+                f"stated modulo its receiver frame — Refine.FrameOk_except)")
     if n == 2:
         return ("two fields is a one-word model plus a second word: an ABI "
                 "change, and the cheapest of the widths to close")
@@ -1891,6 +2177,271 @@ def struct_width_cost(struct_def) -> str:
     return (f"{n} fields is not an ABI special case at all: it needs a calling "
             f"convention that passes aggregates, a register allocator that can "
             f"spill one, and a proof model whose values are no longer one word")
+
+
+# ── A multi-field receiver, BY REFERENCE ───────────────────────────────
+#
+# A value on this path is one 64-bit word, and a struct of two fields has
+# nothing to *be* as a value.  It can nevertheless be given a representation
+# WITHOUT changing the value model at all, by lowering the receiver **by
+# reference**: the receiver word is the ADDRESS of an out-of-line frame of
+# 8-byte slots, `self.<field>` is a load from `mem[base + 8*k]`, and a field
+# write is a store to the same place.  A pointer is one word, so nothing that
+# was one word before becomes two — `MojoFunc`'s single parameter is already
+# `self` and is already the address, so `_rewrite_method_calls` needs no change
+# at all, and `Refine.Post` / `contract_sound` / `runProg` (already
+# `UInt64 → UInt64`) are untouched.
+#
+# The full design, its cost, and the proof-side algebra (`ProofLib.Frame`,
+# `ProofLib.MF`, `Refine.FrameOk_except`) are in
+# `bugs/FORMAL_wide_receiver_by_reference.md`.  What is here is the part the
+# two backends have to agree on, which is why it is in the shared model rather
+# than in either of them: a width that the build pass and the codegen pass
+# measured differently is a struct whose receiver is the wrong number of bytes
+# in one of them, and neither would notice.
+#
+# The switch.  Off means the pre-by-reference behaviour exactly: a wide
+# receiver is refused by name, and every struct of at most one field is
+# unaffected either way (a one-word struct's receiver IS its field, which is a
+# different representation and the cheaper one).  It exists so the switch can
+# be turned off to attribute a regression, and so a reader can see that nothing
+# below it changes a one-field program.
+WIDE_RECEIVER_ENV = "MOJO_FORMAL_WIDE_RECEIVER"
+
+
+def wide_receiver_by_reference() -> bool:
+    """Whether a multi-field receiver is lowered as a pointer to a frame.
+
+    ON by default.  The two settings differ ONLY for a struct with more than
+    one derived field, and for such a struct the "off" setting is a refusal —
+    so turning it on can only turn a refusal into a build, never change the
+    meaning of a program that already built.  `MOJO_FORMAL_WIDE_RECEIVER=0`
+    restores the refusal, which is what one does to attribute a regression to
+    this change rather than to whatever else moved."""
+    return os.environ.get(WIDE_RECEIVER_ENV, "1") not in ("0", "no", "false")
+
+
+def struct_is_framed(struct_def) -> bool:
+    """True when this struct's receiver is a POINTER to a frame of fields.
+
+    The complement of `struct_fits_one_word` for every struct of more than one
+    field, and `False` for the one-field ones whatever the switch says: a
+    one-field struct's receiver is its field, so it needs no frame and there is
+    no reason to spend a word of indirection on it."""
+    return struct_field_count(struct_def) > 1 and wide_receiver_by_reference()
+
+
+def struct_frame_slots(struct_def) -> list:
+    """The slot contents of a framed receiver, in slot order.
+
+    Slot `k` holds field `k`, and that is the WHOLE of the per-struct layout
+    this path needs: no padding, no alignment games, no field reordering.  The
+    order is `struct_field_names`'s, which is a stable, documented order, so a
+    slot index is a function of the class body and nothing else.
+
+    `ProofLib.Frame.SLOT` / `frameOffset` is the same layout stated on the Lean
+    side; `struct_frame_slot` is the `slotOf` table `Frame.SlotOf` requires."""
+    return struct_field_names(struct_def)
+
+
+def struct_frame_slot(struct_def, name):
+    """The slot index field `name` occupies, or None if it is not a field.
+
+    Injective because the slot list has no duplicates (`struct_field_names`
+    de-duplicates), which is exactly `Frame.SlotOf`'s requirement: a write to
+    one field must be invisible to a read of another."""
+    names = struct_frame_slots(struct_def)
+    return names.index(name) if name in names else None
+
+
+# A local name does not always have ONE struct. `x = A()` on one path and
+# `x = B()` on another is ordinary Python, and on this path both are frame
+# addresses — of DIFFERENT frames, with DIFFERENT layouts. Which one a use of
+# `x.f` means depends on the branch, and there is no path sensitivity here to
+# answer it.
+#
+# The consequence is not a refusal; it is a wrong answer waiting to happen, and
+# it is the reason this function exists. Two structs of two fields each:
+#
+#     struct A:  var v; var pad      ->  v is slot 0
+#     struct B:  var pad; var v      ->  v is slot 1
+#
+#     def pick(c):
+#         var x = A()
+#         if c > 0: x = B()
+#         return x.v
+#
+# An analysis that settles on ONE struct computes a slot index from it and
+# emits `LDR [x, #8k]` — so on the `A` path it reads A.pad and on the `B` path
+# it reads B.pad, and both are a number the source never wrote. The program
+# builds, it runs, and it is wrong, which is the outcome this whole design
+# exists to make impossible.
+#
+# So the rule is: AGREE or REFUSE. If every candidate struct puts `name` at the
+# same slot index, the access is well defined whichever frame the name holds
+# and is emitted once. If they disagree — or one candidate has no such field —
+# there is no `k`, and the caller refuses naming the candidates and the slots
+# they wanted. Nothing here infers a type; the caller supplies the candidates it
+# recognised from the BINDINGS, and an empty candidate set means the name holds
+# a plain word rather than a frame address at all.
+def struct_frame_slot_candidates(structs, name):
+    """`(slot, disagreeing)` — the one slot `name` can be at, if they agree.
+
+    `structs` is the candidate list for the holder, in a stable order.
+    `disagreeing` is `(True, [(struct_name, slot_or_None), …])` when there is no
+    single answer, and `None` otherwise. An empty candidate list yields
+    `(None, (False, []))`: the name is not a frame address, so there is no slot
+    to compute and the caller's ordinary value lowering applies.
+
+    "No single answer" has TWO shapes and both are disagreement, which is the
+    part worth stating because only one of them looks like disagreement:
+
+      * the candidates put `name` at DIFFERENT slots — `A` has it first, `B`
+        has it second; or
+      * SOME candidate has it and some do not — `A` has `pad` and `B` does
+        not, so on the `B` path the access is a read of a word this layout
+        never defined.
+
+    The second is the one a "do they agree on the index?" test written as
+    `len(slots) > 1` misses, and it is not a rare shape: any name rebound to a
+    struct with a different field set produces one, and reading the agreed
+    index anyway is the silently-wrong answer. `rows` is returned either way
+    because the refusal has to name WHICH candidate lacks it."""
+    rows, slots, have = [], set(), 0
+    for st in structs:
+        slot = struct_frame_slot(st, name)
+        rows.append((st.name, slot))
+        if slot is not None:
+            slots.add(slot)
+            have += 1
+    if len(slots) > 1 or have != len(rows):
+        return (None, (True, rows))
+    return ((slots.pop() if slots else None), (False, rows))
+
+
+def struct_frame_bytes(struct_def) -> int:
+    """How many bytes of stack one instance of this struct's frame occupies.
+
+    8 per field, rounded UP to a multiple of 16 because that is the stack
+    alignment AAPCS requires and the receiver frame is carved out of the
+    function's own prologue rather than out of the expression-evaluation push
+    area — so the rounding has to keep the frame pointer 16-byte aligned."""
+    n = 8 * struct_field_count(struct_def)
+    return n + (-n % 16)
+
+
+def struct_field_default(struct_def, name) -> tuple:
+    """`(kind, payload)` — the word slot `name` holds in a FRESH instance.
+
+    The per-field reading of the same rule `struct_default_word` states for a
+    one-field struct, and deliberately the same rule: only a LITERAL class-level
+    initializer is materialized, because a literal has no free names and so has
+    the same value at every call site in every function.  Anything else — a
+    name, a call, a container — is `(DEFAULT_OPAQUE, name)`, and the caller
+    refuses the constructor naming the field rather than substituting 0, which
+    is the one answer a formal backend may not invent.
+
+    A field with no class-level initializer at all (`x: Int`, or a field only
+    ever assigned in `__init__`) is `(DEFAULT_NONE, None)`: a fresh word of
+    zeros, which is what the constructor has always emitted for one."""
+    for field in struct_fields(struct_def):
+        if struct_field_name(field) == name:
+            return class_constant_word(name, getattr(field, "value", None))
+    return (DEFAULT_NONE, None)
+
+
+def struct_frame_defaults(struct_def) -> list:
+    """`[(kind, payload)]` per slot, in slot order — what `S()` must store."""
+    return [struct_field_default(struct_def, name)
+            for name in struct_frame_slots(struct_def)]
+
+
+def struct_frame_representable(struct_def):
+    """`(ok, reason)` — can `S()` bring every one of this struct's fields up?
+
+    `ok` is False exactly when some field's declared default is a real value
+    this path cannot evaluate at a call site.  The reason names the field,
+    because a refusal that does not is a refusal the reader has to re-derive."""
+    for name, (kind, payload) in zip(struct_frame_slots(struct_def),
+                                     struct_frame_defaults(struct_def)):
+        if kind == DEFAULT_OPAQUE:
+            return (False, name)
+    return (True, None)
+
+
+def framed_struct_names(structs) -> dict:
+    """`{name: struct}` for every struct whose receiver is a frame pointer.
+
+    The set the build pass hands the two backends, read out of the SHARED
+    model rather than recomputed per backend, so that the pass that lifts a
+    method and the pass that emits its field accesses cannot disagree about how
+    wide the receiver is."""
+    return {st.name: st for st in structs if struct_is_framed(st)}
+
+
+# The largest slot offset `LDR Xt, [Xn, #imm]` / `MOV Xt, [Xn+imm]` can name
+# without computing the address: the arm64 unsigned-offset form's imm12 is 12
+# bits of EIGHT-BYTE units, so slot 4095 is the last one addressable directly.
+# A struct wider than this is refused by name rather than given a second
+# addressing mode, because a second addressing mode is a second thing to get
+# right and this path's whole value is that there is one.
+MAX_FRAME_SLOT = 4095
+
+
+def struct_frame_fits_encoder(struct_def) -> bool:
+    """Whether every one of this struct's slots is directly addressable."""
+    return struct_field_count(struct_def) <= MAX_FRAME_SLOT + 1
+
+
+def iter_nodes(node):
+    """Every dataclass node in a statement tree, parents before children.
+
+    Shared because the frame layout (`struct_constructor_sites`), the
+    frame-holder analysis (`formal/build.py`) and the constant-read census all
+    have to walk the SAME tree the same way; three private copies of this loop
+    are three chances for one of them to see a node the others do not, and a
+    node one of them missed is a frame nobody reserved."""
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            yield from iter_nodes(x)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    yield node
+    for name in node.__dataclass_fields__:
+        yield from iter_nodes(getattr(node, name))
+
+
+def struct_constructor_sites(fn, structs_by_name) -> dict:
+    """`{id(call): (struct, offset)}` — this function's receiver frames.
+
+    A layout decision, so it lives in the shared model and both backends read
+    the same answer: a frame is reserved in the function's PROLOGUE, so it has
+    to exist before the body runs and cannot be handed out by a bump pointer
+    that walks the body the way the list/dict blob cursor does.
+
+    One frame per call SITE, laid out in walk order. Per site rather than per
+    call is what makes a constructor inside a loop safe: the loop reuses its
+    site's frame, exactly as a C local is reused, so a loop cannot grow the
+    stack without bound. `offset` is the frame's distance below the bottom of
+    the function's ordinary frame — below `SP` on both machines, which is the
+    placement `ProofLib.Frame.frameWrite_read_above_sp` needs and the reason a
+    method's write to its receiver cannot reach the caller's window.
+    """
+    framed = framed_struct_names(list(structs_by_name.values()))
+    if not framed:
+        return {}
+    out, offset = {}, 0
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr) or not isinstance(node.func,
+                                                             F.IdentExpr):
+            continue
+        st = framed.get(node.func.name)
+        if st is None:
+            continue
+        out[id(node)] = (st, offset)
+        offset += struct_frame_bytes(st)
+    return out
 
 
 # What a FRESH one-word value has to hold, and whether this path can produce it.
@@ -1929,8 +2480,8 @@ def struct_default_word(struct_def) -> tuple:
     substitute 0, because substituting 0 is precisely the wrong answer this
     function exists to prevent.
 
-    Only meaningful for a struct of at most one field; a wider one has no
-    representation to bring up in the first place."""
+    Only meaningful for a struct of at most one field; a wider one brings each
+    of its fields up separately, through `struct_frame_defaults`."""
     if struct_field_count(struct_def) != 1:
         return (DEFAULT_NONE, None)
     field_name = struct_sole_field_name(struct_def)
@@ -1994,7 +2545,12 @@ def struct_fits_one_word(struct_def) -> bool:
     no indirection is needed anywhere. The count is the DERIVED one, so a class
     that assigns its field in `__init__` gets the same treatment as one that
     declares it — which is what makes `self.n` and `c.n` the same storage
-    instead of two unrelated words that happen to share a spelling."""
+    instead of two unrelated words that happen to share a spelling.
+
+    A `False` here no longer means "cannot be lowered" once
+    `wide_receiver_by_reference()` is on: it means "not a one-word value", and
+    `struct_is_framed` is the question that decides which of the two
+    representations the receiver gets."""
     return struct_field_count(struct_def) <= 1
 
 

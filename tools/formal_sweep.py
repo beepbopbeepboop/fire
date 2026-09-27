@@ -40,9 +40,27 @@ facts. So every verdict now carries a class:
                                     library on its own link line that dyld can
                                     load (see the probe's own comment for what
                                     that does and does not prove)
-  codegen                           the backend refused or crashed on a
-                                    construct — THE FINDING, the only class
-                                    whose count is a gap in the backend
+  codegen                           the backend REFUSED a construct in this
+                                    file — THE FINDING, the only class whose
+                                    count is a gap in the backend, in this file
+  codegen/dependency                the backend refused a construct in a module
+                                    THIS FILE IMPORTS, so this file did not
+                                    build either. Counted separately, and
+                                    never as a gap in this file: the class
+                                    name, the printed line (which carries the
+                                    whole chain and the terminal reason) and
+                                    the summary's breakdown all say the gap is
+                                    one level down. See THE CHAIN below for
+                                    why it is in the denominator at all
+  backend-crash                     the backend RAISED instead of refusing —
+                                    a bug in the compiler's own plumbing, not
+                                    a claim about the construct. Still a
+                                    failure (exit 1), still printed, still
+                                    never cached, and in no rate: a sweep that
+                                    reported 74 files as `codegen: the backend
+                                    raised: ValueError: not enough values to
+                                    unpack` was reporting another agent's
+                                    half-finished edit as a coverage gap
   not-answerable/host-import        imports a CPython host module that has no
                                     Mojo source anywhere: provably outside
                                     this backend's reach, and not fixable by
@@ -62,6 +80,14 @@ facts. So every verdict now carries a class:
                                     the symbol). Real, and not coverage — a
                                     call to a runtime the image never links,
                                     typically, rather than a codegen gap
+  not-answerable/target-limit       calls an entry point of the gimple C
+                                    runtime (`mojo_print`, `mojo_sqlite3_open`,
+                                    …) by name, which a freestanding image
+                                    cannot bind: the backend refuses it
+                                    instead of emitting a call to a symbol
+                                    nothing defines, and the refusal is a fact
+                                    about the TARGET (libSystem and nothing
+                                    else), not a gap in the backend
   tool                              timeout, unreadable file, or an internal
                                     exception in the sweep or the build
                                     driver — no verdict about the source was
@@ -73,12 +99,48 @@ facts. So every verdict now carries a class:
                                     a visible hole in the classifier, never as
                                     silent coverage
 
-Only `pass` and `codegen` are ANSWERABLE — the two classes where the backend
-actually got to look at the constructs. The headline is therefore the
-codegen-coverage rate over the answerable files, and the summary says in
+Only `pass`, `codegen` and `codegen/dependency` are ANSWERABLE — the classes in
+which the backend actually got to look at constructs. The headline is therefore
+the codegen-coverage rate over the answerable files, and the summary says in
 words which files those are. Nothing is hidden: the other classes keep their
 own counts, every one of their files keeps its own printed line, and the
 per-class counts sum to the total.
+
+THE CHAIN — a refusal in a dependency, and what it is for the importer
+-----------------------------------------------------------------------
+formal/build.py reports the whole import chain when a dependency fails to
+build, once per level:
+
+    build: write.mojo imports 'std.format', which cannot be built either:
+    binary_heap.mojo: formal dylib has no public functions: …
+
+That is strictly better diagnostics than the message it replaced, and it is
+also a shape the classifier had never been taught: it read the outermost layer,
+saw an import it could not resolve, and filed 204 stdlib files as `unknown` —
+the largest class in the default sweep, all of it the instrument throwing away
+the terminal reason, which is the only part of the message that says anything
+about the backend. Those 204 files were in no rate at all, so the headline was
+computed on a population that silently dropped 35% of the sweep.
+
+The position this tool takes, stated once so a reader does not have to infer it
+from a class name: a chained refusal is a FAILURE of the importing file, and
+the importer belongs in the answerable denominator, but it is NOT a finding
+about that file.
+
+  · In the denominator, because a file that did not build is not a file the
+    backend can handle, and because the alternative — leaving these files out
+    of every rate, which is the bug being fixed here — reports a number whose
+    population is a third of the sweep and says nothing about why.
+  · Not a finding about the importer, because the construct the backend
+    refused is not in it. Reporting it as `codegen` would point a reader at a
+    file that is fine; `codegen/dependency`, the printed chain, and the
+    per-family breakdown say where the gap actually is, and `report_history`
+    will name any file whose class moves when a rule changes.
+  · The terminal reason still decides the class when it is a fact about the
+    TARGET (a host import, an unresolvable module, a `mojo_*` runtime call):
+    then the importer is unanswerable for the same reason, because it cannot
+    be built here either.
+
 
 SCOPE — why the not-answerable files are still swept
 ----------------------------------------------------
@@ -101,9 +163,10 @@ turn a reported failure into a differently-counted one.
 
 EXIT STATUS
 -----------
-  0  no `codegen` finding, no `tool` failure, no `unknown` verdict
-  1  at least one of those three (a real finding, or a file the sweep could
-     not answer for a reason that is its own problem)
+  0  no codegen finding (in a file or in a dependency), no backend crash, no
+     `tool` failure, no `unknown` verdict
+  1  at least one of those (a real finding, a backend that fell over, or a
+     file the sweep could not answer for a reason that is its own problem)
   2  the sweep did not run (no input files)
 
 `not-answerable` never affects the exit status in either direction: it is a
@@ -119,7 +182,13 @@ own bytes — see _criteria_id), so a re-run with nothing changed reads a file
 per file instead of recompiling. Editing anything under formal/, the parser,
 or mojo/middle/ invalidates it. The cache stores the raw build verdict; the
 class is recomputed from it on every run, so a cached entry can never be
-reported under a class the current rules would not assign it.
+reported under a class the current rules would not assign it — which is the
+half of the contract that matters now that a class is a function of the stored
+TEXT: a verdict written under older rules is re-read and re-classified by the
+rules in force now, and the stored bytes contain no class to go stale. A crash
+is not stored at all (the traceback that decides its class is not in the
+stored bytes), so it stays a miss until the key changes; a stale `ok` must
+never outlive the crash that replaced it.
 
 The one thing deliberately NOT published is a verdict for an image that links
 a formal dylib, because that verdict depends on the dylib and the dylib is not
@@ -211,22 +280,40 @@ def _criteria_id() -> str:
 # rules are what assign it.
 CLASS_PASS = "pass"
 CLASS_CODEGEN = "codegen"
+CLASS_CODEGEN_DEP = "codegen/dependency"
 CLASS_HOST = "not-answerable/host-import"
 CLASS_UNRESOLVED = "not-answerable/unresolved-import"
 CLASS_EXTERN = "not-answerable/unresolved-extern"
+CLASS_TARGET = "not-answerable/target-limit"
 CLASS_TOOL = "tool"
+CLASS_CRASH = "backend-crash"
 CLASS_UNKNOWN = "unknown"
 
-# Report order: the finding first, then the reasons there is no finding, then
-# the two buckets that mean the tool itself did not finish the job.
-CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_HOST, CLASS_UNRESOLVED,
-               CLASS_EXTERN, CLASS_UNKNOWN, CLASS_TOOL)
-ANSWERABLE = frozenset((CLASS_PASS, CLASS_CODEGEN))
-# Classes that are findings about the SOURCE. Only CLASS_CODEGEN is a gap in
-# the backend; CLASS_UNKNOWN is a gap in this file's rules (visible, because
-# absorbing it into `codegen` would invent coverage) and CLASS_TOOL is a gap
-# in the run (a file nobody answered for is not a file that passed).
-DIRTY = frozenset((CLASS_CODEGEN, CLASS_UNKNOWN, CLASS_TOOL))
+# Report order: the findings first, then the reasons there is none, then the
+# buckets that mean the tool itself did not finish the job.
+CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_HOST,
+               CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET, CLASS_CRASH,
+               CLASS_UNKNOWN, CLASS_TOOL)
+# ANSWERABLE = the classes in which the backend got to look at the file's
+# constructs and returned a verdict about them. `codegen/dependency` is in it
+# deliberately (see the position taken in the module docstring): a file whose
+# DEPENDENCY the backend refused did not produce a binary and would have if
+# the backend lowered that construct, so counting it as a file the backend can
+# handle would be a false PASS by omission. `backend-crash` is NOT in it: a
+# crash is the backend's own plumbing falling over, which says nothing about
+# the construct it was looking at, and letting it into the denominator would
+# report a compiler bug as a coverage gap (B4's 74-file sweep, in which every
+# one was a mid-edit artefact of another agent's work).
+ANSWERABLE = frozenset((CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP))
+# Classes that make the run exit non-zero. A codegen finding (in this file or
+# in a dependency it needs) is real; CLASS_CRASH is real too and is counted and
+# printed like any other finding, because a crash that is allowed to pass
+# quietly is how a broken backend gets reported as a clean sweep.
+# CLASS_UNKNOWN is a gap in this file's rules (visible, because absorbing it
+# into `codegen` would invent coverage) and CLASS_TOOL is a gap in the run (a
+# file nobody answered for is not a file that passed).
+DIRTY = frozenset((CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_CRASH,
+                   CLASS_UNKNOWN, CLASS_TOOL))
 
 # `run_one` reports WHY an outcome is not one of the build's own diagnostics,
 # rather than this function trying to recognise a timeout or a traceback inside
@@ -267,6 +354,86 @@ _IMPORT_RE = re.compile(r"imports '([^']+)'")
 # becomes coverage.
 _QUOTED_NAME_RE = re.compile(r"'([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'")
 _EXTERN_COUNT_RE = re.compile(r"(\d+) import\(s\) dyld cannot resolve")
+
+# ── The dependency chain ─────────────────────────────────────────────────────
+# formal/build.py wraps a DEPENDENCY's own error inside the importer's, once
+# per level, so one message can be a chain:
+#
+#   build: write.mojo imports 'std.format', which cannot be built either:
+#   binary_heap.mojo imports '.collections', which cannot be built either:
+#   _heap.mojo: formal dylib has no public functions: …
+#
+# Wave 1 added that wrapper because it is better diagnostics (the old message
+# named a module that resolves perfectly well). The cost was here: the
+# classifier read the OUTERMOST layer, saw an import, and filed 204 stdlib
+# files as `unknown` — discarding the terminal reason, which is the only part
+# of the message that says anything about the backend. So the chain is peeled
+# before anything is classified, and it is peeled as a SHAPE, not as a list of
+# messages: one hop pattern, applied until it stops matching, at any depth.
+_CHAIN_RE = re.compile(
+    r"^(?:build: )?[\w.+-]*\s*imports '(?P<mod>[^']+)', which cannot be built "
+    r"either: ")
+# formal/imports.py prefixes a dependency's own error with the file it came
+# from (`f"{os.path.basename(source_path)}: {e}"`), so the innermost layer is
+# "<file>: <reason>". Stripped for matching only; the printed line keeps it,
+# because the file the refusal is really about is the useful half of it.
+_FILE_PREFIX_RE = re.compile(r"^(?P<file>[\w.+-]*\.(?:mojo|py)):\s+")
+# fire.py's own prefix on a build error, whichever way it exited.
+_BUILD_PREFIX = "build: "
+
+# ── Refused by name, outside the freestanding target ────────────────────────
+# B3 made both backends REFUSE a call to the gimple C runtime's own entry
+# points (`mojo_print`, `mojo_sqlite3_open`, …) instead of emitting a BL to a
+# symbol nothing defines. That is a fact about the TARGET — a formal image is
+# freestanding and links libSystem only — so by this file's own definitions it
+# is `not-answerable`, not a gap in the backend, and filing it as `codegen`
+# overstates what backend work would buy.
+#
+# Keyed on formal/model.py, not on the wording: the name is taken from the
+# message and handed to `is_gimple_runtime_builtin` (the predicate both
+# backends themselves call), and the text is then required to BE that name's
+# refusal, asked of formal/model.py rather than matched here. So a reworded
+# message cannot silently change class — it fails this test and falls to
+# `unknown`, which is the whole point of keeping that class. What is NOT
+# copied into this file is the `mojo_` prefix: a second copy of it would be a
+# list that silently rots the day formal/ changes it.
+_TARGET_LEAD_RE = re.compile(r"^([A-Za-z_]\w*) is an entry point of")
+_TARGET_PROBE = 40      # characters of the model's own text to require
+
+# ── Construct refusals, by family ───────────────────────────────────────────
+# The class of every one of these is `codegen`; the family is what makes the
+# per-class breakdown say WHY, and it is the vocabulary the summary groups by.
+# Built from the distribution the backend actually produces (the stdlib sweep's
+# 204 unclassifiable files reduce to four families: a method call on a value,
+# `multi-index subscript`, `has no representation on this path`, and
+# `has no public functions`), not from a list of every message formal/ can
+# raise. An unrecognised refusal is still a refusal — the class comes from the
+# shape (no import, no target limit, the build spoke about the code) and the
+# family defaults to "other", which keeps the bucket honest instead of
+# pretending the table is complete.
+_REFUSAL_FAMILIES = (
+    ("is a method call on a value", "method call on a value"),
+    ("is a method on a string", "method call on a string"),
+    ("is a real method of String", "string method needing a length"),
+    ("multi-index subscript", "multi-index subscript"),
+    ("has no representation on this path", "value with no representation"),
+    ("has no public functions", "module exports nothing"),
+    ("would bind", "dependency binds what nothing provides"),
+    ("cannot be lowered", "cannot be lowered"),
+    ("is not supported on the formal", "not supported on this path"),
+    # The four wordings below are one family (an AST node this backend has no
+    # case for) and are listed separately because each embeds the ARCH in its
+    # text, so a single marker would have to name one backend and go stale on
+    # the other.
+    ("unsupported expression", "unsupported node"),
+    ("unsupported statement", "unsupported node"),
+    ("unsupported unary operator", "unsupported node"),
+    ("unsupported call target", "unsupported node"),
+    ("does not fold to a compile-time constant",
+     "comptime value does not fold"),
+    ("takes exactly one value to convert", "wrong argument count"),
+)
+_REFUSAL_OTHER = "other refusal"
 
 
 def _is_cpython_stdlib(name: str) -> bool:
@@ -347,6 +514,97 @@ def _import_class(mod: str) -> tuple:
     return CLASS_UNRESOLVED, mod
 
 
+def _split_chain(detail: str) -> tuple:
+    """(hops, terminal) for formal/build.py's dependency-error wrapper.
+
+    `hops` is the list of modules the chain passed through, outermost first;
+    `terminal` is the innermost message, which is the only part that says
+    anything about the backend. Peeling is by shape (one pattern, any depth),
+    so a chain two or five levels long needs nothing added here, and a message
+    that is not a chain peels zero times and comes back whole — which is what
+    keeps every unchained case on exactly the rules it was on before.
+    """
+    hops, rest = [], detail
+    while True:
+        m = _CHAIN_RE.match(rest)
+        if not m:
+            return hops, rest
+        hops.append(m.group("mod"))
+        rest = rest[m.end():]
+
+
+def _terminal_reason(term: str) -> str:
+    """The terminal message with the noise in front of it stripped off.
+
+    Two prefixes, both of them somebody else's formatting: fire.py's
+    `build: ` on the way out, and formal/imports.py's `<file>: ` on the way in
+    (`f"{os.path.basename(source_path)}: {e}"`). Stripped for MATCHING only —
+    the printed line keeps both, because the file the refusal really came from
+    is the useful half of it.
+    """
+    if term.startswith(_BUILD_PREFIX):
+        term = term[len(_BUILD_PREFIX):]
+    return _FILE_PREFIX_RE.sub("", term, count=1)
+
+
+def _refuser(term: str) -> str:
+    """The file the innermost message came from, or "" if it names none.
+
+    This is the file a reader has to open to fix anything, and it is NOT the
+    file the sweep swept — which is the whole distinction the dependency class
+    exists to keep visible.
+    """
+    m = _FILE_PREFIX_RE.match(term)
+    return m.group("file") if m else ""
+
+
+def _refusal_family(term: str) -> str:
+    """Which family of construct refusal this is, for the breakdown only."""
+    for marker, family in _REFUSAL_FAMILIES:
+        if marker in term:
+            return family
+    return _REFUSAL_OTHER
+
+
+def _target_limit(term: str):
+    """(class, reason) when `term` is about the gimple runtime namespace.
+
+    `term` is the terminal message with the prefixes already stripped. Returns
+    None when the message is not about that namespace at all, and otherwise a
+    class:
+
+      · CLASS_TARGET when the text IS formal/model.py's own refusal for the
+        name it leads with — the name goes through `is_gimple_runtime_builtin`
+        (the same predicate both backends call before refusing) and the text is
+        compared against `gimple_runtime_refusal(name)` rather than against a
+        copy of its wording here. A message that merely MENTIONS a `mojo_*`
+        name is not this class, and formal/model.py owns the words.
+
+      · CLASS_UNKNOWN when the name is in the namespace but the wording is not
+        the one formal/model.py produces today — i.e. formal/ was edited under
+        this file. Deliberately neither answer: this file knows the shape (a
+        `mojo_*` name led the sentence) and not the meaning, and guessing
+        would put either a target fact into the gap count or a gap into the
+        excluded population. `unknown` is the class that says so out loud.
+    """
+    m = _TARGET_LEAD_RE.match(term)
+    if not m:
+        return None
+    name = m.group(1)
+    try:
+        from formal import model as M
+        if not M.is_gimple_runtime_builtin(name):
+            return None
+        probe = M.gimple_runtime_refusal(name)
+    except Exception:
+        return None
+    if term.startswith(probe[:_TARGET_PROBE]):
+        return CLASS_TARGET, name
+    return (CLASS_UNKNOWN,
+            f"gimple-runtime refusal in wording this tool does not know: "
+            f"{name}")
+
+
 def _crash_cause(err: str):
     """CAUSE_* for a build that raised, or None if it refused cleanly.
 
@@ -378,23 +636,78 @@ def classify(ok: bool, detail: str, cause=None, source=None) -> tuple:
     and short-circuits the message matching: if the sweep never got the build's
     own answer, there is nothing to read a class off, and no string matching
     should be allowed to guess one. The one exception is a crash inside the
-    backend itself, which IS a finding about the source — see CAUSE_BACKEND_CRASH.
+    backend itself, which IS a finding — see CLASS_CRASH.
 
     `source` is the file's own text, and it is what makes the import test
     structural rather than a template match (see _source_imports). Without it
     the function can only recognise the wordings it already knows, and the
     first wording it does not know would be counted as codegen coverage.
+
+    A CHAIN (a dependency's error wrapped in the importer's) is peeled first
+    and the TERMINAL reason is what gets classified, because that is the only
+    layer that describes the backend. What the importer's own class then is
+    depends on the terminal's, and that is the position this tool takes:
+
+      · terminal is an import refusal (host, unresolved) or a target limit →
+        the importer is unanswerable for the SAME reason. It cannot be built
+        here either, and the reason is a fact about the target.
+      · terminal is a construct refusal → `codegen/dependency`. The importer
+        produced no binary and would have if the backend had lowered that
+        construct, so it belongs in the answerable denominator (a file that
+        does not build is not a file the backend handles), but it is NOT
+        reported as a gap in itself: the class name, the printed line and the
+        summary's breakdown all say the gap is one level down. Calling these
+        plain `codegen` would send a reader to a file that is fine, and
+        dropping them from every rate is what made 204 files invisible.
     """
     if ok:
         return CLASS_PASS, ""
     if cause == CAUSE_BACKEND_CRASH:
-        return CLASS_CODEGEN, f"the backend raised: {_short(detail)}"
+        # Not `codegen`, and the difference is not cosmetic. A refusal is a
+        # claim about a construct: the backend looked at it and said no. A
+        # crash is the backend's own plumbing falling over, which is a bug in
+        # the compiler, not a limit of the language it implements — B4 caught a
+        # sweep reporting 74 files as `codegen: the backend raised: ValueError:
+        # not enough values to unpack`, every one of them an artefact of
+        # another agent half-way through an edit. It stays a failure (it is in
+        # DIRTY, so the run exits 1), it stays printed, and it is never cached
+        # (run_one publishes no verdict when there is a cause) — but it is in
+        # no rate, because a rate is a claim about constructs.
+        #
+        # run_one has already said "the backend raised" in the detail it hands
+        # over (that is the line the report prints); do not say it twice.
+        said = "the backend raised: "
+        return CLASS_CRASH, (detail if detail.startswith(said)
+                             else said + _short(detail))
     if cause:
         return CLASS_TOOL, cause
+
+    hops, terminal = _split_chain(detail)
+    cls, reason = _classify_terminal(terminal, source)
+    if not hops or cls != CLASS_CODEGEN:
+        return cls, reason
+    # The refusal is one level down. Name the file that refused and the family
+    # it refused in, so the breakdown groups by what a reader would have to fix
+    # rather than by which file happened to import it; the whole chain, and the
+    # terminal reason in full, stay in the printed line above.
+    return CLASS_CODEGEN_DEP, _short(
+        f"{len(hops)} import(s) deep: "
+        f"{_refuser(terminal) or hops[-1]}: "
+        f"{_refusal_family(_terminal_reason(terminal))}")
+
+
+def _classify_terminal(detail: str, source=None) -> tuple:
+    """(class, reason) for the innermost message of a build's own answer."""
     if _EXTERN_MARK in detail:
         m = _EXTERN_COUNT_RE.search(detail)
         return CLASS_EXTERN, (f"{m.group(1)} unresolved extern(s)" if m
                               else _short(detail))
+    # A refusal by name, outside the freestanding target. Before the import
+    # rules, because `mojo_list_len` and friends are not modules and no
+    # reading of the import rules would place them.
+    target = _target_limit(_terminal_reason(detail))
+    if target:
+        return target
     mods = _IMPORT_RE.findall(detail)
     if mods:
         # The build's own two wordings, which partition the ImportBuildError
@@ -1016,10 +1329,12 @@ def run_one(path, timeout, flags) -> Verdict:
             err = (proc.stderr or proc.stdout or "").strip()
             # keep the last non-empty line — that's the formal build's message
             lines = [ln for ln in err.splitlines() if ln.strip()]
-            # No message at all still counts as the build's own verdict: a
-            # backend that dies on a construct prints nothing useful, and
-            # "it crashed here" is a finding about that construct, not about
-            # this tool.
+            # No message at all still counts as the build's own verdict: with
+            # no traceback there is no evidence of a crash, and a silent death
+            # is far more often a refusal whose message went to stdout. The
+            # fallback is deliberately the finding side (a codegen row: exit 1,
+            # printed, in the denominator) — a crash we cannot see must not be
+            # able to hide, and a false FAIL only sends someone to look.
             detail = lines[-1] if lines else f"exit {proc.returncode}"
             ok = False
             cause = _crash_cause(err)
@@ -1154,13 +1469,21 @@ def report_history(prev, verdicts: dict) -> None:
 CLASS_BLURB = {
     CLASS_PASS: "built, and every symbol it binds is in a library on its own "
                 "link line that dyld can load",
-    CLASS_CODEGEN: "THE FINDING: the backend refused or crashed on a construct",
+    CLASS_CODEGEN: "THE FINDING: the backend refused a construct IN THIS FILE",
+    CLASS_CODEGEN_DEP: "the backend refused a construct in a module this file "
+                       "imports, so this file did not build either — a failure "
+                       "in the denominator, NOT a gap in this file",
     CLASS_HOST: "imports a CPython host module that has no Mojo source: "
                 "outside this backend's reach, not a gap, not fixable",
     CLASS_UNRESOLVED: "imports a module that is neither host nor in this "
                       "backend's module set (reason not provable from the file)",
     CLASS_EXTERN: "builds, but no library on its link line provides a symbol it "
                   "binds (the printed line names the library and why)",
+    CLASS_TARGET: "calls a gimple-runtime `mojo_*` entry point, which a "
+                  "freestanding image cannot bind: a limit of the TARGET, not a "
+                  "gap in the backend (the printed line names the call)",
+    CLASS_CRASH: "the backend RAISED rather than refusing: a bug in the "
+                 "compiler, in no rate, exit 1 — never cached, so it re-runs",
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "
                    "classifier needs updating, not the backend",
     CLASS_TOOL: "no verdict reached: timeout, unreadable file, or an internal "
@@ -1247,8 +1570,10 @@ def main():
     print(f"Sweeping {len(files)} files through build --formal "
           f"[{arch}] ({jobs} workers, {args.timeout}s timeout)...",
           file=sys.stderr)
-    print("Every file is classified (pass / codegen / not-answerable / tool); "
-          "only the codegen class is a gap in the backend.", file=sys.stderr)
+    print("Every file is classified (pass / codegen / codegen-dependency / "
+          "not-answerable / backend-crash / tool / unknown); the two codegen "
+          "classes are the gaps in the backend, and only the first of them is "
+          "in the file itself.", file=sys.stderr)
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
@@ -1279,8 +1604,10 @@ def main():
         if v.cls != CLASS_PASS:
             rows.append((rel(path), v.cls, v.reason, v.detail))
     total = len(files)
-    passed, codegen = counts[CLASS_PASS], counts[CLASS_CODEGEN]
-    answerable = passed + codegen
+    passed = counts[CLASS_PASS]
+    codegen = counts[CLASS_CODEGEN]
+    codegen_dep = counts[CLASS_CODEGEN_DEP]
+    answerable = passed + codegen + codegen_dep
 
     # Every file that did not pass is still printed, one line each, under its
     # class. Nothing that used to print as `FAIL:` stops printing: a file
@@ -1313,7 +1640,7 @@ def main():
     # without a cause; "170 files, 60 of them because of `os`" is the fact a
     # reader can act on (and the shape of the stdlib-host dependency this repo
     # has, which no amount of backend work will change).
-    for cls in (CLASS_HOST, CLASS_UNRESOLVED):
+    for cls in (CLASS_HOST, CLASS_UNRESOLVED, CLASS_TARGET):
         if not counts[cls]:
             continue
         tally = {}
@@ -1322,12 +1649,40 @@ def main():
                 tally[reason] = tally.get(reason, 0) + 1
         top = ", ".join(f"{k} x{v}" for k, v in
                         sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
-        print(f"  {cls} by module: {top}")
+        print(f"  {cls} by {'call' if cls == CLASS_TARGET else 'module'}: {top}")
+
+    # WHY each codegen finding is a finding: the family, not the file. 57 (or
+    # 110) files is not a finding list, and the same four or five families
+    # repeating is the actionable part — a family nobody has looked at is a
+    # backend feature nobody has scoped. Derived from the stored detail rather
+    # than from `reason`, which is the message itself for a direct refusal.
+    for cls in (CLASS_CODEGEN, CLASS_CODEGEN_DEP):
+        if not counts[cls]:
+            continue
+        tally = {}
+        for _r, c, _reason, detail in rows:
+            if c == cls:
+                fam = _refusal_family(_terminal_reason(detail))
+                if cls == CLASS_CODEGEN_DEP:
+                    # Which module refused is half the finding: four families
+                    # over fourteen modules is fourteen things somebody can go
+                    # and look at, and "method call on a value x204" is not.
+                    hops, terminal = _split_chain(detail)
+                    fam = f"{_refuser(terminal) or hops[-1]}: {fam}"
+                tally[fam] = tally.get(fam, 0) + 1
+        top = ", ".join(f"{k} x{v}" for k, v in
+                        sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
+        print(f"  {cls} by family: {top}")
+    if codegen_dep:
+        print(f"    ({codegen_dep} of these failed to build because a MODULE "
+              f"THEY IMPORT was refused, not because of anything in the file "
+              f"itself — the {codegen} in `codegen` are refusals in the file. "
+              f"Each printed line above carries the whole chain)")
 
     # The headline, with its denominator stated in words so it cannot be read
-    # as a pass rate over the whole sweep. `codegen` is the only class that is
-    # a gap in the backend, so a rate over anything else is measuring the host
-    # platform rather than the codegen.
+    # as a pass rate over the whole sweep. `codegen` and `codegen/dependency`
+    # are the classes that are a gap in the backend, so a rate over anything
+    # else is measuring the host platform rather than the codegen.
     una = total - answerable
     una_parts = ", ".join(f"{counts[c]} {c.split('/')[-1]}"
                           for c in CLASS_ORDER
@@ -1340,7 +1695,8 @@ def main():
         print("codegen coverage: no file could be answered by this backend")
     print(f"  denominator: the {answerable} swept file(s) whose build could "
           f"have answered")
-    print(f"  ({passed} pass + {codegen} codegen = {answerable}), i.e. every "
+    print(f"  ({passed} pass + {codegen} codegen + {codegen_dep} "
+          f"codegen/dependency = {answerable}), i.e. every "
           f"swept file EXCEPT the {una} in a not-answerable or tool class "
           f"[{una_parts}].")
     print("  A not-answerable file is a fact about the target, not a gap in "
@@ -1364,6 +1720,14 @@ def main():
               f"(timeout/unreadable/tool error) and are in NO rate; a "
               f"too-small -t is the usual cause — this run used "
               f"-t {args.timeout}")
+    if counts[CLASS_CRASH]:
+        print(f"  note: {counts[CLASS_CRASH]} file(s) made the BACKEND RAISE "
+              f"rather than refuse a construct. A crash is a bug in the "
+              f"compiler, not a limit of the language, so it is in no rate "
+              f"either way — but it is a failure (this run exits 1) and no "
+              f"verdict for one was cached, so it re-runs until the cause is "
+              f"gone. If a sweep suddenly reports many of these, another agent "
+              f"is mid-edit in formal/ and the number is an artefact")
     if counts[CLASS_UNKNOWN]:
         print(f"  note: {counts[CLASS_UNKNOWN]} verdict(s) this tool cannot "
               f"classify; they are excluded from every rate rather than "
@@ -1373,9 +1737,14 @@ def main():
     report_history(load_ledger(arch, files), verdicts)
     publish_ledger(arch, files, verdicts)
 
-    dirty = [r for r, c, _rs, _d in rows if c in DIRTY]
+    # The class printed is the row's OWN, not the alphabetically-first dirty
+    # class: with `backend-crash` in DIRTY, `sorted(DIRTY)[0]` is a crash, and
+    # labelling a codegen row "first backend-crash finding" would be a lie
+    # about the only line in the report that points at a file to look at.
+    dirty = [row for row in rows if row[1] in DIRTY]
     if dirty:
-        print(f"first {sorted(DIRTY)[0]} finding: {dirty[0]}")
+        r, cls, reason, _d = dirty[0]
+        print(f"first {cls} finding: {r}  ({reason})")
     # Exit status: the not-answerable classes are permanent facts about the
     # target and never gate the run; a codegen finding, an unclassifiable
     # verdict, or a file nobody answered for all do. See EXIT STATUS in the

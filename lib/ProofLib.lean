@@ -4924,6 +4924,158 @@ theorem envToFrame_frameToEnv (mem : Nat → UInt8) (base : UInt64)
   (envToFrame_frameToEnv_cases mem base slotOf fields names nslots a
     hslots hbounds hfit (hbounds a ha)).1 ha
 
+/-- **TWO FRAMES DO NOT ALIAS.**  A write into any slot of the frame at `b1`
+    is invisible to any slot of the frame at `b2`, as long as the two frames are
+    disjoint — which is exactly what the emitter's allocator hands out, one
+    `8*slot_count`-byte region per constructor call site, laid out in walk
+    order and never overlapping.
+
+    This is the property the whole by-reference design is for, and the one a
+    "the code is the same for every width" argument cannot establish on its
+    own: if two constructor sites were ever given the same address, or a slot
+    index were computed from anything but the frame base, this theorem would
+    stop being true and every program with two instances of anything would
+    build, run, and return a number the source never wrote.
+
+    The direction is the one the allocator produces: `b2` is at or above the
+    first byte *past* `b1`'s whole frame, so every slot of `b1` is a whole
+    slot below every slot of `b2`, and `frameWrite_read_outside` applies with
+    its "the untouched slot is above the written one" case.  No ordering
+    between `k1` and `k2` is needed, which is the point: the two fields may be
+    any two of them. -/
+theorem frame_frames_no_alias (mem : Nat → UInt8) (b1 b2 : UInt64) (n : Nat)
+    (k1 k2 : Nat) (v : UInt64)
+    (hk1 : k1 < n) (hk2 : k2 < n)
+    (hfit1 : FrameFits b1 n) (hfit2 : FrameFits b2 n)
+    (hsep : b1.toNat + frameBytes n ≤ b2.toNat) :
+    frameRead (frameWrite mem b1 k1 v) b2 k2 = frameRead mem b2 k2 := by
+  have h1 : frameAddr b1 k1 = b1.toNat + frameOffset k1 :=
+    frameAddr_eq b1 k1 (hfit1.mono (n := k1 + 1) (by omega))
+  have h2 : frameAddr b2 k2 = b2.toNat + frameOffset k2 :=
+    frameAddr_eq b2 k2 (hfit2.mono (n := k2 + 1) (by omega))
+  have hfar : frameAddr b1 k1 + SLOT ≤ frameAddr b2 k2 := by
+    rw [h1]
+    calc b1.toNat + frameOffset k1 + 8
+        ≤ b1.toNat + frameBytes n := by
+          have h' : frameOffset k1 + SLOT = frameBytes (k1 + 1) :=
+            frameOffset_step k1
+          have h'' := frameBytes_mono (show k1 + 1 ≤ n by omega)
+          simp only [frameOffset, SLOT] at h' h'' ⊢
+          omega
+      _ ≤ b2.toNat := hsep
+      _ ≤ b2.toNat + frameOffset k2 := Nat.add_le_add_left (Nat.zero_le _) _
+      _ = frameAddr b2 k2 := h2.symm
+  exact frameWrite_read_outside mem b1 k1 v (frameAddr b2 k2) (Or.inr hfar)
+
+/-- **TWO INSTANCES OF ONE STRUCT DO NOT ALIAS**, in the form the property is
+    usually wanted: the SAME field of two different objects.  The two-instance
+    case of `frame_frames_no_alias`, and the one a caller reads as "writing
+    `a.x` cannot change what `b.x` reads". -/
+theorem frame_instances_no_alias (mem : Nat → UInt8) (b1 b2 : UInt64) (n : Nat)
+    (k : Nat) (v : UInt64)
+    (hk : k < n)
+    (hfit1 : FrameFits b1 n) (hfit2 : FrameFits b2 n)
+    (hsep : b1.toNat + frameBytes n ≤ b2.toNat) :
+    frameRead (frameWrite mem b1 k v) b2 k = frameRead mem b2 k :=
+  frame_frames_no_alias mem b1 b2 n k k v hk hk hfit1 hfit2 hsep
+
+/-- **TWO OBJECTS WHOSE STRUCTS HAVE DIFFERENT FIELD COUNTS STILL DO NOT
+    ALIAS.**  `frame_frames_no_alias` above states the property for two frames
+    of the SAME slot count, which is the case a program gets for free: both
+    objects are the same struct, so one `n` describes both, one pair of
+    `FrameFits` premises covers both, and one separation bound relates them.
+
+    This is the case the build pass's own rule needs.  A name bound from two
+    constructors holds frames of two DIFFERENT layouts -- `x = A()` on one path
+    and `x = B()` on another -- and whether a use of `x.f` is well defined at
+    all depends on the two layouts agreeing about where `f` is.  They need not:
+    `A` may put `f` in slot 0 and `B` in slot 1, in which case the build pass
+    refuses rather than pick one, because the two objects reachable through the
+    SAME NAME are then read through two different slot tables and no single
+    `LDR [x, #8k]` means both.  (Measured, and it was a silently-wrong answer
+    rather than a refusal: a two-struct program built, ran, and printed
+    `61 99` where the source says `50 99`.)
+
+    What still has to hold once the layouts DO agree -- and what this states --
+    is that the two objects remain independent even though their frames are of
+    different sizes.  A larger frame is a larger region, so the separation
+    bound is the larger `frameBytes n1`, and the two `FrameFits` premises are
+    now independent rather than one fact reused twice.  `k2 < n2` is still
+    required, and it should be: reading slot `k2` of `b2` is only a genuine
+    `b2 + 8*k2` when `k2` is inside that frame, and dropping the premise would
+    be exactly the wraparound `FrameFits` exists to exclude.  What is new is
+    that `n1` and `n2` are separate numbers, so the statement applies to two
+    objects of two different structs -- which is what lets a caller treat "the
+    candidate layouts agree on this field's slot" as sufficient rather than as
+    a coincidence. -/
+theorem frame_frames_no_alias_neqn (mem : Nat → UInt8) (b1 b2 : UInt64)
+    (n1 n2 : Nat) (k1 k2 : Nat) (v : UInt64)
+    (hk1 : k1 < n1) (hk2 : k2 < n2)
+    (hfit1 : FrameFits b1 n1) (hfit2 : FrameFits b2 n2)
+    (hsep : b1.toNat + frameBytes n1 ≤ b2.toNat) :
+    frameRead (frameWrite mem b1 k1 v) b2 k2 = frameRead mem b2 k2 := by
+  have h1 : frameAddr b1 k1 = b1.toNat + frameOffset k1 :=
+    frameAddr_eq b1 k1 (hfit1.mono (n := k1 + 1) (by omega))
+  have h2 : frameAddr b2 k2 = b2.toNat + frameOffset k2 :=
+    frameAddr_eq b2 k2 (hfit2.mono (n := k2 + 1) (by omega))
+  have hfar : frameAddr b1 k1 + SLOT ≤ frameAddr b2 k2 := by
+    rw [h1]
+    calc b1.toNat + frameOffset k1 + 8
+        ≤ b1.toNat + frameBytes n1 := by
+          have h' : frameOffset k1 + SLOT = frameBytes (k1 + 1) :=
+            frameOffset_step k1
+          have h'' := frameBytes_mono (show k1 + 1 ≤ n1 by omega)
+          simp only [frameOffset, SLOT] at h' h'' ⊢
+          omega
+      _ ≤ b2.toNat := hsep
+      _ ≤ b2.toNat + frameOffset k2 := Nat.add_le_add_left (Nat.zero_le _) _
+      _ = frameAddr b2 k2 := h2.symm
+  exact frameWrite_read_outside mem b1 k1 v (frameAddr b2 k2) (Or.inr hfar)
+
+/-- The two-instance case of `frame_frames_no_alias_neqn`: the same field index
+    read out of two objects whose structs differ in width.  This is the shape a
+    caller reaches after the build pass has established that the two candidate
+    layouts agree on this field's slot -- the agreement is what makes one index
+    legal, and this is what says the two objects are still separate storage
+    rather than one object seen twice. -/
+theorem frame_instances_no_alias_neqn (mem : Nat → UInt8) (b1 b2 : UInt64)
+    (n1 n2 : Nat) (k : Nat) (v : UInt64)
+    (hk1 : k < n1) (hk2 : k < n2)
+    (hfit1 : FrameFits b1 n1) (hfit2 : FrameFits b2 n2)
+    (hsep : b1.toNat + frameBytes n1 ≤ b2.toNat) :
+    frameRead (frameWrite mem b1 k v) b2 k = frameRead mem b2 k :=
+  frame_frames_no_alias_neqn mem b1 b2 n1 n2 k k v hk1 hk2 hfit1 hfit2 hsep
+
+/-- **A VALUE READ OUT OF A FRAME TOUCHES EXACTLY ITS OWN SLOT.**  The new
+    shape this design admits is a field used as a *value receiver*:
+    `h.f.m(x)` hands `frameRead mem h k` to a callee as an ordinary word.  The
+    property that makes it sound is that reading a slot writes nothing -- not
+    the slot, not its neighbours, and not any other frame -- so the callee
+    receives a value and is not holding a reference into a frame it might
+    scribble on.
+
+    A pure read obviously leaves its own frame alone, so the content here is
+    the "not any other frame" half, and it is the half that is new.  The word
+    that comes out is a `UInt64` the rest of the program may do arithmetic
+    with, and nothing above says which bytes it was read from; what is
+    provable is that the range a read consults is the 8 bytes of ONE slot and
+    that the range lies inside the frame the slot belongs to.  So a value read
+    out of `b1` provably did not come from `b2`, and a write to `b2` provably
+    cannot change it -- which is `frame_frames_no_alias_neqn` with `k1 = k2`,
+    and this is the byte-range fact that theorem consumes. -/
+theorem frameRead_in_range (b : UInt64) (n k : Nat)
+    (hk : k < n) (hfit : FrameFits b n) :
+    b.toNat ≤ frameAddr b k ∧ frameAddr b k + SLOT ≤ b.toNat + frameBytes n := by
+  have heq : frameAddr b k = b.toNat + frameOffset k :=
+    frameAddr_eq b k (hfit.mono (n := k + 1) (by omega))
+  rw [heq]
+  constructor
+  · omega
+  · have h' : frameOffset k + SLOT = frameBytes (k + 1) := frameOffset_step k
+    have h'' := frameBytes_mono (show k + 1 ≤ n by omega)
+    simp only [frameOffset, SLOT] at h' h'' ⊢
+    omega
+
 end Frame
 
 
@@ -4949,18 +5101,11 @@ Nothing here touches `MojoExpr`, `MojoStmt`, `MojoFunc`, `evalExpr`,
 by-reference design additive on the source side at all: **the whole cost is one
 lifting function, one environment merge, and two environment-update lemmas.**
 
-The one thing this section does *not* yet have is a congruence lemma for
-`evalBodyEnv` under pointwise-equal environments,
-
-    evalBodyEnv_congr : (∀ x, env x = env' x) →
-                        evalBodyEnv call stmts env = evalBodyEnv call stmts env'
-
-without which "a field assignment leaves unrelated names alone" can only be
-stated about the *environment* (`mfEnvAfter_at_local`, below) and not about the
-evaluator's result.  It needs `evalExpr_congr` first — one structural induction
-over `MojoExpr`'s twenty-odd `binop` patterns.  That is the next step, it is
-additive, and it is deliberately absent rather than faked;
-`bugs/FORMAL_wide_receiver_by_reference.md` records it.
+The congruence lemmas this section needs are at the end of the file, in
+"Congruence under a merged environment": `evalExpr_congr` and
+`evalBodyEnv_congr`, without which "a field assignment leaves unrelated names
+alone" can only be stated about the *environment* (`mfEnvAfter_at_local`, below)
+and not about the evaluator's result.
 -/
 
 namespace MF
@@ -5183,5 +5328,250 @@ theorem evalMFBody_assignLocal_env (fields : List String) (flds locals : String 
             (evalExpr call (liftMF e) (mfEnv fields flds locals)))).2 := by
   rw [evalMFBody, liftMFStmts, liftMFStmt, evalBodyEnv_assign]
   rfl
+
+end MF
+
+
+/-!
+# Congruence under a merged environment
+
+`MF` (above) lowers a method to `MojoExpr`/`MojoStmt` over ONE merged
+environment, so a method's semantics comes out of the *existing* evaluator.  What
+that buys has a price: a statement about the merged environment is not yet a
+statement about the evaluator's RESULT, because a field assignment leaves the
+environment extensionally different from the environment it was derived from —
+at the assigned name the one returns the assigned value and the other returns
+the old field (`MF.mfEnvAfter_at` vs `MF.mfEnv_fieldTag`).  So "a field
+assignment leaves unrelated names alone" needs congruence.
+
+    evalExpr_congr  : (∀ x, env x = env' x) → evalExpr call e env = evalExpr call e env'
+    evalBodyEnv_congr : (∀ x, env x = env' x) →
+                        evalBodyEnv call stmts env = evalBodyEnv call stmts env'
+
+Both are additive: nothing above them changes, and the ~40 per-node lemmas under
+`evalFunc_eq_mojo_all` do not move.  `evalExpr_congr` is one structural
+induction over `MojoExpr`; the operator dispatch is a 21-way literal `match` on
+a `String`, which neither `rw` nor `simp` will descend into (a stuck `match` is
+opaque to both), so it is discharged by the same `by_cases` chain
+`evalExpr_binop` already uses — which is why that proof is written the way it
+is.
+
+`evalBodyEnv_congr` cannot be a plain structural induction on the statement
+list: an `if`'s branch body is not shorter than the list containing it, so a
+proof about nested bodies does not recurse on `List.length`.  It is a
+well-founded recursion on `stmtsSize` instead, and the mutual size function
+exists only to give that recursion something to descend on.
+-/
+
+set_option linter.unusedSimpArgs false in
+/-- **Expressions only read the environment.**  The one fact a merged
+    environment needs: if two environments agree at every name, every expression
+    evaluates the same in both.  True by construction — `evalExpr`'s only use of
+    `env` is `MojoExpr.var name ↦ env name` — and it is what lets a method's
+    field reads and local reads share one environment without either being able
+    to see the other's names. -/
+theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
+    {env env' : String → UInt64} (h : ∀ x, env x = env' x) :
+    evalExpr callFunc e env = evalExpr callFunc e env' := by
+  induction e generalizing env env' with
+  | int v => rfl
+  | bool v => rfl
+  | var name => exact h name
+  | unop op operand ih =>
+      by_cases hop : op = "neg"
+      · subst hop
+        simp only [evalExpr, ih h]
+      · by_cases hop' : op = "not"
+        · subst hop'
+          simp only [evalExpr, ih h]
+        · simp only [evalExpr, hop', ih h]
+  | binop op l r ihl ihr =>
+      have hl : evalExpr callFunc l env = evalExpr callFunc l env' := ihl h
+      have hr : evalExpr callFunc r env = evalExpr callFunc r env' := ihr h
+      by_cases h0 : op = "+"; · subst h0; simp only [evalExpr, hl, hr]
+      · by_cases h1 : op = "-"; · subst h1; simp only [evalExpr, hl, hr]
+        · by_cases h2 : op = "*"; · subst h2; simp only [evalExpr, hl, hr]
+          · by_cases h3 : op = "<="; · subst h3; simp only [evalExpr, hl, hr]
+            · by_cases h4 : op = "<"; · subst h4; simp only [evalExpr, hl, hr]
+              · by_cases h5 : op = ">"; · subst h5; simp only [evalExpr, hl, hr]
+                · by_cases h6 : op = ">="; · subst h6; simp only [evalExpr, hl, hr]
+                  · by_cases h7 : op = "="; · subst h7; simp only [evalExpr, hl, hr]
+                    · by_cases h8 : op = "!="; · subst h8; simp only [evalExpr, hl, hr]
+                      · by_cases h9 : op = "and"; · subst h9; simp only [evalExpr, hl, hr]
+                        · by_cases h10 : op = "or"; · subst h10; simp only [evalExpr, hl, hr]
+                          · by_cases h11 : op = "&"; · subst h11; simp only [evalExpr, hl, hr]
+                            · by_cases h12 : op = "|"; · subst h12; simp only [evalExpr, hl, hr]
+                              · by_cases h13 : op = "^"; · subst h13; simp only [evalExpr, hl, hr]
+                                · by_cases h14 : op = "/"; · subst h14; simp only [evalExpr, hl, hr]
+                                  · by_cases h15 : op = "//"; · subst h15; simp only [evalExpr, hl, hr]
+                                    · by_cases h16 : op = "%"; · subst h16; simp only [evalExpr, hl, hr]
+                                      · by_cases h17 : op = "<<"; · subst h17; simp only [evalExpr, hl, hr]
+                                        · by_cases h18 : op = ">>"; · subst h18; simp only [evalExpr, hl, hr]
+                                          · by_cases h19 : op = "**"; · subst h19; simp only [evalExpr, hl, hr]
+                                            · simp only [evalExpr, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19, hl, hr]
+  | call name arg ih => simp only [evalExpr, ih h]
+
+mutual
+/-- Node count of one statement, counting its nested bodies. -/
+private def stmtBodySize : MojoStmt → Nat
+  | .return _ => 1
+  | .ifstmt _ tb eb => 1 + stmtsSize tb + stmtsSize eb
+  | .while _ b => 1 + stmtsSize b
+  | .assign _ _ => 1
+  | .exprstmt _ => 1
+  | .pass => 1
+
+/-- Node count of a statement list.  A structural size, so every SUBLIST is
+    strictly smaller — which `List.length` is not, and which is exactly what
+    the recursion in `congrAux` needs. -/
+private def stmtsSize : List MojoStmt → Nat
+  | [] => 0
+  | s :: rest => stmtBodySize s + stmtsSize rest
+end
+
+/-- The two `if`-closures an assignment updates agree when the environments they
+    fall back to do.  The one fact about `evalBodyEnv`'s assignment clause that
+    is not a `rfl`. -/
+private theorem ifUpdate_congr {env env' : String → UInt64} (h : ∀ x, env x = env' x)
+    (name : String) (v : UInt64) :
+    (fun n => if n == name then v else env n) = (fun n => if n == name then v else env' n) := by
+  funext n
+  by_cases hn : n == name <;> simp [hn, h n]
+
+set_option linter.defProp false in
+private def congrAux (callFunc : String → UInt64 → UInt64) :
+    ∀ (stmts : List MojoStmt) (env env' : String → UInt64),
+      (∀ x, env x = env' x) → evalBodyEnv callFunc stmts env = evalBodyEnv callFunc stmts env'
+  | [], env, env', h => by
+      simp only [evalBodyEnv]
+      congr 1
+      funext x
+      exact h x
+  | s :: rest, env, env', h => by
+      cases s with
+      | «return» e =>
+          simp only [evalBodyEnv]
+          congr 1
+          · exact congrArg some (evalExpr_congr callFunc e h)
+          · funext x
+            exact h x
+      | ifstmt cond tb eb =>
+          simp only [evalBodyEnv]
+          rw [evalExpr_congr callFunc cond h]
+          generalize hcv : (evalExpr callFunc cond env') = cv
+          by_cases hc : cv ≠ 0
+          · simp only [if_pos hc]
+            rw [congrAux callFunc tb env env' h]
+          · simp only [if_neg hc]
+            rw [congrAux callFunc eb env env' h]
+      | «while» cond body => simp only [evalBodyEnv]; exact congrAux callFunc rest env env' h
+      | assign name e =>
+          simp only [evalBodyEnv]
+          have henv : (fun n => if (n == name) = true then evalExpr callFunc e env else env n)
+              = (fun n => if (n == name) = true then evalExpr callFunc e env' else env' n) := by
+            funext n
+            by_cases hn : (n == name) = true <;> simp [hn, h n, evalExpr_congr callFunc e h]
+          rw [henv]
+      | exprstmt e => simp only [evalBodyEnv]; exact congrAux callFunc rest env env' h
+      | pass => simp only [evalBodyEnv]; exact congrAux callFunc rest env env' h
+termination_by stmts _ _ _ => stmtsSize stmts
+decreasing_by
+  all_goals simp only [stmtsSize, stmtBodySize]
+  all_goals omega
+
+/-- **Bodies only read the environment, except where they write it.**  The
+    statement `MF` needs and did not have: a method's field assignment is
+    visible in the *evaluator's result*, not only in the environment the
+    `mfEnvAfter` family describes by hand.
+
+    The `if` and the assignment clause are the only two places `evalBodyEnv`
+    threads an environment forward, and each of them reduces to "recurse under
+    an environment that agrees with the original where the original was
+    unchanged" — which is `ifUpdate_congr` and `congrAux` on a strict sublist
+    respectively. -/
+theorem evalBodyEnv_congr (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt)
+    {env env' : String → UInt64} (h : ∀ x, env x = env' x) :
+    evalBodyEnv callFunc stmts env = evalBodyEnv callFunc stmts env' :=
+  congrAux callFunc stmts env env' h
+
+
+namespace MF
+
+/-! ### What this buys the method semantics, in one lemma -/
+
+/-- **A method's result and the fields it left behind depend only on the
+    merged environment.**  `evalMFBody` is `evalBodyEnv` on the lowered
+    statements, so this is `evalBodyEnv_congr` at `liftMFStmts`, and it is what
+    makes `evalMethod` a function of the receiver's CONTENTS rather than of the
+    particular `String → UInt64` the caller happened to splice together. -/
+theorem evalMFBody_congr (fields : List String) (flds flds' locals locals' : String → UInt64)
+    (call : String → UInt64 → UInt64) (stmts : List MFStmt)
+    (hflds : ∀ x, flds x = flds' x) (hlocals : ∀ x, locals x = locals' x) :
+    evalMFBody fields flds locals call stmts = evalMFBody fields flds' locals' call stmts := by
+  refine evalBodyEnv_congr call (liftMFStmts stmts)
+    (env := mfEnv fields flds locals) (env' := mfEnv fields flds' locals') ?_
+  intro x
+  induction fields with
+  | nil => simp only [mfEnv]; exact hlocals x
+  | cons f rest ih =>
+      rw [mfEnv, mfEnv]
+      by_cases hx : fieldTag f = x
+      · simp [hx, hflds f]
+      · simp [hx, ih]
+
+
+/-- Injectivity of the field tag in the direction a proof wants it: two EQUAL
+    tags are two equal names.  `fieldTag_inj` is the other direction (distinct
+    names, distinct tags) and is what `mfEnv` consumes; this one is what a
+    proof about "some OTHER field" consumes, because the hypothesis it needs is
+    "`m` is not `n`" and the goal is about tags. -/
+theorem fieldTag_inj' (a b : String) (h : fieldTag a = fieldTag b) : a = b := by
+  by_cases hne : a = b
+  · exact hne
+  · have hne2 : b ≠ a := fun hba => hne hba.symm
+    exact (fieldTag_inj b a hne2 (h.symm)).elim
+
+/-- **A field assignment leaves every other field of the receiver alone.**
+    The source half of the non-aliasing argument, and the point of the tagged
+    environment: `self.<n> = e` replaces the value at `fieldTag n` and nothing
+    else, so a read of `self.<m>` after it still sees the receiver's `m`. -/
+theorem evalMFExpr_other_field (fields : List String)
+    (flds locals : String → UInt64) (call : String → UInt64 → UInt64)
+    (n : String) (e : MFExpr) (m : String) (hm : m ∈ fields) (hne : m ≠ n) :
+    evalExpr call (liftMF (.field m))
+        (mfEnvAfter fields flds locals n
+          (evalExpr call (liftMF e) (mfEnv fields flds locals)))
+      = flds m := by
+  rw [liftMF, evalExpr_var]
+  have hmn : fieldTag m ≠ fieldTag n := fun h => hne (fieldTag_inj' m n h)
+  simp only [mfEnvAfter]
+  rw [if_neg (by simpa using hmn)]
+  exact mfEnv_fieldTag fields flds locals m hm
+
+/-- **A write through one instance's receiver is invisible to another
+    instance's, in the FRAME layout** — which is where it has to be true,
+    because that is the layout the two backends' `LDR`/`STR [Xn, #8k]` and
+    `mov r, [Rn + 8k]` implement.  A store into slot `slotOf n` of the frame
+    at `b1` does not change slot `slotOf m` of the frame at `b2`, for two
+    DIFFERENT fields `n ≠ m` of two different objects.
+
+    `SlotOf` is the model-side fact that distinct field names get distinct
+    slots and `hsep` is the emitter-side fact that distinct constructor sites
+    get distinct regions; together with `hfit1`/`hfit2` (neither frame runs off
+    the top of the address space, so no two slots can share an address) they
+    are the whole of "two instances do not alias", at the level where it is a
+    theorem rather than a hope. -/
+theorem mf_two_instances_no_alias (mem : Nat → UInt8) (b1 b2 : UInt64)
+    (fields : List String) (slotOf : String → Nat) (nslots : Nat)
+    (n m : String) (v : UInt64)
+    (_hn : n ∈ fields) (_hm : m ∈ fields) (hne : n ≠ m)
+    (hslots : Frame.SlotOf slotOf)
+    (hb1 : slotOf n < nslots) (hb2 : slotOf m < nslots)
+    (hfit1 : Frame.FrameFits b1 nslots) (hfit2 : Frame.FrameFits b2 nslots)
+    (hsep : b1.toNat + Frame.frameBytes nslots ≤ b2.toNat) :
+    Frame.frameRead (Frame.frameWrite mem b1 (slotOf n) v) b2 (slotOf m)
+      = Frame.frameRead mem b2 (slotOf m) :=
+  Frame.frame_frames_no_alias mem b1 b2 nslots (slotOf n) (slotOf m) v
+    hb1 hb2 hfit1 hfit2 hsep
 
 end MF

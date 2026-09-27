@@ -110,8 +110,76 @@ def _write_stamp(stamp: str, source: str, olean: str) -> None:
     os.replace(tmp, stamp)
 
 
-def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
+def _build_lock(olean: str):
+    """Exclusive, cross-process, released on exit: an flock on a side file.
+
+    The stamp check above is not a lock. Every process that arrives while the
+    library is stale sees it stale, misses the CAS (nobody has published yet),
+    and runs `lean -o <the same .olean>` — forty of them at once, which is
+    exactly what a `-j18` suite plus a few concurrent `make check-formal`
+    shells produces. They overwrite each other's output file, so the winner is
+    whichever finished last, and a reader can observe a half-written `.olean`.
+
+    The lock is on a SIDE file (`<olean>.lock`), never on the `.olean` itself:
+    lean truncates and rewrites the `.olean`, so locking it would let a second
+    process in as soon as the first one created it. A side file is never
+    rewritten, so the lock actually spans the whole build.
+
+    `flock` is advisory and per-open-file-description, so it releases when the
+    process dies — a crashed build cannot wedge the tree. It is also per-host:
+    this coordinates the processes on one machine, which is the case that
+    happens (one repo, one lib/ directory). It does not coordinate a network
+    filesystem, and nothing here assumes it does.
+    """
+    import contextlib
+    import fcntl
+
+    @contextlib.contextmanager
+    def _locked():
+        path = olean + ".lock"
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)       # closing releases the lock, even if we raised
+    return _locked()
+
+
+def _ensure_one(lean: str, lib_dir: str, stem: str, env: dict,
+                timeout: int) -> None:
+    """Build one library module if it is not already current. Caller holds the
+    lock for this stem, and must have re-checked currency after taking it."""
     import cas
+    source = os.path.join(lib_dir, stem + ".lean")
+    olean = os.path.join(lib_dir, stem + ".olean")
+    stamp = olean + ".srcsha256"
+    key = _olean_key(stem, source, lean)
+    hit = cas.lookup(key, ".olean")
+    if hit:
+        shutil.copyfile(hit, olean)
+    else:
+        # lean writes the .olean in place, so build beside it and move it into
+        # place: a concurrent reader either sees the old file or the new one.
+        tmp_olean = f"{olean}.tmp.{os.getpid()}"
+        try:
+            result = subprocess.run(
+                [lean, "-o", tmp_olean, source],
+                capture_output=True, text=True, timeout=timeout, env=env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout
+                                    or "lean failed").strip())
+            os.replace(tmp_olean, olean)
+        finally:
+            if os.path.exists(tmp_olean):
+                os.unlink(tmp_olean)
+        with open(olean, "rb") as f:
+            cas.publish(key, ".olean", f.read())
+    _write_stamp(stamp, source, olean)
+
+
+def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
     env = os.environ.copy()
     env["LEAN_PATH"] = lib_dir
     for stem in LIBRARY_MODULES:
@@ -130,21 +198,15 @@ def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
                 and os.path.getmtime(olean) >= os.path.getmtime(source)):
             _write_stamp(stamp, source, olean)
             continue
-        key = _olean_key(stem, source, lean)
-        hit = cas.lookup(key, ".olean")
-        if hit:
-            shutil.copyfile(hit, olean)
-        else:
-            result = subprocess.run(
-                [lean, "-o", olean, source],
-                capture_output=True, text=True, timeout=timeout, env=env,
-            )
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or result.stdout
-                                    or "lean failed").strip())
-            with open(olean, "rb") as f:
-                cas.publish(key, ".olean", f.read())
-        _write_stamp(stamp, source, olean)
+        # Serialise the build, then RE-CHECK under the lock: the process we
+        # waited for has very probably just built exactly what we were about
+        # to, and this is the line that makes the lock cheap instead of merely
+        # correct.
+        with _build_lock(olean):
+            if _library_is_current(source, olean, stamp, _sha256_file(source)):
+                continue
+            _ensure_one(lean, lib_dir, stem, env, timeout)
+
 
 
 # ── verdict cache ───────────────────────────────────────────────────────────

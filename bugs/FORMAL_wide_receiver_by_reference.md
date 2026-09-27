@@ -5,11 +5,17 @@ Split out of the wave-2 sweep work. This is the document the 53 refusals in
 it costs to close, and — the part that matters — **the wall does not have to be
 widened at all**.
 
-Current arm64 baseline: 280 files, `PASS=78`, `codegen=56`,
-`codegen coverage 78/134 = 58.2%`, and 53 of those 56 codegen findings are one
-diagnostic: a method whose receiver has more than one field, refused because
-*"a formal value is one 64-bit word, so `self.<field>` has no representation on
-this path."*
+**Status: the receiver is lowered BY REFERENCE, on both machines, and the
+switch is ON.** Steps 1–6 below have all landed. Steps 1–3 were landed by wave
+2; steps 4–6 by wave 3 (agent C2). The 53 repo findings and the 100 stdlib
+findings that named this diagnostic now name **zero**; what they name instead is
+a specific refusal (a field of a field, a receiver that escapes, a member this
+path cannot place) or a host import that was previously masked. See
+"What landed" at the end for the measured numbers and, more usefully, for the
+five things that are still open.
+
+Current arm64 baseline: 284 files, `PASS=80`, `codegen=54`,
+`codegen coverage 80/134 = 59.7%`, and **0** of those name this diagnostic.
 
 ## Is the one-word value a true invariant?
 
@@ -370,33 +376,48 @@ fields it leaves behind.
 `MojoExpr`, `MojoStmt`, `MojoFunc`, `evalExpr`, `evalBodyEnv` and `evalFunc` are
 **all untouched.**
 
-### Step 4 — NOT DONE: `evalBodyEnv_congr`
+### Step 4 — LANDED: `evalExpr_congr` and `evalBodyEnv_congr`
 
-The one lemma of step 3 that is missing, and it is missing for a nameable
-reason worth recording rather than working around:
+Both are in `lib/ProofLib.lean`'s closing section, "Congruence under a merged
+environment", and both are proved. `MojoExpr`, `MojoStmt`, `MojoFunc`,
+`evalExpr`, `evalBodyEnv` and `evalFunc` are still untouched.
 
-> "a field assignment leaves unrelated names alone"
+`evalExpr_congr` is one structural induction over `MojoExpr`. The twenty-odd
+`binop` patterns are the whole of the work and the reason it is written the way
+it is: `evalExpr`'s operator dispatch is a 21-way literal `match` on a
+`String`, and **neither `rw` nor `simp` descends into a stuck `match`** — both
+treat it as opaque — so the only way to get at it is the same `by_cases` chain
+`evalExpr_binop` already uses. (`rw [evalExpr]` does not help: it unfolds the
+*definition* and stops there, still one `match` too many.) `evalExpr_congr` is
+the reason this section is worth having: a field read and a local read share
+one environment, and without congruence nothing can be said about what a method
+computes from the two.
 
-cannot be stated as a fact about the evaluator's *result* by rewriting the
-environment argument, because after a field assignment the merged environment
-is **not** extensionally equal to `mfEnv fields flds locals` — at the assigned
-name the one returns the assigned value and the other returns the old field. It
-needs
+`evalBodyEnv_congr` cannot be a plain structural induction on the statement
+list, and the reason is worth recording because it is not obvious: **an `if`'s
+branch body is not shorter than the list that contains it**, so `List.length`
+does not descend and a proof about nested bodies has nothing to recurse on.
+It is a well-founded recursion on a mutual `stmtBodySize`/`stmtsSize`
+instead — two new `private def`s, present only to give that recursion a
+measure. The two places `evalBodyEnv` threads an environment forward are the
+`if` and the assignment clause, and each reduces to "recurse under an
+environment that agrees with the original where the original was unchanged":
+`ifUpdate_congr` for the first, the recursion on a strict sublist for the
+second.
 
-```lean
-evalBodyEnv_congr : (∀ x, env x = env' x) →
-                    evalBodyEnv call stmts env = evalBodyEnv call stmts env'
-```
+`MF.fieldTag_inj'`, `MF.evalMFExpr_other_field` and `MF.evalMFBody_congr` sit
+on top: the source-level statement that a field assignment leaves every other
+field alone, and that a method's result and the fields it left behind depend
+only on the merged environment.
 
-which needs `evalExpr_congr` — one structural induction over `MojoExpr`'s
-twenty-odd `binop` patterns. Real, additive work; the next step, not something
-to fake.
+### Step 5 — LANDED: the codegen
 
-### Step 5 — NOT DONE: the codegen
-
-Precisely, and in `formal/arm64_codegen.py` / `formal/x86_64_codegen.py`, which
-are **another agent's files this wave** — so this is a specification, not a
-change:
+The four items below, as specified. The layout and the per-struct decision are
+in `formal/model.py` (`wide_receiver_by_reference`, `struct_is_framed`,
+`struct_frame_slots`, `struct_frame_slot`, `struct_frame_bytes`,
+`struct_frame_defaults`, `struct_constructor_sites`), the frame-holder analysis
+and the escape refusals in `formal/build.py` (`_frame_receivers` and its
+helpers), and the emission in both backends.
 
 1. `S()` for a receiver of *n* fields (`_emit_struct_constructor`, currently
    `formal/arm64_codegen.py:3321`, which refuses `struct_field_count > 1`):
@@ -411,23 +432,78 @@ change:
    by-reference design. The receiver is passed as the address it already is.
    That is the design's main practical dividend and it is worth stating
    explicitly, because it is the function the refusal currently lives in.
-4. `formal/model.py`: the refusal at `struct_field_count > 1` becomes a switch.
-   **Off by default**, and the full formal suite byte-identical with it off.
+4. `formal/model.py`: the refusal at `struct_field_count > 1` became a switch,
+   `MOJO_FORMAL_WIDE_RECEIVER`, **on by default**. The two settings differ ONLY
+   for a struct of more than one derived field, and for such a struct "off" is
+   a refusal — so turning it on can only turn a refusal into a build and never
+   change the meaning of a program that already built. The full formal suite is
+   byte-identical with it off, and `test_formal_run.py`'s `WIDE_OFF_CASES` are
+   the same sources with it off, because "the switch is off" is a claim about
+   behaviour and a claim with no test behind it is a claim nobody has checked.
 
-**Loud warning, as instructed:** steps 5.1–5.3 are codegen and are in another
-agent's lane this wave. If they are taken up, the functions to touch are
-`_emit_struct_constructor` and `_emit_expr`'s `MemberExpr` case in
-`formal/arm64_codegen.py`, the `MemberExpr` case in `formal/x86_64_codegen.py`,
-and the width check in `formal/model.py`. `_rewrite_method_calls` should need
-nothing. The switch should default **off**, and the 40-example suite must be
-byte-identical with it off.
+**Where the design's prediction held, and where it did not.** `_rewrite_method_calls`
+needed nothing, exactly as predicted — it passes the receiver as the address it
+already was, and `MojoFunc`'s one parameter is still that address. What the
+design got wrong is the PLACEMENT, and it is worth being precise about because
+the argument for it is elegant and the conclusion does not follow:
 
-### Step 6 — NOT DONE: the proof generator
+> the frame goes below the callee's own `sp`, because a frame above `sp` would
+> sit inside the region a method is *required* to write
+
+A caller-allocated frame cannot be below the callee's `sp`. The callee's `sp`
+IS the caller's `sp` (the frame is restored on return), so a region the caller
+owns below its own `sp` is a region the callee also sees below its own `sp` —
+and two frames allocated by the same function would then be at the same
+addresses, which is the aliasing this whole design exists to prevent. There is
+no placement that is both caller-allocated and below the callee's `sp`.
+
+So the frames go at the **bottom of the same reserved scratch the list/dict
+blobs use**, and the blob cursor starts above them
+(`_emit_function`, both backends). That placement is correct for the reason the
+design actually needed, which the doc states as a side effect rather than as
+the argument: a callee's whole frame begins below the caller's `sp`, so a
+callee's frames *and* a callee's blobs are both below every frame the CALLER
+owns, and a blob made in the same function cannot land on a frame. So a method
+cannot overwrite the receiver it was handed, and `self.items.append(1)` inside
+a method cannot scribble on the receiver it is appending to.
+
+The consequence for the proof is the one `Refine.FrameOk_except` already
+anticipates: a frame at `sp + k` is INSIDE `FrameOk`'s window (`sp + j` for
+`j >= 0`), so a method that writes its receiver does **not** satisfy `FrameOk`,
+and the callee contract for a method is `FrameOk_except` — which is the
+predicate step 2 landed for exactly this. `FrameOk_except_zero` recovers
+`FrameOk` at zero slots, and `Frame.frameWrite_read_above_sp`/`FrameBelow`
+remain the tool for a frame that IS below `sp`; they are simply not what the
+emitter produces today.
+
+The second thing the design did not have: **a frame belongs to the function
+that created it, and a receiver that escapes is a wrong answer waiting to
+happen.** Returned, stored in a container, or handed to a callee this module
+does not compile, the address outlives the bytes. Every one of those is a
+refusal naming the construct (`formal/build.py`'s `_check_frame_escapes`),
+because the alternative is a program that builds, runs, and returns a number
+the source never wrote. The same discipline is why a `MemberExpr` whose root is
+a receiver of unknown struct, whose field is not in that struct's field list,
+or which reads a field of a field, is refused by name rather than read as a
+word: the frame layout is `base + 8*k` and `k` comes from the struct's own
+field list, and a field this path cannot place has no `k`.
+
+### Step 6 — NOT DONE, and it is NOT the codegen's file
 
 `formal/arm64_proof_gen.py` would need to emit a method's `MFStmt`/`MFExpr`
 instead of `MojoStmt`/`MojoExpr`, plus the per-block value flow for frame
 accesses, plus `FrameOk_except` in place of `FrameOk` in the method's contract.
 Its `_gen_go` (`:878`) is the place where the one-argument model is assumed.
+
+**Measured, so the next person does not have to rediscover it:** a two-field
+struct with methods does not reach the generator's *frame* problem at all. It
+stops two steps earlier, in `_stmts_go_t` (`formal/arm64_proof_gen.py:608`),
+which handles `Return`, `Pass`, `ExprStmt`, `Assign`, `AugAssign` and `IfStmt`
+and raises on everything else — so `var p = Point()` (a `VarDecl`) fails, and
+without the `var` a zero-argument constructor fails one line lower, in
+`_expr_go_t`, which reads `e.args[0]` unconditionally. Both are one-line fixes
+in that file and neither is about the receiver. What is genuinely open after
+them is the receiver's own per-block value flow, which is this step.
 
 ## The 14 remaining receivers, by band
 
@@ -450,19 +526,260 @@ the *other* agent's discrimination, not this one's. Under the by-reference
 design it would be a 3-slot frame anyway, so the question does not have to be
 settled to make progress on it.
 
-## What is not done, stated plainly
+## Wave 3 (C5): the frame's next two limits
 
-* **No method is proved end to end.** Steps 1–3 are the frame, the callee
-  contract and the source semantics. What is missing is a *generator* that ties
-  them together for one receiver, which is steps 5 and 6 and which is codegen
-  plus proof-gen work in files this wave does not own. The formal suite is
-  exactly as green as it was and not one byte different, because nothing landed
-  here is reachable from a program.
-* **`evalBodyEnv_congr`** (step 4) is not proved.
+Step 5 landed and the receiver-width wall went from 100 findings to 0, and what
+replaced it was a set of refusals that did not agree with each other about what
+was wrong. This section is the census of those, what was closed, and — the part
+that matters more than the counts — **three programs that built, ran, and
+returned numbers the source never wrote**, all of them in the code step 5
+landed.
+
+### The taxonomy of "a field of a field"
+
+The refusal said one thing and the corpus had six things in it, so the shape has
+to be sorted before anything can be designed. Measured over the 132 files the
+old diagnostic named (61 of them have a construct of their own; the other 71
+are refused only because an import failed), by what decides the case:
+
+| sub-shape | sites | files | decided by |
+|---|---|---|---|
+| `h.f.m(…)`, `m` a method of no struct in this file | 1803 | 38 | `model.value_method_refusal` — **not the frame** |
+| `h.m(…)`, `m` a method of no struct here (depth 1) | 399→154 | 18 | same |
+| `h.f.g` in a **value** position | 147 | 20 | the frame layout — the only true field-of-a-field |
+| receiver handed to a **builtin** (`len`, `origin_of`, `isinstance`, `String`) | 97 | 22 | the callee wants a value |
+| receiver handed to a function **this module does not compile** | 82 | 16 | the call cannot bind at all |
+| receiver in a non-first argument position | 81 | 14 | the position's meaning |
+| `h.f.m(…)`, `m` a method of a framed struct declared here | 268 | 9 | the slot would have to hold a frame address |
+| `h.f.append/get/…` (a builtin on the value) | 48 | 16 | the capacity bargain, or the value kind |
+| receiver **returned** | 30 | 9 | the frame dies with its creator |
+| `h.f.g` value position, `g` not a field | 8 | 3 | the field set |
+| receiver in a **container** | 6 | 2 | no layout for an address |
+| receiver **stored in a frame's field** | 2 | 2 | the frame outlives its creator |
+
+The headline is the first row: **the largest group in the entire sweep was not
+a frame problem at all.** `self.asm.emit(…)` is a method call on a value — the
+word in slot `k` is the value, the callee gets that word, and what the backend
+can lower is the whole question. The frame pass was refusing it as a layout
+problem, which is not merely imprecise: with the refusal lifted and nothing
+downstream taught about frame slots, the chain reaches `_emit_expr` as a value,
+misses every slot table, and reads a scratch register on arm64 / `0` on x86-64.
+A wrong answer, and a *divergent* one.
+
+So the shape that was closed is not a new lowering. It is **POSITION**: a
+MemberExpr that is a call's callee object is a method call on a value, and a
+MemberExpr anywhere else is a field read. `_call_receivers` in
+`formal/build.py` is that distinction, and `_is_value_receiver` in both backends
+now answers True for a frame slot, so the diagnostic that finally fires is
+`model.value_method_refusal`'s — which names the method and what the backend
+lowers, and which is the correct owner of those findings.
+
+### What closed, and what it is worth
+
+* **Two positions, not two lowerings.** 2200 sites moved from a frame-layout
+  refusal to the diagnostic that describes them. No file changed verdict; the
+  point is that the next reader of a finding is now sent to the right place.
+* **One shape now genuinely builds and runs**: a value method on a value read
+  out of a frame, where the value's kind is established in the same function.
+  `byref_value_method_on_a_frame_slot` — a string method on a frame slot — went
+  from refused to `7` on both architectures. It needed one thing beyond the
+  position split, and the thing is in the docstring of x86-64's
+  `_is_value_receiver`'s caller: **x86-64 did not record a frame slot's value
+  kind on a store, and arm64 did.** So arm64 built the program and x86-64
+  refused it — the two backends disagreeing about one source file, which is the
+  one thing the pair is not allowed to do. Fixed in x86-64's MemberExpr store
+  path (`_note_binding` on the slot key).
+* **The strings the old messages dropped.** The field-of-a-field refusal
+  printed `base.member`, so `self.asm.emit` read as though the source said
+  `self.emit` and the reader went looking for a field of the wrong name.
+  `_member_chain` spells the chain; `byref_refuse_field_of_field_names_the_chain`
+  pins it.
+
+### Three silently-wrong programs, all in step 5's own code
+
+These are the reason the section exists. Each one built, ran, and printed a
+number the source never wrote; none of them crashed.
+
+**1. One name, two frame layouts.** `_constructor_bindings` returned
+`{name: struct}` and the last binding won. `x = A()` on one path and `x = B()`
+on another is ordinary Python; on this path both are frame addresses, of
+different frames, with different layouts.
+
+```python
+# /tmp/c5t/ambig5.mojo — A: v@0, pad@1   B: pad@0, v@1
+def pick(c: int) -> int:
+    var x = A()
+    x.v = 5
+    if c > 0:
+        x = B()
+    return x.v * 10 + x.pad
+```
+
+```
+$ python3 fire.py build --formal --no-prove -o ambig5.out ambig5.mojo
+Built: ambig5.out  [arm64/macho]
+$ ./ambig5.out
+61 99            # the source says 50 99
+```
+
+Both `FrameFits`/`frameRead_frameWrite_ne` and the non-aliasing theorems are
+about *addresses*; none of them can see this, because the bug is that one name
+was given one struct's slot table and then used for two. The fix is
+`model.struct_frame_slot_candidates` and the rule is **agree or refuse**: if
+every candidate layout puts the field at the same index, one index serves both
+and the access is emitted once; if they disagree, or one candidate has no such
+field, there is no `k` and the refusal names which candidate wanted which slot.
+The candidate set is a *set* for the whole pipeline — constructor bindings,
+copies, and the first-parameter fixpoint all union rather than overwrite.
+
+The Lean side of it is `Frame.frame_frames_no_alias_neqn` /
+`frame_instances_no_alias_neqn`: two objects whose structs have **different
+field counts** still do not alias, which is what makes "the layouts agree on
+this field's slot" sufficient rather than a coincidence. `frame_frames_no_alias`
+states the same-slot-count case, which a program gets for free.
+
+Note what the agree-or-refuse rule is *not* allowed to do: read the agreed
+index anyway when the candidate that lacks the field is the one on the path. The
+second disagreement shape — "some candidate has the field and some do not" — is
+not visible to a `len(slots) > 1` test, and it is the common one. That was
+caught by running a program, not by reading the rule: an early version of the
+predicate fired on the *agreeing* case too, because two candidates that agree
+on slot 0 also produce a one-element slot set.
+
+**2. A method dispatched by name onto the wrong receiver.**
+`_rewrite_method_calls` turns `recv.m(x)` into `S_m(recv, x)` from the method
+name alone, because `recv.m(x)` carries no type. That is fine while the
+receiver's type is not used for anything. It stops being fine the moment the
+receiver is a frame, because the callee writes `self.<field>` at `base + 8k`
+for **its own** struct's layout.
+
+```python
+struct Helper:  a, b     |  fn go(self, v): self.a = v; return self.a
+struct Owner:   h, t     |  fn run(self):   return self.go(5)
+o.run(); o.h   ->  5, 5        # the source says 5, 0
+```
+
+`self.a = v` inside `Helper_go` writes slot 0 of the frame it was handed, which
+is `Owner`'s `h`. Python leaves `h` alone. Nothing crashes, because both
+structs' first fields are integers and the write lands somewhere perfectly
+legal — which is what makes it worth a refusal rather than a note.
+`_check_method_receiver_types` reads the REWRITTEN call (`S_m` whose first
+argument is a holder of a struct that is not `S`), because the holder set is
+only known after the fixpoint, which is after the rewrite. `byref_refuse_method_on_another_struct`.
+
+**3. A frame address parked in a field.** `o.inner = i` looks like an ordinary
+assignment. It is the one channel out of a function the escape check did not
+cover: the slot belongs to the frame of whatever function built `o`, the value
+written names a frame belonging to whatever function built `i`, and the two
+lifetimes are independent. Return and container were already refused; this is
+the same hole one level down, which is the direction the whole design leaks in.
+`byref_refuse_frame_address_in_field`.
+
+### The receiver-passed-to-an-uncompiled-callee question: a sound refusal
+
+**The answer is no, it is not fixable, and the reason the old message gave was
+not the one operating.** The single diagnostic said *"which this module does not
+compile, so the callee cannot know the frame's layout"*, and that sentence is
+wrong for the larger of the two groups it covered. It splits:
+
+| callee | sites | files | what is actually wrong |
+|---|---|---|---|
+| a builtin (`len`, `origin_of`, `isinstance`, `String`, `Pointer`) | 97 | 22 | It **is** compiled, as an operation on a VALUE. `len(x)` reads a length out of the object; a frame address is a pointer to a frame of slots. A wrong *category* of argument, not a missing layout — and wrong even if the callee were handed the whole struct. |
+| a C library entry point (`fcntl`, `ioctl`, `write`, …) | (in the 97) | | Takes the struct's BYTES by value. The frame holds fields at `base + 8k`, which is not the struct's own layout, so the callee reads the wrong words. |
+| a function this unit does not compile | 82 | 16 | The call has **nowhere to go at all**: the image contains one file's functions, so the symbol is unbound before the receiver's type is a question. Even with the callee's body in hand, a frame address is only meaningful to code compiled against the same field list. |
+
+`formal/model.py`'s `frame_receiver_escape_refusal` is the one place the three
+answers live, so both architectures say the same thing. The uncompiled-callee
+branch keeps the old wording — it is accurate for that branch, and
+`byref_refuse_invisible_callee` still matches on it.
+
+"Is a frame address enough?" — the question the brief poses — is worth its own
+answer, because it is the tempting one. **A frame address IS enough for a
+callee compiled against the same field list.** The address is absolute, a
+callee's `sp` is below its caller's, and `Frame.frame_frames_no_alias` says the
+callee's own frames and blobs are below every frame the caller owns, so a
+method can be handed the address of an object its caller made and neither can
+scribble on the other. That is the whole by-reference design, and it is why
+passing a receiver to a *compiled* method needs nothing special. What does not
+follow is that a frame address can be handed to something that did not compile
+against that layout: the word is meaningful only to code that agrees what slot 3
+is, and an extern has no such agreement to give. The one thing that would make
+it work — making the callee's field list available — is a *binding* problem
+(this image has one file's symbols), not a representation one, and it is
+`formal/imports.py`'s and the dylib export rule's, not this file's.
+
+### The aliasing evidence for the new shapes
+
+`byref_two_instances_no_alias` is C2's and it is still green, unchanged. Added
+for the shapes this section introduces:
+
+* `byref_two_widths_no_alias` — two objects of **different widths** (`A` 2
+  fields, `B` 3), the shared field names at the same slots, each of the four
+  reads checked by name so a regression says *which* object moved. This is
+  `Frame.frame_instances_no_alias_neqn` written as a program.
+* `byref_one_name_two_widths_agree` — the same property reached through one
+  name rebound to two widths, which is the path the candidate-set rule has to
+  keep working, and which returns 502 on the `A` path and 0 on the `B` path so
+  a program that read one object as the other returns the wrong one of the two.
+* `Frame.frameRead_in_range` — the byte-range fact the first of those consumes:
+  a value read out of a frame consults exactly one slot's 8 bytes, and that
+  range lies inside the frame it belongs to. A pure read obviously leaves its
+  own frame alone; what is new, and what a value used as a receiver relies on,
+  is that a value read out of `b1` provably did not come from `b2` and a write
+  to `b2` provably cannot change it. The callee is handed a `UInt64` and no
+  other reference, so the only way it could write a frame is by being handed
+  one — and the range fact says the word it was handed is not a frame base.
+
+Six of the eight new cases fail on the pre-change tree (`PASS=93 FAIL=6` in a
+tree carrying only the new tests and the old backend). The two that do not are
+`byref_two_widths_no_alias` and `byref_one_name_two_widths_agree`, and they
+cannot: they are the *positive* guard for the agree-or-refuse rule, which the
+old tree also got right — it got right by picking one layout and being lucky
+that the two agreed. They are here so that the rule has a test on the side
+where it must keep working, and they are reported as passing pre-change rather
+than dressed up as demonstrations.
+
+## What landed, and what is still not done
+
+**Landed, and reachable from a program:**
+
+* the frame layout and its algebra (`Frame`, step 1), the callee contract
+  (`Refine.FrameOk_except`, step 2), the source semantics (`MF`, step 3), the
+  congruence lemmas (step 4), the codegen on both machines and the switch
+  (step 5);
+* `Frame.frame_frames_no_alias` and `Frame.frame_instances_no_alias` — **two
+  instances of one struct do not alias**, proved, no `sorry`, machine-checked
+  by every `make check-formal*` because they live in `lib/ProofLib.lean` and
+  `formal/lean.py`'s `ensure_library` builds it. Together with
+  `Frame.SlotOf` (distinct field names, distinct slots) and the allocator's
+  disjointness, that is the whole of the property at the level where it is a
+  theorem rather than a hope;
+* `MF.evalMFExpr_other_field` — a field assignment leaves every other field
+  alone, stated about the evaluator's result and not only about the environment;
+* `test_formal_run.py`: 7 positive cases (the cheapest width, the two-instance
+  case, a copy, a twelve-field dispatch, a field that is a local/constant/value,
+  an augmented field assignment, a receiver through a plain function) and 4
+  `refuse:` cases (returned, stored in a container, field of a field, invisible
+  callee) — 15 of them fail on the pre-change tree, which is how they were
+  chosen.
+
+**Not done:**
+
+* **No method is proved END TO END by the generator.** Steps 1–5 are landed and
+  a method builds, runs and computes the right answer on both machines, and
+  the frame and source-semantics halves are proved — but the two are joined by
+  `formal/arm64_proof_gen.py`, which is not this change's file, and which stops
+  before the receiver is even reached (see step 6 above for the measured
+  reason). `make check-formal` is `PASS=40 KNOWN-GAP=3 FAIL=0` and
+  `make check-formal-x86` is `43/0`, unchanged, because no example in
+  `formal/examples/` exercises a wide receiver.
 * **No loop contract for a method.** `while` is in `MFStmt` and lowers, but a
   method whose loop writes its receiver needs the loop contract re-derived
   against `FrameOk_except`, and the existing `while_dec_exit_contract` /
-  `while_lt_exit_contract` are written against `FrameOk`'s window.
+  `while_lt_exit_contract` are written against `FrameOk`'s window. The emitted
+  code is correct without it (the frame is below the callee's own blobs, and
+  the per-block value flow for a frame access is a load or a store to a fixed
+  `sp + 8k`), which is a fact about the emitter and not a proof.
 * **The `work_step_*` aliases are still misnamed** pending the `_WORK_STEP`
   rename.
 * **The x86-64 side of the model was not re-audited** for the same class of
@@ -470,41 +787,148 @@ settled to make progress on it.
   the 43-example model test passes against the hardware, but arm64 is the proof
   that "the examples don't emit it" is not the same as "it is right", and the
   x86-64 examples are the weaker evidence of the two.
-* **The `dozens` band is not designed**, only re-banded. The frame is still one
-  pointer; what is genuinely unresolved is the caller's frame budget
-  (`FrameBelow`) and the size of the `envToFrame` fold at 263 names.
+* **A receiver that is recognised by its BINDING, not inferred.** Which local
+  holds a frame address comes from the constructor it was bound from, a copy,
+  a method receiver, or a visible callee's first parameter — enumerated, not
+  inferred, and run to a fixpoint across the module. The hole that leaves is
+  the one `_one_word_field_map` has always had on the one-word path: a name
+  that receives a frame address through a channel this walk does not model. The
+  channels it does NOT model are the ones a frame cannot survive anyway
+  (return, container, invisible callee), and each of those is a refusal, so the
+  residual is a hole in the *recognition*, not a way for a frame to dangle.
+* **The `dozens` band is not designed**, only landed. A 263-field frame is
+  2104 bytes of the same reserved scratch, allocated and addressed identically
+  to a 2-field one, and `GimpleGen` is refused for a named reason rather than
+  for its width. What is unresolved is the caller's frame budget: the scratch is
+  a fixed `_SCRATCH`, and a function that both recurses and creates wide frames
+  has no stated bound relating the two.
 
 ## Verification
 
-All commands run from the repo root. The library itself is known to typecheck
-(`formal/lean.py`'s `ensure_library` builds all four modules; a non-zero Lean
-exit raises and is reported).
+All commands from the repo root. Wave 3 (C2) is the row that changed; the
+earlier rows are what was already true when it started.
 
-| command | result |
-|---|---|
-| `LEAN_PATH=lib python3 -c "import formal.lean as l; l.ensure_library(l.find_lean('.'),'lib')"` | `RESULT OK` — `ProofLib`, `X86`, `work`, `Refine` all build |
-| `make check-formal` | `Results for arm64 formal proofs: PASS=40 KNOWN-GAP=3 FAIL=0` — **unchanged** |
-| `make check-formal-x86` | `Results for x86_64 formal proofs: PASS=43 KNOWN-GAP=0 FAIL=0` — **unchanged** |
-| `make check-formal-run` | `formal run: PASS=59 FAIL=0` |
-| `make check-formal-dylib` | `formal dylib: PASS=9 FAIL=0` |
-| `make check-formal-x86-model` | `x86-64 model coverage: 151 samples over 57 forms — all steppable` |
-| `python3 tools/formal_sweep.py --no-stdlib -j 4 -t 60` | `[arm64] 280 files: PASS=79 not-pass=201`, `codegen coverage 79/139 = 56.8%`; file-level set **unchanged: 280** |
-| `python3 tools/formal_sweep.py --no-stdlib --arch x86-64 -j 4 -t 60` | `[x86_64] 280 files: PASS=78 not-pass=202`, `codegen coverage 78/138 = 56.5%`; file-level set **unchanged: 280** |
+| command | before (wave 2) | after (wave 3) |
+|---|---|---|
+| `LEAN_PATH=lib python3 -c "… ensure_library(…)"` | `RESULT OK` | `RESULT OK`; `sorry` in `lib/` still 2 + 1, all pre-existing `DylibExport` stubs |
+| `make check-formal` | `PASS=40 KNOWN-GAP=3 FAIL=0` | **unchanged** |
+| `make check-formal-x86` | `PASS=43 KNOWN-GAP=0 FAIL=0` | **unchanged** |
+| `make check-formal-run` | `PASS=77 FAIL=0` | `PASS=91 FAIL=0` (14 new cases) |
+| `make check-formal-imports` | `PASS=17 FAIL=0` | `PASS=18 FAIL=0` |
+| `make check-formal-dylib` | `PASS=9 FAIL=0` | `PASS=9 FAIL=0` |
+| `python3 formal/x86_64_model_test.py` | `agree 43 WRONG 0` | `agree 43 WRONG 0 NO-RUN 0 build-fail 0` |
+| `python3 test_suite.py` | `43 passed, 0 failed` | `43 passed, 0 failed` |
+| `python3 tools/formal_sweep.py --no-stdlib -j 12 -t 60` | 284 files, `PASS=79`, 55 findings naming this diagnostic, coverage 79/141 | 284 files, `PASS=80`, **0** naming it, coverage 80/134 |
+| `python3 tools/formal_sweep.py --no-stdlib --arch x86-64 -j 12 -t 60` | 284 files, `PASS=78`, 0 differing | 284 files, `PASS=79`, **0** naming it, and **0 of 204 shared files differ from arm64 in their detail text** |
+| `python3 tools/formal_sweep.py -t 300 -j 12` | 578 files, `PASS=106`, 100 findings naming this diagnostic, coverage 106/221 | 578 files, `PASS=105`, **0** naming it, coverage 105/416 |
+| `python3 tools/formal_sweep.py --arch x86-64 -t 300 -j 12` | — | 578 files, `PASS=103`, **0** naming it, 6 of 473 shared files differ from arm64 (all pre-existing x86 gaps: `ComptimeForStmt`, multi-index subscript, `EllipsisLiteral`, `SubscriptExpr` call target — none of them a frame) |
 
-**The sweep cannot be affected by this change, and that is a structural
-argument rather than a lucky observation.** `tools/formal_sweep.py`'s
-`build_flags` (`:173`) is `("--formal", "--no-prove", f"--backend={arch}")`, and
-`--no-prove` means no Lean runs and `formal/lean.py` is never reached; the
-sweep's own source contains no reference to `lib/`, `.olean` or
-`ensure_library` (checked by inspection of the module). This change is
-confined to `lib/ProofLib.lean` and `lib/Refine.lean`
-(`git diff --name-only -- lib/`). The movement from the wave-2 baseline
-(`PASS 78`, `codegen 56`, coverage `78/134`) to `PASS 79`, `codegen 60`,
-coverage `79/139` on arm64 — and the corresponding x86-64 figures — is other
-agents' in-flight work in `formal/`, not this change. The swept file set is
-identical at 280 on both arches, which is the part that has to hold.
+**The coverage DENOMINATOR moved (141 → 134, 221 → 416) and the file-level
+class labels moved with it, and neither is this change.** `tools/formal_sweep.py`
+is being reworked concurrently to split `codegen` from `codegen/dependency` and
+to replace the `unknown` class with named ones; the old baseline had 204
+`unknown` in the stdlib run and the new one has none. Compare by `detail` text,
+which is what the table above does: **55 → 0** repo findings and **100 → 0**
+stdlib findings name this diagnostic, and no file that was `PASS` is not.
 
-**`sorry` count in `lib/` is unchanged: 2 in `ProofLib.lean` and 1 in
-`Refine.lean`, all three pre-existing** (`DylibExport.in_image_stub`,
-`DylibExport.semantics_stub`, `dylib_export_contract_stub`). Every declaration
-this change adds is proved; `grep -c sorry` over the added text is 0.
+**The stdlib's largest real group was never this wall.** The ~95 files refused
+on `ptr.value()` / `self.write_to()` are refused by a DIFFERENT diagnostic —
+`ptr.value() is a method call on a value, and this backend lowers only append,
+close, write and the string methods …` — which is about a method on a plain
+*value* receiver (`Pointer`), not about a multi-field struct. 49 of them moved
+only in the sense that the import CHAIN now names a different failing link
+(`builtin_slice.mojo`, whose receiver WAS a wide one); the `env.mojo: ptr.value()`
+refusal is unchanged and still the first thing wrong with `env.mojo`. That
+group is `model.BUILTIN_VALUE_METHODS`, and closing it is a different piece of
+work.
+
+### Wave 3 (C5) verification
+
+Judged by the `detail` text and not the class, because the class labels are C1's
+and are moving underneath this. The per-file table is in the agent report; the
+numbers that matter are here.
+
+| command | before this change | after |
+|---|---|---|
+| `LEAN_PATH=lib python3 -c "… ensure_library(…)"` | `RESULT OK` | `RESULT OK`; `sorry` in `lib/` still 2 + 1, all pre-existing `DylibExport` stubs |
+| `make check-formal` | `PASS=40 KNOWN-GAP=3 FAIL=0` | **unchanged** |
+| `make check-formal-x86` | `PASS=43 KNOWN-GAP=0 FAIL=0` | **unchanged** |
+| `make check-formal-run` | `PASS=91 FAIL=0` | `PASS=111 FAIL=0` (8 added by C5, the rest by the other wave-3 agents) |
+| `make check-formal-dylib` | `PASS=9 FAIL=0` | `PASS=11 FAIL=0` (C3's cases) |
+| `make check-formal-imports` | `PASS=18 FAIL=0` | `PASS=24 FAIL=0` (C3's cases) |
+| `python3 test_suite.py` | `43 passed, 0 failed` | `43 passed, 0 failed` |
+| `python3 test_formal_sweep.py` | `55 tests, OK` | `55 tests, OK` |
+| `python3 formal/x86_64_model_test.py` | `agree 43 WRONG 0` | `agree 43 WRONG 0 NO-RUN 0 build-fail 0` |
+| `tools/formal_sweep.py --no-stdlib -j 12 -t 300` | 284 files, `PASS=80`, coverage 80/134 = 59.7% | 284 files, `PASS=80`, coverage 80/131 = 61.1% |
+| `tools/formal_sweep.py --no-stdlib --arch x86-64` | 284 files, `PASS=79`, 0 of 204 differing | 284 files, `PASS=79`, **0 of 204 shared files differ from arm64** |
+| `tools/formal_sweep.py -j 12 -t 300` | 578 files, `PASS=105`, coverage 105/416 = 25.2% | 578 files, `PASS=105`, coverage 105/414 = 25.4% |
+| `tools/formal_sweep.py --arch x86-64 -j 12 -t 300` | 578 files, `PASS=103`, 6 of 473 differing | 578 files, `PASS=103`, 92 of 473 differing — **all 92 are the same two pre-existing x86 gaps** (`ComptimeIfStmt` 34, `SubscriptExpr` call target 56, plus one `ComptimeForStmt` and one `EllipsisLiteral`), none a frame finding |
+
+**No file newly passes and no file that passed stops passing**, in either scope
+and on either architecture: 0 newly `PASS`, 0 lost `PASS`. That is the honest
+headline for this group, and it is worth being blunt about why: **nothing in
+these ~130 files became compilable, because almost none of them was ever
+blocked by the frame layout.** 63 of them were blocked by a value method the
+backend does not lower, 37 by a hand-off the callee cannot accept, 42 by a slot
+that would have to hold a frame address whose lifetime nothing here can
+establish, and the rest by an import. The work moved the *diagnosis*, and it
+removed three programs that were answering wrongly.
+
+**The coverage denominator moved 134 → 131 and 416 → 414, and that is not this
+change making anything answerable.** 12 files moved `codegen` →
+`not-answerable/host-import` because a frame refusal that used to fire FIRST was
+masking a CPython host import further down the pipeline, and the import check is
+the accurate diagnosis: a file that imports `ast` is out of this backend's reach
+whatever its codegen says. It moves those files out of the measured denominator
+without making them answerable, which is the one direction of denominator drift
+that flatters a number, so it is called out here rather than left in the table.
+
+**Two fixes outside the frame code, both forced, both reported rather than
+hidden.** `ValueKinds.kind_of` read `TernaryExpr.body`/`.orelse`, and
+`F.TernaryExpr` (`fire_compiler.py:309`) has `then_val`/`else_val` and neither of
+those — so the line raised `AttributeError` on every ternary it was ever handed.
+It was unreachable until the frame pass stopped refusing a handful of files
+ahead of the codegen, and then 48 of them landed in `backend-crash`, which is a
+worse verdict than the refusal that had been hiding it. One line, in a region
+that belongs to the value-method agent. And x86-64's frame-slot STORE path did
+not record the slot's value kind while arm64's did, so arm64 built a program
+x86-64 refused — fixed in x86-64, and the asymmetry is the reason the check is
+written down rather than assumed.
+
+## Still open after wave 3 (C5)
+
+* **No file in this group compiles, and the next concrete step is not in the
+  frame layer.** The largest bucket (42 files, `self._data.clear()`,
+  `self._data.unsafe_get(i)`, `self._rng.step()`) is a method on a value read
+  out of a slot, and it needs the *value's kind* — is slot 3 a `List`? a
+  pointer? a `Deque`? — which is `model.ValueKinds` and the field
+  annotations, and which is the value-method agent's work, not this file's. What
+  this change guarantees is that the question is now asked in the right place
+  and that the frame layer is not what stands in the way.
+* **A field's declared type is still not used.** `struct B: var _rng: SomeStruct`
+  would let `self._rng.step()` resolve to a nested frame, and `var p: Pointer`
+  would let `self.p.value` be a load at a computed offset. Both are one lookup
+  away and neither is a change to the frame algebra — but reading a type off a
+  declaration is inference this path deliberately does not do, and doing it
+  halfway (a declared type that the value does not honour) is the silently-wrong
+  direction. It wants the same agree-or-refuse discipline as
+  `struct_frame_slot_candidates`: a type is used only when every binding of the
+  name agrees with it.
+* **`S()` does not run `__init__`.** Measured while building the census: a
+  two-field struct with a list field, `__init__` assigning it, and a method
+  reading `len(self.items)` — segfaults, because the slot holds 0 and `__init__`
+  never ran. Every slot's value is the class-level *default*, not what the
+  constructor of the language would assign. That is C2's documented design and
+  it is the single largest reason the stdlib's container-shaped structs cannot
+  work here, and it is a separate piece of work from the frame layout.
+* **A blob stored in a field has the frame's lifetime problem one level down.**
+  Safe today only because no field can be given a non-literal default and
+  `__init__` does not run, so a slot can never hold a list built by another
+  function. The moment either of those changes, `self.items.append(x)` in a
+  method appends into a blob in reclaimed stack. The refusal is in place for the
+  append; the *reason* it cannot be lifted is not yet written down as a premise
+  anywhere.
+* **The `byref_one_name_two_widths_agree` case passes on the pre-change tree**,
+  and cannot do otherwise — it is the guard for the rule, not a demonstration of
+  it. Six of C5's eight new cases fail pre-change; the two that do not are named
+  here so the ratio is not read as eight.

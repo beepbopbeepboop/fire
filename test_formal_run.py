@@ -257,37 +257,54 @@ CASES = [
                             "    c = Cell()\n"
                             "    c.n = n\n"
                             "    return c.get()\n", 10, None),
-    # The other side of the same line: a class with fields assigned in
-    # `__init__` is honest ONLY while there is at most one. Two of them, and
-    # there is nothing in one word that both `c.a` and `c.b` can be, so the
-    # build must REFUSE — and name the fields it counted, so the reader can
-    # check the count rather than take it on faith. Before the width was
-    # derived, this built and returned 1: `self.a`/`self.b` were method-local
-    # slots, and the receiver word was never written by anything at all.
+    # The other side of the same line, and it used to be a REFUSAL: a class
+    # with two fields had nothing to be as a one-word value, so `c.a` and
+    # `c.b` could not both exist. It is now a frame of two 8-byte slots with
+    # the receiver holding its ADDRESS, which is still one word, so the value
+    # model is untouched and this builds and RUNS. Both directions matter:
+    # a write at the call site (`p.a = 1`) and a write through the receiver
+    # (`p.b = 2`, inside a method) land in the same frame and the accessor
+    # reads back the sum, so the answer 3 is the sum of the two writes and not
+    # of anything else. The same source with the receiver switch OFF is
+    # `wide_off_pair_two_fields`, which still refuses by name.
     ("pyclass_two_fields",
      "class Pair:\n"
      "    def __init__(self):\n"
      "        self.a = 1\n"
      "        self.b = 2\n\n"
+     "    def set_b(self, v):\n"
+     "        self.b = v\n\n"
      "    def total(self):\n"
      "        return self.a + self.b\n\n"
      "def main(n):\n"
      "    p = Pair()\n"
-     "    return p.total()\n", "refuse:2 field(s): a, b", None),
+     "    p.a = 1\n"
+     "    p.set_b(2)\n"
+     "    return p.total()\n", 3, None),
     # The refusal above has to be the SAME refusal on both backends. They used
     # to disagree about struct construction outright: arm64 refused a two-field
     # `Point()` while x86-64 emitted a `call _Point` against a symbol nothing
     # defines, built the image, and let dyld kill it at launch ("Symbol not
     # found: _Point"). One source, two architectures, and only one of them said
     # no — so the check is that both now refuse, with the same words.
+    # A direct field write at the call site AND a write through a method, then
+    # two reads back: the method's write wins (9), and all three reads are the
+    # same frame, so 9 + 9 + 9 = 27 and not 5 + 9 + 9. The old expectation of
+    # 23 was the arithmetic of a program where the two spellings were two
+    # different words.
     ("struct_ctor_both_backends",
      "struct Point:\n"
      "    x: Int\n"
      "    y: Int\n\n"
+     "    fn get_x(self) -> Int:\n"
+     "        return self.x\n\n"
+     "    fn set_x(self, v: Int):\n"
+     "        self.x = v\n\n"
      "def main(n):\n"
      "    p = Point()\n"
-     "    return p.x + p.y\n",
-     "refuse:constructing Point needs 2 field(s): x, y", None),
+     "    p.x = 5\n"
+     "    p.set_x(9)\n"
+     "    return p.x + p.get_x() + p.get_x()\n", 27, None),
     ("struct_ctor_args_both_backends",
      "class Resolver:\n"
      "    def resolve(self, name):\n"
@@ -481,13 +498,13 @@ CASES = [
     # ── class-level CONSTANT vs per-instance state ─────────────────────────
     # A class-level constant is not a field. `Regs.A = 1` is one value for
     # every instance, so there is nothing for a receiver word to hold, and
-    # counting it made this class two fields wide and the program REFUSED —
-    # for a receiver that has two real fields. The refusal is the
-    # interesting half: it has to survive as a refusal, with the count now
-    # naming the two fields that are actually storage (`hi`, `lo`) and not the
-    # two that are not (`A`, `B`). A `refuse:` sentinel is the only assertion
-    # here that can see the difference, because both trees refuse; before the
-    # rule this said "4 field(s): A, B, hi, lo".
+    # counting it used to make this class FOUR fields wide. With the
+    # by-reference receiver the count no longer decides whether the program
+    # builds, so what this case has to assert instead is that the two names
+    # that are NOT storage still do not become slots: `A` and `B` are read as
+    # their own literals, and the answer is the two field writes plus `A`.
+    # 40 + 90 + 1 = 131, and it would be 39 more if `A` had quietly become a
+    # third slot with a zero in it.
     ("pyclass_constant_table_with_two_fields",
      "class Regs:\n"
      "    A = 1\n"
@@ -498,12 +515,13 @@ CASES = [
      "        self.hi = 9\n"
      "\n"
      "    def total(self):\n"
-     "        return self.lo + self.hi\n"
+     "        return self.lo + self.hi + self.A\n"
      "\n"
      "def main(n):\n"
      "    r = Regs()\n"
-     "    return r.total()\n",
-     "refuse:2 field(s): hi, lo", None),
+     "    r.lo = 40\n"
+     "    r.hi = 90\n"
+     "    return r.total()\n", 131, None),
     # …and the same class with NO instance state at all, which is the case the
     # rule exists for: it is one word (in fact none), it builds, and it RUNS.
     # The exit value is the assertion — the constants are materialized where
@@ -556,13 +574,12 @@ CASES = [
      "    return c.get() + Cell.M\n", 12, None),
     # A name written through a receiver AT A CALL SITE is storage too, and this
     # is the case that says so: no method of `Pair2` mentions `B`, so only the
-    # unit-wide write census can see that `p.B = 5` makes it per-instance. Drop
-    # that clause and `B` is demoted, the struct measures one field, and the
-    # one-word rewrite turns `p.B = 5` into an assignment to the receiver the
-    # alias `q` then reads — which is refused, but as "assignment target must be
-    # a plain name", a diagnostic about a shape rather than about the width that
-    # is the actual limit. A refusal either way here; the point is that the
-    # honest one is the one that names the two fields.
+    # unit-wide write census can see that `p.B = 5` makes it per-instance.
+    # `B` and `a` are two fields with two slots, and a write at the call site
+    # has to reach a method that reads it: 3*10 + 5 = 35. The one-field
+    # lowering this replaced would have turned `p.B = 5` into an assignment to
+    # the receiver itself, which is the aliasing bug the width rule existed to
+    # prevent — and the frame is what makes the two slots two slots again.
     ("pyclass_field_written_only_at_call_site",
      "class Pair2:\n"
      "    B = 0\n"
@@ -573,11 +590,14 @@ CASES = [
      "    def get(self):\n"
      "        return self.a\n"
      "\n"
+     "    def get_b(self):\n"
+     "        return self.B\n"
+     "\n"
      "def main(n):\n"
      "    p = Pair2()\n"
      "    p.B = 5\n"
-     "    return p.get()\n",
-     "refuse:2 field(s): B, a", None),
+     "    p.a = 3\n"
+     "    return p.get() * 10 + p.get_b()\n", 35, None),
     # A constant whose value is not a literal has nowhere to live on this path:
     # there is no module-global storage, so a read can only be answered by the
     # value it is written with. A container is not that. The honest answer is to
@@ -819,16 +839,771 @@ CASES = [
      "refuse:is a method on a string", None),
 ]
 
+# ── a multi-field receiver, BY REFERENCE ───────────────────────────────────
+#
+# A value on this path is one 64-bit word, and a struct of two fields has
+# nothing to BE as a value. It is given a representation anyway, without
+# changing the value model at all: the receiver word is the ADDRESS of an
+# out-of-line frame of 8-byte slots, `h.x` is a load from `[h, #8k]`, and
+# `h.x = v` is a store to the same place. A pointer is one word, so
+# `MojoFunc`'s single parameter is still `self` and is still that address, and
+# the method call is unchanged (`S.m(self, ...)` — the receiver is passed as
+# the address it already was).
+#
+# What these cases are really about is the failure mode that matters: TWO
+# INSTANCES OF ONE STRUCT MUST NOT ALIAS. `byref_two_instances_no_alias` is
+# that case and it is the one to read first; the rest pin the widths, the
+# field kinds, and the escapes that have to be REFUSED rather than lowered,
+# because a frame belongs to the function that created it and a receiver that
+# outlives its creator would be dereferenced after its bytes were reused.
+BYREF_CASES = [
+    # The cheapest width, and the whole design in one program: two fields, a
+    # constructor, a write through the receiver, a read back through a
+    # DIFFERENT method. 3 + 4 = 7.
+    ("byref_two_fields_roundtrip",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "    fn set_x(self, v: Int):\n"
+     "        self.x = v\n\n"
+     "    fn set_y(self, v: Int):\n"
+     "        self.y = v\n\n"
+     "    fn get_x(self) -> Int:\n"
+     "        return self.x\n\n"
+     "    fn get_y(self) -> Int:\n"
+     "        return self.y\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = Point()\n"
+     "    p.set_x(3)\n"
+     "    p.set_y(4)\n"
+     "    return p.get_x() + p.get_y()\n", 7, None),
+    # **TWO INSTANCES MUST NOT ALIAS.** This is the case the whole design
+    # exists for, and the one a "same code, bigger n" framing hides: if the two
+    # constructors had handed out the same address, or if the slots were
+    # indexed by anything but the frame base, then `a` and `b` would share
+    # storage and every value below would be wrong in a way no refusal would
+    # catch. Each check below names WHICH instance was corrupted, so a
+    # regression says which of the two frames moved rather than just "35".
+    ("byref_two_instances_no_alias",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "    fn set_x(self, v: Int):\n"
+     "        self.x = v\n\n"
+     "    fn set_y(self, v: Int):\n"
+     "        self.y = v\n\n"
+     "    fn get_x(self) -> Int:\n"
+     "        return self.x\n\n"
+     "    fn get_y(self) -> Int:\n"
+     "        return self.y\n\n"
+     "def main(n) -> Int:\n"
+     "    var a = Point()\n"
+     "    var b = Point()\n"
+     "    a.set_x(3)\n"
+     "    a.set_y(4)\n"
+     "    b.set_x(100)\n"
+     "    b.set_y(200)\n"
+     "    if a.get_x() != 3:\n"
+     "        return 1000 + a.get_x()\n"
+     "    if a.get_y() != 4:\n"
+     "        return 2000 + a.get_y()\n"
+     "    if b.get_x() != 100:\n"
+     "        return 3000 + b.get_x()\n"
+     "    if b.get_y() != 200:\n"
+     "        return 4000 + b.get_y()\n"
+     "    return 0\n", 0, None),
+    # …and the same two instances with a COPY, because a copy shares the
+    # frame and must: `c = a` then `c.set_x(9)` is visible through `a`, and
+    # `b` is still untouched. 9 * 1 + 100 = 109.
+    ("byref_copy_shares_the_frame",
+     "struct Cell:\n"
+     "    var n: Int\n"
+     "    var m: Int\n\n"
+     "    fn set_n(self, v: Int):\n"
+     "        self.n = v\n\n"
+     "    fn get_n(self) -> Int:\n"
+     "        return self.n\n"
+     "    fn get_m(self) -> Int:\n"
+     "        return self.m\n\n"
+     "def main(n) -> Int:\n"
+     "    var a = Cell()\n"
+     "    var b = Cell()\n"
+     "    a.set_n(3)\n"
+     "    b.set_n(100)\n"
+     "    var c = a\n"
+     "    c.set_n(9)\n"
+     "    if a.get_n() != 9:\n"
+     "        return 1000 + a.get_n()\n"
+     "    return a.get_n() + b.get_n() - 100\n", 9, None),
+    # A field written through the receiver and read through ANOTHER method,
+    # with the dispatch in between: `set` picks a slot by index, `get` reads
+    # it back. The 12-field case is here for the width, not for the dispatch:
+    # `many` is the same code with a bigger n, which is the claim the design
+    # makes and the reason the width bands are not three projects.
+    ("byref_twelve_fields_dispatch",
+     "struct Wide:\n"
+     "    var f0: Int\n"
+     "    var f1: Int\n"
+     "    var f2: Int\n"
+     "    var f3: Int\n"
+     "    var f4: Int\n"
+     "    var f5: Int\n"
+     "    var f6: Int\n"
+     "    var f7: Int\n"
+     "    var f8: Int\n"
+     "    var f9: Int\n"
+     "    var f10: Int\n"
+     "    var f11: Int\n"
+     "\n"
+     "    fn set(self, i: Int, v: Int):\n"
+     "        if i == 0:\n"
+     "            self.f0 = v\n"
+     "        elif i == 1:\n"
+     "            self.f1 = v\n"
+     "        elif i == 2:\n"
+     "            self.f2 = v\n"
+     "        elif i == 3:\n"
+     "            self.f3 = v\n"
+     "        elif i == 4:\n"
+     "            self.f4 = v\n"
+     "        elif i == 5:\n"
+     "            self.f5 = v\n"
+     "        elif i == 6:\n"
+     "            self.f6 = v\n"
+     "        elif i == 7:\n"
+     "            self.f7 = v\n"
+     "        elif i == 8:\n"
+     "            self.f8 = v\n"
+     "        elif i == 9:\n"
+     "            self.f9 = v\n"
+     "        elif i == 10:\n"
+     "            self.f10 = v\n"
+     "        else:\n"
+     "            self.f11 = v\n"
+     "\n"
+     "    fn get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.f0\n"
+     "        elif i == 1:\n"
+     "            return self.f1\n"
+     "        elif i == 2:\n"
+     "            return self.f2\n"
+     "        elif i == 3:\n"
+     "            return self.f3\n"
+     "        elif i == 4:\n"
+     "            return self.f4\n"
+     "        elif i == 5:\n"
+     "            return self.f5\n"
+     "        elif i == 6:\n"
+     "            return self.f6\n"
+     "        elif i == 7:\n"
+     "            return self.f7\n"
+     "        elif i == 8:\n"
+     "            return self.f8\n"
+     "        elif i == 9:\n"
+     "            return self.f9\n"
+     "        elif i == 10:\n"
+     "            return self.f10\n"
+     "        return self.f11\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    var w = Wide()\n"
+     "    var i = 0\n"
+     "    while i < 12:\n"
+     "        w.set(i, i + 1)\n"
+     "        i = i + 1\n"
+     "    var total = 0\n"
+     "    i = 0\n"
+     "    while i < 12:\n"
+     "        total = total + w.get(i)\n"
+     "        i = i + 1\n"
+     "    return total\n", 78, None),
+    # A field that is a LOCAL, a CONSTANT and a POINTER-shaped value, all in
+    # one receiver, because those are the three things a method body reaches
+    # for and only one of them is the frame. The local is computed from the
+    # receiver and added back, the class constant is materialized where it is
+    # read (it is NOT a slot), and the third field holds a value written at the
+    # call site. 5*2 + 10 + 7 = 27.
+    ("byref_field_local_const_and_value",
+     "struct Mixed:\n"
+     "    var n: Int\n"
+     "    var s: String\n"
+     "    var p: Int\n"
+     "    const K: Int = 7\n\n"
+     "    fn get_n(self) -> Int:\n"
+     "        return self.n\n\n"
+     "    fn set_n(self, v: Int):\n"
+     "        self.n = v\n\n"
+     "    fn describe(self) -> Int:\n"
+     "        var local = self.n * 2\n"
+     "        local = local + self.p\n"
+     "        return local + Mixed.K\n\n"
+     "def main(n) -> Int:\n"
+     "    var m = Mixed()\n"
+     "    m.set_n(5)\n"
+     "    m.p = 10\n"
+     "    if m.get_n() != 5:\n"
+     "        return 1000 + m.get_n()\n"
+     "    return m.describe()\n", 27, None),
+    # An AUGMENTED assignment to a field: `self.n += 5` is a load, an add and
+    # a store through the receiver, so it exercises the frame store from the
+    # augmented-assignment path as well as the plain one. Two bumps: n = 10,
+    # m = 4, so 10*10 + 4 = 104 — and a load that returned 0 both times (the
+    # classic SRA-slot bug) would have given 4.
+    ("byref_augmented_field",
+     "struct Counter:\n"
+     "    var n: Int\n"
+     "    var m: Int\n\n"
+     "    fn bump(self):\n"
+     "        self.n += 5\n"
+     "        self.m += 2\n\n"
+     "    fn get_n(self) -> Int:\n"
+     "        return self.n\n\n"
+     "    fn get_m(self) -> Int:\n"
+     "        return self.m\n\n"
+     "def main(n) -> Int:\n"
+     "    var c = Counter()\n"
+     "    c.bump()\n"
+     "    c.bump()\n"
+     "    return c.get_n() * 10 + c.get_m()\n", 104, None),
+    # A receiver handed to a plain function, which reads a field of it: the
+    # argument IS the address, so the callee's parameter is a frame holder
+    # without any type inference. 40 + 2 = 42.
+    ("byref_receiver_through_a_plain_function",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "    fn set_a(self, v: Int):\n"
+     "        self.a = v\n\n"
+     "    fn get_a(self) -> Int:\n"
+     "        return self.a\n\n"
+     "def bump(x):\n"
+     "    return x.get_a() + 2\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = Pair()\n"
+     "    p.set_a(40)\n"
+     "    return bump(p)\n", 42, None),
+    # ── wave 3 (C5): a field used as a VALUE RECEIVER, and a name that is two
+    # shapes at once ──
+    #
+    # `h.f.m(x)` reads `mem[h + 8k]` and hands that word to the callee, so it
+    # is a method call ON A VALUE and the frame layout is not what decides it.
+    # Until this case existed the build pass refused the whole shape as "a field
+    # of a field", which is not what is wrong with it: the value IS a word, the
+    # backend just may not know which. With the receiver kind established —
+    # the slot is assigned a string LITERAL in this same function, which is what
+    # `_string_vars` records — `startswith` lowers and the program runs.
+    #
+    # The receiver kind is per-function on purpose: a slot assigned in `main`
+    # and read in a method is NOT known to be a string in that method, so the
+    # same program split across two functions is still refused. That asymmetry
+    # is the reason this case puts the assignment in the same function, and it
+    # is why it is a positive case at all.
+    ("byref_value_method_on_a_frame_slot",
+     "struct Named:\n"
+     "    var tag: Int\n"
+     "    var name: String\n\n"
+     "    fn check(self, p: String) -> Bool:\n"
+     "        self.name = \"hello\"\n"
+     "        return self.name.startswith(p)\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Named()\n"
+     "    var ok: Bool = m.check(\"he\")\n"
+     "    if ok:\n"
+     "        return 7\n"
+     "    return 100\n", 7, None),
+    # THE SAME VALUE, READ OUT OF TWO INSTANCES. A field read used as a value
+    # receiver is a plain load, so the property that has to survive is the one
+    # this file already states for the two-instance case: reading `a.name` must
+    # not see what was written to `b.name`, and neither object's `tag` may move.
+    # Each branch names WHICH object was corrupted, so a regression says which
+    # frame moved rather than just a number.
+    #
+    # This is the positive counterpart of `byref_two_layouts_disagree` below: two
+    # objects of two DIFFERENT widths, and the field used is at the same slot
+    # index in both — which is what makes one index legal, and
+    # `Frame.frame_instances_no_alias_neqn` is what says the two objects are
+    # still separate storage rather than one object seen twice.
+    ("byref_two_widths_no_alias",
+     "struct A:\n"
+     "    var v: Int\n"
+     "    var w: Int\n\n"
+     "struct B:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "    var z: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = A()\n"
+     "    var b = B()\n"
+     "    a.v = 5\n"
+     "    a.w = 2\n"
+     "    b.v = 7\n"
+     "    b.w = 3\n"
+     "    if a.v != 5:\n"
+     "        return 1000 + a.v\n"
+     "    if a.w != 2:\n"
+     "        return 2000 + a.w\n"
+     "    if b.v != 7:\n"
+     "        return 3000 + b.v\n"
+     "    if b.w != 3:\n"
+     "        return 4000 + b.w\n"
+     "    return 0\n", 0, None),
+    # …and the same property reached through ONE NAME rebound to two widths,
+    # which is the path the candidate-set rule has to keep working. `v` and `w`
+    # are slot 0 and 1 in both layouts, so one index serves both and the access
+    # is well defined whichever object the name holds; `z` is B's alone and is
+    # never written through the shared name, because writing it would be a third
+    # shape the layouts do not agree on and `byref_two_layouts_disagree` is what
+    # that has to say. 502 is the `A` path and 0 the `B` path, so a program that
+    # read one object as the other returns the wrong one of the two.
+    ("byref_one_name_two_widths_agree",
+     "struct A:\n"
+     "    var v: Int\n"
+     "    var w: Int\n\n"
+     "struct B:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "    var z: Int\n\n"
+     "def touchB(b) -> Int:\n"
+     "    b.z = 1\n"
+     "    return 0\n\n"
+     "def pick(c: Int) -> Int:\n"
+     "    var x = A()\n"
+     "    x.v = 5\n"
+     "    x.w = 2\n"
+     "    if c > 0:\n"
+     "        x = B()\n"
+     "    return x.v * 100 + x.w\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a: Int = pick(0)\n"
+     "    var b: Int = pick(1)\n"
+     "    if a != 502:\n"
+     "        return 1000 + a\n"
+     "    if b != 0:\n"
+     "        return 2000 + b\n"
+     "    return 0\n", 0, None),
+]
 
-def build_formal(src, out, backend=None, tmpdir=None):
-    """`fire.py build --formal --no-prove`, as a (returncode, output) pair."""
+# Constructs a frame ADDRESS may not take part in. Each is a `refuse:` case
+# because the alternative is a program that builds, runs, and reads a frame
+# after the function that created it has returned — the one outcome this
+# backend may not produce. They are here so that a future change which
+# "helpfully" lowers them is caught.
+BYREF_REFUSALS = [
+    # Returned: the frame dies with the function that made it.
+    ("byref_refuse_returned",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def mk():\n"
+     "    var p = P()\n"
+     "    return p\n\n"
+     "def main(n) -> Int:\n"
+     "    var q = mk()\n"
+     "    return 0\n",
+     "refuse:is returned from the function that created it", None),
+    # Into a container: a list blob has no layout for a frame address.
+    ("byref_refuse_stored_in_a_list",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = P()\n"
+     "    var xs = [p]\n"
+     "    return 0\n",
+     "refuse:is stored in a container", None),
+    # A field OF a field: a slot holds one 64-bit word, and that word is a
+    # value, not a struct.
+    ("byref_refuse_field_of_field",
+     "struct Q:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct P:\n"
+     "    var q: Int\n"
+     "    var r: Int\n\n"
+     "    fn get(self) -> Int:\n"
+     "        return self.q.a\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = P()\n"
+     "    return 0\n",
+     "refuse:reads a field of a field", None),
+    # A callee this module does not compile cannot know the frame's layout.
+    ("byref_refuse_invisible_callee",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = P()\n"
+     "    return mojo_print(p)\n",
+     "refuse:this module does not compile", None),
+    # ── wave 3 (C5) ──
+    #
+    # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary
+    # assignment and is the one channel out of a function that was not checked:
+    # the slot belongs to the frame of whatever function built `o`, while the
+    # value written into it names a frame belonging to whatever function built
+    # `i`, and the two lifetimes are independent. Return and container were
+    # already refused; this is the same hole one level down, which is the
+    # direction this whole design leaks in.
+    #
+    # It BUILT before this case existed, and read the reclaimed bytes.
+    ("byref_refuse_frame_address_in_a_field",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Outer:\n"
+     "    var inner: Int\n"
+     "    var tag: Int\n\n"
+     "def stash(o) -> Int:\n"
+     "    var i = Inner()\n"
+     "    o.inner = i\n"
+     "    return o.tag\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 4\n"
+     "    return stash(o)\n",
+     "refuse:outlives the frame it names", None),
+    # TWO LAYOUTS THAT DISAGREE. `x = A()` on one path and `x = B()` on another
+    # is one name and two frame layouts, and `A` puts `v` in slot 0 where `B`
+    # puts it in slot 1. An analysis that settles on one of them reads the
+    # other's storage: this exact program built, ran, and printed `61 99` where
+    # the source says `50 99`, which is the outcome this backend exists to make
+    # impossible. The needle is the sentence that says which candidate wanted
+    # which slot, because a regression that re-introduces the miscompile would
+    # otherwise pass a vaguer assertion.
+    ("byref_two_layouts_disagree",
+     "struct A:\n"
+     "    var v: Int = 11\n"
+     "    var pad: Int = 0\n\n"
+     "struct B:\n"
+     "    var pad: Int = 99\n"
+     "    var v: Int = 0\n\n"
+     "def touchA(a) -> Int:\n"
+     "    a.pad = 7\n"
+     "    return 0\n\n"
+     "def pick(c: Int) -> Int:\n"
+     "    var x = A()\n"
+     "    x.v = 5\n"
+     "    if c > 0:\n"
+     "        x = B()\n"
+     "    return x.v * 10 + x.pad\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r0: Int = pick(0)\n"
+     "    var r1: Int = pick(1)\n"
+     "    print(r0, r1)\n"
+     "    return 0\n",
+     "refuse:the shapes do not agree on where 'v' lives", None),
+    # A METHOD DISPATCHED BY NAME ONTO THE WRONG RECEIVER. `_rewrite_method_calls`
+    # turns `self.go(5)` into `Helper_go(self, 5)` from the method name alone,
+    # because `recv.m(x)` carries no type — which is fine until the receiver is a
+    # frame, at which point `Helper_go`'s `self.a = v` writes slot 0 of an
+    # `Owner`'s frame, i.e. its `h`. Measured: `o.run(); o.h` printed `5, 5`
+    # where the source says `5, 0`, because both structs' first fields are
+    # integers and the write lands somewhere perfectly legal.
+    ("byref_refuse_method_on_another_struct",
+     "struct Helper:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "    fn go(self, v: Int) -> Int:\n"
+     "        self.a = v\n"
+     "        return self.a\n\n"
+     "struct Owner:\n"
+     "    var h: Int\n"
+     "    var t: Int\n\n"
+     "    fn run(self) -> Int:\n"
+     "        return self.go(5)\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Owner()\n"
+     "    o.t = 3\n"
+     "    var r: Int = o.run()\n"
+     "    return r * 10 + o.h\n",
+     "refuse:is dispatched to Helper.go() by method NAME", None),
+    # A receiver handed to a BUILTIN, which is a different reason from the
+    # invisible-callee case above and was being reported as the same one.
+    # `len` is compiled; it is compiled as an operation on a VALUE, so what
+    # arrives is a pointer where it wants the object. The old text said "the
+    # callee cannot know the frame's layout", which is not what is wrong and
+    # sends the reader to look at the wrong thing.
+    ("byref_refuse_receiver_to_a_builtin",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "    fn n(self) -> Int:\n"
+     "        return len(self)\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    return p.n()\n",
+     "refuse:lowered as an operation on a VALUE", None),
+    # A field of a field that is NOT a call: the value-position shape, which is
+    # the one that stays a layout refusal. The needle is the CHAIN, because the
+    # old message printed `self.<last member>` and so described a field the
+    # source never mentions — `h.sub.g` read as though it said `h.g`.
+    ("byref_refuse_field_of_field_names_the_chain",
+     "struct Q:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct P:\n"
+     "    var q: Int\n"
+     "    var r: Int\n\n"
+     "    fn get(self) -> Int:\n"
+     "        return self.q.a\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    return p.get()\n",
+     "refuse:self.q.a reads a field of a field", None),
+]
+
+# ── wave 3 (C4): the subscript, and a subscript with more than one index ──
+#
+# `x[a, b]` is a SubscriptExpr whose index is a TUPLE. What it means is
+# settled by the corpus rather than by the spelling: across the 294 stdlib
+# files and every source in this repository there is not one multi-element
+# subscript whose base is a value. They are all compile-time explicit-
+# parameter lists on a generic (`size_of[type, target]`,
+# `external_call["sysctlbyname", Int32]`, `UnsafePointer[NoneType,
+# MutAnyOrigin]`) or `__mlir_attr[...]` templates — a construct that selects
+# an instantiation and hands it types, of which no runtime word exists here.
+# So none of them is a 2-D index, and a stride would have to be invented.
+#
+# The refusals live in `_emit_subscript_addr` on both backends, which is the
+# one place a read, a store and an augmented assignment all pass through, and
+# the TEXT comes from formal/model.py so the two architectures cannot drift.
+# The `refuse:` cases below run on both, which is the assertion.
+SUBSCRIPT_CASES = [
+    # ── the three that must keep working ──
+    # A single-index read, with the index in a VARIABLE rather than a literal
+    # because that is the shape nothing in formal/examples covers: all 65 of
+    # them index with a literal, which is why an arm64 proof gap on
+    # `a[i]` (see bugs/FORMAL_arm64_known_proof_gaps.md) went unregistered.
+    # The exit status is the assertion: 20, not a frame address.
+    ("sub_single_index_var",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    i = 1\n"
+     "    return a[i]\n", 20, None),
+    # Out of range must still be LOUD. This is the bargain the blob
+    # bounds-check buys: a 3-element list indexed at 7 exits(1) rather than
+    # reading past the end of the frame. It is here because the multi-index
+    # refusal was added at the same place this check lives, and a check added
+    # next to a bounds check is a check that can be lost.
+    ("sub_out_of_range_exits",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    i = 7\n"
+     "    return a[i]\n", 1, None),
+    # The store path, for the same reason and for wave 1's B3: `_emit_sub-
+    # script_store_reg` used to build the ADDRESS in X0 and then store X0, so
+    # `a[i] = 9` wrote a pointer. 9 + 1 = 10, and a pointer is not 9.
+    ("sub_single_index_store",
+     "def main(n):\n"
+     "    a = [1, 2, 3]\n"
+     "    i = 2\n"
+     "    a[i] = 9\n"
+     "    return a[i] + a[0]\n", 10, None),
+    # ── the multi-index forms, all of which must be refused identically ──
+    # `a[i, j]` on a LIST. The one that motivated the group. Pre-change this
+    # was refused on arm64 and SILENTLY LOWERED on x86-64: the index tuple
+    # became a frame blob and that blob's own ADDRESS was used as the element
+    # index, so `a[i, j]` returned an element nobody asked for.
+    ("sub_multi_index_list_read",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    i = 1\n"
+     "    j = 2\n"
+     "    return a[i, j]\n",
+     "refuse:is a subscript whose index is a tuple", None),
+    # A static tuple index, which pre-change took a different wrong road: the
+    # old rule let any statically-known container key through to the DICT
+    # path, so a list base was scanned as if it held pair keys.
+    ("sub_multi_index_list_static_key",
+     "def main(n):\n"
+     "    a = [10, 20, 30]\n"
+     "    return a[1, 2]\n",
+     "refuse:is a subscript whose index is a tuple", None),
+    # On a STRING, where there is no bounds check to catch a bad index at all
+    # (a string is a bare `char *` with no header). Pre-change this SEGFAULTED
+    # on x86-64 while arm64 refused: base + (address of the tuple blob).
+    ("sub_multi_index_string_read",
+     "def main(n):\n"
+     "    s = \"hello\"\n"
+     "    i = 1\n"
+     "    j = 2\n"
+     "    c = s[i, j]\n"
+     "    return 0\n",
+     "refuse:is a subscript whose index is a tuple", None),
+    # THE STORE, and the reason the check moved to the address computation:
+    # both refusals used to sit in the READ path, so `a[i, j] = v` reached the
+    # emitter. On arm64 that made the PROOF GENERATOR livelock (it was killed
+    # at 50s and again at 45s; the sweep's own 300s timeout is what eventually
+    # catches it), and on x86-64 it built and ran.
+    ("sub_multi_index_list_store",
+     "def main(n):\n"
+     "    a = [1, 2, 3]\n"
+     "    i = 1\n"
+     "    j = 2\n"
+     "    a[i, j] = 9\n"
+     "    return a[0]\n",
+     "refuse:is a subscript whose index is a tuple", None),
+    # On a FRAME-BACKED STRUCT FIELD. This is C2's territory and the
+    # interaction is the point: the field is a frame slot, so the refusal must
+    # be about the SUBSCRIPT and must not be attributed to the receiver — a
+    # message here would send the reader to the frame rules for something the
+    # frame rules are fine with. Same needle as the plain list case, which is
+    # what says the two produced the same answer.
+    ("sub_multi_index_frame_field",
+     "struct Point:\n"
+     "    x: Int\n"
+     "    y: Int\n\n"
+     "    fn get_x(self) -> Int:\n"
+     "        return self.x\n\n"
+     "def main(n):\n"
+     "    p = Point()\n"
+     "    p.x = 5\n"
+     "    i = 0\n"
+     "    j = 1\n"
+     "    return p.x[i, j]\n",
+     "refuse:is a subscript whose index is a tuple", None),
+    # A generic's explicit-parameter list used AS A VALUE, which is the shape
+    # `size_of[type, target]` and `is_triple["…", target]` have when they are
+    # not the callee of a call. `pick[1, 2]()` — the call form — is a
+    # different route through `_emit_call` and is deliberately not here.
+    ("sub_multi_index_comptime_params",
+     "def pick[type: Int, target: Int]() -> Int:\n"
+     "    return type + target\n\n"
+     "def main(n):\n"
+     "    v = pick[1, 2]\n"
+     "    return 0\n",
+     "refuse:is a compile-time explicit-parameter list on a generic", None),
+    # The construct that actually blocks 36 stdlib files, named for what it
+    # is. `std/sys/info.mojo` has 27 of these and nothing else the backend
+    # reaches first; the old text called it a "multi-index subscript", which
+    # is a misdiagnosis — it is not a subscript and no index is involved.
+    ("sub_multi_index_mlir_template",
+     "def main(n):\n"
+     "    x = __mlir_attr[`#kgen.param.expr<eq,`, 1, `, 2> : i1`]\n"
+     "    return 0\n",
+     "refuse:assembles an MLIR attribute from a template", None),
+    # `del a[i, j]`. arm64 reaches the subscript here and refuses with the
+    # shared message; x86-64 has no `del` at all and refuses the STATEMENT
+    # first, which is correct and complete but names a different thing. Both
+    # refusing is the assertion, and the two reasons are genuinely different,
+    # which `refuse:` cannot express — hence `refuse_either:`.
+    #
+    # This case exists because the shape used to be a silent NO-OP: the
+    # SubscriptExpr branch of arm64's `_emit_del` sits after the SliceExpr
+    # branch's `continue`, so `del a[i, j]` fell off the end of the loop,
+    # built, ran, and left all three elements in place.
+    ("sub_multi_index_del",
+     "def main(n):\n"
+     "    a = [1, 2, 3]\n"
+     "    i = 0\n"
+     "    j = 1\n"
+     "    del a[i, j]\n"
+     "    return a[0]\n",
+     "refuse_either:is a subscript whose index is a tuple|"
+     "unsupported statement DelStmt", None),
+    # A multi-index inside a function whose frame is already well filled. The
+    # refusal must be the SUBSCRIPT's, not the frame-capacity one, and it must
+    # be the same on both arches: a construct that needs more slots than the
+    # frame has has to fail loudly and say which of the two it was.
+    ("sub_multi_index_near_frame_capacity",
+     "def main(n):\n"
+     "    a = [1, 2, 3]\n"
+     "    b = [4, 5, 6]\n"
+     "    c = [7, 8, 9]\n"
+     "    d = [10, 11, 12]\n"
+     "    e = [13, 14, 15]\n"
+     "    f = [16, 17, 18]\n"
+     "    g = [19, 20, 21]\n"
+     "    h = [22, 23, 24]\n"
+     "    i = 1\n"
+     "    j = 2\n"
+     "    v = a[i, j] + b[i, j] + c[i, j] + d[i, j]\n"
+     "    return v + e[i, j] + f[i, j] + g[i, j] + h[i, j]\n",
+     "refuse:is a subscript whose index is a tuple", None),
+]
+
+
+def build_formal(src, out, backend=None, tmpdir=None, env=None):
+    """`fire.py build --formal --no-prove`, as a (returncode, output) pair.
+
+    `env` is merged over this process's environment rather than replacing it,
+    so a case can turn one backend switch off and leave PATH and HOME alone."""
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove", "-o", out]
     if backend:
         cmd.append(f"--backend={backend}")
     cmd.append(src)
+    child = os.environ.copy()
+    if env:
+        child.update(env)
     p = subprocess.run(cmd, capture_output=True, text=True,
-                       timeout=BUILD_TIMEOUT, cwd=HERE)
+                       timeout=BUILD_TIMEOUT, cwd=HERE, env=child)
     return p.returncode, (p.stderr or p.stdout or "")
+
+
+# Cases that must be REFUSED with the by-reference receiver switched OFF.
+#
+# The switch (`formal/model.py`'s `wide_receiver_by_reference`,
+# `MOJO_FORMAL_WIDE_RECEIVER`) defaults ON, so the corresponding cases in CASES
+# now build and run. These are the same sources with the switch off, and they
+# exist because "the switch is off" is a claim about behaviour and a claim with
+# no test behind it is a claim nobody has checked: if turning the switch off
+# stopped refusing, the switch would not be a switch.
+WIDE_OFF_CASES = [
+    ("wide_off_pair_two_fields",
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.a = 1\n"
+     "        self.b = 2\n\n"
+     "    def total(self):\n"
+     "        return self.a + self.b\n\n"
+     "def main(n):\n"
+     "    p = Pair()\n"
+     "    return p.total()\n", "refuse:2 field(s): a, b", None),
+    ("wide_off_point_ctor",
+     "struct Point:\n"
+     "    x: Int\n"
+     "    y: Int\n\n"
+     "def main(n):\n"
+     "    p = Point()\n"
+     "    return p.x + p.y\n",
+     "refuse:constructing Point needs 2 field(s): x, y", None),
+    ("wide_off_two_instance_alias",
+     "struct Pair2:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    fn get_a(self):\n"
+     "        return self.a\n"
+     "    fn set_a(self, v):\n"
+     "        self.a = v\n\n"
+     "def main(n):\n"
+     "    p = Pair2()\n"
+     "    q = Pair2()\n"
+     "    p.set_a(5)\n"
+     "    return q.get_a()\n", "refuse:2 field(s): a, b", None),
+]
+
+
+def run_wide_off_case(name, source, needle, tmpdir, verbose):
+    """The same refusal both backends gave before the by-reference receiver."""
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(source)
+    env = {"MOJO_FORMAL_WIDE_RECEIVER": "0"}
+    for backend in ("arm64", "x86_64"):
+        rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.{backend}"),
+                                backend=backend, env=env)
+        if rc == 0:
+            return False, (f"--backend={backend} BUILT it with the "
+                           f"by-reference receiver switched off; the switch is "
+                           f"not a switch")
+        if needle not in text:
+            return False, (f"--backend={backend} refused, but not with the "
+                           f"expected words {needle!r}: "
+                           f"{text.strip()[-200:]}")
+    if verbose:
+        print(f"      refused identically with the switch off: {needle!r}")
+    return True, ""
 
 
 def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
@@ -860,6 +1635,31 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
             print(f"      refused identically on arm64 and x86-64: {needle!r}")
         return True, ""
 
+    # `refuse_either:` is the same assertion with a weaker equality: each
+    # backend must refuse, and each must name ONE OF the given reasons. It
+    # exists for a construct where the two architectures refuse at DIFFERENT
+    # depths, so the shared-text rule cannot apply and a common substring does
+    # not exist — `del a[i, j]`, which arm64 refuses at the subscript and
+    # x86-64 refuses at the statement, because it lowers no `del` at all. Both
+    # are correct; the point the case is making is that neither BUILDS, and
+    # `|` in the expectation separates the alternatives. Prefixed so it cannot
+    # be mistaken for a single needle.
+    if isinstance(want_exit, str) and want_exit.startswith("refuse_either:"):
+        needles = want_exit[len("refuse_either:"):].split("|")
+        for backend in ("arm64", "x86_64"):
+            rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.{backend}"),
+                                    backend=backend)
+            if rc == 0:
+                return False, (f"--backend={backend} BUILT a construct that has no "
+                               f"representation (expected a refusal naming one of "
+                               f"{needles!r}); the binary is the real answer here")
+            if not any(n in text for n in needles):
+                return False, (f"--backend={backend} refused, but not with any of "
+                               f"{needles!r}: {text.strip()[-200:]}")
+        if verbose:
+            print(f"      refused on both, naming one of: {needles!r}")
+        return True, ""
+
     out = os.path.join(tmpdir, name)
     rc, text = build_formal(src, out)
     if rc != 0:
@@ -889,18 +1689,27 @@ def main():
         print(f"SKIP: formal output is arm64-only, host is {platform.machine()}")
         return 0
 
-    selected = [c for c in CASES if not args.cases or c[0] in args.cases]
+    everything = (CASES + BYREF_CASES + BYREF_REFUSALS + WIDE_OFF_CASES
+                  + SUBSCRIPT_CASES)
+    selected = [c for c in everything if not args.cases or c[0] in args.cases]
+    known = {c[0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
-        missing = set(args.cases) - {c[0] for c in selected}
+        missing = set(args.cases) - known
         print(f"ERROR: unknown case(s): {sorted(missing)}", file=sys.stderr)
         return 2
+    off_names = {c[0] for c in WIDE_OFF_CASES}
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, want_exit, want_stdout in selected:
             try:
-                ok, detail = run_case(name, source, want_exit, want_stdout,
-                                      tmpdir, args.verbose)
+                if name in off_names:
+                    ok, detail = run_wide_off_case(
+                        name, source, want_exit[len("refuse:"):], tmpdir,
+                        args.verbose)
+                else:
+                    ok, detail = run_case(name, source, want_exit, want_stdout,
+                                          tmpdir, args.verbose)
             except subprocess.TimeoutExpired:
                 ok, detail = False, "timed out"
             except Exception as e:  # unexpected: report, do not mask
@@ -910,8 +1719,11 @@ def main():
                     traceback.print_exc()
             if ok:
                 passed += 1
-                label = (want_exit[len("refuse:"):]
-                         if isinstance(want_exit, str) else want_exit)
+                label = (want_exit
+                         if not isinstance(want_exit, str) else
+                         want_exit[len("refuse:"):]
+                         if want_exit.startswith("refuse:") else
+                         want_exit[len("refuse_either:"):])
                 print(f"  PASS  {name} ({label})")
             else:
                 failed += 1

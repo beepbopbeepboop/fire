@@ -19,8 +19,10 @@ import io
 import os
 import re
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -44,6 +46,31 @@ UNRESOLVED_MSG = ("build: wave1.py imports '__future__', which is not a "
 CODEGEN_MSG = ("build: GimpleGen._record_sys_path_inserts() cannot be lowered: "
                "its receiver has 16 fields and a formal value is one word, so "
                "`self.<field>` has no representation on this path")
+# The CHAINED form: formal/build.py wraps a dependency's own error inside the
+# importer's, and the two messages below are quoted from a real stdlib sweep.
+# Wave 1 added the wrapper as better diagnostics; the classifier used to read
+# only the outer layer and file all 204 of these as `unknown`, which is how the
+# largest class in the default sweep was this instrument throwing away the only
+# part of the message that says anything about the backend.
+CHAIN_MSG = (
+    "build: write.mojo imports 'std.format', which cannot be built either: "
+    "binary_heap.mojo: formal dylib has no public functions: binary_heap.mojo "
+    "exports nothing under doc/ABI.md's rules (a struct-only module has no "
+    "free-function API, and this backend compiles no struct methods)")
+# Two hops, to pin that peeling is by shape at any depth rather than a list of
+# the messages this tool has seen.
+CHAIN_MSG_2 = (
+    "build: reduce.mojo imports 'std.math', which cannot be built either: "
+    "env.mojo imports 'std.sys', which cannot be built either: "
+    "env.mojo: ptr.value() is a method call on a value, and this backend "
+    "lowers only append, close, write")
+# B3's refusal, verbatim from the model's own function (formal/model.py:
+# gimple_runtime_refusal), which is what the class is keyed on.
+TARGET_MSG = ("build: mojo_sqlite3_open is an entry point of the gimple "
+              "backend's C runtime (the `mojo_*` ABI declared in "
+              "runtime/fire_runtime.h and runtime/fire_sqlite3.h), and a "
+              "formal image is freestanding: it links libSystem and nothing "
+              "else, embeds no C runtime, and its values are one 64-bit word")
 EXTERN_MSG = ("builds, but 31 import(s) dyld cannot resolve (one file "
               "compiled, no import resolution): _ZN6mojo5printEPKc, _ZN4mojo"
               "5writeEPKc, _ZN5mojo34read_file_to_stringB5cxx11E ...")
@@ -182,10 +209,26 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(S._crash_cause(TB_BACKEND), S.CAUSE_BACKEND_CRASH)
         self.assertEqual(S._crash_cause(TB_DRIVER), S.CAUSE_DRIVER_CRASH)
         self.assertIsNone(S._crash_cause("build: something refused\n"))
-        # A backend crash IS a finding about the construct; a driver crash is
-        # this tool's own problem and belongs in no rate.
-        self.assertEqual(S.classify(False, "AttributeError: x", "backend-crash"
-                                   )[0], S.CLASS_CODEGEN)
+
+    def test_a_crash_is_not_a_coverage_gap(self):
+        # B4's hole, closed. A backend that REFUSES a construct has looked at
+        # it and made a claim; a backend that RAISED has fallen over, and the
+        # 74-file sweep that reported `codegen: the backend raised: ValueError:
+        # not enough values to unpack` was reporting another agent's half-written
+        # edit as a gap in the language coverage. So: its own class, counted
+        # and printed, exit 1 (DIRTY), and in NO rate (not ANSWERABLE) — it is
+        # a bug in the compiler, and a rate is a claim about constructs.
+        cls, reason = S.classify(False, "AttributeError: x", "backend-crash")
+        self.assertEqual(cls, S.CLASS_CRASH)
+        self.assertNotIn(cls, S.ANSWERABLE)
+        self.assertIn(cls, S.DIRTY)
+        self.assertIn("the backend raised", reason)
+        # The same text with NO traceback is a refusal, not a crash: the
+        # deepest frame is the only thing that tells them apart, so the same
+        # words must classify differently when there is no crash to see.
+        self.assertEqual(S.classify(False, "AttributeError: x")[0],
+                         S.CLASS_CODEGEN)
+        # A driver crash is this tool's own problem and still lands in `tool`.
         self.assertEqual(S.classify(False, "AttributeError: x", "driver-crash"
                                    )[0], S.CLASS_TOOL)
 
@@ -386,6 +429,143 @@ class TestDyldProbe(unittest.TestCase):
             S._resolvable(1, "printf", [], ML.CPU_TYPE_ARM64), "")
 
 
+class TestChainedDependencyRefusal(unittest.TestCase):
+    """A refusal in a DEPENDENCY: which class the importing file gets, and why.
+
+    The 204 files this exists for were the largest class in the default sweep
+    and were in no rate at all, so every assertion below is about a file that
+    does NOT build staying visible, counted, and never called a pass.
+    """
+
+    def test_a_chained_refusal_is_not_unknown(self):
+        # The bug this closes: the outer layer is an import, no host/unresolved
+        # wording is present, so the old rules reached `import message not
+        # recognised` and the file left every rate.
+        cls, reason = S.classify(False, CHAIN_MSG)
+        self.assertEqual(cls, S.CLASS_CODEGEN_DEP)
+        self.assertNotEqual(cls, S.CLASS_UNKNOWN)
+        self.assertIn("binary_heap.mojo", reason)
+        self.assertIn("module exports nothing", reason)
+
+    def test_it_is_a_failure_and_in_the_denominator(self):
+        cls = S.classify(False, CHAIN_MSG)[0]
+        # Answerable: the file produced no binary, and would have if the
+        # backend had lowered the construct its dependency used. Leaving these
+        # out of the denominator is the bug being fixed, not a fix for it.
+        self.assertIn(cls, S.ANSWERABLE)
+        # And a failure: the run must not report exit 0 over 204 files that
+        # did not build.
+        self.assertIn(cls, S.DIRTY)
+
+    def test_a_two_hop_chain_peels_all_the_way_down(self):
+        hops, terminal = S._split_chain(CHAIN_MSG_2)
+        self.assertEqual(hops, ["std.math", "std.sys"])
+        self.assertTrue(terminal.startswith("env.mojo: ptr.value()"))
+        cls, reason = S.classify(False, CHAIN_MSG_2)
+        self.assertEqual(cls, S.CLASS_CODEGEN_DEP)
+        self.assertIn("2 import(s) deep", reason)
+        self.assertIn("env.mojo", reason)
+        self.assertIn("method call on a value", reason)
+
+    def test_an_unchained_message_peels_nothing(self):
+        # The guarantee that makes this safe: the rules for a message with no
+        # chain are the rules it had before, character for character.
+        hops, terminal = S._split_chain(CODEGEN_MSG)
+        self.assertEqual(hops, [])
+        self.assertEqual(terminal, CODEGEN_MSG)
+        self.assertEqual(S.classify(False, CODEGEN_MSG)[0], S.CLASS_CODEGEN)
+
+    def test_the_terminal_import_reason_still_wins_through_a_chain(self):
+        # A target fact stays a target fact however deep it is: the importer
+        # cannot be built here either, so it is not-answerable, not a
+        # dependency-blocked finding.
+        msg = ("build: model.py imports 'fire_compiler', which cannot be built "
+               "either: fire_compiler.py imports 're', which is a host module "
+               "(CPython standard library), which has no Mojo source for this "
+               "backend to compile")
+        self.assertEqual(S.classify(False, msg), (S.CLASS_HOST, "re"))
+
+    def test_the_outside_module_is_not_mistaken_for_the_blocker(self):
+        # The structural import test must run on the TERMINAL only. The outer
+        # module really is imported by this file, so a whole-message scan would
+        # read this as an unresolved import of 'std.format' — a module that
+        # resolves perfectly well, and the exact misattribution the chain rule
+        # exists to prevent.
+        msg = CHAIN_MSG.replace("'std.format'", "'.not_a_real_module'")
+        cls, _reason = S.classify(False, msg, source="from .not_a_real_module "
+                                                    "import x\n")
+        self.assertEqual(cls, S.CLASS_CODEGEN_DEP)
+
+    def test_every_real_family_from_the_sweep_lands_in_a_real_class(self):
+        # The actual distribution the 204 files reduce to, one per family, so
+        # a new wording in one of them shows up here rather than in a report.
+        for msg, family in (
+                (CHAIN_MSG, "module exports nothing"),
+                (CHAIN_MSG_2, "method call on a value"),
+                ("build: tempfile.mojo imports 'std.os', which cannot be built "
+                 "either: info.mojo: multi-index subscript [...] is not "
+                 "supported on the formal arm64 path", "multi-index subscript"),
+                ("build: runner.mojo imports '.random', which cannot be built "
+                 "either: random.mojo: constructing Error has no "
+                 "representation on this path (a formal value is one 64-bit "
+                 "word, and Error is not one thing)",
+                 "value with no representation")):
+            cls, reason = S.classify(False, msg)
+            self.assertEqual(cls, S.CLASS_CODEGEN_DEP, msg[:60])
+            self.assertIn(family, reason)
+
+
+class TestTargetLimit(unittest.TestCase):
+    """B3's refusal-by-name, which had no class and fell to `codegen`.
+
+    `codegen` is "a gap in the backend" and `not-answerable` is "a fact about
+    the target, not a gap" — by this file's own definitions a call the
+    freestanding image cannot bind is the second, and filing it as the first
+    overstates what backend work would buy.
+    """
+
+    def test_it_is_not_answerable_and_not_a_finding(self):
+        cls, reason = S.classify(False, TARGET_MSG)
+        self.assertEqual(cls, S.CLASS_TARGET)
+        self.assertEqual(reason, "mojo_sqlite3_open")
+        self.assertNotIn(cls, S.ANSWERABLE)
+        self.assertNotIn(cls, S.DIRTY)
+
+    def test_it_is_keyed_on_formal_model_not_on_wording(self):
+        # The name and the text are both asked of formal/model.py, so this
+        # cannot rot: reword the refusal there and this test follows it.
+        from formal import model as M
+        name = "mojo_sqlite3_open"
+        self.assertTrue(M.is_gimple_runtime_builtin(name))
+        self.assertEqual(S._target_limit(M.gimple_runtime_refusal(name)),
+                         (S.CLASS_TARGET, name))
+
+    def test_a_mention_is_not_a_refusal(self):
+        # The namespace test is the model's predicate, not `startswith("mojo_")`
+        # pasted here: a message that merely mentions such a name says nothing
+        # about the target, and must stay a construct finding.
+        msg = ("build: GimpleGen.overload_suffix_for() cannot be lowered: "
+               "`self._mojo_list_len_cache` has no representation on this path")
+        self.assertEqual(S.classify(False, msg)[0], S.CLASS_CODEGEN)
+
+    def test_a_reworded_refusal_is_unknown_not_a_guess(self):
+        # formal/ edited under this file: the shape is recognised (a `mojo_*`
+        # name led the sentence) and the meaning is not, so it is `unknown` —
+        # counted, printed, exit 1 — rather than silently moved into either
+        # the gap count or the excluded population.
+        msg = "build: mojo_print is an entry point of some runtime or other"
+        cls, reason = S.classify(False, msg)
+        self.assertEqual(cls, S.CLASS_UNKNOWN)
+        self.assertIn("mojo_print", reason)
+
+    def test_through_a_chain_the_importer_is_unanswerable_too(self):
+        # Same rule as an import refusal: a target fact stays a target fact
+        # however deep it is, so the importing file is not-answerable too.
+        msg = ("build: env.mojo imports 'std.sys', which cannot be built "
+               "either: " + TARGET_MSG)
+        self.assertEqual(S.classify(False, msg)[0], S.CLASS_TARGET)
+
+
 class TestReport(unittest.TestCase):
     """The summary, over a synthetic sweep — no builds, no CAS.
 
@@ -463,12 +643,59 @@ class TestReport(unittest.TestCase):
         # The denominator is stated in words, not just as a number.
         self.assertIn("denominator: the 8 swept file(s) whose build could have "
                       "answered", out)
-        self.assertIn("7 pass + 1 codegen = 8", out)
+        self.assertIn("7 pass + 1 codegen + 0 codegen/dependency = 8", out)
         self.assertIn("the 15 in a not-answerable", out)
         self.assertIn("host-import by module: os x15", out)
         # And the old all-in-one number is gone: nothing reports PASS/total.
         self.assertNotIn("24.0% pass", out)
         self.assertNotIn("FAIL=16", out)
+
+    def test_a_dependency_blocked_file_is_in_the_denominator_and_says_which(self):
+        # The headline must not quietly shrink when 204 files become
+        # classifiable, and the breakdown must say where the gap is rather
+        # than leaving "204" as the whole story.
+        rows = ([("p%d.py" % i, True, "", None) for i in range(7)]
+                + [("d%d.py" % i, False, CHAIN_MSG, None) for i in range(4)]
+                + [("c.py", False, CODEGEN_MSG, None)])
+        out, code, _pub = self._main(rows, cas_state=(len(rows), 0))
+        self.assertIn("codegen coverage: 7/12 = 58.3%", out)
+        self.assertIn("7 pass + 1 codegen + 4 codegen/dependency = 12", out)
+        self.assertIn(f"{S.CLASS_CODEGEN_DEP} by family: binary_heap.mojo: "
+                      "module exports nothing x4", out)
+        self.assertIn(f"{S.CLASS_CODEGEN} by family: value with no "
+                      "representation x1", out)
+        # The reader can tell "this file is fine, its dependency is not" from
+        # "this file is not fine": the class says so, and the printed line
+        # carries the whole chain plus the terminal reason.
+        self.assertIn(f"{S.CLASS_CODEGEN_DEP.upper()}: d0.py", out)
+        self.assertIn("binary_heap.mojo: formal dylib has no public functions",
+                      out)
+        self.assertIn(f"{S.CLASS_CODEGEN.upper()}: c.py", out)
+        self.assertNotIn(f"{S.CLASS_CODEGEN_DEP.upper()}: c.py", out)
+        self.assertEqual(code, 1)
+
+    def test_a_crash_fails_the_run_and_is_in_no_rate(self):
+        rows = ([("p%d.py" % i, True, "", None) for i in range(4)]
+                + [("boom.py", False, "the backend raised: ValueError: not "
+                   "enough values to unpack", S.CAUSE_BACKEND_CRASH)])
+        out, code, _pub = self._main(rows, cas_state=(len(rows), 0))
+        self.assertIn("codegen coverage: 4/4 = 100.0%", out)
+        self.assertIn(f"{S.CLASS_CRASH.upper()}: boom.py", out)
+        self.assertIn("made the BACKEND RAISE", out)
+        self.assertIn("another agent", out)
+        self.assertNotIn("the backend raised: the backend raised", out)
+        self.assertEqual(code, 1)
+
+    def test_the_first_finding_line_names_the_rows_own_class(self):
+        # With a crash in DIRTY, `sorted(DIRTY)[0]` is alphabetically first, so
+        # the line that points a reader at a file must take the class from the
+        # row rather than from the set.
+        rows = [("a.py", True, "", None),
+                ("crash.py", False, "the backend raised: ValueError: x",
+                 S.CAUSE_BACKEND_CRASH),
+                ("b.py", False, CODEGEN_MSG, None)]
+        out, _code, _pub = self._main(rows)
+        self.assertIn(f"first {S.CLASS_CRASH} finding: crash.py", out)
 
     def test_not_answerable_alone_does_not_fail_the_run(self):
         rows = [("p.py", True, "", None),
@@ -516,6 +743,107 @@ class TestReport(unittest.TestCase):
     def test_history_says_so_when_there_is_none(self):
         out, _code, _pub = self._main([("p.py", True, "", None)], prev=None)
         self.assertIn("verdict history: none", out)
+
+
+class TestCacheContract(unittest.TestCase):
+    """The three properties a classification rule must not be able to break.
+
+    A class is now a function of the STORED TEXT as well as of the source, so
+    these are no longer bookkeeping: if a cached entry could be reported under
+    the class it was given when it was written, then editing a rule would
+    silently do nothing for every file already in the cache — which is every
+    file, on every re-run.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="fs_cache_")
+        self.path = os.path.join(self._tmp.name, "m.mojo")
+        with open(self.path, "w") as f:
+            f.write("from std.format import fmt\n")
+        self.flags = S.build_flags("arm64")
+        cas.reset_stats()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        cas.reset_stats()
+
+    def _key(self):
+        with open(self.path) as f:
+            return cas.formal_build_key(f.read(), self.path, self.flags,
+                                        S._criteria_id())
+
+    def test_the_stored_bytes_carry_no_class(self):
+        # The first half of the contract, structurally: only `ok` and the
+        # build's own text are stored, so there is nothing in the entry that
+        # could go stale.
+        raw = S._verdict_bytes(False, CHAIN_MSG)
+        self.assertNotIn(S.CLASS_CODEGEN_DEP.encode(), raw)
+        self.assertNotIn(S.CLASS_CODEGEN.encode(), raw)
+        ok, detail = S._verdict_from_bytes(raw)
+        self.assertFalse(ok)
+        self.assertEqual(detail, CHAIN_MSG)
+
+    def test_a_verdict_stored_under_older_rules_is_reclassified_now(self):
+        # The second half, end to end through the real cache: an entry written
+        # by an OLDER version of these rules (which filed this message
+        # `unknown`) is served from the CAS, and today's rules decide its
+        # class. Nothing about the entry is rewritten — the class is simply
+        # not in it.
+        cas.publish(self._key(), ".result", S._verdict_bytes(False, CHAIN_MSG))
+        v = S.run_one(self.path, 60, self.flags)
+        self.assertTrue(v.cached, "the entry must be served, not rebuilt")
+        self.assertEqual(v.cls, S.CLASS_CODEGEN_DEP)
+        self.assertIn(v.cls, S.ANSWERABLE)
+        self.assertEqual(S.classify(v.ok, v.detail, v.cause,
+                                   "from std.format import fmt\n")[0],
+                         S.CLASS_CODEGEN_DEP)
+
+    def test_a_stored_pass_is_still_a_pass(self):
+        # The other direction: re-classification must not be able to demote or
+        # invent. A stored `ok` is still `ok` under every rule.
+        cas.publish(self._key(), ".result", S._verdict_bytes(True, ""))
+        v = S.run_one(self.path, 60, self.flags)
+        self.assertTrue(v.cached)
+        self.assertEqual(v.cls, S.CLASS_PASS)
+
+    def test_editing_a_rule_invalidates_the_key(self):
+        # _criteria_id() is this file's own bytes, so a changed rule — or a
+        # changed COMMENT, which is the price of keeping the rules explained
+        # where they are — moves the key and no verdict survives it. Proved
+        # without editing the file on disk: the id is a pure function of the
+        # bytes, so a one-byte change to those bytes changes the id.
+        with open(os.path.join(S.REPO, "tools", "formal_sweep.py"), "rb") as f:
+            raw = f.read()
+        self.assertEqual(S._criteria_id(), cas.hash_parts(raw))
+        self.assertNotEqual(cas.hash_parts(raw), cas.hash_parts(raw + b"\n# x\n"))
+        # …and the key really does depend on it, end to end.
+        with open(self.path) as f:
+            src = f.read()
+        self.assertNotEqual(cas.formal_build_key(src, self.path, self.flags,
+                                                 S._criteria_id()),
+                            cas.formal_build_key(src, self.path, self.flags,
+                                                 S._criteria_id() + "0"))
+
+    def test_a_crash_is_never_published(self):
+        # The third property, and the reason it exists: the traceback that
+        # decides a crash's class is not in the stored bytes, so storing the
+        # verdict would serve a crash back as an ordinary refusal next run —
+        # or, worse, serve a stale `ok`. So run_one returns before publishing,
+        # and the crash stays a miss.
+        import formal_sweep as mod
+        err = "build: 'X' object has no attribute 'y'\n" + TB_BACKEND
+        proc = mod.subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=err)
+        published = []
+        with mock.patch.object(mod.subprocess, "run",
+                               return_value=proc), \
+             mock.patch.object(mod.cas, "lookup", return_value=None), \
+             mock.patch.object(mod.cas, "publish",
+                               side_effect=lambda *a, **k: published.append(a)):
+            v = mod.run_one(self.path, 60, self.flags)
+        self.assertEqual(v.cls, mod.CLASS_CRASH)
+        self.assertFalse(v.cached)
+        self.assertEqual(published, [], "a crash must publish nothing")
 
 
 class TestLedgerKey(unittest.TestCase):

@@ -688,7 +688,19 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
     if not mods:
         return []
     if fmt_wants_macho(arch):
-        out_dir = os.path.join(cas_dir(), "formal-imports")
+        # Per-architecture, and that is load-bearing rather than tidiness.
+        # This directory holds BUILT module dylibs, and a dylib is a
+        # target-specific image: an arm64 library and an x86-64 library for
+        # the same source are not two versions of one artifact, they are two
+        # different artifacts. Sharing one directory keyed by module name
+        # alone meant the second sweep overwrote the first's file, so a
+        # program could be handed a link line naming a dylib of the wrong
+        # architecture — which builds, links and passes every static check,
+        # and then dies in dyld with "mach-o file, but is an incompatible
+        # architecture" before `main` runs. The same directory is also
+        # written concurrently by unrelated builds, so a name collision there
+        # is a live hazard and not only a theoretical one.
+        out_dir = os.path.join(cas_dir(), "formal-imports", arch)
         chain = []
         for mod in mods:
             path = resolve_module_path(mod, relative_to=source_path)
@@ -921,13 +933,20 @@ def _struct_methods(stmts: list) -> list:
     accesses are lowered, not by rewriting the AST here: expressing it as an
     empty-member MemberExpr sends every later AST pass into infinite
     recursion, because a member access whose object is itself is a cycle.
+
+    A struct of MORE than one field is lifted too when the by-reference
+    receiver is on (`formal.model.struct_is_framed`): its receiver word is
+    the address of a frame of fields, so `self.<field>` is a load from
+    `[self, #8k]` rather than a rewrite, and the method needs no special
+    casing at all — which is the whole dividend of the by-reference design.
     """
     out = []
     for st in stmts:
         if not isinstance(st, F.StructDef):
             continue
         for m in M.struct_methods(st):
-            if not M.struct_fits_one_word(st):
+            if not M.struct_fits_one_word(st) \
+                    and not M.struct_is_framed(st):
                 # Not compiled, and not exported — but NOT an error here. The
                 # body would read `self.<field>` as a field of an integer, so
                 # it cannot be lowered; refusing at DECLARATION though broke
@@ -943,6 +962,500 @@ def _struct_methods(stmts: list) -> list:
     return out
 
 
+# ── A frame-pointer receiver: which names hold one, and what may hold one ──
+#
+# A struct of more than one field is lowered with its receiver BY REFERENCE
+# (`formal/model.py`'s `struct_is_framed`): the receiver word is the ADDRESS of
+# an out-of-line frame of 8-byte slots, so `h.x` is a load from `[h, #8k]` and
+# `h.x = v` a store. Nothing in the value model changes — a pointer is one word
+# — and `_rewrite_method_calls` needs no change either, because the receiver it
+# already passes IS that address.
+#
+# What this function decides, and it has to be decided ONCE and in the build
+# pass, is which local names hold such an address. Two instances of one struct
+# get two frames and so never alias; but that is only true if the name holding
+# an instance is the SAME name at the write and at the read, which on a path
+# with no type inference means recognising the binding rather than inferring
+# the type. That is the same discipline, and the same limitation, as
+# `_one_word_field_map` above: found from the binding, not inferred.
+#
+# Everything a holder may NOT do is a REFUSAL naming the construct, and that is
+# the point of the rule rather than a limitation of it. A frame lives in the
+# frame of the function that created it, so a holder that escapes — returned,
+# stored in a container, handed to a callee this module cannot see — would be
+# read back as whatever now occupies those bytes, and the program would build,
+# run, and be wrong. Refusing by name is the only honest answer available, and
+# it is available because the value is a pointer and the escape is visible in
+# the source.
+
+
+def _root_ident(node):
+    """`(name, depth)` for a chain of `.member` hops over a plain name, else None.
+
+    `depth` is how many hops there are, which is what separates a frame slot
+    (`h.x`, depth 1) from a field OF a field (`h.sub.x`, depth 2) — the second
+    has no representation here, because slot `k` holds one 64-bit word and that
+    word is a field, not a struct.
+
+    None for anything the hops do not account for, and that is load-bearing
+    rather than tidy: `h[i].f` and `f(h).g` both bottom out at a name but are
+    NOT `h.f`, and a chain that reached the frame-slot table through a
+    subscript would silently read the wrong word. So the walk has to be
+    MemberExpr all the way down, and anything else is None — which sends it to
+    the ordinary local-slot lowering, i.e. to the pre-existing behaviour, not
+    to a frame access."""
+    depth = 0
+    while isinstance(node, F.MemberExpr):
+        depth += 1
+        node = node.obj
+    if isinstance(node, F.IdentExpr):
+        return (node.name, depth)
+    return None
+
+
+def _member_chain(node) -> str:
+    """`a.b.c` for a MemberExpr chain, spelled the way the source spells it.
+
+    `_root_ident` reports a chain's root and depth and nothing else, which is
+    the right answer for a lookup and the wrong one for a MESSAGE: the old
+    field-of-a-field diagnostic printed `base.member`, so a refusal about
+    `self.asm.emit` read as though the source said `self.emit`, and the reader
+    went looking for a field of the wrong name. Every refusal that talks about a
+    chain now spells the chain."""
+    parts = []
+    while isinstance(node, F.MemberExpr):
+        parts.append(node.member)
+        node = node.obj
+    parts.append(node.name if isinstance(node, F.IdentExpr) else "?")
+    parts.reverse()
+    return ".".join(parts)
+
+
+def _call_receivers(fn):
+    """The `id()` of every MemberExpr used as `X.m(...)`'s callee object.
+
+    POSITION, not shape, and the distinction is the whole of the largest group
+    in the sweep. `self.f.g` in a value position is a field of a field: the
+    word in slot `k` is a value, and there is no layout behind it. `self.f.g()`
+    is a METHOD CALL on that value, and the value is all the callee ever gets
+    either way — so the frame layout is not what decides it, and refusing it
+    here with a layout diagnostic hides the diagnostic that does decide it
+    (`model.value_method_refusal`, which names the method and what the backend
+    can lower). Getting this backwards is not a wording problem: with the
+    refusal lifted and nothing downstream taught about frame slots, the chain
+    reaches `_emit_expr` as a value, misses every slot table, and reads a
+    scratch register — a wrong answer rather than a failure.
+
+    `id()` of the node, because the walk yields nodes and a set of identities
+    is the only way to say "this node, in this position" without a second walk
+    that could disagree about which nodes it saw."""
+    out = set()
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr):
+            out.add(id(node.func))
+    return out
+
+
+def _frame_receivers(functions: list, structs_by_name: dict) -> None:
+    """Annotate every function with its frame-pointer receivers and field slots.
+
+    Writes `fn._frame_holders` (the names holding a frame address) and
+    `fn._frame_slots` (`{"<holder>.<field>": slot}`, the table the codegen
+    intercepts a local load/store with) onto each function, and RAISES for any
+    construct a frame address may not take part in. Called once, at the end of
+    `_prepare_functions`, so it sees the FINAL function list — after closures
+    are flattened and lambdas lifted, because a lifted lambda is a function
+    with its own locals and its own receivers.
+
+    The fixpoint is over one edge only: a call `f(c, …)` in some function where
+    `c` is a holder makes `f`'s FIRST parameter a holder. That is the whole of
+    interprocedural flow here, and it is sound in the direction that matters
+    because it can only ADD holders — a name wrongly added is a name whose
+    field accesses become memory accesses, and a name wrongly missing is the
+    silent case, which is why every way a holder can be created is enumerated
+    rather than inferred.
+
+    A holder's type is a SET of candidates, not one struct, and that is a
+    correctness requirement rather than a refinement: `x = A()` on one path and
+    `x = B()` on another gives one name two frame layouts, and settling on
+    either computes a slot index that is wrong on the other path. See
+    `model.struct_frame_slot_candidates` for the two-struct counterexample and
+    `model` for why the answer is agree-or-refuse."""
+    structs = list(structs_by_name.values())
+    framed = M.framed_struct_names(structs)
+    if not framed:
+        return
+    owners = M.method_owner_names(structs)
+    # {BARE method name: [struct, …]}, which is the other direction and is not
+    # the same table: `owners` is keyed by the lifted `<Struct>_<method>` a
+    # rewritten call spells, and a MemberExpr's `.member` is the bare name.  A
+    # name two structs declare is left with both, so a caller can tell "one
+    # owner" from "ambiguous" rather than seeing whichever came last.
+    by_method = {}
+    for st in structs:
+        for m in M.struct_methods(st):
+            by_method.setdefault(m.name, []).append(st)
+    param0 = {}
+    for fn in functions:
+        params = list(getattr(fn, "params", None) or [])
+        if params and isinstance(params[0], (tuple, list)) and params[0] \
+                and isinstance(params[0][0], str):
+            param0[fn.name] = params[0][0]
+    # `holders[fn]` is the set of names in `fn` holding a frame address, and
+    # `hstruct[fn][name]` is the SET of structs it might be — carried through
+    # the fixpoint rather than re-derived afterwards, because a holder that
+    # arrived as a callee's first parameter has no binding left to re-derive it
+    # from. A candidate set that is EMPTY means the name was bound from a
+    # constructor this path does not frame, so it holds a plain word and its
+    # `.<field>` accesses are not frame accesses at all.
+    holders = {fn.name: set() for fn in functions}
+    hstruct = {fn.name: {} for fn in functions}
+    for fn in functions:
+        owner = owners.get(fn.name)
+        if owner is not None and owner.name in framed:
+            for recv in M.struct_receivers(owner):
+                holders[fn.name].add(recv)
+                hstruct[fn.name][recv] = [owner]
+        for name, sts in _constructor_bindings(fn, framed).items():
+            holders[fn.name].add(name)
+            hstruct[fn.name].setdefault(name, []).extend(sts)
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            hs = holders[fn.name]
+            for node in M.iter_nodes(fn.body):
+                target = value = None
+                if isinstance(node, F.VarDecl):
+                    target, value = node.name, node.value
+                elif isinstance(node, F.AssignStmt) \
+                        and isinstance(node.target, F.IdentExpr):
+                    target, value = node.target.name, node.value
+                if target and isinstance(value, F.IdentExpr) \
+                        and value.name in hs and target not in hs:
+                    # a copy: the same frame under a second name
+                    hs.add(target)
+                    hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
+                    changed = True
+                if isinstance(node, F.CallExpr) and node.args \
+                        and isinstance(node.func, F.IdentExpr) \
+                        and node.func.name in param0:
+                    r = _root_ident(node.args[0])
+                    if r and r[0] in hs and r[1] == 0:
+                        callee = param0[node.func.name]
+                        if callee not in holders.get(node.func.name, ()):
+                            holders[node.func.name].add(callee)
+                            hstruct[node.func.name][callee] = \
+                                list(hstruct[fn.name][r[0]])
+                            changed = True
+    for fn in functions:
+        hs = holders[fn.name]
+        if not hs:
+            continue
+        by_name = hstruct[fn.name]
+        call_recv = _call_receivers(fn)
+        slots = {}
+        for node in M.iter_nodes(fn.body):
+            if not isinstance(node, F.MemberExpr):
+                continue
+            r = _root_ident(node)
+            if r is None or r[0] not in hs:
+                continue
+            base, depth = r
+            chain = _member_chain(node)
+            is_call_recv = id(node) in call_recv
+            if is_call_recv:
+                # A METHOD CALL whose receiver is (or starts at) a frame
+                # address. The callee is handed ONE WORD — a load from
+                # `[base, 8k]` for a depth-2 chain, the address itself for a
+                # depth-1 one — and what that word has to be is a question
+                # about the METHOD, not about the frame layout. So the two
+                # cases where the method's own declaration settles it are
+                # decided here, and everything else is handed on to
+                # `model.value_method_refusal`, which is the diagnostic that
+                # describes it. Deciding them here is what keeps a frame
+                # diagnostic from being printed for a call that never had a
+                # layout question.
+                # `owners` is keyed by the LIFTED name `<Struct>_<method>`, and
+                # this is the BARE name the source spells, so the lookup is
+                # `by_method`.  A name two structs declare is genuinely
+                # ambiguous, and `_rewrite_method_calls` already refused to
+                # rewrite it, so there is nothing to say about it here that it
+                # has not said — hence the `== 1` and not a pick.
+                declared = by_method.get(node.member) or ()
+                if len(declared) == 1:
+                    ost = declared[0]
+                    if depth > 1 and M.struct_is_framed(ost):
+                        raise CodegenError(
+                            f"{chain}() hands the word in the slot "
+                            f"{base}.{node.member} to "
+                            f"{ost.name}.{node.member}(), whose receiver is the "
+                            f"ADDRESS of a frame of 8-byte slots — so the slot "
+                            f"would have to hold a frame address. Nothing here "
+                            f"can say it does: that frame belongs to whichever "
+                            f"function built the object, and this path cannot "
+                            f"establish those bytes are still that object's. "
+                            f"Assign the field to a name and call the method on "
+                            f"the name instead, which is the same program with a "
+                            f"lifetime this analysis can see")
+                    if depth == 1 and ost.name not in {
+                            s.name for s in (by_name.get(base) or [])}:
+                        raise CodegenError(
+                            f"{chain}() is a call to {ost.name}.{node.member}"
+                            f"(), but the receiver is a "
+                            f"{', '.join(s.name for s in by_name.get(base) or [])}"
+                            f" frame: a method is rewritten to take its OWN "
+                            f"struct's frame, and passing a different struct's "
+                            f"address has the callee read one object's fields "
+                            f"out of another's storage. Dispatch here is by "
+                            f"method name alone — `recv.m(x)` carries no type — "
+                            f"so the two cannot be told apart except by "
+                            f"refusing")
+                continue
+            if depth > 1:
+                raise CodegenError(
+                    f"{chain} reads a field of a field through the receiver "
+                    f"{base}: a frame slot holds one 64-bit word, and the word "
+                    f"in the slot {base}.{node.member} is a value, not a struct, "
+                    f"so there is no second layout to read through. Two things "
+                    f"would make it representable and neither is a change to "
+                    f"this function: an ANNOTATION on the field saying what it "
+                    f"holds (a struct declared here would then be a nested "
+                    f"frame, a pointer a load at a computed offset), or a "
+                    f"builtin method on the value — which is "
+                    f"{node.member!r}() as a call, not a field read"
+                )
+            cands = by_name.get(base) or []
+            if not cands:
+                # bound from a constructor that is not framed: a plain word.
+                # Not a frame access, so not this pass's business.
+                continue
+            slot, (disagree, rows) = M.struct_frame_slot_candidates(
+                cands, node.member)
+            if disagree:
+                raise CodegenError(
+                    f"{base}.{node.member} cannot be placed: this name holds a "
+                    f"frame address in more than one shape, and the shapes do "
+                    f"not agree on where {node.member!r} lives — "
+                    + "; ".join(
+                        f"{sn} puts it at slot {sl}" if sl is not None
+                        else f"{sn} has no such field" for sn, sl in rows)
+                    + ". Which one applies depends on the path taken, and this "
+                      "analysis has none, so a slot index computed from either "
+                      "would read the wrong word on the other: the program "
+                      "would build, run, and return a number the source never "
+                      "wrote"
+                )
+            if slot is None:
+                raise CodegenError(
+                    f"{base}.{node.member} is a member access on a "
+                    f"{cands[0].name} receiver, and {node.member!r} is not one "
+                    f"of its {M.struct_field_summary(cands[0])}: this path has "
+                    f"no way to know which word that is, and reading the wrong "
+                    f"one is a wrong answer rather than a failure")
+            slots[f"{base}.{node.member}"] = slot
+        _check_frame_escapes(fn, hs, by_name, param0)
+        _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
+        fn._frame_holders = hs
+        fn._frame_slots = slots
+
+
+def _constructor_bindings(fn, framed) -> dict:
+    """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
+
+    A LIST per name, and that is the fix for a miscompile rather than a
+    refinement: `x = A()` on one path and `x = B()` on another is one name with
+    two frame layouts, and a dict that kept the last binding computed a slot
+    index from that one alone — so on the `A` path `x.v` read `A`'s idea of
+    where `v` is, which is generally not where `A` puts it. Every candidate is
+    kept and `model.struct_frame_slot_candidates` decides whether they agree.
+
+    The empty list is meaningful and not an oversight: a name bound from a
+    constructor this path does NOT frame holds a plain word, and remembering
+    that is what stops a later `x.f` from being read as a frame slot."""
+    out = {}
+    for node in M.iter_nodes(fn.body):
+        target = value = None
+        if isinstance(node, F.VarDecl):
+            target, value = node.name, node.value
+        elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                          F.IdentExpr):
+            target, value = node.target.name, node.value
+        if not target or not isinstance(value, F.CallExpr):
+            continue
+        if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
+            # De-duplicated, order kept: `x = A()` twice on two paths is ONE
+            # candidate, and a refusal that printed "a A, A receiver" because it
+            # counted a binding twice would be reporting the walk rather than
+            # the program.
+            got = out.setdefault(target, [])
+            st = framed[value.func.name]
+            if st not in got:
+                got.append(st)
+    return out
+
+
+def _check_method_receiver_types(fn, holders, by_name, owners,
+                                structs_by_name) -> None:
+    """Refuse a method of one struct called on another struct's receiver.
+
+    The hole is pre-existing and it is in the receiver, so it belongs to this
+    pass rather than to the call rewriting that created it.  Method dispatch
+    here is by NAME: `_rewrite_method_calls` turns `recv.m(x)` into
+    `S_m(recv, x)` from the method name alone, because `recv.m(x)` carries no
+    type.  That is fine while the receiver's type is not being used for
+    anything, and it stops being fine the moment the receiver IS a frame: the
+    callee writes `self.<field>` at `base + 8k` for ITS OWN struct's layout,
+    so handing it a different struct's address has it write one object's field
+    into another object's storage.
+
+    Measured on a two-struct program, and it was a wrong answer rather than a
+    crash:
+
+        struct Helper:  a, b     |  fn go(self, v): self.a = v; return self.a
+        struct Owner:   h, t     |  fn run(self):   return self.go(5)
+        o.run(); o.h   ->  5, 5
+
+    `self.a = v` inside `Helper_go` writes slot 0 of the frame it was handed,
+    which is `Owner`'s `h`.  Python leaves `h` alone, so the program computes
+    something the source never wrote — and worse, it does so silently, because
+    the two structs' first fields are both integers and the write lands
+    somewhere legal.
+
+    The refusal is possible here and not at the rewrite because the holder set
+    is only known once the fixpoint has run, which is after the rewrite.  So
+    the check reads the REWRITTEN call: a `S_m` whose first argument is a
+    holder of a struct that is not `S`.
+    """
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr) or not node.args:
+            continue
+        if not isinstance(node.func, F.IdentExpr):
+            continue
+        # `owners` is keyed by the LIFTED name, which is what a rewritten call
+        # spells, so this is the call the rewriting produced and not a guess.
+        st = owners.get(node.func.name)
+        if st is None or st.name not in structs_by_name:
+            continue
+        owner = st.name
+        prefix = owner + "_"
+        named = (owner, node.func.name[len(prefix):]
+                 if node.func.name.startswith(prefix) else node.func.name)
+        recv = node.args[0]
+        if not isinstance(recv, F.IdentExpr) or recv.name not in holders:
+            continue
+        cands = [st.name for st in (by_name.get(recv.name) or [])]
+        if not cands or owner in cands:
+            continue
+        raise CodegenError(
+            f"{recv.name}.{named[1]}() is dispatched to {owner}.{named[1]}() by "
+            f"method NAME, and the receiver is a "
+            f"{', '.join(cands)} frame: {owner}.{named[1]}() writes its own "
+            f"struct's fields at `base + 8k` for {owner}'s layout, so handing "
+            f"it a {', '.join(cands)} address stores one struct's field in "
+            f"another struct's storage. The program still runs and still "
+            f"returns a number, which is why this cannot be left to fail "
+            f"loudly later. `recv.m(x)` carries no type on this path, so the "
+            f"two cannot be told apart except by refusing — give the method a "
+            f"name of its own, or call it on a value of its own struct"
+        )
+
+
+def _check_frame_escapes(fn, holders, by_name, param0) -> None:
+    """Refuse every construct a frame ADDRESS may not take part in.
+
+    A frame belongs to the function that created it and is reclaimed when that
+    function returns, so a holder that outlives its creator — returned, put in
+    a container, stored through a subscript, parked in another frame's field, or
+    handed to something that wants a value — would be dereferenced after its
+    bytes had been reused. The program would build, run, and produce a number
+    the source never wrote, which is the outcome this backend exists to make
+    impossible, so each of these is a refusal that names the construct.
+
+    The one that was MISSING here, and the reason this function grew a case
+    rather than a reason: parking a frame address in another object's field.
+    `interpreter.scope = func_scope` looks like an ordinary assignment, and
+    `func_scope`'s frame lives in the frame of whatever function built it — so
+    the slot can outlive those bytes by as much as the object's own lifetime.
+    Every other channel out of a function is a return or a container and both
+    were already refused; this one was a hole, and it is the same hole one
+    level down, which is the direction this whole design leaks in."""
+    known = set(param0)
+    for node in M.iter_nodes(fn.body):
+        if isinstance(node, F.ReturnStmt) and node.value is not None:
+            _refuse_holder_use(fn, node.value, holders, by_name,
+                               "is returned from the function that created it")
+        elif isinstance(node, (F.ListExpr, F.TupleExpr, F.DictExpr)):
+            for el in _container_values(node):
+                _refuse_holder_use(fn, el, holders, by_name,
+                                   "is stored in a container, which has no "
+                                   "layout for a frame address")
+        elif isinstance(node, F.AssignStmt) \
+                and isinstance(node.target, F.MemberExpr) \
+                and isinstance(node.value, F.IdentExpr):
+            _refuse_holder_use(
+                fn, node.value, holders, by_name,
+                f"is stored in the field {_member_chain(node.target)!r}, so it "
+                f"outlives the frame it names by however long that object "
+                f"lives: the slot belongs to the function that created THAT "
+                f"frame, and nothing here can say the two lifetimes agree")
+        elif isinstance(node, F.CallExpr):
+            args = list(node.args or []) + [v for _k, v in (node.kwargs or [])]
+            callee = node.func.name if isinstance(node.func, F.IdentExpr) else None
+            for i, a in enumerate(args):
+                if i or callee is None:
+                    _refuse_holder_use(fn, a, holders, by_name,
+                                       "is passed to a call in a position "
+                                       "whose meaning this path cannot see")
+                elif callee not in known:
+                    names = [st.name for st in (by_name.get(a.name) or [])] \
+                        if isinstance(a, F.IdentExpr) else []
+                    reason = M.frame_receiver_escape_refusal(callee, names)
+                    if reason is not None:
+                        _refuse_holder_use(fn, a, holders, by_name, "", reason)
+
+
+def _container_values(node) -> list:
+    """The values a container literal holds, in source order.
+
+    A dict's are its VALUES, not its keys: `{p: 1}` parks the frame address just
+    as `[p]` does, and reading the keys instead would miss exactly the case
+    this exists to catch."""
+    if isinstance(node, F.DictExpr):
+        return [v for _k, v in (node.pairs or [])]
+    return list(getattr(node, "elements", None) or [])
+
+
+def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
+    """Raise if `node` IS a frame address rather than something read out of one.
+
+    Deliberately only a bare name. `h.x` is a 64-bit FIELD, not an address, and
+    passing it onward is as ordinary as passing any other word; what has no
+    representation here is the address itself, so a chain with a `.member` in
+    it is not this function's business.
+
+    `reason` is the whole message when the caller has one — which is how the
+    hand-off cases get to say what is actually wrong with the hand-off instead
+    of restating the rule they are an instance of. See
+    `model.frame_receiver_escape_refusal`, which is where the difference
+    between "the callee wants a value" and "the callee is not in this image"
+    is drawn; a single message covering both named a cause that was not
+    operating for the larger of the two groups."""
+    if not isinstance(node, F.IdentExpr) or node.name not in holders:
+        return
+    if reason is not None:
+        raise CodegenError(reason)
+    cands = by_name.get(node.name) or []
+    name = ", ".join(st.name for st in cands) if cands else node.name
+    raise CodegenError(
+        f"a {name} receiver {why} on this path: the receiver of a "
+        f"multi-field struct is the ADDRESS of a frame of 8-byte slots that "
+        f"belongs to the function which created it, so it can only be read, "
+        f"written, copied, or passed as a method's receiver. "
+        f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
+        f"what is still open about it")
+
+
 def _one_word_field_map(fn, structs_by_name: dict) -> dict:
     """{local name: its field name} for locals holding a one-word struct.
 
@@ -950,7 +1463,7 @@ def _one_word_field_map(fn, structs_by_name: dict) -> dict:
     struct's constructor holds that struct's only field, and nothing else on
     this path can produce such a value."""
     mapping = {}
-    for node in _iter_nodes(fn.body):
+    for node in M.iter_nodes(fn.body):
         target = value = None
         if isinstance(node, F.VarDecl):
             target, value = node.name, node.value
@@ -991,19 +1504,6 @@ def _sole_field_name(st) -> str:
     return name
 
 
-def _iter_nodes(node):
-    """Every dataclass node in a statement tree, parents before children."""
-    if isinstance(node, list):
-        for x in node:
-            yield from _iter_nodes(x)
-        return
-    if not hasattr(node, "__dataclass_fields__"):
-        return
-    yield node
-    for name in node.__dataclass_fields__:
-        yield from _iter_nodes(getattr(node, name))
-
-
 def _rewrite_self_fields(node, mapping: dict):
     """`x.f` -> `x` where `mapping[x] == f`, returning any replacement node.
 
@@ -1040,7 +1540,7 @@ def _constant_read_sites(body, structs_by_name: dict) -> dict:
     model counts any name a method reaches that way as a FIELD, precisely so
     this decision never has to be made."""
     aliases = {}
-    for node in _iter_nodes(body):
+    for node in M.iter_nodes(body):
         target = value = None
         if isinstance(node, F.VarDecl):
             target, value = node.name, node.value
@@ -1165,7 +1665,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     structs_by_name = {st.name: st for st in structs}
     method_owners = M.method_owner_names(structs)
     functions = functions + _struct_methods(stmts)
-    wide = {st.name: st for st in structs if not M.struct_fits_one_word(st)}
+    # A struct of more than one field is not refused here when its receiver is
+    # by reference (formal.model.struct_is_framed): the receiver word is a
+    # frame address, which is one word, so the method needs no special casing
+    # and the call needs no change. What is still refused is a struct that
+    # fits neither representation.
+    wide = {st.name: st for st in structs
+            if not M.struct_fits_one_word(st) and not M.struct_is_framed(st)}
     # Re-attach the census to the structs THIS FILE declares, so that a
     # consumer of the same file's declarations cannot narrow one of them behind
     # this build's back: the two would then measure the same class differently
@@ -1202,6 +1708,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
     functions = _lift_lambdas(functions)
+    # LAST, on the FINAL function list: which local names hold a frame
+    # address is a property of the code that survives every rewrite above, and
+    # a lifted lambda or a flattened closure is a function with its own locals
+    # and its own receivers.
+    _frame_receivers(functions, structs_by_name)
     return functions, structs
 
 
@@ -1235,7 +1746,18 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None) -> None:
     codegen means the ordinary call path handles it: the method is already
     compiled as a function taking `self` first, so the receiver simply
     becomes its first argument and every existing rule about arguments,
-    registers and tail calls applies unchanged."""
+    registers and tail calls applies unchanged.
+
+    Which is also why the by-reference receiver needed NO change here. The
+    receiver this already passes is the word the local holds, and for a
+    multi-field struct that word is the address of its frame — so the receiver
+    arrives as the address it already was, and the one parameter `MojoFunc`
+    has is still enough. The whole ABI question
+    `bugs/FORMAL_wide_receiver_by_reference.md` asks is answered by that
+    accident of the design, and this function is where it shows up: the
+    receiver-width refusal below fires only for a struct that fits NEITHER
+    representation, which with the switch on is one whose fields cannot be
+    given a real slot at all."""
     if isinstance(node, list):
         for x in node:
             _rewrite_method_calls(x, owners, wide)
@@ -1324,9 +1846,17 @@ def load_dylib_manifests(dylib_paths: list) -> list:
                 f"cannot read the export manifest for {dylib} ({mpath}): {e}. "
                 f"It is written next to the dylib by `mojo dylib --formal`.")
         exports = payload.get("exports") or []
-        if not exports:
+        if not exports and payload.get("kind") != "namespace":
             raise FormalBuildError(
                 f"{dylib}'s manifest lists no exports")
+        # A NAMESPACE library (a package `__init__` that only re-exports —
+        # `_namespace_library`) legitimately has none: its definitions are in
+        # the submodules whose own libraries are also on this link line, and
+        # its export table is empty on purpose, so that no consumer resolves a
+        # name to an address inside an image that has no code. It contributes
+        # an empty map and its load commands, which is all it has to
+        # contribute. Every other library still has to offer something, so
+        # the check above is unchanged for them.
         # Two libraries may export the same callee name; first one listed
         # wins, matching the dylib ordinal order the image will record.
         amap = {}
@@ -1414,6 +1944,153 @@ def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
             if symbol:
                 exported.setdefault(entry["name"], (prefix, entry, symbol))
     return exported
+
+
+def _declared_api_shape(text: str) -> dict:
+    """What this source DECLARES, ignoring doc/ABI.md's rules — the input to
+    `no_public_api_reason`.
+
+    Four counts and the names behind them, because the question "why does this
+    module export nothing" has four different true answers and picking the
+    wrong one is what made the old single-sentence refusal useless:
+
+      funcs / generic_funcs / private_funcs   top-level FunctionDefs
+      structs / generic_structs / private_structs   top-level StructDefs
+
+    Generics are detected from the source text with the SAME regex
+    `reflect.collect_exports_src` uses (`(?:fn|def)\\s+(\\w+)\\s*\\[`), because
+    the parser drops the bracket list and so cannot tell a template from a
+    concrete definition. It has to be the same test: a name counted as generic
+    here and concrete there would produce a message that contradicts the rule
+    that produced the refusal.
+    """
+    generic_names = set(re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', text))
+    generic_names |= set(re.findall(r'\bstruct\s+(\w+)\s*\[', text))
+    shape = {"funcs": [], "structs": [], "generic_funcs": [],
+             "generic_structs": [], "private_funcs": [],
+             "private_generic_funcs": [], "private_structs": [],
+             "private_generic_structs": []}
+    try:
+        stmts = F.Parser(F.py_tokenize(text)).parse_module()
+    except Exception:
+        return shape
+    for st in stmts:
+        if isinstance(st, F.FunctionDef):
+            key = "generic_funcs" if st.name in generic_names else "funcs"
+            (shape[key] if not st.name.startswith("_")
+             else shape["private_" + key]).append(st.name)
+        elif isinstance(st, F.StructDef):
+            key = "generic_structs" if st.name in generic_names else "structs"
+            (shape[key] if not st.name.startswith("_")
+             else shape["private_" + key]).append(st.name)
+    return shape
+
+
+def no_public_api_reason(source_paths: list) -> str:
+    """The refusal text for a module that exports nothing, naming WHY.
+
+    Every one of these files is a real module that a real file imports, so the
+    refusal is load-bearing: it is what stops a program from being handed a
+    link line with nothing on it. What it must therefore also do is SAY which
+    of the four ways a module can have no boundary symbol it has hit, because
+    they need different work and the reader cannot tell them apart from the
+    old wording:
+
+      * it declares nothing at all (module-level `comptime` constants only —
+        `std/sys/_io.mojo`'s `stdin`/`stdout`/`stderr`): there is no
+        function and no type to cross, and there never will be;
+      * every public function is a GENERIC template (`std/stat/stat.mojo`'s
+        seven `S_ISxxx[intable: Intable]`): doc/ABI.md is explicit that a
+        generic is not a single boundary symbol, each INSTANTIATION is, and
+        the CAS keying that needs is Stage 5. Until monomorphization exists
+        on this path there is no name an importer could bind;
+      * only struct TYPES, no free functions: the boundary symbol for a type
+        is its layout in the reflection table (which this backend does not
+        emit), so a type alone gives a dylib nothing to export;
+      * every declaration is private (`_`-prefixed), which doc/ABI.md's
+        public-symbol rule excludes on purpose.
+
+    The generic case is the one worth being careful about in the OTHER
+    direction: exporting a template under its base name would be easy and
+    would make these files build, and it would be wrong. `S_ISREG` as one
+    symbol is one function; called at `Int` and at some other `Intable` it is
+    two, and only one address can be in the trie. Publishing a link line that
+    can silently bind the wrong body is the failure this whole mechanism
+    exists to prevent, so the honest answer is the refusal until the
+    instantiation keying lands.
+    """
+    names = [os.path.basename(p) for p in source_paths]
+    head = f"formal dylib has no public functions: {', '.join(names)}"
+    shapes = []
+    for p in source_paths:
+        try:
+            with open(p) as f:
+                shapes.append((os.path.basename(p), _declared_api_shape(f.read())))
+        except OSError:
+            shapes.append((os.path.basename(p), _declared_api_shape("")))
+    concrete_funcs = [n for _f, s in shapes for n in s["funcs"]]
+    concrete_structs = [n for _f, s in shapes for n in s["structs"]]
+    gen_funcs = [n for _f, s in shapes for n in s["generic_funcs"]]
+    gen_structs = [n for _f, s in shapes for n in s["generic_structs"]]
+    private = [n for _f, s in shapes
+               for k in ("private_funcs", "private_generic_funcs",
+                         "private_structs", "private_generic_structs")
+               for n in s[k]]
+    if not concrete_funcs and not concrete_structs and not gen_funcs \
+            and not gen_structs:
+        if private:
+            listed = ", ".join(sorted(set(private))[:6])
+            return (f"{head} exports nothing under doc/ABI.md's rules: every "
+                    f"declaration in it is private ({listed}), and a private "
+                    f"name is excluded from the boundary on purpose — the "
+                    f"leading underscore is the source saying this is not for "
+                    f"another module.")
+        return (f"{head} exports nothing under doc/ABI.md's rules because it "
+                f"declares no function and no type at all — only module-level "
+                f"constants, which are inlined at their use site and cross no "
+                f"boundary. There is nothing an importer could bind, and "
+                f"nothing this backend could add.")
+    if not concrete_funcs and gen_funcs and private:
+        listed = ", ".join(sorted(set(gen_funcs))[:6])
+        return (f"{head} exports nothing under doc/ABI.md's rules: the only "
+                f"function it declares is the generic template {listed}, which "
+                f"is both private and parametric. doc/ABI.md is explicit that a "
+                f"generic is not a single boundary symbol — each "
+                f"INSTANTIATION is, keyed in the CAS by its type arguments — and "
+                f"that is Stage 5, which this path does not implement. There is "
+                f"no name here an importer could bind, and exporting the "
+                f"template under its base name would be wrong rather than "
+                f"conservative: one trie entry cannot be two instantiations, so "
+                f"a call with different type arguments would silently bind the "
+                f"first one's body.")
+    if not concrete_funcs and gen_funcs:
+        listed = ", ".join(sorted(set(gen_funcs))[:6])
+        return (f"{head} exports nothing under doc/ABI.md's rules: every "
+                f"public function in it is a GENERIC template ({listed}"
+                f"{' …' if len(set(gen_funcs)) > 6 else ''}), and doc/ABI.md "
+                f"is explicit that a generic is not a single boundary symbol "
+                f"— each INSTANTIATION is, keyed in the CAS by its type "
+                f"arguments. That monomorphization is Stage 5 and this path "
+                f"does not do it, so there is no name an importer could bind. "
+                f"Exporting the template under its base name instead would be "
+                f"wrong, not conservative: one trie entry cannot be two "
+                f"instantiations, so a call with different type arguments "
+                f"would silently bind the first one's body.")
+    if not concrete_funcs and not gen_funcs and not concrete_structs \
+            and gen_structs:
+        listed = ", ".join(sorted(set(gen_structs))[:6])
+        return (f"{head} exports nothing under doc/ABI.md's rules: it "
+                f"declares only the generic struct template(s) {listed}, and a "
+                f"parametric type has no single boundary layout either.")
+    if not concrete_funcs and concrete_structs:
+        listed = ", ".join(sorted(set(concrete_structs))[:6])
+        return (f"{head} exports nothing under doc/ABI.md's rules: it has no "
+                f"free function, only the struct type(s) {listed}. A type "
+                f"crosses the boundary as its layout in the reflection table, "
+                f"which this backend does not emit.")
+    return (f"{head} exports nothing under doc/ABI.md's rules: every "
+            f"declaration in it is private (a leading `_`), and a private "
+            f"name is excluded from the boundary on purpose.")
 
 
 def _method_exports(source_paths: list, structs_by_file: dict,
@@ -1525,12 +2202,150 @@ def _record_link_deps(manifest_path: str, linked: list) -> None:
         f.write("\n")
 
 
+def _namespace_library(output: str, install_name: str, arch: str,
+                       reexports: dict, dylib_syms: dict, dep_install: list,
+                       linked: list) -> dict:
+    """A dylib for a module whose whole API is RE-EXPORTED — a package
+    `__init__.mojo`.
+
+    This is the shape that was being refused as "a struct-only module has no
+    free-function API", which it is not: `pkg/__init__.mojo` containing
+    `from .sub import addone` has a real, public, importable API, and
+    `addone` really exists — in `pkg/sub.mojo`, whose dylib this package's
+    link line already carries. Refusing it took out every file that imports the
+    PACKAGE, for a module that had nothing wrong with it, and it did so on
+    every stdlib package: `std/stat`, `std/atomic`, `std/ffi`, `std/compile`,
+    `std/sys`, `std/reflection`, `std/gpu/sync` and the rest are all
+    re-export-only `__init__` files.
+
+    What it emits is a real MH_DYLIB with NO code and an EMPTY export trie,
+    and that emptiness is the whole design, not a shortcut. The re-exported
+    names are NOT copied into this library's export table. They already
+    resolve: the consumer's symbol map is assembled from the manifests of
+    every library on its link line, and `pkg_sub.dylib`'s manifest maps
+    `addone` to the symbol `pkg_sub.dylib` really defines. Re-listing that
+    symbol here would be actively harmful — the export trie is an address
+    lookup, so a trie claiming a symbol this image does not contain sends
+    every consumer of the package to an address inside an empty file, and
+    the program dies in dyld (or, worse, binds something). The one outcome
+    worse than refusing.
+
+    So the manifest records the re-exports under `reexports` (for a reader and
+    for `depends_on`) and leaves `exports` empty, and `load_dylib_manifests`
+    accepts an empty `exports` list ONLY for a manifest that says
+    `kind: "namespace"` — the check it otherwise makes, that a library with
+    nothing to offer is a mistake worth refusing, stays in force for every
+    other library.
+
+    A re-exported FUNCTION that no dependency actually provides is still
+    refused, naming the name. Otherwise the package would build, the
+    consumer's call would stay unbound, and the failure would move from this
+    build to dyld at launch — which is the exact regression the import
+    machinery exists to remove.
+
+    A re-exported TYPE is not in that set, and must not be: a type has no
+    function symbol to bind. It crosses as a layout in the reflection table
+    and reaches the importer as a StructDef, which `imported_struct_defs`
+    collects by following the same re-export edge. Treating "no symbol for it"
+    as a missing definition would refuse every package that re-exports a type,
+    which is most of them, and would be refusing a module whose API is
+    complete.
+    """
+    functions = {n: v for n, v in reexports.items() if v[1] != "type"}
+    missing = sorted(n for n in functions if n not in dylib_syms)
+    if missing:
+        listed = ", ".join(missing[:8])
+        mods = ", ".join(sorted({functions[n][0] for n in missing})[:4])
+        raise FormalBuildError(
+            f"{os.path.basename(install_name)} re-exports {listed} from {mods}, "
+            f"but no module it imports exports "
+            f"{'that name' if len(missing) == 1 else 'those names'}, so a "
+            f"caller of {'it' if len(missing) == 1 else 'them'} would have "
+            f"nothing to bind. This is a real gap in that module's public API "
+            f"— a private, generic or overloaded definition, all of which "
+            f"doc/ABI.md keeps out of the boundary — and not something this "
+            f"backend can paper over: emitting a link line with no definition "
+            f"behind it turns a build error into a wrong answer at run time.")
+    binary = build_macho_dylib(b"", TEXT_BASE + dylib_code_offset(
+        install_name, False, dep_install), [], install_name, arch=arch,
+        deps=dep_install or None)
+    with open(output, "wb") as f:
+        f.write(binary)
+    os.chmod(output, 0o755)
+    _ad_hoc_sign(output)
+    manifest_path = write_dylib_manifest(output, install_name, [])
+    _record_namespace(manifest_path, reexports, dylib_syms)
+    if linked:
+        _record_link_deps(manifest_path, linked)
+    return {
+        "manifest_path": manifest_path,
+        "path": output,
+        "code": b"",
+        "binary": binary,
+        "info": {"labels": {}},
+        "exports": [],
+        "reexports": reexports,
+        "backend": f"{arch}/macho-dylib-namespace",
+    }
+
+
+def _record_namespace(manifest_path: str, reexports: dict,
+                      dylib_syms: dict) -> None:
+    """Mark a manifest as a NAMESPACE library and record what it forwards.
+
+    The `kind` field is what makes an empty `exports` list legal to read back
+    (`load_dylib_manifests`): it is the difference between "this library
+    defines nothing, and that is its purpose" and "this library's manifest is
+    empty, which means the build went wrong". Each re-export records the
+    SYMBOL it resolves to, taken verbatim from the defining module's own
+    manifest, so a reader can check the forwarding without re-deriving it.
+    """
+    import json
+    try:
+        with open(manifest_path) as f:
+            payload = json.load(f)
+    except OSError:
+        return
+    payload["kind"] = "namespace"
+    payload["reexports"] = {
+        n: {"module": v[0], "kind": v[1], "symbol": dylib_syms.get(n)}
+        for n, v in sorted(reexports.items())}
+    with open(manifest_path, "w") as f:
+        json.dump(payload, f, indent=1, sort_keys=True)
+        f.write("\n")
+
+
 def compile_formal_dylib(source_paths: list, output: str = None,
                          test_input: int = 10, prove: bool = True,
                          check: bool = True, module_prefixes: dict = None,
-                         link_dylibs: list = None) -> dict:
+                         link_dylibs: list = None, arch: str = "arm64",
+                         fmt: str = "macho", reexports: dict = None) -> dict:
+    """Compile `source_paths` into one dylib for `arch`.
+
+    `arch`/`fmt` select the CODEGEN and the container, exactly as
+    `compile_formal` does for an executable (`_make_codegen` /
+    `arch_spec`). This used to be hardwired to arm64, which meant a module
+    dylib was ALWAYS an arm64 image no matter which architecture the program
+    linking it was built for: an x86-64 program got an arm64 `.dylib` on its
+    link line, built and linked cleanly, and then died in dyld with "mach-o
+    file, but is an incompatible architecture" before `main` ever ran. The
+    dylib is part of the target, not part of the host, so the architecture
+    the CALLER is for is the architecture the library has to be.
+
+    `reexports` ({name: module}) is the set of names this module binds with
+    `from .other import name` and does not itself define. It changes the
+    refusal below and nothing else: a package `__init__` whose whole body is
+    re-exports produces a NAMESPACE library (see `_namespace_library`) instead
+    of an error, because its API is real and its definitions live in the
+    submodules already on its link line.
+    """
     if not source_paths:
         raise FormalBuildError("at least one source file is required")
+    if not fmt_wants_macho(arch) and fmt != "macho":
+        raise FormalBuildError(
+            f"a formal dylib is a Mach-O container; {arch!r} defaults to "
+            f"{default_format(arch)!r}, which has no dylib form")
+    reexports = dict(reexports or {})
 
     # The libraries THIS library links. Their export spellings decide how a
     # cross-module call is named — a call to a sibling's `base` has to become a
@@ -1587,20 +2402,35 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # image the emitter builds must all be derived for the SAME decision. The
     # first pass discovers whether there are externs at all; the second emits
     # at the offset that implies, exactly as the executable path does.
-    # Refuse before emitting, and for the true reason. A module can compile no
-    # code and still be useless as a library: binary_heap and a third of std/
-    # are struct-only, and doc/ABI.md's export rules give them no public
-    # symbol, so no importer could ever bind them. Saying so is the difference
-    # between "this backend cannot do structs yet" and a mystery.
-    if not _export_entries(source_paths, module_prefixes):
-        names = [os.path.basename(p) for p in source_paths]
-        raise FormalBuildError(
-            f"formal dylib has no public functions: {', '.join(names)} "
-            f"exports nothing under doc/ABI.md's rules (a struct-only module "
-            f"has no free-function API, and this backend compiles no struct "
-            f"methods)")
+    #
+    # A module can be useful source and still be useless as a LIBRARY, and
+    # then no importer of it can link. That is a real property of the module
+    # and it has to be said, so the refusal below names WHICH of the ways it
+    # happens — see `no_public_api_reason`. The one-sentence version this
+    # replaces ("a struct-only module has no free-function API") was false for
+    # most of the files it was reported against, and a message that is false
+    # about the file is worse than no message: it sends the reader looking for
+    # a struct that isn't there.
+    if not _export_entries(source_paths, module_prefixes) \
+            and not reexports:
+        raise FormalBuildError(no_public_api_reason(source_paths))
+    if not _export_entries(source_paths, module_prefixes) and reexports:
+        # A proof is a property of CODE, and this library has none. Saying so
+        # beats quietly returning a result with no `proof_path` in it: a
+        # caller that asked for a checked proof and got a library would
+        # otherwise believe it had one. (The only in-tree caller that passes
+        # `reexports` is the import path, which asks for neither.)
+        if prove:
+            raise FormalBuildError(
+                f"{os.path.basename(source_paths[0])} is a package whose API "
+                f"is entirely re-exported, so it compiles to a library with no "
+                f"code and there is nothing to prove. Its definitions are in "
+                f"{', '.join(sorted({v[0] for v in reexports.values()})[:4])}"
+                f", whose libraries are on this one's link line.")
+        return _namespace_library(output, install_name, arch, reexports,
+                                  dylib_syms, dep_install, linked)
 
-    codegen = ARM64Codegen(test_input=test_input, dylib_syms=dylib_syms)
+    codegen = _make_codegen(arch, fmt, test_input, dylib_syms)
     try:
         code, info = codegen.compile(
             ordered,
@@ -1612,13 +2442,13 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             # The dependency load commands are known BEFORE compiling, so the
             # no-extern offset already accounts for them; only the extern
             # segment and libSystem are discovered by the first pass.
-            codegen = ARM64Codegen(test_input=test_input, dylib_syms=dylib_syms)
+            codegen = _make_codegen(arch, fmt, test_input, dylib_syms)
             code_file = dylib_code_offset(install_name, True, dep_install)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
                                          emit_startup=False)
             external_syms = info.get("external_syms") or []
-            stub_addrs = externer_layout(len(code), external_syms,
+            stub_addrs = externer_layout(len(code), external_syms, arch=arch,
                                         entryoff=code_file)["stub_addrs"]
             codegen.asm.resolve_extern(stub_addrs)
             code = bytes(codegen.asm.sections["text"])
@@ -1667,7 +2497,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         code,
         TEXT_BASE + dylib_code_offset(install_name, bool(external_syms),
                                       dep_install),
-        exports, install_name, external_syms=external_syms,
+        exports, install_name, arch=arch, external_syms=external_syms,
         deps=dep_install, dep_syms=dep_syms)
     with open(output, "wb") as f:
         f.write(binary)
@@ -1684,7 +2514,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         "binary": binary,
         "info": info,
         "exports": exports,
-        "backend": "arm64/macho-dylib",
+        "backend": f"{arch}/macho-dylib",
     }
 
     if prove:

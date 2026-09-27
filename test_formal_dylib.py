@@ -39,6 +39,7 @@ FIRE = os.path.join(HERE, "fire.py")
 MH_MAGIC_64 = 0xFEEDFACF
 MH_DYLIB = 0x6
 CPU_TYPE_ARM64 = 0x0100000C
+CPU_TYPE_X86_64 = 0x01000007
 LC_SEGMENT_64 = 0x19
 LC_ID_DYLIB = 0x0D
 LC_UUID = 0x1B
@@ -198,9 +199,16 @@ def parse_macho(data):
 
 # ── driving the CLI ─────────────────────────────────────────────────────────
 
-def run_fire(args, cwd=None):
+def run_fire(args, cwd=None, env=None):
+    """`fire.py …`, as a CompletedProcess.
+
+    `env` is merged over this process's environment rather than replacing it,
+    so a test can flip one backend switch without having to restate PATH."""
+    child = os.environ.copy()
+    if env:
+        child.update(env)
     return subprocess.run([sys.executable, FIRE] + args, capture_output=True,
-                          text=True, timeout=600, cwd=cwd or HERE)
+                          text=True, timeout=600, cwd=cwd or HERE, env=child)
 
 
 def build_dylib(tmpdir, sources, out_name, extra_args=()):
@@ -476,6 +484,98 @@ def test_private_only_module_rejected(tmpdir, shared):
           f"{(result.stderr or result.stdout).strip()[-200:]}")
 
 
+# The four shapes a module can have no boundary symbol in, and the one fact
+# that tells them apart. A module that is useful source and useless as a
+# LIBRARY takes its importer down with it, so the refusal has to be right
+# about which of the four it hit — and the four need completely different
+# work, so a message that names the wrong one sends the reader after the wrong
+# thing. (`std/sys/_io.mojo`, `std/stat/stat.mojo`,
+# `std/reflection/function.mojo` and `std/utils/_select.mojo` are the real
+# stdlib instances, and they are four different answers.)
+NO_API_SHAPES = [
+    ("constants only, no function and no type",
+     "comptime stdin = 0\ncomptime stdout = 1\n", "no function and no type"),
+    ("every public function is a generic template",
+     "def pick[T: Copyable](a: T, b: T, c: Bool) -> T:\n  return a\n",
+     "GENERIC template"),
+    ("only a generic struct template",
+     "struct Box[T: Copyable]:\n  var v: T\n", "generic struct template"),
+    ("only struct types, no free function",
+     "struct Pair:\n  var a: Int\n  var b: Int\n", "no free function"),
+    ("every declaration is private",
+     "def _helper(n: Int) -> Int:\n  return n\n", "private"),
+]
+
+
+def test_refusal_names_the_real_reason(tmpdir, shared):
+    """Each no-API shape is refused, and the message names THAT shape.
+
+    Before this, all five of these produced the same sentence — "a struct-only
+    module has no free-function API, and this backend compiles no struct
+    methods" — which is false for four of them: a generic-only module is not
+    struct-only, a constants-only module has no struct either, and a
+    constants-only module is not a gap in anything. A refusal that is wrong
+    about the file is worse than a bare error, because it sends the reader
+    looking for a struct that is not there.
+    """
+    for label, body, expected in NO_API_SHAPES:
+        src = os.path.join(tmpdir, "noapi.mojo")
+        with open(src, "w") as f:
+            f.write(body)
+        out = os.path.join(tmpdir, "noapi.dylib")
+        result = run_fire(["dylib", "--formal", "--no-prove", "-o", out, src])
+        text = (result.stderr + result.stdout).strip()
+        check(result.returncode != 0,
+              f"a module with {label} was built as a dylib successfully")
+        check(expected in text,
+              f"a module with {label} was refused without saying so: {text}")
+        check("struct-only module has no free-function API" not in text,
+              f"a module with {label} was refused with the shape-agnostic "
+              f"wording, which is false for it: {text}")
+
+
+def test_dylib_is_built_for_the_requested_arch(tmpdir, shared):
+    """`compile_formal_dylib` honours `arch` for BOTH the code and the header.
+
+    A dylib is a target-specific image, not a host artifact, and this call
+    used to hardwire arm64 for both: `_make_codegen` was bypassed for
+    `ARM64Codegen(...)` and `build_macho_dylib` was given no `arch`, so an
+    x86-64 program got an arm64 library on its link line — one that builds,
+    links, and passes every check the toolchain makes statically, and then
+    dies in dyld with "mach-o file, but is an incompatible architecture"
+    before `main` runs. Asserted here on the Mach-O header's own cputype,
+    read from the file rather than taken from the return value.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import compile_formal_dylib
+    src = os.path.join(tmpdir, "archsrc.mojo")
+    with open(src, "w") as f:
+        f.write("def triple(n):\n  return n * 3\n")
+    seen = {}
+    for arch, cputype in (("arm64", CPU_TYPE_ARM64),
+                           ("x86_64", CPU_TYPE_X86_64)):
+        out = os.path.join(tmpdir, f"arch_{arch}.dylib")
+        compile_formal_dylib([src], output=out, prove=False, check=False,
+                             arch=arch)
+        with open(out, "rb") as f:
+            head = f.read(16)
+        check(struct.unpack_from("<I", head, 0)[0] == MH_MAGIC_64,
+              f"{out} is not a 64-bit Mach-O")
+        check(struct.unpack_from("<I", head, 4)[0] == cputype,
+              f"{out} was built for cputype "
+              f"{struct.unpack_from('<I', head, 4)[0]}, expected {cputype} "
+              f"for arch={arch} — the architecture argument is not reaching "
+              f"the emitter")
+        seen[arch] = out
+    # And the two must be different files with different content: the same
+    # bytes under two names is the overwrite this is guarding against.
+    with open(seen["arm64"], "rb") as f:
+        a = f.read()
+    with open(seen["x86_64"], "rb") as f:
+        b = f.read()
+    check(a != b, "the two architectures produced byte-identical dylibs")
+
+
 def test_executable_links_a_dylib(tmpdir, shared):
     """An executable built with --link-dylib calls into the library and RUNS.
 
@@ -581,6 +681,9 @@ TESTS = [
     ("overloads build and export once", test_overloads_do_not_collide),
     ("same name in two modules", test_same_name_in_two_modules),
     ("module with no public functions rejected", test_private_only_module_rejected),
+    ("the refusal names the real reason", test_refusal_names_the_real_reason),
+    ("a dylib is built for the requested arch",
+     test_dylib_is_built_for_the_requested_arch),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
 ]

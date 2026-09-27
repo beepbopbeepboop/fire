@@ -37,6 +37,7 @@ import json
 import os
 import platform
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -51,7 +52,56 @@ from test_formal_dylib import (TestFailure, check, parse_macho, read_uleb,
                                run_fire)
 
 FIRE = os.path.join(HERE, "fire.py")
-CAS_IMPORTS = os.path.expanduser("~/.gmojo/cas/formal-imports")
+# Module dylibs are written per ARCHITECTURE (formal/build.py's
+# `_resolve_imports`): a dylib is a target-specific image, so an arm64 library
+# and an x86-64 library for the same source are two artifacts, not two
+# versions of one, and a shared directory keyed by module name alone let the
+# second architecture overwrite the first. A test that looks for a built dylib
+# therefore has to ask for the architecture it built.
+#
+# This file also gets a CAS of its OWN, which it must set before `cas` is
+# imported, because `fresh_cas()` below deletes the whole module-dylib
+# directory. Against the shared `~/.gmojo` that is only safe when this file
+# runs alone: under a `-j18` bucket it deletes libraries that a parallel job —
+# test_formal_sweep.py's dyld probe builds and then loads one — is holding a
+# path to, which is how `formal-sweep` failed only at 9 jobs and passed at 2.
+# An isolated home also stops this file reading another tree's dylibs, so a
+# test cannot pass on a library it did not build.
+_CAS_HOME = tempfile.mkdtemp(prefix="formal_imports_cas_")
+os.environ["GMOJO_HOME"] = _CAS_HOME
+CAS_IMPORTS_ROOT = os.path.join(_CAS_HOME, "cas", "formal-imports")
+
+
+def _drop_cas_home():
+    shutil.rmtree(_CAS_HOME, ignore_errors=True)
+
+
+def cas_imports(arch="arm64"):
+    return os.path.join(CAS_IMPORTS_ROOT, arch)
+
+
+def module_dylib(prefix, arch="arm64"):
+    """The built library for `prefix`, found by prefix rather than by name.
+
+    A module library's file name is `<prefix>.<source-digest>.<arch>.dylib`:
+    the digest is there so two builds of the same module name cannot overwrite
+    each other, and the arch is there so the two architectures cannot either.
+    So the name is only stable up to the digest, and every test that wants a
+    library has to look it up. Globbing on `<prefix>.*.<arch>.dylib` still
+    pins the convention that matters — the arch really is in the name, and it
+    really is the last field — while tolerating the digest between.
+    """
+    import glob
+    found = sorted(glob.glob(os.path.join(
+        cas_imports(arch), f"{prefix}.*.{arch}.dylib")))
+    if not found:
+        raise AssertionError(
+            f"no module dylib for {prefix!r} under {cas_imports(arch)}")
+    if len(found) > 1:
+        raise AssertionError(
+            f"{prefix!r} has more than one library, which means two different "
+            f"sources claimed one name: {found}")
+    return found[0]
 
 # A module whose functions are all one int64 in, one int64 out, so every
 # exported function can be called the same way from ctypes.
@@ -125,14 +175,16 @@ def write_tree(root, files):
 def fresh_cas():
     """Module dylibs are cached by content, so a stale one from an earlier
     run could mask a regression; every test starts from an empty cache."""
-    shutil.rmtree(CAS_IMPORTS, ignore_errors=True)
+    shutil.rmtree(CAS_IMPORTS_ROOT, ignore_errors=True)
 
 
-def build(root, name, expect_ok=True):
+def build(root, name, expect_ok=True, arch=None):
     out = os.path.join(root, name)
-    result = run_fire(["build", "--formal", "--no-prove", "-o", out,
-                       os.path.join(root, name.replace(".aout", ".mojo"))],
-                      cwd=root)
+    argv = ["build", "--formal", "--no-prove", "-o", out]
+    if arch:
+        argv.append(f"--backend={arch}")
+    argv.append(os.path.join(root, name.replace(".aout", ".mojo")))
+    result = run_fire(argv, cwd=root)
     if expect_ok:
         check(result.returncode == 0,
               f"build failed: {(result.stderr or result.stdout).strip()[-400:]}")
@@ -171,7 +223,7 @@ def test_module_compiled_in_full(tmpdir, _shared):
     write_tree(root, {"mylib/__init__.mojo": LIB, "prog.mojo": PROG})
     fresh_cas()
     _result, out = build(root, "prog.aout")
-    dylib = os.path.join(CAS_IMPORTS, "mylib.dylib")
+    dylib = module_dylib("mylib")
     check(os.path.isfile(dylib), f"no module dylib at {dylib}")
     m = manifest(dylib)
     names = sorted(e["name"] for e in m["exports"])
@@ -219,8 +271,8 @@ def test_package_identity_is_module_name(tmpdir, _shared):
     code, err = run(out)
     check(code == 7, f"two packages both resolved to one library: returned "
                      f"{code}, expected 7; stderr: {err}")
-    for name in ("mylib.dylib", "other.dylib"):
-        check(os.path.isfile(os.path.join(CAS_IMPORTS, name)),
+    for name in (module_dylib("mylib"), module_dylib("other")):
+        check(os.path.isfile(os.path.join(cas_imports(), name)),
               f"{name} was not built; a package's identity has to come from "
               f"the module name, since __init__.mojo has no other")
 
@@ -239,12 +291,12 @@ def test_cross_module_call_is_qualified(tmpdir, _shared):
     code, err = run(out)
     check(code == 41, f"transitive chain returned {code}, expected 41 "
                       f"(mid(20) = base(20)+1); stderr: {err}")
-    pkg = os.path.join(CAS_IMPORTS, "pkg.dylib")
+    pkg = module_dylib("pkg")
     with open(pkg, "rb") as f:
         data = f.read()
     check(b"base" in data, "sanity: the module's code should mention base")
     leaf_sym = [e["symbol"] for e in
-                manifest(os.path.join(CAS_IMPORTS, "leaf.dylib"))["exports"]
+                manifest(module_dylib("leaf"))["exports"]
                 if e["name"] == "base"][0]
     check(leaf_sym.encode() in data,
           f"pkg.dylib does not reference the leaf export {leaf_sym!r}; a "
@@ -253,7 +305,7 @@ def test_cross_module_call_is_qualified(tmpdir, _shared):
           "pkg.dylib still carries an unqualified reference to `base`")
     # and the load command that makes the bind possible
     r = subprocess.run(["otool", "-L", pkg], capture_output=True, text=True)
-    check("leaf.dylib" in r.stdout,
+    check(os.path.basename(module_dylib("leaf")) in r.stdout,
           f"pkg.dylib does not link leaf.dylib:\n{r.stdout}")
 
 
@@ -268,7 +320,8 @@ def test_dependencies_linked_first(tmpdir, _shared):
     lines = [l for l in r.stdout.splitlines() if "formal-imports" in l]
     check(len(lines) == 2, f"expected both module dylibs on the link line, "
                            f"got {lines}")
-    check("leaf.dylib" in lines[0] and "pkg.dylib" in lines[1],
+    check(os.path.basename(module_dylib("leaf")) in lines[0]
+          and os.path.basename(module_dylib("pkg")) in lines[1],
           f"dependencies must be linked before their dependents; got {lines}")
 
 
@@ -314,8 +367,8 @@ def test_no_import_needs_no_dylib(tmpdir, _shared):
     _result, out = build(root, "prog.aout")
     code, err = run(out)
     check(code == 7, f"returned {code}, expected 7; stderr: {err}")
-    check(not os.path.isdir(CAS_IMPORTS) or
-          not os.listdir(CAS_IMPORTS),
+    check(not os.path.isdir(cas_imports()) or
+          not os.listdir(cas_imports()),
           "a program with no imports built module dylibs anyway")
 
 
@@ -346,7 +399,7 @@ def test_future_import_is_inert(tmpdir, _shared):
     _result, out = build(root, "prog.aout")
     code, err = run(out)
     check(code == 11, f"returned {code}, expected 11; stderr: {err}")
-    check(not os.path.isdir(CAS_IMPORTS) or not os.listdir(CAS_IMPORTS),
+    check(not os.path.isdir(cas_imports()) or not os.listdir(cas_imports()),
           "a __future__ import built a module dylib; it is inert and must not "
           "produce a dependency")
 
@@ -404,7 +457,7 @@ def test_repository_sibling_resolves(tmpdir, _shared):
     _result, out = build(root, "prog.aout")
     code, err = run(out)
     check(code == 42, f"returned {code}, expected 42; stderr: {err}")
-    dylib = os.path.join(CAS_IMPORTS, "sibmod.dylib")
+    dylib = module_dylib("sibmod")
     check(os.path.isfile(dylib),
           f"the sibling was found but no dylib was built for it at {dylib}")
 
@@ -523,7 +576,7 @@ def test_struct_method_across_modules(tmpdir, _shared):
     code, err = run(out)
     check(code == 21, f"cross-module struct use returned {code}, expected 21 "
                       f"(c.get() + c.bumped() with c.n = 10); stderr: {err}")
-    dylib = os.path.join(CAS_IMPORTS, "slib.dylib")
+    dylib = module_dylib("slib")
     check(os.path.isfile(dylib), f"a struct-only module built no dylib at "
                                  f"{dylib}")
     names = sorted(e["name"] for e in manifest(dylib)["exports"])
@@ -562,24 +615,301 @@ def test_one_word_struct_field_is_the_value(tmpdir, _shared):
           f"returning the constructor's zero")
 
 
-def test_wide_struct_is_refused_by_name(tmpdir, _shared):
-    """A struct too wide for one word must be refused where the decision is.
+WIDE_SRC = ("struct Pair:\n  var a: Int\n  var b: Int\n"
+            "  fn get_a(self) -> Int:\n    return self.a\n"
+            "  fn set_a(self, v: Int):\n    self.a = v\n"
+            "def main() -> Int:\n  var p = Pair()\n  p.set_a(6)\n"
+            "  return p.get_a()\n")
+
+
+def test_wide_struct_is_refused_with_the_switch_off(tmpdir, _shared):
+    """With the by-reference receiver OFF, a wide struct is still refused.
 
     It used to reach the call path and become a BL against a symbol named
     after the type, so the image built and then aborted in dyld with
-    "Symbol not found" — a loader failure pointing at a compile-time limit."""
+    "Symbol not found" — a loader failure pointing at a compile-time limit.
+    The limit is now a switch rather than a wall, so the refusal is a property
+    of the switch's OFF setting and this is the test that says so; with the
+    switch on (the default) the same source builds and runs, which
+    `test_wide_struct_runs_by_reference` covers. A switch nobody ever exercises
+    is not a switch, it is a constant."""
     src = os.path.join(tmpdir, "wide.mojo")
     with open(src, "w") as f:
-        f.write("struct Pair:\n  var a: Int\n  var b: Int\n"
-                "def main() -> Int:\n  var p = Pair()\n  return 0\n")
+        f.write(WIDE_SRC)
     out = os.path.join(tmpdir, "wide.aout")
-    result = run_fire(["build", "--formal", "--no-prove", "-o", out, src])
-    check(result.returncode != 0, "a two-field struct was accepted silently")
+    result = run_fire(["build", "--formal", "--no-prove", "-o", out, src],
+                      env={"MOJO_FORMAL_WIDE_RECEIVER": "0"})
+    check(result.returncode != 0,
+          "a two-field struct was accepted with the by-reference receiver off")
     text = result.stderr + result.stdout
     check("Pair" in text and "word" in text,
           f"the refusal should name the struct and the limit: {text[-300:]}")
     check("dyld" not in text and "Symbol not found" not in text,
           f"this must fail at compile time, not in the loader: {text[-300:]}")
+
+
+def test_wide_struct_runs_by_reference(tmpdir, _shared):
+    """A two-field struct builds, RUNS, and gets the right answer.
+
+    The receiver is the ADDRESS of a frame of two 8-byte slots, which is still
+    one word, so the value model is untouched and the accessor sees the write
+    the method made. The exit status is the assertion: 6, and a build that
+    quietly computed 0 would be the exact failure the one-word lowering had
+    (a method-local slot nothing ever wrote)."""
+    src = os.path.join(tmpdir, "wide_on.mojo")
+    with open(src, "w") as f:
+        f.write(WIDE_SRC)
+    out = os.path.join(tmpdir, "wide_on.aout")
+    result = run_fire(["build", "--formal", "--no-prove", "-o", out, src])
+    check(result.returncode == 0,
+          f"a two-field struct should build by reference: "
+          f"{(result.stderr or result.stdout).strip()[-300:]}")
+    run = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    check(run.returncode == 6,
+          f"exit status {run.returncode}, expected 6 (the value the method "
+          f"wrote through the receiver)")
+
+
+# ── a package whose API is its re-exports ───────────────────────────────────
+#
+# A `pkg/__init__.mojo` that is nothing but `from .sub import name` has a
+# real, public, importable API — and used to be refused as "a struct-only
+# module has no free-function API", which took down every file that imports
+# the PACKAGE, over a module with nothing wrong with it. That is most of the
+# stdlib: std/stat, std/atomic, std/ffi, std/sys, std/reflection and the rest
+# are all re-export-only `__init__` files. Every stdlib `__init__` the sweep
+# refused was refused for this reason.
+
+REEXPORT_PKG = """\
+from .sub import bump
+from .sub import Box
+"""
+
+REEXPORT_SUB = """\
+def bump(x):
+  return x + 2
+
+
+struct Box:
+  var v: Int
+"""
+
+REEXPORT_PROG = """\
+from pkg import bump
+def main():
+  return bump(40)
+"""
+
+
+def test_package_reexport_builds_and_runs(tmpdir, _shared):
+    """`from pkg import bump`, where pkg only re-exports, builds and RUNS.
+
+    The test that would have caught the original bug: a dylib that builds is
+    not a result, an importing program that builds, loads and returns the
+    right value is. It failed before the fix with
+    "__init__.mojo: formal dylib has no public functions", even though
+    `bump` was right there in `pkg/sub.mojo`, compiled, exported, and already
+    on this program's link line.
+    """
+    root = os.path.join(tmpdir, "reexport")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": REEXPORT_PKG,
+                      "pkg/sub.mojo": REEXPORT_SUB,
+                      "prog.mojo": REEXPORT_PROG})
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 42, f"a re-exported function returned {code}, expected 42; "
+                      f"stderr: {err}")
+
+
+def test_namespace_library_exports_nothing(tmpdir, _shared):
+    """The package's own dylib exports NOTHING, and says it is a namespace.
+
+    This is the half of the re-export fix that has to be right in the
+    restrictive direction. A re-export is not a new definition, so the symbol
+    must NOT be copied into the package's export trie: the trie is an ADDRESS
+    lookup, and an entry for a symbol this image does not contain sends every
+    consumer of the package to an address inside a file with no code. The
+    names resolve through the submodule's own manifest, which is on the same
+    link line — so the correct export table here is the empty one, and the
+    only thing that must be right about it is that it is empty.
+    """
+    root = os.path.join(tmpdir, "ns")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": REEXPORT_PKG,
+                      "pkg/sub.mojo": REEXPORT_SUB,
+                      "prog.mojo": REEXPORT_PROG})
+    fresh_cas()
+    _result, _out = build(root, "prog.aout")
+    pkg = module_dylib("pkg")
+    check(os.path.isfile(pkg), f"no package dylib at {pkg}")
+    m = manifest(pkg)
+    check(m.get("kind") == "namespace",
+          f"the package dylib is not marked namespace: {m.get('kind')!r}")
+    check(m.get("exports") == [],
+          f"the package dylib exports {m.get('exports')!r}; a re-export is "
+          f"not a definition, so its export table must be empty — an entry "
+          f"here is an address lookup into an image that has no code")
+    check("bump" in (m.get("reexports") or {}),
+          f"the re-export is not recorded in the manifest: "
+          f"{m.get('reexports')!r}")
+    # And the trie itself, read independently of the writer.
+    with open(pkg, "rb") as f:
+        info = parse_macho(f.read())
+    check(info["exports"] == {},
+          f"the package dylib's export trie is not empty: {info['exports']}")
+    # The definition is in the submodule, which is where a consumer must find
+    # it — so the submodule's trie must really carry it. The submodule's
+    # dylib is found through the package manifest's own `depends_on` rather
+    # than by guessing its file name: a relative import spells its module name
+    # `.sub`, and the file name is derived from that.
+    deps = m.get("depends_on") or []
+    check(len(deps) == 1 and deps[0]["source"].endswith("sub.mojo"),
+          f"the package dylib does not record its submodule: {deps}")
+    sub = module_dylib("pkg_sub")
+    if not os.path.isfile(sub):
+        found = [n for n in os.listdir(cas_imports()) if n.endswith(".dylib")]
+        check(False, f"no submodule dylib at {sub}; the directory holds "
+                     f"{found}")
+    with open(sub, "rb") as f:
+        sub_info = parse_macho(f.read())
+    sym = [e["symbol"] for e in manifest(sub)["exports"]
+           if e["name"] == "bump"][0]
+    check("_" + sym in sub_info["exports"],
+          f"the submodule's trie does not carry {sym}; the re-exported name "
+          f"has nothing to resolve to")
+
+
+def test_reexport_of_an_unexported_name_is_refused(tmpdir, _shared):
+    """A re-export nothing provides is refused, naming the name.
+
+    The protective half. If this were waved through, the package would build,
+    the consumer's call to `hidden` would stay unbound, and the failure would
+    move from this build to dyld at launch — a build error traded for a
+    program that dies before `main`, which is the one trade this whole import
+    mechanism exists to refuse. `hidden` is private in `sub.mojo`, so
+    doc/ABI.md keeps it out of the boundary and there is nothing to forward.
+    """
+    root = os.path.join(tmpdir, "badreexport")
+    os.makedirs(root)
+    write_tree(root, {
+        "pkg/__init__.mojo": "from .sub import hidden\n",
+        "pkg/sub.mojo": "def _hidden(x):\n  return x\n",
+        "prog.mojo": "from pkg import hidden\ndef main():\n  return hidden(1)\n",
+    })
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    check(result.returncode != 0,
+          "a package re-exporting a name nothing exports built successfully")
+    text = (result.stderr or result.stdout)
+    check("hidden" in text,
+          f"the refusal does not name the unforwardable name: "
+          f"{text.strip()[-300:]}")
+
+
+def test_module_dylib_matches_the_programs_arch(tmpdir, _shared):
+    """An x86-64 program's module dylibs are x86-64, and it RUNS.
+
+    Run for BOTH arches from one test on purpose: arm64-only evidence proves
+    nothing about x86-64 here, because the defect was a dylib built for one
+    architecture and linked into a program for another. That combination
+    builds, links, and passes every static check the toolchain makes — the
+    only symptom is dyld refusing to load it, after the build has "succeeded".
+
+    Two independent things had to be fixed for this to hold, and both are
+    "a key that is not the thing being cached": `build_module_dylib` took an
+    `arch` and never used it (the codegen and the Mach-O header were both
+    hardwired to arm64), and it wrote every architecture's library to ONE path
+    keyed by module name alone, so the two overwrote each other.
+    """
+    for arch, cputype in (("arm64", 0x0100000C), ("x86_64", 0x01000007)):
+        root = os.path.join(tmpdir, f"arch_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"mylib/__init__.mojo": LIB,
+                          "prog.mojo": PROG})
+        fresh_cas()
+        _result, out = build(root, "prog.aout", arch=arch)
+        for name in (os.path.basename(module_dylib("mylib", arch)),):
+            path = os.path.join(cas_imports(arch), name)
+            check(os.path.isfile(path),
+                  f"[{arch}] no module dylib at {path}")
+            with open(path, "rb") as f:
+                head = f.read(8)
+            check(struct.unpack_from("<I", head, 4)[0] == cputype,
+                  f"[{arch}] {name} has cputype "
+                  f"{struct.unpack_from('<I', head, 4)[0]}, expected "
+                  f"{cputype}: the library was built for the wrong "
+                  f"architecture")
+        code, err = run(out)
+        check(code == 42, f"[{arch}] returned {code}, expected 42; "
+                          f"stderr: {err[-300:]}")
+
+
+def test_both_arch_libraries_coexist(tmpdir, _shared):
+    """Building for one architecture does not destroy the other's library.
+
+    The overwrite half of the previous test, isolated: a program for the other
+    architecture must still find a library of ITS OWN architecture at the path
+    its own link line names. Before the per-architecture directory and the
+    architecture in the file name, the second build replaced the first's file
+    and the first program stopped loading.
+    """
+    roots = {}
+    for arch in ("arm64", "x86_64"):
+        root = os.path.join(tmpdir, f"coexist_{arch}")
+        os.makedirs(root)
+        write_tree(root, {"mylib/__init__.mojo": LIB, "prog.mojo": PROG})
+        roots[arch] = root
+    fresh_cas()
+    _r, first = build(roots["arm64"], "prog.aout", arch="arm64")
+    first_dylib = module_dylib("mylib")
+    with open(first_dylib, "rb") as f:
+        before = f.read()
+    _r, second = build(roots["x86_64"], "prog.aout", arch="x86_64")
+    with open(first_dylib, "rb") as f:
+        after = f.read()
+    check(before == after,
+          f"building for x86_64 changed the arm64 library at {first_dylib}: "
+          f"the two architectures share a path and overwrite each other")
+    # And the arm64 program, built before the other architecture ran, still
+    # runs — which is the symptom the overwrite actually caused.
+    code, err = run(first)
+    check(code == 42, f"the arm64 program stopped working after an x86-64 "
+                      f"build: returned {code}; stderr: {err[-300:]}")
+    code, err = run(second)
+    check(code == 42, f"the x86-64 program returned {code}, expected 42; "
+                      f"stderr: {err[-300:]}")
+
+
+def test_reexported_type_reaches_the_importer(tmpdir, _shared):
+    """A re-exported STRUCT TYPE is recognised as a type by the importer.
+
+    The type half of the same bug. `from pkg import Box` resolves to
+    `pkg/__init__.mojo`, which declares no struct — it re-exports one — so
+    reading only the file the import NAME resolved to found nothing, and
+    `Box()` in the importer lowered to a call to an undefined function. A
+    package's API is its re-exports, so reaching a type means walking to the
+    module that defines it.
+    """
+    sys.path.insert(0, HERE)
+    import fire_compiler as F
+    from formal.imports import imported_struct_defs
+    root = os.path.join(tmpdir, "rextype")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": "from .sub import Box\n",
+                      "pkg/sub.mojo": "struct Box:\n  var v: Int\n",
+                      "prog.mojo": "from pkg import Box\n"
+                                   "def main():\n  return 0\n"})
+    prog = os.path.join(root, "prog.mojo")
+    with open(prog) as f:
+        stmts = F.Parser(F.py_tokenize(f.read())).with_filename(prog) \
+                    .parse_module()
+    names = [s.name for s in imported_struct_defs(prog, stmts,
+                                                  project_root=prog)]
+    check("Box" in names,
+          f"a struct re-exported through a package is invisible to its "
+          f"importer; imported_struct_defs found {names}")
 
 
 TESTS = [
@@ -601,8 +931,10 @@ TESTS = [
      test_struct_method_across_modules),
     ("a one-word struct's field IS its value",
      test_one_word_struct_field_is_the_value),
-    ("a struct too wide for one word is refused by name",
-     test_wide_struct_is_refused_by_name),
+    ("a struct too wide for one word is refused with the switch off",
+     test_wide_struct_is_refused_with_the_switch_off),
+    ("a two-field struct builds and runs by reference",
+     test_wide_struct_runs_by_reference),
     ("a __future__ import is inert, not a dependency",
      test_future_import_is_inert),
     ("a guarded import is inert too", test_guarded_imports_stay_inert),
@@ -611,6 +943,18 @@ TESTS = [
      test_package_relative_dotted_import_resolves),
     ("a host module is refused despite a same-named sibling",
      test_host_module_still_refused_despite_same_named_sibling),
+    ("a package that only re-exports builds and runs",
+     test_package_reexport_builds_and_runs),
+    ("a package dylib exports nothing and says namespace",
+     test_namespace_library_exports_nothing),
+    ("a re-export nothing provides is refused by name",
+     test_reexport_of_an_unexported_name_is_refused),
+    ("a module dylib matches the program's arch, both arches",
+     test_module_dylib_matches_the_programs_arch),
+    ("both architectures' libraries coexist",
+     test_both_arch_libraries_coexist),
+    ("a re-exported type reaches the importer",
+     test_reexported_type_reaches_the_importer),
     ("a local Mojo module beats the host-module list",
      test_mojo_source_beats_host_module),
 ]
@@ -650,4 +994,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        _drop_cas_home()

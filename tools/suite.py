@@ -295,8 +295,29 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
-                   'assert fire_compiler.Parser; print("parser+codegen OK")'],
-     desc='import-level smoke check of the parser and codegen')
+                   'assert fire_compiler.Parser; print("parser+codegen OK"); '
+                   # Build the Lean library HERE, once, before any parallel
+                   # job can want it. All eight formal tests depend on
+                   # preflight, so this is the one place that has to happen;
+                   # leaving it to each test meant every worker that arrived
+                   # while the library was stale ran `lean -o` on the same
+                   # .olean, which is 40 concurrent lean processes writing one
+                   # file. It took 3.5 minutes of 40-way CPU to do what one
+                   # build does in seconds, and the winner was whichever
+                   # finished last. formal/lean.py now also holds a
+                   # cross-process lock, so this is belt and braces: the lock
+                   # makes any caller correct, and hoisting it here means the
+                   # gate pays for it once rather than N times.
+                   #
+                   # A missing Lean is reported, not fatal: `smoke` is
+                   # preflight + suite-self-test and must still work on a
+                   # machine with no toolchain. The formal tests that need it
+                   # fail on their own with a clearer message than this.
+                   'import formal.lean as l; '
+                   'lean = l.find_lean(".") or ""; '
+                   'print("lean:", lean or "NOT FOUND") if not lean else '
+                   'l.ensure_library(lean, "lib")'],
+     desc='import smoke check, and build the Lean library once for the formal tests')
 # The runner tests itself. `make check` is a one-line recipe that hands the
 # whole bucket to tools/suite.py, so a bug in the runner does not fail one
 # test — it fails or falsely passes the entire gate. This is synthetic specs

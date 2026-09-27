@@ -324,7 +324,7 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
 
 def imported_struct_defs(source_path: str, stmts: list,
                          project_root: str = None) -> list:
-    """The StructDefs declared by the modules `source_path` imports.
+    """The StructDefs reachable through the modules `source_path` imports.
 
     An importer needs these for the same reason its own file's structs are
     needed: a constructor call and a method call have to be recognised as
@@ -336,31 +336,177 @@ def imported_struct_defs(source_path: str, stmts: list,
 
     The declarations are read from the imported module's own source, which is
     the same parse the module's dylib was built from, so the two cannot
-    disagree about a struct's shape."""
-    out, seen = [], set()
-    for mod in imported_modules(stmts):
-        path = resolve_module_path(mod, relative_to=source_path,
-                                   project_root=project_root or source_path)
-        if path is None:
-            continue
+    disagree about a struct's shape.
+
+    The walk follows RE-EXPORTS, and that is not a refinement — it is the
+    whole point for a package. `from pkg import Two` resolves to
+    `pkg/__init__.mojo`, which declares no struct at all; it re-exports one
+    from `pkg/two.mojo`. Reading only the file the import NAME resolved to
+    therefore found nothing, and the importer's `Two(...)` was lowered as a
+    call to an undefined function — the type half of exactly the bug the
+    re-export fix in `build_module_dylib` addresses on the symbol half. A
+    package's API is its re-exports, so reaching a type means walking to the
+    module that defines it.
+
+    Transitive, and cycle-safe: a package that re-exports from a sibling that
+    re-exports back terminates on the visited set, and a struct is collected
+    once however many paths reach it."""
+    out, seen, visited = [], set(), set()
+
+    def collect(path):
+        key = os.path.abspath(path)
+        if key in visited:
+            return
+        visited.add(key)
         try:
             with open(path) as f:
                 text = f.read()
             mod_stmts = F.Parser(F.py_tokenize(text)).with_filename(path) \
                             .parse_module()
         except Exception:
-            continue
+            return
         for st in mod_stmts:
             name = getattr(st, "name", None)
             if st.__class__.__name__ == "StructDef" and name not in seen:
                 seen.add(name)
                 out.append(st)
+        # Then whatever this module re-exports, which is where a package's
+        # types actually live.
+        for st in mod_stmts:
+            if not isinstance(st, F.FromImportStmt):
+                continue
+            dep = resolve_module_path(st.module, relative_to=path,
+                                      project_root=project_root or source_path)
+            if dep:
+                collect(dep)
+
+    for mod in imported_modules(stmts):
+        path = resolve_module_path(mod, relative_to=source_path,
+                                   project_root=project_root or source_path)
+        if path is not None:
+            collect(path)
     return out
+
+
+def declared_kinds(path: str) -> dict:
+    """{name: "function"|"type"} for what `path` declares at top level.
+
+    Read from the module's OWN source — the same file the dylib is built from,
+    so the two cannot disagree about what the module contains. A name the
+    source does not declare at all is simply absent, which is how a re-export
+    of something that does not exist gets caught rather than forwarded."""
+    out: dict = {}
+    try:
+        with open(path) as f:
+            text = f.read()
+        stmts = F.Parser(F.py_tokenize(text)).with_filename(path).parse_module()
+    except Exception:
+        return out
+    for st in stmts:
+        name = getattr(st, "name", None)
+        if not name:
+            continue
+        if isinstance(st, F.FunctionDef):
+            out.setdefault(name, "function")
+        elif isinstance(st, F.StructDef):
+            out.setdefault(name, "type")
+    return out
+
+
+def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
+    """{name: (module, kind)} for the names this module binds by RE-EXPORT.
+
+    `from .sub import addone` binds `addone` in this file without defining
+    it. A package `__init__.mojo` is nothing BUT such statements, and that is
+    a module with a real public API, not one with none — which is why it used
+    to be refused as "a struct-only module has no free-function API" and took
+    every importer of the package down with it.
+
+    A name this module also DEFINES is not a re-export: its definition is
+    here, it exports under this module's own qualifier, and the submodule's
+    same-named symbol is irrelevant to anything binding it. (Which of the two
+    a bare call resolves to is the pre-existing name-based-dispatch limit,
+    stated in `compile_formal_dylib`'s overload handling.)
+
+    `kind` is the DECLARED kind in the defining module (`declared_kinds`), and
+    it is what makes a missing symbol reportable as the right kind of gap: a
+    re-exported FUNCTION nobody exports is a missing definition, while a
+    re-exported TYPE is not a missing symbol at all — a type crosses the
+    boundary as a layout in the reflection table and is carried to the importer
+    by `imported_struct_defs`, not by a trie entry. Conflating the two would
+    either refuse every package that re-exports a type (most of them) or wave
+    through a genuinely missing function.
+
+    `import a.b` binds the MODULE, not a name, so it contributes nothing here;
+    only `from ... import ...` does."""
+    defined = {st.name for st in (stmts or [])
+               if isinstance(st, (F.FunctionDef, F.StructDef))}
+    kinds_by_module = kinds_by_module or {}
+    out: dict = {}
+    for st in stmts or []:
+        if not isinstance(st, F.FromImportStmt):
+            continue
+        for pair in (st.names or []):
+            name = pair[0] if isinstance(pair, (tuple, list)) else pair
+            if (isinstance(name, str) and name and name not in defined
+                    and not _is_inert_module(name)
+                    and not name.startswith("_")):
+                out.setdefault(name, (st.module,
+                                      kinds_by_module.get(st.module, {})
+                                      .get(name, "unknown")))
+    return out
+
+
+def _module_identity(module_name: str, parent: str = None) -> str:
+    """`module_name` resolved against the module that spelled it.
+
+    An absolute name is its own identity. A relative one — `.sub`, `..util` —
+    only means something relative to the module that wrote it, so it is
+    qualified by `parent`, that module's own already-resolved identity. The
+    result is the dotted name the file is really addressed by, which is what
+    makes two different `a/sub.mojo` and `b/sub.mojo` two different libraries
+    instead of one name written twice.
+
+    With no parent (a top-level build, where the import is resolved from the
+    project root rather than from a package) a relative name keeps its own
+    spelling: there is nothing to qualify it against, and flattening it is
+    better than dropping it, since the name is then at least stable."""
+    if not module_name or not module_name.startswith("."):
+        return module_name
+    if not parent:
+        return module_name
+    if parent.endswith(".__init__"):
+        parent = parent[: -len(".__init__")]
+    return parent + module_name
+
+
+def _dylib_lock(out: str):
+    """Exclusive, cross-process, released on exit: an flock on a side file.
+
+    A side file and not the library itself: `compile_formal_dylib` truncates
+    and rewrites the `.dylib`, so locking that would let a second process in
+    as soon as the first created it. A side file is never rewritten, so the
+    lock spans the whole build. `flock` is advisory and per-open-file-
+    description, so it is released when the process dies — a crashed build
+    cannot wedge the tree.
+    """
+    import contextlib
+    import fcntl
+
+    @contextlib.contextmanager
+    def _locked():
+        fd = os.open(out + ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+    return _locked()
 
 
 def build_module_dylib(module_name: str, source_path: str, out_dir: str,
                        arch: str = "arm64", project_root: str = None,
-                       _stack=()) -> str:
+                       _stack=(), _parent: str = None) -> str:
     """Compile `source_path` in full into a dylib; return its path.
 
     "In full" = every public function the module defines. Its own imports are
@@ -373,15 +519,32 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     forward-declares functions precisely so mutual imports work. It is
     reported as a dependency and not rebuilt, which is what breaks the
     recursion.
+
+    `arch` is part of the identity of what comes out, so it is part of BOTH
+    keys. `_BUILT` used to be keyed by source path alone, so a process that
+    built the same module for two architectures got the first architecture's
+    dylib back for the second request; and the OUTPUT NAME is the same for
+    both, so even across processes one architecture's library overwrote the
+    other's on disk. Together those are why an x86-64 program could link an
+    arm64 module dylib and then die in dyld with "mach-o file, but is an
+    incompatible architecture" — a cache key that was not the thing being
+    cached, in the one place where a stale hit is a wrong-architecture load
+    rather than a slow rebuild. `out_dir` is per-architecture for the same
+    reason (see `formal/build.py`'s `_resolve_imports`).
     """
-    key = os.path.abspath(source_path)
+    key = (arch, os.path.abspath(source_path))
     if key in _BUILT:
         return _BUILT[key]
-    if key in _stack:
+    if os.path.abspath(source_path) in _stack:
         return None            # cycle: the caller links us, we link them
 
     from formal.build import compile_formal_dylib, FormalBuildError
     from formal.arm64_codegen import CodegenError
+
+    # This module's own identity, which is also what a RELATIVE import of
+    # its own is resolved against. Computed before the recursion so each
+    # level qualifies the next (see the `_parent` note at the output name).
+    module_identity = _module_identity(module_name, _parent)
 
     with open(source_path) as f:
         text = f.read()
@@ -416,7 +579,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     for _mod, dep_path in depends:
         d = build_module_dylib(_mod, dep_path, out_dir, arch,
                                project_root=project_root or source_path,
-                               _stack=_stack + (key,))
+                               _stack=_stack + (os.path.abspath(source_path),),
+                               _parent=module_identity)
         if d:
             dep_dylibs.append(d)
 
@@ -424,19 +588,74 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # The library's identity is the module NAME the importer used, not the
     # file's basename: a package resolves to `<pkg>/__init__.mojo`, and two
     # packages would otherwise both be `_init_`.
-    prefix = re.sub(r"[^A-Za-z0-9_]", "_", module_name)
-    out = os.path.join(out_dir, prefix + ".dylib")
-    try:
-        result = compile_formal_dylib([source_path], output=out, prove=False,
-                                      check=False,
-                                      module_prefixes={source_path: prefix},
-                                      link_dylibs=dep_dylibs)
-    except (FormalBuildError, CodegenError) as e:
-        raise ImportBuildError(f"{os.path.basename(source_path)}: {e}")
-    # Record the dependencies in the manifest so a program can link them
-    # without re-deriving this module's imports.
-    _record_depends(_manifest_path(out),
-                    [(m, p) for m, p in depends])
+    #
+    # A RELATIVE name has to be qualified by the module that spelled it, or
+    # it is not an identity at all. `pkg/__init__.mojo` saying `from .sub
+    # import x` means `pkg.sub`; taken literally the name is `.sub`, which
+    # normalizes to `_sub` — and then `a/__init__.mojo` and `b/__init__.mojo`
+    # each importing their own `.sub` both write `_sub.dylib` into the SAME
+    # directory, and whichever built second replaces the other's library. Two
+    # packages' symbols, silently interchangeable. `_parent` carries the
+    # importing module's own resolved identity down the recursion, which is
+    # what turns `.sub` into `pkg.sub`.
+    #
+    # The architecture is part of the file NAME too, not only of the
+    # directory: `out_dir` is per-arch (so the two do not overwrite each
+    # other in the CAS), but a caller can pass any directory it likes, and a
+    # name that collides across architectures would reintroduce the same
+    # overwrite one level up.
+    #
+    # The SOURCE DIGEST is in the name as well, and that closes the last
+    # overwrite. `(arch, module name)` is not an identity: two builds of a
+    # module called `helper` — two checkouts, two temp trees, two concurrent
+    # jobs in one `-j18` bucket — took the same path, so whichever finished
+    # last replaced the other's library, and a program could be linked against
+    # a dylib built from different source. It showed up as an intermittent
+    # failure in test_formal_sweep.py's dyld-probe cases, which read a dylib
+    # back off this shared path while other jobs were writing it.
+    #
+    # Hashing the source is what makes sharing safe rather than merely rare:
+    # two builds whose sources agree produce byte-identical libraries, so
+    # writing the same path is then harmless, and two that disagree get
+    # different paths. Nothing has to take a lock, so a concurrent build
+    # neither blocks nor blocks on it — the same bargain the CAS makes
+    # everywhere else. The digest is the module's own source, so editing it
+    # invalidates the path rather than leaving a stale library reachable
+    # under a name that looks current.
+    prefix = re.sub(r"[^A-Za-z0-9_]", "_", module_identity)
+    with open(source_path, "rb") as f:
+        src_digest = cas.hash_parts(f.read())[:12]
+    out = os.path.join(out_dir, f"{prefix}.{src_digest}.{arch}.dylib")
+    # Serialise the write to this exact path.
+    #
+    # The digest above already separates two builds whose SOURCES differ, so
+    # the only remaining collision is two builds of the SAME source onto one
+    # path — and that is the common case, not a rare one: `-j18` over a bucket
+    # where several jobs import the same stdlib module, or one
+    # `make check-formal-sweep` beside another. Their content agrees, so
+    # sharing is fine; writing it in place is not, because a reader can
+    # observe the file part written.
+    #
+    # A lock, not a staging path with a rename. Renaming looked like the tidier
+    # fix and is wrong here: a dylib's install name is derived from its output
+    # path, and it is baked into the load command of everything that links it,
+    # so a file built as `.../staging/foo.dylib` and moved afterwards no longer
+    # matches the path its dependents were told to load. The lock leaves the
+    # path — and therefore the identity — exactly as it was.
+    with _dylib_lock(out):
+        try:
+            result = compile_formal_dylib(
+                [source_path], output=out, prove=False, check=False,
+                module_prefixes={source_path: prefix},
+                link_dylibs=dep_dylibs, arch=arch, fmt="macho",
+                reexports=reexported_names(
+                    stmts, {m: declared_kinds(p) for m, p in depends}))
+        except (FormalBuildError, CodegenError) as e:
+            raise ImportBuildError(f"{os.path.basename(source_path)}: {e}")
+        # Record the dependencies in the manifest so a program can link them
+        # without re-deriving this module's imports.
+        _record_depends(_manifest_path(out),
+                        [(m, p) for m, p in depends])
     _BUILT[key] = out
     return out
 
@@ -459,12 +678,21 @@ def dylib_chain(dylib_path: str, _seen=None) -> list:
 
     A dependency has to be on the link line before the module that needs it is
     bound, so the order is the post-order of the dependency graph. A cycle
-    terminates because `_seen` stops the walk."""
+    terminates because `_seen` stops the walk.
+
+    The architecture is recovered from `dylib_path` (the `.N.dylib` suffix
+    `build_module_dylib` writes) to look dependencies up in `_BUILT`, whose key
+    is (arch, path). Reading it back off the name rather than threading it
+    through every call is safe because the name is the only thing that decides
+    which library this is — and a suffix this function cannot parse yields no
+    match, i.e. an omitted dependency, which is the same behaviour as a
+    manifest with no `depends_on`, not a wrong one."""
     _seen = set() if _seen is None else _seen
     key = os.path.abspath(dylib_path)
     if key in _seen:
         return []
     _seen.add(key)
+    arch = _arch_of_dylib(dylib_path)
     import json
     depends = []
     try:
@@ -474,11 +702,25 @@ def dylib_chain(dylib_path: str, _seen=None) -> list:
         depends = []
     out = []
     for dep in depends:
-        dep_dylib = _BUILT.get(os.path.abspath(dep["source"]))
+        dep_dylib = _BUILT.get((arch, os.path.abspath(dep["source"])))
         if dep_dylib:
             out.extend(dylib_chain(dep_dylib, _seen))
     out.append(dylib_path)
     return out
+
+
+def _arch_of_dylib(dylib_path: str) -> str:
+    """The architecture in a `<prefix>.<src-digest>.<arch>.dylib` name, or "".
+
+    `rsplit(".", 1)` splits on the LAST dot, so the digest field in the middle
+    needs no parsing of its own and this is unchanged by it.
+    """
+    base = os.path.basename(dylib_path)
+    if base.endswith(".dylib"):
+        parts = base[:-len(".dylib")].rsplit(".", 1)
+        if len(parts) == 2:
+            return parts[1]
+    return ""
 
 
 # ImportBuildError is defined in formal/build.py (a FormalBuildError subclass,

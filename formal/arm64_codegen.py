@@ -97,9 +97,24 @@ def _collect_var_names(f: F.FunctionDef) -> list:
     keys on top (scalar replacement; backend-specific, not middle-end)."""
     names = bound_names_in_order(f.body, f.params)
     seen = set(names)
+    # `h.x` for a frame receiver is a SLOT IN MEMORY, not a local: the value
+    # lives at `[h, #8k]` and is loaded by `_load_var`. Allocating a register
+    # for it would waste one of the ten callee-saved registers on a name nothing
+    # ever stores, and push every other local one step closer to a spill slot.
+    frame_slots = getattr(f, "_frame_slots", None) or {}
+    frame_holders = getattr(f, "_frame_holders", None) or set()
 
     def add(name):
-        if isinstance(name, str) and name not in seen:
+        # A chain DEEPER than a frame slot gets no register home either. It is
+        # a field of a field, which the build pass refuses and `_emit_expr`
+        # refuses again; giving it a register would mean a relaxed refusal
+        # turned into a MOV of a register nothing ever wrote, which is quieter
+        # than the crash it replaced. The cost of excluding it is one callee-
+        # saved register, which is the cheaper of the two mistakes.
+        if isinstance(name, str) and name not in seen \
+                and name not in frame_slots \
+                and not ("." in name
+                         and name.split(".", 1)[0] in frame_holders):
             seen.add(name)
             names.append(name)
 
@@ -515,6 +530,30 @@ class ARM64Codegen:
         # `generate_arm64_proof`'s `_cond_branches` consumer.
         self._cond_branch_pcs = []
         self._blob_cap = _SCRATCH
+        # ── A multi-field receiver, BY REFERENCE ──────────────────────────
+        # `_frame_sites` is this function's `{id(call): (struct, offset)}` from
+        # `model.struct_constructor_sites`: one reserved frame per constructor
+        # call SITE, laid out in walk order, all of it BELOW the ordinary frame
+        # (and therefore below SP) so that a method's write to its receiver
+        # provably cannot reach the caller's window — which is what
+        # `ProofLib.Frame.frameWrite_read_above_sp` says, and why the
+        # reservation is in the prologue rather than handed out by a bump
+        # cursor as the body is walked. `_frame_recv_bytes` is their total and
+        # is added to the prologue's SP reservation. `_frame_slots` is
+        # `formal/build.py`'s `{f"{holder}.{field}": slot}` for this function,
+        # consulted by `_load_var`/`_store_var` to turn what would have been a
+        # local load into `LDR Xt, [Xh, #8k]`. Both reset per function.
+        self._frame_sites: dict = {}
+        self._frame_recv_bytes = 0
+        self._frame_slots: dict = {}
+        # The NAMES in this function that hold a frame address, as opposed to
+        # the slot table above. Kept because the two answer different
+        # questions: `_frame_slots` says which `h.f` is a load, and the holder
+        # set says which `h` is a frame at all — which is what tells a
+        # `h.f.g` chain (a field of a field, no layout) from an ordinary
+        # `a.b.c` member path (scalar replacement, a local). Reset per function.
+        self._frame_holders: set = set()
+        self._frame_base = 0
         # Stack of enclosing loops, innermost last. Each entry:
         #   start -- loop top (continue target for `while`)
         #   step  -- iteration step (continue target for `for`)
@@ -681,6 +720,32 @@ class ARM64Codegen:
         # must stop before the first spill slot.
         self._blob_cap = _SCRATCH - self._spill_bytes
         self._npairs = max(1, (n_reg + 1) // 2)
+        # Receiver frames for this function's multi-field structs. They live at
+        # the BOTTOM of the same reserved scratch the list/dict blobs use, and
+        # the blob cursor starts ABOVE them, which is the whole of the
+        # placement argument:
+        #
+        #   * a callee's scratch begins below the caller's SP, so a callee's
+        #     frames and a callee's blobs are both below every frame the
+        #     CALLER owns — a method cannot overwrite the receiver it was
+        #     handed, and two frames created by the same function are at
+        #     different offsets and so cannot alias;
+        #   * a blob created in the same function starts past the frames, so
+        #     `self.items.append(1)` inside a method cannot scribble on the
+        #     receiver it is appending to.
+        #
+        # `Refine.FrameOk`'s window is `SP + j` for `j >= 0`, so a frame at
+        # `SP + k` is INSIDE it and a method that writes its receiver does not
+        # satisfy `FrameOk` — which is why the callee contract for a method is
+        # `Refine.FrameOk_except`, the predicate
+        # `bugs/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
+        # The layout itself is `formal/model.py`'s, so the x86-64 backend
+        # reserves the same bytes in the same order.
+        self._frame_sites = M.struct_constructor_sites(f, self._structs)
+        self._frame_recv_bytes = sum(
+            M.struct_frame_bytes(st) for st, _ in self._frame_sites.values())
+        self._frame_slots = dict(getattr(f, "_frame_slots", None) or {})
+        self._frame_holders = set(getattr(f, "_frame_holders", None) or ())
 
         self._call_types = {
             g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
@@ -688,7 +753,10 @@ class ARM64Codegen:
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
-        self._list_cursor = 0
+        # The blob cursor starts ABOVE the receiver frames, not at the bottom
+        # of the scratch: the frames live there (see above) and a blob must not
+        # land on one.
+        self._list_cursor = self._frame_recv_bytes
         self._for_list_depth = 0
         self._compr_depth = 0
         self._container_ctx = 0
@@ -790,7 +858,19 @@ class ARM64Codegen:
     def _load_var(self, name: str, dst: int) -> None:
         """dst = local `name`. Register homes MOV; spill slots LDR via X17.
 
+        A FRAME SLOT is not a local at all: `name` is spelled `h.x`, `h` holds
+        the address of `x`'s frame, and the value lives in memory at
+        `[h, #8*slot]`.  Intercepted here rather than at every call site
+        because every read of a field on this path — expression position,
+        augmented assignment, a chained `a = b = …` — already funnels through
+        this one function, so one branch here covers all of them and there is
+        no second lowering to keep in step.
+
         Unknown names fall back to X19 (same as the old `.get(..., 19)`)."""
+        slot = self._frame_slots.get(name)
+        if slot is not None:
+            self._emit_frame_load(name, slot, dst)
+            return
         if name in self._var_regs:
             r = self._var_regs[name]
             if dst != r:
@@ -813,8 +893,45 @@ class ARM64Codegen:
         if dst != 19:
             self.asm.emit(encode_mov_zr_xn(dst, 19))
 
+    def _emit_frame_load(self, name: str, slot: int, dst: int) -> None:
+        """`LDR Xdst, [Xholder, #8*slot]` — a receiver field read.
+
+        The holder's ADDRESS is loaded first, into X17.  X17 rather than a
+        fresh register because it is already this function's scratch for spill
+        addressing and is dead across the single instruction that follows, and
+        because a holder is an ordinary local — a register home or a spill slot
+        — so `_load_var` on it is exactly the ordinary path."""
+        holder = name.rsplit(".", 1)[0]
+        self._load_var(holder, 17)
+        self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 8 * slot))
+
+    def _emit_frame_store(self, name: str, slot: int, src: int) -> None:
+        """`STR Xsrc, [Xholder, #8*slot]` — a receiver field write.
+
+        The write half of the pair above, and the reason a method's effect is
+        visible to its caller: the caller's local holds the SAME address, so
+        the store lands in the frame the caller will read back."""
+        holder = name.rsplit(".", 1)[0]
+        if src == 17:
+            # The value is in the scratch the address wants. Park it in a
+            # caller-saved register that holds nothing across these two
+            # instructions (X16 is the IP/caller-saved intra-procedure slot on
+            # AAPCS and is dead everywhere on this path).
+            self.asm.emit(encode_mov_zr_xn(16, src))
+            src = 16
+        self._load_var(holder, 17)
+        self.asm.emit(encode_str_xt_xn_imm(src, 17, 8 * slot))
+
     def _store_var(self, name: str, src: int) -> None:
-        """local `name` = src. Register homes MOV; spill slots STR via X17."""
+        """local `name` = src. Register homes MOV; spill slots STR via X17.
+
+        A frame slot is a store into the receiver's frame — see
+        `_emit_frame_store` and `_load_var` above for why the branch is here
+        rather than at the call sites."""
+        slot = self._frame_slots.get(name)
+        if slot is not None:
+            self._emit_frame_store(name, slot, src)
+            return
         if name in self._var_regs:
             r = self._var_regs[name]
             if src != r:
@@ -1943,6 +2060,29 @@ class ARM64Codegen:
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None:
+                # A chain DEEPER than a frame slot reaching a VALUE position is
+                # the one shape the frame layout cannot answer, and it must not
+                # fall through to `_load_var`: a name that is in no register
+                # home and no spill slot reads X19, so `h.f.g` would quietly
+                # become "whatever that scratch register holds" — a wrong answer
+                # with no failure anywhere. `formal/build.py` refuses it in the
+                # same shape, and this is the second line of that refusal: the
+                # build pass is a whole-module judgement and this one is
+                # per-emission, so a construct that reached here by some route
+                # the build pass does not model is still stopped rather than
+                # read. A `h.f.m(...)` CALL does not come through here — the
+                # call path reads `h.f` as a value receiver and dispatches on
+                # the method — so what is refused here is a genuine field of a
+                # field.
+                root = key.split(".", 1)[0]
+                if "." in key and key not in self._frame_slots \
+                        and root in self._frame_holders:
+                    raise CodegenError(
+                        f"{key} reads a field of a field through the receiver "
+                        f"{root} and reached a value position, where a frame "
+                        f"slot has no second layout to offer: the word in the "
+                        f"slot is a value, and this path will not read a word "
+                        f"as though it were a struct's storage")
                 self._load_var(key, 0)
                 return
             # Non-named base (call result, literal, …): evaluate the base
@@ -2170,28 +2310,17 @@ class ARM64Codegen:
         List/tuple blobs: `[count:i64][e0…]`, unsigned bounds-checked
         (negative indices wrap like Python, then bounds-check); OOB →
         Darwin exit(1). String pointers (literal or tracked var): raw
-        byte load, no header."""
-        if e.attrs is not None:
-            raise CodegenError(
-                "type-parameter subscript [...] is not supported on the "
-                "formal arm64 path")
+        byte load, no header.
+
+        Every refusal lives in `_emit_subscript_addr`, which this calls: a
+        read, a store and an augmented assignment all go through it, and a
+        check that lives here covers only the read."""
         if isinstance(e.index, F.SliceExpr):
             # `obj[start:stop:step]` parses as SliceExpr with .obj attached;
             # a nested `base[sl]` form puts SliceExpr in .index.
             sl = e.index
             self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
             return
-        if isinstance(e.index, F.TupleExpr):
-            # `d[(a, b)]` is a dict lookup with a tuple key, compared
-            # element-wise — it does not need the base to be a *known* dict,
-            # because in Python a tuple index is a dict key or a TypeError,
-            # never a list multi-index (which this path has no representation
-            # for anyway). A computed tuple index keeps the old error: there
-            # the base really could be a numpy-style multi-index.
-            if self._static_key_needle(e.index) is None:
-                raise CodegenError(
-                    "multi-index subscript [...] is not supported on the "
-                    "formal arm64 path")
         self._emit_subscript_addr(e)
         if self._is_string_subscript(e.obj):
             self.asm.emit(encode_ldrb_wd_wn(0, 0, 0))
@@ -2381,13 +2510,39 @@ class ARM64Codegen:
     def _is_dict_key_subscript(self, e: F.SubscriptExpr) -> bool:
         """True when this subscript is a dict lookup, key compare included.
 
-        A known dict base is one way; a static container key is the other,
-        since a tuple index on a list is not a Python operation at all."""
-        return (self._is_dict_subscript(e.obj)
-                or self._static_key_needle(e.index) is not None)
+        ONLY a known dict base qualifies. The rule used to be broader — a
+        static container key qualified on its own, on the reasoning that a
+        tuple index in Python is a dict key or a TypeError and never a list
+        multi-index. That reasoning is right about Python and wrong about
+        this corpus: `size_of[type, target]` and every other multi-element
+        subscript in the stdlib is a compile-time parameter list on a generic,
+        so the broader rule sent those down the dict path, where the "index"
+        is a freshly materialized blob and the scan compares one address
+        against another. It built, it ran, and it disagreed with x86-64."""
+        return self._is_dict_subscript(e.obj)
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
-        """X0 = &obj[index]. Blob path bounds-checks (exit 1 on OOB)."""
+        """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
+
+        The single choke point for a subscript: a read, a store
+        (`_emit_subscript_store_reg`) and an augmented assignment
+        (`_emit_subscript_aug`) all come through here, so every refusal that
+        belongs to a subscript belongs here too. Two did not, and both were
+        reachable only through the store — `a[i, j] = v` and `a[x=1] = v` —
+        because the checks sat in the read path. The first LIVELOCKED the
+        proof generator (the emitted index is a frame address, so the
+        bounds-check branch the step model has to follow is not one it has a
+        contract for) and the second emitted a store through a computed
+        address. Both now say no."""
+        if e.attrs is not None:
+            raise CodegenError(
+                "type-parameter subscript [...] is not supported on the "
+                "formal arm64 path")
+        if M.is_multi_index(e.index):
+            why = M.multi_index_refusal_for(
+                e, self._is_dict_subscript(e.obj), self._functions)
+            if why is not None:
+                raise CodegenError(why)
         if self._is_dict_key_subscript(e):
             self._emit_dict_lookup_addr(e)
             return
@@ -2687,15 +2842,29 @@ class ARM64Codegen:
         through to the extern path and became `BL _strip`, the flat-symbol call
         to a method this path is supposed to refuse. Adding the string methods
         made the hole reachable, and a method on a literal is the most ordinary
-        method call there is."""
+        method call there is.
+
+        A FRAME SLOT is a value here too, and has to be: `h.f.m(...)` reads
+        `mem[h + 8k]` and hands that word to the callee, so it is a method call
+        on a value and `model.value_method_refusal` is what decides it. The
+        build pass used to refuse the chain outright as a field of a field,
+        which meant the case never got here — and if it had got here without
+        this, `_callee_symbol` would have flattened `h.f.m` to a dotted name,
+        found no such function, and emitted `BL h.f.m`: an image that builds
+        and then dies in the loader. A frame slot is explicitly NOT a
+        register or spill home (`_collect_var_names` leaves it out for
+        exactly that reason), so the membership test below has to be extended
+        rather than left to find it by accident."""
         if isinstance(obj, F.StringLiteral):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._var_regs or obj.name in self._var_spills
         if isinstance(obj, F.MemberExpr):
             key = _member_slot_key(obj)
-            return key is not None and (
-                key in self._var_regs or key in self._var_spills)
+            if key is None:
+                return False
+            return (key in self._var_regs or key in self._var_spills
+                    or key in self._frame_slots)
         return False
 
     def _emit_value_method(self, e: F.CallExpr, method: str) -> None:
@@ -3640,10 +3809,18 @@ class ARM64Codegen:
         a symbol named after the type, so the library built and then could not
         be loaded ("Symbol not found: _Counter").
 
-        Wider structs have no representation here and are refused by name and
-        width. They used to reach the extern path and produce that same
-        unloadable image, so the honest limit has to be stated where the
-        decision is made rather than discovered by dyld.
+        WIDER structs are represented BY REFERENCE, and their constructor is
+        still not a call: the receiver word is the ADDRESS of a frame of
+        8-byte slots that the prologue already reserved
+        (`model.struct_constructor_sites`), every field is brought up at its
+        own default, and the address is the result. A pointer is one word, so
+        nothing that was one word before becomes two, and the call sites need
+        no change at all — they pass the address they already had.
+
+        A struct that fits NEITHER representation is refused by name and width.
+        It used to reach the extern path and produce that same unloadable
+        image, so the honest limit has to be stated where the decision is made
+        rather than discovered by dyld.
 
         The width is the DERIVED one (formal.model.struct_field_count), not
         `len(st.fields)`. A class that assigns its fields in `__init__` declares
@@ -3653,13 +3830,18 @@ class ARM64Codegen:
         formal/build.py, which reads the derived count, called the same class
         wide. One struct, two widths, two backends: the count has to come from
         the shared model or the two answers can disagree."""
+        if M.struct_is_framed(st):
+            self._emit_frame_constructor(e, name, st)
+            return
         if M.struct_field_count(st) > 1:
             raise CodegenError(
                 f"constructing {name} needs {M.struct_field_summary(st)}, and a "
                 f"formal value is one 64-bit word — a multi-field struct has "
                 f"no representation on this path (previously this emitted a "
                 f"call to a symbol named {name!r} that nothing defines, so the "
-                f"image built and then failed to load)")
+                f"image built and then failed to load). The by-reference "
+                f"receiver that gives one is switched off "
+                f"({M.WIDE_RECEIVER_ENV}=0)")
         if e.args or e.kwargs:
             # Positional/keyword construction is not Mojo's struct syntax, and
             # silently ignoring a supplied value would lose data.
@@ -3669,6 +3851,71 @@ class ARM64Codegen:
                 f"{len(e.args) + len(e.kwargs)}-argument construction is not a "
                 f"shape this backend can honour")
         self._emit_fresh_one_word(name, st)
+
+    def _emit_frame_constructor(self, e: F.CallExpr, name: str,
+                                st: F.StructDef) -> None:
+        """`S()` for a struct of more than one field — an address, not a value.
+
+        Brings every field up at its own default in its own slot and leaves the
+        frame's address in X0.  The frame was reserved in the prologue (see
+        `_emit_function`), so this is a fixed X29-relative address and the
+        result does not depend on how many times the constructor runs: a
+        constructor inside a loop reuses its site's frame, exactly as a C local
+        is reused.
+
+        Every default is materialized or the constructor is refused, naming the
+        field.  A fresh struct whose field reads 0 where the source says
+        something else is the wrong answer this whole path exists to avoid, and
+        it would be invisible: the program builds, runs, and returns a number
+        nobody wrote."""
+        if e.args or e.kwargs:
+            raise CodegenError(
+                f"{name}(...) takes no arguments on this path: a struct is "
+                f"default-initialized and its fields assigned, and a "
+                f"{len(e.args) + len(e.kwargs)}-argument construction is not a "
+                f"shape this backend can honour")
+        ok, bad = M.struct_frame_representable(st)
+        if not ok:
+            raise CodegenError(
+                f"constructing {name} cannot bring its field {bad!r} up at "
+                f"its default on this path: the default is not a literal, and "
+                f"this constructor has no scope to evaluate it in (assign the "
+                f"field explicitly after `S()` instead, which is the same "
+                f"program with a representation)")
+        site = self._frame_sites.get(id(e))
+        if site is None:
+            raise CodegenError(
+                f"constructing {name} at a site this function did not reserve "
+                f"a receiver frame for — the frame layout and the body "
+                f"disagree, which is a compiler bug, not a program error")
+        self._emit_frame_base(site[1])
+        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+            if kind == M.DEFAULT_STRING:
+                self._emit_expr(F.StringLiteral(value=payload))
+            else:
+                self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
+            # The base is recomputed per store: materializing a default goes
+            # through X0, and a string default goes through ADRP, which
+            # clobbers X9.
+            self._emit_frame_base(site[1])
+            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+        # …and once more at the end, because the address is the RESULT and
+        # every store above left something else in X0. An address materialized
+        # once and then overwritten is a null pointer, and the program
+        # segfaults on the first field read rather than computing anything.
+        self._emit_frame_base(site[1])
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_frame_base(self, offset: int) -> None:
+        """X9 = the address of the receiver frame `offset` bytes into the area.
+
+        Literally `_emit_list_base`: the frames are at the bottom of the same
+        reserved scratch the blobs are, at the same `SP + offset` addresses, and
+        the only difference is that the blob cursor is told to start above
+        them. Sharing the one routine rather than writing a second one is what
+        makes "a frame is a blob that the cursor skips" true by construction
+        instead of by two address computations agreeing."""
+        self._emit_list_base(offset)
 
     def _emit_fresh_one_word(self, name: str, st) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.
@@ -5424,10 +5671,28 @@ class ARM64Codegen:
     def _emit_del(self, stmt) -> None:
         """`del target…` — list index/slice remove, dict key shift-delete.
 
-        Bare Ident/Member del is a no-op (no GC; SRA slots persist)."""
+        Bare Ident/Member del is a no-op (no GC; SRA slots persist).
+
+        A multi-element subscript index is refused HERE, before the branches
+        below, because the SubscriptExpr branch below is unreachable (it sits
+        after the SliceExpr branch's `continue`), so without this
+        `del a[i, j]` fell off the end of the loop and did NOTHING: it built,
+        it ran, and the list still had three elements. A silent no-op where
+        the source says "remove" is the one outcome this backend may not
+        produce, and the refusal belongs at the point where the shape is still
+        visible rather than in a branch nothing reaches."""
         for target in stmt.targets:
             if isinstance(target, (F.IdentExpr, F.MemberExpr)):
                 continue
+            if isinstance(target, F.SubscriptExpr) and M.is_multi_index(
+                    target.index):
+                why = M.multi_index_refusal_for(
+                    target, self._is_dict_subscript(target.obj),
+                    self._functions)
+                raise CodegenError(
+                    f"del {why}" if why is not None else
+                    "del on a subscript with a tuple index is not supported "
+                    "on the formal arm64 path")
             if isinstance(target, F.SliceExpr):
                 self._emit_del_slice(target)
                 continue
