@@ -219,6 +219,38 @@ performance fix, a refactor), the standard is stronger than a green gate:
 `cmp` the artifacts. Anything less is a change you have not finished
 verifying.
 
+## Shared expensive dependencies: build once, then depend on it
+
+A step whose product every other step needs must be its own registered test
+with `deps`, not something each consumer races to produce. Two mechanisms
+cooperate, and the pattern generalises:
+
+- **In the process** (`formal/lean.py`'s `ensure_library` is the worked
+  example): a check-then-act on a shared filesystem is a cache stampede
+  waiting to happen. `lib/ProofLib.olean` is 27MB and ~80s, every
+  proof-checking path calls `ensure_library`, and the proofs bucket runs 16
+  such paths at once. Before the lock, 3 concurrent callers meant 3
+  simultaneous `lean -o` invocations on the SAME output path — measured, all
+  ~81s — which wastes ~16 CPUs and can interleave into a truncated `.olean`
+  that every later typecheck then reads. So the build takes an exclusive
+  `flock` (kernel-released on process death, so a killed run cannot wedge
+  the next one), re-checks currency *inside* the lock, and writes via a
+  private temp + `os.replace`. Measured after: 8 concurrent callers → 1
+  build, 7 no-ops.
+- **In the runner**: the lock makes latecomers *queue*, not vanish, so the
+  library is also registered as its own step (`prooflib`) that every
+  proof-checking test `deps` on. One build happens, alone, before the
+  fan-out is released; the rest then find the stamp valid and return in
+  ~0.1s. `prooflib` is deliberately in no bucket — it is a dependency, not a
+  test, and `make check`/`make gate` must not pay for it.
+
+Note what is deliberately NOT there: a suite-level artifact cache for it.
+The `.olean` is already content-addressed twice over (the cas publish inside
+`ensure_library`, and the `.srcsha256` stamp that makes a repeat run a stat
+rather than a hash), so a third cache in front of two working ones would
+only add a way to go stale — notably when one cas is shared between
+checkouts.
+
 ## Known-failing tests: recorded, not hidden
 
 A test registered with `expect='<why>'` in `tools/suite.py` is a known

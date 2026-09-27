@@ -295,29 +295,8 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
-                   'assert fire_compiler.Parser; print("parser+codegen OK"); '
-                   # Build the Lean library HERE, once, before any parallel
-                   # job can want it. All eight formal tests depend on
-                   # preflight, so this is the one place that has to happen;
-                   # leaving it to each test meant every worker that arrived
-                   # while the library was stale ran `lean -o` on the same
-                   # .olean, which is 40 concurrent lean processes writing one
-                   # file. It took 3.5 minutes of 40-way CPU to do what one
-                   # build does in seconds, and the winner was whichever
-                   # finished last. formal/lean.py now also holds a
-                   # cross-process lock, so this is belt and braces: the lock
-                   # makes any caller correct, and hoisting it here means the
-                   # gate pays for it once rather than N times.
-                   #
-                   # A missing Lean is reported, not fatal: `smoke` is
-                   # preflight + suite-self-test and must still work on a
-                   # machine with no toolchain. The formal tests that need it
-                   # fail on their own with a clearer message than this.
-                   'import formal.lean as l; '
-                   'lean = l.find_lean(".") or ""; '
-                   'print("lean:", lean or "NOT FOUND") if not lean else '
-                   'l.ensure_library(lean, "lib")'],
-     desc='import smoke check, and build the Lean library once for the formal tests')
+                   'assert fire_compiler.Parser; print("parser+codegen OK")'],
+     desc='import-level smoke check of the parser and codegen')
 # The runner tests itself. `make check` is a one-line recipe that hands the
 # whole bucket to tools/suite.py, so a bug in the runner does not fail one
 # test — it fails or falsely passes the entire gate. This is synthetic specs
@@ -450,30 +429,71 @@ test('bootstrap-validate', [PY, 'bootstrap-validate.mojo'],
      desc='bootstrap-validate.mojo over the three stage trees')
 
 # ── formal ───────────────────────────────────────────────────────────────────
-test('formal', [PY, 'test_formal.py'], j=True, deps=['preflight'],
+# ── the Lean library, built ONCE and made a dependency ──────────────────────
+# lib/ProofLib.olean is 27MB and takes ~80s to produce, and EVERY
+# proof-checking path reaches `formal.lean.ensure_library`, which is a
+# check-then-act on a shared filesystem. Run 16 of those concurrently — which
+# is exactly what the proofs bucket does at -j18, since eight registered
+# tests between them drive test_formal.py, test_formal_sweep.py and the four
+# test_x86_64_* sub-suites — and on a cold content-addressed store every one
+# of them misses the stamp, misses the cas, and starts its own `lean -o` on
+# the SAME output path. Measured here before the fix: 3 concurrent callers,
+# 3 simultaneous builds, peak 3 `lean` processes, all done at ~81s. Sixteen
+# is sixteen. It is also a correctness hazard, not just a waste: concurrent
+# unsynchronised writes to one .olean can interleave into a truncated file
+# that every later typecheck then reads.
+#
+# Two fixes, and the second is this one. `formal/lean.py` now builds under an
+# exclusive flock with the currency check repeated inside it, and writes via
+# a private temp + os.replace, so concurrent callers cannot duplicate or
+# corrupt a build (that is what makes the mechanism safe for ANY number of
+# callers, including two humans and a fanout inside one test). This test is
+# the other half: the lock still makes the 15 latecomers QUEUE, so the
+# library is built as its own step, once, alone, before the proof fan-out is
+# released — and the other 15 then find the stamp valid and return in
+# ~0.1s without contending at all.
+#
+# Not `cache=True` on purpose: the .olean is already content-addressed twice
+# over (the cas publish inside ensure_library, and the .srcsha256 stamp that
+# makes a repeat run a stat rather than a hash), so a suite-level artifact
+# cache would be a third cache in front of two that already work — and
+# would go stale in a new way when the cas is shared between checkouts.
+test('prooflib', [PY, '-c',
+                  'import os, formal.lean as L; '
+                  'L.ensure_library(L.find_lean(), '
+                  'os.path.join(L._default_root(), "lib"))'],
+     timeout=2400,
+     desc='build lib/*.olean once — 27MB, ~80s, and 16-way duplicated '
+          'without this step')
+
+test('formal', [PY, 'test_formal.py'], j=True,
+     deps=['preflight', 'prooflib'],
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
      desc='formal arm64 executables that actually build AND run (no lean)')
-test('formal-dylib', [PY, 'test_formal_dylib.py'], deps=['preflight'],
+test('formal-dylib', [PY, 'test_formal_dylib.py'],
+     deps=['preflight', 'prooflib'],
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
-test('formal-imports', [PY, 'test_formal_imports.py'], deps=['preflight'],
+test('formal-imports', [PY, 'test_formal_imports.py'],
+     deps=['preflight', 'prooflib'],
      desc='formal import surface')
 # No j=True: test_formal_sweep.py is a plain unittest.main() and has no -j of
 # its own, so forwarding one makes it exit 2 on "unrecognized arguments".
 # `j` is a claim about the tool, not a request — test_formal.py, which does
 # parse -j, keeps it above.
-test('formal-sweep', [PY, 'test_formal_sweep.py'], deps=['preflight'],
+test('formal-sweep', [PY, 'test_formal_sweep.py'],
+     deps=['preflight', 'prooflib'],
      desc='the formal sweep')
 # output/x86_64/ keeps these from colliding with the arm64 verdicts above, so
 # they can share the machine with them.
 test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
-     deps=['preflight'],
+     deps=['preflight', 'prooflib'],
      desc='the x86-64 examples, built and proof-checked')
 test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
-     deps=['preflight'],
+     deps=['preflight', 'prooflib'],
      desc='x86-64 whole run, every input, no sorry')
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
-     deps=['preflight'],
+     deps=['preflight', 'prooflib'],
      desc='every byte the x86-64 emitter can produce is a step the model can step')
 
 # ── the A/B sweep: Make's own job server, so driver='make' ─────────────────
