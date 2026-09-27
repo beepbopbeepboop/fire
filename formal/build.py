@@ -827,6 +827,13 @@ def compile_formal(source_path: str, output: str = None,
         # launch with "Symbol not found" for a function the source plainly
         # imports.
         raise FormalBuildError(str(e))
+    # HERE and not inside `_prepare_functions`, which ran before the imports
+    # resolved: a file that imports a host module is out of reach whatever its
+    # codegen says, and this check fires on a third of the repository, so
+    # raising it earlier would report the secondary problem in 67 files and
+    # move the coverage denominator for it.  See
+    # `check_frame_field_blob_premises`.
+    check_frame_field_blob_premises(structs)
     if import_dylibs:
         have = {d["install_name"] for d in linked}
         linked = linked + [d for d in load_dylib_manifests(import_dylibs)
@@ -913,6 +920,12 @@ def _formal_module_functions(source_path: str) -> tuple[str, list]:
     # later, by the check that can actually say why). Reporting the accurate
     # reason matters: "no top-level functions" reads like a codegen gap.
     functions, structs = _prepare_functions(stmts, synthetic=False)
+    # The other of the two call sites of `check_frame_field_blob_premises`, and
+    # for the same reason: this is the dylib path, it has no import resolution
+    # of its own to be preempted by, and the check has to apply to a dylib
+    # exactly as it does to an executable or the invariant is a property of one
+    # front end.  Marked as a call site so the pair stays findable.
+    check_frame_field_blob_premises(structs)
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
     return module, functions, source, structs
@@ -1154,7 +1167,20 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
             continue
         by_name = hstruct[fn.name]
         call_recv = _call_receivers(fn)
-        slots = {}
+        # `{"h.a": struct}` — the fields of a HOLDER in this function whose
+        # agreed declared type is a framed struct of this module, so the slot
+        # holds a nested frame this compiler placed.  Distinct from
+        # `_frame_nested_slots`, which is the read side and a two-load access:
+        # this is the CALL side and a one-word receiver.
+        nested_fields = {}
+        # `_frame_slots` is `{"<holder>.<field>": slot}` — ONE load, which is
+        # what the codegen's `_load_var`/`_store_var` interception expects.
+        # `_frame_nested_slots` is `{"<holder>.<field>.<field>": slot}` — a
+        # load of a load, and it is a SEPARATE table rather than an entry with a
+        # null in it because a null is indistinguishable from "this field has
+        # no slot", which is the disagreement this whole pass exists to keep
+        # apart from "this field is nested".
+        slots, nested_slots = {}, {}
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.MemberExpr):
                 continue
@@ -1162,6 +1188,7 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
             if r is None or r[0] not in hs:
                 continue
             base, depth = r
+            cands = by_name.get(base) or []
             chain = _member_chain(node)
             is_call_recv = id(node) in call_recv
             if is_call_recv:
@@ -1185,19 +1212,80 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                 declared = by_method.get(node.member) or ()
                 if len(declared) == 1:
                     ost = declared[0]
-                    if depth > 1 and M.struct_is_framed(ost):
-                        raise CodegenError(
-                            f"{chain}() hands the word in the slot "
-                            f"{base}.{node.member} to "
-                            f"{ost.name}.{node.member}(), whose receiver is the "
-                            f"ADDRESS of a frame of 8-byte slots — so the slot "
-                            f"would have to hold a frame address. Nothing here "
-                            f"can say it does: that frame belongs to whichever "
-                            f"function built the object, and this path cannot "
-                            f"establish those bytes are still that object's. "
-                            f"Assign the field to a name and call the method on "
-                            f"the name instead, which is the same program with a "
-                            f"lifetime this analysis can see")
+                    if depth > 1:
+                        # A field's DECLARED TYPE is the one thing on this path
+                        # that says what the word in the slot is, and it has
+                        # three answers, not two.  `model.frame_field_type_can
+                        # didates` is the agree-or-refuse check over them and
+                        # its own diagnostic is `model.field_type_disagree
+                        # ment`; what happens next is decided by which answer
+                        # came back, and the third one is the reason this
+                        # function grew rather than shrank.
+                        # `chain` is `self.inner.sum`, so the field whose slot
+                        # is being read is the one BEFORE the last, not the
+                        # method's own name.  Getting this wrong is not a
+                        # cosmetic problem: the refusal would then report the
+                        # declared type of a name the struct never declares,
+                        # which is the same "the tool looked at something else"
+                        # failure C5 fixed in the message text.
+                        outer = chain.split(".")[-2] if depth > 1 else None
+                        nested = _typed_nested_frame(
+                            base, outer, cands, structs_by_name, ost)
+                        if nested is _NOT_TYPED:
+                            # No single declared type, so the slot's contents
+                            # are unknown — which is what the old message said,
+                            # and now it also says WHICH candidate disagreed.
+                            raise CodegenError(
+                                f"{chain}() hands the word in the slot "
+                                f"{base}.{outer} to "
+                                f"{ost.name}.{node.member}(), whose receiver is "
+                                f"the ADDRESS of a frame of 8-byte slots — so "
+                                f"the slot would have to hold a frame address. "
+                                f"The declared type of {outer!r} is the only "
+                                f"thing here that could say so, and it does "
+                                f"not: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer))}"
+                                f". Until every binding of the name agrees on "
+                                f"one type there is no frame to place here"
+                            )
+                        if nested is _REASSIGNED:
+                            raise CodegenError(
+                                f"{base}.{outer} is declared as a "
+                                f"{M.annotation_base_name(_field_annotation(cands, outer))}"
+                                f", a struct of this module whose receiver is a "
+                                f"frame of 8-byte slots, so the slot does hold a "
+                                f"frame address — but a method of "
+                                f"{', '.join(sorted({st.name for st in cands}))} "
+                                f"ASSIGNS that field, so what is in the slot is a "
+                                f"frame belonging to whichever function ran the "
+                                f"assignment rather than the frame this "
+                                f"constructor placed. Those two lifetimes are "
+                                f"independent, which is the whole reason the "
+                                f"placed frame is preferred, so it is not "
+                                f"available here. Assign the field to a name and "
+                                f"call the method on the name, which is the same "
+                                f"program with a lifetime this analysis can see"
+                            )
+                        if nested is None:
+                            # Agreed, and the agreed type is provably NOT a
+                            # frame of this unit.  The word in the slot is a
+                            # plain value, so the frame layout is not what is
+                            # in question and a frame diagnostic would be a
+                            # diagnostic about the wrong thing.  Fall through to
+                            # the value path, which either lowers the method or
+                            # refuses it with `model.value_method_refusal`.
+                            continue
+                        # Agreed, and it names a framed struct: the slot holds a
+                        # NESTED FRAME, placed in the outer object's own block
+                        # so that its lifetime is the outer object's.  The
+                        # placement itself is `model.struct_nested_frame_fields`
+                        # via `struct_constructor_sites`; nothing more is needed
+                        # here.  The write half of the rule needs nothing
+                        # either: the placement list excludes every field an
+                        # executed method writes, so a placed nested frame is
+                        # write-once by construction and a field that IS
+                        # written got `_REASSIGNED` above instead.
+                        nested_fields[f"{base}.{outer}"] = nested
+                        continue
                     if depth == 1 and ost.name not in {
                             s.name for s in (by_name.get(base) or [])}:
                         raise CodegenError(
@@ -1213,19 +1301,86 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                             f"refusing")
                 continue
             if depth > 1:
-                raise CodegenError(
-                    f"{chain} reads a field of a field through the receiver "
-                    f"{base}: a frame slot holds one 64-bit word, and the word "
-                    f"in the slot {base}.{node.member} is a value, not a struct, "
-                    f"so there is no second layout to read through. Two things "
-                    f"would make it representable and neither is a change to "
-                    f"this function: an ANNOTATION on the field saying what it "
-                    f"holds (a struct declared here would then be a nested "
-                    f"frame, a pointer a load at a computed offset), or a "
-                    f"builtin method on the value — which is "
-                    f"{node.member!r}() as a call, not a field read"
-                )
-            cands = by_name.get(base) or []
+                # A field of a field in a VALUE position.  Same three answers
+                # as the call case above, and the one that matters is the
+                # nested frame: `self.a.b` where `a` is declared to be a framed
+                # struct of this module is a load from the slot followed by a
+                # load from the nested frame, and both addresses are placed.
+                # `chain` is the whole chain, so the OUTER field is the one
+                # before the last and the inner is `node.member` — the chain
+                # is spelled rather than reconstructed because
+                # `self.a.b.c`'s outer field is `b`, not `a`.
+                parts = chain.split(".")
+                outer_field = parts[-2] if len(parts) >= 2 else node.member
+                cands = by_name.get(base) or []
+                nested = _typed_nested_frame(
+                    base, outer_field, cands, structs_by_name, None)
+                if nested is _NOT_TYPED:
+                    raise CodegenError(
+                        f"{chain} reads a field of a field through the receiver "
+                        f"{base}: a frame slot holds one 64-bit word, and the word "
+                        f"in the slot {base}.{outer_field} is a value, not a "
+                        f"struct, so there is no second layout to read through. "
+                        f"Two things would make it representable and neither is a "
+                        f"change to this function: an ANNOTATION on "
+                        f"{outer_field!r} that EVERY binding of the name agrees "
+                        f"on and that names a struct declared here (a struct "
+                        f"declared here would then be a nested frame, placed in "
+                        f"the outer object's own block), or a builtin method on "
+                        f"the value — which is {node.member!r}() as a call, not "
+                        f"a field read. The declared type of {outer_field!r} does "
+                        f"not settle it: "
+                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field))}"
+                    )
+                if nested is _REASSIGNED:
+                    raise CodegenError(
+                        f"{chain} reads through {base}.{outer_field}, which is "
+                        f"declared as a "
+                        f"{M.annotation_base_name(_field_annotation(cands, outer_field))}"
+                        f" — a struct of this module whose receiver is a frame — "
+                        f"but a method of "
+                        f"{', '.join(sorted({st.name for st in cands}))} ASSIGNS "
+                        f"it, so the word in the slot is a frame belonging to "
+                        f"whichever function ran the assignment. Assign the "
+                        f"field to a name and read through the name, which is the "
+                        f"same program with a lifetime this analysis can see"
+                    )
+                if nested is None:
+                    # Agreed, and not a frame of this unit — so the outer field
+                    # is a plain value and the inner name is a member of
+                    # whatever that value is.  Not this pass's business; the
+                    # ordinary value lowering owns it.
+                    continue
+                # A nested frame read in a value position: two loads, and the
+                # OUTER one is already in `_frame_slots` (the depth-1 MemberExpr
+                # of the same chain was visited on an earlier turn of this walk,
+                # and if it was not then the name is not a holder's field and
+                # there is nothing to place).  The INNER one goes in its own
+                # table, because a `_frame_slots` entry is one load and this is
+                # two, and a two-load access with a one-load table entry is a
+                # wrong answer rather than a failure.
+                outer_slot, (odis, orows) = M.struct_frame_slot_candidates(
+                    cands, outer_field)
+                if odis or outer_slot is None:
+                    raise CodegenError(
+                        f"{base}.{outer_field} cannot be placed, so the nested "
+                        f"read {chain} has no first load: "
+                        + ("the candidate layouts disagree — "
+                           + M.field_type_disagreement(
+                               cands, outer_field, _type_rows(cands, outer_field))
+                           if odis else
+                           f"no candidate declares it as a field of a frame")
+                    )
+                inner = M.struct_frame_slot(nested, node.member)
+                if inner is None:
+                    raise CodegenError(
+                        f"{chain} reads {node.member!r} out of a nested "
+                        f"{nested.name} frame, and that struct's "
+                        f"{M.struct_field_summary(nested)} has no such field"
+                    )
+                slots[f"{base}.{outer_field}"] = outer_slot
+                nested_slots[f"{base}.{outer_field}.{node.member}"] = inner
+                continue
             if not cands:
                 # bound from a constructor that is not framed: a plain word.
                 # Not a frame access, so not this pass's business.
@@ -1254,10 +1409,263 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                     f"no way to know which word that is, and reading the wrong "
                     f"one is a wrong answer rather than a failure")
             slots[f"{base}.{node.member}"] = slot
-        _check_frame_escapes(fn, hs, by_name, param0)
+        # Which of this function's holders were built HERE, as opposed to
+        # arriving as a method receiver or as a callee's first parameter.  It
+        # is the difference between "returned from the function that created it"
+        # and "returned from a function that received it", and the second is the
+        # larger half of the family: the holder fixpoint makes a first parameter
+        # a holder, so `def fwd(r): return r` in a program whose object `main`
+        # built was reported as a return from the creator.  A constructor
+        # binding is the one way a frame is created in this function, and it is
+        # the same enumeration the fixpoint started from, so the two cannot
+        # disagree about which names those are.
+        _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
+                             set(_constructor_bindings(fn, framed)))
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
+        fn._frame_nested_slots = nested_slots
         fn._frame_slots = slots
+        # LAST for this function, and after the walk above rather than inside
+        # it: the rewrite MUTATES the tree the walk is iterating, and a walk
+        # that mutates what it is walking is how a pass ends up seeing a node
+        # twice or not at all.  `_rewrite_method_calls` cannot do this job
+        # because it runs before any of this — the holder set, the candidate
+        # list and the declared-type agreement are all settled here — and
+        # guessing a nested receiver there is exactly the name-dispatch bug
+        # `_check_method_receiver_types` exists for.
+        _rewrite_nested_method_calls(fn, nested_fields)
+
+
+def _rewrite_nested_method_calls(fn, nested_fields) -> None:
+    """`h.a.m(x)` → `A_m(h.a, x)`, for the fields `nested_fields` names.
+
+    The last step of a nested frame, and it exists because the OTHER method-call
+    rewrite cannot do it.  `_rewrite_method_calls` runs before any frame
+    analysis exists, so at that point nothing knows that `h.a` is a nested frame
+    rather than a value; and it only rewrites a receiver that is a plain
+    `IdentExpr`, so a `MemberExpr` receiver was never rewritten at all and the
+    chain reached the backend as a call to a symbol spelled `self.inner.sum`.
+    Rewriting it HERE, from the table the declared-type agreement produced, is
+    what makes the ordinary call path apply: the receiver is a frame slot, the
+    call is an ordinary `BL A_m`, and nothing new has to be right.
+
+    The receiver stays the slot key `h.a`, which is a load out of the outer
+    frame — the same word the value-position read of that field produces — so
+    both spellings of the access go through `_load_var` and there is one
+    lowering of it.
+
+    Only a receiver the table names is rewritten.  A chain the table does not
+    name is left alone deliberately: it is either a value receiver (the
+    declared type said the slot is not a frame) or untyped, and both of those
+    already have a diagnostic that describes them.  Rewriting a guess here would
+    replace a refusal with a call to a struct's method on a word that is not its
+    frame, which is C5's second silently-wrong program with a new cause.
+    """
+    if not nested_fields:
+        return
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr) or not isinstance(node.func,
+                                                             F.MemberExpr):
+            continue
+        obj = node.func.obj
+        if not isinstance(obj, F.MemberExpr):
+            continue
+        key = _root_ident(obj)
+        if key is None or key[1] != 1:
+            continue
+        st = nested_fields.get(f"{key[0]}.{obj.member}")
+        if st is None:
+            continue
+        node.func = F.IdentExpr(name=M.method_function_name(st.name,
+                                                            node.func.member))
+        node.args = [obj] + list(node.args)
+
+
+# The three answers a field's declared type can have, as one value rather than
+# two, because "no single type" and "a single type that is not a frame" are the
+# two halves of the rule and mixing them up is the silently-wrong direction in
+# both directions: treating an untyped slot as a value read gives a scratch
+# register, and treating a value as a frame address gives a wild load.
+#
+#   `_NOT_TYPED`   — the candidates do not agree, so nothing is known.
+#   `None`         — they agree, and the agreed type is provably NOT a frame of
+#                    this unit, so the word in the slot is a plain value.
+#   `_REASSIGNED`  — they agree, and it IS a framed struct of this unit, but
+#                    some executed method WRITES the field, so the slot holds
+#                    whatever that assignment put there rather than the frame the
+#                    constructor placed.  Distinct from `_NOT_TYPED` because the
+#                    diagnosis is different and much more useful: the type is
+#                    known and it is a frame, and what is unknown is WHOSE.
+#   a StructDef    — they agree, it is a framed struct of this unit, and nothing
+#                    writes the field, so the word in the slot is the address of
+#                    a NESTED FRAME that `model.struct_nested_frame_fields`
+#                    places in the outer object's own block.
+#
+# The fourth answer is the one that took a measurement to get right.  Without
+# it, a written field was treated as the constructor's frame and every write to
+# it was refused — which is sound about the frame and useless about the
+# program: `self._bytes = remaining` in `std/collections/string/_utf8.mojo` is
+# ordinary code, and refusing it moved 164 stdlib files' verdicts in the sweep
+# to say so.
+_NOT_TYPED = object()
+_REASSIGNED = object()
+
+
+def _field_annotation(cands, name):
+    """The declared type of `name` as a candidate spells it, for a message.
+
+    The first candidate's answer, and only ever used to NAME a type in a
+    diagnostic — the decision itself is `frame_field_type_candidates`, which
+    requires unanimity.  A reader is better served by the spelling one
+    candidate used than by no type at all, and the message says "is declared as"
+    rather than asserting it is the type.
+    """
+    for st in cands:
+        _base, ann = M.struct_field_declared_type(st, name)
+        if ann is not None:
+            return ann
+    return None
+
+
+def _type_rows(cands, name):
+    """The declared-type evidence for a field, for a refusal to quote.
+
+    A function rather than a call at each use site because the refusal has to
+    quote the SAME table the decision was made from; recomputing it at the raise
+    would be a second walk of the same candidates that could disagree with the
+    first, and a refusal that misreports why it fired is worse than one that
+    does not report at all."""
+    return M.field_type_rows(cands, name)
+
+
+def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
+    """The nested frame `base.<field>` holds, or `_NOT_TYPED`, or None.
+
+    The whole of C5's named next step, in one function: read a field's DECLARED
+    type, apply the agree-or-refuse rule to it
+    (`model.frame_field_type_candidates`), and return the one thing the emitter
+    can act on.  Three answers, as `_NOT_TYPED` documents.
+
+    `method_owner` is the struct declaring the method being called on the field,
+    or None for a value-position field read.  It is used for ONE thing and that
+    thing is worth reading twice: when the agreed type is a framed struct but a
+    DIFFERENT struct owns the method, the call is a mis-dispatch and this path
+    must not place a nested frame to make it work.  `recv.m(x)` carries no type,
+    so `_rewrite_method_calls` has already sent it to `method_owner.m` by name
+    alone; placing a nested frame for a type the callee does not expect would
+    make the program build and compute on the wrong layout, which is the shape
+    of C5's second silently-wrong program with a different cause.
+
+    The four answers are `_NOT_TYPED`, `None`, `_REASSIGNED` and a StructDef;
+    see the note on the sentinels for why `_REASSIGNED` is not the same answer
+    as `_NOT_TYPED`.
+    """
+    if not cands:
+        return _NOT_TYPED
+    nested, (disagree, _rows) = M.frame_field_type_candidates(
+        cands, field, structs_by_name)
+    if nested is None:
+        if disagree:
+            return _NOT_TYPED
+        return None
+    if method_owner is not None and method_owner.name != nested.name:
+        return None
+    # Agreed, and it names a framed struct.  It is a NESTED FRAME only if every
+    # candidate both agrees and never writes the field — the placement list is
+    # the authority, and consulting it rather than re-deriving the condition is
+    # what keeps the emitter and this decision from disagreeing about which
+    # fields are placed.
+    for st in cands:
+        if not any(name == field for name, _slot, _child
+                   in M.struct_nested_frame_fields(st, structs_by_name)):
+            return _REASSIGNED
+    return nested
+
+
+def check_frame_field_blob_premises(structs) -> None:
+    """Refuse a method that puts a CONTAINER into a field of a framed receiver.
+
+    Called by the ENTRY POINTS, after their imports have resolved, and not from
+    `_prepare_functions` — and the reason is a measured one rather than a
+    stylistic one. `_prepare_functions` runs BEFORE `_resolve_imports`, so a
+    refusal raised from inside it preempts the import diagnosis, and this check
+    fires on 106 of this repository's 284 files: 67 of them import a CPython
+    host module, and for those the import is the more fundamental fact (a file
+    that imports `ast` is out of this backend's reach whatever its codegen
+    says).  Measured with the call inside `_prepare_functions`: 67 files moved
+    `not-answerable/host-import` → `codegen`, which puts 67 unbuildable files
+    into the measured denominator and reports the coverage as 40.4% when the
+    accurate figure is the baseline's.  That is the mirror image of the drift
+    `bugs/FORMAL_wide_receiver_by_reference.md` calls out, and it flatters
+    nothing while misinforming.
+
+    So the check moved LATER, to the one point where both facts are known.  It
+    is a separate function rather than a flag so that "which entry points call
+    it" is a one-line answer, and both call sites are marked.
+
+    The enforcement half of the premise `formal/model.py` states
+    (`model.frame_field_premise` / `FRAME_FIELD_BLOB_PREMISE_B1`).  The premise
+    is that a frame slot never holds a blob, and it was true only because two
+    other decisions happened to make it true: no field can take a non-literal
+    default, and `S()` does not run `__init__`.  Neither is a property of the
+    frame layout, so a `reset()` that assigns a list into a field — a shape
+    ordinary Python and absent from the corpus only by luck — put a blob in a
+    slot with the ASSIGNING function's lifetime while the slot's lifetime is
+    the object's.  A method reaching through the slot afterwards appends into
+    reclaimed stack.  The program builds, runs, and returns a number nobody
+    wrote.
+
+    Framed structs only.  A ONE-WORD struct's receiver IS its field, so a
+    container written there is a blob in a local slot whose lifetime the
+    ordinary value path already governs, and refusing it would be refusing a
+    different (and separately owned) problem.  The narrowness is deliberate:
+    this check is about the lifetime the FRAME introduces, and it should not
+    reach past that.
+
+    `__init__` is excluded, and the reason is the second premise rather than a
+    convenience: it does not run on this path.  That is the whole content of
+    why nearly every container-shaped struct in the corpus passes this check
+    while `self.items = List[Self.T]()` sits unread in its `__init__` — and
+    `model.frame_field_premise_note` is what says so out loud, so the exclusion
+    is a stated premise with a name rather than a silent hole.
+    """
+    for st in structs:
+        if not M.struct_is_framed(st):
+            continue
+        writes = M.struct_field_container_writes(st)
+        if writes:
+            raise CodegenError(M.frame_field_premise_refusal(st))
+
+
+# `_check_nested_frame_writes` USED to live here, refusing any write to a field
+# that held a placed nested frame.  It is gone, and the reason is worth
+# recording because the deletion is the fix rather than a simplification: the
+# check was a band-aid over a placement decision that was too permissive, and
+# it fired 164 stdlib files' worth of ordinary code (`self._bytes = remaining`)
+# for a frame the program had just replaced.  `model.struct_nested_frame_fields`
+# now excludes every field some executed method writes, so a placed nested
+# frame is write-once BY CONSTRUCTION and there is nothing left to check.  The
+# four-way answer in `_typed_nested_frame` is what a written field gets instead,
+# and it is a diagnosis rather than a prohibition: the type is known, the field
+# is known to be reassigned, and what is unknown is whose frame the slot holds.
+
+
+def _describe_value(value) -> str:
+    """How a refusal names the value that would have gone into a nested slot."""
+    if value is None:
+        return "no value"
+    if isinstance(value, F.IdentExpr):
+        return f"a name, {value.name!r}"
+    if isinstance(value, F.CallExpr):
+        name = value.func.name if isinstance(value.func, F.IdentExpr) else "?"
+        return f"a call to {name!r}"
+    if isinstance(value, (F.ListExpr, F.DictExpr, F.TupleExpr)):
+        return "a container literal"
+    if isinstance(value, F.IntLiteral):
+        return f"the literal {value.value}"
+    if isinstance(value, F.StringLiteral):
+        return f"the string {value.value!r}"
+    return f"a {type(value).__name__}"
 
 
 def _constructor_bindings(fn, framed) -> dict:
@@ -1361,7 +1769,8 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
         )
 
 
-def _check_frame_escapes(fn, holders, by_name, param0) -> None:
+def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
+                         structs_by_name=None, created_here=frozenset()) -> None:
     """Refuse every construct a frame ADDRESS may not take part in.
 
     A frame belongs to the function that created it and is reclaimed when that
@@ -1379,10 +1788,48 @@ def _check_frame_escapes(fn, holders, by_name, param0) -> None:
     the slot can outlive those bytes by as much as the object's own lifetime.
     Every other channel out of a function is a return or a container and both
     were already refused; this one was a hole, and it is the same hole one
-    level down, which is the direction this whole design leaks in."""
+    level down, which is the direction this whole design leaks in.
+
+    `owners` and `structs_by_name` are what let the CALL half tell a callee it
+    can bind from one it cannot, which is the question the old single refusal
+    answered wrongly for 23 of this repository's 25 hand-off sites. Both are
+    optional so the dylib path, which has no imported structs and so has no
+    cross-module callee to recognise, can call this with neither.
+
+    `created_here` is the set of holder names this function BUILT; a holder
+    outside it arrived from a caller, and the return refusal says so rather than
+    naming this function as the creator."""
     known = set(param0)
+    # `<Struct>_<method>` for every method of every struct in hand, MINUS the
+    # ones this module compiles.  The difference is exactly the set of callees
+    # that live in an IMPORTED module: their bodies are in the dylib that
+    # module compiles into, and they are exported under the module-qualified
+    # spelling `dylib_syms` maps them to.  A frame address is exactly what such
+    # a callee wants — it is a method of the receiver's own struct, so it was
+    # compiled against the very field list in hand, and `base + 8k` means the
+    # same thing on both sides of the boundary.
+    cross_module = set(owners or ()) - known
+    struct_names = structs_by_name or {}
+
+    def _names(node):
+        return [st.name for st in (by_name.get(node.name) or [])] \
+            if isinstance(node, F.IdentExpr) else []
+
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is not None:
+            # Whether the returning function CREATED the frame is not a thing
+            # this walk knows: a holder may have arrived as the first parameter,
+            # in which case the creator is up the call chain.  `owners` says
+            # which case this is, and the message says so, because "returned
+            # from the function that created it" is false for the second and
+            # sends the reader to the wrong function looking for it.
+            owner = (owners or {}).get(fn.name)
+            if isinstance(node.value, F.IdentExpr) \
+                    and node.value.name in holders:
+                raise CodegenError(M.frame_return_refusal(
+                    owner.name if owner is not None else None,
+                    node.value.name not in created_here,
+                    _names(node.value)))
             _refuse_holder_use(fn, node.value, holders, by_name,
                                "is returned from the function that created it")
         elif isinstance(node, (F.ListExpr, F.TupleExpr, F.DictExpr)):
@@ -1402,15 +1849,53 @@ def _check_frame_escapes(fn, holders, by_name, param0) -> None:
         elif isinstance(node, F.CallExpr):
             args = list(node.args or []) + [v for _k, v in (node.kwargs or [])]
             callee = node.func.name if isinstance(node.func, F.IdentExpr) else None
+            # A METHOD call's own name, for the message: `recv.m(x)` that the
+            # rewriting did not lift has no callee name to report, and "a call
+            # this path does not recognise" sends the reader looking for a
+            # missing function rather than at the method the source names.
+            method = (_member_chain(node.func)
+                      if isinstance(node.func, F.MemberExpr) else None)
             for i, a in enumerate(args):
                 if i or callee is None:
-                    _refuse_holder_use(fn, a, holders, by_name,
-                                       "is passed to a call in a position "
-                                       "whose meaning this path cannot see")
-                elif callee not in known:
-                    names = [st.name for st in (by_name.get(a.name) or [])] \
-                        if isinstance(a, F.IdentExpr) else []
-                    reason = M.frame_receiver_escape_refusal(callee, names)
+                    _refuse_holder_use(
+                        fn, a, holders, by_name, "",
+                        M.frame_position_refusal(callee, i, len(args),
+                                                 _names(a), method))
+                    continue
+                if callee in cross_module:
+                    # A method of an imported struct, called on a frame of a
+                    # struct.  `_check_method_receiver_types` has already
+                    # refused the case where the two structs disagree, so what
+                    # is left is the hand-off the by-reference design exists
+                    # for, and it needs nothing special: see
+                    # `_method_exports`, which is the other half — the export
+                    # that makes the symbol bindable at all.
+                    continue
+                if callee not in known:
+                    if callee in struct_names \
+                            and M.type_constructor_kind(callee) is None:
+                        # A struct CONSTRUCTOR, not a function: `Repeat`,
+                        # `IdentExpr`, `StringSlice`, `ElementFn` in this
+                        # repository.  It was reported as a name this module
+                        # does not compile, which is false twice over — the
+                        # struct is declared here, and a struct has no body to
+                        # compile.  See `model.frame_constructor_refusal`.
+                        #
+                        # The `type_constructor_kind` half is load-bearing and
+                        # was a measured miss: `Pointer` is ALSO a struct some
+                        # files declare, and `Pointer(to=stat)` is an IDENTITY
+                        # conversion rather than a construction, so without it
+                        # `std/os/_macos.mojo` was reported as a copy
+                        # construction — a strictly worse message than the one
+                        # it replaced, and about a construct the source does not
+                        # contain.  The test is the model's own, so a name added
+                        # to the type-constructor tables is classified correctly
+                        # here without this file being told.
+                        _refuse_holder_use(
+                            fn, a, holders, by_name, "",
+                            M.frame_constructor_refusal(callee, _names(a)))
+                        continue
+                    reason = M.frame_receiver_escape_refusal(callee, _names(a))
                     if reason is not None:
                         _refuse_holder_use(fn, a, holders, by_name, "", reason)
 
@@ -1687,6 +2172,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     own = {id(st) for st in M.iter_struct_defs(stmts)}
     M.attach_field_evidence([st for st in structs if id(st) in own],
                             M.unit_field_evidence(stmts))
+    # Which callees this module PLACES: the framed structs it declares, and
+    # every struct reached as a typed-nested field of one of them.  Published
+    # rather than threaded because the one consumer — the blob-in-a-field
+    # premise check — is a node walk with no unit in hand, the same reason
+    # `attach_field_evidence` puts the evidence on the struct.
+    M.publish_placed_frame_structs(
+        {st.name for st in structs_by_name.values()
+         if M.struct_is_framed(st)}
+        | {child.name for st in structs_by_name.values()
+           for _f, _s, child in M.struct_nested_frame_fields(
+               st, structs_by_name)})
     for fn in functions:
         _rewrite_method_calls(fn.body, owners, wide)
         # A method's `self` IS the field; a local initialised from a one-word
@@ -2100,14 +2596,40 @@ def _method_exports(source_paths: list, structs_by_file: dict,
     Built here rather than inside _formal_exports because the module qualifier
     is a property of the FILE a struct was declared in, and only the caller
     knows which file that was. Naming is doc/ABI.md's: module-qualified, so
-    two modules' same-named structs cannot collide in one library."""
+    two modules' same-named structs cannot collide in one library.
+
+    A method of a WIDE struct is exported too, and the filter that used to
+    exclude it here was a wave-3 leftover whose own comment says so: "refused
+    at lift time, never compiled".  That was true when a multi-field struct had
+    no representation at all.  It stopped being true the moment the by-reference
+    receiver landed — a wide struct's method IS compiled, its receiver word is
+    the frame's address, and `_struct_methods` lifts it on exactly the
+    `struct_is_framed` condition.  So the filter was dropping the export of code
+    that was in the library, and an importer's `S_get(...)` call had no symbol
+    to bind to.
+
+    Measured, on two files differing in nothing but the field count: a one-field
+    struct's method appears in the manifest and a two-field struct's does not,
+    with the same code path and the same `_export_entries` probe — which finds
+    `S.get` in both cases, so the export SET was never the thing excluding it.
+    With the filter gone, a two-field struct's method is advertised, the call
+    binds, and the program returns the value the source computes on both
+    architectures.
+
+    The hand-off is sound rather than merely possible, and the reason is the one
+    `bugs/FORMAL_wide_receiver_by_reference.md` gives for the by-reference design
+    itself: the callee is a method of the receiver's OWN struct, and the
+    importer derived that struct's field list from this very file
+    (`imported_struct_defs`), so `base + 8k` is computed from the same field
+    list on both sides of the boundary.  What a frame address is NOT meaningful
+    to is an extern, or code compiled against a different declaration — and
+    `_check_frame_escapes` still refuses both.
+    """
     out = {}
     for src_path, structs in (structs_by_file or {}).items():
         prefix = (prefixes or {}).get(src_path) or _module_prefix(src_path)
         for st in structs:
             for m in M.struct_methods(st):
-                if not M.struct_fits_one_word(st):
-                    continue          # refused at lift time, never compiled
                 out[M.method_function_name(st.name, m.name)] = (
                     prefix,
                     M.abi_method_symbol(prefix, st.name, m.name),

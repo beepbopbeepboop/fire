@@ -5076,6 +5076,151 @@ theorem frameRead_in_range (b : UInt64) (n k : Nat)
     simp only [frameOffset, SLOT] at h' h'' ⊢
     omega
 
+/-! ### A NESTED receiver: a field whose agreed declared type is a framed struct
+
+`bugs/FORMAL_wide_receiver_by_reference.md`'s next step is a field's DECLARED
+type, used only when every binding of the name agrees on it
+(`formal/model.py`'s `frame_field_type_candidates`).  When the agreed type is a
+framed struct of the same module, the slot holds the ADDRESS of that struct's
+frame, and the emitter PLACES it: one BLOCK per constructor site, the object's
+own frame at the bottom and the frames of its typed-nested fields immediately
+above it (`struct_constructor_sites` / `struct_frame_block_bytes`).
+
+Everything below is about that placement, and the first question it has to
+answer is the one C5 flagged as the reason the shape is worth having at all: a
+nested frame's address is a frame address, so a VALUE read out of a frame has
+to be provably unable to reach one.  The answer is the placement.  A nested
+frame sits entirely ABOVE the object's own last slot, and a slot's 8 bytes sit
+below the first nested byte, so the two ranges cannot meet.  `nested_above_own_
+slots` is that fact, and `nested_write_no_outer_slot` / `outer_write_no_nested_
+slot` are the two ways of stating what it buys.
+
+The second is the aliasing.  Two objects' nested frames are separate storage,
+and the reason is the ALLOCATOR's, not anything about nested frames: one block
+per site, blocks disjoint and in walk order, each block containing its object's
+own frame and then the nested ones.  `block_sep_nested_sep` is the arithmetic
+that turns block separation into separation of the two nested frames, which is
+the one step `frame_frames_no_alias_neqn` does not do for you — it consumes a
+separation bound about the frames you name, and here the bound the emitter
+actually produces is about blocks. -/
+
+/-- `FrameFits` specialised to a prefix of the frame.  `FrameFits.mono` goes
+    DOWN in the slot count, which is the direction a caller discharging a whole
+    frame needs; this goes to the one slot it is about to name, and is what
+    `frameAddr_eq` consumes.  Present because every `frameAddr_eq` call in this
+    section has to re-derive it, and a caller that re-derives an arithmetic
+    step is a caller that can get it wrong. -/
+theorem FrameFits.of_lt (b : UInt64) (n k : Nat) (h : FrameFits b n) (hk : k < n) :
+    FrameFits b (k + 1) := by
+  have hh := h
+  simp only [FrameFits, frameBytes, SLOT] at hh ⊢
+  have hk' : SLOT * k + SLOT = SLOT * (k + 1) := frameOffset_step k
+  omega
+
+/-- **A NESTED FRAME LIES ENTIRELY ABOVE THE OBJECT'S OWN SLOTS.**  `habove` is
+    the placement: the nested frame's base is at or above the first byte past
+    the object's last slot.  The conclusion is that every slot of the object
+    ends below the nested frame's base, so the two byte ranges are disjoint.
+
+    This is the fact that makes a nested frame distinguishable from a value.
+    `frameRead_in_range` says a read consults exactly one slot and that slot
+    lies inside its own frame; combined with this, the word a read produces can
+    never BE a nested frame's base — so a callee handed `h.a` as a value is
+    provably not holding a reference into a frame it might scribble on, which
+    is the whole argument for handing a value receiver a bare `UInt64`. -/
+theorem nested_above_own_slots (b nb : UInt64) (n k : Nat)
+    (hfit : FrameFits b n) (hk : k < n)
+    (habove : b.toNat + frameBytes n ≤ nb.toNat) :
+    frameAddr b k + SLOT ≤ nb.toNat := by
+  have h1 : frameAddr b k = b.toNat + frameOffset k :=
+    frameAddr_eq b k (FrameFits.of_lt b n k hfit hk)
+  rw [h1]
+  have h' : frameOffset k + SLOT = frameBytes (k + 1) := frameOffset_step k
+  have h'' := frameBytes_mono (show k + 1 ≤ n by omega)
+  simp only [frameOffset, SLOT] at h' h'' ⊢
+  omega
+
+/-- **WRITING THROUGH A NESTED FRAME LEAVES EVERY SLOT OF THE OBJECT ALONE.**
+    `a.inner.k = v` cannot change `a.x` for any other field `x` of `a`, at byte
+    granularity, which is the granularity `mem_write_u64` works at.  A method
+    reached through a nested field and a method of the outer struct are then
+    independent, and neither can corrupt the other's storage. -/
+theorem nested_write_no_outer_slot (mem : Nat → UInt8) (b nb : UInt64)
+    (n nn k k' : Nat) (v : UInt64)
+    (hfit : FrameFits b n) (hk : k < n) (hk' : k' < n)
+    (hfitnb : FrameFits nb nn) (hkn : k < nn)
+    (habove : b.toNat + frameBytes n ≤ nb.toNat) :
+    frameRead (frameWrite mem nb k v) b k' = frameRead mem b k' := by
+  have hfar : frameAddr b k' + SLOT ≤ frameAddr nb k :=
+    calc frameAddr b k' + SLOT ≤ nb.toNat := nested_above_own_slots b nb n k' hfit hk' habove
+      _ ≤ frameAddr nb k := by
+          have h2 : frameAddr nb k = nb.toNat + frameOffset k :=
+            frameAddr_eq nb k (FrameFits.of_lt nb nn k hfitnb hkn)
+          rw [h2]
+          simp only [frameOffset, SLOT]
+          omega
+  exact frameWrite_read_outside mem nb k v (frameAddr b k') (Or.inl hfar)
+
+/-- …and the other direction: a write to a slot of the outer object cannot reach
+    the nested frame either.  Both directions are one lemma applied with the
+    two frames' roles swapped, and both are stated because a one-directional
+    claim about two adjacent regions is the kind of thing that reads as
+    complete and is not. -/
+theorem outer_write_no_nested_slot (mem : Nat → UInt8) (b nb : UInt64)
+    (n nn k k' : Nat) (v : UInt64)
+    (hfit : FrameFits b n) (hk : k < n)
+    (hfitnb : FrameFits nb nn) (hkn : k' < nn)
+    (habove : b.toNat + frameBytes n ≤ nb.toNat) :
+    frameRead (frameWrite mem b k v) nb k' = frameRead mem nb k' := by
+  have hfar : frameAddr b k + SLOT ≤ frameAddr nb k' :=
+    calc frameAddr b k + SLOT ≤ nb.toNat := nested_above_own_slots b nb n k hfit hk habove
+      _ ≤ frameAddr nb k' := by
+          have h2 : frameAddr nb k' = nb.toNat + frameOffset k' :=
+            frameAddr_eq nb k' (FrameFits.of_lt nb nn k' hfitnb hkn)
+          rw [h2]
+          simp only [frameOffset, SLOT]
+          omega
+  exact frameWrite_read_outside mem b k v (frameAddr nb k') (Or.inr hfar)
+
+/-- **BLOCK SEPARATION IMPLIES NESTED SEPARATION.**  The one arithmetic step the
+    nested layout needs and `frame_frames_no_alias_neqn` does not supply: that
+    theorem consumes a separation bound about the two frames you name, and the
+    bound the emitter actually produces is about BLOCKS — one per constructor
+    site, disjoint and in walk order, each block being an object's own frame
+    followed by the frames of its typed-nested fields (`struct_frame_block_bytes`
+    reserves exactly `blk`, and `struct_constructor_sites` advances by it).
+
+    So: the first object's block ends at or below where the second's begins, the
+    first nested frame sits inside the first block, and the second nested frame
+    sits at or above the second object's base.  Transitivity, and it is the
+    whole reason two objects' nested frames are separate storage. -/
+theorem block_sep_nested_sep (b1 b2 nb1 nb2 o1 o2 blk1 n1 : Nat)
+    (hblk : b1 + blk1 ≤ b2)
+    (hn1 : nb1 = b1 + o1)
+    (hfitslot : o1 + frameBytes n1 ≤ blk1)
+    (hn2 : nb2 = b2 + o2) :
+    nb1 + frameBytes n1 ≤ nb2 := by
+  rw [hn1, hn2]
+  omega
+
+/-- **TWO OBJECTS' NESTED FRAMES DO NOT ALIAS.**  `frame_frames_no_alias_neqn`
+    with the two nested bases, and it is stated separately because a caller
+    holding two objects' nested frames needs the conclusion in that shape and
+    because the separation it needs is the one `block_sep_nested_sep` derives.
+
+    What the property buys a program: `a.inner.k = v` cannot change what
+    `b.inner.k'` reads, for any two fields of any two objects, at any nesting
+    depth the emitter will place.  Which is the nested-frame version of
+    `frame_instances_no_alias_neqn` and the reason the two-instance cases in
+    `test_formal_run.py` have nested twins. -/
+theorem nested_frames_no_alias (mem : Nat → UInt8)
+    (b1 b2 nb1 nb2 : UInt64) (n1 n2 k1 k2 : Nat) (v : UInt64)
+    (hk1 : k1 < n1) (hk2 : k2 < n2)
+    (hfit1 : FrameFits nb1 n1) (hfit2 : FrameFits nb2 n2)
+    (hsep : nb1.toNat + frameBytes n1 ≤ nb2.toNat) :
+    frameRead (frameWrite mem nb1 k1 v) nb2 k2 = frameRead mem nb2 k2 :=
+  frame_frames_no_alias_neqn mem nb1 nb2 n1 n2 k1 k2 v hk1 hk2 hfit1 hfit2 hsep
+
 end Frame
 
 

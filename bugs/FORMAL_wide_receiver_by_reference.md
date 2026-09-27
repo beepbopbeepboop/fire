@@ -932,3 +932,321 @@ written down rather than assumed.
   and cannot do otherwise — it is the guard for the rule, not a demonstration of
   it. Six of C5's eight new cases fail pre-change; the two that do not are named
   here so the ratio is not read as eight.
+
+## Wave 4 (D2): a field's DECLARED type, used only when every binding agrees
+
+The entry above named this as the next step and named it precisely: *"A field's
+declared type is still not used … use a declared type only when every binding of
+the name agrees with it — the same agree-or-refuse discipline as
+`struct_frame_slot_candidates`."* This section is that step, and the first
+thing worth saying about it is that **the rule has four answers, not two**,
+which is the whole content of C5's "doing it halfway is the silently-wrong
+direction".
+
+### The rule, and where it lives
+
+`formal/model.py`, a new section headed "A field's DECLARED type: agree, or
+refuse", next to the slot-agreement check it copies:
+
+| what | where |
+|---|---|
+| `_strip_type_args`, `annotation_base_name` | reduce `List[Self.T]` → `List`, `unsafe Pointer[Int32]` → `Pointer`, `ref[Inner]` → `Inner`, and `ref[self.items]` → **None** |
+| `struct_field_declared_type` | one reading of one field's declaration; `(None, why)` when there is no single answer |
+| `field_type_rows` | the evidence table a refusal quotes, computed once and shared with the decision |
+| **`frame_field_type_candidates`** | **the agree-or-refuse check**, the exact analogue of `struct_frame_slot_candidates` one level in |
+| `field_type_is_value` | the other answer, as its own accessor so no caller re-derives it |
+| **`field_type_disagreement`** | **its own diagnostic** — every candidate spelled, agreeing ones included |
+| `struct_fields_written_outside_init` | the third condition on placement, and the one a first version left out |
+| `struct_nested_frame_fields` | the PLACEMENT list: `[(field, slot, struct)]` |
+| `struct_frame_block_bytes` | a block is the object's frame PLUS its nested frames' |
+| `struct_constructor_sites` | extended to `(struct, offset, nested)`, `nested` carrying each child's own absolute offset |
+
+`formal/build.py` consumes it in `_frame_receivers` through one function,
+**`_typed_nested_frame`**, which is where the four answers live:
+
+| answer | meaning | what happens |
+|---|---|---|
+| `_NOT_TYPED` | the candidates do not agree | refused, and the refusal now spells WHICH candidate wanted what |
+| `None` | they agree, and the type is **not** a framed struct of this module | the word is a plain VALUE: no frame diagnostic, the value path owns it |
+| `_REASSIGNED` | they agree, it **is** a framed struct, and an executed method WRITES the field | refused, naming the type and saying whose frame the slot holds is unknown |
+| a `StructDef` | they agree, it is a framed struct, and **nothing writes the field** | a NESTED FRAME, placed in the outer object's own block |
+
+**The tie-break that keeps it in the safe direction** is the shape of the
+function, not a line inside it: `frame_field_type_candidates` returns `None` for
+*every* doubtful case — no annotation, two declarations that disagree, two
+candidates naming different types, a base that is not one of this module's
+framed structs — and returns a `StructDef` only on unanimity. **An absent
+answer is the answer.** There is no path by which a doubtful annotation reaches
+the emitter, and `struct_nested_frame_fields` re-checks unanimity from scratch
+rather than trusting the caller's verdict, so the two decisions cannot drift.
+
+The `_REASSIGNED` answer is the one that took a measurement. Without it, a
+written field was treated as the constructor's frame and every write to it was
+refused — sound about the frame, useless about the program. Measured on the
+stdlib sweep: **164 files changed verdict**, every one because ordinary code
+(`self._bytes = remaining` in `_utf8.mojo`, `self.functions = ...` in
+`module_gen.py`) was being refused for a frame the program had just replaced.
+Excluding written fields from the placement list is the fix; the prohibition
+was the band-aid.
+
+### What it lowers, on both machines
+
+* `h.a.b` in a value position, `a` a placed nested field: two loads. Both
+  backends intercept it in `_load_var`/`_store_var`, keyed on a **separate**
+  table `_frame_nested_slots` — a `_frame_slots` entry is one load, and a null in
+  it is indistinguishable from "this field has no slot", which is the
+  disagreement this pass exists to keep apart from "this field is nested".
+* `h.a.m(x)`: `_rewrite_nested_method_calls` turns it into `A_m(h.a, x)`, so the
+  ordinary call path applies. It is a *second* method-call rewrite because
+  `_rewrite_method_calls` runs before any frame analysis exists and only
+  rewrites a receiver that is a plain `IdentExpr` — a `MemberExpr` receiver was
+  never rewritten at all, and the chain reached the backend as a call to a
+  symbol spelled `self.inner.sum`.
+* `S()`: one BLOCK per constructor site — the object's own frame, then the
+  frames of its typed-nested fields immediately above it, each brought up at its
+  own slot defaults and its address stored into the slot. Recursive through
+  `struct_nested_frame_fields` and bounded by `MAX_NESTED_FRAME_DEPTH = 4`, so
+  a cyclic declaration graph (`A.b: B` / `B.a: A`) truncates identically on both
+  machines rather than hanging on one.
+
+**The nested frames go ABOVE the object's own slots, not below, and the reason
+is the one C5 flagged as the point of the shape.** A value read out of a frame
+consults exactly one slot, and a nested frame's address is a frame address — so
+if a nested frame sat inside the outer frame's own byte range, a value read
+could *be* a frame base and the two would stop being distinguishable.
+`Frame.nested_above_own_slots` is that: every slot of the object ends below the
+nested frame's base. `Frame.nested_write_no_outer_slot` and
+`Frame.outer_write_no_nested_slot` are the two directions of "so a method
+reached through a nested field and a method of the outer struct are
+independent", and `Frame.block_sep_nested_sep` is the one arithmetic step
+`frame_frames_no_alias_neqn` does not supply: the bound the emitter actually
+produces is about **blocks**, and it has to be turned into a bound about the two
+nested frames before that theorem applies.
+
+### The blob-in-a-field premise, stated and checked
+
+C5's fourth open item: *"A blob stored in a field has the frame's lifetime
+problem one level down … the reason it cannot be lifted is not yet written down
+as a premise anywhere."* It is now a premise with a name, a check and a test.
+
+`formal/model.py`: `FRAME_FIELD_BLOB_PREMISE_B1` / `_B2`,
+`struct_field_container_writes`, `frame_field_premise`,
+`frame_field_premise_note`, `frame_field_premise_refusal`.
+`formal/build.py`: `check_frame_field_blob_premises`, called from the two entry
+points.
+
+The premise has two halves with **different standing**, and saying so is the
+point:
+
+* **(B1) is a real constraint, enforced.** No method body that actually EXECUTES
+  writes a container into a field. A list or a dict on this path is a
+  bump-allocated region of the function's own reserved scratch, so a slot
+  holding one hands a method a blob whose bytes belong to whichever function
+  built it.
+* **(B2) is an enabling premise, asserted by the emitter and reported by
+  name.** `S()` emits no call and refuses `S(x)`, so `__init__` does not run and
+  the `self.items = List[Self.T]()` in every container-shaped `__init__` in the
+  corpus never executes. That is *why* nearly every container-shaped struct
+  passes (B1) — `frame_field_premise_note` prints the sentence for the ones that
+  would not, e.g. *"Parser.__init__ assigns a container literal to
+  self._pending_decs … this is safe only because S() does not run __init__"*.
+
+**D1 can rely on (B1).** It is a refusal, not a comment, and it is
+`byref_refuse_container_written_into_a_field` in `test_formal_run.py`. What it
+buys concretely: with the check in place, `self.<container>.append(x)` in a
+method cannot append into reclaimed stack, because no slot can hold a container
+in the first place. The residual, stated: a write of a **bare name** whose value
+kind is unknown is not caught — `_is_container_value` names that gap and says
+what closes it (the value kind of a name, which is `ValueKinds`' question and
+D1's table, not a re-derivation to be smuggled in here). One hop of propagation
+IS caught (`tmp = [1, 2, 3]; self.x = tmp`).
+
+**And the check found a real wrong program, not just a missing comment.** A
+two-field struct whose `reset()` assigns `[1, 2, 3]` into a field:
+
+```
+$ cd /tmp/d2base && python3 fire.py build --formal --no-prove -o b1b.out b1b.mojo
+Built: b1b.base.out  [arm64/macho]
+$ ./b1b.base.out ; echo $?
+128            # the source says 42
+```
+
+The pre-change tree built it, ran it, and returned a **blob address** read out
+of a frame slot. Now it is refused by name. `byref_refuse_container_written_
+into_a_field` fails on the pre-change tree for exactly this reason: the harness
+reports *"BUILT a construct that has no representation … the binary is the real
+answer here."*
+
+**Where the check is called from is a measurement, not a style choice.** With it
+inside `_prepare_functions` it fires before imports resolve, and it fires on
+**106 of this repository's 284 files** — 67 of which import a CPython host
+module, for which the import is the more fundamental fact. Measured: **67 files
+moved `not-answerable/host-import` → `codegen`**, putting 67 unbuildable files
+into the measured denominator and reporting coverage as 40.4% when the accurate
+figure is 61.1%. That is the mirror image of the drift C5 called out, so the
+check moved LATER, to the two entry points where both facts are known
+(`formal/build.py`'s `build_module`, after `_resolve_imports`, and
+`_formal_module_functions` for the dylib path). **Zero class moves after the
+move**, and both `stdlib-dylib`'s skip count (0) and `stdlib-syntax`'s
+unexpected-failure count (0) are unchanged.
+
+### What it did to the 42
+
+**No file in the group became compilable, and the honest reason is the
+annotation, not the analysis.** Of the group's 15 direct findings, the field
+whose declared type is read is a type this module does not declare in **every**
+one:
+
+| field | declared | declared in the same file? | what the analysis now says |
+|---|---|---|---|
+| `BinaryHeap._data` | `List[Self.T]` | no | a value, not a frame — so `self._data.clear()` goes to the value path |
+| `Semaphore._state` | `Int32` | no | a value; the frame diagnostic is GONE |
+| `_PhiloxWrapper._rng` | `PhiloxRandom[10]` | **an import ALIAS** for `Random`, in `philox.mojo` | untyped here |
+| `NormalRandom._rng` | `Random[Self.rounds]` | **yes** | **a placed nested frame**, slot 1, block 48 bytes |
+| `Interpreter.scope` | (assigned in `__init__`) | — | untyped, and the refusal says so |
+| `ARM64Codegen.asm` / `X86_64Codegen.asm` | (assigned in `__init__`) | — | untyped |
+| `Tail._chunks` | (a list) | — | untyped |
+
+Two rows are worth reading twice. `NormalRandom._rng` is a **real stdlib nested
+frame that this path now places** — measured: `nested [('_rng', 1, 'Random')]`,
+`block 48` (16 own + 32 for `Random`) — and `philox.mojo`'s refusal moved from
+"the slot would have to hold a frame address" to its import chain, i.e. the
+shape no longer refuses at all. It emits nothing, because `NormalRandom()` is
+constructed only in `__init__` and there is therefore no site; the honest
+statement is that the ANALYSIS accepts the real stdlib shape, not that a stdlib
+file now compiles. And `Semaphore._state: Int32` is the negative use doing its
+job: `self._state.eq()` no longer produces a frame diagnostic at all, because
+the annotation proves the word is a value and `model.value_method_refusal` is
+the diagnostic that describes it.
+
+**The one thing this change is really worth is a diagnostic bug it fixed.** C5's
+message printed the METHOD's own name where the FIELD's belonged, so
+`interpreter.scope.define()` read as *"the word in the slot `interpreter.define`"* —
+a field the source never mentions. Eleven repo files and most of the group now
+say `interpreter.scope`, and the disagreement that stopped them is spelled.
+
+### The pointer half, deliberately not done
+
+`var p: Pointer` → `self.p.value` as a load at a computed offset is the other
+half of C5's sentence and it is **not** attempted, for the reason C5 gave: the
+pointee's width, signedness and address space are not in this value model, so
+the only instruction available is an 8-byte load, which over-reads a `UInt8`
+pointee by seven bytes and can fault on a page boundary, and for a struct pointee
+there is nothing at the address to load. D3's concurrent `ptr.value()` refusal
+now says exactly that, and it is the same conclusion from the value-model side.
+
+### The `S()` / `__init__` question: REPORTED, not changed
+
+C2's documented design, measured again while building the census, and left
+alone. `S()` takes no arguments, emits no call, and brings every field up at its
+class-level default; `__init__` never runs, so a two-field struct with a list
+field, `__init__` assigning it, and a method reading `len(self.items)` reads 0
+where the language's constructor would have put a list. It is the single largest
+reason the stdlib's container-shaped structs cannot work here, and changing it
+is a change to what a struct *is* on this path (`MojoExpr` has no aggregate
+node, `MojoFunc` has one parameter, `evalFunc` is `UInt64 → UInt64`) — not a
+small, safe improvement, and not one to make unilaterally while four other
+agents hold the tree. The premise that makes it survivable is now written down
+and checked (above), which is the part of it that was missing.
+
+### Still open after wave 4
+
+* **An import ALIAS is not a declared type this path can use.**
+  `from .philox import Random as PhiloxRandom` and `var _rng: PhiloxRandom[10]`
+  is a nested frame by every rule except that the name in the annotation is not
+  the name the struct is declared under. Resolving it is a BINDING problem
+  (`formal/imports.py`), not a frame one, and it is the single change that would
+  put the stdlib's other nested-frame shapes in reach.
+* **The untyped majority of the group.** 13 of the group's 15 direct findings
+  are classes that assign their fields in `__init__` and declare none. No
+  annotation means no type, and the rule says so rather than guessing; the way
+  to change that is to make `S()` run `__init__` (above) or to require an
+  annotation, neither of which is a decision this change can make.
+* **A nested frame deeper than `MAX_NESTED_FRAME_DEPTH = 4` is dropped from the
+  layout, not refused.** The block size truncates with it, so it is safe, but a
+  program that needs the fifth level gets a nested frame the emitter did not
+  place and a field-of-a-field refusal on the use. No struct in the corpus is
+  that deep; the bound is a hang-avoider, not a design.
+* **`Refine.lean` needed no change and that is worth saying.** A method's callee
+  contract is `FrameOk_except st st' base n`, and `n` is a slot count — a block
+  is contiguous from `base`, so carving the whole block out is the same
+  predicate with a larger `n`. There is nothing to add and adding something
+  would be a second spelling of one fact.
+* **No method is proved end to end**, and a nested frame is not either. The
+  generator half (`formal/arm64_proof_gen.py`, step 6) is untouched, so
+  `Frame.nested_*` is proved and unused by any generated proof — the same
+  standing as C5's `frame_frames_no_alias`.
+
+### Wave 4 (D2) verification
+
+Judged by the `detail` text; the class labels are C1's and moved under this
+change twice before settling. All four sweeps re-run after the change.
+
+| command | before (wave 3, `/tmp/s5_*.txt`) | after |
+|---|---|---|
+| `LEAN_PATH=lib … ensure_library(…)` | `RESULT OK`, 3 pre-existing `DylibExport` `sorry` | `RESULT OK`; `sorry` in `lib/` still **2 + 1**, all pre-existing |
+| `python3 test_formal.py -j 18` | `PASS=40 KNOWN-GAP=3 FAIL=0` | **unchanged** |
+| `python3 test_formal.py --backend x86_64 -j 18` | `PASS=43 KNOWN-GAP=0 FAIL=0` | **unchanged** |
+| `python3 test_formal_run.py` | `PASS=111 FAIL=0` | **`PASS=146 FAIL=0`** (8 added, all fail pre-change) |
+| `python3 test_formal_dylib.py` | `PASS=11 FAIL=0` | **unchanged** |
+| `python3 test_formal_imports.py` | `PASS=24 FAIL=0` | **unchanged** |
+| `python3 test_suite.py` | `43 passed, 0 failed` | **unchanged** |
+| `python3 test_formal_sweep.py` | `55 tests, OK` | **unchanged** |
+| `python3 formal/x86_64_model_test.py` | `agree 43 WRONG 0` | **unchanged** |
+| `tools/suite.py check` | `7/7` | **`7 passed, 0 failed`** (7 replayed) |
+| `tools/suite.py gate` | `15 passed, 3 expected-failure` | **`15 passed, 0 failed, 5 skipped, 3 expected-failure`** (155 jobs, 474.7 s, peak 10.5 GB) |
+| `tools/formal_sweep.py --no-stdlib -j 12 -t 300` | 284 files, `PASS=80`, coverage 80/131 = 61.1% | **284 files, `PASS=80`, coverage 80/131 = 61.1%**; **0 class moves**, 11 detail changes, all D2's |
+| `tools/formal_sweep.py --no-stdlib --arch x86_64` | 284 files, `PASS=79`, 0 of 204 differing | **`PASS=79`, coverage 79/130 = 60.8%, 0 of 204 shared files differ** |
+| `tools/formal_sweep.py -j 12 -t 300` | 578 files, `PASS=105`, coverage 105/414 = 25.4% | **`PASS=105`, coverage 105/414 = 25.4%**; 0 gained, 0 lost, 7 moves all `CODEGEN` → `CODEGEN/DEPENDENCY` |
+| `tools/formal_sweep.py --arch x86_64 -j 12 -t 300` | 578 files, `PASS=103`, 92 of 473 differing | **`PASS=103`, 96 of 473 differing — 0 of them D2-marked**; all are the concurrent `ptr.value()` divergence |
+
+`stdlib-dylib`: skip count **0** before and after. `stdlib-syntax`: `FAILED: 0
+(0 expected, 0 unexpected)` — `U` did not increase, it is zero.
+
+**No file newly passes and no file that passed stops passing, in either scope
+and on either architecture.** That is the same honest headline C5 reported, and
+for a sharper reason: the group's block was the ANNOTATION, and an annotation is
+either present and names a struct of the same file (one stdlib case, which now
+lowers) or is absent. The work moved the diagnosis, fixed the slot name the
+message printed, and removed a program that was answering 128 where the source
+says 42.
+
+## Wave 4 (D4): the hand-off, split by what the callee actually is
+
+`bugs/FORMAL_frame_receiver_handoff.md` has the full account, the
+measurements and the per-file table. What belongs here is the one-line summary
+and the thing that changes this document's own conclusions.
+
+**"A function this module does not compile" was, for 23 of this repository's 25
+sites, false.** Every one of them was a method of the receiver's **own** struct
+reached across a module boundary, and the callee *is* compiled — into the
+dylib that `formal/imports.py` builds for the imported module. It was not
+*advertised*: `_method_exports` carried a filter whose own comment read "refused
+at lift time, never compiled", which was true before this design and stopped
+being true when it landed. So the sentence "a frame address is only meaningful
+to code compiled against the same field list" was answering a question that did
+not arise: the code is compiled against the same field list, because the
+importer read that field list out of the file the dylib was built from. Both
+halves are fixed; a two-field struct's method now crosses the boundary, reads
+and writes the caller's frame correctly, and the program computes the right
+answer on both machines.
+
+**"Is a frame address enough?" — the answer this document gives is now measured
+rather than argued, and it is yes in one more place than it said.** `Pointer`
+was in the value-only set on the reasoning that the callee wants the object and
+would dereference the address instead. `Pointer` is an *identity* conversion, so
+the address is the answer. And the frame's bytes **are** the struct's C layout
+for a struct of 8-byte fields: `memset(Pointer(to=s), 65, 16)` writes both slots
+and both read back, on both machines. What is still refused is a C entry point
+that takes the struct's bytes, and the reason is now the accurate one — the C
+library's declaration of the struct comes from the C headers, not from the Mojo
+declaration here, and nothing on this path compares them.
+
+The net effect on this file's own census: the case-(c) family falls from 25
+sites to 3 in the repo scope, one of which is a struct constructor (a copy
+construction, `S(x)`, which has no lowering on this path) and two of which are
+genuinely cross-module free functions. **No file newly compiles**: eleven repo
+files moved `codegen → not-answerable/host-import`, because the hand-off is now
+accepted and the next fact is a CPython host import they were always also
+blocked by. That flatters the coverage denominator, so the baseline 80/131 =
+61.1% is the honest figure and 80/120 = 66.7% is not.

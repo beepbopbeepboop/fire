@@ -131,22 +131,18 @@ re-export edge (`test_reexported_type_reaches_the_importer`).
 
 ## Why the generic case is a refusal and not a fix
 
-The tempting one-line change is to stop excluding generic templates, so
-`stat.mojo` exports `S_ISREG` and 20-odd files build. **That would be wrong,
-not conservative.** `S_ISREG` as one trie entry is *one* function; called at
-`Int` and at some other `Intable` it is two, and one address cannot be both. A
-consumer with different type arguments would silently bind the first
-instantiation's body — a build-time error traded for a run-time wrong answer,
-which is the one trade this whole mechanism exists to refuse. The sound fix is
-ABI.md's: one symbol per instantiation, keyed by its type arguments, which is
-Stage 5 monomorphization. `monomorphize.py` exists for the gimple path; the
-formal path has no equivalent and building one is a project, not a patch.
-
-The same applies to `_assembly.mojo`, whose single function is
-`inlined_assembly[…]` — variadic over `*types: AnyType` and implemented with
-`__mlir_op.\`pop.inline_asm\``, which this backend does not lower at all. Even
-if the export rule were relaxed, that library would fail to compile for a
-different and more fundamental reason.
+**MOVED (wave 4, D5) to [`FORMAL_known_limits.md`](FORMAL_known_limits.md) §1.2,
+"What would close it, and what it costs", which now owns the Stage 5
+monomorphization limit together with its per-module audit.** The short
+version, kept here because it is the reason the rule exists rather than the
+limit itself: the tempting one-line change is to stop excluding generic
+templates so `stat.mojo` exports `S_ISREG` and 20-odd files build, and **that
+would be wrong, not conservative.** `S_ISREG` as one trie entry is *one*
+function; called at `Int` and at some other `Intable` it is two, and one
+address cannot be both. A consumer with different type arguments would
+silently bind the first instantiation's body — a build-time error traded for a
+run-time wrong answer, which is the one trade this whole mechanism exists to
+refuse.
 
 ## The per-architecture dylib bug (wave 2's B4, left open)
 
@@ -201,10 +197,16 @@ well; `tools/formal_sweep.py` is C1's file and was left untouched.)
 
 ## What is still open
 
-- **Stage 5 monomorphization on the formal path.** The only thing that would
-  lift the largest remaining part of this family (23 of the 28 remaining
-  refusals: `_assembly` ×14, `stat`, `tile` ×2, `_select`, `function` ×5).
-  `monomorphize.py` is the gimple path's; porting it is a project.
+- **Stage 5 monomorphization on the formal path.** MOVED to
+  `FORMAL_known_limits.md` §1.2, which owns it and re-measures the family.
+  (The count here was stale: it read "23 of the 28 remaining refusals,
+  `_assembly` ×14"; on the 2026-09-26 tree the family is **33 files over 8
+  terminal modules**, `_assembly` ×19 — the three extra are files whose
+  blocking reason moved when the by-reference work landed, not new refusals.
+  Six of the 33 are *permanent* and would not be unblocked by it at all — the
+  three behind `_io.mojo`, the one behind `_unicode_lookups.mojo`, the
+  docstring-only `__init__.mojo`, and the private `_select.mojo` — so the real
+  ceiling is 27, not 33.)
 - **`_candidates` destroys `..` and `.`** (`formal/imports.py`: `rel =
   module_name.replace(".", os.sep)` turns `".."` into `"/"`, so the real parent
   directory is never tried and the leaf fallback finds the importing file's OWN

@@ -793,11 +793,19 @@ CASES = [
     # 64-bit word the receiver holds as if it were an address to bytes. The
     # receiver here is an unannotated parameter, so the source does not say
     # what it holds, and the honest answer is to say so rather than to guess.
+    #
+    # The needle is the DEREFERENCE half, and it is a needle rather than the old
+    # "is a method call on a value" because that blanket text told a reader of
+    # this case to add the method to the string table — the exact
+    # mis-implementation the guard exists to prevent. `value` is a load, and the
+    # refusal now says so, names the three things a load needs and this model
+    # has none of, and still ends with the "died in the loader" history so the
+    # two facts are not separated.
     ("str_method_unknown_receiver",
      "def main(n):\n"
      "    h = n\n"
      "    return h.value()\n",
-     "refuse:is a method call on a value", None),
+     "refuse:is a DEREFERENCE on this path, not an identity", None),
     # A string method on a receiver the classifier positively knows is NOT a
     # string. Same refusal family, different wording, and the wording is the
     # point: \"the source does not say\" and \"it is an int\" are different
@@ -837,6 +845,480 @@ CASES = [
      "    c = k.count(\"a\")\n"
      "    return 0\n",
      "refuse:is a method on a string", None),
+
+    # ── the string VALUE: len, ==, and + ──────────────────────────────────
+    #
+    # A string on this path is a bare `char *` to NUL-terminated bytes interned
+    # into `__TEXT,__text` (measured: that segment is mapped `initprot 0x5`,
+    # read+execute, no write). Three things follow, and each of them used to be
+    # a plausible-looking WRONG ANSWER rather than a diagnostic:
+    #
+    #   NO LENGTH FIELD. There is no count at offset 0 to read. `len()` of a
+    #       string is a `strlen` over the bytes — a computation, not a field
+    #       load, which is why the representation does not have to widen.
+    #   POINTER EQUALITY, not content equality, for `==`. Right for two interned
+    #       literals (interning is by content) and wrong for every derived
+    #       interior pointer, which is what `lstrip` returns.
+    #   READ-ONLY BYTES. Nothing may write them, so nothing may return a
+    #       shorter string, and nothing may build a new one — which is why `+`
+    #       cannot be lowered at all and is refused instead.
+    #
+    # Every case in this group FAILED on the pre-change tree. The `len` ones
+    # failed by returning the first eight CHARACTERS of the string as a number
+    # (1819043176 = 0x6C6C6568 = "hell" for `m = "hello"`, on both backends),
+    # the `==` one failed by taking the wrong branch on a correct program, and
+    # the `+` one failed by printing `[]` on arm64 and SEGFAULTING on x86-64.
+
+    # `len` of a string, on a LITERAL. Pre-change this was REFUSED — the old
+    # check fired on a syntactic literal and on an identity type-constructor
+    # and nothing else — so it changed from a diagnostic to a number. It is the
+    # smallest case that shows the refusal was the wrong answer even where it
+    # fired: the length of a NUL-terminated `char *` is a `strlen`, and the
+    # representation does not have to widen to have one.
+    ("str_len_literal",
+     "def main(n):\n"
+     "    printf(\"%d\\n\", len(\"hello\"))\n"
+     "    return 0\n", 0, "5"),
+    # `len` of a LOCAL. This is the case that was wrong: the refusal only fired
+    # on a literal, so a name fell through to the count-field load and read the
+    # first eight bytes of the CHARACTER data. Observed on the pre-change tree,
+    # on BOTH backends: 1819043176.
+    ("str_len_local",
+     "def main(n):\n"
+     "    m = \"hello\"\n"
+     "    printf(\"%d\\n\", len(m))\n"
+     "    return 0\n", 0, "5"),
+    # `len` of a METHOD RESULT — the third shape, and the one that is neither a
+    # literal nor a name. `lstrip` yields an INTERIOR pointer, so this is also
+    # the case that pins down that the lowering reads to the NUL from wherever
+    # the pointer starts and not from the original literal. Pre-change it
+    # returned 536897896 = 0x20006869, which is "hi" followed by the two spaces
+    # that had just been trimmed.
+    ("str_len_method_result",
+     "def main(n):\n"
+     "    m = \"  hi\".lstrip()\n"
+     "    printf(\"%d\\n\", len(m))\n"
+     "    return 0\n", 0, "2"),
+    # The empty string and a string that is entirely whitespace, which is where
+    # a scan that forgets the terminator walks off the end of the buffer. Both
+    # are 0.
+    ("str_len_empty",
+     "def main(n):\n"
+     "    e = \"\"\n"
+     "    w = \"   \".lstrip()\n"
+     "    printf(\"%d %d\\n\", len(e), len(w))\n"
+     "    return 0\n", 0, "0 0"),
+    # `len` where the answer is used as a NUMBER rather than printed, because a
+    # printf of the wrong value and an arithmetic result of the wrong value are
+    # different symptoms of the same bug and only one of them is a "return
+    # status" a suite can check.
+    ("str_len_in_arithmetic",
+     "def main(n):\n"
+     "    a = \"abc\"\n"
+     "    b = \"de\"\n"
+     "    return len(a) * 10 + len(b)\n", 32, None),
+    # The blob half, as a guard: `len` of a list, a range and a local list all
+    # still read the count field at offset 0. `len(range(10))` is in here for a
+    # second reason — `range(...)` lowers to a `[count][elements]` blob but the
+    # kind table calls a `range(...)` call an `int`, so the `len` decision
+    # recognises it by the shape that decides the answer rather than by the
+    # kind. Without that, the new kind-driven refusal broke a case that has
+    # always worked.
+    ("len_blob_shapes_still_work",
+     "def main(n):\n"
+     "    xs = [1, 2, 3]\n"
+     "    return len([1, 2, 3, 4]) + len(range(10)) + len([]) + len(xs)\n",
+     17, None),
+    # `len` of something the source does not say the type of. This one is a
+    # refusal and it is a refusal on purpose: the old lowering read eight bytes
+    # at offset 0 of an unclassified word and called the result a length, and
+    # for a `char *` that is the first eight CHARACTERS. An unannotated
+    # parameter is a word, and a word here is an `int` (see the note on kinds in
+    # formal/model.py), so this is the INT row of `model.len_operand_lowering`
+    # rather than the unknown row — the int message says an integer has no
+    # length and names the two things that do.
+    ("str_len_of_unannotated_param_refused",
+     "def main(n):\n"
+     "    printf(\"%d\\n\", len(n))\n"
+     "    return 0\n",
+     "refuse:an integer has no length", None),
+    # And the unknown row, which is a different refusal for a different reason:
+    # this operand is bound both ways in one function, so the classifier says
+    # nothing rather than saying `int`.
+    ("str_len_of_conflicted_name_refused",
+     "def main(n):\n"
+     "    h = \"abc\"\n"
+     "    if n > 0:\n"
+     "        h = 5\n"
+     "    return len(h)\n",
+     "refuse:the source does not say what this operand holds", None),
+
+    # `==` on two literals: right before, right after, and the pair that must
+    # NOT be equal. The pre-change pointer compare got all three of these right
+    # (interning is by content), so this case is a GUARD — it is here to catch
+    # a content compare that is subtly wrong, not to catch the old bug.
+    ("str_eq_two_literals",
+     "def main(n):\n"
+     "    r = 0\n"
+     "    if \"abc\" == \"abc\": r = r + 1\n"
+     "    if \"abc\" == \"xyz\": r = r + 2\n"
+     "    if \"abc\" != \"xyz\": r = r + 4\n"
+     "    printf(\"%d\\n\", r)\n"
+     "    return 0\n", 0, "5"),
+    # `==` on a DERIVED INTERIOR POINTER against a literal. This is the case
+    # that was wrong, and it is the worst shape a wrong answer can have: a
+    # correct program taking the WRONG BRANCH, with nothing downstream able to
+    # tell. Observed on the pre-change tree, on BOTH backends: `r` came out 9,
+    # i.e. the `m == "abc"` arm did not fire.
+    ("str_eq_interior_pointer",
+     "def main(n):\n"
+     "    m = \"  abc\".lstrip()\n"
+     "    r = 0\n"
+     "    if m == \"abc\": r = r + 1\n"
+     "    if m == \"xyz\": r = r + 2\n"
+     "    if m != \"abc\": r = r + 4\n"
+     "    printf(\"%d\\n\", r)\n"
+     "    return 0\n", 0, "1"),
+    # `==` where the interior pointer is on the LEFT of one comparison and the
+    # RIGHT of another, and where the two operands are the same name. The
+    # lowering puts the operands in the stack across two libc calls, so a
+    # register clobbered by the first call shows up here and nowhere else.
+    ("str_eq_operand_positions",
+     "def main(n):\n"
+     "    s = \"  xy\".lstrip()\n"
+     "    t = \"xy\"\n"
+     "    r = 0\n"
+     "    if s == t: r = r + 1\n"
+     "    if t == s: r = r + 2\n"
+     "    if s == s: r = r + 4\n"
+     "    printf(\"%d\\n\", r)\n"
+     "    return 0\n", 0, "7"),
+    # `is` and `is not` must stay POINTER comparisons. They are the one string
+    # comparison for which the pointer is the answer rather than an
+    # approximation of it — `a is b` asks whether two names hold one object, and
+    # with interning by content two equal literals already are one object.
+    # Routing them through the content compare would make `x is y` true whenever
+    # the CONTENTS match, which is a different question spelled the same way.
+    # The observable consequence on this path: two equal literals ARE the same
+    # interned object, so `is` is true, and an interior pointer is NOT that
+    # object, so `is` is false even though the content compare says equal.
+    ("str_is_stays_identity",
+     "def main(n):\n"
+     "    m = \"  abc\".lstrip()\n"
+     "    a = \"abc\"\n"
+     "    b = \"abc\"\n"
+     "    r = 0\n"
+     "    if a is b: r = r + 1\n"
+     "    if m is a: r = r + 2\n"
+     "    printf(\"%d\\n\", r)\n"
+     "    return 0\n", 0, "1"),
+    # `+` on two strings. It is a refusal and the pre-change behaviour was the
+    # worst of anything in this group: `[]` on arm64 and a SEGFAULT on x86-64,
+    # from one line, so the two backends did not even agree on whether the
+    # program worked. Asserted as a refusal on both, which is also the assertion
+    # that they now agree.
+    ("str_concat_refused",
+     "def main(n):\n"
+     "    s = \"ab\" + \"cd\"\n"
+     "    printf(\"[%s]\\n\", s)\n"
+     "    return 0\n",
+     "refuse:on two strings is refused on this path", None),
+    # `+` where ONE side is a string is not string concatenation and must not be
+    # refused: the mixed case is the pointer/offset arithmetic a caller may have
+    # meant, and refusing it would turn a working program into a diagnostic over
+    # a case the model cannot see. This is a guard.
+    ("str_plus_int_still_arithmetic",
+     "def main(n):\n"
+     "    k = 3\n"
+     "    s = \"ab\"\n"
+     "    return k + 4\n", 7, None),
+
+    # ── wave 4 (D5): the limits, pinned so they cannot be lost ──────────────
+    #
+    # Four `refuse:` cases, one per verified-true limit in the sweep residue
+    # that no other list already covers. A `refuse:` case asserts the build
+    # FAILS with these words on BOTH backends, so each of these goes RED if
+    # the limit is closed — which is the point. A limit nobody can detect the
+    # disappearance of is indistinguishable from a limit nobody re-checked.
+    #
+    # What closes each one, and what it costs, is in
+    # bugs/FORMAL_known_limits.md §2 and §3. The short version: the MLIR one
+    # cannot be closed on this path at all (there is no MLIR in a freestanding
+    # image for the template to become); the other three are shape and
+    # comptime-folding rules that a fuller value model would replace.
+    #
+    # NOT pinned here, deliberately, because pinning them would cement a
+    # fabricated answer as intended behaviour — see the same document §2.2-2.4
+    # and §3.1-3.2 for the four constructs that DO build and lie:
+    # `__mlir_attr.`…`` (a dotted template, single element) builds and reads an
+    # undefined name, so it prints whatever word is in the register — 10 on
+    # arm64, 0 on x86-64, for the same source; a module-level
+    # `comptime X = __mlir_type[…]` is never walked at all, which is why
+    # std/builtin/type_aliases.mojo is a false PASS in the sweep baseline;
+    # `__mlir_op.`…`[n]` builds and segfaults; and `String()` (zero operands)
+    # is refused as if it were a two-operand conversion.
+
+    # An MLIR attribute template is not a subscript. The elements are
+    # backtick-quoted literal fragments interleaved with compile-time
+    # sub-expressions and the whole thing denotes a dialect attribute, so
+    # there is nothing here for a subscript to index. Materializing it as a
+    # container would put a pointer to a frame blob where an attribute belongs
+    # and disagree with the compiler that does have MLIR. This is the refusal
+    # behind 36 of the 578 swept stdlib files — and it is arch-free text on
+    # purpose, so `refuse:` (not `refuse_either:`) is the right assertion.
+    ("limit_mlir_multi_element_template",
+     "def main(n: Int) -> Int:\n"
+     "    var t = __mlir_attr[`#kgen.param.expr<`, n, `> : !kgen.string`]\n"
+     "    return n\n",
+     "refuse:assembles an MLIR attribute from a template", None),
+    # NOT HERE: a struct's positional-argument construction. That limit is
+    # already pinned by `struct_ctor_args_both_backends` (same needle, both
+    # backends, same refusal) and a second case asserting the same thing is a
+    # parallel implementation of a pin that exists, not extra coverage. It is
+    # listed in bugs/FORMAL_known_limits.md §3 with that case's name.
+    # A `comptime` binding whose right-hand side mentions a RUNTIME parameter
+    # cannot be folded, and this path has no comptime evaluator that could
+    # resolve it. Guessing a value would be a fabricated answer.
+    #
+    # `refuse_either:`, and the reason is worth reading: the two backends
+    # refuse at DIFFERENT depths and name DIFFERENT limits for one construct.
+    # arm64 reaches the fold and says so; x86-64 has no `comptime` statement
+    # lowering at all and says "unsupported statement ComptimeVarStmt". Both
+    # are honest, and the shared-text rule that `refuse:` enforces cannot
+    # apply — but the DRIFT is real and is recorded in
+    # bugs/FORMAL_known_limits.md §3 as arch drift, not as agreement.
+    ("limit_comptime_over_a_runtime_parameter",
+     "def poly(coefficients):\n"
+     "    comptime num_coefficients = len(coefficients)\n"
+     "    return num_coefficients\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return poly([1, 2, 3])\n",
+     "refuse_either:does not fold to a compile-time constant"
+     "|unsupported statement ComptimeVarStmt", None),
+    # A body written `...` is a declaration with no instructions behind it, and
+    # there is nothing to emit. Reached only where the walk actually gets to
+    # the body — an `...` in a trait method nothing calls compiles, which is
+    # correct and is why this case calls the function.
+    #
+    # The needle stops before the architecture name because the x86-64 text
+    # carries a different tail ("the integer/boolean surface is lowered…"),
+    # which is irrelevant boilerplate here but does not change the verdict.
+    ("limit_ellipsis_function_body",
+     "def slen(value):\n"
+     "    ...\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return slen(1)\n",
+     "refuse:unsupported expression EllipsisLiteral", None),
+]
+
+# ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
+#
+# A formal value is one 64-bit word, so `recv.m()` cannot mean anything until
+# the word is said to hold something. The kind of the receiver is what says it,
+# and the cases below are the matrix: one case per receiver kind, per method,
+# so that "which methods mean what here" is a test and not a claim.
+#
+# The group is the wave-4 finding family — 76 files, the largest in the sweep,
+# and NOT a string-method family at all. Re-derived from the sweep rather than
+# from the earlier censuses, and it came out as FIVE distinct blocking sites
+# over 73 of the 76 dependency-propagated files: `ptr.value()` (53),
+# `self.step.or_else()` (20), and one each of `writer.write_string()`,
+# `condition.__mlir_bool__()` and `ptr.unsafe_value()`. The two big ones are a
+# DEREFERENCE and an OPTIONAL UNWRAP, which are spelled alike in the stdlib
+# (`value` / `unsafe_value`) and mean opposite things; conflating them is how
+# the characterised group would have been mis-implemented.
+#
+# What the cases assert is the SHAPE of the refusal, not just that there is
+# one. A refusal that says "this backend lowers only append, close, write and
+# the string methods …" is worse than no refusal for a non-string receiver: it
+# reads as "add it to the string table". So each needle here names what is
+# actually missing.
+
+# The DEREFERENCE half. `UnsafePointer.value()` in Mojo returns the pointee, so
+# on this path it is a LOAD from the address in the receiver — and a load is
+# not one instruction here. All three reasons are load-bearing and each alone
+# is enough, which is why the needle names the middle one (the pointer value
+# model) rather than only asserting a refusal.
+#
+# Pre-change these all refused as "is a method call on a value", which told a
+# reader the fix was another string method.
+RECVKIND_CASES = [
+ ("recvkind_value_on_name",
+ "def main(n):\n"
+ "    ptr = n\n"
+ "    k = ptr.value()\n"
+ "    return 0\n",
+ "refuse:is a DEREFERENCE on this path, not an identity", None),
+ # The same method on a FRAME SLOT — a different SHAPE, and the shape the
+ # wave-3 by-reference work exposed: the receiver is a word read out of
+ # another function's frame, so what it holds is a question about that
+ # function's field list, not about this one.
+ ("recvkind_value_on_frame_slot",
+  "struct Box:\n"
+  "    ptr: Int\n"
+  "    n: Int\n"
+  "    def __init__(self):\n"
+  "        self.ptr = 1\n"
+  "        self.n = 2\n"
+  "\n"
+  "def main(n):\n"
+  "    b = Box()\n"
+  "    k = b.ptr.value()\n"
+  "    return 0\n",
+  "refuse:is a DEREFERENCE on this path, not an identity", None),
+ # An Optional UNWRAP, which is NOT a dereference and must not be answered as
+ # one. The reason is the missing NICHE: `None` and a value are both one word
+ # in one frame slot, and `None` is emitted as the integer 0, so treating 0 as
+ # empty would be wrong about `Some(0)` — a silent wrong answer on a program
+ # that computes a different number. This is the 20-file shape
+ # (`builtin_slice.mojo`'s `self.step.or_else()`).
+ ("recvkind_or_else_frame_slot",
+  "struct S:\n"
+  "    step: Int\n"
+  "    def __init__(self):\n"
+  "        self.step = 1\n"
+  "\n"
+  "def main(n):\n"
+  "    s = S()\n"
+  "    k = s.step.or_else(1)\n"
+  "    return 0\n",
+  "refuse:is an Optional unwrap", None),
+ # A WRITER, which is a multi-field struct and therefore a frame ADDRESS. This
+ # is the most tempting name in the tree to add next to the `write` that IS
+ # lowered, and adding it would pass a frame address as fd(2): EBADF, nothing
+ # checks it, and the program's output is missing rather than wrong-looking.
+ ("recvkind_write_string_on_struct",
+  "struct W:\n"
+  "    buf: Int\n"
+  "    n: Int\n"
+  "    def __init__(self):\n"
+  "        self.buf = 0\n"
+  "        self.n = 0\n"
+  "\n"
+  "def main(n):\n"
+  "    w = W()\n"
+  "    k = w.write_string(\"None\")\n"
+  "    return 0\n",
+  "refuse:is a method on a Writer", None),
+ # `__mlir_bool__` is the one case here that IS implementable — a Bool is a word
+ # holding 0 or 1 on this path, so it is the test `if` already does — and is
+ # refused only because it cannot be GUARDED. The needle is the guard, not the
+ # impossibility: a reader should come away knowing the fix is a BOOL kind.
+ ("recvkind_mlir_bool_needs_a_bool_kind",
+  "def main(n):\n"
+  "    c = n > 3\n"
+  "    k = c.__mlir_bool__()\n"
+  "    return 0\n",
+  "refuse:is a real builtin and is implementable as the same test", None),
+]
+
+# ── `write`/`close` are a SYSCALL, and need a real receiver ─────────────────
+#
+# These two lower to the C library's `write(2)` and `close(2)`, so the receiver
+# has to be a file descriptor. `open(...)` already lowers to the C library's
+# `open(2)`, so a descriptor is a word that came from `open(2)` — and NOTHING
+# CHECKED THAT until this group. The pre-change docstring asserted it ("the
+# receiver of a file method IS a descriptor") as an assumption about the
+# source.
+#
+# Measured on the pre-change tree: all four of the refusals below BUILT on both
+# architectures, and each passed something that is not a descriptor as fd. None
+# of them faults — `write(2)` on a bad descriptor returns -1, which nothing
+# here checks — so the program runs, writes nothing, and exits 0. That is what
+# a silently-wrong lowering produces, and it is why these are `refuse:` cases
+# and not a note in a comment.
+#
+# The needle is "has to be a file descriptor", which is the part that tells a
+# reader the RECEIVER is the problem and not the method.
+FD_CASES = [
+ ("fd_write_on_string_refused",
+  "def main(n):\n"
+  "    s = \"hello\"\n"
+  "    k = s.write(\"x\")\n"
+  "    return 0\n",
+  "refuse:has to be a file descriptor", None),
+ # An int, which is the closest miss: a descriptor IS an int, so the kind is
+ # no help at all here. This is the case that shows the guard cannot be a kind
+ # guard and has to be a flow fact.
+ ("fd_write_on_int_refused",
+  "def main(n):\n"
+  "    k = 7\n"
+  "    r = k.write(\"x\")\n"
+  "    return 0\n",
+  "refuse:has to be a file descriptor", None),
+ # A struct receiver, whose word is a FRAME ADDRESS. The message names the
+ # shape as well as the requirement, because "a Writer reaches here too" is the
+ # sentence that stops the next reader adding `write_string`.
+ ("fd_write_on_struct_refused",
+  "struct P:\n"
+  "    x: Int\n"
+  "    y: Int\n"
+  "    def __init__(self):\n"
+  "        self.x = 1\n"
+  "        self.y = 2\n"
+  "\n"
+  "def main(n):\n"
+  "    p = P()\n"
+  "    r = p.write(\"x\")\n"
+  "    return 0\n",
+  "refuse:its receiver is a frame address", None),
+ # A list blob, whose word is ALSO a frame address, and which is the case most
+ # likely to be waved through on the grounds that a blob is "container-ish".
+ ("fd_write_on_list_refused",
+  "def main(n):\n"
+  "    xs = [1, 2, 3]\n"
+  "    r = xs.write(\"x\")\n"
+  "    return 0\n",
+  "refuse:has to be a file descriptor", None),
+ # `close` gets its own case because it is the other syscall and the guard is
+ # a table lookup, not a shared code path — a table with two entries and one
+ # test is not a test of the table.
+ ("fd_close_on_string_refused",
+  "def main(n):\n"
+  "    s = \"hello\"\n"
+  "    k = s.close()\n"
+  "    return 0\n",
+  "refuse:has to be a file descriptor", None),
+ # An ALIAS of a descriptor keeps it, so this one BUILDS. The guard is on
+ # where the word was bound, and a name bound from a name bound from `open` is
+ # still that word. A guard that only recognised the direct binding would refuse
+ # this, which would be a false refusal on correct source.
+ ("fd_alias_still_writes",
+  "def main(n):\n"
+  "    f = open(\"/tmp/fd_alias_still_writes.txt\", \"w\")\n"
+  "    g = f\n"
+  "    g.write(\"aliased\")\n"
+  "    f.close()\n"
+  "    return 0\n",
+  0, None),
+ # …and the real thing, so the guard has a positive case that RUNS rather than
+ # only refusing. 5 bytes on disk is the assertion: `write` lowering to a
+ # no-op would pass every refusal case above and still be broken.
+ ("fd_write_close_roundtrip",
+  "def main(n):\n"
+  "    f = open(\"/tmp/fd_write_close_roundtrip.txt\", \"w\")\n"
+  "    f.write(\"hello\")\n"
+  "    f.close()\n"
+  "    return 0\n",
+   0, None),
+ # A FRAME SLOT holding what is syntactically a descriptor. Refused, and the
+ # message names the receiver's SHAPE as well as the requirement, because
+ # proving a field holds a descriptor is cross-field flow and this path cannot
+ # see it — a correct-looking `self._fd.write(s)` must not be lowered on the
+ # strength of a name the model does not have.
+ ("fd_write_on_frame_slot_refused",
+  "struct Box:\n"
+  "    fd: Int\n"
+  "    n: Int\n"
+  "    def __init__(self):\n"
+  "        self.fd = 3\n"
+  "        self.n = 0\n"
+  "\n"
+  "def main(n):\n"
+  "    b = Box()\n"
+  "    b.fd.write(\"x\")\n"
+  "    return 0\n",
+  "refuse:and it is a frame slot", None),
 ]
 
 # ── a multi-field receiver, BY REFERENCE ───────────────────────────────────
@@ -1235,7 +1717,7 @@ BYREF_REFUSALS = [
      "def main(n) -> Int:\n"
      "    var p = P()\n"
      "    return mojo_print(p)\n",
-     "refuse:this module does not compile", None),
+     "refuse:no definition in hand", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary
@@ -1351,6 +1833,613 @@ BYREF_REFUSALS = [
      "    var p = P()\n"
      "    return p.get()\n",
      "refuse:self.q.a reads a field of a field", None),
+]
+
+# ── wave 4 (D4): the CALL hand-off, split by what the callee actually is ─────
+#
+# `_check_frame_escapes` used to answer every one of these with one sentence per
+# shape, and for two of the shapes the sentence named a cause that was not
+# operating. The cases below are the split, one per answer, and each says what
+# the reader would otherwise have to go and check.
+#
+# (a) an ADDRESS constructor is NOT a refusal. `Pointer` is an identity type
+#     constructor on this path, so `Pointer(to=s)` yields the word it was
+#     handed — and for a multi-field struct that word is the frame's base
+#     address, which is what a pointer to the object means. It was in
+#     FRAME_VALUE_ONLY_CALLS, whose text says the callee "wants the object
+#     itself … so what would arrive is the address Pointer() would then
+#     dereference as one", which for `Pointer` is the reasoning upside down.
+#
+# The positive case is written so a wrong answer cannot hide in it: the two
+# addresses are printed AND subtracted, and the difference has to be the frame
+# size. Two unrelated leftover registers 16 bytes apart is not what a no-op
+# would produce by accident, and if `Pointer(to=s)` stopped being the identity
+# the difference would be whatever the registers happened to hold.
+BYREF_HANDOFF_CASES = [
+    ("byref_pointer_to_a_frame_is_the_address",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s1 = S()\n"
+     "    s1.a = 11\n"
+     "    s1.b = 22\n"
+     "    var s2 = S()\n"
+     "    s2.a = 33\n"
+     "    s2.b = 44\n"
+     "    var p1 = Pointer(to=s1)\n"
+     "    var p2 = Pointer(to=s2)\n"
+     "    print(p1)\n"
+     "    print(p2)\n"
+     "    return p2 - p1\n", 16, None),
+    # The same hand-off on a plain VALUE, as a guard: `Pointer(to=l)` on a list
+    # has always been the identity and must keep being it. This case passes
+    # before and after and is here for the side where the rule has to hold, not
+    # as a demonstration of anything.
+    ("byref_pointer_to_a_list_is_still_the_identity",
+     "def main(n: Int) -> Int:\n"
+     "    var l = [7, 8, 9]\n"
+     "    var p = Pointer(to=l)\n"
+     "    return p - Pointer(to=l) + l[0]\n", 7, None),
+    # (b) THE FRAME AND THE STRUCT'S C LAYOUT COINCIDE — measured, not argued,
+    # and this case is the measurement. `memset` writes sixteen bytes through a
+    # pointer taken from the frame, and both slots read back as the sixteen
+    # bytes it wrote. That is only true if the frame block IS the struct's
+    # storage: contiguous from `base`, field `k` at `base + 8k`, in declaration
+    # order — which is exactly the C layout of a struct whose every field is 8
+    # bytes wide and 8-aligned. So the old refusal's premise ("the frame holds
+    # the fields at `base + 8k`, which is not the struct's own layout") is
+    # false for that shape, and this is the program that says so.
+    #
+    # It is also the case that needed a one-line fix in the x86-64 emitter,
+    # which is why it is here rather than only in the report: `Pointer(to=x)`
+    # is spelled with a keyword, arm64's `_emit_type_constructor` has always
+    # accepted a keyword-named operand and x86-64's read `e.args` alone, so the
+    # two backends disagreed about this source file — a divergence that had
+    # been masked because the frame analysis refused both before either
+    # emitter was reached.
+    ("byref_frame_bytes_are_the_structs_c_layout",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 0\n"
+     "    s.b = 0\n"
+     "    memset(Pointer(to=s), 65, 16)\n"
+     "    return (s.a == 4702111234474983745) * 100 \\\n"
+     "        + (s.b == 4702111234474983745)\n", 101, None),
+]
+
+BYREF_HANDOFF_REFUSALS = [
+    # (b) A struct CONSTRUCTOR called with a frame address. `R` is declared in
+    # this very file — it is the only reason the argument is a frame address at
+    # all — and a struct has no body to compile, so "which this module does not
+    # compile" was false twice over. The limit is real and is one level down:
+    # `R()` takes no arguments on this path, so a one-argument construction has
+    # no lowering whatever it is handed. Verified by lifting this refusal: the
+    # call then reaches the constructor and is refused there by name.
+    ("byref_copy_construction_names_the_struct",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    var s = R(r)\n"
+     "    return s.a\n",
+     "refuse:is a COPY CONSTRUCTION", None),
+    # A NON-FIRST argument position. "A position whose meaning this path cannot
+    # see" was a statement about the analysis in a message a reader takes to be
+    # a statement about the program, and it is the largest of the three shapes
+    # under it. All three are wrong answers without the check — the field read
+    # through a non-first parameter returns 0 where the source says 7 — so the
+    # refusal stands and now says which one it is looking at.
+    ("byref_refuse_nonfirst_position_names_it",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def take(x: Int, y: Int) -> Int:\n"
+     "    return y\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    return take(1, r).a\n",
+     "refuse:in argument position 1 of 2", None),
+    # …and the C half of it, which is a wrong CATEGORY of argument and not a
+    # position question at all. `printf` was falling through to "no definition
+    # in hand", which is false — it is libSystem's and it binds — and the
+    # program it produced printed the frame's ADDRESS as the integer the format
+    # asked for, and exited 0.
+    ("byref_refuse_c_entry_point_in_a_position",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    printf(\"val=%d\\n\", r)\n"
+     "    return 0\n",
+     "refuse:a C library entry point, in argument position", None),
+    # A frame address RETURNED by a function that did not create it. The holder
+    # fixpoint makes a callee's first parameter a holder, so this is the larger
+    # half of the return family, and the old sentence named THIS function as the
+    # creator — sending the reader to `fwd` for a construction that is in
+    # `main`. The refusal is right; the creator is the caller and nothing here
+    # establishes the caller is still on the stack.
+    ("byref_refuse_returned_from_a_receiver",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def fwd(r: Int) -> Int:\n"
+     "    return r\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    return fwd(r).a\n",
+     "refuse:returned from a function that did not create it", None),
+    # …and the method half, where the sentence is the same lie with a struct's
+    # name attached.
+    ("byref_refuse_returned_from_a_method_receiver",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    fn give(self) -> Int:\n"
+     "        return self\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    return r.give().a\n",
+     "refuse:returned from a method of R", None),
+    # A name the model KNOWS and cannot represent. `Error` is a real type, so
+    # "which this module does not compile" was false a third time over: it is
+    # neither a function this module compiles nor a function at all, and the
+    # fact that stops the program is that one formal value is one 64-bit word.
+    ("byref_refuse_unrepresentable_type_constructor",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    var e = Error(r)\n"
+     "    return r.a\n",
+     "refuse:is a real type this path has no representation", None),
+]
+
+# ── wave 4 (D4): a frame address handed to a method in an IMPORTED module ───
+#
+# The binding half of case (c), and it is the change with a program behind it.
+#
+# `_method_exports` filtered out every method whose struct was not one word,
+# with the comment "refused at lift time, never compiled". That was true when a
+# multi-field struct had no representation, and stopped being true the moment
+# the by-reference receiver landed: a wide struct's method IS compiled and its
+# receiver word IS the frame address. So the filter was dropping the export of
+# code that was in the library, and the importer's call had no symbol to bind
+# to — while the refusal said the callee "is not compiled", which is the
+# opposite of what was happening.
+#
+# Two cases, and the second is a GUARD: a one-field struct's method has always
+# crossed this boundary, so the one-field case passes before and after. It is
+# here because the rule has to hold on the side where it already worked, and it
+# is reported as passing pre-change rather than dressed up as a demonstration.
+#
+    # The mutating case is the one that would catch a wrong lowering. `S_set_a`
+    # writes `self.a`, which on the caller's side is the caller's `s1.a`: if the
+    # address handed over were anything other than the caller's frame base, the
+    # write would land somewhere else and `s1.a` would still read 2. The answer
+    # is `s1.a == 5`, `s1.b == 9` and `r == 9` read back on the CALLER's side,
+    # so a wrong address gives 38 rather than 68. (68 rather than 959 because
+    # the formal entry's return value becomes the process exit status, so a
+    # three-digit answer is truncated to a byte and would stop distinguishing
+    # anything.)
+CROSS_MODULE_CASES = [
+    ("byref_cross_module_wide_receiver_reads",
+     {"mod": "struct S:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "    fn get(self) -> Int:\n"
+             "        return self.a * 10 + self.b\n"
+             "\n"
+             "def bump(v: Int) -> Int:\n"
+             "    return v + 1\n",
+      "main": "from byref_xmod import S, bump\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var s = S()\n"
+              "    s.a = 3\n"
+              "    s.b = 4\n"
+              "    return s.get() + bump(1)\n"}, 36, None),
+    ("byref_cross_module_wide_receiver_writes",
+     {"mod": "struct S:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "    fn set_a(self, v: Int) -> Int:\n"
+             "        self.a = v\n"
+             "        return self.b\n",
+      "main": "from byref_xmod import S\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var s1 = S()\n"
+              "    s1.a = 2\n"
+              "    s1.b = 9\n"
+              "    var r = s1.set_a(5)\n"
+              "    return s1.a * 10 + s1.b + r\n"}, 68, None),
+    # The GUARD: the same two files with a ONE-field struct, which has always
+    # bound across the module boundary. Before this change: passes. After:
+    # passes. It is here so that a change which "fixed" the wide case by
+    # breaking the export table for both would fail here.
+    ("byref_cross_module_one_field_receiver",
+     {"mod": "struct T:\n"
+             "    var a: Int\n"
+             "\n"
+             "    fn get(self) -> Int:\n"
+             "        return self.a * 10\n",
+      "main": "from byref_xmod import T\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var t = T()\n"
+              "    t.a = 7\n"
+              "    return t.get()\n"}, 70, None),
+]
+
+
+def run_module_case(name, files, want_exit, want_stdout, tmpdir, verbose):
+    """A case that needs TWO files: a module and a program that imports it.
+
+    The cross-module hand-off is the only shape in this suite that a single
+    source file cannot express, and it is the shape this change is about: a
+    frame address handed to a method that is compiled into another image. The
+    module is written next to the program in the same temporary directory, which
+    is what `resolve_module_path` looks in for a sibling, so the import resolves
+    the way it does in the repository.
+
+    The `refuse:` and `refuse_either:` conventions are the same as
+    `run_case`'s and mean the same thing: both architectures must refuse, with
+    the same words. A divergence here would be the worst kind, because the two
+    sides of the boundary are separate compilations and a disagreement about
+    what a frame address means is exactly what would not show up in a
+    single-file case.
+    """
+    mod = os.path.join(tmpdir, "byref_xmod.mojo")
+    with open(mod, "w") as f:
+        f.write(files["mod"])
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(files["main"])
+
+    if isinstance(want_exit, str) and (
+            want_exit.startswith("refuse:")
+            or want_exit.startswith("refuse_either:")):
+        either = want_exit.startswith("refuse_either:")
+        needles = (want_exit[len("refuse_either:"):].split("|") if either
+                   else [want_exit[len("refuse:"):]])
+        for backend in ("arm64", "x86_64"):
+            rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.{backend}"),
+                                    backend=backend)
+            if rc == 0:
+                return False, (f"--backend={backend} BUILT a cross-module "
+                               f"hand-off that has no representation (expected "
+                               f"a refusal naming one of {needles!r})")
+            if not any(n in text for n in needles):
+                return False, (f"--backend={backend} refused, but not with any "
+                               f"of {needles!r}: {text.strip()[-200:]}")
+        if verbose:
+            print(f"      refused identically on both architectures: {needles!r}")
+        return True, ""
+
+    out = os.path.join(tmpdir, name)
+    rc, text = build_formal(src, out)
+    if rc != 0:
+        return False, text.strip()[-300:]
+    if not os.path.isfile(out):
+        return False, "build reported success but wrote no binary"
+    run = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT)
+    if run.returncode != want_exit:
+        return False, (f"exit status {run.returncode}, expected {want_exit}"
+                       + (f"; stderr: {run.stderr.strip()[:120]}"
+                          if run.stderr.strip() else ""))
+    if want_stdout is not None and want_stdout not in run.stdout:
+        return False, f"stdout {run.stdout[:120]!r} does not contain {want_stdout!r}"
+    if verbose:
+        print(f"      stdout={run.stdout[:60]!r} exit={run.returncode}")
+    return True, ""
+
+# ── wave 4 (D2): a field's DECLARED type, used only when every binding agrees ──
+#
+# C5's named next step. The rule is the one C5 handed over verbatim — a declared
+# type is used only when EVERY binding of the name agrees with it, the same
+# agree-or-refuse discipline as `model.struct_frame_slot_candidates` — and the
+# two ways it can end are both here, because the interesting one is the way it
+# ends BADLY:
+#
+#   * agreed, and the type names a framed struct of this module → the slot holds
+#     a NESTED FRAME, which the constructor PLACES in the outer object's own
+#     block (`model.struct_nested_frame_fields` / `struct_constructor_sites`).
+#     The lifetime is then the outer object's, which is strictly more than the
+#     refusal it replaces could offer: that refusal's whole complaint was that
+#     the frame belongs to whichever function built the object.
+#   * agreed, and it does NOT → the word in the slot is provably a plain value,
+#     and the frame layout is not what is in question, so the frame diagnostic
+#     must NOT fire and the value-method one must.
+#   * NOT agreed — no annotation, two candidates naming different types, one
+#     candidate not declaring the field → untyped, and the case stays refused
+#     with the disagreement spelled out.
+#
+# `byref_declared_type_contradicted_by_a_rebinding` is the one that makes the
+# approach sound and the one most likely to be quietly dropped: it is the case
+# where a single counter-example has to take the whole capability back out.
+DECLARED_TYPE_CASES = [
+    # The positive case: `inner: Inner` names a struct of this module whose
+    # receiver is a frame, every binding agrees (there is one), and so the
+    # nested frame is placed and `self.in1.total()` is a call on a placed
+    # address. The method writes nothing and reads two fields, so 123 is the
+    # source's answer and a build that computed 0 or 5 would be the silently-
+    # wrong outcome this whole shape is arranged to avoid.
+    ("byref_nested_frame_method_call",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    o.in1.b = 2\n"
+     "    o.in1.c = 3\n"
+     "    return o.go()\n", 128, None),
+    # TWO OBJECTS, EACH HOLDING ITS OWN NESTED FRAME. `Frame.nested_frames_no_
+    # alias` written as a program, and written the way C5 wrote its two-instance
+    # cases: each read is guarded by a DIFFERENT return code, so a regression
+    # says WHICH frame moved rather than only that a number is wrong.
+    #
+    # `o1` and `o2` are two constructor SITES, so two blocks, so two nested
+    # Inner frames at different addresses. Writing `o2.in1.a = 4` must not be
+    # visible in `o1`, and the 3000/5000 guards are the reads that would catch
+    # it. This is the case a "the code is the same for every width" argument
+    # cannot establish on its own.
+    ("byref_nested_frame_two_objects_no_alias",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o1 = Outer()\n"
+     "    var o2 = Outer()\n"
+     "    o1.in1.a = 1\n"
+     "    o1.in1.b = 2\n"
+     "    o1.in1.c = 3\n"
+     "    o2.in1.a = 7\n"
+     "    o2.in1.b = 8\n"
+     "    o2.in1.c = 9\n"
+     "    if o1.in1.total() != 123:\n"
+     "        return 1000 + o1.in1.total()\n"
+     "    if o2.in1.total() != 789:\n"
+     "        return 2000 + o2.in1.total()\n"
+     "    o2.in1.a = 4\n"
+     "    if o1.in1.total() != 123:\n"
+     "        return 3000 + o1.in1.total()\n"
+     "    if o2.in1.total() != 489:\n"
+     "        return 4000 + o2.in1.total()\n"
+     "    o1.in1.c = 5\n"
+     "    if o2.in1.total() != 489:\n"
+     "        return 5000 + o2.in1.total()\n"
+     "    return 0\n", 0, None),
+    # A nested frame the nested struct's OWN method writes to. The slot belongs
+    # to the nested frame, so this is the ordinary frame store and not the
+    # write-once rule — which is exactly the distinction `_check_nested_frame_
+    # writes` draws by refusing writes to the field from the OWNER's methods and
+    # not from the nested struct's. 4 + 5 is the nested method's own answer.
+    ("byref_nested_frame_is_mutable_by_its_own_method",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn bump(self) -> Int:\n"
+     "        self.c = self.c + 1\n"
+     "        return self.a + self.b + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.bump()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.in1.a = 2\n"
+     "    o.in1.b = 3\n"
+     "    o.in1.c = 4\n"
+     "    return o.go()\n", 10, None),
+]
+
+DECLARED_TYPE_REFUSALS = [
+    # ── THE CASE THAT MAKES THE APPROACH SOUND ──
+    #
+    # One local rebound to two structs, and the two DISAGREE about the field's
+    # declared type: `A.in1` is an `Inner` (a frame) and `B.in1` is an `Int` (a
+    # word). One counter-example, and the name is not typed, so no nested frame
+    # is placed and the case is refused — with BOTH candidates spelled, because
+    # a refusal that does not say which candidate wanted what is a refusal the
+    # reader has to re-derive, and this is the refusal where being vague would
+    # be most tempting.
+    #
+    # The direction that matters: reading the `A` candidate's type on the `B`
+    # path would place a frame where a word lives and hand the method a frame
+    # address read out of an integer. That program builds, runs, and returns a
+    # number nobody wrote.
+    ("byref_declared_type_contradicted_by_a_rebinding",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct A:\n"
+     "    var in1: Inner\n"
+     "    var w: Int\n"
+     "\n"
+     "struct B:\n"
+     "    var in1: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "def pick(c: Int) -> Int:\n"
+     "    var x = A()\n"
+     "    x.in1.a = 1\n"
+     "    if c > 0:\n"
+     "        x = B()\n"
+     "    return x.in1.total()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return pick(0)\n",
+     "refuse:A declares 'in1' as 'Inner'", None),
+    # No annotation at all: `in1 = 0` is a class-level ASSIGNMENT, so nothing
+    # here says what the slot holds, and the untyped case must stay refused
+    # rather than being treated as a value on the strength of `= 0`. The
+    # message has to say WHICH shape of untyped it is, because a class that
+    # assigns its fields in `__init__` and one that assigns a literal are both
+    # "no declared type" and only one of them is `= 0`.
+    ("byref_declared_type_absent_stays_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct P:\n"
+     "    var in1 = 0\n"
+     "    var z: Int\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    return p.go()\n",
+     "refuse:does not declare 'in1'", None),
+    # A field that IS written. `in1: Inner` agrees on a framed struct, so the
+    # slot does hold a frame address — but `P.go` ASSIGNS the field, so what is
+    # in the slot is a frame belonging to whichever function ran the assignment,
+    # not the frame the constructor placed. Those two lifetimes are independent,
+    # which is the whole reason the placed frame is preferred, so the case is
+    # refused with that said rather than silently treated as the placed one.
+    #
+    # This is the fourth answer of the declared-type rule and the one an early
+    # version got wrong: it placed the frame anyway and then refused every
+    # write to it, which is sound about the frame and useless about the program
+    # — it moved 164 stdlib files' verdicts to refuse ordinary code like
+    # `self._bytes = remaining`. The needle is the REASSIGNMENT, because that is
+    # the fact a reader needs and the one a regression would drop.
+    ("byref_refuse_write_over_a_nested_frame",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct P:\n"
+     "    var in1: Inner\n"
+     "    var z: Int\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        var t = Inner()\n"
+     "        self.in1 = t\n"
+     "        return self.in1.total()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    return p.go()\n",
+     "refuse:ASSIGNS that field, so what is in the slot is a frame belonging to", None),
+    # The BLOB-IN-A-FIELD PREMISE, as a refusal. C5 recorded that a slot can
+    # never hold a list today only because no field can take a non-literal
+    # default AND `S()` does not run `__init__` — neither of which is a property
+    # of the frame layout. This is the check that stops that being an accident
+    # of two other decisions: a `reset()` that builds a list into a field is a
+    # blob with the ASSIGNING function's lifetime sitting in a slot whose
+    # lifetime is the object's, and `self.items.append(x)` afterwards appends
+    # into reclaimed stack.
+    #
+    # It is the case the value-method work depends on, so it is a test and not
+    # a comment: the day (B1) is lifted for any reason, this goes red.
+    ("byref_refuse_container_written_into_a_field",
+     "struct Bag:\n"
+     "    var items: Int\n"
+     "    var n: Int\n"
+     "\n"
+     "    fn reset(self) -> Int:\n"
+     "        self.items = [1, 2, 3]\n"
+     "        return self.n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Bag()\n"
+     "    return b.reset()\n",
+     "refuse:breaks the premise that makes a frame field safe", None),
+    # The NEGATIVE use of the declared type, and the reason this is not only a
+    # nesting feature. `n: Int` says the slot is NOT a frame address of this
+    # unit, so the word handed to `bump` is a plain value — which is the value-
+    # method question, not the frame's. The needle is the VALUE-METHOD refusal
+    # and it is the assertion: the frame refusal must be GONE for this source,
+    # because a diagnostic about the frame layout is a diagnostic about the
+    # wrong thing. (`bump` is deliberately not in any lowered table, so the
+    # value path refuses it loudly instead of computing something.)
+    ("byref_declared_scalar_receiver_is_not_a_frame_question",
+     "struct Helper:\n"
+     "    var q: Int\n"
+     "    var r: Int\n"
+     "\n"
+     "    fn bump(self) -> Int:\n"
+     "        return self.q + 1\n"
+     "\n"
+     "struct P:\n"
+     "    var n: Int\n"
+     "    var m: Int\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.n.bump()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    return p.go()\n",
+     "refuse:is a method call on a value", None),
 ]
 
 # ── wave 3 (C4): the subscript, and a subscript with more than one index ──
@@ -1689,8 +2778,12 @@ def main():
         print(f"SKIP: formal output is arm64-only, host is {platform.machine()}")
         return 0
 
-    everything = (CASES + BYREF_CASES + BYREF_REFUSALS + WIDE_OFF_CASES
-                  + SUBSCRIPT_CASES)
+    everything = (CASES + RECVKIND_CASES + FD_CASES + BYREF_CASES
+                  + BYREF_REFUSALS + WIDE_OFF_CASES
+                  + SUBSCRIPT_CASES + DECLARED_TYPE_CASES
+                  + DECLARED_TYPE_REFUSALS
+                  + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
+                  + CROSS_MODULE_CASES)
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
@@ -1698,6 +2791,7 @@ def main():
         print(f"ERROR: unknown case(s): {sorted(missing)}", file=sys.stderr)
         return 2
     off_names = {c[0] for c in WIDE_OFF_CASES}
+    module_names = {c[0] for c in CROSS_MODULE_CASES}
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1706,6 +2800,10 @@ def main():
                 if name in off_names:
                     ok, detail = run_wide_off_case(
                         name, source, want_exit[len("refuse:"):], tmpdir,
+                        args.verbose)
+                elif name in module_names:
+                    ok, detail = run_module_case(
+                        name, source, want_exit, want_stdout, tmpdir,
                         args.verbose)
                 else:
                     ok, detail = run_case(name, source, want_exit, want_stdout,

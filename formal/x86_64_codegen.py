@@ -466,6 +466,9 @@ class X86_64Codegen:
         self._frame_sites: dict = {}
         self._frame_recv_bytes = 0
         self._frame_slots: dict = {}
+        # `{"h.a.b": slot}` — a NESTED frame read, which is two loads
+        # and therefore not something `_frame_slots` can express.
+        self._frame_nested_slots: dict = {}
         # The NAMES in this function that hold a frame address, as opposed to
         # the slot table above: `_frame_slots` says which `h.f` is a load, and
         # the holder set says which `h` is a frame at all — which is what tells
@@ -505,6 +508,12 @@ class X86_64Codegen:
         # indistinguishable from two integers, and the operator silently
         # lowers to pointer arithmetic.
         self._blob_vars = set()
+        # Names bound to a FILE DESCRIPTOR (the lowered `open`, or an alias of
+        # one). `write`/`close` lower to the C library's `write(2)`/`close(2)`,
+        # so the receiver has to be one, and `open(2)` is the only thing on
+        # this path that produces one — see model.VALUE_METHOD_RECEIVERS for
+        # what went wrong without this. Reset per function.
+        self._fd_vars = set()
         # String-literal data, appended after all the code: (label, bytes).
         # `_str_intern` maps content to label so equal literals share one
         # address. Both persist across compile()'s two-pass re-emit so the
@@ -652,9 +661,23 @@ class X86_64Codegen:
         # every frame the caller owns, and a blob made in the same function
         # cannot land on one.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
+        # The BLOCK size, not the frame size: a site whose struct has a
+        # typed-nested field reserves that nested frame too, and the blob cursor
+        # has to start above the lot or a blob would land on one.  Reading the
+        # block from the shared model rather than summing frame bytes here is
+        # what keeps the two backends reserving the same bytes in the same
+        # order.
         self._frame_recv_bytes = sum(
-            M.struct_frame_bytes(st) for st, _ in self._frame_sites.values())
+            M.struct_frame_block_bytes(st, self._structs)
+            for st, _off, _nested in self._frame_sites.values())
         self._frame_slots = dict(getattr(f, "_frame_slots", None) or {})
+        # `{"h.a.b": slot}` — a NESTED frame read, two loads rather than one,
+        # and a separate table because a `_frame_slots` entry is one load and a
+        # null in it is indistinguishable from "this field has no slot", which
+        # is the disagreement `formal/build.py` exists to keep apart from
+        # "this field is nested".
+        self._frame_nested_slots = dict(
+            getattr(f, "_frame_nested_slots", None) or {})
         self._frame_holders = set(getattr(f, "_frame_holders", None) or ())
         self._list_cursor = self._blob_base + self._frame_recv_bytes
         self._frame_bytes = _align16(self._top_bytes + _BLOB_BYTES
@@ -672,6 +695,7 @@ class X86_64Codegen:
         self._string_vars = set()
         self._dict_vars = set()
         self._blob_vars = set()
+        self._fd_vars = set()
         self._pending_finally = []
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Whole-function properties, so they
@@ -778,6 +802,16 @@ class X86_64Codegen:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * slot))
             return
+        # A NESTED frame slot is TWO loads.  Checked before the one-load table
+        # would matter if the key could collide, and before the register and
+        # spill homes for the reason that matters: an x86-64 backend with no
+        # globals reads an unknown name as 0, so a missing entry here is a
+        # silent zero rather than a wrong register.
+        nested = self._frame_nested_slots.get(name)
+        if nested is not None:
+            self._load_var(name.rsplit(".", 1)[0], Reg.R11)
+            self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * nested))
+            return
         if name in self._var_regs:
             r = self._var_regs[name]
             if dst != r:
@@ -803,6 +837,17 @@ class X86_64Codegen:
                 src = Reg.R10
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * slot, src))
+            return
+        # A NESTED frame slot: the outer load gives the nested frame's base and
+        # the store lands in its own slot.  The R11 parking is the same dance as
+        # the one-load case above, for the same reason.
+        nested = self._frame_nested_slots.get(name)
+        if nested is not None:
+            if src == Reg.R11:
+                self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
+                src = Reg.R10
+            self._load_var(name.rsplit(".", 1)[0], Reg.R11)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested, src))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -954,7 +999,16 @@ class X86_64Codegen:
                 # compile-only reading a MemberExpr load gets).
                 if isinstance(stmt.target, F.MemberExpr):
                     key = _member_slot_key(stmt.target)
-                    if key is not None and key in self._frame_slots:
+                    # `_frame_nested_slots` is here for the same reason the
+                    # load side has its own branch: a nested key is not in
+                    # `_frame_slots`, so without it `o.inner.a = 1` would fall
+                    # into the "no model for this object" reading below and be
+                    # DROPPED — the program would build, run, and return a
+                    # number the source never wrote.  arm64 routes every name
+                    # through `_store_var` and would have stored it, so this is
+                    # also the divergence the pair must not have.
+                    if key is not None and (key in self._frame_slots
+                                            or key in self._frame_nested_slots):
                         self._emit_expr(stmt.value)
                         self._store_var(key, Reg.RAX)
                         # …and the slot's VALUE KIND has to be recorded, the
@@ -1120,7 +1174,8 @@ class X86_64Codegen:
         if isinstance(stmt.target, F.IdentExpr):
             name = stmt.target.name
         elif isinstance(stmt.target, F.MemberExpr) \
-                and _member_slot_key(stmt.target) in self._frame_slots:
+                and _member_slot_key(stmt.target) in (
+                    self._frame_slots.keys() | self._frame_nested_slots.keys()):
             # `self.count += 1` on a by-reference receiver. No new code: the
             # load and the store below go through `_load_var`/`_store_var`,
             # which already turn a frame slot into a memory access, so the whole
@@ -1435,34 +1490,63 @@ class X86_64Codegen:
         self._emit_blob_base(offset, Reg.RAX)
 
     def _emit_len(self, e) -> None:
-        """`len(x)` — the count field of a list/tuple blob.
+        """`len(x)` — a blob's count field, or a string's `strlen`.
 
         A builtin, intercepted here for the same reason `range` is. Left to the
         extern path it became a call to a symbol `len` that libSystem does not
         define, so the image built and then aborted in the loader with
         "Symbol not found: _len" — the same defect the arm64 backend had.
 
-        A list is `[count][elements]` and a list value IS its blob address in
-        RAX, so this is one load from offset 0 (the same read the comprehension
-        generator already does for its own count).
+        TWO lowerings, chosen by `model.len_operand_lowering` on the operand's
+        kind, and the choice is the model's so the two architectures cannot
+        make it differently:
 
-        A string is refused by name: a string here is a bare char * with no
-        length prefix, so there is no count at offset 0, and returning the
-        pointer would be a plausible-looking wrong answer."""
+          BLOB   a list is `[count][elements]` and a list value IS its blob
+                 address in RAX, so this is one load from offset 0 (the same
+                 read the comprehension generator already does for its own
+                 count).
+
+          STRING a string is a bare `char *` to NUL-terminated bytes, so its
+                 length is not a field but a COMPUTATION: `strlen` is the
+                 length of a NUL-terminated `char *` by definition. Same libc
+                 call `endswith`, `count` and `f.write(s)` already make here.
+
+        The string half used to be a refusal, and the refusal was narrower than
+        the bug: it fired on a SYNTACTIC `StringLiteral` and on an identity
+        type-constructor, and for every other shape it fell through to the
+        count-field load — which for a `char *` reads the first eight
+        CHARACTERS. Measured on this backend and on arm64, `len(m)` where
+        `m = "hello"` returned 1819043176 (0x6C6C6568, `hell` little-endian),
+        and `len("  hi".lstrip())` returned 536897896 (0x20006869, `hi` plus
+        the trimmed spaces). Both built, both ran, both were wrong.
+
+        So the unclassified case is now a REFUSAL naming itself rather than a
+        read, which is the third row of `len_operand_lowering` and the reason
+        it exists: there is no shape for which reading offset 0 is right unless
+        the source has said what the operand holds.
+        """
         args = list(e.args)
         if len(args) != 1 or e.kwargs:
             raise CodegenError(
                 f"len() takes exactly one argument on this path "
                 f"(got {len(args) + len(e.kwargs)})")
         operand = args[0]
-        if isinstance(operand, F.StringLiteral) or (
-                isinstance(operand, F.CallExpr)
-                and _callee_symbol(operand.func) in IDENTITY_TYPE_CTORS):
+        how = M.len_operand_lowering(self._expr_str_kind(operand), operand)
+        if how is None:
             raise CodegenError(
-                f"len() of a string is not lowered on this path: a string is "
-                f"a bare char * with no length prefix, so its length cannot be "
-                f"read (len of a list or tuple is the blob's count field and "
-                f"is supported)")
+                M.len_refusal(self._expr_str_kind(operand), M.spelled(operand)))
+        if how == M.LEN_FROM_STRLEN:
+            self._emit_expr(operand)          # RAX = the char *
+            # RDI, not RAX: an expression leaves its value in RAX and the first
+            # ARGUMENT register is RDI. The same note as in `_emit_str_affix`,
+            # and the same consequence — strlen dereferences whatever RDI held,
+            # so omitting the move is a fault inside libc rather than a wrong
+            # answer. Measured: with it omitted, `len(m)` for `m = "hello"`
+            # segfaulted on x86-64 while arm64 returned 5, and
+            # `len("  hi".lstrip())` returned 4 instead of 2.
+            self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+            self._emit_extern_call(M.STRING_LENGTH_SYMBOL)
+            return
         self._emit_expr(operand)
         # RAX holds the blob address; the count is its first 8 bytes.
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
@@ -1492,6 +1576,25 @@ class X86_64Codegen:
         elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
             return M.STR_KIND
         return self._vkinds.kind_of(expr)
+
+    def _expr_is_fd(self, expr) -> bool:
+        """True when `expr` is known to be a FILE DESCRIPTOR.
+
+        The same rule as the arm64 backend's, so the two architectures cannot
+        disagree about which receivers are descriptors: `_fd_vars`, a name bound
+        from `open` in an earlier statement of this function and its aliases.
+
+        A frame slot is not covered (proving a field holds a descriptor is
+        cross-field flow), and neither is a CALL RESULT — `open(p, "w").write(s)`
+        refuses, because a method on a call result is not a value receiver on
+        this path at all (`_is_value_receiver`), which is a separate pre-existing
+        gap the arm64 docstring records in full."""
+        if isinstance(expr, F.IdentExpr):
+            return expr.name in self._fd_vars
+        if isinstance(expr, F.MemberExpr):
+            key = _member_slot_key(expr)
+            return key is not None and key in self._fd_vars
+        return False
 
     def _print_call(self, args: list):
         """`(format, operands)` for a `print` of `args`.
@@ -1613,8 +1716,11 @@ class X86_64Codegen:
 
     def _emit_value_method(self, e, method: str) -> None:
         """`recv.method(...)` where `recv` is a value."""
-        reason = M.value_method_refusal(method, self._method_recv_kind(e),
-                                        _dotted(e.func))
+        obj = e.func.obj if isinstance(e.func, F.MemberExpr) else None
+        reason = M.value_method_refusal(
+            method, self._method_recv_kind(e), _dotted(e.func),
+            receiver_is_fd=self._expr_is_fd(obj),
+            receiver_shape=M.receiver_shape(obj))
         if reason is not None:
             raise CodegenError(reason)
         if e.kwargs:
@@ -2782,6 +2888,17 @@ class X86_64Codegen:
             if key is not None and key in self._frame_slots:
                 self._load_var(key, Reg.RAX)
                 return
+            # A NESTED frame slot, which is two loads and is routed through
+            # `_load_var` for exactly that reason.  It has to be a SEPARATE
+            # branch here rather than a longer key in `_frame_slots`: the
+            # guard below refuses any dotted key that is not a one-load slot, so
+            # a nested key left to fall through would be refused by the guard
+            # rather than read — and the arm64 twin, whose `_emit_expr` defers to
+            # `_load_var` for every key, would answer it.  One backend refusing
+            # and the other computing is the divergence this pair must not have.
+            if key is not None and key in self._frame_nested_slots:
+                self._load_var(key, Reg.RAX)
+                return
             # …except a chain DEEPER than a frame slot, which is a field of a
             # field and must not be read as the 0 below. arm64's second line at
             # the same shape refuses it too, and both are here because the two
@@ -2791,6 +2908,7 @@ class X86_64Codegen:
             # A `h.f.m(...)` CALL does not come through here — the call path
             # reads `h.f` as a value receiver and dispatches on the method.
             if key is not None and "." in key \
+                    and key not in self._frame_nested_slots \
                     and key.split(".", 1)[0] in self._frame_holders:
                 raise CodegenError(
                     f"{key} reads a field of a field through the receiver "
@@ -2850,9 +2968,20 @@ class X86_64Codegen:
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
+        # `+` on two strings is refused, and this is the only place that knows
+        # both operand kinds before the ALU table adds the two addresses
+        # together. Measured on the pre-change tree, on BOTH backends:
+        # `print("ab" + "cd")` printed `[]` on arm64 and segfaulted on x86-64 —
+        # one wrong answer and one crash from one line of source. See
+        # `model.string_concat_refusal` for why it cannot be made right here.
+        reason = M.string_concat_refusal(
+            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right))
+        if reason is not None:
+            raise CodegenError(reason)
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
-            self._emit_cmp(e.left, e.right, unsigned, signed)
+            if not self._emit_strcmp(e.left, e.right, op):
+                self._emit_cmp(e.left, e.right, unsigned, signed)
             return
 
         # Python `and`/`or` return the deciding OPERAND, not a bitwise mix
@@ -2911,6 +3040,62 @@ class X86_64Codegen:
         self.asm.emit(encode_mov_r64_r64(scratch, Reg.RAX))
         self._pop_slot(Reg.RAX)
         self.asm.emit(alu(Reg.RAX, scratch))
+
+    def _emit_strcmp(self, l, r, op: str) -> bool:
+        """`l == r` / `l != r` on two STRINGS as `strcmp(l, r) == 0`.
+
+        True if it emitted, 0/1 in RAX, the same shape `_emit_cmp` produces for
+        an integer — so every consumer of a comparison's value works unchanged,
+        which is the whole reason this backend needs only one hook where arm64
+        needs two (it has a separate flag-consuming branch path).
+
+        WHY CONTENT, measured rather than assumed. `==` on two strings used to
+        compare the two POINTERS. That is right for two interned literals —
+        interning is by content, so equal literals are the same object — and
+        wrong for every derived interior pointer, which is exactly what
+        `lstrip` returns and what every sub-range method would return:
+
+            m = "  abc".lstrip()
+            if m == "abc": ...        # NOT taken, on both backends
+
+        A correct program taking the wrong branch, which is worse than a wrong
+        number: nothing downstream can tell. `is` / `is not` keep the pointer
+        compare, which for them is the answer and not an approximation of it;
+        `model.string_comparison_lowering` is what keeps the two pairs apart and
+        is shared with the arm64 backend so they cannot come apart there.
+
+        RDI, not RAX, for the second operand: an expression leaves its value in
+        RAX and the first ARGUMENT register is RDI, and `strcmp` dereferences
+        both. Omitting the move is a fault inside libc rather than a wrong
+        answer, which is the same trap `_emit_str_affix` documents.
+        """
+        if M.string_comparison_lowering(
+                op, self._expr_str_kind(l), self._expr_str_kind(r)) \
+                != M.STRING_COMPARE_CONTENT:
+            return False
+        # push l, then r  =>  [rsp] = r, [rsp+16] = l. The same two-slot shape
+        # `_emit_str_affix` uses, and for the same reason: an expression leaves
+        # its value in RAX and a nested call clobbers every caller-saved
+        # register, so both operands have to survive the calls.
+        self._emit_expr(l)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(r)
+        self._push_slot(Reg.RAX)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))    # r
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_extern_call("strlen")                  # RAX = len(r)
+        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))     # n = len(r) + 1
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))   # l
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))    # r
+        self._emit_extern_call(M.STRING_COMPARE_SYMBOL)
+        self._emit_setcc_bool(Reg.RAX, "sete" if op == "==" else "setne")
+        # Into R11, never RAX: `_pop_slot` WRITES its target, and popping into
+        # RAX would throw away the 0/1 the setcc just produced. Same trap, same
+        # fix, as `_emit_str_affix`.
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        return True
 
     def _emit_cmp(self, l, r, unsigned_mnem: str, signed_mnem: str) -> None:
         """l <op> r as 0/1 in RAX, at the signedness of the operands' type."""
@@ -3588,6 +3773,17 @@ class X86_64Codegen:
         # A dict is checked FIRST: it is a pair-blob too, but its subscript is
         # a key lookup, so it must not be recorded as a plain blob (which
         # would make `d[k]` take the index path and read the key as data).
+        #
+        # The descriptor mark is separate and not mutually exclusive: a
+        # descriptor IS an int, so a name bound to one is correctly an int too,
+        # but it must not be handed to `write(2)`/`close(2)` as an arbitrary
+        # number. See model.VALUE_METHOD_RECEIVERS.
+        if M.is_open_call(value):
+            self._fd_vars.add(name)
+        elif isinstance(value, F.IdentExpr) and value.name in self._fd_vars:
+            self._fd_vars.add(name)          # an alias keeps it: `g = f`
+        else:
+            self._fd_vars.discard(name)
         if isinstance(value, F.DictExpr) or (
                 isinstance(value, F.IdentExpr)
                 and value.name in self._dict_vars):
@@ -3803,7 +3999,26 @@ class X86_64Codegen:
                 f"formal value is one 64-bit word, and {name} is not one "
                 f"thing) — previously this emitted a call to a symbol named "
                 f"{name!r} that nothing defines")
-        operands = list(e.args)
+        # A keyword argument names the same single value a positional one does,
+        # so it is accepted as the operand — arm64 has always done this and its
+        # comment says why: `String(unsafe_from_utf8_ptr=…)` is how
+        # std/os/env.mojo builds a string from a raw pointer, and refusing
+        # every keyword form blocked 78 stdlib files on a shape the language
+        # allows. x86-64 read `e.args` alone, so the two backends disagreed
+        # about one source file over a conversion neither of them had a reason
+        # to refuse. Measured with no frame anywhere in the program (a
+        # one-field struct, so nothing here is a receiver): `Pointer(to=t)`
+        # built on arm64 and was refused here with "got 0 argument(s)".
+        #
+        # It became REACHABLE from the frame hand-off rather than being
+        # harmless: `Pointer(to=stat)` over a struct's frame is the one hand-off
+        # in the frame family that is correct (a pointer wants the address, and
+        # a frame address is one), and it is spelled with a keyword, so the
+        # frame analysis stopped refusing the file and this refusal took its
+        # place. What is still refused is a genuine mismatch of ARITY — a
+        # conversion has one operand, and two of them, positioned or named, is
+        # not a conversion.
+        operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
         if len(operands) != 1:
             raise CodegenError(
                 f"{name}(...) takes exactly one value to convert on this path "
@@ -3888,6 +4103,13 @@ class X86_64Codegen:
                 f"a receiver frame for — the frame layout and the body "
                 f"disagree, which is a compiler bug, not a program error")
         base = self._blob_base + site[1]
+        # Nested frames FIRST, in the same order arm64 does it and for the same
+        # reason: the block is laid out with the object's own slots at the
+        # bottom, and the outer base is recomputed per store anyway.  The
+        # layout and the list of children both come from the shared model, so
+        # the bytes reserved and the defaults stored cannot disagree.
+        for _fname, _slot, _child, child_off in site[2]:
+            self._emit_nested_frame_init(_child, child_off + self._blob_base)
         for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
             if kind == M.DEFAULT_STRING:
                 self._emit_expr(F.StringLiteral(value=payload))
@@ -3895,9 +4117,44 @@ class X86_64Codegen:
                 self._emit_mov_imm(Reg.RAX, int(payload or 0))
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
                                               Reg.RAX))
+        # Each nested field's slot then gets the ADDRESS of the frame just
+        # brought up.  Same order as the loop above, so the address stored and
+        # the frame initialized are the same one by construction.
+        for _fname, slot, _child, child_off in site[2]:
+            self._emit_blob_base(child_off + self._blob_base, Reg.RAX)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
+                                              Reg.RAX))
         # The address is the RESULT and every store above left something else
         # in RAX, so it is materialized last.
         self._emit_blob_base(base, Reg.RAX)
+
+    def _emit_nested_frame_init(self, st, base: int, depth: int = 0) -> None:
+        """Bring a NESTED receiver frame up at its own slot defaults.
+
+        The x86-64 twin of arm64's `_emit_nested_frame_init`, and it recurses
+        through the same `model.struct_nested_frame_fields` and stops at the
+        same `model.MAX_NESTED_FRAME_DEPTH`, so a cyclic declaration graph
+        truncates identically on both machines rather than hanging on one.
+
+        `base` is the ABSOLUTE byte offset from `RBP` (arm64 passes the
+        relative offset and adds nothing, because its `_emit_frame_base` adds
+        the scratch base itself); the shape of the emitted stores is otherwise
+        identical, which is what makes a default one machine can bring up and
+        the other cannot not expressible.
+        """
+        if depth >= M.MAX_NESTED_FRAME_DEPTH:
+            return
+        for _fname, _slot, child, child_off in \
+                M.struct_nested_frame_fields(st, self._structs):
+            self._emit_nested_frame_init(child, child_off + self._blob_base,
+                                         depth + 1)
+        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+            if kind == M.DEFAULT_STRING:
+                self._emit_expr(F.StringLiteral(value=payload))
+            else:
+                self._emit_mov_imm(Reg.RAX, int(payload or 0))
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
+                                              Reg.RAX))
 
     def _emit_fresh_one_word(self, name: str, st) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.

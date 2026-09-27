@@ -27,12 +27,30 @@ only because `formal/x86_64_codegen.py` was another agent's active file, and
 landed once that agent was stopped). `len(range(10))` now returns 10 on
 arm64 and on x86-64 under `arch -x86_64`. Five cases in
 `test_formal_run.py` pin it (list, range, empty, nested, and two lens added).
-On arm64 the symptom was worth stating exactly, because it is not a wrong
-answer: the image built and then **aborted in the loader** with
-`dyld: Symbol not found: _len`. A string argument is refused by name on both
-backends — a string is a bare `char *` with no length prefix, so there is no
-count at offset 0 to read, and returning the pointer would be a
-plausible-looking wrong answer.
+
+**A string argument is no longer refused, and this section's reason for
+refusing it was wrong.** The text below says "A string argument is refused by
+name on both backends — a string is a bare `char *` with no length prefix, so
+there is no count at offset 0 to read". The first half of that is still true;
+the second half was the wrong reason, and it hid a worse bug. There is no
+*count field* at offset 0, but a NUL-terminated `char *`'s length is a
+*computation* — `strlen` is the definition of it — so `len` of a string needs no
+field and no second word. It is now lowered as `strlen` on both backends, and
+`bugs/FORMAL_string_value_model.md` has the decision, the cost and the
+measurement.
+
+The refusal was also narrower than the bug it was standing in for, which is
+worth recording because the shape recurs: it fired on a **syntactic**
+`StringLiteral` and on an identity type-constructor and nothing else, so
+`len(m)` for a local fell through to the count-field load and read the first
+eight bytes of the *character data*. Measured on both architectures,
+`len(m)` where `m = "hello"` returned **1819043176** — 0x6C6C6568, the bytes
+`hell` read little-endian — and `len("  hi".lstrip())` returned **536897896**,
+0x20006869, `hi` followed by the two spaces that had just been trimmed. Both
+built, both ran, both were wrong, and the wrong number was indistinguishable
+from a right one. It is now 5 and 2. The third case — an operand the source
+does not type — is refused rather than read, which is the half of the old
+refusal that was right.
 
 Found while gating the x86-64 machine model. `formal/x86_64_model_test.py` is
 green, but the container suite has one failure

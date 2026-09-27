@@ -28,6 +28,13 @@ with "Symbol not found". These tests pin the replacement behaviour:
      goes red if the order inverts — because the failure mode of getting it
      wrong is a program that binds the wrong module and computes the wrong
      answer with nothing to grep for.
+ 10. a module that genuinely has no boundary symbol is REFUSED, and the
+     refusal says which of the ways it has none. 33 of the 578 swept files
+     are this one refusal; the decision and its cost are in
+     bugs/FORMAL_known_limits.md §1, and the five tests at the end of this
+     file pin both the decision and the accuracy of the message, because a
+     message that is false about the file sends the reader after a construct
+     that is not there.
 
 Invoked directly:
     python3 test_formal_imports.py [-v]
@@ -912,6 +919,173 @@ def test_reexported_type_reaches_the_importer(tmpdir, _shared):
           f"importer; imported_struct_defs found {names}")
 
 
+
+# ── the "exports nothing" family: 33 of the sweep's 578 files ────────────────
+#
+# These five pin the LIMIT, and each one is a pin in the anti-rot direction: it
+# asserts that a refusal still fires, so if the limit is closed the test goes
+# RED and has to be looked at. That is the same contract as an `expect=`
+# marker in tools/suite.py, for the same reason — a limit nobody can detect
+# the disappearance of is indistinguishable from a limit nobody re-checked.
+#
+# The family is documented, audited and costed in
+# bugs/FORMAL_known_limits.md §1. Measured there: 33 files, EIGHT terminal
+# modules, and all eight refusals TRUE. What is pinned here is therefore not a
+# bug but a decision, plus three message-ACCURACY guards, because
+# `no_public_api_reason` had no test at all before this wave and three of its
+# six branches were saying something false about the file they were reported
+# against (bugs/FORMAL_known_limits.md §1.3).
+
+GENERIC_ONLY_MODULE = "def widen[T: Intable](v: T) -> T:\n  return v\n"
+CONCRETE_MODULE = "def widen(v):\n  return v\n"
+
+
+def test_a_module_with_no_boundary_symbol_is_refused(tmpdir, _shared):
+    """A module whose only public function is a GENERIC template is refused.
+
+    The limit, pinned. doc/ABI.md §Generics is explicit that a generic is not
+    a single boundary symbol — each INSTANTIATION is, keyed in the CAS by its
+    type arguments — and that monomorphization is Stage 5, which this path
+    does not do. So there is no name an importer could bind, and the honest
+    answer is the refusal.
+
+    It is a `refuse` in substance: the build must FAIL and the message must
+    name the module and say GENERIC. If a future change makes this build, this
+    test fails — which is the point, because the only way to make it build is
+    to publish the template under its base name, and that is a run-time wrong
+    answer rather than a build error.
+    """
+    root = os.path.join(tmpdir, "genericonly")
+    os.makedirs(root)
+    write_tree(root, {"mylib/__init__.mojo": GENERIC_ONLY_MODULE,
+                      "prog.mojo": "from mylib import widen\n"
+                                  "def main():\n  return 0\n"})
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    check(result.returncode != 0,
+          "a module exporting only a generic template built successfully; one "
+          "trie entry cannot be two instantiations, so a call with different "
+          "type arguments would silently bind the first one's body")
+    text = result.stderr or result.stdout
+    check("__init__.mojo" in text,
+          f"the refusal does not name the module: {text.strip()[-300:]}")
+    check("GENERIC" in text,
+          f"the refusal does not say the export is blocked by genericity: "
+          f"{text.strip()[-300:]}")
+
+
+def test_a_generic_template_is_not_exported_under_its_base_name(tmpdir,
+                                                                _shared):
+    """The export set is empty for a generic-only module, and is the concrete
+    name for the same module with one concrete function.
+
+    The restrictive half, and the reason the family above is a limit rather
+    than an oversight. Read straight out of `formal.build`, so it pins the
+    DECISION and not the message: this is the predicate the refusal is built
+    on, and a change that made it non-empty for a generic template would let
+    33 files build and every one of them wrong.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import _export_entries
+    gen = os.path.join(tmpdir, "gen_only.mojo")
+    with open(gen, "w") as f:
+        f.write(GENERIC_ONLY_MODULE)
+    check(_export_entries([gen]) == {},
+          f"a generic template reached the export set: "
+          f"{sorted(_export_entries([gen]))}")
+    con = os.path.join(tmpdir, "concrete.mojo")
+    with open(con, "w") as f:
+        f.write(CONCRETE_MODULE)
+    got = sorted(_export_entries([con]))
+    check(got == ["widen"],
+          f"the same module with one CONCRETE function exported {got}, not "
+          f"['widen'] — so the difference between the two cases is genericity "
+          f"and nothing else")
+
+
+def test_a_clib_named_definition_is_refused_not_blamed_on_privacy(tmpdir,
+                                                                  _shared):
+    """A module defining only `strlen` is refused, and NOT told it is private.
+
+    A message-accuracy guard, and it guards a bug that is live on this tree.
+    `no_public_api_reason` ends in an unconditional fall-through that reads
+    "every declaration in it is private (a leading `_`)", and it is reached by
+    every module with at least one CONCRETE public function that nevertheless
+    exports nothing — because all four named branches are gated on `not
+    concrete_funcs`. `std/memory/memory.mojo` gets it today, and it declares
+    fifteen public functions and four private ones.
+
+    The cause is `reflect._CLIB_SYMS`: `strlen` is a C library symbol, so the
+    export rule drops it. The assertion is only that the message does not
+    blame a privacy rule that was not applied, which is what a reader would
+    otherwise act on.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "clib_named.mojo")
+    with open(path, "w") as f:
+        f.write("def strlen(s: String) -> Int:\n  return 1\n")
+    reason = no_public_api_reason([path])
+    check("is private" not in reason,
+          f"a module with NO private declaration was told every declaration "
+          f"in it is private: {reason}")
+    check("strlen" in reason,
+          f"the refusal does not name the symbol the export rule actually "
+          f"excluded: {reason}")
+
+
+def test_a_concrete_and_a_generic_of_one_name_are_told_apart(tmpdir, _shared):
+    """`def f()` plus `def f[T](…)` is ONE concrete and ONE generic, not two
+    generics.
+
+    The second message-accuracy guard, on a bug that is live on this tree and
+    that `std/sys/terminate.mojo` hits today. `_declared_api_shape` collects
+    generics into a set of NAMES and then looks each parsed definition up in
+    it, so a name that is concrete in one place and a template in another is
+    counted as a template in both places — and the message then says "every
+    public function in it is a GENERIC template" about a function that has no
+    template parameters at all.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import _declared_api_shape
+    path = os.path.join(tmpdir, "one_name_two_defs.mojo")
+    with open(path, "w") as f:
+        f.write("def exit():\n  return 0\n\n"
+                "def exit[intable: Intable](code: intable):\n  return 0\n")
+    shape = _declared_api_shape(open(path).read())
+    check(shape["funcs"] == ["exit"],
+          f"the concrete `def exit()` was not counted as concrete: {shape}")
+    check(shape["generic_funcs"] == ["exit"],
+          f"the generic `def exit[intable]` was not counted as generic: "
+          f"{shape}")
+
+
+def test_a_public_generic_is_not_reported_as_private(tmpdir, _shared):
+    """Two PUBLIC generics and one private helper is not "the only function
+    it declares … which is both private and parametric".
+
+    The third message-accuracy guard, same shape of mistake as the one above:
+    the branch's condition tests whether the module has ANY private
+    declaration, and its text then asserts something about the generics
+    themselves. `std/memory/unsafe.mojo` hits it today — it declares two
+    public generics (`bitcast`, `pack_bits`) and one private helper, and is
+    told its only function is a template that is "both private and
+    parametric". Neither half is true.
+    """
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "public_generics.mojo")
+    with open(path, "w") as f:
+        f.write("def bitcast[T: Copyable](x: T) -> T:\n  return x\n\n"
+                "def pack_bits[T: Copyable](x: T) -> T:\n  return x\n\n"
+                "def _helper(x: Int) -> Int:\n  return x\n")
+    reason = no_public_api_reason([path])
+    check("both private and parametric" not in reason,
+          f"two PUBLIC generic templates were reported as private: {reason}")
+    check("only function it declares" not in reason,
+          f"two public declarations were reported as one: {reason}")
+
+
 TESTS = [
     ("an import links the module and the program runs",
      test_import_links_and_runs),
@@ -957,7 +1131,61 @@ TESTS = [
      test_reexported_type_reaches_the_importer),
     ("a local Mojo module beats the host-module list",
      test_mojo_source_beats_host_module),
+    ("a module exporting only a generic template is refused",
+     test_a_module_with_no_boundary_symbol_is_refused),
+    ("a generic template is not exported under its base name",
+     test_a_generic_template_is_not_exported_under_its_base_name),
+    ("a C-library-named definition is not blamed on privacy",
+     test_a_clib_named_definition_is_refused_not_blamed_on_privacy),
+    ("a concrete and a generic of one name are told apart",
+     test_a_concrete_and_a_generic_of_one_name_are_told_apart),
+    ("a public generic is not reported as private",
+     test_a_public_generic_is_not_reported_as_private),
 ]
+
+
+# ── known failures, recorded rather than hidden ──────────────────────────────
+#
+# The same contract as `test_formal.py`'s EXPECTED_FAILURES and as an
+# `expect='<why>'` marker in tools/suite.py: a test listed here that PASSES is
+# reported as a FAILURE, because a marker nobody revisits is a bug quietly
+# reintroduced. So these are pins in both directions — they cannot rot green,
+# and they cannot rot red.
+#
+# All three are message-ACCURACY guards for `no_public_api_reason`, and all
+# three are live defects on this tree rather than unimplemented features. Each
+# names the stdlib module it was measured on, because "a test is red" is not a
+# reason and "std/memory/memory.mojo is told it has no public declarations
+# when it has fifteen" is. Full analysis, reproducers and the cost of each fix:
+# bugs/FORMAL_known_limits.md §1.3.
+EXPECTED_FAILURES = {
+    "a C-library-named definition is not blamed on privacy":
+        "formal/build.py's no_public_api_reason falls through to an "
+        "unconditional 'every declaration in it is private (a leading `_`)' "
+        "for any module with a concrete public function that exports nothing, "
+        "because all four named branches are gated on `not concrete_funcs`. "
+        "Measured on std/memory/memory.mojo (fifteen public functions, four "
+        "private) and on a one-function `def strlen` reproducer. The real "
+        "cause is reflect._CLIB_SYMS. Fix: a fifth branch naming the excluded "
+        "symbol, and a fall-through that states no reason it has not checked.",
+
+    "a concrete and a generic of one name are told apart":
+        "formal/build.py's _declared_api_shape collects generics into a set "
+        "of NAMES and looks each parsed FunctionDef up in it, so a name that "
+        "is concrete in one definition and a template in another is counted "
+        "as a template twice. Measured on std/sys/terminate.mojo, whose "
+        "concrete `def exit():` is reported as a GENERIC template. Fix: "
+        "classify per definition rather than per name.",
+
+    "a public generic is not reported as private":
+        "no_public_api_reason's 'both private and parametric' branch is "
+        "gated on the module having ANY private declaration and then asserts "
+        "the properties of the generics themselves. Measured on "
+        "std/memory/unsafe.mojo: two public generics (bitcast, pack_bits) and "
+        "one private helper, reported as 'the only function it declares … "
+        "which is both private and parametric'. Fix: gate on the "
+        "intersection set(gen_funcs) & set(private).",
+}
 
 
 def main():
@@ -970,26 +1198,54 @@ def main():
               f"{platform.machine()}")
         return 0
 
-    passed = failed = 0
+    passed = failed = expected = 0
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, fn in TESTS:
+            expect = EXPECTED_FAILURES.get(name)
+            if expect is not None and name not in [n for n, _f in TESTS]:
+                print(f"  STALE  {name}\n        marked expected-fail but is "
+                      f"not in TESTS — drop the marker")
+                failed += 1
+                continue
             try:
                 fn(tmpdir, None)
             except TestFailure as e:
+                if expect is not None:
+                    expected += 1
+                    print(f"  EXPECTED  {name}\n        {expect}")
+                    continue
                 failed += 1
                 print(f"  FAIL  {name}\n        {e}")
                 continue
             except Exception as e:
+                if expect is not None:
+                    expected += 1
+                    print(f"  EXPECTED  {name}\n        {expect}")
+                    if args.verbose:
+                        import traceback
+                        traceback.print_exc()
+                    continue
                 failed += 1
                 print(f"  ERROR {name}\n        {type(e).__name__}: {e}")
                 if args.verbose:
                     import traceback
                     traceback.print_exc()
                 continue
+            if expect is not None:
+                failed += 1
+                print(f"  FAIL  {name}\n        marked expect=… but it PASSES "
+                      f"— drop the marker:\n        {expect}")
+                continue
             passed += 1
             print(f"  PASS  {name}")
 
-    print(f"\nformal imports: PASS={passed} FAIL={failed}")
+    stale = sorted(set(EXPECTED_FAILURES) - {n for n, _f in TESTS})
+    for name in stale:
+        print(f"  STALE  {name}\n        marked expect=… but is not in TESTS "
+              f"— drop the marker")
+        failed += 1
+
+    print(f"\nformal imports: PASS={passed} EXPECTED={expected} FAIL={failed}")
     return 1 if failed else 0
 
 
