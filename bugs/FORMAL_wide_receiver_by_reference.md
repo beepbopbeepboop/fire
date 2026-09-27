@@ -1250,3 +1250,163 @@ files moved `codegen → not-answerable/host-import`, because the hand-off is no
 accepted and the next fact is a CPython host import they were always also
 blocked by. That flatters the coverage denominator, so the baseline 80/131 =
 61.1% is the honest figure and 80/120 = 66.7% is not.
+
+## Wave 5 (E5): the loop closed — a method's frame contract, proved
+
+Steps 1–5 landed the frame; step 6 was `formal/arm64_proof_gen.py`, which every
+wave has deferred to, and which stopped before the receiver was even reached.
+This wave is step 6, and the headline is that **a wide-receiver method is now
+proved end to end, with no `sorry` in the way and with the premises shown to be
+load-bearing.**
+
+### What the generator could not do, and why (the three blockers, in order)
+
+1. **A `LDR`/`STR` through a non-`SP` base had no correct step RESULT.** The
+   generator's `_step_rhs`/`_step_rhs_generic` still carried the pre-fix model
+   of `0xF9400000` — a pre-index store of ONE BYTE at `sp - imm` — because the
+   generator and `arm64_step` had been fixed together and then one of the two
+   was edited. A generated `..._sr_N` lemma therefore asserted
+   `arm64_step s code = some <a store>` where the library's `work_step_ldr_pre`
+   said `some <a load>`, and `exact` rejected it: **no program that touches
+   memory through a non-`SP` base could generate a proof at all.** `idx 18` and
+   `idx 31` are now the model the library has (`work_step_ldr_uoff`,
+   `work_step_str_uoff`, and the `_WORK_STEP` table dispatches on those names
+   rather than on the historical ones). `idx 19` was a THIRD mis-modelled form
+   and is now fixed on both sides: `0xB9000000` is `STR Wt, [Xn, #imm]`, and both
+   `arm64_step` and the generator had it as a post-index LOAD from `SP`.
+   `lib/ProofLib.lean`'s `work_step_ldr_post` became `work_step_str_uoff32`
+   (with the old name kept as an alias, as for the other two). Measured first:
+   **zero of the 43 examples emitted any of the three**, which is exactly why
+   the suite was green throughout.
+
+   One subtlety that is worth the two lines it took to find: the generator's
+   RHS has to be the *syntactic* mirror of the library lemma's statement, so
+   `arm64_reg 31 s` must be emitted as `arm64_reg 31 s` and **not** as the
+   equal `s.sp`. A hand-simplified base is a different term, and `exact` cares.
+
+2. **A method's own stack traffic is in the way of reading its receiver.** A
+   method's prologue stores four words at `sp - 8 … sp - 32` before the `LDR`,
+   so the value the source says is in the receiver's slot `k` is read out of
+   the memory *after* those stores, and the terminal value flow has to peel
+   them. There was no lemma for it — the existing ones are all stated over
+   `sp + j` (a caller slot) or over two frame slots. `Frame.frameRead_write_below`
+   (in `lib/ProofLib.lean`, proved, no `sorry`) is that lemma: a store at
+   `sp - j` leaves the frame slot `k` alone, given `FrameFits base (k+1)` and
+   `FrameBelow (sp - j) base 1`. `u64_sub_pair` is the second new lemma, and it
+   exists because `u64_sub_add` leaves `UInt64.ofNat 16 - 8` in a shape
+   `u64_ofNat_sub` does not match, so a pair's second word never reached the
+   canonical form the frame premises are stated in.
+
+3. **The contract is about MEMORY, so the proposition is about memory.** A
+   method's `x0` is not a source-level value, and the entry function's `mojo`
+   does not exist at all for a program that constructs a frame — so the ordinary
+   `s.x0 = mojo n` is not a statement anyone can make. What is true, and proved,
+   is the frame relation.
+
+### The proposition
+
+For `formal/examples/wide_recv.mojo`'s `set_x(self, v)` on a two-field struct,
+the emitted theorem is (addresses elided, the rest verbatim):
+
+```lean
+theorem main_Point_set_x_frame_contract (n v : UInt64) (hmem : Nat → UInt8)
+    (hn : 131168 * (n.toNat + 1) + 131168 ≤ 18446744073709551600)
+    (hfit : Frame.FrameFits n 2)
+    (hsep8  : Frame.FrameBelow (UInt64.ofNat 70368744177664 - UInt64.ofNat 8)  n 1)
+    (hsep16 : Frame.FrameBelow (UInt64.ofNat 70368744177664 - UInt64.ofNat 16) n 1)
+    (hsep24 : Frame.FrameBelow (UInt64.ofNat 70368744177664 - UInt64.ofNat 24) n 1)
+    (hsep32 : Frame.FrameBelow (UInt64.ofNat 70368744177664 - UInt64.ofNat 32) n 1)
+    (hbnd : FrameBound 131168 { … } n) :
+    (match arm64_exec_go_exit { Arm64State.init n 4294967808 with
+                                pc := 4294968024, x30 := UInt64.ofNat 4294968168,
+                                sp := UInt64.ofNat 70368744177664,
+                                mem := hmem, x1 := v }
+                              main_code 4294968168 ((200000 + 14 * n.toNat)) with
+     | some s => Frame.frameRead s.mem n 0 = v ∧
+                 Frame.frameRead s.mem n 1 =
+                 Frame.frameRead ({ … }).mem n 1
+     | none => False)
+```
+
+Read: **for any receiver word `n` whose frame fits, and for ANY memory
+`hmem`**, entering the method with that receiver in `x0` and `v` in `x1` leaves
+the receiver's slot 0 holding `v` and its slot 1 exactly as it was. The
+premises are the calling convention in the frame layout's own vocabulary:
+`FrameFits` (the frame does not run off the top of the address space, so its
+slots have distinct addresses) and, per stack word the method touches,
+`FrameBelow` (the receiver frame's base is at or above the top of that word).
+
+Three things about it are deliberate and are the reason it is worth anything:
+
+* **`hmem` is a parameter, not `Arm64State.init`'s all-zero memory.** With a
+  zero memory every slot of every receiver reads `0`, so the theorem would be
+  `0 = 0` and would pass whether the method wrote slot 0, slot 1, or the wrong
+  register. Quantifying the memory is what makes the proposition testable, and
+  it is the change that turned a green file into a checkable one.
+* **The entry `sp` is a literal with room above and below**, not
+  `0xfffffffffffffff0`. The receiver frame sits AT the callee's entry `sp` and
+  grows upward, so with `sp` at the top of the address space the frame's second
+  slot wraps and `FrameFits` is false for EVERY receiver — the contract would be
+  true and vacuous, with no `n` satisfying its premises. (The premises are
+  jointly satisfiable at `n = sp`; that is what a real caller does.)
+* **No `sorry`, no `grind`, no `+decide`, no evaluator tactic.** A frame
+  contract is emitted with `all_goals done` where the ordinary path emits
+  `all_goals (first | done | sorry)`, and with the terminal value flow's `simp`
+  as `simp only`. That is not a style choice: `grind` closed a *false* version
+  of the getter's claim during development, and `bv_decide`/`+decide`/
+  `exact u64_div_msub` each cost 20 million heartbeats on a goal with a `String`
+  -keyed `Decidable` instance in it. A gap here is now a hard error.
+
+For a getter, the machine half's claim (`s.x0 = Frame.frameRead s.mem n k`) is
+emitted **as a separate source-semantics theorem** rather than inside the
+contract: `<m>_source_semantics` says the `MF.evalMethod` of the method body,
+with the field environment `Frame.frameToEnv` reads out of the receiver's frame,
+IS `Frame.frameRead mem n k`, and the contract says the machine returns the
+same term. The two compose at one shared term, and putting the `MF` term in the
+contract's own statement cost a 20M-heartbeat `whnf` timeout (see below).
+
+### It is not vacuous — three checks, each of which fails
+
+| check | what was changed | result |
+|---|---|---|
+| a premise is load-bearing | `have hlow24 : 70368744177640 + 8 ≤ n.toNat` weakened to `+ 1` | **`Type mismatch`** at the derivation |
+| the claim is about the right slot | `Frame.frameRead s.mem n 0 = v` → `n 1` | **does not typecheck** (heartbeat timeout on the unpeelable goal) |
+| the frame work is what closes it | every `hfb*` peel equation and every `rw [hfb*]` deleted | **`Unknown identifier` / `unsolved goals`** |
+
+And a fourth, at the source level, as two `test_formal_run.py` cases: the
+generator READS each field's slot off the emitted `STR`'s offset, so two
+programs differing in one character of a method body (`self.x` vs `self.y`) get
+41 and 40 (`byref_slot_follows_the_field_written`,
+`byref_second_field_write_leaves_first`).
+
+### What is still open, with the measurement
+
+* **A getter's UNIVERSAL contract is generated and typechecks, and costs ~20
+  million heartbeats per method** (a 41-minute `lean` on one three-method
+  example, measured, with `maxHeartbeats 400000000`). The claim is about `s.x0`,
+  so the value flow goes through the method's whole register chain, and
+  re-deriving it with the terminal `simp only` over every block definition is
+  what costs. The fix is the one the ordinary path already has — a per-block
+  `have` for the result register instead of a `simp only` that re-derives it —
+  and until then the getter's end-to-end claim is its `native_decide` run test,
+  which is a real evaluation of the model over the real instruction bytes.
+* **The entry function's own result is not proved.** Its blocks contain `BL`s,
+  and the CFG walk discharges a call with the RECURSION contract, which is only
+  valid when the callee is the entry function. A call to a different function
+  needs an interprocedural contract; `Point_get_x`'s contract above is the
+  callee half of one.
+* **`Frame.SlotOf` is still used by no generated proof.** The contract's field
+  table is an inline `if`-chain, and a `SlotOf` for it needs a `String` case
+  analysis the generator has no source for. The concrete slot literals are what
+  it actually knows, and `Frame.frameRead_frameWrite_ne` (disjointness of two
+  slots of one frame) is what the non-interference conjunct is about.
+* **A runtime-indexed subscript is proved on the machine half and not on the
+  source half** (`formal/examples/subscript_var.mojo`, an `EXPECTED_FAILURES`
+  entry with the reason). Every `LDR`/`STR` through a non-`SP` base now gets a
+  correct step lemma and the block certificates build; what is missing is the
+  SOURCE side, and it is not a dataflow question — `mojo : UInt64 → UInt64` has
+  no domain for a list, so `a[i]` has no value in it, and the list's storage (a
+  blob whose first word is its count) is never related to the source literal.
+  Two facts close it: a list domain in the model, and a memory image for the
+  blob. A dict lookup still crashes the generator
+  (`unsupported edge … loop back-edge`), unchanged and recorded.

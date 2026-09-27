@@ -4,10 +4,13 @@
 The string stays a bare `char *`; the length and the content equality are
 recovered as *computations* over that one word rather than as fields, and the
 two wrong answers that followed from not doing so are fixed on both backends.
-What is NOT fixed, and is written down at the bottom, is the collision between
-that representation and the stdlib's own `String` struct — which is what all 16
-of the "a String receiver is returned/passed" refusals in the stdlib sweep
-actually are, and which is not a string-value-model problem at all.
+Wave 5 then closed the two items this document left named (`in` and `+=`) and
+found the same defect class in **eleven more operators** — every one measured,
+every one refused, and the residue written down at the bottom with a next step
+for each. What is still NOT fixed, and is the larger thing, is the collision
+between that representation and the stdlib's own `String` struct — which is
+what all 16 of the "a String receiver is returned/passed" refusals in the stdlib
+sweep actually are, and which is not a string-value-model problem at all.
 
 ## The decision, and the reasoning that decides it
 
@@ -220,25 +223,167 @@ this: *a `char *` to `__TEXT,__text` has static storage duration, so the
 frame-escape rule is sound for a struct whose fields live in a frame and unsound
 as applied to it.*
 
-## Also found, deliberately NOT fixed
+## Wave 5 (E4): the two named items closed, and the class around them is wider
 
-- **`"x" in s` with a string on the right SIGBUSes** on both backends (a crash,
-  not a wrong answer, and the two architectures agree). It belongs to whoever
-  owns `_emit_membership`; the fix is the same shape as the rest of this
-  document — `strstr(s, x) != NULL`, and `strstr` is already emitted by both
-  backends for `find`.
-- **`+=` on a string is not intercepted**, only `+` (the two `_emit_binop`
-  entry points are covered; the augmented-assign path is not). Same wrong answer
-  as `+` — an address added to an address — so it is a real gap in this change,
-  and the fix is one call to `model.string_concat_refusal` in each backend's
-  augmented-assign emitter.
+Both items D3 named are fixed, and both turned out to be two holes in one
+table rather than two holes in two places. The table is
+`model.string_binary_refusal` — the single entry point both backends ask, with
+`model.string_membership_lowering` beside it for `in`. Before and after, on
+both architectures:
+
+| source | pre-change | after |
+|---|---|---|
+| `s = "hello"; if "ell" in s: …` | **SIGBUS, exit 138, both backends** | `r=3`, exit 0, both backends |
+| `s = "ab"; t = "cd"; s += t; printf("[%s]", s)` | `[]`, exit 0, **arm64**; **SIGSEGV exit 139, x86-64** | refused identically on both |
+
+The `in` fix is `strstr(haystack, needle) != NULL`, and the *argument order* is
+the whole method — `strstr("bc", "abcabcabc")` is a well-defined NULL, so
+getting it backwards does not crash and returns FALSE for every haystack that
+contains its needle. The needle shape is the second decision and it is the
+model's: a string needle is `strstr`, a **byte** needle is `strchr`. The byte
+case is not optional — x86-64 had no string membership path *at all*, so
+`98 in "abc"` scanned the interned bytes as a blob and returned FALSE where
+Python says TRUE.
+
+Three things about the byte case, each of which is a wrong answer if missed:
+
+- **`strchr(s, 0)` is non-NULL.** It returns the TERMINATOR, so a bare
+  `!= NULL` makes `0 in "abc"` TRUE. On this representation it is certainly
+  false: the only NUL in a string is the one that ends it. The byte is tested
+  against zero in front of the call on both backends.
+- **The result is 0/1**, and that is not a formality: there is no BOOL kind
+  distinct from INT (which is why `__mlir_bool__` is refused), so "0/1" and "a
+  bool" are the same thing here.
+- **An EMPTY needle is TRUE.** `strstr` agrees (it returns the haystack), and
+  a membership test that says an empty needle is absent is wrong in the
+  direction that *hides* bugs. The compile-time both-literals path had this
+  backwards for one revision (`bool("") and ...`), which is exactly the kind
+  of half-answer two paths for one question produce.
+
+`strchr` was **measured to bind on both backends** before being relied on,
+because of the x86-64 `strcmp` observation above: with the byte path pointed at
+it, `98 in "abc"` returned TRUE on arm64 and on x86-64, and `strchr` used as a
+`strstr` walked off the mapping on both — which is how a bound-but-misapplied
+call is told from an unbound one.
+
+### The class: eleven more operators, all measured, all refused
+
+`string_concat_refusal` was ONE operator out of a table, and the reason it was
+one is historical: it was the one whose failure had been measured. Every
+operator below has the same cause — a string is a bare `char *`, so any
+operator reaching the integer ALU or the flag-setting compare is operating on
+an ADDRESS — and every one **built, ran and returned a number the source never
+wrote**. For `s = "abc"`, `t = "bc"`, on BOTH backends, and the two columns
+**disagree**:
+
+```
+s & t    69911496 /  45978594      s | t    68191180 /   2872318
+s ^ t          4 /        28      s - t         -4 /        -4
+s * 2    8062864 /   5302246      s // 2  -2147433998 / -2128240118
+s >> 1  -2107760164 / -2147386903  ~s         8881076 /    3236815
+-s      -36488120 /  -79725522     s % 2           0 /         2
+```
+
+`s % 2` is worth reading twice: it is the one that *looks* like it might work.
+`"%d" % k` is printf-style formatting, and it was returning the address modulo
+`k` — 0 on arm64 and 2 on x86-64 for `k = 3`, and `"%s-%d" % (t, k)` printed
+the format string through unchanged. A program that formats a string was
+computing an address modulo a number.
+
+**The relational half is worse than a wrong number, because it is a wrong
+BRANCH.** `s < t` was TRUE and `s > t` FALSE on both backends, decided by the
+order the two literals happen to be interned in `__TEXT,__text`. Reordering the
+two lines of source reverses every one of them. Lexicographic order needs a
+three-way compare and this path has no symbol that provides one, so `<`, `>`,
+`<=`, `>=` are refused rather than approximated.
+
+Also refused, for the same reason and by the same call: every **augmented**
+spelling (`+=`, `-=`, `*=`, `//=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`),
+which is the whole of the second named item — one augmented emitter had simply
+never asked the question — and **unary** `-` and `~`.
+
+One operator is deliberately NOT in the table: `ptr + int` and `ptr - int` with
+exactly **one** string operand stays allowed, which is D3's decision and a real
+C reading (`str_plus_int_still_arithmetic` is its guard). Every other operator
+above has no such reading: `%` and `&` on a pointer are not C at all, `|` and
+`^` are bit operations on an address, and `*` would have to scale a pointer,
+which is a GNU extension rather than the C this path emits.
+
+### Two gaps that only RUNNING programs found
+
+Both are cases where the SAME construct is a diagnostic in one context and a
+wrong answer in another, which no amount of reading `_emit_binop` would show:
+
+- **`if s < t:` did not go through `_emit_binop` at all.** A comparison in a
+  *condition* is lowered as CMP + B.cond so the boolean never round-trips
+  through a register, and that fast path bypassed the refusal entirely. So
+  `r = s < t` was refused while `if s < t:` branched on the address order. The
+  refusal is now asked in arm64's `_emit_branch_unless` as well.
+- **A string INDEX, `s[t]`, is `s + i` with two addresses.** It printed **67** on
+  arm64 — the low byte of a text-section address, which is the most believable
+  fabricated number in this whole group because it is small and printable and
+  reads like a character code — and segfaulted on x86-64. Refused at
+  `_emit_subscript_addr`, the single choke point a read, a store and an
+  augmented assignment all pass through.
+
+## Also found, and NOT fixed — the residue, with the next step for each
+
+These are the ones wave 5 found and did **not** close. Each says what it would
+take.
+
+- **`~` never reaches the parser, so `~s` silently means `s`.** This is the
+  only one of the twelve operators above that is still lowered, and the reason
+  is not in `formal/`: `fire_compiler.py`'s `_TOKEN_RE` has no `~` in its `OP`
+  alternation, and `py_tokenize` drops `UNK` tokens without a word
+  (`if kind in ("WS", "UNK", "XFER"): continue`). So the `~` is gone before
+  `Parser._parse_unary` — whose `t.value in ("-", "+", "~")` branch is correct
+  and unreachable — ever sees it. Measured: `r = ~s; printf("%d", r)` prints
+  **77693904** on arm64 and **74486761** on x86-64, and the AST contains
+  `AssignStmt(target=r, value=IdentExpr(s))` with no `UnaryOp` in it at all.
+  **Next step:** add `~` to the `OP` group in `_TOKEN_RE` (it is unambiguous, so
+  its position in the alternation does not matter). Nothing else is needed:
+  `model.string_unary_refusal` already refuses `~` on a string and both
+  backends already ask for it, and x86-64's `_emit_unary` already has a
+  `~` branch. `fire_compiler.py` was read-only for wave 5 and this is why.
+- **`if s:` and `while s:` are still a fabricated falsity, and `not s` is now a
+  refusal instead.** A string is a pointer and a pointer is never zero, so
+  every string is truthy here INCLUDING THE EMPTY ONE. Measured, both
+  backends: `s = "abc"; e = ""; if s: …; if e: …` prints `S-truthy` and
+  `E-truthy`. `not s` was the same defect in an expression position and IS now
+  refused (`str_not_refused_because_empty_string_is_falsy`), because at a
+  `UnaryOp` site the emitter can see the operand's kind.
+  **Next step:** the condition sites are the remaining half, and they are a
+  *helper*, not a check: one `_emit_truthy(expr, reg)` on each backend that,
+  when `expr`'s kind is `STR_KIND`, emits the `strlen` and tests THAT, and
+  otherwise emits the CBZ/TEST it emits today. The honest test is
+  `strlen(s) != 0`, which is the same computation `len` already makes with a
+  symbol both backends already call. Every truthiness site has to go through
+  the helper or the two spellings disagree again, which is the lesson of the
+  `_emit_binop` / `_emit_branch_unless` pair above. Until then `len(s) == 0`
+  is the spelling to write, and the refusal says so.
+- **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
+  backends, which is a true fact about the representation rather than a
+  fabricated value, so it is left alone. **Next step:** a one-character String
+  is a two-byte object and this representation has nowhere to put it — the same
+  missing buffer as `upper`. It belongs in `LENGTH_DEPENDENT_METHODS` with the
+  rest of that family rather than in a refusal, and it is a consequence of the
+  representation decision above, not a separate bug.
+- **`s[1:]` — a SLICE of a string — segfaults on both backends** (exit 139).
+  A crash rather than a wrong answer, and the same class: a slice is a blob
+  operation and a string is not a blob. A suffix slice is in fact just
+  `s + k`, an interior pointer this path can already make, so it is a
+  *lowering* rather than a refusal. **Next step:** refuse it in
+  `_emit_slice_parts` for a `STR_KIND` base until someone wants the lowering;
+  nothing is currently wrong-but-quiet here, so it is lower priority than the
+  truthiness helper above.
 - **The proving arm64 build cannot prove `len` or any string method.** Both
-  pre-date this change and both are outside it: `formal/arm64_proof_gen.py`
-  looks for a function called `len_go` when it sees `len(...)`
-  (`Unknown identifier 'len_go'`), and it raises
+  pre-date the representation decision and both are outside it:
+  `formal/arm64_proof_gen.py` looks for a function called `len_go` when it
+  sees `len(...)` (`Unknown identifier 'len_go'`), and it raises
   `unsupported: recursion argument bound` on a program containing
-  `s.startswith(...)`. Nothing here made either worse and neither was made
-  right; the codegen change is in the `--no-prove` path the sweep uses.
+  `s.startswith(...)`. Nothing since has made either worse and neither has
+  been made right; the codegen change is in the `--no-prove` path the sweep
+  uses.
 - **`lib/ProofLib.lean` still carries two `sorry`s**, at `InImage` and
-  `Semantics` (line ~4510). Pre-existing, not this change's, and recorded here
-  only so the next reader of the Lean side knows they are there.
+  `Semantics` (line ~4510). Pre-existing, and recorded here only so the next
+  reader of the Lean side knows they are there.

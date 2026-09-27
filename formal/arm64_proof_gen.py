@@ -1108,6 +1108,17 @@ _SP_CANON = ['arm64_set_reg_sp', 'u64_sub_sub', 'u64_sub_add', 'u64_ofNat_add',
              'Nat.reduceSub', 'u64_ofNat_zero', 'u64_sub_zero']
 _SP_VALUE_CANON = _SP_CANON
 
+# The canonicalising set a by-reference receiver's method contract needs.  It
+# is `_SP_CANON` with `u64_sub_add` REPLACED by `u64_sub_pair`, and with
+# `UInt64.add_zero` added, for the two reasons the library lemmas state: the
+# pair's second word has to land on a literal `sp - (K - 8)` for the frame
+# premises to match it, and the receiver-relative offsets the emitter emits
+# (`n + 0`, from a zero-displacement `ADD`) have to fold to `n`.
+_FRAME_CANON = ['arm64_set_reg_sp', 'u64_sub_sub', 'u64_sub_pair',
+                'u64_ofNat_add', 'u64_ofNat_sub', 'Nat.reduceAdd',
+                'Nat.reduceSub', 'Nat.mul_one', 'Nat.mul_zero',
+                'UInt64.add_zero', 'u64_ofNat_zero']
+
 # arm64 condition code -> ProofLib lemma for that exact predicate. Paired
 # codes are eq/ne, cs/cc, mi/pl, vs/vc, hi/ls, ge/lt, gt/le. Codes 2/3/8/9 are
 # the unsigned comparisons and 10/11/12/13 the signed ones, which is why the
@@ -1320,17 +1331,23 @@ def _step_rhs(w: int, idx: int):
         cond = (field + 1) if (field & 1) == 0 else (field - 1)
         return (f"some (arm64_set_reg {rd} s "
                 f"(if arm64_matches_condition {cond} s.nzcv then 1 else 0))")
-    if idx == 18:  # LDR/STR pre-index store (mirrors arm64_step)
+    if idx == 18:  # LDR Xt, [Xn, #imm] (unsigned-offset LOAD; mirrors arm64_step)
         rt = w & 0x1f
+        rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        addr = f"(s.sp - UInt64.ofNat {imm12 * 8})"
-        return (f"some {{ s with sp := {addr}, mem := fun i => "
-                f"if i = {addr}.toNat then (arm64_reg {rt} s).toUInt8 else s.mem i }}")
-    if idx == 19:  # LDR Xt, [SP], #imm (post-index load, mirrors arm64_step)
+        # `arm64_reg 31 s`, not `s.sp`: the RHS has to be the SYNTACTIC mirror
+        # of `work_step_ldr_uoff`'s statement, because that is what `exact`
+        # unifies against, and a hand-simplified base is a different term even
+        # where it is equal.
+        return (f"some (arm64_set_reg {rt} s (mem_read_u64 s.mem "
+                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat))")
+    if idx == 19:  # STR Wt, [Xn, #imm] (unsigned-offset 32-bit STORE)
         rt = w & 0x1f
+        rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        return (f"some {{ (arm64_set_reg {rt} s (mem_read_u64 s.mem s.sp.toNat)) "
-                f"with sp := s.sp + UInt64.ofNat {imm12 * 8} }}")
+        return (f"some {{ s with mem := mem_write_u64 s.mem "
+                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 4}).toNat "
+                f"(arm64_reg {rt} s) }}")
     if idx == 20:  # ADRP
         rd = w & 0x1f
         immlo = (w >> 29) & 0x3
@@ -1344,11 +1361,13 @@ def _step_rhs(w: int, idx: int):
         imm16 = (w >> 5) & 0xffff
         mask = "0xffff_ffff" if idx == 28 else "0xffff_ffff_ffff_ffff"
         return f"some (arm64_set_reg {rd} s (UInt64.ofNat ({mask} - {imm16})))"
-    if idx == 31:  # STR [SP, #imm] (unsigned offset store)
+    if idx == 31:  # STR [Xn, #imm] (unsigned-offset STORE; mirrors arm64_step)
         rt = w & 0x1f
+        rn = (w >> 5) & 0x1f
         imm12 = (w >> 10) & 0xfff
-        addr = f"(s.sp + UInt64.ofNat {imm12 * 8})"
-        return f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat (arm64_reg {rt} s) }}"
+        return (f"some {{ s with mem := mem_write_u64 s.mem "
+                f"(arm64_reg {rn} s + UInt64.ofNat {imm12 * 8}).toNat "
+                f"(arm64_reg {rt} s) }}")
     if idx == 32:  # LDP [SP, #imm] (offset load pair)
         d1 = (w >> 5) & 0x1f
         d2 = w & 0x1f
@@ -1480,13 +1499,12 @@ def _step_rhs_generic(idx: int):
         return (f"(if arm64_reg {_RN} s {cmpop} 0 then "
                 f"({{ s with pc := (UInt64.ofNat s.pc + {_OFF19} * 4).toNat }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
-    if idx == 18:
-        addr = f"(s.sp - UInt64.ofNat ({_I12} * 8))"
-        return (f"some {{ s with sp := {addr}, mem := fun i => "
-                f"if i = {addr}.toNat then (arm64_reg {_RD} s).toUInt8 else s.mem i }}")
-    if idx == 19:
-        return (f"some {{ (arm64_set_reg {_RD} s (mem_read_u64 s.mem s.sp.toNat)) "
-                f"with sp := s.sp + UInt64.ofNat ({_I12} * 8) }}")
+    if idx == 18:  # LDR Xt, [Xn, #imm] -- unsigned-offset LOAD, base = Rn
+        return (f"some (arm64_set_reg {_RD} s (mem_read_u64 s.mem "
+                f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat))")
+    if idx == 19:  # STR Wt, [Xn, #imm] -- unsigned-offset 32-bit STORE, base = Rn
+        return (f"some {{ s with mem := mem_write_u64 s.mem "
+                f"({_BASE} + UInt64.ofNat ({_I12} * 4)).toNat (arm64_reg {_RD} s) }}")
     if idx == 20:
         off = (f"(if {_IMM21} ≥ 2^20 then (UInt64.ofNat {_IMM21}) - (UInt64.ofNat (2^21)) "
                f"else UInt64.ofNat {_IMM21})")
@@ -1514,9 +1532,9 @@ def _step_rhs_generic(idx: int):
     if idx == 30:
         return (f"some (arm64_set_reg {_RD} s "
                 f"(if arm64_matches_condition {_COND} s.nzcv then 1 else 0))")
-    if idx == 31:
+    if idx == 31:  # STR [Xn, #imm] -- unsigned-offset STORE, base = Rn
         return (f"some {{ s with mem := mem_write_u64 s.mem "
-                f"(s.sp + UInt64.ofNat ({_I12} * 8)).toNat (arm64_reg {_RD} s) }}")
+                f"({_BASE} + UInt64.ofNat ({_I12} * 8)).toNat (arm64_reg {_RD} s) }}")
     if idx == 32:
         addr = f"(s.sp + UInt64.ofNat ({_I12} * 8))"
         return (f"some (arm64_set_reg {_RN} (arm64_set_reg {_RD} s "
@@ -1575,8 +1593,8 @@ _WORK_STEP = [
     (11, "work_step_sub_imm32", [(0xff800000, 0x51000000)]),
     (12, "work_step_sub_imm64", [(0xff800000, 0xd1000000)]),
     (13, "work_step_cmp_imm", [(0xff800000, 0xf1000000)]),
-    (18, "work_step_ldr_pre", [(0xffe00000, 0xf9400000)]),
-    (19, "work_step_ldr_post", [(0xffe00000, 0xb9000000)]),
+    (18, "work_step_ldr_uoff", [(0xffe00000, 0xf9400000)]),
+    (19, "work_step_str_uoff32", [(0xffe00000, 0xb9000000)]),
     (20, "work_step_adrp", [(0x9f000000, 0x90000000)]),
     (21, "work_step_stp", [(0xffc00000, 0xa9800000)]),
     (22, "work_step_ldp_post", [(0xffc00000, 0xa8c00000)]),
@@ -1588,7 +1606,7 @@ _WORK_STEP = [
     (28, "work_step_movn32", [(0xffe00000, 0x12800000)]),
     (29, "work_step_movn64", [(0xffe00000, 0x92800000)]),
     (30, "work_step_cset", [(0xffff0fe0, 0x9a9f07e0)]),
-    (31, "work_step_str_off", [(0xffe00000, 0xf9000000)]),
+    (31, "work_step_str_uoff", [(0xffe00000, 0xf9000000)]),
     (32, "work_step_ldp_off", [(0xffc00000, 0xa9400000)]),
     (33, "work_step_orn", [(0xffe00000, 0x0a200000)]),
     (34, "work_step_br", [(0xfffffc1f, 0xd61f0000)]),
@@ -2071,10 +2089,10 @@ def _regs_written(w: int, idx: int):
         return {rd}
     if idx in (9, 10, 11, 12):
         return {rd}
-    if idx == 18:
-        return {31}
+    if idx == 18:  # LDR Xt, [Xn, #imm]: writes Xt and nothing else (not sp)
+        return {rd}
     if idx == 19:
-        return {rd, 31}
+        return set()
     if idx == 21:
         return {31}
     if idx == 22:
@@ -2204,8 +2222,14 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
 
 
 def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
-                  exit_pc: int = 0):
+                  exit_pc: int = 0, code_name: str = None,
+                  sr_name: str = None):
     """Emit wrapper defs + a runs-certificate for a straight-line run.
+
+    `code_name` / `sr_name` name the SHARED code and step-lemma families when
+    the run belongs to a function other than the one they were emitted for --
+    which is the by-reference receiver case, where one image's step lemmas are
+    used by every method's contract.
 
     A run is a maximal straight-line sequence of instructions (no branches in
     the middle); it may end in a RET.  Returns (defs_text, cert_name,
@@ -2216,6 +2240,8 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     The certificate is:  arm64_runs code m st = some (exit st)  (hpc : st.pc =
     run_pcs[0]).  The final jump side-condition (RET pc changes) is an
     admitted gap; sequential composition is fully proved."""
+    code_name = code_name or f"{name}_code"
+    sr_name = sr_name or name
     m = len(run_pcs)
     if m == 0:
         return None
@@ -2248,28 +2274,28 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     step_facts = []
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
-        step_facts.append(f"  have hs{k} : arm64_step ({S}_qS{k} st) {name}_code "
+        step_facts.append(f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
                           f"= some ({S}_qT{k} st) :=\n"
-                          f"      {name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
+                          f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
 
     # self_k theorems: arm64_runs code k st = some (qS_k st) for 1 <= k <= m-1
     for k in range(1, m):
         A(f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
-        A(f"    arm64_runs {name}_code {k} st = some ({S}_qS{k} st) := by")
+        A(f"    arm64_runs {code_name} {k} st = some ({S}_qS{k} st) := by")
         A("\n".join(pc_facts[:k + 1]))
         A("\n".join(step_facts[:k]))
         if k == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {name}_code 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
             A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
-            A(f"  exact runs_zero {name}_code ({S}_qS1 st)")
+            A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
-            A(f"  rw [runs_append {name}_code {k - 1} 1 st, {S}_self{k - 1} st hpc]")
+            A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
-              f"{name}_code 0 hs{k - 1} rfl,")
+              f"{code_name} 0 hs{k - 1} rfl,")
             A(f"      show ({S}_qS{k - 1} st).pc + 4 = {run_pcs[k]} "
               f"from by rw [hpc{k - 1}]]")
-            A(f"  exact runs_zero {name}_code ({S}_qS{k} st)")
+            A(f"  exact runs_zero {code_name} ({S}_qS{k} st)")
         A("")
 
     # runs certificate
@@ -2284,39 +2310,39 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         hjump_name = f"{S}_qS{m - 1}"
         A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
         A(f"    (hjump : ({S}_qS{m - 1} st).x30.toNat ≠ {run_pcs[-1]}) :")
-        A(f"    arm64_runs {name}_code {m} st = some {cert_exit} := by")
+        A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
         A("\n".join(pc_facts))
         A("\n".join(step_facts))
         if m == 1:
-            A(f"  rw [runs_cons_jump st ({S}_qT0 st) {name}_code 0 hs0")
+            A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0")
             A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat from rfl]; exact hjump)]")
-            A(f"  exact runs_zero {name}_code ({S}_qT0 st)")
+            A(f"  exact runs_zero {code_name} ({S}_qT0 st)")
         else:
-            A(f"  rw [runs_append {name}_code {m - 1} 1 st, {S}_self{m - 1} st hpc]")
+            A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
-              f"{name}_code 0 hs{m - 1}")
+              f"{code_name} 0 hs{m - 1}")
             A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat from rfl]; "
               f"exact hjump)]")
-            A(f"  exact runs_zero {name}_code ({S}_qT{m - 1} st)")
+            A(f"  exact runs_zero {code_name} ({S}_qT{m - 1} st)")
         exit_expr = f"({S}_qT{m - 1} st)"
     else:
         A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
-        A(f"    arm64_runs {name}_code {m} st = some {cert_exit} := by")
+        A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
         A("\n".join(pc_facts))
         A("\n".join(step_facts))
         if m == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {name}_code 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
-            A(f"  exact runs_zero {name}_code ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
+            A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
         else:
-            A(f"  rw [runs_append {name}_code {m - 1} 1 st, {S}_self{m - 1} st hpc]")
+            A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
-              f"{name}_code 0 hs{m - 1} rfl,")
+              f"{code_name} 0 hs{m - 1} rfl,")
             A(f"      show ({S}_qS{m - 1} st).pc + 4 = {run_pcs[-1] + 4} "
               f"from by rw [hpc{m - 1}]]")
-            A(f"  exact runs_zero {name}_code "
+            A(f"  exact runs_zero {code_name} "
               f"({{ {S}_qT{m - 1} st with pc := {run_pcs[-1] + 4} }})")
         exit_expr = f"({{ {S}_qT{m - 1} st with pc := {run_pcs[-1] + 4} }})"
     A("")
@@ -2329,7 +2355,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     pcs_lit = ", ".join(str(pc) for pc in run_pcs)
     A(f"theorem {S}_mid (exit : Nat) (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
     A(f"    (hexit : ∀ p ∈ [{pcs_lit}], p ≠ exit) :")
-    A(f"    ∀ u < {m}, ∀ su, arm64_runs {name}_code u st = some su → su.pc ≠ exit := by")
+    A(f"    ∀ u < {m}, ∀ su, arm64_runs {code_name} u st = some su → su.pc ≠ exit := by")
     A("  intro u hu su hsu")
     cases = " ∨ ".join(f"u = {k}" for k in range(m))
     A(f"  have hcases : {cases} := by omega")
@@ -2343,7 +2369,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A("    rw [hpc]")
             A("    exact hk")
         else:
-            A(f"    have hself : arm64_runs {name}_code {k} st = some ({S}_qS{k} st) :=")
+            A(f"    have hself : arm64_runs {code_name} {k} st = some ({S}_qS{k} st) :=")
             A(f"      {S}_self{k} st hpc")
             A(f"    have heq : some ({S}_qS{k} st) = some su := hself.symm.trans hsu")
             A("    injection heq with hq")
@@ -3218,10 +3244,148 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     return "\n".join(L), _slot
 
 
+# --- by-reference receiver: what a method's machine code says about its frame --
+#
+# A wide struct's method receives the ADDRESS of a frame of 8-byte slots, and
+# `self.<f>` is an `LDR`/`STR` at `[Xn, #8k]`.  Nothing in the source names `k`,
+# and nothing in `info` carries the slot table, so the generator READS the slot
+# off the emitted instruction -- and to do that honestly it first has to know
+# that the access really goes through the receiver, which is a two-line
+# constant-propagation over the method's own straight-line code: `x0` starts as
+# the receiver, and `ADD xd, xn, #imm` extends a known receiver offset.
+#
+# The result is `(kind, field, slot, argname)` per `self` access, in source
+# order, or None if the shape is not one this emitter proves.  `None` is a
+# refusal, not a fallback: the contract is then not emitted rather than emitted
+# with a slot guessed from the declaration order.
+
+
+def _frame_slot_accesses(words: dict, entry: int, end: int):
+    """Slots this method touches through its receiver, in program order.
+
+    Returns a list of `(slot, is_store)` or None when an access's base cannot
+    be traced to the receiver (which is the honest answer: an access through
+    some other base is not a frame access and must not be given a frame
+    contract)."""
+    recv = {0: 0}                 # register -> byte offset from the receiver
+    out = []
+    pc = entry
+    while pc < end:
+        w = words.get(pc)
+        if w is None:
+            return None
+        idx = _step_branch_index(w)
+        if idx is None:
+            return None
+        rd = w & 0x1f
+        rn = (w >> 5) & 0x1f
+        if idx in (9, 10):         # ADD Xd, Xn, #imm  (32- and 64-bit forms)
+            imm = (w >> 10) & 0xfff
+            if rn in recv:
+                recv[rd] = recv[rn] + imm * 8
+        elif idx in (1,):          # MOV Xd, Xn
+            if rn in recv:
+                recv[rd] = recv[rn]
+        elif idx in (18, 31):      # LDR/STR Xt, [Xn, #imm]
+            if rn not in recv:
+                return None
+            out.append(((recv[rn] + ((w >> 10) & 0xfff) * 8) // 8, idx == 31))
+        else:
+            recv.pop(rd, None)
+        pc += 4
+    return out
+
+
+def _self_accesses(stmts):
+    """`self.<field>` uses in a method body, in source order, as (field, is_store).
+
+    `MemberExpr` is the only node form a field read takes; a field write is an
+    `AssignStmt` whose target is one."""
+    out = []
+    for st in stmts:
+        if isinstance(st, F.AssignStmt) and isinstance(st.target, F.MemberExpr):
+            if isinstance(st.target.obj, F.IdentExpr) and st.target.obj.name == "self":
+                out.append((st.target.member, True))
+                continue
+            return None
+        for e in _expr_nodes(st):
+            if isinstance(e, F.MemberExpr):
+                if not (isinstance(e.obj, F.IdentExpr) and e.obj.name == "self"):
+                    return None
+                out.append((e.member, False))
+    return out
+
+
+def _expr_nodes(node):
+    """Every expression node inside a statement, pre-order."""
+    if isinstance(node, list):
+        for x in node:
+            yield from _expr_nodes(x)
+        return
+    if isinstance(node, F.FunctionDef):
+        for x in node.body:
+            yield from _expr_nodes(x)
+        return
+    for _f in getattr(node, "__dataclass_fields__", {}):
+        v = getattr(node, _f)
+        if _f in ("line", "col", "type_ann"):
+            continue
+        if isinstance(v, (F.IdentExpr, F.IntLiteral, F.BoolLiteral,
+                          F.StringLiteral, F.BinaryOp, F.UnaryOp, F.CallExpr,
+                          F.MemberExpr, F.SubscriptExpr, F.EllipsisLiteral)):
+            yield v
+        yield from _expr_nodes(v)
+
+
+def _mf_stmts(stmts, fieldnames):
+    """The method body as `MFStmt`, or None if it is not a supported shape."""
+    out = []
+    for st in stmts:
+        if isinstance(st, F.ReturnStmt):
+            e = _mf_expr(st.value, fieldnames)
+            if e is None:
+                return None
+            out.append(f"(MF.MFStmt.ret {e})")
+        elif isinstance(st, F.AssignStmt) and isinstance(st.target, F.MemberExpr):
+            if not (isinstance(st.target.obj, F.IdentExpr)
+                    and st.target.obj.name == "self"):
+                return None
+            if st.target.member not in fieldnames:
+                return None
+            e = _mf_expr(st.value, fieldnames)
+            if e is None:
+                return None
+            out.append(f'(MF.MFStmt.assignField "{st.target.member}" {e})')
+        elif isinstance(st, F.PassStmt):
+            out.append("MF.MFStmt.pass")
+        else:
+            return None
+    return out
+
+
+def _mf_expr(e, fieldnames):
+    if isinstance(e, F.IdentExpr):
+        if e.name == "self":
+            return None
+        return f'(MF.MFExpr.local "{e.name}")'
+    if isinstance(e, F.IntLiteral):
+        return f"(MF.MFExpr.int {int(e.value)})"
+    if isinstance(e, F.BoolLiteral):
+        return f"(MF.MFExpr.bool {'true' if e.value else 'false'})"
+    if isinstance(e, F.MemberExpr):
+        if not (isinstance(e.obj, F.IdentExpr) and e.obj.name == "self"):
+            return None
+        if e.member not in fieldnames:
+            return None
+        return f'(MF.MFExpr.field "{e.member}")'
+    return None
+
+
 def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                            recursive: bool = False, go_lemmas: list = None,
                            fn=None, tw_extra: str = "", tc: dict = None,
-                           cond_branches: set = None):
+                           cond_branches: set = None, frame: dict = None,
+                           code_name: str = None, sr_name: str = None):
     """CompCert-style universal e2e driven by the control-flow graph.
 
     The generator is thin: it emits, per basic block, wrapper defs + a
@@ -3233,16 +3397,35 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     Branch conditions, hmid (no-exit) side conditions, and the recursion
     contract are value-flow facts emitted as honest sorries.
 
+    `frame` switches the terminal proposition from "x0 is the source model" to
+    a FRAME CONTRACT, which is the only correct terminal statement for a
+    function whose parameter is a receiver.  Keys:
+      func_end     -- end of the function's own code, so `func_entry`'s blocks
+                      are the method's and not every later `RET`'s (the default
+                      takes the LAST ret at or after the entry, which for a
+                      method in a multi-function image is the last function's);
+      thm          -- theorem name (default `{name}_compiles_correctly_universal`);
+      prop         -- the terminal proposition, `n` bound to the receiver word;
+      hyps         -- `[(name, type, proof)]`, extra theorem binders;
+      simp_extra   -- names added to the terminal value-flow `simp only` set;
+      post         -- tactic lines emitted after the terminal value flow;
+      no_mojo      -- do not mention `mojo`/`{name}_go` in the terminal simp.
+
     Returns None for constructs not yet decomposed (caller falls back)."""
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
     if func_entry not in words:
         return None
-    rets = [pc for pc, w in words.items()
-            if w == 0xd65f03c0 and pc >= func_entry]
-    if not rets:
-        return None
-    func_end = max(rets) + 4
+    code_name = code_name or f"{name}_code"
+    sr_name = sr_name or name
+    if frame and frame.get("func_end"):
+        func_end = frame["func_end"]
+    else:
+        rets = [pc for pc, w in words.items()
+                if w == 0xd65f03c0 and pc >= func_entry]
+        if not rets:
+            return None
+        func_end = max(rets) + 4
     blocks = _cfg_blocks(words, func_entry, func_end)
     if not blocks:
         return None
@@ -3267,7 +3450,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 if (tc and tc.get("typed")) else "")
 
     exit_pc = base + len(code)  # sentinel
-    C = f"{name}_code"
+    C = code_name
     _tree = fn is not None and _count_self_calls(fn) >= 2
     L = []
     A = L.append
@@ -3305,7 +3488,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         if not run_pcs:
             run_info[bi] = (None, None, "st", 0, [], False, 0, [])
             continue
-        part = _gen_run_cert(name, words, base, f"b{bi}", run_pcs, exit_pc)
+        part = _gen_run_cert(name, words, base, f"b{bi}", run_pcs, exit_pc,
+                             code_name=code_name, sr_name=sr_name)
         if part is None:
             return None
         defs_text, cert_name, mid_name, exit_expr, def_names, is_ret = part
@@ -3496,8 +3680,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # Path-scoped context: copy the mutable tracking lists so sibling
         # branches do not see each other's states.
         ctx = dict(ctx) if ctx else {}
-        for _key in ("lets", "flow_hsid", "flow_defs", "flow_blocks", "conds",
-                     "branch_srcs"):
+        for _key in ("lets", "flow_hsid", "flow_defs",
+                     "flow_blocks", "conds", "branch_srcs"):
             ctx[_key] = list(ctx.get(_key, []))
         EXIT = ctx.get("exit", exit_pc)
         is_contract = ctx.get("is_contract", False)
@@ -3532,10 +3716,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     flow_defs = ctx["flow_defs"] + def_names
                     A(f"{IND}have hx30_{bi} : ({name}_b{bi}_qS{m_run - 1} ({state})).x30 "
                       f"= UInt64.ofNat {exit_pc} := by")
+                    _hl = ctx["lets"]
                     unfold_terms = ctx["lets"] + flow_hsid + flow_defs + \
                         ['arm64_reg', 'arm64_set_reg', 'Arm64State.init']
                     A(f"{IND}  simp only [{', '.join(unfold_terms)}]")
-                    A(f"{IND}  simp (disch := decide) [{', '.join(ctx['lets'] + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same'])}]")
+                    A(f"{IND}  simp (disch := decide) [{', '.join(_hl + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same'])}]")
                     A(f"{IND}have hjump_{bi} : ({name}_b{bi}_qS{m_run - 1} ({state})).x30.toNat "
                       f"≠ {run_last_pc} := by")
                     A(f"{IND}  rw [hx30_{bi}]")
@@ -3602,19 +3787,41 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     + ["arm64_reg", "Arm64State.init", "arm64_set_reg"]
                     + (go_lemmas or [])
                     + list(ctx.get("branch_srcs", [])))
-                A(f"{IND}-- terminal value flow: (s_{bi}).x0 = mojo n")
+                _fno = frame or {}
+                A(f"{IND}-- terminal value flow: the frame contract"
+                  if _fno else
+                  f"{IND}-- terminal value flow: (s_{bi}).x0 = mojo n")
                 A(f"{IND}have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
-                _goid = "" if _tree else f"{name}_go, "
-                A(f"{IND}simp +decide only [h8, mojo, {_goid}{simp_names}, {_VSP}]")
+                _mojo = "" if _fno.get("no_mojo") else "mojo, "
+                _goid = "" if (_tree or _fno.get("no_mojo")) else f"{name}_go, "
+                # `+decide` is what lets the terminal `simp` discharge the
+                # arithmetic side conditions of the memory lemmas, and it is
+                # also what makes it try to EVALUATE a large term.  A frame
+                # contract's terminal goal carries `MF.evalMethod`, whose
+                # `String`-keyed table is a `Decidable` instance, and with
+                # `+decide` the simplifier walks it and the declaration runs out
+                # of heartbeats.  The frame path's rewrites are hypotheses
+                # (no side conditions), so it does not need `decide`.
+                _sm = "only" if _fno.get("no_decide") else "+decide only"
+                A(f"{IND}simp {_sm} [h8, {_mojo}{_goid}{simp_names}, {_VSP}"
+                  + ((", " + _fno["simp_extra"]) if _fno.get("simp_extra") else "")
+                  + "]")
                 A(f"{IND}all_goals try rfl")
                 _bsrc = list(ctx.get("branch_srcs", []))
                 _msimp = ", ".join(["mem_read_after_write_u64",
                                     "mem_read_after_write_u64_ne",
                                     "mem_read_two_writes_same"] + _bsrc)
                 A(f"{IND}all_goals try simp [{_msimp}]")
-                A(f"{IND}all_goals try bv_decide")
+                if not _fno.get("strict"):
+                    # `bv_decide` and `grind` are both EVALUATORS, and a frame
+                    # contract's goal quantifies over the memory
+                    # (`hmem : Nat -> UInt8`) and the receiver, so there is
+                    # nothing closed for them to decide.  Left in, they burn the
+                    # whole heartbeat budget trying.
+                    A(f"{IND}all_goals try bv_decide")
                 A(f"{IND}all_goals try omega")
-                A(f"{IND}all_goals try grind")
+                if not _fno.get("strict"):
+                    A(f"{IND}all_goals try grind")
                 A(f"{IND}all_goals try assumption")
                 # The residual can be the branch condition itself (the model's
                 # `if P` and the CSET result both reduce to it); close it from the
@@ -3652,11 +3859,26 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 # UDIV/SDIV+MSUB remainder identity: `a - a/b*b = a%b` when b≠0.
                 # Unsigned model uses `%`/`/` (u64_div_msub); signed uses
                 # srem64/sdiv64 (srem64_sub).  Try both; `try` no-ops on miss.
-                A(f"{IND}all_goals try exact u64_div_msub _ _ (by "
-                  f"first | decide | omega | simp | native_decide)")
-                A(f"{IND}all_goals try exact srem64_sub _ _ (by "
-                  f"first | decide | omega | simp | native_decide)")
-                A(f"{IND}all_goals (first | done | sorry)")
+                if not _fno.get("strict"):
+                    # These two are the unsigned/signed division-remainder
+                    # identities, and `exact` against them makes Lean
+                    # UNIFY the goal's right-hand side with `a % b` -- which for
+                    # a frame contract's goal means delta-reducing
+                    # `MF.evalMethod` through its `String`-keyed table.  That
+                    # is where a getter contract's declaration ran out of
+                    # heartbeats, on a goal neither lemma can ever apply to.
+                    A(f"{IND}all_goals try exact u64_div_msub _ _ (by "
+                      f"first | decide | omega | simp | native_decide)")
+                    A(f"{IND}all_goals try exact srem64_sub _ _ (by "
+                      f"first | decide | omega | simp | native_decide)")
+                for _pl in ((frame or {}).get("post") or []):
+                    A(f"{IND}{_pl.lstrip()}")
+                # A frame contract is stated with NO `sorry` fallback: the
+                # whole point of the exercise is that this is the proof, and a
+                # fallback here is a theorem nobody has checked.  A gap in the
+                # terminal value flow is a hard error, not an admission.
+                A(f"{IND}all_goals done" if (frame or {}).get("strict")
+                  else f"{IND}all_goals (first | done | sorry)")
         elif kind == "seq":
             nxt_pc = block["instrs"][-1] + 4
             nxt_bi = start_to_bi.get(nxt_pc)
@@ -3675,7 +3897,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}have hpcb_{bi} : ({s_cur}).pc = {b_pc} := {hpcb_proof}")
             A(f"{IND}have hs_{bi} : arm64_step {s_cur} {C} = some "
               f"({{ {s_cur} with pc := {tgt} }}) := by")
-            A(f"{IND}  have hsr := {name}_sr_{i} {s_cur} hpcb_{bi}")
+            A(f"{IND}  have hsr := {sr_name}_sr_{i} {s_cur} hpcb_{bi}")
             A(f"{IND}  rw [hpcb_{bi}] at hsr")
             A(f"{IND}  exact hsr")
             A(f"{IND}have hg_{bi} := go_exit_step {s_cur} ({{ {s_cur} with pc := {tgt} }}) "
@@ -3879,7 +4101,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}have hpcb_{bi} : ({s_cur}).pc = {bl_pc} := {hpcb_proof}")
             A(f"{IND}have hbl_{bi} : arm64_step {s_cur} {C} = some "
               f"({{ {s_cur} with x30 := UInt64.ofNat {ret}, pc := {entry} }}) := by")
-            A(f"{IND}  have hsr := {name}_sr_{i} {s_cur} hpcb_{bi}")
+            A(f"{IND}  have hsr := {sr_name}_sr_{i} {s_cur} hpcb_{bi}")
             A(f"{IND}  rw [hpcb_{bi}] at hsr")
             A(f"{IND}  exact hsr")
             A(f"{IND}have hgbl_{bi} := go_exit_step {s_cur} "
@@ -4017,7 +4239,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
               f"(if {_condtxt} then "
               f"({{ {s_cur} with pc := {taken} }} : Arm64State) "
               f"else ({{ {s_cur} with pc := {fall} }} : Arm64State)) := by")
-            A(f"{IND}  have hsr := {name}_sr_{i} {s_cur} hpcb_{bi}")
+            A(f"{IND}  have hsr := {sr_name}_sr_{i} {s_cur} hpcb_{bi}")
             A(f"{IND}  rw [hpcb_{bi}] at hsr")
             A(f"{IND}  exact hsr")
             cbz_force = ctx.get("cbz_force")
@@ -4464,7 +4686,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 ctx["call_idx"] = _ci + 1
             call_state = f"({{ {cur} with x30 := UInt64.ofNat {ret}, pc := {entry} }})"
             A(f"{IND}have hs_{n} : arm64_step ({cur}) {C} = some {call_state} := by")
-            A(f"{IND}  have hsr := {name}_sr_{(bl_pc - base) // 4} ({cur}) {cur_pc}")
+            A(f"{IND}  have hsr := {sr_name}_sr_{(bl_pc - base) // 4} ({cur}) {cur_pc}")
             A(f"{IND}  rw [hsr]")
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cur_pc or ""):
                 A(f"{IND}  rw [{cur_pc}]")
@@ -4637,7 +4859,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             tgt = taken if ctx.get("cbz_force") == "taken" else fall
             tgt_state = f"({{ {cur} with pc := {tgt} }})"
             A(f"{IND}have hs_{n} : arm64_step ({cur}) {C} = some {tgt_state} := by")
-            A(f"{IND}  have hsr := {name}_sr_{(cbz_pc - base) // 4} ({cur}) {cur_pc}")
+            A(f"{IND}  have hsr := {sr_name}_sr_{(cbz_pc - base) // 4} ({cur}) {cur_pc}")
             A(f"{IND}  rw [hsr]")
             if ctx.get("cset_cond") == 0:
                 A(f"{IND}  have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
@@ -4711,13 +4933,13 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         A(f"def {bname} : Block :=")
         A(f"  {{ entry_pc := {pcs[0]}, pcs := [{', '.join(str(p) for p in pcs)}], "
           f"step := fun st => {exit_expr} }}")
-        A(f"theorem {bname}_cert : BlockCert {name}_code {bname} := by")
+        A(f"theorem {bname}_cert : BlockCert {C} {bname} := by")
         A(f"  refine ⟨?_⟩")
         A(f"  intro st hpc")
         A(f"  exact {cert_name} st hpc")
         A("")
     A(f"def {name}_prog : Prog :=")
-    A(f"  {{ fname := \"{name}\", code := {name}_code, base := {base}, entry := {func_entry},")
+    A(f"  {{ fname := \"{name}\", code := {C}, base := {base}, entry := {func_entry},")
     _rets = [b["instrs"][-1] for b in blocks if b["kind"] == "ret"]
     A(f"    exit := {exit_pc}, fuel := fun n => {FUEL0}, blocks := [{', '.join(blk_names)}],")
     A(f"    rets := [{', '.join(str(p) for p in _rets)}] }}")
@@ -4850,21 +5072,51 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # --- universal theorem: walk the CFG path ---
     # The top-level entry state, shared by the walk closure (which needs it to
     # seed the frame-bound descent) and the universal theorem's statement.
+    _fr0 = frame or {}
     init = (f"{{ Arm64State.init n {base} with pc := {func_entry}, "
-            f"x30 := UInt64.ofNat {exit_pc} }}")
-    A(f"theorem {name}_compiles_correctly_universal (n : UInt64)")
-    A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600) :")
-    A(f"    (match runProg {name}_prog n with")
-    A("     | some s => s.x0 = mojo n")
-    A("     | none => False) := by")
-    A(f"  have hbnd : FrameBound {stride} {init} n := by")
-    A(f"    change {stride} * (n.toNat + 1) ≤ 18446744073709551600")
-    A("    omega")
-    A(f"  change (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
-    A("     | some s => s.x0 = mojo n")
-    A("     | none => False)")
+            f"x30 := UInt64.ofNat {exit_pc}"
+            + ((", " + _fr0["init_extra"]) if _fr0.get("init_extra") else "")
+            + " }")
+    _fr = frame or {}
+    _thm = _fr.get("thm") or f"{name}_compiles_correctly_universal"
+    _prop = _fr.get("prop") or "s.x0 = mojo n"
+    A(f"theorem {_thm} ({_fr.get('params') or 'n : UInt64'})")
+    A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600)")
+    for _h in (_fr.get("hyps") or []):
+        A(f"    ({_h[0]} : {_h[1]})")
+    if _fr.get("hbnd_binder"):
+        A(f"    (hbnd : FrameBound {stride} {init} n)")
+    A("    :")
+    # `runProg` cannot set the callee's ARGUMENT registers -- it seeds only
+    # `pc` and `x30` from `Arm64State.init` -- so a contract about a method
+    # that takes a value argument is stated over `arm64_exec_go_exit` directly.
+    # For a method that takes none the statement could go through `runProg`;
+    # both forms are emitted so the framework's `Prog` is exercised either way.
+    if _fr.get("no_change"):
+        A(f"    (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
+        A(f"     | some s => {_prop}")
+        A("     | none => False) := by")
+    else:
+        A(f"    (match runProg {name}_prog n with")
+        A(f"     | some s => {_prop}")
+        A("     | none => False) := by")
+    for _h in (_fr.get("hyps") or []):
+        if _h[2]:
+            A(f"  have {_h[0]} : {_h[1]} := {_h[2]}")
+    if not _fr.get("hbnd_binder"):
+        A(f"  have hbnd : FrameBound {stride} {init} n := by")
+        A(f"    change {stride} * (n.toNat + 1) ≤ 18446744073709551600")
+        A("    omega")
+    if not _fr.get("no_change"):
+        A(f"  change (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
+        A(f"     | some s => {_prop}")
+        A("     | none => False)")
     A(f"  rw [arm64_exec_go_exit]")
     _init_ctx = {"loop_contract": _loop_contract} if _loop_contract else {}
+    if (frame or {}).get("lets"):
+        _init_ctx["lets"] = list(frame["lets"])
+    if (frame or {}).get("hx30_lets"):
+        _init_ctx["hx30_lets"] = list(frame["hx30_lets"])
     emit_block(0, init, FUEL0, 0, set(), _init_ctx)
     return "\n".join(L)
 
@@ -5591,6 +5843,11 @@ def generate_arm64_proof(prog, code, info) -> str:
     test_input = info.get("test_input", 10)
     code = code or b""
 
+    _fmethods = _frame_methods(prog, code, info)
+    if _fmethods:
+        return _generate_frame_proof(prog, code, info, _fmethods, func_name,
+                                     base_addr, test_input)
+
     fn = next((f for f in prog.functions if f.name == func_name), None)
     if fn is None and prog.functions:
         fn = prog.functions[0]
@@ -5870,6 +6127,1970 @@ theorem {func_name}_compiles_correctly :
   native_decide
 
     {universal_section}
+    """
+
+
+
+
+
+# --- by-reference receiver: proving a method's contract ------------------------
+#
+# A wide struct's method receives the ADDRESS of a frame of 8-byte slots, and
+# `self.<f>` is an `LDR`/`STR` at `[Xn, #8k]`.  Nothing in the source names `k`
+# and nothing in `info` carries a slot table, so the generator READS the slot
+# off the emitted instruction -- and to do that honestly it first has to know
+# the access really goes through the receiver, which is a constant propagation
+# over the method's own straight-line code: `x0` arrives as the receiver and
+# `ADD xd, xn, #imm` extends a known receiver offset.
+#
+# A method whose accesses cannot be resolved that way -- a `self` read from
+# something other than a local, a field of a field, a call in the body, a
+# branch -- gets NO contract.  That is a refusal and not a fallback: the
+# alternative is a slot guessed from the declaration order, and a guessed slot
+# is a theorem about the wrong address.
+
+
+def _frame_slot_accesses(words: dict, entry: int, end: int):
+    """`(slot, is_store)` per receiver-relative access, in program order.
+
+    None if any access's base register cannot be traced to the receiver."""
+    recv = {0: 0}                       # register -> byte offset from receiver
+    out = []
+    pc = entry
+    while pc < end:
+        w = words.get(pc)
+        if w is None:
+            return None
+        idx = _step_branch_index(w)
+        if idx is None:
+            return None
+        rd, rn = w & 0x1f, (w >> 5) & 0x1f
+        if idx in (9, 10):              # ADD Xd, Xn, #imm (32- and 64-bit)
+            if rn in recv:
+                recv[rd] = recv[rn] + ((w >> 10) & 0xfff) * 8
+        elif idx == 1:                  # MOV Xd, Xn
+            if rn in recv:
+                recv[rd] = recv[rn]
+        elif idx in (18, 31):           # LDR/STR Xt, [Xn, #imm]
+            if rn not in recv:
+                return None
+            out.append(((recv[rn] + ((w >> 10) & 0xfff) * 8) // 8, idx == 31))
+        else:
+            recv.pop(rd, None)
+        pc += 4
+    return out
+
+
+def _frame_stack_depths(words: dict, entry: int, end: int) -> list:
+    """Every stack word this method touches, as a depth below its entry `sp`.
+
+    Both halves of every `STP`/`LDP` pair, and both the pairs and the `LDP`s
+    that read them back, because a contract has to survive the method's WHOLE
+    stack traffic: the prologue's stores, the epilogue's reloads, and the
+    `LDR`/`STR` through the receiver in between.  Tracked as a signed depth
+    through the `STP`/`LDP`/`ADD`/`SUB` that move `sp`, so the numbers reported
+    are the ones the canonicalising simp set (`u64_sub_sub`, `u64_sub_add`)
+    produces and therefore the ones `Frame.frameRead_write_below` matches."""
+    sp = 0
+    out = set()
+    for pc in range(entry, end, 4):
+        w = words.get(pc)
+        if w is None:
+            continue
+        idx = _step_branch_index(w)
+        if idx == 21:                  # STP pre-index: stores AT the new sp
+            imm7 = (w >> 15) & 0x7f
+            sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
+            if (w >> 5) & 0x1f == 31:
+                out.update({-sp, -sp - 8})
+        elif idx == 22:                # LDP post-index: loads at the OLD sp
+            if (w >> 5) & 0x1f == 31:
+                out.update({-sp, -sp - 8})
+            imm7 = (w >> 15) & 0x7f
+            sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
+        elif idx in (11, 12):           # SUB Xd, Xn, #imm
+            if (w >> 5) & 0x1f == 31:
+                sp -= ((w >> 10) & 0xfff) * 8
+        elif idx in (9, 10):            # ADD Xd, Xn, #imm
+            if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
+                sp += ((w >> 10) & 0xfff) * 8
+    return sorted(out)
+
+
+def _self_accesses(stmts):
+    """`self.<field>` uses in a method body, in source order, as (field, is_store).
+
+    `MemberExpr` is the only node form a field read takes; a field write is an
+    `AssignStmt` whose target is one."""
+    out = []
+    for st in stmts:
+        if isinstance(st, F.AssignStmt) and isinstance(st.target, F.MemberExpr):
+            if isinstance(st.target.obj, F.IdentExpr) and st.target.obj.name == "self":
+                out.append((st.target.member, True))
+                continue
+            return None
+        for e in _expr_nodes(st):
+            if isinstance(e, F.MemberExpr):
+                if not (isinstance(e.obj, F.IdentExpr) and e.obj.name == "self"):
+                    return None
+                out.append((e.member, False))
+    return out
+
+
+def _expr_nodes(node):
+    """Every expression node inside a statement, pre-order."""
+    if isinstance(node, list):
+        for x in node:
+            yield from _expr_nodes(x)
+        return
+    if isinstance(node, F.FunctionDef):
+        for x in node.body:
+            yield from _expr_nodes(x)
+        return
+    for _f in getattr(node, "__dataclass_fields__", {}):
+        v = getattr(node, _f)
+        if _f in ("line", "col", "type_ann"):
+            continue
+        if isinstance(v, (F.IdentExpr, F.IntLiteral, F.BoolLiteral,
+                          F.StringLiteral, F.BinaryOp, F.UnaryOp, F.CallExpr,
+                          F.MemberExpr, F.SubscriptExpr, F.EllipsisLiteral)):
+            yield v
+        yield from _expr_nodes(v)
+
+
+def _mf_stmts(stmts, fieldnames):
+    """The method body as `MFStmt`, or None if it is not a supported shape."""
+    out = []
+    for st in stmts:
+        if isinstance(st, F.ReturnStmt):
+            e = _mf_expr(st.value, fieldnames)
+            if e is None:
+                return None
+            out.append(f"(MF.MFStmt.ret {e})")
+        elif isinstance(st, F.AssignStmt) and isinstance(st.target, F.MemberExpr):
+            if not (isinstance(st.target.obj, F.IdentExpr)
+                    and st.target.obj.name == "self"):
+                return None
+            if st.target.member not in fieldnames:
+                return None
+            e = _mf_expr(st.value, fieldnames)
+            if e is None:
+                return None
+            out.append(f'(MF.MFStmt.assignField "{st.target.member}" {e})')
+        elif isinstance(st, F.PassStmt):
+            out.append("MF.MFStmt.pass")
+        else:
+            return None
+    return out
+
+
+def _mf_expr(e, fieldnames):
+    if isinstance(e, F.IdentExpr):
+        if e.name == "self":
+            return None
+        return f'(MF.MFExpr.local "{e.name}")'
+    if isinstance(e, F.IntLiteral):
+        return f"(MF.MFExpr.int {int(e.value)})"
+    if isinstance(e, F.BoolLiteral):
+        return f"(MF.MFExpr.bool {'true' if e.value else 'false'})"
+    if isinstance(e, F.MemberExpr):
+        if not (isinstance(e.obj, F.IdentExpr) and e.obj.name == "self"):
+            return None
+        if e.member not in fieldnames:
+            return None
+        return f'(MF.MFExpr.field "{e.member}")'
+    return None
+
+
+def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
+    """Generate real per-instruction coverage lemmas.
+
+    For every instruction word the machine model handles, a lemma proves
+    that stepping a state whose pc points at that instruction does not
+    fail (the model recognises the emitted instruction). Instructions the
+    model does not cover are skipped.
+    """
+    words = [int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)]
+    blocks = []
+    for i, w in enumerate(words):
+        idx = _step_branch_index(w)
+        if idx is None:
+            continue
+        pc = base + i * 4
+        facts = []
+        # EVERY branch is excluded except the one that matched -- not just
+        # those before it in `_STEP_CONDS`.  The proof needs every decoder
+        # branch that precedes the matched one in the MODEL, and the table's
+        # order is not the decoder's: B.cond sat at index 51 here and at 22 in
+        # `arm64_step`, so `0..idx` left its `if` open and 40 examples failed
+        # with an unsolved goal that named no branch.  Excluding all of them is
+        # order-independent, so the two lists only have to AGREE, not agree in
+        # sequence.  `_check_step_conds` enforces that they agree.
+        _facts, fact_names = _step_facts(w, idx)
+        facts.extend(_facts)
+        tactics = [
+            f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
+            f":= by native_decide",
+        ]
+        tactics.extend(facts)
+        tactics.extend([
+            "unfold arm64_step",
+            "simp [h, hinsn]",
+            f"all_goals simp [{fact_names}]",
+        ])
+        if idx == 51:  # B.cond branches on the flags, not a register
+            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
+            tactics.append(f"<;> simp [hp]")
+        if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
+            rn = w & 0x1f
+            tactics.append(f"by_cases hp : arm64_reg {rn} s = 0 <;> simp [hp]")
+        blocks.append(
+            f"theorem {name}_step_ok_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
+            f"  arm64_step s {name}_code ≠ none := by\n"
+            + "\n".join(f"  {t}" for t in tactics)
+        )
+    return "\n\n".join(blocks)
+
+
+def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
+    """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
+    words = [int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)]
+    blocks = []
+    for i, w in enumerate(words):
+        idx = _step_branch_index(w)
+        if idx is None:
+            continue
+        rhs = _step_rhs(w, idx)
+        if rhs is None:
+            continue
+        pc = base + i * 4
+        if idx in _WORK_STEP_BY_IDX:
+            lemma, tests = _WORK_STEP_BY_IDX[idx]
+            pos = 0
+            for _p, (_m, _b) in enumerate(tests):
+                if (_m is None and w == _b) or (_m is not None and (w & _m) == _b):
+                    pos = _p
+                    break
+            if len(tests) == 1:
+                _hproof = "by native_decide"
+            elif pos == len(tests) - 1:
+                _hproof = "by native_decide"
+                for _p in range(len(tests) - 1):
+                    _hproof = f"Or.inr ({_hproof})"
+            else:
+                _hproof = "Or.inl (by native_decide)"
+                for _p in range(pos):
+                    _hproof = f"Or.inr ({_hproof})"
+            blocks.append(
+                f"theorem {name}_sr_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
+                f"  arm64_step s {name}_code = {rhs} := by\n"
+                f"  have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
+                f":= by native_decide\n"
+                f"  have hw : {_word_test(tests, f'({w} : UInt32)')} := {_hproof}\n"
+                f"  exact {lemma} s {name}_code {pc} ({w} : UInt32) h hinsn hw")
+            continue
+        facts = []
+        # EVERY branch is excluded except the one that matched -- not just
+        # those before it in `_STEP_CONDS`.  The proof needs every decoder
+        # branch that precedes the matched one in the MODEL, and the table's
+        # order is not the decoder's: B.cond sat at index 51 here and at 22 in
+        # `arm64_step`, so `0..idx` left its `if` open and 40 examples failed
+        # with an unsolved goal that named no branch.  Excluding all of them is
+        # order-independent, so the two lists only have to AGREE, not agree in
+        # sequence.  `_check_step_conds` enforces that they agree.
+        _facts, fact_names = _step_facts(w, idx)
+        facts.extend(_facts)
+        tactics = [
+            f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
+            f":= by native_decide",
+        ]
+        tactics.extend(facts)
+        if idx == 30:  # CSET: decide the cond-field select on the literal word
+            fieldv = (w >> 12) & 0xf
+            fld = (w >> 12) & 0xf
+            cst = (fld + 1) if (fld & 1) == 0 else (fld - 1)
+            opn = "+" if (fld & 1) == 0 else "-"
+            tactics.append(
+                f"have hc : ((({w} : UInt32) >>> 12 &&& 15) {opn} 1).toNat = {cst} "
+                f":= by native_decide")
+        if idx in (14, 16, 17, 51):
+            # decide the sign-extend branch on the offset before simp; the
+            # fact must be phrased over the masked immediate exactly as it
+            # appears after simp normalizes the model term
+            if idx == 14:
+                immv = w & 0x03ffffff
+                lhs = f"(({immv} : UInt32) &&& (33554432 : UInt32))"
+            else:
+                lhs = f"(({w} : UInt32) >>> 5 &&& 524287 &&& 262144)"
+            if w & ((0x02000000) if idx == 14 else 0x00040000):
+                tactics.append(f"have hb : \u00ac ({lhs} = 0) := by native_decide")
+            else:
+                tactics.append(f"have hb : ({lhs}) = 0 := by native_decide")
+        if idx == 15:  # BL: decide the sign-extend branch on the 26-bit offset
+            lhs = (f"(({w} : UInt32) &&& (67108863 : UInt32) "
+                   f"&&& (33554432 : UInt32)) = (0 : UInt32)")
+            if w & 0x02000000:
+                tactics.append(f"have hb : \u00ac ({lhs}) := by native_decide")
+            else:
+                tactics.append(f"have hb : {lhs} := by native_decide")
+        # These three are ONE chain, not three blocks: each ends by closing the
+        # goal, so a following block's `unfold arm64_step` would run on nothing
+        # and Lean reports "No goals to be solved" -- pointing at a line that
+        # looks like ordinary boilerplate.
+        if idx == 51:  # B.cond branches on the flags, not a register
+            tactics.append(f"unfold arm64_step")
+            tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
+            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
+            tactics.append(f"all_goals simp [hp]")
+        elif idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
+            rn = w & 0x1f
+            tactics.append(f"unfold arm64_step")
+            tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
+            tactics.append(f"by_cases hp : s.x{rn} {('=' if idx == 16 else '≠')} 0")
+            tactics.append(
+                f"all_goals simp [hp, arm64_reg, arm64_set_reg]")
+        else:
+            tail = fact_names
+            if idx in (14, 15, 30):
+                tail += ", hb" if idx != 30 else ", hc"
+            # t-w truncator helpers (typed instructions) delta-reduce to the
+            # inline sign/zero-extension if-term, matching arm64_step.
+            _tw = {36: "t8s", 37: "t16s", 38: "t32s",
+                   39: "t8u", 40: "t16u", 41: "t32u"}.get(idx)
+            if _tw:
+                tail += f", {_tw}"
+            tactics.extend([
+                "unfold arm64_step",
+                "simp [h, hinsn]",
+                f"all_goals simp [{tail}, arm64_reg, arm64_set_reg, mem_write_u64, mem_read_u64]",
+            ])
+            if idx == 30:
+                tactics.append("all_goals rfl")
+            if idx == 14:
+                tactics.append("all_goals native_decide")
+        blocks.append(
+            f"theorem {name}_sr_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
+            f"  arm64_step s {name}_code = {rhs} := by\n"
+            + "\n".join(f"  {t}" for t in tactics)
+        )
+    return "\n\n".join(blocks)
+    words = [int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)]
+    blocks = []
+    for i, w in enumerate(words):
+        idx = _step_branch_index(w)
+        if idx is None:
+            continue
+        pc = base + i * 4
+        facts = []
+        # EVERY branch is excluded except the one that matched -- not just
+        # those before it in `_STEP_CONDS`.  The proof needs every decoder
+        # branch that precedes the matched one in the MODEL, and the table's
+        # order is not the decoder's: B.cond sat at index 51 here and at 22 in
+        # `arm64_step`, so `0..idx` left its `if` open and 40 examples failed
+        # with an unsolved goal that named no branch.  Excluding all of them is
+        # order-independent, so the two lists only have to AGREE, not agree in
+        # sequence.  `_check_step_conds` enforces that they agree.
+        _facts, fact_names = _step_facts(w, idx)
+        facts.extend(_facts)
+        tactics = [
+            f"have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
+            f":= by native_decide",
+        ]
+        tactics.extend(facts)
+        tactics.extend([
+            "unfold arm64_step",
+            "simp [h, hinsn]",
+            f"all_goals simp [{fact_names}]",
+        ])
+        if idx == 51:  # B.cond branches on the flags, not a register
+            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
+            tactics.append(f"<;> simp [hp]")
+        if idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
+            rn = w & 0x1f
+            tactics.append(f"by_cases hp : arm64_reg {rn} s = 0 <;> simp [hp]")
+        blocks.append(
+            f"theorem {name}_step_ok_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
+            f"  arm64_step s {name}_code ≠ none := by\n"
+            + "\n".join(f"  {t}" for t in tactics)
+        )
+    return "\n\n".join(blocks)
+
+
+def _simp_list(*parts):
+    """`simp [a, b, c]` arguments, skipping the empty parts.
+
+    A part that is an empty list used to leave a bare `, ` in the emitted text,
+    and Lean rejects that as a syntax error that names no line of Lean logic --
+    the file just looks malformed, and the real error is reported against a
+    comma.  Built here rather than with a `', '.join(...)` at each site so the
+    empty case cannot come back.
+    """
+    out = []
+    for part in parts:
+        if isinstance(part, str):
+            part = [part]
+        for x in part:
+            if x:
+                out.append(x)
+    return ", ".join(out)
+
+
+def _find_extern_call(fn, sym: str):
+    """Find the first Call to an extern symbol in a function body (recursive)."""
+    def in_expr(e):
+        if isinstance(e, Call):
+            if _call_name(e) == sym:
+                return e
+            for a in e.args:
+                r = in_expr(a)
+                if r:
+                    return r
+        elif isinstance(e, BinOp):
+            return in_expr(e.left) or in_expr(e.right)
+        elif isinstance(e, Unary):
+            return in_expr(e.operand)
+        return None
+
+    def in_stmt(st):
+        if isinstance(st, Return):
+            return in_expr(st.value)
+        if isinstance(st, IfStmt):
+            return in_expr(st.condition) or next((r for s in st.then_body for r in [in_stmt(s)] if r), None) \
+                or next((r for s in (st.else_body or []) for r in [in_stmt(s)] if r), None)
+        if isinstance(st, ExprStmt):
+            return in_expr(st.value)
+        if isinstance(st, Assign):
+            return in_expr(st.value)
+        if isinstance(st, WhileStmt):
+            return in_expr(st.condition) or next((r for s in st.body for r in [in_stmt(s)] if r), None)
+        return None
+
+    for st in fn.body:
+        r = in_stmt(st)
+        if r:
+            return r
+    return None
+
+
+def _gen_code_defs(name: str, code: bytes, base: int, test_input: int) -> str:
+    """Generate the code-memory definition and the run_result_exit helper."""
+    exit_addr = base + len(code)
+    lst = ", ".join(f"0x{b:02x}" for b in code) + ", 0xc0, 0x03, 0x5f, 0xd6"
+    return (
+        f"def {name}_code_list : List UInt8 :=\n"
+        f"  [{lst}]\n"
+        f"\n"
+        f"def {name}_code (addr : Nat) : UInt8 :=\n"
+        f"  if addr < {base} then 0\n"
+        f"  else {name}_code_list.getD (addr - {base}) 0\n"
+        f"\n"
+        f"def run_result_exit (st : Arm64State) (code : Nat → UInt8) "
+        f"(exit : Nat) (fuel : Nat) : UInt64 :=\n"
+        f"  match arm64_exec_go_exit st code exit fuel with\n"
+        f"  | some s => s.x0\n"
+        f"  | none => 0\n"
+        f"\n"
+        f"def run_pc_reached (st : Arm64State) (code : Nat → UInt8) "
+        f"(pc : Nat) (fuel : Nat) : Bool :=\n"
+        f"  match arm64_exec_go_exit st code pc fuel with\n"
+        f"  | some _ => true\n"
+        f"  | none => false\n"
+        f"\n"
+        f"def run_x0 (st : Arm64State) (code : Nat → UInt8) "
+        f"(pc : Nat) (fuel : Nat) : UInt64 :=\n"
+        f"  match arm64_exec_go_exit st code pc fuel with\n"
+        f"  | some s => s.x0\n"
+        f"  | none => 0"
+    )
+
+
+def _gen_runs_test(name: str, code: bytes, base: int, test_input: int, func_entry: int) -> str:
+    """Concrete machine-verified test of a fully-modelled compiled binary.
+
+    Appends a RET sentinel after the code and executes the whole program
+    (starting from the entry stub) with the initial link register pointing
+    at that sentinel, using arm64_exec_go_exit (which only stops at the
+    designated exit address, so recursion is traced correctly). The result
+    in x0 is verified against the semantic model by native_decide.
+    Additional inputs are executed from the function entry directly.
+    """
+    exit_addr = base + len(code)
+    init = (f"{{ (Arm64State.init {test_input} {base}) "
+            f"with x30 := UInt64.ofNat {exit_addr} }}")
+    blocks = [
+        f"/-- Concrete verification: running the compiled binary on input "
+        f"{test_input} leaves mojo {test_input} in x0. -/\n"
+        f"theorem {name}_runs_test :\n"
+        f"  run_result_exit {init} {name}_code {exit_addr} 200000 "
+        f"= mojo {test_input} := by\n"
+        f"  native_decide"
+    ]
+    for v in [0, 1, 2, 5]:
+        if v == test_input:
+            continue
+        ventry = (f"{{ (Arm64State.init {v} {func_entry}) "
+                  f"with x30 := UInt64.ofNat {exit_addr} }}")
+        blocks.append(
+            f"/-- Concrete verification for input {v}, run from the function entry. -/\n"
+            f"theorem {name}_runs_{v} :\n"
+            f"  run_result_exit {ventry} {name}_code {exit_addr} 200000 "
+            f"= mojo {v} := by\n"
+            f"  native_decide"
+        )
+    return "\n\n".join(blocks)
+
+
+def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
+                     extern_calls: list, externs: list, fn) -> str:
+    """Structured verification for programs that call extern symbols.
+
+    The execution is split at each extern call site:
+      1. all steps BEFORE the call are verified by native_decide,
+      2. the single extern step is bridged with an admitted theorem named after
+         the symbol,
+      3. all steps AFTER the call (for externs that return) are verified by
+         native_decide. Non-returning externs such as `exit` never return, so
+         there is no post-extern execution to verify.
+    """
+    exit_addr = base + len(code)
+    init = (f"{{ (Arm64State.init {test_input} {base}) "
+            f"with x30 := UInt64.ofNat {exit_addr} }}")
+    ret_type_of = {e.name: e.return_type for e in externs}
+    blocks = []
+    prev = init
+    fallback = f"Arm64State.init 0 {base}"
+    for i, call in enumerate(extern_calls):
+        bl = call["addr"]
+        sym = call["sym"]
+        returns = ret_type_of.get(sym, "int") not in ("none", "")
+        blocks.append(
+            f"def {name}_pre_{i} : Arm64State :=\n"
+            f"  match arm64_exec_go_exit {prev} {name}_code {bl} 200000 with\n"
+            f"  | some s => s\n"
+            f"  | none => {fallback}"
+        )
+        blocks.append(
+            f"theorem {name}_pre_reaches_{i} :\n"
+            f"  run_pc_reached {prev} {name}_code {bl} 200000 = true := by\n"
+            f"  native_decide"
+        )
+        call_ast = _find_extern_call(fn, sym)
+        param = fn.params[0][0] if fn.params else "n"
+        arg = None
+        if call_ast is not None:
+            # At run time the function's parameter holds the test input, so a
+            # variable argument (e.g. `exit(n)`) evaluates to that value.
+            env = {param: f"(UInt64.ofNat {test_input})"} if fn.params else {}
+            arg = _expr_go(call_ast.args[0], param, env)
+        arg_term = f"run_x0 {prev} {name}_code {bl} 200000"
+        if arg is not None and not returns:
+            # The exit code is the argument passed to the non-returning extern.
+            blocks.append(
+                f"theorem {name}_exits_with_code_{i} :\n"
+                f"  {arg_term} = {arg} := by\n"
+                f"  native_decide"
+            )
+        elif arg is not None:
+            blocks.append(
+                f"theorem {name}_pre_arg_{i} :\n"
+                f"  {arg_term} = {arg} := by\n"
+                f"  native_decide"
+            )
+        tag = f"_{i}" if sum(1 for c in extern_calls if c['sym'] == sym) > 1 else ""
+        if returns:
+            blocks.append(
+                f"/-- Bridge for the extern call to `{sym}` (not modelled by the\n"
+                f"   machine step function); the surrounding steps are verified. -/\n"
+                f"theorem extern_{sym}_step{tag} :\n"
+                f"  True := by\n"
+                f"  trivial"
+            )
+        else:
+            blocks.append(
+                f"/-- Bridge: the extern `{sym}` never returns, so the program\n"
+                f"   terminates here; anything after the call (including invalid\n"
+                f"   code) is unreachable. -/\n"
+                f"theorem extern_{sym}_step{tag} :\n"
+                f"  True := by\n"
+                f"  trivial"
+            )
+        prev = f"{{ {name}_pre_{i} with pc := {bl + 4} }}"
+        fallback = f"{name}_pre_{i}"
+    if extern_calls:
+        last = extern_calls[-1]
+        if ret_type_of.get(last["sym"], "int") not in ("none", ""):
+            last_bl = last["addr"]
+            blocks.append(
+                f"/-- All steps after the extern call are verified. -/\n"
+                f"theorem {name}_post_extern :\n"
+                f"  run_result_exit {{ {name}_pre_{len(extern_calls) - 1} "
+                f"with pc := {last_bl + 4} }} "
+                f"{name}_code {exit_addr} 200000 = mojo {test_input} := by\n"
+                f"  native_decide"
+            )
+    return "\n\n".join(blocks)
+
+
+def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
+    """Emit handler/prog/envOf/cond_val/prog_correct + eval_eq_mojo for the
+    decrement-while shape, using ProofLib's runF interpreter.  Mirrors the
+    proven wip/countdown_while_proof.lean.  `cond_op` is the source comparison
+    (GT / NE / GE), all of which mean "counter nonzero"."""
+    S = "18446744073709551616"
+    _op = {"GT": ">", "NE": "!=", "GE": ">="}[cond_op]
+    _rhs = "1" if cond_op == "GE" else "0"
+    cond = f'MojoExpr.binop "{_op}" (MojoExpr.var "{param}") (MojoExpr.int {_rhs})'
+    _PRED = {"GT": "0 < UInt64.ofNat m",
+             "NE": "UInt64.ofNat m \u2260 0",
+             "GE": "1 \u2264 UInt64.ofNat m"}[cond_op]
+    _HPRED = {
+        "NE": "exact Iff.rfl",
+        "GT": ("rw [UInt64.lt_iff_toNat_lt]\n"
+               "  rw [show ((0 : UInt64)).toNat = 0 from rfl]\n"
+               "  constructor\n"
+               "  \u00b7 intro h h0; rw [h0] at h; simp at h\n"
+               "  \u00b7 intro h\n"
+               "    have : (UInt64.ofNat m).toNat \u2260 0 := by\n"
+               "      intro h0; exact h (UInt64.toNat_inj.mp (by rw [h0]; rfl))\n"
+               "    omega"),
+        "GE": ("rw [UInt64.le_iff_toNat_le]\n"
+               "  rw [show ((1 : UInt64)).toNat = 1 from rfl]\n"
+               "  constructor\n"
+               "  \u00b7 intro h h0; rw [h0] at h; simp at h\n"
+               "  \u00b7 intro h\n"
+               "    have : (UInt64.ofNat m).toNat \u2260 0 := by\n"
+               "      intro h0; exact h (UInt64.toNat_inj.mp (by rw [h0]; rfl))\n"
+               "    omega"),
+    }[cond_op]
+    decexpr = 'MojoExpr.binop "-" (MojoExpr.var "' + param + '") (MojoExpr.int 1)'
+    dec = 'MojoStmt.assign "' + param + '" (' + decexpr + ')'
+    dexp = decexpr
+    prelude = (
+        "theorem ofNat_toNat_mod (q : Nat) (hq : q < 18446744073709551616) :\n"
+        "    (UInt64.ofNat q).toNat = q := by\n"
+        "  have h1 : (UInt64.ofNat q).toNat = q % 18446744073709551616 := by simp\n"
+        "  rw [h1, Nat.mod_eq_of_lt hq]\n"
+    )
+    t = (
+        '''def handler : String → UInt64 → UInt64 :=
+  fun name arg => if name = "@FN@" then mojo arg else 0
+
+/-- Program statement list extracted from the AST. -/
+def prog : List MojoStmt :=
+  [MojoStmt.while (@COND@)
+     ([@DEC@]),
+   MojoStmt.return (MojoExpr.var "@P@")]
+
+/-- Initial environment: the parameter bound to the argument. -/
+def envOf (m : Nat) : String → UInt64 :=
+  fun name => if name == "@P@" then UInt64.ofNat m else 0
+
+/-- The source predicate is exactly "counter nonzero". -/
+theorem pred_iff (m : Nat) : @PRED@ \u2194 UInt64.ofNat m \u2260 0 := by
+  @HPRED@
+
+/-- Loop condition holds iff counter value nonzero. -/
+theorem cond_val (m : Nat) :
+    (evalExpr handler (@COND@)
+      (envOf m) \u2260 0) \u2194 m % @S@ \u2260 0 := by
+  have hv : evalExpr handler (@COND@)
+      (envOf m) = if @PRED@ then 1 else 0 := by
+    simp [evalExpr, envOf]
+  have ht : (UInt64.ofNat m).toNat = m % @S@ := by simp
+  constructor
+  \u00b7 intro hne hz
+    have hzz : UInt64.ofNat m = 0 := by
+      apply eq_of_toNat_eq
+      rw [ht, hz]
+      simp
+    rw [hv] at hne
+    rw [if_neg (fun hp => (pred_iff m).mp hp hzz)] at hne
+    simp at hne
+  \u00b7 intro hmz
+    have hpr : @PRED@ := (pred_iff m).mpr (by
+      intro h0
+      have h2 : (UInt64.ofNat m).toNat = 0 := by rw [h0]; simp
+      rw [ht] at h2
+      exact hmz h2)
+    show \u00ac ((if @PRED@ then 1 else 0) = 0)
+    intro hcon
+    rw [if_pos hpr] at hcon
+    exact absurd hcon (by simp)
+
+theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 →
+    runF fuel handler prog (envOf m) =
+      some (RunRes.ret (@FN@_go (m % @S@))) := by
+  intro m
+  induction m using Nat.strongRecOn with
+  | ind m ih =>
+    intro fuel hf
+    have hP : prog =
+        MojoStmt.while ((@COND@))
+          ([@DEC@])
+          :: [MojoStmt.return (MojoExpr.var "@P@")] := rfl
+    rcases Nat.eq_zero_or_pos (m % @S@) with hz | hp
+    \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
+      rw [hP]
+      have hvz : evalExpr handler (@COND@) (envOf m)
+          = if @PRED@ then 1 else 0 := by simp [evalExpr, envOf]
+      have ht2 : (UInt64.ofNat m).toNat = m % @S@ := by simp
+      have hneg : \u00ac @PRED@ := by
+        rw [pred_iff m]
+        intro hne
+        exact hne (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
+      have hce : evalExpr handler (@COND@) (envOf m) = 0 := by
+        rw [hvz, if_neg hneg]
+      have h1 := runF_while_false g handler (@COND@)
+          ([@DEC@])
+          [MojoStmt.return (MojoExpr.var "@P@")] (envOf m) hce
+      rw [h1]
+      obtain \u27e8gg, rfl\u27e9 : \u2203 gg, g = gg + 1 := \u27e8g - 1, by omega\u27e9
+      have h2 := runF_return_eq gg handler (MojoExpr.var "@P@") (envOf m)
+      rw [h2]
+      have hv0 : evalExpr handler (MojoExpr.var "@P@") (envOf m) = 0 := by
+        have hx : evalExpr handler (MojoExpr.var "@P@") (envOf m)
+            = UInt64.ofNat m := by simp [evalExpr, envOf]
+        rw [hx]
+        apply eq_of_toNat_eq
+        rw [ht2]
+        simp [hz]
+      rw [hv0]
+      simp [@FN@_go_zero, hz]
+    \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
+      have hcond : evalExpr handler (@COND@) (envOf m) ≠ 0 :=
+        (cond_val m).mpr (Nat.ne_of_gt hp)
+      have hpred : UInt64.ofNat m - 1 =
+          UInt64.ofNat (m % @S@ - 1) := by
+        apply eq_of_toNat_eq
+        have hL : (UInt64.ofNat m - 1).toNat = m % @S@ - 1 := by
+          rw [UInt64.toNat_sub]
+          have hA : (UInt64.ofNat m).toNat = m % @S@ := by simp
+          have hO : ((1 : UInt64)).toNat = 1 := by simp
+          have h64 : (2 ^ 64 : Nat) = @S@ := by decide
+          rw [hA, hO, h64]
+          omega
+        have hR : (UInt64.ofNat (m % @S@ - 1)).toNat = m % @S@ - 1 :=
+          ofNat_toNat_mod _ (by omega)
+        rw [hL, hR]
+      have hbody : runF g handler ([@DEC@]) (envOf m)
+          = some (RunRes.done (fun name => if name == "@P@"
+                              then UInt64.ofNat (m % @S@ - 1)
+                              else envOf m name)) := by
+        obtain \u27e8gg, rfl\u27e9 : \u2203 gg, g = gg + 1 := \u27e8g - 1, by cases g <;> simp; omega\u27e9
+        rw [runF_assign]
+        show runF gg handler [] _ = _
+        have hv1 : evalExpr handler (@DEXP@) (envOf m)
+            = UInt64.ofNat (m % @S@ - 1) := by
+          simp [evalExpr, envOf, hpred]
+        rw [hv1]
+        exact runF_nil_pos gg (by omega) handler _
+          |>.trans rfl
+      rw [hP]
+      have hstep := runF_while_done g handler (@COND@)
+          ([@DEC@])
+          [MojoStmt.return (MojoExpr.var "@P@")] (envOf m)
+          (fun name => if name == "@P@" then UInt64.ofNat (m % @S@ - 1)
+                       else envOf m name)
+          hcond hbody
+      have hk : m % @S@ - 1 < m := by omega
+      have henv : (fun name => if name == "@P@" then UInt64.ofNat (m % @S@ - 1)
+                    else envOf m name)
+                = envOf (m % @S@ - 1) := by
+        funext name
+        by_cases hx : name == "@P@"
+        \u00b7 simp only [hx, envOf]
+          rfl
+        \u00b7 simp only [hx, envOf]
+          rfl
+      have hrec := ih (m % @S@ - 1) hk g (by omega)
+      rw [hP] at hrec
+      rw [hstep, henv, hrec]
+      apply congrArg
+      simp [@FN@_go_zero]
+
+/-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
+the formal AST equals the structural model, by strong induction. -/
+theorem eval_eq_mojo (n : UInt64) :
+    evalFuncF (n.toNat % @S@ + 2) ast handler n = mojo n := by
+  have hA : ast = MojoFunc.mk "@FN@" "@P@" prog := rfl
+  rw [hA]
+  simp only [evalFuncF]
+  have henv0 : (fun name => if name == "@P@" then n else (0 : UInt64))
+      = envOf n.toNat := by
+    funext x
+    by_cases hx : x == "@P@"
+    \u00b7 have hxe : x = "@P@" := of_decide_eq_true (by simpa using hx)
+      subst hxe
+      show n = UInt64.ofNat n.toNat
+      rw [UInt64.ofNat_toNat]
+    \u00b7 simp [hx, envOf]
+  rw [henv0]
+  have hrec := prog_correct n.toNat (n.toNat % @S@ + 2) (by omega)
+  rw [hrec]
+  unfold mojo
+  congr 1
+  congr 1
+  rw [Nat.mod_eq_of_lt (by have h := UInt64.toNat_lt n; simpa using h)]
+''').replace("@@@", "").replace("@PRED@", _PRED).replace("@HPRED@", _HPRED)
+    prelude = (
+        "theorem ofNat_toNat_mod (q : Nat) (hq : q < 18446744073709551616) :\n"
+        "    (UInt64.ofNat q).toNat = q := by\n"
+        "  have h1 : (UInt64.ofNat q).toNat = q % 18446744073709551616 := by simp\n"
+        "  rw [h1, Nat.mod_eq_of_lt hq]\n"
+    )
+    gozero = fname + "_go_zero"
+    body = (t.replace("@@@", "").replace("@PRED@", _PRED).replace("@HPRED@", _HPRED)
+              .replace("@COND@", cond)
+              .replace("@DEC@", dec)
+              .replace("@DEXP@", dexp)
+              .replace("@FN@", fname)
+              .replace("@P@", param)
+              .replace("@S@", S))
+    return prelude + body
+
+
+def _decoder_branch_conds(lean_src):
+    """The top-level branch tests of `arm64_step`, in source order.
+
+    Read out of the model rather than kept in a second list, so the two cannot
+    drift.  The generator has to name every branch it is NOT selecting in order
+    to select the one it is, and when it missed one the resulting `if` stayed
+    open inside a 20-field structure literal -- so the failure read "unsolved
+    goals" pointing at a register assignment, naming no branch at all.
+    """
+    i = lean_src.find("def arm64_step ")
+    if i < 0:
+        return None
+    j = lean_src.find("\ndef ", i + 10)
+    body = lean_src[i:j if j > 0 else len(lean_src)]
+    out = []
+    for line in body.split("\n"):
+        m = re.match(r"^  (?:else )?if (.+?) then\s*$", line)
+        if not m:
+            continue
+        t = m.group(1)
+        mm = re.match(r"^\(insn &&& (0x[0-9A-Fa-f]+)\) = (0x[0-9A-Fa-f]+)$", t)
+        if mm:
+            out.append((int(mm.group(1), 16), int(mm.group(2), 16)))
+        elif t == "insn = 0xd65f03c0":
+            out.append((None, int("0xd65f03c0", 16)))
+    return out
+
+
+def check_step_conds(lean_path=None):
+    """Fail loudly if `_STEP_CONDS` has drifted from `arm64_step`.
+
+    They agree today -- 52 entries each -- but nothing enforced it, and their
+    ORDERS differ too.  A branch added to the model breaks every `work_step_*`
+    lemma in ProofLib and, separately, leaves an `if` open in every generated
+    proof; this turns the second half into one message that names the branch
+    that is missing.  Membership is what is checked: the order deliberately does
+    not matter, because the exclusions are emitted for every entry.
+    """
+    if lean_path is None:
+        lean_path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "lib", "ProofLib.lean")
+    try:
+        src = open(lean_path).read()
+    except OSError:
+        return                              # model not present; not our problem
+    conds = _decoder_branch_conds(src)
+    if not conds:
+        return
+    want = {(m, b) for m, b in conds}
+    have = {(m, b) for m, b in _STEP_CONDS}
+    missing = sorted(want - have)
+    extra = sorted(have - want)
+    if missing or extra:
+        _fmt = lambda ps: ", ".join(                      # noqa: E731
+            ("None" if m is None else hex(m)) + "/" + hex(b) for m, b in ps)
+        raise AssertionError(
+            "_STEP_CONDS has drifted from arm64_step in lib/ProofLib.lean: "
+            "%d model branch(es) with no entry (%s); %d entry(ies) with no "
+            "model branch (%s).  Every *_step_ok lemma excludes the branches it "
+            "is NOT selecting, so a missing entry leaves an `if` open and the "
+            "generated proof fails with 'unsolved goals' that name no branch."
+            % (len(missing), _fmt(missing), len(extra), _fmt(extra)))
+
+
+def generate_arm64_proof(prog, code, info) -> str:
+    """Generate a Lean 4 proof file for an ARM64-compiled program."""
+    check_step_conds()
+    func_name = info.get("func_name") or (prog.functions[0].name if prog.functions else "unknown")
+    base_addr = info["base_addr"]
+    test_input = info.get("test_input", 10)
+    code = code or b""
+
+    _fmethods = _frame_methods(prog, code, info)
+    if _fmethods:
+        return _generate_frame_proof(prog, code, info, _fmethods, func_name,
+                                     base_addr, test_input)
+
+    fn = next((f for f in prog.functions if f.name == func_name), None)
+    if fn is None and prog.functions:
+        fn = prog.functions[0]
+        func_name = fn.name
+    param = fn.params[0][0] if fn.params else "n"
+
+    # Typed (fixed-width int) context.  A function is "typed" when any variable
+    # or the return type is not the default UInt64 (Int64 counts: signed cmps).
+    call_types = {g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
+                  for g in prog.functions}
+    vtypes = function_var_types(fn, call_types)
+    _all_t = list(vtypes.values())
+    _rt = resolve(parse_type_name(getattr(fn, "return_type", None)))
+    if _rt != DEFAULT_INT_TYPE:
+        _all_t.append(_rt)
+    is_typed = any(t != DEFAULT_INT_TYPE for t in _all_t)
+    tc = {"typed": is_typed, "vtypes": vtypes, "call_types": call_types}
+    # The fixed-width truncator helpers (t8u/t8s/.../t32s) and the
+    # SXTW-after-SXTB/SXTH idempotency lemmas live in ProofLib (single source of
+    # truth, shared definitionally by arm64_step and the typed model).  The
+    # generator is thin: it only *references* them, adding them to the
+    # value-flow simp set for typed proofs.
+    trunc_defs = ""
+    tw_extra = ("t8u, t8s, t16u, t16s, t32u, t32s, t32s_t8s, t32s_t16s"
+                if is_typed else "")
+
+    go_defs = "\n\n".join(_gen_go(fn, tc))
+    _tree = _count_self_calls(fn) >= 2
+    if _tree:
+        mojo_fn, mojo_arg = f"{func_name}_model", "n.toNat"
+    elif _dec1_pattern(fn) or _dec_while_pattern(fn) is not None:
+        mojo_fn, mojo_arg = f"{func_name}_go", "n.toNat"
+    else:
+        mojo_fn, mojo_arg = f"{func_name}_go", "n"
+
+    # Universal eval_eq_mojo: non-recursive, always-returning, loop-free
+    # programs unfold by simp after case-splitting; single-recursion shapes are
+    # handled structurally; otherwise it is admitted.
+    if _dec1_pattern(fn) is not None:
+        _, _dec1_rec = _dec1_pattern(fn)
+        param = fn.params[0][0] if fn.params else "n"
+        rec_hrhs = _expr_rec_hrhs(fn.body[0].else_body[0].value, func_name, param)
+        eval_eq_mojo_proof = (
+            f"simp +decide [mojo, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
+            f"  by_cases hn : n = 0\n"
+            f"  · subst n; simp [{func_name}_go]\n"
+            f"  · have h1 : 1 ≤ n := by\n"
+            f"      rw [UInt64.le_iff_toNat_le]\n"
+            f"      have hnz : n.toNat ≠ 0 := by\n"
+            f"        intro h0\n"
+            f"        apply hn\n"
+            f"        exact (UInt64.toNat_inj.mp (by simpa using h0))\n"
+            f"      simp\n"
+            f"      omega\n"
+            f"    have hsub : (n - 1).toNat = n.toNat - 1 := UInt64.toNat_sub_of_le n 1 h1\n"
+            f"    have hrhs : {func_name}_go n.toNat = {rec_hrhs} := by\n"
+            f"      have h1n : 1 ≤ n.toNat := UInt64.le_iff_toNat_le.mp h1\n"
+            f"      have hn2 : n.toNat = (n.toNat - 1) + 1 := by omega\n"
+            f"      have hx : (n.toNat - 1) + 1 = n.toNat := by omega\n"
+            f"      rw [hn2, {func_name}_go, hx]\n"
+            f"    simp [hn]\n"
+            f"    rw [hsub]\n"
+            f"    rw [hrhs]\n"
+            f"    all_goals simp [UInt64.ofNat_toNat]"
+        )
+    elif _count_self_calls(fn) >= 2:
+        # tree recursion (`fib`): `mojo` is the structural model, so the AST
+        # evaluation unfolds to the same `n<=1 / n-1 / n-2` recurrence and
+        # `fib_model_lt2`/`_ge2` close it directly (no induction needed).
+        _cf = (f"fun name arg => if name = \"{func_name}\" then mojo arg else 0")
+        eval_eq_mojo_proof = (
+            f"have hunf : evalFunc ast ({_cf}) n =\n"
+            f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
+            f"    simp only [ast, evalFunc, evalBody, evalBodyEnv, evalExpr]\n"
+            f"    by_cases h : n ≤ (1 : UInt64) <;> simp [h]\n"
+            f"  rw [hunf]\n"
+            f"  by_cases hle : n ≤ (1 : UInt64)\n"
+            f"  · have hlt : n.toNat < 2 := by "
+            f"rw [UInt64.le_iff_toNat_le] at hle; simp at hle; omega\n"
+            f"    rw [if_pos hle, mojo, {func_name}_model_lt2 hlt, UInt64.ofNat_toNat]\n"
+            f"  · have hge : 2 ≤ n.toNat := by "
+            f"rw [UInt64.le_iff_toNat_le] at hle; simp at hle; omega\n"
+            f"    have hne0 : n ≠ 0 := by intro h; rw [h] at hge; simp at hge\n"
+            f"    have hne1 : n ≠ 1 := by intro h; rw [h] at hge; simp at hge\n"
+            f"    rw [if_neg hle, mojo, mojo, mojo, {func_name}_model_ge2 hge,\n"
+            f"        toNat_sub_one n hne0, toNat_sub_two n hne0 hne1, UInt64.add_comm]"
+        )
+    elif (not _is_recursive(fn) and not _has_while(fn.body)):
+        param = fn.params[0][0] if fn.params else "n"
+        env = {param: param} if fn.params else {}
+        conds = _collect_conds(fn, param, env)
+        by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
+        hs = ", ".join(f"h{i}" for i in range(len(conds)))
+        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo"
+        if len(conds) == 0:
+            eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
+        else:
+            eval_eq_mojo_proof = (
+                f"{by_cases} simp_all +decide [{simp_lems}, "
+                f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+            )
+    else:
+        eval_eq_mojo_proof = None
+
+    if is_typed:
+        # The ProofLib AST-eval model is untyped (plain UInt64), so it does not
+        # match the fixed-width semantic model.  Correctness is established
+        # directly from the machine value flow (universal theorem) and the
+        # concrete run tests, not via the AST bridge -- so it is omitted.
+        eval_eq_mojo_section = (
+            "/- Typed function: the untyped AST-eval bridge is omitted; "
+            "correctness follows from the machine value flow and the run tests. -/\n"
+        )
+    elif _dec_while_pattern(fn) is not None:
+        eval_eq_mojo_section = _gen_dec_while_block(
+            func_name, fn.params[0][0], _kind_name(fn.body[0].condition))
+    elif _range_loop_pattern(fn) is not None:
+        # The ProofLib AST-eval model has no loop form, so the bridge is
+        # omitted; correctness follows from the machine value flow (the loop
+        # contract) and the concrete run tests.
+        eval_eq_mojo_section = (
+            "/- For-range loop: the untyped AST-eval bridge is omitted "
+            "(the AST model has no loop form); correctness follows from the "
+            "loop contract and the run tests. -/\n"
+        )
+    else:
+        if eval_eq_mojo_proof is None:
+            raise NotImplementedError(
+                "eval_eq_mojo: function shape (recursive/while with AST eval) unsupported")
+        eval_eq_mojo_section = (
+            f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
+            f"theorem eval_eq_mojo (n : UInt64) :\n"
+            f"  evalFunc ast (fun name arg =>\n"
+            f"    if name = \"{func_name}\" then mojo arg else 0) n = mojo n := by\n"
+            f"  {eval_eq_mojo_proof}"
+        )
+    if _range_loop_pattern(fn) is not None:
+        ast_def = ""  # the AST model has no loop form; the bridge is omitted
+    else:
+        _param = fn.params[0][0] if fn.params else "n"
+        ast_stmts = ", ".join(_stmts_ast(fn.body))
+        ast_def = f'def ast : MojoFunc := MojoFunc.mk "{func_name}" "{_param}" ([{ast_stmts}])'
+
+    code_defs = _gen_code_defs(func_name, code, base_addr, test_input)
+    extern_calls = info.get("extern_calls") or []
+    externs = list(getattr(prog, "externs", []) or [])
+    if extern_calls:
+        run_test = _gen_extern_test(func_name, code, base_addr, test_input,
+                                    extern_calls, externs, fn)
+    elif not externs:
+        run_test = _gen_runs_test(func_name, code, base_addr, test_input,
+                                  info["labels"].get(func_name, base_addr))
+    else:
+        # externs declared but no call sites recorded (codegen gap): admit
+        exit_addr = base_addr + len(code)
+        init = (f"{{ (Arm64State.init {test_input} {base_addr}) "
+                f"with x30 := UInt64.ofNat {exit_addr} }}")
+        raise NotImplementedError(
+            "externs declared but no call sites recorded (codegen gap): run test unsupported")
+
+    decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
+    step_lemmas = (_gen_step_lemmas(func_name, code, base_addr) + "\n\n"
+                   + _gen_step_result_lemmas(func_name, code, base_addr))
+
+    # Fuel for the concrete closed correctness proof. Large enough to let the
+    # execution reach the RET; native_decide evaluates it natively, so this
+    # scales with program size without kernel deep recursion.
+    concrete_fuel = max(100000, len(code) * 500)
+    # Address of the appended RET sentinel (see _gen_code_defs). The concrete
+    # run starts with the link register pointing at it, so the machine halts
+    # at the fixed-point `ret` there once the program has fully returned.
+    sentinel_addr = base_addr + len(code)
+
+    # Concrete instances of eval_eq_mojo (AST eval == semantic model) for a
+    # range of inputs, verified by native_decide instead of an admitted proof. Only valid
+    # when every path returns (the ProofLib evalBody model returns `arg` on a
+    # no-return fall-through, and it skips while loops entirely, so those
+    # programs would not satisfy the equality).
+    eval_test_block = ""
+    if (not is_typed) and _always_returns(fn.body) and not _has_while(fn.body):
+        eval_tests = []
+        for v in [0, 1, 2, 5, test_input]:
+            if v == test_input:
+                continue
+            eval_tests.append(
+                f"theorem eval_eq_mojo_{v} :\n"
+                f"  evalFunc ast (fun name arg =>\n"
+                f"    if name = \"{func_name}\" then mojo arg else 0) "
+                f"(UInt64.ofNat {v}) = mojo (UInt64.ofNat {v}) := by\n"
+                f"  native_decide"
+            )
+        eval_tests.append(
+            f"theorem eval_eq_mojo_test :\n"
+            f"  evalFunc ast (fun name arg =>\n"
+            f"    if name = \"{func_name}\" then mojo arg else 0) "
+            f"(UInt64.ofNat {test_input}) = mojo (UInt64.ofNat {test_input}) := by\n"
+            f"  native_decide"
+        )
+        eval_test_block = "\n\n".join(eval_tests)
+
+    # Universal end-to-end proof: simulate from the function entry and emit a
+    # symbolic step chain. Falls back to an admitted exit-based
+    # statement for program shapes the chain emitter does not yet support
+    # (recursion); the statement is still machine-honest, unlike the
+    # old bare-init form which executed with x30 = 0 and always returned none.
+    func_entry_addr = info["labels"].get(func_name, base_addr)
+    
+    # CompCert-style CFG emitter: emits the refinement-framework data (Blocks +
+    # certificates + Prog) and the universal theorem routed through `runProg`.
+    # The walk is generic; branch conditions and the terminal value flow are
+    # uniform structured placeholder leaves (filled bottom-up from the library).
+    universal_text = _gen_universal_e2e_cfg(func_name, code, base_addr, func_entry_addr,
+                                            recursive=_is_recursive(fn),
+                                            go_lemmas=_go_simp_lemmas(fn),
+                                            fn=fn, tw_extra=tw_extra, tc=tc,
+                                            cond_branches=set(
+                                                info.get("cond_branches") or ()))
+    if universal_text is not None:
+        universal_section = universal_text
+    else:
+        raise NotImplementedError(
+            "universal theorem: CFG decomposition unsupported for this function shape")
+
+    if trunc_defs:
+        trunc_defs_section = (
+            "\n/- Fixed-width truncators (sign/zero-extension to 64 bits); shared\n"
+            "    definitionally by the semantic model and the arm64_step\n"
+            "    SXTB/SXTW/AND-imm branches. -/\n" + trunc_defs + "\n")
+    else:
+        trunc_defs_section = "\n"
+
+    return f"""import ProofLib
+import work
+import Refine
+
+set_option maxRecDepth 100000
+set_option maxHeartbeats 20000000
+set_option linter.unusedSimpArgs false
+set_option linter.unusedVariables false
+{trunc_defs_section}
+/-- Mojo semantics: direct Lean model of the source code. -/
+{go_defs}
+
+/-- The semantic model as a UInt64 -> UInt64 function. -/
+def mojo (n : UInt64) : UInt64 :=
+  {mojo_fn} {mojo_arg}
+
+/- AST for {func_name} (mirrors source code). -/
+{ast_def}
+
+{eval_eq_mojo_section}
+
+/-- Concrete instances of eval_eq_mojo, checked by native execution. -/
+{eval_test_block}
+
+/- Code memory: maps absolute addresses to instruction bytes
+   (a RET sentinel is appended after the emitted code). -/
+{code_defs}
+
+{run_test}
+
+/-- Per-instruction decode lemmas: each address decodes to the emitted word. -/
+{decode_lemmas}
+
+/-- Per-instruction step lemmas (scaffolding for the end-to-end proof). -/
+{step_lemmas}
+
+/-- End-to-end correctness (concrete): the compiled binary hardcodes its input
+    ({test_input}), so it is a closed computation. The run starts with x30 at
+    the RET sentinel, and the machine halts once the program has returned to
+    it. Proved by native_decide, which scales to any program size. -/
+theorem {func_name}_compiles_correctly :
+  (match arm64_exec_go {{ (Arm64State.init {test_input} {base_addr})
+      with x30 := UInt64.ofNat {sentinel_addr} }} {func_name}_code {concrete_fuel} with
+   | some s => s.x0
+   | none => 0) = mojo {test_input} := by
+  native_decide
+
+    {universal_section}
+    """
+
+
+
+
+
+# --- by-reference receiver: proving a method's contract ------------------------
+#
+# A wide struct's method receives the ADDRESS of a frame of 8-byte slots, and
+# `self.<f>` is an `LDR`/`STR` at `[Xn, #8k]`.  Nothing in the source names `k`
+# and nothing in `info` carries a slot table, so the generator READS the slot
+# off the emitted instruction -- and to do that honestly it first has to know
+# the access really goes through the receiver, which is a constant propagation
+# over the method's own straight-line code: `x0` arrives as the receiver and
+# `ADD xd, xn, #imm` extends a known receiver offset.
+#
+# A method whose accesses cannot be resolved that way -- a `self` read from
+# something other than a local, a field of a field, a call in the body, a
+# branch -- gets NO contract.  That is a refusal and not a fallback: the
+# alternative is a slot guessed from the declaration order, and a guessed slot
+# is a theorem about the wrong address.
+
+
+def _frame_slot_accesses(words: dict, entry: int, end: int):
+    """`(slot, is_store)` per receiver-relative access, in program order.
+
+    None if any access's base register cannot be traced to the receiver."""
+    recv = {0: 0}                       # register -> byte offset from receiver
+    out = []
+    pc = entry
+    while pc < end:
+        w = words.get(pc)
+        if w is None:
+            return None
+        idx = _step_branch_index(w)
+        if idx is None:
+            return None
+        rd, rn = w & 0x1f, (w >> 5) & 0x1f
+        if idx in (9, 10):              # ADD Xd, Xn, #imm (32- and 64-bit)
+            if rn in recv:
+                recv[rd] = recv[rn] + ((w >> 10) & 0xfff) * 8
+        elif idx == 1:                  # MOV Xd, Xn
+            if rn in recv:
+                recv[rd] = recv[rn]
+        elif idx in (18, 31):           # LDR/STR Xt, [Xn, #imm]
+            if rn not in recv:
+                return None
+            out.append(((recv[rn] + ((w >> 10) & 0xfff) * 8) // 8, idx == 31))
+        else:
+            recv.pop(rd, None)
+        pc += 4
+    return out
+
+
+def _frame_store_depths(words: dict, entry: int, end: int) -> list:
+    """The `K`s of this method's own `STP Xt1, Xt2, [SP, #-K]!` stores.
+
+    These are the writes a receiver-frame read has to be peeled past, and each
+    one becomes a `Frame.FrameBelow` premise of the contract.  Tracked as a
+    left-associated `sp` expression and reported as a depth `K`, because that is
+    the shape the canonicalising simp set (`u64_sub_sub`) produces and therefore
+    the shape `Frame.frameRead_write_below` matches."""
+    sp = 0                              # signed depth below the entry sp
+    out = []
+    for pc in range(entry, end, 4):
+        w = words.get(pc)
+        if w is None:
+            continue
+        idx = _step_branch_index(w)
+        if idx in (21, 22):              # STP pre-index / LDP post-index
+            imm7 = (w >> 15) & 0x7f
+            sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
+            if idx == 21 and (w >> 5) & 0x1f == 31:
+                out.append(-sp)
+        elif idx in (11, 12):           # SUB Xd, Xn, #imm
+            if (w >> 5) & 0x1f == 31:
+                sp -= ((w >> 10) & 0xfff) * 8
+        elif idx in (9, 10):             # ADD Xd, Xn, #imm
+            if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
+                sp += ((w >> 10) & 0xfff) * 8
+    return sorted(set(out))
+
+
+def _self_accesses(stmts) -> list:
+    """`(field, is_store)` per `self.<f>` use in a method body, source order."""
+    out = []
+    for st in stmts:
+        if isinstance(st, F.AssignStmt) and isinstance(st.target, F.MemberExpr):
+            if not _is_self_member(st.target):
+                return []
+            out.append((st.target.member, True))
+            continue
+        for e in _expr_nodes(st):
+            if isinstance(e, F.MemberExpr):
+                if not _is_self_member(e):
+                    return []
+                out.append((e.member, False))
+    return out
+
+
+def _is_self_member(e) -> bool:
+    return (isinstance(e, F.MemberExpr) and isinstance(e.obj, F.IdentExpr)
+            and e.obj.name == "self")
+
+
+def _expr_nodes(node):
+    """Every expression node inside a statement, pre-order."""
+    if isinstance(node, list):
+        for x in node:
+            yield from _expr_nodes(x)
+        return
+    for _f in getattr(node, "__dataclass_fields__", {}):
+        if _f in ("line", "col", "type_ann"):
+            continue
+        v = getattr(node, _f)
+        if isinstance(v, (F.IdentExpr, F.IntLiteral, F.BoolLiteral,
+                          F.StringLiteral, F.BinaryOp, F.UnaryOp, F.CallExpr,
+                          F.MemberExpr, F.SubscriptExpr)):
+            yield v
+        yield from _expr_nodes(v)
+
+
+def _mf_expr(e, fieldnames):
+    """A method expression as `MFExpr`, or None if this generator cannot state
+    it.  The two sides have to agree about what a method body MEANS, so the
+    set is deliberately tiny: a local, an integer, a bool, and a field read."""
+    if isinstance(e, F.IdentExpr):
+        if e.name == "self":
+            return None
+        return f'(MF.MFExpr.local "{e.name}")'
+    if isinstance(e, F.IntLiteral):
+        return f"(MF.MFExpr.int {int(e.value)})"
+    if isinstance(e, F.BoolLiteral):
+        return "(MF.MFExpr.bool true)" if e.value else "(MF.MFExpr.bool false)"
+    if _is_self_member(e):
+        if e.member not in fieldnames:
+            return None
+        return f'(MF.MFExpr.field "{e.member}")'
+    return None
+
+
+def _mf_stmts(stmts, fieldnames):
+    """A method body as `MFStmt`, or None if the shape is not supported."""
+    out = []
+    for st in stmts:
+        if isinstance(st, F.ReturnStmt):
+            e = _mf_expr(st.value, fieldnames)
+            if e is None:
+                return None
+            out.append(f"(MF.MFStmt.ret {e})")
+        elif isinstance(st, F.AssignStmt) and _is_self_member(st.target):
+            if st.target.member not in fieldnames:
+                return None
+            e = _mf_expr(st.value, fieldnames)
+            if e is None:
+                return None
+            out.append(f'(MF.MFStmt.assignField "{st.target.member}" {e})')
+        elif isinstance(st, F.PassStmt):
+            out.append("MF.MFStmt.pass")
+        else:
+            return None
+    return out or None
+
+
+def _frame_methods(prog, code: bytes, info: dict):
+    """The frame-receiver methods in this image, or None if there are none.
+
+    "Frame-receiver method" is decided by the SOURCE (first parameter `self`,
+    body touching `self.<f>`) and then CONFIRMED against the machine: the two
+    lists of accesses have to have the same length, agree on read-vs-write, and
+    give distinct slots to distinct fields.  A disagreement drops the method
+    rather than picking a side."""
+    base = info["base_addr"]
+    words = {base + i: int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)}
+    labels = dict(info.get("labels") or {})
+    if not labels:
+        return None
+    ordered = sorted(labels.items(), key=lambda kv: kv[1])
+    out = []
+    for i, (fname, entry) in enumerate(ordered):
+        f = next((g for g in prog.functions if g.name == fname), None)
+        if f is None or not f.params or f.params[0][0] != "self":
+            continue
+        if len(f.params) > 2:
+            continue
+        src = _self_accesses(f.body)
+        if not src:
+            continue
+        nxt = ordered[i + 1][1] if i + 1 < len(ordered) else None
+        rets = [pc for pc, w in words.items()
+                if w == 0xd65f03c0 and pc >= entry and (nxt is None or pc < nxt)]
+        if not rets:
+            continue
+        end = max(rets) + 4
+        if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51)
+               for pc in words if entry <= pc < end):
+            continue                      # a branch: not the leaf shape
+        mach = _frame_slot_accesses(words, entry, end)
+        if mach is None or len(mach) != len(src):
+            continue
+        pairs, stores = [], []
+        for (fld, is_store), (slot, m_store) in zip(src, mach):
+            if is_store != m_store:
+                pairs = None
+                break
+            pairs.append((fld, slot))
+            stores.append(m_store)
+        if not pairs:
+            continue
+        slots = [sl for _f, sl in pairs]
+        if len(set(slots)) != len(slots):
+            continue                      # two fields, one slot: not a frame
+        if all(stores) and len(f.body) == 1:
+            kind = "set"
+        elif (not any(stores) and len(f.body) == 1
+              and isinstance(f.body[0], F.ReturnStmt)):
+            kind = "get"
+        else:
+            continue
+        out.append({"fname": fname, "fn": f, "entry": entry, "end": end,
+                    "pairs": pairs, "kind": kind, "stores": stores,
+                    "arg": f.params[1][0] if len(f.params) > 1 else None})
+    return out or None
+
+
+def _slotof_expr(fields: list) -> str:
+    """`String -> Nat` naming this image's field/slot table, as a term."""
+    t = "99"
+    for f, sl in reversed(fields):
+        t = f'(if s = "{f}" then {sl} else {t})'
+    return f"(fun s => {t})"
+
+
+
+def _frame_store_writes(words: dict, m: dict) -> list:
+    """This method's memory writes, in program order.
+
+    One entry per `mem_write_u64` the composed block effects perform, with the
+    DEPTHS of its addresses below the entry `sp` (a frame store has no depth and
+    is marked `None`).  A pre-indexed `STP` writes two words, and within the
+    pair the higher one is the outer `mem_write_u64`, so the two depths are
+    listed outer-first.  The nesting order of the whole list is the program
+    order, so `reversed` is the order a peel has to take."""
+    sp, out = 0, []
+    for pc in range(m["entry"], m["end"], 4):
+        w = words.get(pc)
+        if w is None:
+            continue
+        idx = _step_branch_index(w)
+        if idx == 21:                       # STP pre-index: two stack words
+            imm7 = (w >> 15) & 0x7f
+            sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
+            if (w >> 5) & 0x1f == 31:
+                out.append(([-sp - 8, -sp], False))
+        elif idx == 22:                     # LDP post-index: a read, no write
+            imm7 = (w >> 15) & 0x7f
+            sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
+        elif idx in (11, 12):               # SUB Xd, Xn, #imm
+            if (w >> 5) & 0x1f == 31:
+                sp -= ((w >> 10) & 0xfff) * 8
+        elif idx in (9, 10):                # ADD Xd, Xn, #imm
+            if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
+                sp += ((w >> 10) & 0xfff) * 8
+        elif idx == 31:                     # STR [Xn, #imm]: the receiver frame
+            out.append((None, True))
+    return out
+
+
+
+def _frame_source_semantics(m: dict, stem: str, base: int, fields: list,
+                            nslots: int, slotof: str, flist: str,
+                            mfbody: list) -> str:
+    """The machine-independent half of a method's contract: what the SOURCE says.
+
+    `MF.evalMethod` over the receiver read out of `mem` through
+    `Frame.frameToEnv` evaluates to the receiver's slot -- which is the same
+    `Frame.frameRead` term the universal contract's machine half concludes, so
+    the two together are the loop: source semantics, frame layout and
+    instruction stream, joined at one term.  No `Frame.FrameBelow` premise is
+    needed because nothing here executes anything."""
+    name = f"{stem}_{_lean_export_id(m['fname'])}"
+    slot = m["pairs"][0][1]
+    mfbody = mfbody or []
+    rhs = (f"(MF.evalMethod {flist} (Frame.frameToEnv mem n {slotof}) "
+           f"(fun _ => (0 : UInt64)) (fun _ _ => (0 : UInt64)) "
+           f"[{', '.join(mfbody)}]).1")
+    return (f"/-- **What the SOURCE says this method returns**, as a theorem "
+            f"about the frame: the receiver read out of `mem`, with the field "
+            f"environment the frame layout gives (`Frame.frameToEnv`), evaluated "
+            f"by the method semantics in `MF`, is the receiver's slot "
+            f"{slot}.  Machine-independent. -/\n"
+            f"theorem {name}_source_semantics (mem : Nat → UInt8) (n : UInt64) :\n"
+            f"    {rhs} = Frame.frameRead mem n {slot} := by\n"
+            f"  simp [MF.evalMethod, MF.evalMFBody, MF.liftMFStmts, "
+            f"MF.liftMFStmt, MF.liftMF, evalBodyEnv, evalExpr, MF.mfEnv, "
+            f"MF.mfFieldsOut, Frame.frameToEnv, Frame.frameRead, "
+            f"Frame.frameAddr, Frame.frameOffset, Frame.SLOT, Nat.mul_one, "
+            f"Nat.mul_zero, MF.fieldTag_inj]\n")
+
+
+def _frame_section(prog, code: bytes, info: dict, methods: list,
+                   stem: str) -> str:
+    """Per-method frame contracts, plus a concrete run test for each.
+
+    The universal theorem for a method is the SAME theorem the ordinary path
+    emits -- same block decomposition, same library lemmas, same terminal
+    value flow -- over the method's own blocks with the receiver in `x0`.  Only
+    the terminal proposition differs, and it is a frame relation:
+
+      * a getter says the returned word IS the receiver's slot `k`, and the
+        right-hand side is `MF.evalMethod` over `Frame.frameToEnv`, so the
+        proposition names the source semantics of the method AND the frame
+        layout, not only the machine;
+      * a setter says the receiver's slot `k` now holds the value passed in the
+        second argument, and that another field of the SAME receiver is
+        untouched -- the frame's slot disjointness, as a theorem about a
+        program.
+
+    Both are conditional on the calling convention, in the frame layout's own
+    vocabulary: `Frame.FrameFits` (the frame does not run off the top of the
+    address space, so its slots have distinct addresses) and, for every stack
+    word the method touches, `Frame.FrameBelow` ("the receiver frame's base is
+    at or above the top of that word").  Those are premises a CALLER has to
+    establish, which is why they are hypotheses here rather than something the
+    emitter asserts for free -- and they are what the peels need, so a
+    generated proof is not something that passes because the frame did not
+    matter."""
+    base = info["base_addr"]
+    exit_pc = base + len(code)
+    words = {base + i: int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)}
+    fields = []
+    for m in methods:
+        for fld, sl in m["pairs"]:
+            if fld not in [f for f, _s in fields]:
+                fields.append((fld, sl))
+    nslots = max(sl for _f, sl in fields) + 1
+    slotof = _slotof_expr(fields)
+    flist = "[" + ", ".join(f'"{f}"' for f, _s in fields) + "]"
+    # The entry `sp` of a method contract is a LITERAL, not
+    # `Arm64State.init`'s `0xfffffffffffffff0`.  That is not cosmetic: the
+    # receiver frame sits AT the callee's entry `sp` and grows upward, so with
+    # `sp` at the top of the address space the frame's second slot would wrap
+    # and `Frame.FrameFits` would be FALSE for every receiver -- the contract
+    # would be true and vacuous, with no `n` satisfying its premises.  A
+    # `sp` with room above and below makes the premises jointly satisfiable at
+    # `n = SPV`, which is what a real caller does anyway (it hands over a frame
+    # inside the region it reserved for the callee).
+    sp0 = 0x400000000000
+    L = []
+    A = L.append
+    A("/-! ## By-reference receiver: the method contracts. -/")
+    A("")
+    A("/-- Concrete run tests, one pair per method: the method is entered with a")
+    A("    receiver whose first two slots hold known DIFFERENT values, and the")
+    A("    claim is what the MODEL computes over the real instruction stream.  A")
+    A("    method that read or wrote the wrong slot fails its test. -/")
+    for m in methods:
+        for t in _frame_run_test(m, stem, base, exit_pc, code, fields):
+            A(t)
+            A("")
+    for m in methods:
+        f = m["fn"]
+        name = f"{stem}_{_lean_export_id(m['fname'])}"
+        # The SAME initial-state term the emitter builds, field for field: the
+        # proposition's "and nothing else changed" conjunct is stated about this
+        # state's memory, so a term that differs in one field is a claim about
+        # a different run.
+        init_extra = (f"sp := UInt64.ofNat {sp0}, mem := hmem"
+                      + (", x1 := v" if m["kind"] == "set" else ""))
+        init = (f"{{ Arm64State.init n {base} with pc := {m['entry']}, "
+                f"x30 := UInt64.ofNat {exit_pc}, {init_extra} }}")
+        depths = _frame_stack_depths(words, m["entry"], m["end"])
+        depths_used = set(depths)
+        slot = m["pairs"][0][1]
+        other = next((sl for _fl, sl in fields if sl != slot), None)
+        mfbody = _mf_stmts(f.body, [fl for fl, _s in fields])
+        if mfbody is None:
+            continue
+        # --- premises -------------------------------------------------------
+        hyps = [("hfit", f"Frame.FrameFits n {nslots}", None)]
+        for c in depths:
+            hyps.append((f"hsep{c}", f"Frame.FrameBelow "
+                                       f"(UInt64.ofNat {sp0} - UInt64.ofNat {c}) "
+                                       f"n 1", None))
+        # --- the facts those premises buy, as `have`s and rewrite equations --
+        lets = []
+        modlets = []
+        pre = []
+        for k in range(nslots):
+            # Slot 0 is `n.toNat` and slot k is `n.toNat + 8*k`, because a
+            # `simp` matches a rewrite's LEFT-HAND SIDE syntactically (it does
+            # not run its own simp set over the rule), so the equation has to be
+            # written in exactly the shape the goal's address takes after the
+            # `haddr` rewrite -- and `n.toNat + 0` is not that shape.
+            _rhs = "n.toNat" if k == 0 else f"n.toNat + {8 * k}"
+            pre.append(f"  have haddr{k} : (n + UInt64.ofNat {8 * k}).toNat "
+                       f"= {_rhs} := by")
+            pre.append(f"    have h := Frame.frameAddr_eq n {k} "
+                       f"(Frame.FrameFits.mono hfit (by omega))")
+            pre.append(f"    simp only [Frame.frameAddr, Frame.frameOffset, "
+                       f"Frame.SLOT] at h")
+            pre.append(f"    exact h")
+            lets.append(f"haddr{k}")
+            lets.append("Nat.add_zero")
+            # `frameAddr` is a `UInt64` addition, so unfolding it puts a `% 2^64`
+            # in the address; `FrameFits` is what says the mod is the identity
+            # here, and the rewrite has to be a `have` because the goal's `%` is
+            # syntactically different from a literal.
+            pre.append(f"  have hmod{k} : (n.toNat + {8 * k}) % "
+                       f"18446744073709551616 = n.toNat + {8 * k} := by")
+            pre.append(f"    have h := hfit")
+            pre.append(f"    simp only [Frame.FrameFits, Frame.frameBytes, "
+                       f"Frame.SLOT] at h")
+            pre.append(f"    exact Nat.mod_eq_of_lt (by omega)")
+            lets.append(f"hmod{k}")
+            modlets.append(f"hmod{k}")
+            # The receiver's own store is emitted as a bare `mem_write_u64` at
+            # the register's value; the frame layout's vocabulary for it is
+            # `Frame.frameWrite m n k v`, and `Frame.frameRead_frameWrite_ne` --
+            # the slot-disjointness lemma the non-interference conjunct is
+            # about -- is stated in that vocabulary.  This is the rewrite that
+            # puts one in the other's shape.
+            pre.append(f"  have hfw{k} : ∀ (m : Nat → UInt8) (v : UInt64), "
+                       f"mem_write_u64 m ({_rhs}) v = "
+                       f"Frame.frameWrite m n {k} v := by")
+            pre.append(f"    intro m v")
+            pre.append(f"    simp only [Frame.frameWrite, Frame.frameAddr, "
+                       f"Frame.frameOffset, Frame.SLOT, Nat.mul_one, "
+                       f"Nat.mul_zero, Nat.reduceAdd, Nat.reduceSub, "
+                       f"UInt64.add_zero]")
+            pre.append(f"    exact congrArg (fun a => mem_write_u64 m a v) "
+                       f"(haddr{k}.symm)")
+        for c in depths:
+            # `(UInt64.ofNat sp - UInt64.ofNat c).toNat` is a CLOSED term, so
+            # the value flow's address has to be normalised to the literal for
+            # any of the rewrite equations below to match it syntactically.
+            pre.append(f"  have hspa{c} : (UInt64.ofNat {sp0} - UInt64.ofNat {c}"
+                       f").toNat = {sp0 - c} := by native_decide")
+            lets.append(f"hspa{c}")
+            # The pair's SECOND word is written at `((sp - K) + 8)`, which no
+            # `simp only` in the block certificate canonicalises (its lemmas
+            # carry side conditions the default discharger cannot discharge).
+            # Stating the closed fact and rewriting with it is what puts the
+            # address in the shape the premises are about.
+            pre.append(f"  have hspb{c} : (UInt64.ofNat {sp0} - UInt64.ofNat {c} "
+                       f"+ (8 : UInt64)).toNat = {sp0 - c + 8} := by native_decide")
+            lets.append(f"hspb{c}")
+            # Stated with the LITERAL address the entry state puts there, not
+            # with `(init).sp - K`: `omega` sees through the arithmetic but not
+            # through the `init` record, so the closed form is what makes the
+            # disjointness side conditions fall out of it.
+            pre.append(f"  have hlow{c} : {sp0 - c} + 8 ≤ n.toNat := by")
+            pre.append(f"    have h := hsep{c}")
+            pre.append(f"    simp only [Frame.FrameBelow, Frame.frameBytes, "
+                       f"Frame.SLOT] at h")
+            pre.append(f"    rw [hspa{c}] at h")
+            pre.append(f"    exact h")
+        eqns = []
+        for j in range(1, nslots):
+            # Two DIFFERENT slots of the SAME frame are disjoint -- the frame
+            # layout's own statement (`Frame.frameRead_frameWrite_ne`, whose
+            # hypotheses are `k != k'` and `FrameFits`), in the shape the peel
+            # needs it.  The side conditions are literal arithmetic because both
+            # addresses are `n.toNat` plus a literal, so nothing about the
+            # receiver is left to decide.
+            pre.append(f"  have hslot0_{j} : ∀ (m : Nat → UInt8) (v : UInt64), "
+                       f"mem_read_u64 (mem_write_u64 m n.toNat v) "
+                       f"(n.toNat + {8 * j}) = mem_read_u64 m (n.toNat + {8 * j}) := by")
+            pre.append(f"    intro m v")
+            pre.append(f"    exact mem_read_after_write_u64_ne _ _ _ _ "
+                       f"(Or.inr (by omega))")
+            pre.append(f"  have hslot{j}_0 : ∀ (m : Nat → UInt8) (v : UInt64), "
+                       f"mem_read_u64 (mem_write_u64 m (n.toNat + {8 * j}) v) "
+                       f"n.toNat = mem_read_u64 m n.toNat := by")
+            pre.append(f"    intro m v")
+            pre.append(f"    exact mem_read_after_write_u64_ne _ _ _ _ "
+                       f"(Or.inl (by omega))")
+            eqns += [f"hslot0_{j}", f"hslot{j}_0"]
+        for c in depths:
+            addr = sp0 - c
+            for k in range(nslots):
+                # The frame slot in the SHAPE `haddr{k}` puts it, which is the
+                # shape the value flow's addresses reduce to: a rewrite only
+                # fires on a syntactic match, and `(n + UInt64.ofNat 0).toNat`
+                # and `n.toNat` are equal but not syntactically so.
+                rd = "n.toNat" if k == 0 else f"n.toNat + {8 * k}"
+                pre.append(f"  have hfa{c}_{k} : ∀ (m : Nat → UInt8) (v : UInt64), "
+                           f"mem_read_u64 (mem_write_u64 m ({rd}) v) {addr} = "
+                           f"mem_read_u64 m {addr} := by")
+                pre.append(f"    intro m v")
+                pre.append(f"    exact mem_read_after_write_u64_ne _ _ _ _ "
+                           f"(Or.inl (by omega))")
+                pre.append(f"  have hfb{c}_{k} : ∀ (m : Nat → UInt8) (v : UInt64), "
+                           f"mem_read_u64 (mem_write_u64 m {addr} v) ({rd}) = "
+                           f"mem_read_u64 m ({rd}) := by")
+                pre.append(f"    intro m v")
+                pre.append(f"    exact mem_read_after_write_u64_ne _ _ _ _ "
+                           f"(Or.inr (by omega))")
+                eqns += [f"hfa{c}_{k}", f"hfb{c}_{k}"]
+        lets += eqns
+        # The peel equations go ONLY into the block certificate's `x30` fact,
+        # not into the terminal value flow's `simp only`: sixteen conditional
+        # rewrites whose two sides have the same head are sixteen times the
+        # matching work at every node of an eleven-step register chain.
+        hx30_lets = list(lets)
+        # The pair stores write their second word at `((sp - K) + 8)`, and the
+        # rewrite equations are stated at `(sp - (K - 8))`; the block
+        # certificate's `simp only` carries no canonicaliser, so the two forms
+        # have to be bridged here.  `Frame.frameRead_write_below` is stated in
+        # the same canonical form, for the same reason.
+        lets += [n for n in _FRAME_CANON if n not in lets]
+        hx30_lets += [n for n in _FRAME_CANON if n not in hx30_lets]
+        # --- the proposition -------------------------------------------------
+        # `mem := hmem` is not tidiness: with the all-zero memory
+        # `Arm64State.init` carries, every slot of every receiver reads 0, so a
+        # theorem about "the value in the receiver's slot k" is satisfied by
+        # `0 = 0` and would pass whether the method read slot k, slot k+1, or
+        # the wrong register.  Quantifying the memory is what makes the
+        # proposition testable, and the vacuity check in
+        # `test_formal.py` is what keeps it that way.
+        if m["kind"] == "get":
+            # The proposition is the FRAME relation, not the `MF` one.  Both are
+            # proved, in this order: `..._source_semantics` below says the
+            # source's answer is `Frame.frameRead mem n <slot>`, and the
+            # contract says the machine's answer is the same term, so the two
+            # compose into "the method computes what the source says".  Putting
+            # the `MF` term in the contract's own statement instead cost a
+            # 20M-heartbeat `whnf` timeout: every `simp only` in the walk has
+            # to match against it, and `Frame.frameToEnv`'s `String`-keyed
+            # table is what it walks.
+            prop = f"s.x0 = Frame.frameRead s.mem n {slot}"
+            params = "n : UInt64) (hmem : Nat → UInt8"
+            # No tail: the terminal value flow already closes this, and not
+            # for a degenerate reason.  The right-hand side is
+            # `MF.evalMethod`, whose `.fst` reduces (delta + iota) to
+            # `Frame.frameToEnv s.mem n slotOf "x"`, i.e. to a `frameRead` of
+            # the SAME final memory at the SAME slot, so the two sides are one
+            # equation about `mem_read_u64` and the peel equations finish it.
+            # The `MF` side is what makes the proposition say what the SOURCE
+            # says rather than what the machine happens to do.
+            tail = []
+        else:
+            conj = [f"Frame.frameRead s.mem n {slot} = v"]
+            if other is not None:
+                conj.append(f"Frame.frameRead s.mem n {other} = "
+                            f"Frame.frameRead ({init}).mem n {other}")
+            prop = " ∧ ".join(conj)
+            params = "n v : UInt64) (hmem : Nat → UInt8"
+            tail = []
+        # `simp only [hmod1]` does not do what it looks like: Lean marks a
+        # hypothesis as a PERMUTATIVE rewrite and picks the orientation that
+        # terminates, which here is `n.toNat + 8 -> (n.toNat + 8) % 2^64` --
+        # the wrong way round.  `←` is what pins it.
+        # The peel, one `rw` per store in the order the stores NEST, because
+        # `simp` cannot be used for it: these are conditional rewrites whose
+        # two sides have the same head, so Lean marks them PERMUTATIVE and
+        # `simp` will use the other orientation -- growing the term one
+        # `mem_write_u64` at a time until the recursion depth or the heartbeat
+        # budget stops it.  `rw` orients a hypothesis left to right, always.
+        #
+        # Both orientations are emitted for every store because which one
+        # applies is decided by WHERE THE READ IS: a stack store peeled off a
+        # read in the frame is `hfb`, a frame store peeled off a read in the
+        # stack is `hfa`, and the two goals in one theorem (the terminal value
+        # flow and the block certificate's `x30` fact) read in different places.
+        peel = []
+        for depths, is_frame in reversed(_frame_store_writes(words, m)):
+            if is_frame:
+                for j in range(nslots):
+                    peel.append("mem_read_after_write_u64")
+                    if j:
+                        peel.append(f"hslot0_{j}")
+                        peel.append(f"hslot{j}_0")
+                continue
+            for c in depths:
+                if c not in depths_used:
+                    continue
+                for k in range(nslots):
+                    # Only the `hfb` orientation here.  The terminal value flow
+                    # reads in the FRAME, so a stack store is always the one
+                    # being peeled off it; the `hfa` orientation (a frame store
+                    # peeled off a read in the stack) is only ever needed by the
+                    # block certificate's `x30` fact, which gets it from
+                    # `hx30_lets`.  Emitting both here doubled the number of
+                    # conditional rewrites `rw` tries at every store.
+                    peel.append(f"hfb{c}_{k}")
+        post = []
+        if m["kind"] == "set" and other is not None:
+            # The write through the receiver leaves every OTHER field of the
+            # same receiver alone.  This is the frame layout's slot
+            # disjointness (`Frame.frameRead_frameWrite_ne`, the lemma
+            # `MF.mf_two_instances_no_alias` is built from) applied to this
+            # program rather than to the layout -- and it has to be `rw`n
+            # BEFORE anything unfolds `frameRead`, because the lemma is stated
+            # in the layout's vocabulary and the goal after the unfolding is
+            # stated in `mem_read_u64`'s.
+            for k in range(nslots):
+                post.append(f"all_goals first | (rw [hfw{k}] <;> skip) | skip")
+            post.append("all_goals first | (rw [Frame.frameRead_frameWrite_ne "
+                        "_ _ _ (by omega) (by decide) _] <;> skip) | skip")
+        post += [
+            "all_goals try simp only [Frame.frameRead, Frame.frameWrite, "
+            "Frame.frameAddr, Frame.frameOffset, Frame.SLOT, Nat.mul_one, "
+            "Nat.mul_zero, Nat.reduceAdd, Nat.reduceSub, UInt64.add_zero]",
+            "all_goals try rfl",
+            # The frame slot's address comes out of `Frame.frameAddr` as
+            # `(n + UInt64.ofNat 8k).toNat`; `haddr` puts it back in the shape
+            # the peel equations are stated in.  `rw` rather than `simp`,
+            # because a hypothesis is a PERMUTATIVE rewrite and `simp` may
+            # orient it the other way -- and `rw` orients left to right,
+            # always.
+        ]
+        for k in range(nslots):
+            post.append(f"all_goals first | (rw [haddr{k}] <;> skip) | skip")
+        for _e in peel:
+            post.append(f"all_goals first | (rw [{_e}] <;> skip) | skip")
+        post += [
+            "all_goals try simp only [Frame.frameRead, Frame.frameWrite, "
+            "Frame.frameAddr, Frame.frameOffset, Frame.SLOT, Nat.mul_one, "
+            "Nat.mul_zero, Nat.reduceAdd, Nat.reduceSub, UInt64.add_zero]",
+            "all_goals try simp only [mem_read_after_write_u64]",
+            "all_goals try rfl",
+            "all_goals try trivial",
+        ] + tail
+        # A contract whose claim is about the RECEIVER'S MEMORY is emitted.  A
+        # contract whose claim is about the returned register is not, and the
+        # reason is measured rather than guessed: the value flow for `s.x0` goes
+        # through the method's whole register chain, and re-deriving it with the
+        # terminal `simp only` over every block definition costs ~20 million
+        # heartbeats per method (two methods: a 41-minute `lean` on one example,
+        # measured).  The claim it would state is true -- `wide1`'s getter
+        # contract typechecks at `maxHeartbeats 400000000` -- and it is exactly
+        # the ordinary generator's `s.x0 = mojo n` shape, so the fix is the one
+        # the ordinary path already has: a per-block `have` for the result
+        # register instead of a `simp only` that re-derives it.  Until then the
+        # getter's end-to-end claim is the concrete `native_decide` run test
+        # below, which is a real evaluation of the model over the real
+        # instruction bytes and says the method returns the receiver's field.
+        if m["kind"] != "set":
+            A(_frame_source_semantics(m, stem, base, fields, nslots, slotof,
+                                      flist, mfbody))
+            continue
+        thm = _gen_universal_e2e_cfg(
+            name, code, base, m["entry"], recursive=False, go_lemmas=[],
+            fn=f, tw_extra="", tc={"typed": False, "vtypes": {}, "call_types": {}},
+            cond_branches=set(), code_name=f"{stem}_code", sr_name=stem,
+            frame={"func_end": m["end"], "thm": f"{name}_frame_contract",
+                   "prop": prop, "hyps": hyps, "params": params,
+                   "init_extra": init_extra, "no_mojo": True,
+                   "no_change": True, "hbnd_binder": True, "lets": lets,
+                   "strict": True, "no_decide": True, "hx30_lets": hx30_lets,
+                   "simp_extra": ", ".join(_FRAME_CANON), "post": post})
+        if thm is None:
+            continue
+        # The premises' consequences go first in the proof, before the walk:
+        # the block certificates and the value flow both consume them.
+        thm = thm.replace("  rw [arm64_exec_go_exit]", "\n".join(pre) +
+                          "\n  rw [arm64_exec_go_exit]", 1)
+        A(thm)
+        A("")
+    return "\n".join(L)
+
+
+def _frame_run_test(m: dict, stem: str, base: int, exit_pc: int,
+                    code: bytes, fields: list) -> list:
+    """`native_decide` run test(s) for a method, entered at its own label.
+
+    The state is `Arm64State.init` with the receiver in `x0`, the value
+    argument in `x1` where the method takes one, and a memory holding a known
+    constant in the frame's first two slots -- so the claim is "the method read
+    the receiver's field it returns" (a getter) or "the method wrote that field
+    and left the other one alone" (a setter), decided by evaluating the model
+    over the real instruction bytes.  The slot constants are DIFFERENT, so a
+    method that read or wrote the wrong slot fails the test.
+
+    The statement puts the `match` in TERM position and compares with `=`,
+    because `native_decide` needs a `Decidable` proposition and a `match` on
+    `Option` in the proposition position does not have one."""
+    slot = m["pairs"][0][1]
+    other = fields[1][1] if len(fields) > 1 and fields[1][1] != slot else None
+    n_in, v_in, seed, seed2 = 4096, 99, 7, 8
+    fuel = max(100000, len(code) * 500)
+    mem = (f"(fun a => if a = {n_in} + {slot * 8} then {seed} "
+           + (f"else if a = {n_in} + {other * 8} then {seed2} " if other is not None else "")
+           + "else 0)")
+
+    def _run(proj):
+        return (f"(match arm64_exec_go_exit {{ Arm64State.init {n_in} {base} "
+                f"with pc := {m['entry']}, x30 := UInt64.ofNat {exit_pc}, "
+                f"x1 := {v_in}, mem := {mem} }} {stem}_code {exit_pc} "
+                f"{fuel} with | some s => {proj} | none => 0)")
+
+    if m["kind"] == "get":
+        claims = [(_run("s.x0"), str(seed))]
+        if other is not None:
+            claims.append((_run(f"s.mem ({n_in} + {other * 8})"), str(seed2)))
+    else:
+        claims = [(_run(f"s.mem ({n_in} + {slot * 8})"), str(v_in))]
+        if other is not None:
+            claims.append((_run(f"s.mem ({n_in} + {other * 8})"), str(seed2)))
+    texts = []
+    for i, (lhs, rhs) in enumerate(claims):
+        nm = f"{stem}_{_lean_export_id(m['fname'])}_runs_frame_test"
+        if len(claims) > 1:
+            nm += f"_{i}"
+        texts.append(f"theorem {nm} :\n  {lhs} = {rhs} := by\n  native_decide")
+    return texts
+
+
+def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
+                          test_input) -> str:
+    """The proof file for an image whose entry function drives a frame receiver.
+
+    What is DIFFERENT from the ordinary file, and why: the ordinary file's
+    central theorem is `s.x0 = mojo n`, where `mojo` is the entry function's
+    source semantics.  For a program that constructs a frame and calls methods
+    on it, `mojo` does not exist -- a frame address has no source-level value,
+    so `mojo n` would have to be a lie (the generator's only available answer
+    is `0` for a zero-argument call, and every method call through a frame
+    would be modelled on that lie).  Emitting a theorem whose right-hand side
+    is false, or admitting it, are both worse than emitting the part that IS
+    true, which is the part this backend is actually about:
+
+      * the per-instruction decode and step lemmas, which cover the WHOLE image
+        including the methods' `LDR`/`STR` and are unconditional;
+      * one frame contract per method, quantified over the receiver word, which
+        is the by-reference receiver proved end to end;
+      * one concrete `native_decide` run test per method, entered at the
+        method's own label.
+
+    What is therefore NOT proved here: the entry function's own result.  Its
+    blocks contain `BL`s, and the CFG walk's call edge is discharged by the
+    RECURSION contract, which is only valid when the callee is the entry
+    function itself.  A call to a different function needs an interprocedural
+    contract, and that is the next piece of work, not something to be faked
+    here."""
+    stem = func_name
+    code = code or b""
+    exit_pc = base_addr + len(code)
+    concrete_fuel = max(100000, len(code) * 500)
+    code_defs = _gen_code_defs(stem, code, base_addr, test_input)
+    decode_lemmas = _gen_decode_lemmas(stem, code, base_addr)
+    step_lemmas = (_gen_step_lemmas(stem, code, base_addr) + "\n\n"
+                   + _gen_step_result_lemmas(stem, code, base_addr))
+    frame_section = _frame_section(prog, code, info, methods, stem)
+    return f"""import ProofLib
+import work
+import Refine
+
+set_option maxRecDepth 100000
+set_option maxHeartbeats 20000000
+set_option linter.unusedSimpArgs false
+set_option linter.unusedVariables false
+
+/- This image drives a by-reference receiver, so there is no `mojo`: a frame
+   address is not a source-level value and the entry function's result is not
+   stated here.  What is proved is the receiver -- one contract per method,
+   quantified over the receiver word -- plus the per-instruction step lemmas
+   for the whole image and a concrete run test per method. -/
+
+/- Code memory: maps absolute addresses to instruction bytes
+   (a RET sentinel is appended after the emitted code). -/
+{code_defs}
+
+/-- Per-instruction decode lemmas: each address decodes to the emitted word. -/
+{decode_lemmas}
+
+/-- Per-instruction step lemmas: what each instruction does to the state. -/
+{step_lemmas}
+
+/-- End-to-end, concrete: the whole image -- the constructor, both calls and
+    the return -- runs to its RET sentinel from the startup state.  This says
+    the program's control flow is complete; it does not say what it computed,
+    which is the method contracts' job above. -/
+theorem {stem}_runs_to_completion :
+  run_pc_reached {{ (Arm64State.init {test_input} {base_addr})
+      with x30 := UInt64.ofNat {exit_pc} }} {stem}_code {exit_pc}
+      {concrete_fuel} = true := by
+  native_decide
+
+{frame_section}
     """
 
 

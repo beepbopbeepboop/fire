@@ -1086,6 +1086,306 @@ def test_a_public_generic_is_not_reported_as_private(tmpdir, _shared):
           f"two public declarations were reported as one: {reason}")
 
 
+# ── wave 5 (E1): the messages must name the rule, not guess at it ────────────
+#
+# The three guards above were written as `expect=` markers because the defects
+# were live, and they started reporting "marked expect=… but it PASSES" the
+# moment the messages were corrected. What is below is the OTHER direction: it
+# pins the CONTENT of the corrected messages, because a `refuse:`-style
+# assertion ("does not say X") is satisfied by any rewording at all, including a
+# less informative one.
+
+
+def test_a_clib_defined_name_is_reported_as_a_definition(tmpdir, _shared):
+    """A module whose only name is a C library symbol says so, and says the
+    hazard: the file DEFINES the name.
+
+    The `_CLIB_SYMS` exclusion is right for a CALL — the symbol is already
+    reachable with `dlsym` out of the system dylibs — and wrong for a
+    DEFINITION, which is what `std/sys/terminate.mojo` does: it defines `exit`.
+    If that module also exported one other symbol, an importer's `exit()` would
+    bind libSystem's, silently, with no diagnostic. A message that only says
+    "it is a C library symbol" leaves the reader with the benign half of the
+    rule and none of the dangerous one, so both halves are asserted here."""
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "clib_defined.mojo")
+    with open(path, "w") as f:
+        f.write("def strlen(s: String) -> Int:\n  return 1\n")
+    reason = no_public_api_reason([path])
+    check("C library symbol" in reason,
+          f"the refusal does not name the rule that excluded the only symbol: "
+          f"{reason}")
+    check("strlen" in reason,
+          f"the refusal does not name the symbol: {reason}")
+    check("DEFINES the name" in reason,
+          f"the refusal does not say the module DEFINES the C library symbol it "
+          f"is excluded for, which is the half of the rule that is wrong here "
+          f"and the only half with a consequence: {reason}")
+
+
+def test_the_fallthrough_names_a_rule_for_each_public_name(tmpdir, _shared):
+    """A module with a concrete public function is told WHICH rule excluded each
+    of its names, and the two rules are told apart.
+
+    The old fall-through was unconditional and read "every declaration in it is
+    private (a leading `_`)", so it fired on every module the four named
+    branches did not cover and named a privacy rule that had never been
+    applied. This reproducer has one public name the C-library rule excludes and
+    one the template rule excludes, so a single-rule message cannot satisfy it
+    — which is what makes it a test of the content rather than of the absence
+    of the old sentence."""
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "two_rules.mojo")
+    with open(path, "w") as f:
+        f.write("def strlen(s: String) -> Int:\n  return 1\n\n"
+                "def widen[T: Copyable](x: T) -> T:\n  return x\n")
+    reason = no_public_api_reason([path])
+    check("strlen" in reason and "C library symbol" in reason,
+          f"the C-library rule is not named for the name it excludes: {reason}")
+    check("widen" in reason and "GENERIC template" in reason,
+          f"the template rule is not named for the name it excludes: {reason}")
+    check("is private" not in reason,
+          f"a module with a public declaration was told its declarations are "
+          f"private: {reason}")
+
+
+def test_a_clib_only_module_does_not_reach_the_per_name_fallthrough(
+        tmpdir, _shared):
+    """GUARD: a module whose every public name is a C library symbol takes the
+    DEDICATED branch, not the generic per-name one.
+
+    Before this change there was no such branch, so a `def strlen` module fell
+    all the way through to the privacy sentence. The dedicated branch says
+    something the per-name list cannot — that the module DEFINES the name — and
+    this is what keeps it reachable now that the fall-through can enumerate
+    C-library names too. Without it, the fifth branch could be deleted and
+    every case above would still pass."""
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "clib_only.mojo")
+    with open(path, "w") as f:
+        f.write("def strlen(s: String) -> Int:\n  return 1\n")
+    reason = no_public_api_reason([path])
+    check(reason.startswith("formal dylib has no public functions: "
+                            "clib_only.mojo exports nothing under doc/ABI.md's "
+                            "rules: every name it declares"),
+          f"a C-library-only module did not take the dedicated branch: {reason}")
+
+
+def test_a_private_generic_module_is_told_it_is_private(tmpdir, _shared):
+    """GUARD, and it is about a branch that was DELETED rather than re-gated.
+
+    `no_public_api_reason` had a branch reading "the only function it declares
+    is the generic template …, which is both private and parametric", gated on
+    the module having ANY private declaration. The suggested repair was to gate
+    it on `set(gen_funcs) & set(private)`, and that would have made it
+    UNREACHABLE rather than correct: `gen_funcs` holds only non-underscore
+    names and `private` only underscore ones, so the intersection is empty for
+    every possible module. A branch that cannot be reached in a state where its
+    claim is true is the same defect as one that can, so it is gone.
+
+    This case pins both halves of that: the phrase is not producible for the
+    module it was written for, and that module is still told the true reason.
+    `std/utils/_select.mojo` is the module it was measured on — its only
+    declaration is the private template `_select_register_value`."""
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "priv_generic.mojo")
+    with open(path, "w") as f:
+        f.write("def _select_register_value[T: Copyable](x: T) -> T:\n"
+                "  return x\n")
+    reason = no_public_api_reason([path])
+    check("is both private and parametric" not in reason,
+          f"a sentence about a branch that cannot be reached is still "
+          f"reachable: {reason}")
+    check("every declaration in it is private" in reason,
+          f"a module whose only declaration is a private template was not told "
+          f"so, which is the true and sufficient reason: {reason}")
+    check("_select_register_value" in reason,
+          f"the refusal does not name the declaration: {reason}")
+
+
+def test_a_generic_struct_template_is_still_reported_as_one(tmpdir, _shared):
+    """GUARD: the struct-template branch still fires, and still says "generic
+    struct template".
+
+    It is one of the four branches the new fall-through could have swallowed,
+    and swallowing it would lose a distinction the reader needs: a parametric
+    TYPE has no single boundary layout, which is a different fact from a
+    parametric FUNCTION having no single symbol. `std/reflection/function.mojo`
+    is the module it was measured on."""
+    sys.path.insert(0, HERE)
+    from formal.build import no_public_api_reason
+    path = os.path.join(tmpdir, "generic_struct.mojo")
+    with open(path, "w") as f:
+        f.write("struct ReflectedFn[func_type, func]:\n"
+                "  var x: Int\n")
+    reason = no_public_api_reason([path])
+    check("generic struct template" in reason,
+          f"a module declaring only a generic struct template lost that "
+          f"distinction: {reason}")
+    check("ReflectedFn" in reason,
+          f"the refusal does not name the template: {reason}")
+
+
+# ── reflect.py: the export probe must not raise, and must not change ─────────
+
+
+def test_a_dataclass_field_with_a_default_is_in_a_struct_layout(tmpdir, _shared):
+    """`x: int = 0` in a struct body is a FIELD, and the layout descriptor says so.
+
+    `fire_compiler.Parser` deliberately keeps an annotated assignment with a
+    value as an `AssignStmt` CARRYING `type_ann` rather than a `VarDecl` (see
+    the annotated-assignment branch in `parse_stmt` for the blast radius of
+    changing that), so a reader that reaches for `.name` gets an
+    `AttributeError` instead of a field. That is not a diagnostic: it is a
+    traceback out of `collect_exports_src`, which is the export probe, so the
+    whole module fails to build for a reason no message names — measured on
+    `gimple_codegen.py` and `fire_compiler.py`, whose dataclass fields are
+    exactly this shape.
+
+    The importer parses these pairs back and keeps the ones that split into
+    `ctype name`, so a field missing here is a field missing from the type the
+    importer materializes."""
+    sys.path.insert(0, HERE)
+    import reflect
+    path = os.path.join(tmpdir, "annotated_field.mojo")
+    with open(path, "w") as f:
+        f.write("struct Cfg:\n"
+                "  var a: Int = 3\n"
+                "  var b: Int\n"
+                "  self.c: Int = 0\n"
+                "  def get(self) -> Int:\n    return self.a\n")
+    types = {e["name"]: e["signature"] for e in reflect.collect_exports_src(
+        open(path).read(), "m")}
+    check("Cfg" in types, f"the struct produced no TYPE entry: {sorted(types)}")
+    sig = types["Cfg"]
+    check("int64_t a;" in sig,
+          f"the field declared `a: Int = 3` is not in the layout descriptor — "
+          f"an annotated assignment is an AssignStmt, and its name is on "
+          f"`.target`, not `.name`: {sig!r}")
+    check("int64_t b;" in sig,
+          f"the plain VarDecl field is missing too, so the reader is dropping "
+          f"fields rather than misreading one: {sig!r}")
+    check("c;" not in sig,
+          f"a class-level `self.c: Int = 0` binds no declaration name and must "
+          f"not be given one: {sig!r}")
+
+
+def test_every_module_in_this_repository_survives_the_export_probe(tmpdir,
+                                                                   _shared):
+    """No source in this repository makes `collect_exports_src` raise.
+
+    The `_struct_layout_sig` crash was found by sweeping the repository rather
+    than by reading the code, and it is the kind of defect that hides: it fires
+    on a SHAPE rather than a name, so it disables every module with a
+    dataclass field with a default and no module without one, and the two
+    `GimpleGen_gen_module` files it was found on could not be built at all.
+    A per-file check is the only thing that finds the next one, and it is cheap
+    because the probe is an AST pass with no codegen."""
+    sys.path.insert(0, HERE)
+    import reflect
+    checked = failed = 0
+    for name in sorted(os.listdir(HERE)):
+        if not name.endswith((".py", ".mojo")) or name.startswith("test_"):
+            continue
+        path = os.path.join(HERE, name)
+        if not os.path.isfile(path):
+            continue
+        checked += 1
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                reflect.collect_exports_src(f.read(), "m")
+        except Exception as exc:                      # noqa: BLE001
+            failed += 1
+            check(False, f"the export probe raised on {name}: "
+                         f"{type(exc).__name__}: {exc}")
+    check(checked >= 50,
+          f"only {checked} files were probed, so this case is not covering the "
+          f"repository it claims to cover")
+
+
+def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
+    """`collect_exports_src` filters through `export_exclusions` and exports
+    EXACTLY what it exported before.
+
+    The refactor moved the private / C-library / overloaded / generic decisions
+    out of `collect_exports_src` and into one table both it and
+    `no_public_api_reason` read, so that a refusal cannot name a rule the export
+    did not apply. A consolidation like that is only safe if the decision is
+    UNCHANGED, and "the two implementations agree" is not a thing a reader can
+    check by reading — so it is measured here, over every `.py` and `.mojo` in
+    the repository plus the stdlib's `std/`, against the rule as it was written
+    before the table existed (recomputed inline, from the same four inputs).
+
+    This is the case that would catch a consolidation which quietly widens what
+    a dylib exports, which is the one direction in which "one rule, two readers"
+    is worse than two rules."""
+    sys.path.insert(0, HERE)
+    import re
+    import reflect
+    from fire_compiler import py_tokenize, Parser, FunctionDef
+    from mojo.backend_gimple.emit_funcs import dup_def_signature_key
+
+    stdlib = None
+    try:
+        from module_loader import STDLIB_PATH
+        if STDLIB_PATH and os.path.isdir(STDLIB_PATH):
+            stdlib = os.path.join(STDLIB_PATH, "std")
+    except Exception:
+        pass
+
+    paths = []
+    for name in sorted(os.listdir(HERE)):
+        if name.endswith((".py", ".mojo")) and os.path.isfile(
+                os.path.join(HERE, name)):
+            paths.append(os.path.join(HERE, name))
+    if stdlib:
+        for root, _dirs, files in os.walk(stdlib):
+            for name in sorted(files):
+                if name.endswith(".mojo"):
+                    paths.append(os.path.join(root, name))
+
+    def old_exports(src, parsed):
+        """`collect_exports_src` exactly as it was before the table existed."""
+        generic = set(re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', src))
+        generic |= set(re.findall(r'\bstruct\s+(\w+)\s*\[', src))
+        dup: dict = {}
+        for s in parsed:
+            if isinstance(s, FunctionDef):
+                dup.setdefault(s.name, []).append(s)
+        overloaded = {n for n, ds in dup.items()
+                      if len(ds) >= 2
+                      and len({dup_def_signature_key(d) for d in ds}) != 1}
+        skip = generic | overloaded
+        return [e for e in reflect.collect_exports(parsed, "M")
+                if e['name'].split('.', 1)[0] not in skip
+                and e['name'].split('.', 1)[0] not in reflect._CLIB_SYMS]
+
+    differing = probed = 0
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                src = f.read()
+            parsed = Parser(py_tokenize(src)).parse_module()
+        except Exception:
+            continue
+        probed += 1
+        want = sorted((e["name"], e["signature"], e["kind"])
+                      for e in old_exports(src, parsed))
+        got = sorted((e["name"], e["signature"], e["kind"])
+                     for e in reflect.collect_exports_src(src, "M"))
+        if want != got:
+            differing += 1
+            check(False, f"the export set for {path} changed: "
+                         f"{set(want) ^ set(got)}")
+    check(probed >= 300,
+          f"only {probed} modules were compared, so this case is not covering "
+          f"the corpus it claims to cover")
+
+
 TESTS = [
     ("an import links the module and the program runs",
      test_import_links_and_runs),
@@ -1141,6 +1441,22 @@ TESTS = [
      test_a_concrete_and_a_generic_of_one_name_are_told_apart),
     ("a public generic is not reported as private",
      test_a_public_generic_is_not_reported_as_private),
+    ("a C-library-named definition is reported as a definition",
+     test_a_clib_defined_name_is_reported_as_a_definition),
+    ("the fall-through names a rule for each public name",
+     test_the_fallthrough_names_a_rule_for_each_public_name),
+    ("a C-library-only module takes the dedicated branch",
+     test_a_clib_only_module_does_not_reach_the_per_name_fallthrough),
+    ("a private generic module is told it is private",
+     test_a_private_generic_module_is_told_it_is_private),
+    ("a generic struct template is still reported as one",
+     test_a_generic_struct_template_is_still_reported_as_one),
+    ("a dataclass field with a default is in a struct layout",
+     test_a_dataclass_field_with_a_default_is_in_a_struct_layout),
+    ("every module here survives the export probe",
+     test_every_module_in_this_repository_survives_the_export_probe),
+    ("the exclusion table does not change the export set",
+     test_the_exclusion_table_does_not_change_the_export_set),
 ]
 
 
@@ -1152,40 +1468,14 @@ TESTS = [
 # reintroduced. So these are pins in both directions — they cannot rot green,
 # and they cannot rot red.
 #
-# All three are message-ACCURACY guards for `no_public_api_reason`, and all
-# three are live defects on this tree rather than unimplemented features. Each
-# names the stdlib module it was measured on, because "a test is red" is not a
-# reason and "std/memory/memory.mojo is told it has no public declarations
-# when it has fifteen" is. Full analysis, reproducers and the cost of each fix:
-# bugs/FORMAL_known_limits.md §1.3.
-EXPECTED_FAILURES = {
-    "a C-library-named definition is not blamed on privacy":
-        "formal/build.py's no_public_api_reason falls through to an "
-        "unconditional 'every declaration in it is private (a leading `_`)' "
-        "for any module with a concrete public function that exports nothing, "
-        "because all four named branches are gated on `not concrete_funcs`. "
-        "Measured on std/memory/memory.mojo (fifteen public functions, four "
-        "private) and on a one-function `def strlen` reproducer. The real "
-        "cause is reflect._CLIB_SYMS. Fix: a fifth branch naming the excluded "
-        "symbol, and a fall-through that states no reason it has not checked.",
-
-    "a concrete and a generic of one name are told apart":
-        "formal/build.py's _declared_api_shape collects generics into a set "
-        "of NAMES and looks each parsed FunctionDef up in it, so a name that "
-        "is concrete in one definition and a template in another is counted "
-        "as a template twice. Measured on std/sys/terminate.mojo, whose "
-        "concrete `def exit():` is reported as a GENERIC template. Fix: "
-        "classify per definition rather than per name.",
-
-    "a public generic is not reported as private":
-        "no_public_api_reason's 'both private and parametric' branch is "
-        "gated on the module having ANY private declaration and then asserts "
-        "the properties of the generics themselves. Measured on "
-        "std/memory/unsafe.mojo: two public generics (bitcast, pack_bits) and "
-        "one private helper, reported as 'the only function it declares … "
-        "which is both private and parametric'. Fix: gate on the "
-        "intersection set(gen_funcs) & set(private).",
-}
+# EMPTY, and that is the point. It held three message-ACCURACY guards for
+# `no_public_api_reason`, each with the stdlib module it had been measured on
+# (bugs/FORMAL_known_limits.md §1.3), and all three started reporting
+# "marked expect=… but it PASSES" the moment the messages were corrected — which
+# is the mechanism working, not a failure to suppress. The guards are still in
+# `TESTS` above and are now ordinary passing tests; what was removed is the
+# MARKER, and with it the claim that the defects are live.
+EXPECTED_FAILURES: dict = {}
 
 
 def main():

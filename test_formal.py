@@ -86,6 +86,27 @@ EXPECTED_FAILURES = {
     "fib": "tree-recursion FrameOk window read over a store stack whose "
            "addresses u64_sub_add splits into sp - (K - 8); the peel needs a "
            "collapse at data-dependent nesting depth",
+
+    # `a = [10,20,30]; i = 1; return a[i]` -- a subscript with a
+    # RUNTIME-VARIABLE index.  The program builds, runs, and returns 20 on both
+    # architectures, and the x86-64 generator proves it.  On arm64 what is now
+    # proved is the per-instruction half: every `LDR`/`STR` through a non-SP
+    # base gets a correct step RESULT lemma (before this wave the 0xF9400000
+    # branch of the generator was a pre-index STORE OF ONE BYTE, so the emitted
+    # lemma asserted the opposite of the architecture and no proof of a
+    # memory-touching program could even be generated), and the block
+    # certificates build.  What is left is the SOURCE half, and it is not a
+    # dataflow question: the semantic model `mojo : UInt64 -> UInt64` has no
+    # domain for a list, so `a[i]` has no value in it, and the list's storage
+    # (a blob whose first word is its count) is never related to the source
+    # literal.  The first term needs a list domain in the model and a memory
+    # image for the blob; the second is a `Frame.frameToEnv`-shaped fact about
+    # the blob.  `bugs/FORMAL_wide_receiver_by_reference.md` records both.
+    "subscript_var": "runtime-indexed list subscript: the machine half is "
+                     "proved (correct LDR/STR step lemmas, block "
+                     "certificates), the source half is not -- the semantic "
+                     "model has no list domain and the list blob's memory "
+                     "image is not derived from the source literal",
 }
 
 

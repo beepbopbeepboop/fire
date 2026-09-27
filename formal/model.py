@@ -183,6 +183,114 @@ def _base_name(obj):
     return None
 
 
+def is_mlir_template(e) -> bool:
+    """True when `e` is an MLIR attribute/type TEMPLATE, in any spelling.
+
+    Keys on the BASE NAME alone, and that is the whole of the fix. It used to
+    be reached only for a MULTI-ELEMENT subscript, so the two other spellings
+    of the identical construct — the dotted one,
+    `__mlir_attr.`#kgen.param.expr<…>``, and the single-element bracket,
+    `__mlir_type[x]` — fell through to the ordinary member-read / subscript
+    lowering, which reads a name nothing defined and produces whatever word is
+    in the register. That is not a wrong answer, it is a FABRICATED one, and it
+    had three properties that made it the worst output of this path:
+
+      * three different templates (including a deliberately bogus one) all
+        produced the same number, because the template is never read;
+      * the two architectures disagreed — arm64 printed 10 and x86-64 printed 0
+        for the same source, which no arch-free refusal text can prevent
+        because there was no refusal to share;
+      * the number was PROGRAM-SHAPE dependent (adding five locals changed it
+        to 1), so it could not even be mistaken for a stable wrong answer that
+        a test might accidentally agree with.
+
+    A template is a template however it is spelled, so the check is on the
+    base and the arity is not consulted. `MemberExpr` is included because that
+    is the spelling real stdlib source uses (`std/sys/info.mojo:32`,
+    `std/builtin/type_aliases.mojo:146/149/153`)."""
+    if not isinstance(e, (F.SubscriptExpr, F.MemberExpr)):
+        return False
+    return _base_name(e.obj) in MLIR_TEMPLATE_NAMES
+
+
+def mlir_template_spelling(e) -> str:
+    """How the source spelled this template, for a diagnostic.
+
+    A multi-element bracket gets the element list (`__mlir_type[`!lit.origin<`,
+    1, `>`]`) because that is the shape the original refusal was written for and
+    the reader is looking for those fragments. `_spell` on its own would render
+    that subscript `__mlir_type[…]`, which names the construct but not enough of
+    it to find in the file. The dotted and single-element spellings have no
+    comma list, and `_spell` already renders both exactly as written."""
+    if isinstance(e, F.SubscriptExpr) and is_multi_index(e.index):
+        return multi_index_spelling(e)
+    return _spell(e)
+
+
+def mlir_template_refusal(e):
+    """The refusal for an MLIR template in any spelling, or None if `e` is not one.
+
+    The text is `multi_index_refusal`'s, unchanged and still ARCH-FREE: it was
+    already correct for the one spelling that reached it, and the defect was
+    that the other two spellings did not. Naming the construct — not the
+    symptom — is what makes it usable on a file nobody has read."""
+    if not is_mlir_template(e):
+        return None
+    return multi_index_refusal(MULTI_INDEX_MLIR_TEMPLATE,
+                               mlir_template_spelling(e))
+
+
+def refuse_module_level_mlir_templates(stmts) -> None:
+    """Raise `CodegenError` if a module-level `comptime` binding's initializer
+    contains an MLIR template. Called first by BOTH backends' `compile()`.
+
+    A module-level `comptime X = …` is a compile-time binding, and the
+    expression walk that refuses MLIR templates runs over FUNCTION bodies only:
+    `compile()` picks `FunctionDef`s out of the module statement list and
+    lowers nothing else. So the one construct the refusal exists for —
+    `comptime OriginSet = __mlir_type[`!lit.origin<`, 1, `>`]` — was written,
+    compiled away without a word, and every later `var v = OriginSet` read a
+    name with no definition. It built, it ran, and it printed a fabricated
+    word: 10 on arm64, 0 on x86-64, for the same source. That is a FALSE PASS
+    in the strongest sense the project has — `std/builtin/type_aliases.mojo`
+    declares four such bindings (lines 146/149/153/157) and was counted in the
+    sweep's coverage as a file that built.
+
+    The walk RECURSES, because the templates are not always the initializer's
+    top node: in that same file the `__mlir_attr[…]` templates sit two levels
+    down, inside a call's keyword argument
+    (`Origin[0, _mlir_origin=__mlir_attr[…]]()`).
+
+    What is missing is the walk's REFUSALS, not its lowering: this function
+    decides nothing about what a module-level `comptime` binding means, and a
+    module-level `comptime n = len(xs)` over a runtime parameter is still
+    outside both backends rather than newly refused here. MLIR templates are
+    the one refusal that is decidable with no value context and no type
+    inference — the base NAME is the whole of the test — which is why this one
+    closes and the rest do not.
+
+    Called from `formal/build.py:_prepare_functions`, which is the ONE pipeline
+    both front ends (executable and dylib) hand their parsed module to, so
+    there is a single call site rather than one per backend and the two
+    architectures cannot name different limits for one construct — the failure
+    `limit_comptime_over_a_runtime_parameter` is pinned against."""
+    for st in stmts:
+        value = getattr(st, "value", None)
+        if value is None or not isinstance(st, F.ComptimeVarStmt):
+            continue
+        for node in iter_nodes(value):
+            why = mlir_template_refusal(node)
+            if why is not None:
+                raise CodegenError(
+                    f"the module-level comptime binding "
+                    f"{getattr(st, 'target', '?')!r} is initialized from an MLIR "
+                    f"attribute template: {why} Module-level `comptime` "
+                    f"bindings are not part of the function-body expression "
+                    f"walk on this path, so nothing used to refuse this and the "
+                    f"binding read as an undefined name at every use site.")
+    return None
+
+
 def multi_index_kind(e, base_is_dict: bool = False,
                      generic_callee=None) -> str:
     """What a multi-element subscript index means here. See the section note.
@@ -197,7 +305,7 @@ def multi_index_kind(e, base_is_dict: bool = False,
     check rather than a guess from the spelling."""
     if base_is_dict:
         return None                       # the one lowered case; not a refusal
-    if _base_name(e.obj) in MLIR_TEMPLATE_NAMES:
+    if is_mlir_template(e):
         return MULTI_INDEX_MLIR_TEMPLATE
     if generic_callee is not None and is_generic(generic_callee):
         return MULTI_INDEX_COMPTIME_PARAMS
@@ -296,7 +404,19 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None):
 
     Called from the address computation, not from the read: that is the one
     place a read, a store and an augmented assignment all pass through, and
-    the read-only check this replaces left `a[i, j] = v` unrefused."""
+    the read-only check this replaces left `a[i, j] = v` unrefused.
+
+    Callable UNCONDITIONALLY — the multi-element gate moved inside — because the
+    MLIR answer does not depend on the arity (`is_mlir_template` keys on the
+    base), and a caller that still guarded the call with `is_multi_index` would
+    keep the single-element spelling `__mlir_type[x]` fabricated. A non-MLIR
+    single index is not this function's business and returns None, exactly as
+    before."""
+    why = mlir_template_refusal(e)
+    if why is not None:
+        return why
+    if not is_multi_index(getattr(e, "index", None)):
+        return None
     kind = multi_index_kind(e, base_is_dict=base_is_dict,
                             generic_callee=(
                                 (callee_defs or {}).get(_base_name(e.obj))))
@@ -871,9 +991,18 @@ def string_comparison_lowering(op: str, left_kind, right_kind):
 
 
 def string_concat_refusal(op: str, left_kind, right_kind) -> str | None:
-    """Why `a + b` cannot be lowered when both sides are strings, or None.
+    """Why `a {op} b` cannot be lowered when BOTH sides are strings, or None.
 
-    The measured state of this, on the pre-change tree and on both backends:
+    The name is historical and the docstring should not pretend otherwise:
+    `+` was the only member when this was written, and it is still the one
+    carrying the measured transcript. `-` joined it because address minus
+    address is the same missing buffer as address plus address, and because
+    leaving it out meant `s = s - t` was refused while `s -= t` was not — the
+    same operator, two answers, from the same two backends. The augmented
+    spellings are in the set because the AUGMENTED emitters are a separate code
+    path from the binary ones and have to be caught by name.
+
+    The measured state of `+`, on the pre-change tree and on both backends:
 
         s = "ab" + "cd"; printf("[%s]\\n", s)
 
@@ -889,14 +1018,14 @@ def string_concat_refusal(op: str, left_kind, right_kind) -> str | None:
     STRING on one architecture and crashes on the other, so the two backends
     do not even agree on whether the program works.
     """
-    if op not in ("+", "+="):
+    if op not in STRING_TWO_STRING_ARITHMETIC_OPS:
         return None
     if not (string_operand_is_string(left_kind)
             and string_operand_is_string(right_kind)):
         return None
     return (
         f"{op!r} on two strings is refused on this path. A string here is a "
-        f"bare `char *`, so `{op}` is integer addition of two addresses, and "
+        f"bare `char *`, so `{op}` is integer arithmetic on two addresses, and "
         f"what it produced was measured: `print(\"ab\" + \"cd\")` printed `[]` "
         f"on arm64 and segfaulted on x86-64. Concatenation needs a buffer whose "
         f"size is a function of both operands, and this path has no heap to "
@@ -904,6 +1033,324 @@ def string_concat_refusal(op: str, left_kind, right_kind) -> str | None:
         f"down in — a string literal is interned into __TEXT,__text, which is "
         f"mapped read+execute. This is the same missing buffer that keeps "
         f"`upper`, `replace` and `join` refused; see LENGTH_DEPENDENT_METHODS")
+
+
+# `+`/`+=` and `-`/`-=`: the operators whose refusal is about TWO strings and
+# the buffer their result would need. Every other operator in the arithmetic
+# table is refused on a single string operand too, and is not here.
+STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
+
+
+# ── Everything else that reaches an INTEGER path holding a `char *` ───────
+#
+# `string_concat_refusal` above is one operator out of a table, and the reason
+# it is one operator is historical rather than principled: it was the operator
+# whose failure was MEASURED (`[]` on arm64, SIGSEGV on x86-64) and so the one
+# anybody looked at. Every operator below has the same cause — a string is a
+# bare `char *`, so any operator that reaches the integer ALU or the flag-
+# setting compare is operating on an ADDRESS — and every one of them BUILDS,
+# RUNS and returns a number the source never wrote. Measured on the tree this
+# was written on, for `s = "abc"; t = "bc"`, on BOTH backends:
+#
+#     s & t     69911496 (arm64)   45978594 (x86-64)
+#     s | t     68191180           2872318
+#     s ^ t         4                  28          <- the two architectures
+#     s - t        -4                  -4             DISAGREE on a
+#     s * 2      8062864            5302246         fabricated number
+#     s // 2   -2147433998        -2128240118
+#     s >> 1   -2107760164        -2147386903
+#     ~s          8881076            3236815
+#     -s       -36488120          -79725522
+#
+# and the RELATIONAL half is worse than a wrong number, because it is a wrong
+# BRANCH: `if s < t:` is decided by the interning order of two literals in the
+# text section, so the answer is a property of the image's layout rather than
+# of the program. On the tree above `s < t` and `s <= t` were TRUE and
+# `s > t` and `s >= t` were FALSE, on both backends, purely because `"abc"` is
+# emitted before `"bc"`. Reordering the two literals in the source reverses
+# every one of them.
+#
+# So: the same answer as for `+`, for the same reason. None of these is lowered.
+#
+# The ONE exception, and it is D3's decision rather than this file's, is
+# `ptr + int` and `ptr - int` with exactly one string operand. That is real C
+# pointer arithmetic, it is the idiom a caller who reached a `char *` through
+# this path may have meant, and refusing it would turn a working program into a
+# diagnostic over a case the model cannot see. `str_plus_int_still_arithmetic` in
+# test_formal_run.py is the guard. Every operator below has NO such reading:
+# `%` and `&` on a pointer are not C at all, `|` and `^` are bit operations on
+# an address, and `*` would have to scale a pointer to mean anything, which is
+# a GNU extension rather than the C this path emits.
+STRING_RELATIONAL_OPS = ("<", ">", "<=", ">=")
+STRING_BITWISE_OPS = ("&", "|", "^")
+STRING_SHIFT_OPS = ("<<", ">>")
+STRING_PRODUCT_OPS = ("*", "/", "//", "%", "**")
+# `+` and `-` are absent deliberately: `string_concat_refusal` owns them for the
+# two-strings case, and the one-string case is the pointer arithmetic above.
+STRING_ARITHMETIC_OPS = (STRING_BITWISE_OPS + STRING_SHIFT_OPS
+                         + STRING_PRODUCT_OPS + STRING_RELATIONAL_OPS
+                         + ("-",))
+
+# Unary operators with no meaning on a `char *`. `~` is a bit operation on an
+# address; unary `-` is negation of one. `not` is here too and for a different
+# reason — see `string_unary_refusal`.
+STRING_ARITHMETIC_UNARY_OPS = ("-", "~")
+
+
+# The operator as a table key. A trailing `=` marks an AUGMENTED form and the
+# tables below are keyed on the bare operator, so `+=` looks up `+`.
+#
+# The membership test is `AUG_OPS`, NOT "ends with `=`": the comparison
+# operators `<=`, `>=` and `!=` end with `=` and are not augmented, and
+# stripping their `=` turned `s <= t` into a refusal that named `'<'` — a
+# diagnostic about a different operator than the line the reader is looking
+# at, which is the one thing a refusal must not be. `==` is excluded for the
+# same reason, and it is why `string_concat_refusal`'s own operator set has
+# always been safe to spell out.
+def _bare_operator(op: str, spelled_op: str | None = None) -> str:
+    if op.endswith("=") and op[:-1] in AUG_OPS:
+        return op[:-1]
+    return op
+
+
+def string_arithmetic_refusal(op: str, left_kind, right_kind,
+                              spelled_op: str | None = None) -> str | None:
+    """Why `a {op} b` cannot be lowered when a `char *` is an operand, or None.
+
+    `spelled_op` is what the DIAGNOSTIC should say, which is not always `op`:
+    the augmented-assignment emitters strip the `=` (`+=` arrives as `+`), and
+    a message that told somebody their `+=` was a `+` would be a small lie
+    about the line they are looking at. The table is keyed on the bare operator;
+    only the wording uses the spelling.
+
+    The refusal is deliberately not split by whether one or both operands are
+    strings, with ONE exception: see `STRING_ARITHMETIC_OPS` for why `+`/`-`
+    with a single string operand is left alone. For everything else the answer
+    is the same either way — a pointer in an integer operator is meaningless —
+    so a message that distinguished them would be longer and say less.
+    """
+    bare = _bare_operator(op, spelled_op)
+    if bare not in STRING_ARITHMETIC_OPS:
+        return None
+    if bare == "-":
+        # `-` is the one operator whose refusal is `+`'s, so it goes through
+        # the same function and inherits the same measured numbers. The
+        # two-strings case is address minus address — the same missing buffer as
+        # address plus address. The one-string case is `ptr - int`, which is
+        # real C pointer arithmetic and is deliberately left alone; see the
+        # note above on why `+`/`-` are absent from the general table.
+        return string_concat_refusal(spelled_op or bare, left_kind, right_kind)
+    if not (string_operand_is_string(left_kind)
+            or string_operand_is_string(right_kind)):
+        return None
+    return _string_operand_refusal(bare, spelled_op, left_kind, right_kind)
+
+
+def _string_operand_refusal(op: str, spelled_op, left_kind,
+                            right_kind) -> str:
+    """The shared wording for "this operator reached the integer path with a
+    `char *` in it". One function so the two backends print the same sentence
+    and so adding an operator does not mean writing a second paragraph."""
+    shown = spelled_op or op
+    which = "the left operand" if string_operand_is_string(left_kind) else (
+        "the right operand" if string_operand_is_string(right_kind)
+        else "an operand")
+    return (
+        f"{shown!r} is refused when {which} is a string. A string on this path "
+        f"is a bare `char *`, so `{shown}` is an integer operation on an "
+        f"ADDRESS, and it builds, runs and returns a number the source never "
+        f"wrote: for `s = \"abc\"` and `t = \"bc\"`, `s ^ t` returned 4 on arm64 "
+        f"and 28 on x86-64, `s * 2` returned 8062864 and 5302246, and "
+        f"`s // 2` returned -2147433998 and -2128240118 — two architectures "
+        f"disagreeing about a number neither of them computed. "        + ("Python orders strings lexicographically and this compares their "
+           "addresses, so the branch is taken by the order the literals happen "
+           "to be interned in the text section: `s < t` measured TRUE and "
+           "`s > t` FALSE on both backends for no reason a reader of the "
+           "program could see. Lexicographic order needs a three-way compare "
+           "and this path has no symbol that provides one. "
+           if op in STRING_RELATIONAL_OPS else "")
+        + "The string operations that ARE lowered are `len`, `==`/`!=`, `is`/"
+        "`is not`, `in`/`not in`, and the methods in POINTER_BOUNDED_METHODS; see "
+        "STRING_LENGTH_SYMBOL for why a string's length and content equality "
+        "are computations over its bytes rather than fields, and "
+        "string_concat_refusal for the `+` half of this table")
+
+
+def string_binary_refusal(op: str, left_kind, right_kind,
+                          spelled_op: str | None = None) -> str | None:
+    """The ONE place a binary operator with a string operand is decided not to
+    be lowered, so both backends ask the same question in the same order.
+
+    `+`/`+=` first, because that is the one with the measured transcript in it,
+    and then everything else that reaches the integer ALU or the flag-setting
+    compare. Exists as one entry point rather than two call sites per backend
+    precisely because the failure mode being prevented is the two architectures
+    disagreeing: the first version of this table was consulted by arm64 and not
+    by x86-64 for the augmented forms, so `s += t` printed `[]` on arm64 and
+    segfaulted on x86-64 — the same non-answer as `s = s + t`, which both
+    backends refused, from the same line of source.
+    """
+    return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
+            or string_arithmetic_refusal(op, left_kind, right_kind,
+                                         spelled_op))
+
+
+def string_unary_refusal(op: str, kind, spelled_operand: str) -> str | None:
+    """Why `-s` / `~s` / `not s` cannot be lowered for a string, or None.
+
+    `-` and `~` are the arithmetic table again with one operand: negation of an
+    address and a bit complement of one. `not` is here for a different reason
+    and is a DIFFERENT KIND of wrong answer, which is why it is worth naming:
+    a string is a pointer, and a pointer is never zero, so `not s` is FALSE for
+    every string on this path INCLUDING THE EMPTY ONE. Measured, both backends:
+
+        s = "abc"
+        e = ""
+        printf("%d %d", 1 if not s else 0, 1 if not e else 0)   # -> 0 0
+
+    Python's answer is `0 1`. This one is a fabricated FALSITY — a program that
+    tests a string for emptiness is told the empty string is non-empty, and no
+    downstream check can tell. It is refused rather than lowered because the
+    honest lowering (`strlen(s) == 0`, which is exactly what `len` already
+    does) is not available at this site: `not` here is a CBZ on a value in a
+    register, and the kind of the expression that produced it is not
+    available. The condition sites — `if s:`, `while s:`, `s and k` — have the
+    same defect and are NOT fixed by this; see
+    bugs/FORMAL_string_value_model.md for the count and the next step.
+    """
+    if op not in STRING_ARITHMETIC_UNARY_OPS and op != "not":
+        return None
+    if not string_operand_is_string(kind):
+        return None
+    if op == "not":
+        return (
+            f"`not {spelled_operand}` is refused because {spelled_operand} is "
+            f"a string. A string on this path is a bare `char *` and a pointer "
+            f"is never zero, so this test is FALSE for every string — including "
+            f"the empty one, which is what Python calls falsy. Measured on both "
+            f"backends: `not \"\"` returned 0 where Python returns 1. The "
+            f"answer is knowable (`len({spelled_operand}) == 0`, which is a "
+            f"`{STRING_LENGTH_SYMBOL}` and nothing else) but not HERE, because "
+            f"`not` tests a value already in a register and this site cannot "
+            f"see what produced it. Write `len({spelled_operand}) == 0`")
+    return (
+        f"unary {op!r} is refused on a string. A string on this path is a "
+        f"bare `char *`, so {op!r} is an integer operation on an ADDRESS, and "
+        f"it builds, runs and returns a number the source never wrote — "
+        f"`~s` measured 8881076 on arm64 and 3236815 on x86-64 for the same "
+        f"source. See string_binary_refusal for the two-operand form of this")
+
+
+# ── `in` / `not in` on a string haystack ──────────────────────────────────
+#
+# The measured state of this, on the tree this was written on, on BOTH
+# backends: `if "ell" in s:` where `s = "hello"` terminated the process with
+# SIGBUS. Not a wrong answer — a crash — and the two architectures agreed on
+# that much, which is the only good news in it. The cause is the same one as
+# everywhere else in this section: the haystack is a `char *`, and the
+# membership path had no string case for a haystack that is not a syntactic
+# literal, so it read the first eight bytes of the CHARACTERS as a blob count
+# and walked off the end of the mapping. x86-64 had no string case at all, so
+# `"bc" in "abcd"` scanned the interned bytes as a blob; where that did not
+# fault it returned FALSE, which is a wrong answer rather than a crash.
+#
+# So this is a libc call, on both backends, and the same libc call `find`
+# already makes:
+#
+#     "ell" in s        ->   strstr(s, "ell") != NULL
+#     101 in s          ->   strchr(s, 101)     != NULL
+#
+# The argument order of `strstr` is the whole method and it is the reason this
+# is a table rather than a one-liner in a backend:
+# `strstr("bc", "abcabcabc")` is a well-defined NULL, so getting it backwards
+# does not crash, does not look wrong in the image, and returns FALSE for every
+# haystack that contains its needle — which is every real use of `in`. It is
+# `strstr(HAYSTACK, NEEDLE)`.
+#
+# `strchr` rather than a hand-written byte loop, for the reason `strspn` replaced
+# the `lstrip` loop: it IS the algorithm, it cannot be half-right, and there is
+# then nothing to keep in step between two architectures. `strchr` was checked
+# to BIND on both backends before being relied on here (the x86-64 `strcmp`
+# observation in bugs/FORMAL_string_value_model.md is why that is worth a
+# measurement rather than an assumption): with `STRING_COMPARE_SYMBOL` pointed
+# at it, a program that calls it ran to completion and returned a non-NULL
+# pointer on arm64 and on x86-64.
+STRING_SEARCH_SYMBOL = "strstr"
+STRING_BYTE_SEARCH_SYMBOL = "strchr"
+
+# The two shapes `in`/`not in` takes when the haystack is a string. Which one
+# is decided by the NEEDLE's kind, because that is what decides the libc call.
+STRING_MEMBERSHIP_SUBSTRING = "strstr"   # needle is a char *  → strstr
+STRING_MEMBERSHIP_BYTE = "strchr"        # needle is an int    → strchr
+
+
+def string_membership_lowering(left_kind, right_kind) -> str | None:
+    """How `needle in haystack` lowers when the haystack is a string, or None.
+
+    None means "not a string membership" and the caller keeps whatever it did
+    before, which for a list/tuple/dict haystack is the blob scan.
+
+    The needle decides the call and nothing else does. A string needle is
+    `strstr`; a byte needle is `strchr`. An unclassified needle (None kind) is
+    NOT treated as a byte: `int in str` and `str in str` are different
+    questions, and guessing which one was meant is how a membership test comes
+    to answer the wrong one. An unclassified needle is left to the caller,
+    which for a haystack that is a string means the blob scan — so this
+    function returning None for it is deliberate, and the backends' own
+    refusal for an unusable haystack is what the reader sees.
+
+    THE BYTE CASE HAS AN EDGE, and it is the reason this is a table and not a
+    two-line call. `strchr(s, 0)` returns a pointer to the terminating NUL, so
+    it is non-NULL, so a plain `!= NULL` would make `0 in "abc"` TRUE. Python
+    says FALSE, and on this representation it is certainly false: the only NUL
+    in a string is the one that ends it. The backends therefore have to test the
+    byte against zero before the call, and the test is one instruction in front
+    of it on both.
+    """
+    if not string_operand_is_string(right_kind):
+        return None
+    if string_operand_is_string(left_kind):
+        return STRING_MEMBERSHIP_SUBSTRING
+    if left_kind == INT_KIND:
+        return STRING_MEMBERSHIP_BYTE
+    return None
+
+
+def string_index_refusal(base_kind, index_kind,
+                          spelled_index: str) -> str | None:
+    """Why `s[i]` cannot be lowered when `i` is itself a string, or None.
+
+    The same class as everything else in this section, one level down: the
+    subscript on a string is `s + i` on a bare `char *`, so a string INDEX
+    makes it integer addition of two addresses. Measured on the tree this was
+    written on, on BOTH backends, for `s = "abc"; t = "bc"; printf("%d", s[t])`:
+
+        arm64   67          0x43 — the low byte of a text-section address
+        x86-64  SIGSEGV     the sum of two addresses, dereferenced
+
+    An address's low byte is the worst of the fabricated numbers in this file
+    because it is small, printable and plausible: 67 reads like a character
+    code, and a reader checking the output would have no reason to doubt it.
+
+    NOT the same refusal as `string_operand_is_string(base_kind)` being false:
+    this is about the INDEX. A string base with an integer index is `s + i`,
+    which is real C pointer arithmetic and is lowered, giving the byte at that
+    offset — see the `s[0]` case in bugs/FORMAL_string_value_model.md for why
+    that byte rather than a one-character String is a recorded divergence
+    rather than a refusal.
+    """
+    if not (string_operand_is_string(base_kind)
+            and string_operand_is_string(index_kind)):
+        return None
+    return (
+        f"`{spelled_index}` cannot index a string on this path: a string here "
+        f"is a bare `char *`, so the subscript is `s + i` — integer addition of "
+        f"two addresses when the index is a string too. Measured on both "
+        f"backends: `printf(\"%d\", s[t])` printed 67 on arm64 (the low byte of "
+        f"a text-section address) and segfaulted on x86-64. Use "
+        f"`s.find({spelled_index})`, which is lowered as a `strstr`, or index "
+        f"with an integer offset, which is the pointer arithmetic this path "
+        f"does have")
 
 
 def spelled(expr) -> str:
@@ -1615,109 +2062,132 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
 # two of the three said something that is not true of the program in front of
 # the reader. They are separate functions, in this file, so the two backends
 # cannot answer them differently and a reader gets the one that operates.
-
-def frame_constructor_refusal(callee: str, struct_names) -> str:
-    """A struct CONSTRUCTOR called with a frame address, where `callee` is a
-    struct this module declares.
-
-    The old text was "a X receiver is passed to R(), which this module does not
-    compile" — false on its face, and demonstrably so: `structs_by_name` holds
-    `R`, which is the only reason the argument is a frame address at all, and
-    `R` is a struct rather than a function so there was never a body to
-    compile. The real limit is one level down and already has a diagnostic of
-    its own in each backend: `S()` brings every field up at its default and
-    takes no arguments, so a one-argument construction has no lowering whatever
-    it is handed. Measured: with this refusal lifted, `R(r)` reaches
-    `_emit_struct_constructor` and is refused there by name.
-
-    So the answer is still a refusal, and the same one, but stated as what it
-    is — a copy construction, which is a feature rather than a gap, and one that
-    wants a fresh block plus a field-by-field copy rather than a binding."""
-    who = ", ".join(struct_names) if struct_names else "this struct"
-    return (f"a {who} frame address is passed to {callee}(), which is a COPY "
-            f"CONSTRUCTION: {callee} is a struct this module declares, so the "
-            f"callee is not a function at all and there is nothing unbound about "
-            f"it. What is missing is a lowering — on this path {callee}() takes "
-            f"no arguments, because a struct is default-initialized and its "
-            f"fields assigned, so a one-argument construction is refused by name "
-            f"whether what it is handed is a frame address or anything else. A "
-            f"copy wants a FRESH block and a field-by-field copy into it, which "
-            f"is a feature and not a binding")
+#
+# The third of those shapes — a struct CONSTRUCTOR reached with a frame address
+# — is no longer here at all, and its REMOVAL is the content. It was reported
+# as "a X receiver is passed to R(), which this module does not compile", false
+# twice over (`structs_by_name` holds `R`, which is the only reason the argument
+# is a frame address, and a struct has no body to compile), and its real
+# content was one level down: a copy construction had no lowering. It has one
+# now, so the diagnostic moved from "this is not a call" to "here is which of
+# the three shapes this is, and here is why this one is not representable" —
+# `struct_construction_plan` below, which is the one place both backends and
+# the build pass read it from.
 
 
-def frame_position_refusal(callee: str, position: int, total: int,
-                           struct_names, method: str = None) -> str:
-    """A frame address in a NON-FIRST argument position.
+def _who(struct_names) -> str:
+    return ", ".join(struct_names) if struct_names else "this struct"
 
-    "A position whose meaning this path cannot see" was true of the ANALYSIS
-    and false of the PROGRAM, and a refusal that says its own author has not
-    worked out how is not a diagnosis: it sends the next reader after a
-    non-bug. There are three distinct things under it and all three were
-    measured, by building the program with this one check removed:
 
-    | position | what it is | what the build did |
-    |---|---|---|
-    | non-first, callee compiled here | the callee's non-first parameter is not a frame HOLDER: the fixpoint follows the first parameter only, so a field read through the word misses every slot table | `def take(x, y): return y` … `take(1, r).a` returned **0** where the source says 7 |
-    | non-first, callee's body stores or returns the word | the frame outlives its creator | the same shape one frame deeper built and returned **10** where the source says 7 — the frame's bytes were gone |
-    | non-first, callee is a C entry point | a wrong CATEGORY of argument, not a position at all | `printf("val=%d\\n", r)` printed the address as an integer |
+def _where(position, total, kwname: str = None) -> str:
+    """`in argument position 1 of 3`, or the keyword's own name.
 
-    So the refusal stands — all three are wrong answers without it — and it now
-    says which of the three it is looking at, because the callee decides it and
-    the callee is in hand."""
-    who = ", ".join(struct_names) if struct_names else "this struct"
-    if callee is None:
-        where = f"{method}()" if method else "the call"
-        return (f"a {who} receiver is passed to {where} — a METHOD call on a "
-                f"value receiver — and this is not a question about the "
-                f"position. A frame address in a bare-name call is followed "
-                f"into the callee's first parameter, which is the whole of the "
-                f"interprocedural flow here; a method call is different twice "
-                f"over, and both differences are why nothing is followed. The "
-                f"callee is dispatched by NAME off a receiver that is not a "
-                f"frame, so `recv.m(x)` carries no type and the parameter list "
-                f"belongs to a declaration this walk has not read — and the "
-                f"method-call rewriting runs before any frame analysis exists, "
-                f"so a method it could not rewrite arrives still spelled "
-                f"`recv.m` with no lifted name to look a parameter list up by. "
-                f"Measured on the shape that IS rewritten, which shows the rule "
-                f"is the right one: `w.emit(s)` becomes `W_emit(w, s)`, whose "
-                f"FIRST parameter is the receiver, so `s` is the method's second "
-                f"parameter and is correctly not followed. What closes this is "
-                f"the method's declaration reaching the analysis — a receiver "
-                f"whose type names the struct, so the call can be rewritten and "
-                f"the parameter list read")
-    if callee in FRAME_C_LIBRARY_CALLS or callee in FRAME_C_VALUE_CALLS:
-        # A C entry point in a non-first position is a wrong CATEGORY of
-        # argument, not a position question at all, and the two were one
-        # sentence. Measured with the position check removed:
-        # `printf("val=%d\n", r)` builds, runs, and prints the frame ADDRESS as
-        # the integer the format asked for — the program produces output, exits
-        # 0, and never mentions the object.
-        return (f"a {who} receiver is passed to {callee}(), a C library entry "
-                f"point, in argument position {position}"
-                + (f" of {total}" if total > 1 else "")
-                + f". This is not a question about the position: {callee}() is "
-                f"variadic and takes its arguments as values, and a frame "
-                f"address is an address, so the format string reads it as "
-                f"whatever conversion it names. Measured with this check "
-                f"removed: `printf(\"val=%d\\n\", r)` builds, runs, prints the "
-                f"address as a decimal, and exits 0. Read a field out first "
-                f"(`{callee}(…, r.n)`)")
-    return (f"a {who} receiver is passed to {callee}() in argument position "
-            f"{position}"
-            + (f" of {total}" if total > 1 else "")
-            + f", and only the FIRST parameter is followed: a frame address "
-            f"passed to {callee}()'s first parameter makes that parameter a "
-            f"frame holder, and nothing does the same for any other position, "
-            f"so {callee}() reads the word as a plain value and a field access "
-            f"through it misses the slot table entirely. Measured, with this "
-            f"check removed: a two-field struct's field read through a "
-            f"non-first parameter returns 0 where the source says 7. It is "
-            f"also the channel the frame's lifetime leaks through — {callee}() "
-            f"may store the word or return it, and neither is visible from "
-            f"here. Passing the receiver as the first argument, or copying the "
-            f"value out first, is the same program with a lifetime this "
-            f"analysis can see")
+    A keyword argument has no position to quote, and printing the index it
+    happens to occupy in the concatenated `args + kwargs` list is a statement
+    about the ANALYSIS's list rather than about the call — the word lands
+    wherever the parameter list says it does, and a reader sent to position 2
+    of a call that wrote `take(x=1, y=r)` goes looking in the wrong place."""
+    if kwname:
+        return f"as the keyword argument {kwname!r}"
+    return (f"in argument position {position}"
+            + (f" of {total}" if total and total > 1 else ""))
+
+
+def frame_opaque_position_refusal(where_the: str, callee: str, position,
+                                  total, struct_names, method: str = None,
+                                  kwname: str = None, why: str = None) -> str:
+    """A frame address in a position THIS PASS cannot establish.  Case 3.
+
+    The honest remainder, and it is marked as a statement about the ANALYSIS
+    because that is what it is: there is no declaration in hand for the
+    parameter this argument lands in, so nothing here can say whether the
+    callee treats that word as a frame address.  Every shape that CAN be
+    established is established instead — see `frame_holder_disagreement_refusal`
+    for the one where the declaration is in hand and the two call sites
+    disagree, which is a different thing and a commoner one.
+
+    `why` names which of the ways the declaration is missing, because "this
+    pass cannot see it" without the reason is the sentence this whole family
+    was written to stop saying."""
+    who = _who(struct_names)
+    head = (f"a {who} receiver is passed to {where_the} "
+            f"{_where(position, total, kwname)}, and {why}. ")
+    if method:
+        return (head +
+                f"This is not a question about the position: a METHOD call on a "
+                f"value receiver is dispatched by NAME, so `recv.m(x)` carries no "
+                f"type and the parameter list belongs to a declaration this walk "
+                f"has not read — and the method-call rewriting runs before any "
+                f"frame analysis exists, so a method it could not rewrite "
+                f"arrives still spelled `{method}` with no lifted name to look a "
+                f"parameter list up by. A frame address in a bare-name call IS "
+                f"followed into the callee's parameter at that position, in "
+                f"every position and not only the first. Measured on the shape "
+                f"that IS rewritten, which shows the rule is right: `w.emit(s)` "
+                f"becomes `W_emit(w, s)`, whose FIRST parameter is the receiver, "
+                f"so `s` is the method's second parameter — and it is followed "
+                f"there too. What closes this is the method's declaration "
+                f"reaching the analysis: a receiver whose type names the struct, "
+                f"so the call can be rewritten and the parameter list read")
+    return (head +
+            f"This is a limit of the ANALYSIS and not a fact about the program: "
+            f"the frame belongs to the function that created it, that function "
+            f"is an ancestor of the callee — the address reached the callee "
+            f"through an active call — so a read or a write through this "
+            f"parameter would be in the right place, and the missing thing is "
+            f"the declaration that says so. Nothing in this image is compiled "
+            f"wrong without it: the word is refused rather than followed, so "
+            f"the alternative is a program that builds, runs, and returns a "
+            f"number the source never wrote")
+
+
+def frame_holder_disagreement_refusal(callee: str, position, param,
+                                      holder_structs, holder_spellings,
+                                      plain_spellings) -> str:
+    """One parameter reached with a frame address at one call site and with
+    something else at another.  The measured wrong answer this replaces.
+
+    The holder fixpoint makes a parameter a holder when a call site hands it a
+    frame address, and it used to do that at the FIRST position with nothing
+    said about the other call sites.  So `f` below compiles `x.a` as a frame
+    read, and the call `f(2, 3)` arrives with `x = 2`:
+
+    ```
+    struct R: var a: Int; var b: Int
+    def f(x: Int, y: Int) -> Int: return x.a
+    def main(n: Int) -> Int:
+        var r = R(); r.a = 7; r.b = 8
+        return f(r, 1) + f(2, 3)
+    ```
+
+    **Measured on both architectures, with nothing lifted: it builds, runs, and
+    dies with SIGSEGV (exit 139)** — the word 2 is not a frame address and
+    `x.a` loads eight bytes from wherever 2 points.  This is a use-after-free's
+    sibling, and it is in the shipped tree, at the FIRST position, before this
+    change existed: the rule the family was written for was never the thing
+    that was wrong.
+
+    So a parameter's being a holder is a property of the WHOLE IMAGE, not of
+    one call site, and this refusal is what makes that visible.
+
+    Phrased from BOTH sides and naming both, because either call site can be
+    the one the reader is standing at, and a message that names the wrong one of
+    the pair is the same defect as a message that names the wrong reason: it
+    sends the reader to a call that is fine.  The spellings are the source's
+    own, so the pair is visible without re-running anything.
+    """
+    who = _who(holder_structs)
+    return (f"{callee}() takes a {who} receiver at argument {position} — "
+            f"{param!r} — at {' and '.join(holder_spellings)} here, and "
+            f"something that is not a frame address at "
+            f"{' and '.join(plain_spellings)}. One parameter, two kinds of "
+            f"value: {callee}() is compiled with {param!r} as a frame holder, "
+            f"so a field read through it is a load at `base + 8k` — and at the "
+            f"other call site there is no frame there at all. Measured on both "
+            f"architectures with nothing lifted: the two-call-site shape builds, "
+            f"runs, and dies with SIGSEGV (exit 139). Give {param!r} one kind "
+            f"of value at every call site — pass the frame address everywhere, "
+            f"or nowhere")
 
 
 def frame_return_refusal(owner, received: bool, struct_names) -> str:
@@ -1726,35 +2196,48 @@ def frame_return_refusal(owner, received: bool, struct_names) -> str:
     frame was NOT built here.
 
     "Returned from the function that created it" is true for a frame a function
-    built and false for one that arrived as its first parameter, and the second
-    is the larger half of this family: the holder fixpoint makes a callee's
-    first parameter a holder, so `def fwd(r): return r` in a program whose
-    object was made by `main` was reported as a return from the creator. The
-    refusal is right — nothing here establishes that the creator is still on the
-    stack — and the sentence was naming the wrong function, which sends the
-    reader to look at `fwd` for a construction that is in `main`.
+    built and false for one that arrived as a PARAMETER, and the second is the
+    larger half of this family: the holder fixpoint makes a callee's parameter a
+    holder — in every position since the position rule was split out of this
+    one — so `def fwd(r): return r` in a program whose object was made by `main`
+    was reported as a return from the creator. The refusal is right — nothing
+    here establishes that the creator is still on the stack — and the sentence
+    was naming the wrong function, which sends the reader to look at `fwd` for a
+    construction that is in `main`.
 
-    The hazard is measured, not asserted: the same shape with the creator one
-    frame deeper built, ran, and returned 10 where the source says 7, because
-    the bytes the address names had been reused."""
+    Which is why nothing here says "first parameter" any more.  It said that
+    because the fixpoint only followed index 0, and it became false the moment
+    the fixpoint followed every position: `def stash(x, y): return y` receives
+    the frame as its SECOND parameter, and a message naming the first one
+    points the reader at a parameter the source does not use.
+
+    The hazard is measured, not asserted, and it is a use-after-free rather than
+    a wrong number in the shape that matters: with the creator one frame
+    deeper, `def stash(x, y): return y` called as `outer(1)`, the program built,
+    ran, and returned **10 on arm64 and 0 on x86-64** where the source says 7 —
+    the bytes the address names had been reused, and the two architectures
+    disagreed about what was in them."""
     who = ", ".join(struct_names) if struct_names else "this struct"
     tail = (f" Returning the address hands the caller a pointer into a frame "
             f"whose lifetime this pass cannot follow, and the failure is a "
             f"wrong number rather than a crash: the bytes get reused and the "
             f"read returns whatever is in them now. Measured with this check "
-            f"removed: the same shape returns 10 where the source says 7. "
+            f"removed: the same shape returns 10 on arm64 and 0 on x86-64 "
+            f"where the source says 7 — a use-after-free, and a two-backend "
+            f"disagreement about what the reused bytes held. "
             f"Return a field (`return self.n`) or a copy of the value, which "
             f"is the same program with a lifetime this analysis can see")
     if received and owner:
         return (f"a {who} receiver is returned from a method of {owner}, which "
                 f"did not create the frame — it received the address as its "
-                f"first parameter, so the function that DID create it is "
+                f"receiver, so the function that DID create it is "
                 f"somewhere up the call chain and nothing here establishes that "
                 f"its frame is still there." + tail)
     if received:
         return (f"a {who} receiver is returned from a function that did not "
-                f"create it: the address arrived as its first parameter, so the "
-                f"function that built the frame is this function's CALLER, and "
+                f"create it: the address arrived as one of its parameters, so "
+                f"the function that built the frame is this function's CALLER "
+                f"or an ancestor of it, and "
                 f"nothing here establishes that the caller's frame is still "
                 f"there when the caller reads the value this return produces." +
                 tail)
@@ -2505,6 +2988,72 @@ def type_constructor_kind(callee_name: str):
     if callee_name in UNREPRESENTABLE_TYPE_CTORS:
         return ("unsupported", None)
     return None
+
+
+def type_constructor_prefers_local_struct(callee_name: str, structs: dict,
+                                          nargs: int) -> bool:
+    """Whether THIS MODULE's own `struct N` beats `N`'s place in
+    `UNREPRESENTABLE_TYPE_CTORS`.
+
+    `UNREPRESENTABLE_TYPE_CTORS` is a hand-kept list of NAMES, and a name in it
+    was refused outright — "constructing DType has no representation on this
+    path" — without anybody asking what the file being compiled says about
+    `DType`.  In a file that DECLARES `struct DType`, that declaration is the
+    only thing in hand that says what the name means, and the hand-kept list
+    was overriding it.  That is the defect: the list is a statement about types
+    this path cannot represent *abstractly*, and a struct of one field is a
+    plain word, which is the most representable thing there is.
+
+    So the rule that was masked is the ordinary one, and ARITY is what applies
+    it: a call whose argument count matches the local declaration's field count
+    is a construction of that struct, and one that does not match is not — which
+    leaves the name's own reading standing for every other arity, so this can
+    never reclassify a call the tables already handled well.
+
+    Two deliberate exclusions, both measured:
+
+      * only `UNREPRESENTABLE_TYPE_CTORS` is overridden, never the identity or
+        the integer tables.  `Pointer` is a struct some files in this
+        repository declare AND an identity conversion, and
+        `Pointer(to=stat)` over a struct's frame is the one hand-off in the
+        whole family that is correct (a pointer wants the address, and a frame
+        address is one).  Preferring the local declaration there would turn a
+        working identity conversion into a construction, which is a change of
+        MEANING rather than a change of verdict — the one direction this
+        function must never go;
+      * the field count must match, so `Error()` in a file that declares a
+        two-field `Error` keeps the unrepresentable refusal.  That file is not
+        in the corpus, and the point is that the rule does not need it to be:
+        arity decides, and an unmatched call is left exactly as it was.
+
+    Everything here is a change of VERDICT in one direction only: the
+    'unsupported' branch is a refusal today, so preferring the local struct can
+    turn a refusal into a lowering and can never change the meaning of a program
+    that already built.
+
+    The ZERO-ARGUMENT form is the second half of the answer, and it is the one
+    that was still wrong. `S()` — no arguments — is not an arity to match
+    against a field count: it is Mojo's own struct syntax, the shape
+    `_emit_struct_constructor` was written for and the only one that used to
+    exist. So for a name this image knows as a struct, `S()` is a construction
+    of that struct and the struct's own field count decides whether it is
+    representable — which is the whole of the rule everywhere else in this
+    file. Left as it was, `struct DType: var _mlir_value: Int` — ONE field,
+    and a formal value is one 64-bit word, so a `DType` is as representable as
+    anything here — was refused with the sentence "a formal value is one 64-bit
+    word, and DType is not one thing", which is false, while the identical
+    program with the struct renamed built on both architectures. The arity test
+    also masked the rule that actually stops the neighbouring case: `DTypeX(7)`
+    is refused by the shape rule (`DTypeX(...) takes no arguments on this
+    path`), not by anything about representability, and the name list got there
+    first and said something else.
+    """
+    if callee_name not in UNREPRESENTABLE_TYPE_CTORS:
+        return False
+    st = (structs or {}).get(callee_name)
+    if st is None:
+        return False
+    return nargs == 0 or nargs == len(struct_frame_slots(st))
 
 
 # The subset of `IDENTITY_TYPE_CTORS` that ASKS FOR AN ADDRESS rather than
@@ -3861,6 +4410,587 @@ def struct_frame_representable(struct_def):
     return (True, None)
 
 
+# ── THE THREE CONSTRUCTION SHAPES ────────────────────────────────────────
+#
+# `S()`, `S(a, b, …)` and `S(x)` are three different lowerings and until now
+# only the first existed.  What they have in common is that all three end with
+# a FRESH BLOCK whose bytes belong to the function that created it, so all
+# three are confined to that function's activation and none of them can hand
+# the block anywhere.  That confinement is what makes the other two
+# representable, and it is the whole content of this section — so it is worth
+# stating precisely, because it is the difference between the second and third
+# shapes being lowerings and being wrong answers:
+#
+#     A block built at a construction SITE belongs to the function the site is
+#     in, and `_check_frame_escapes` refuses every channel by which it could
+#     leave that activation: returning it, putting it in a container, parking
+#     it in another object's field, handing it to a callee in a non-first
+#     parameter position.  So the object is read only while its creator is
+#     still on the stack, and:
+#
+#       * a WORD stored into one of its slots came from a live local or
+#         parameter of that same function or of an ancestor of it, so it
+#         outlives the block's last read.  A frame address is the interesting
+#         case of that and is ALLOWED here — which is exactly what the
+#         assignment form `o.inner = i` may not be, and the difference is
+#         worth naming because the two look identical in the source: `o` in
+#         `o.inner = i` may be an object built by an ANCESTOR, so the slot
+#         outlives `i`'s creator and the next use of `o` reads reclaimed
+#         stack.  At a construction site the object is new here, so there is
+#         no such ancestor-built object to be.
+#
+# The two per-argument checks below are the ones that argument does NOT
+# survive, and each is refused by name rather than stored.
+
+CONSTRUCTION_DEFAULT = "default"
+CONSTRUCTION_POSITIONAL = "positional"
+CONSTRUCTION_COPY = "copy"
+
+
+def _construction_arg_spelling(arg) -> str:
+    """How a refusal names the argument it is about.
+
+    A refusal that says "an argument" when the source has four of them sends
+    the reader to count them again, so the argument is named the way the
+    source spells it."""
+    if isinstance(arg, F.IdentExpr):
+        return f"argument {arg.name!r}"
+    if isinstance(arg, F.MemberExpr):
+        return f"argument {_member_chain_text(arg)}"
+    if isinstance(arg, F.CallExpr):
+        callee = arg.func.name if isinstance(arg.func, F.IdentExpr) else "?"
+        return f"the call to {callee!r}"
+    if isinstance(arg, (F.ListExpr, F.DictExpr, F.TupleExpr)):
+        return "a container literal"
+    if isinstance(arg, (F.IntLiteral, F.BoolLiteral, F.StringLiteral)):
+        # The VALUE, not the node class: `an argument of type IntLiteral` tells
+        # a reader nothing they can look for in their own source, and the
+        # literal's spelling is the one thing about it that is in the source.
+        return f"the literal {getattr(arg, 'value', '?')!r}"
+    return f"an argument of type {type(arg).__name__}"
+
+
+def _member_chain_text(node) -> str:
+    """`a.b.c` for a MemberExpr chain, without importing build.py's walker.
+
+    Deliberately a second, tiny implementation rather than a shared import:
+    `formal/model.py` is imported by the BACKENDS as well as the build pass and
+    must not acquire a dependency on it, and a member chain is three lines.
+    """
+    parts = []
+    while isinstance(node, F.MemberExpr):
+        parts.append(node.member)
+        node = node.obj
+    if isinstance(node, F.IdentExpr):
+        parts.append(node.name)
+    return ".".join(reversed(parts))
+
+
+def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
+    """A construction argument that is a blob belonging to a CALLEE.
+
+    The one per-argument hazard the confinement above does not cover, and the
+    reason it is a call and not a container: a container LITERAL is built here,
+    in the function whose block is being filled, so it lives at least as long
+    as the slot; a name was bound here or in an ancestor, so the region it
+    names does too.  A CALL is neither — `List[T]()` and every other container
+    constructor on this path is a bump-allocated region of the CALLEE's own
+    reserved scratch, and the callee has returned by the time the store
+    happens.  Storing it would give `self.<field>.append(x)` in a method a
+    blob in reclaimed stack, which is premise (B1)'s hazard arrived at from a
+    direction the premise's own check does not walk: `check_frame_field_blob_
+    premises` looks at what a METHOD BODY writes, and this is a constructor
+    argument.
+
+    The exception is a call to a struct this path PLACES: that is a frame
+    address, one word, with a lifetime the frame layout governs, and
+    `_callee_is_placed_frame` is the one predicate that knows.
+    """
+    callee = (arg.func.name
+             if isinstance(arg.func, F.IdentExpr) else "?")
+    return (f"constructing {name} with {_construction_arg_spelling(arg)} as "
+            f"field {field!r} is refused on this path: {callee}() is declared "
+            f"to return a container, and a container on this path is a "
+            f"bump-allocated region of the CALLEE's own reserved scratch, so by "
+            f"the time the constructor stores it the bytes are reclaimed — and "
+            f"a method reaching through the slot afterwards appends into "
+            f"reclaimed stack. A container LITERAL, or a name bound here or in "
+            f"a caller, is fine for exactly the opposite reason: it is built in "
+            f"a function that is still running, and so is any call whose "
+            f"declared return type is not a container. Build the container and "
+            f"assign the field after `S()`, which is the same program with a "
+            f"lifetime this analysis can see")
+
+
+def construction_frame_in_value_refusal(name: str, field: str, arg,
+                                        struct_names) -> str:
+    """A frame address as the whole value of a ONE-WORD struct.
+
+    The one argument kind a framed construction accepts and a one-word one
+    does not, and the asymmetry is the confinement argument read from the
+    other side.  A framed object has a BLOCK, and a block is confined to the
+    function that built it, so a frame address parked in one of its slots is
+    read only while that function is still running.  A one-field struct has no
+    block: its receiver IS the field, so the word is the struct, and this path
+    has no lifetime analysis for a plain word at all — it can be passed to any
+    callee, stored anywhere, and laundered past every frame check on the way,
+    because a name bound from a ONE-word constructor is deliberately not a
+    holder.  That is the same reason `byref_refuse_frame_address_in_a_field`
+    exists, one level out.
+    """
+    who = ", ".join(struct_names) if struct_names else "another struct"
+    return (f"constructing {name} with {_construction_arg_spelling(arg)} as "
+            f"field {field!r} is refused on this path: that argument is the "
+            f"ADDRESS of a {who} frame of 8-byte slots, and {name} has one "
+            f"field, so its whole value IS that word — there is no block "
+            f"confining it to the function that built it, and a one-field "
+            f"struct's value is passed around as an ordinary word, which every "
+            f"frame-lifetime check here is bypassed by. Copy the value out of "
+            f"the frame first (`{name}(frame.field)`), which is the same "
+            f"program with a lifetime this analysis can see")
+
+
+def struct_init_overloads(struct_def) -> list:
+    """`[(required, optional, [names])]` per `__init__` this struct declares.
+
+    The shapes of the struct's user-defined CONSTRUCTORS, which is a different
+    question from its field list and the one that decides what `S(a, b)` means
+    when `S` declares any.
+
+    `required` counts the parameters with no default, EXCLUDING the receiver:
+    `out self` is where the object is written, not something the caller passes,
+    and counting it would make every arity in this file off by one.  The
+    receiver is recognised by `struct_receivers`, so a class spelling it `this`
+    is read the same as one spelling it `self`.
+
+    Empty when the struct declares no `__init__` at all, and that emptiness is
+    the whole of the distinction: with no `__init__`, Mojo's `S(...)` fills the
+    fields in declaration order, which is what `struct_frame_slots` describes
+    and what the positional construction lowers.  With one, `S(...)` calls it.
+    """
+    out = []
+    receivers = struct_receivers(struct_def)
+    for m in struct_methods(struct_def):
+        if m.name != "__init__":
+            continue
+        names, required, optional = [], 0, 0
+        for p in (getattr(m, "params", None) or []):
+            pname = p[0] if isinstance(p, (tuple, list)) else p
+            if pname in receivers:
+                continue
+            names.append(pname)
+            if getattr(m, "param_has_default", {}).get(pname):
+                optional += 1
+            else:
+                required += 1
+        out.append((required, optional, names))
+    return out
+
+
+def construction_init_overload_refusal(name: str, overloads, got: int) -> str:
+    """`S(a, b)` where `S` declares a user-defined `__init__`.
+
+    A refusal that has to come BEFORE the arity one, because the arity
+    message's claim — "a struct's fields are filled in DECLARATION ORDER and
+    there is no other form" — is FALSE for this struct, and a message that is
+    false about the program in front of the reader is worse than no message.
+
+    `std/builtin/builtin_slice.mojo`'s `Slice` is the case that makes it
+    concrete and it is twenty stdlib files' first blocking fact: it declares
+    TWO `__init__` overloads, a two-parameter one and a four-parameter one with
+    a defaulted fourth, and the corpus writes `Slice(6, len(lst))`,
+    `Slice(start, end)` and `Slice(start, end, step)`.  So `Slice(6, len(lst))`
+    is not a two-field construction of a three-field struct; it is a call to the
+    two-parameter constructor, which assigns `self.step = None` itself.
+
+    Which is premise (B2) again, and the honest statement of it: this path does
+    not run `__init__`.  `S()` brings every field up at its class-level default
+    and nothing else, so a construction with arguments is a call whose body this
+    backend has not lowered — and the fix is not to make the arity message
+    accommodate it but to say which constructor the source named, so the reader
+    can see that the shape is a real one and that what is missing is `__init__`.
+
+    The overload shapes are spelled because "it has a constructor" is not
+    actionable and `Slice`'s two shapes are.
+    """
+    shapes = "; ".join(
+        f"{req} required" + (f" and {opt} defaulted" if opt else "")
+        + (f" ({', '.join(names)})" if names else "")
+        for req, opt, names in overloads)
+    return (f"constructing {name} with {got} argument(s) is a call to a "
+            f"user-defined `__init__`, not a field-filling construction: "
+            f"{name} declares {len(overloads)} `__init__` overload"
+            f"{'' if len(overloads) == 1 else 's'} ({shapes}), and in Mojo a "
+            f"declared `__init__` is what `name(...)` calls. This path does NOT "
+            f"run it — {FRAME_FIELD_BLOB_PREMISE_B2} — so every field of a "
+            f"fresh {name} comes up at its class-level default and a "
+            f"construction with arguments names a body nothing here has "
+            f"lowered. That is a real limit and not the same one as a "
+            f"mismatched field count: use `{name}()` and assign the fields, "
+            f"which is the same program with a representation, and see "
+            f"bugs/FORMAL_wide_receiver_by_reference.md for what running "
+            f"`__init__` would cost")
+
+
+def construction_arity_refusal(name: str, got: int, summary: str) -> str:
+    """A construction whose argument count is not this struct's field count.
+
+    Named with both counts and the field list, because "wrong number of
+    arguments" without the field list is the reader's next question and the
+    field list is the answer."""
+    return (f"constructing {name} with {got} argument(s) does not match its "
+            f"fields ({summary}), and {name} declares no `__init__` for it to "
+            f"call instead: with no user-defined constructor, a struct's fields "
+            f"are filled in DECLARATION ORDER from positional arguments and "
+            f"there is no other form, so this path can only place a word in a "
+            f"slot it can name. Give the fields explicitly (`{name}()` then "
+            f"`obj.<field> = …`), which is the same program with a "
+            f"representation")
+
+
+def construction_keyword_refusal(name: str, keys) -> str:
+    """`S(a=1)` — a keyword form of a construction, refused rather than
+    misread.
+
+    Refused rather than read as positional, because reading it as positional
+    would depend on the order the keywords happen to appear in a dict, and a
+    program's meaning must not depend on that.
+
+    It is a REAL limit and not an oversight, and it has a shape worth stating
+    because the stdlib leans on it — `StringSlice(unsafe_from_ptr=p)` is the
+    idiomatic spelling and 1 stdlib file reaches it as its first thing wrong.
+    What would close it is decidable and is named here so the next reader does
+    not have to work it out: match each keyword against
+    `struct_frame_slots`, let the positionals take the remaining slots in
+    declaration order, and require the two together to cover every field
+    EXACTLY once — a keyword naming no field, a field named twice, and a field
+    left uncovered are each a refusal with its own reason.  That is a small
+    extension of what is here and it was left out of a change whose subject is
+    the three positional shapes, not because it is hard.
+    """
+    return (f"constructing {name} with keyword argument(s) "
+            f"{', '.join(repr(k) for k in keys)} is not a shape this path "
+            f"lowers: {name}'s fields are filled in DECLARATION ORDER from "
+            f"positional arguments, and reading a keyword as positional would "
+            f"make the program's meaning depend on the order the keywords "
+            f"appear in. Match the keyword against the field list instead — "
+            f"each keyword naming a field, the positionals taking the rest in "
+            f"declaration order, and the two together covering every field "
+            f"exactly once — or pass the values positionally, or use `{name}()` "
+            f"and assign the fields")
+
+
+def construction_nested_slot_refusal(name: str, field: str, arg,
+                                    nested_name: str) -> str:
+    """A construction argument landing on a field the constructor PLACED.
+
+    The one positional argument this path must refuse for a reason of its own.
+    The slot is not an ordinary slot: `struct_nested_frame_fields` placed a
+    frame in it, in the object's OWN block, and that placement is what makes
+    the word in it mean anything — it is a frame address whose layout this
+    compiler chose.  Storing an argument over it would leave a word in a slot
+    that every reader (`self.<field>.<field>`) treats as a frame base, so a
+    field read would compute an address out of a value.
+
+    The two honest ways out are both in the message, and neither is "just store
+    it": assign the field, which the write path already handles and which is
+    why a written field is excluded from the placement list in the first
+    place, or declare the field untyped, which takes it out of the placed set.
+    """
+    return (f"constructing {name} with {_construction_arg_spelling(arg)} as "
+            f"field {field!r} is refused on this path: {field!r} is declared "
+            f"as a {nested_name}, a struct of this module whose receiver is a "
+            f"frame of 8-byte slots, so the constructor PLACED a {nested_name} "
+            f"frame in that slot and in the object's own block — a word stored "
+            f"over it would leave a value where every read of "
+            f"`self.{field}.…` computes a frame base from it. Assign the field "
+            f"after `{name}(…)`, which is the same program and is the form the "
+            f"placement's own write-once rule already anticipates")
+
+
+def construction_copy_source_refusal(name: str, arg, struct_names) -> str:
+    """`S(x)` where `x` is a frame, but not a frame of `S`.
+
+    The one copy that cannot be a copy, and the reason is that a copy here is a
+    SLOT-FOR-SLOT copy: slot `k` of the source into slot `k` of the
+    destination, which means anything only if the two layouts are the same
+    layout.  A different struct is a different layout by definition, and a
+    name that may be either is two layouts with no path sensitivity to say
+    which — the same `struct_frame_slot_candidates` question one level in, and
+    it has the same answer: agree or refuse.
+    """
+    who = ", ".join(struct_names) if struct_names else "another struct"
+    return (f"constructing {name} with {_construction_arg_spelling(arg)} is a "
+            f"COPY CONSTRUCTION and the argument is a {who} frame, not a "
+            f"{name} one: a copy on this path is a slot-for-slot copy — slot k "
+            f"of the source into slot k of the destination — so it is only "
+            f"defined when the two layouts are the same layout. Construct "
+            f"{name}() and assign the fields, which is the same program with "
+            f"a representation")
+
+
+def construction_copy_unrecognised_refusal(name: str, arg) -> str:
+    """`S(x)` where nothing here can say what `x` is.
+
+    The refusal that matters most in this section, because it is the one whose
+    absence is a silently-wrong answer rather than a missing feature.  A copy
+    needs a BASE to copy from, and on this path the only thing that says a word
+    is a frame address is the holder analysis — a name bound from a framed
+    struct's constructor, a copy of such a name, a method receiver, or a
+    visible callee's first parameter, carried to a fixpoint.  A name outside
+    that set is a plain word, and reading slot `k` of it would be reading
+    whatever eight bytes the word happens to name.
+
+    So an ABSENT answer is the answer, which is the same tie-break
+    `frame_field_type_candidates` uses and for the same reason: a doubtful
+    case must be able to fall out of the typed set and never into it.
+    """
+    return (f"constructing {name} with {_construction_arg_spelling(arg)} is a "
+            f"COPY CONSTRUCTION and nothing here can say that argument is a "
+            f"{name} frame: a copy needs a base to copy from, and the only "
+            f"thing on this path that says a word is a frame address is the "
+            f"holder analysis — a name bound from a framed struct's "
+            f"constructor, a copy of one, a method receiver, or a visible "
+            f"callee's first parameter. This name is none of those, so it is a "
+            f"plain word, and copying slot k out of it would copy whatever "
+            f"eight bytes that word happens to name. Construct {name}() and "
+            f"assign the fields, which is the same program with a "
+            f"representation")
+
+
+def struct_construction_plan(struct_def, call, decls: dict,
+                             candidates: dict, rets=None) -> tuple:
+    """`(plan, refusal)` — which of the three shapes `S(...)` is, or why not.
+
+    THE decision, in the shared model, so the two backends cannot answer it
+    differently and the build pass (which refuses before either backend runs)
+    and the emitters (which have to emit) read one table.  `decls` is
+    `{name: StructDef}` for the structs this module declares; `candidates` is
+    `formal/build.py`'s `{holder name: [StructDef, …]}` for the function the
+    call is in — the recognition a copy construction needs, and the only thing
+    in the compiler that can say a word is a frame address, and `rets` is
+    `function_return_types`' `{name: declared return annotation}` — the
+    evidence for the one argument kind that is refused, a container returned by
+    a callee (`_construction_arg_is_dead_blob`).
+
+    A `plan` is `(kind, …)`:
+
+    | kind | payload | what the emitter does |
+    |---|---|---|
+    | `CONSTRUCTION_DEFAULT` | — | the existing `S()`: every field at its own default, and every placed nested frame brought up |
+    | `CONSTRUCTION_POSITIONAL` | `[(field, slot)]` in DECLARATION ORDER, one per argument | evaluate each argument, store it at `base + 8·slot` |
+    | `CONSTRUCTION_COPY` | the slot count | evaluate the source, then `n`-slot copy into the fresh block |
+
+    `slot` is `None` in the positional payload exactly when the struct is a
+    one-word VALUE rather than a frame: there the argument is not stored at
+    all, it IS the result, which is the same statement as "stored at slot 0 of
+    a zero-byte frame" and is the only reading of `S(x)` that does not invent
+    storage.
+
+    The refusals, each with its own message and its own reason, are in the
+    functions above; a reader who wants to know which construct is being
+    refused can tell from the first clause of each.
+    """
+    name = struct_def.name
+    decls = decls or {}
+    candidates = candidates or {}
+    args = list(getattr(call, "args", None) or [])
+    kwargs = list(getattr(call, "kwargs", None) or [])
+    slots = struct_frame_slots(struct_def)
+    if kwargs:
+        return (None, construction_keyword_refusal(
+            name, [k for k, _v in kwargs]))
+    if not args:
+        # The existing shape.  Deliberately NOT re-decided here: `S()`'s
+        # refusal for a non-literal default belongs to
+        # `struct_frame_representable` / `struct_default_word` and has its own
+        # message, and a second copy of the decision is a second thing to keep
+        # in step with the first.
+        return ((CONSTRUCTION_DEFAULT,), None)
+    # A DECLARED `__init__` outranks everything below, and it has to: with one,
+    # `S(a, b)` is a call to it, so every message underneath — the arity one
+    # included — is describing a construct the source does not contain.
+    # `Slice(6, len(lst))` against a three-field `Slice` is the case, and it is
+    # twenty stdlib files' first blocking fact.
+    overloads = struct_init_overloads(struct_def)
+    if overloads:
+        return (None, construction_init_overload_refusal(
+            name, overloads, len(args) + len(kwargs)))
+    if not struct_is_framed(struct_def):
+        # Zero or one field: the whole value is one word.  Zero fields has
+        # nowhere to put an argument at all, which is an arity refusal with
+        # the field list saying so.
+        if len(slots) != 1:
+            return (None, construction_arity_refusal(
+                name, len(args), struct_field_summary(struct_def)))
+        only = slots[0]
+        for arg in args:
+            if _construction_arg_is_dead_blob(arg, rets):
+                return (None, construction_dead_blob_refusal(name, only, arg))
+            src = _frame_source_structs(arg, candidates)
+            if src:
+                return (None, construction_frame_in_value_refusal(
+                    name, only, arg, [s.name for s in src]))
+        return ((CONSTRUCTION_POSITIONAL, [(only, None)]), None)
+
+    # A FRAMED struct.  One argument that is a recognised frame of THIS struct
+    # is a copy, and it is checked before the arity rule because arity is what
+    # makes it look wrong: `R(r)` on a two-field `R` is not a one-field
+    # construction, it is a copy of a two-field object.
+    if len(args) == 1:
+        src = _frame_source_structs(args[0], candidates)
+        if src is not None:
+            if len(src) != 1 or src[0] is not struct_def:
+                return (None, construction_copy_source_refusal(
+                    name, args[0], [s.name for s in src]))
+            return ((CONSTRUCTION_COPY, len(slots)), None)
+        if isinstance(args[0], F.IdentExpr):
+            # A name, and NOT a holder: a plain word.  `S(x)` with a plain word
+            # is an arity error on a multi-field struct and saying so is the
+            # whole content — but the copy reading is the one a reader will
+            # have in mind, so it is named as such rather than left to be
+            # inferred from a count.
+            return (None, construction_copy_unrecognised_refusal(name, args[0]))
+    if len(args) != len(slots):
+        return (None, construction_arity_refusal(
+            name, len(args), struct_field_summary(struct_def)))
+    placed = {field: child.name
+              for field, _slot, child in struct_nested_frame_fields(
+                  struct_def, decls)}
+    plan = []
+    for arg, field in zip(args, slots):
+        if field in placed:
+            return (None, construction_nested_slot_refusal(
+                name, field, arg, placed[field]))
+        if _construction_arg_is_dead_blob(arg, rets):
+            return (None, construction_dead_blob_refusal(name, field, arg))
+        plan.append((field, struct_frame_slot(struct_def, field)))
+    return ((CONSTRUCTION_POSITIONAL, plan), None)
+
+
+def _construction_arg_is_dead_blob(arg, rets=None) -> bool:
+    """Whether a construction argument is a container belonging to a CALLEE.
+
+    One predicate, because it is one fact and the two call sites were two
+    copies of a three-line test.  It is a CALL, and among calls only the ones
+    whose DECLARED RETURN TYPE is a bump-allocated region: a function that says
+    it returns `Int` puts an integer in the slot, whatever it did internally,
+    and a function that says it returns a `List` puts a region of ITS OWN
+    reserved scratch in the slot, and that scratch is reclaimed the moment it
+    returns.
+
+    The declared return type is the whole of the evidence, and the cases are
+    the three this path can tell apart:
+
+      * a container type — refused, by name;
+      * any other type, INCLUDING no type at all — allowed.  A function that
+        declares nothing returns whatever its body returns, and a
+        `-> Int`-shaped declaration is the ordinary case (`scale(2)` in
+        `constr_positional_expression_arguments`), so refusing every call would
+        refuse essentially every positional construction in a real program.  An
+        absent answer has to be the PERMISSIVE one here, and that is the
+        opposite tie-break from the copy construction's on purpose: a wrong
+        word in a slot is a value the source did not write, while a missed blob
+        is only reachable if some method later appends through the slot — and
+        that path is refused on its own terms today (`list.append()` needs the
+        capacity to be known where the list is built, and a slot is not a list
+        literal).  So the residual is real and it is stated rather than
+        guessed at in either direction: it is the same gap premise (B1) has
+        about a bare name, and what closes it is the VALUE KIND of a call's
+        result, which is `ValueKinds`' question and not a re-derivation to be
+        smuggled in here;
+      * a call to a struct this path PLACES — a frame address, one word, with a
+        lifetime the frame layout governs.  Not a container and not refused.
+
+    A container LITERAL and a name are not in this function at all: a literal
+    is built by the function whose block is being filled and a name was bound
+    in that function or an ancestor, so in both cases the region outlives every
+    read of the slot.  `construction_dead_blob_refusal` is where that argument
+    is spelled out for the reader.
+    """
+    if not isinstance(arg, F.CallExpr) \
+            or not isinstance(arg.func, F.IdentExpr):
+        # `arg.func` is a bare name or it is not a call this table can say
+        # anything about: `List[Self.T]()`, `Self.T[…]()`, `a.b()` and
+        # `f()[0]()` all land here, and a subscript callee is not a name in
+        # `rets` — it is a type or an expression whose result this path does
+        # not follow.  Not a blob, because nothing here knows that it is one.
+        return False
+    if _callee_is_placed_frame(arg.func.name):
+        return False
+    return return_type_is_blob((rets or {}).get(arg.func.name))
+
+
+# The annotations that name a BUMP-ALLOCATED REGION on this path — the types
+# whose value is a word pointing into the creating function's own reserved
+# scratch, as opposed to a word that means something on its own.  `String` and
+# its relatives are deliberately NOT here: a string literal has static storage
+# duration, so a string is the one pointer on this path with no lifetime
+# problem at all, and treating it as a blob would refuse the most common
+# argument in the corpus.
+BLOB_TYPE_NAMES = frozenset({
+    "List", "Dict", "Set", "Tuple", "Optional", "InlineArray", "StaticTuple",
+    "Array", "StringRef",
+})
+
+
+def return_type_is_blob(annotation) -> bool:
+    """Whether a declared return type names a bump-allocated region.
+
+    `List[Self.T]` and `unsafe Pointer[Int32]` both reduce through
+    `annotation_base_name`, so the type ARGUMENTS are dropped rather than
+    compared — the same reading `annotation_base_name` gives a field's declared
+    type and for the same reason: the base decides which KIND of thing the word
+    is, and the arguments decide nothing this value model has a slot for.
+
+    False for an absent or unreadable annotation.  That is the permissive
+    direction and `_construction_arg_is_dead_blob` says why, at length, because
+    a reader who finds this predicate alone would reasonably guess the other
+    way round.
+    """
+    base = annotation_base_name(annotation)
+    return base is not None and base in BLOB_TYPE_NAMES
+
+
+def function_return_types(functions) -> dict:
+    """`{name: declared return annotation}` for a unit's functions.
+
+    Read once and passed down rather than reached for, because
+    `struct_construction_plan` is called from three places (the build pass and
+    the two backends) and each of them has a different shape of function list.
+    One reader means all three see the same evidence.
+    """
+    out = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            out[name] = getattr(fn, "return_type", None)
+    return out
+
+
+def _frame_source_structs(arg, candidates: dict):
+    """The candidate structs for `arg` if it is a recognised FRAME, else None.
+
+    Two answers and the difference between them is the copy construction's
+    whole dependency on the holder analysis:
+
+      * `[S]` — a frame of exactly one struct, and a copy into `S` is a
+        slot-for-slot copy of one layout into itself;
+      * `[A]`/`[A, B]`/`[A, B, C]` — a frame, but not of a single struct, so
+        there is no one layout to copy;
+      * `None` — NOT a frame at all.  A name bound from a constructor this path
+        does not frame is in `candidates` with an EMPTY list, and that is a
+        plain word; a name not in `candidates` at all is a plain word too, and
+        the caller refuses it rather than treating it as one, because for a
+        COPY the difference between "a plain word" and "a frame whose kind
+        this analysis missed" is the difference between refusing a feature and
+        copying eight bytes of unrelated memory.
+    """
+    if not isinstance(arg, F.IdentExpr) or arg.name not in candidates:
+        return None
+    return list(candidates[arg.name]) or None
+
+
 # ── THE BLOB-IN-A-FIELD PREMISE ──────────────────────────────────────────
 #
 # C5's open item, and the one the value-method work meets head-on, so it is
@@ -4094,6 +5224,22 @@ def frame_field_premise_note(struct_def) -> str:
     every container in the corpus, so this is the sentence that stops the
     premise from being an accident: it names the line whose non-execution is
     doing the work.
+
+    The second sentence is the THIRD door, and it is here because the
+    construction shapes added one.  A slot can now hold a container without any
+    method writing it: `S([1, 2, 3])` puts a literal straight into a field.  That
+    is sound and the reason is worth having on the record rather than in a
+    comment three files away — a container LITERAL is built by the function
+    whose block is being filled, and it is reachable only through that block,
+    and the block is confined to that function's activation by
+    `_check_frame_escapes`, so the region outlives every read of the slot.  The
+    unsafe neighbour is a container that came back from a CALLEE
+    (`construction_dead_blob_refusal` refuses exactly that), because that one
+    is bump-allocated in the callee's scratch and the callee has returned by
+    the time the store happens.  So the three doors are: a method's write
+    (refused, premise B1), `__init__`'s write (does not run, premise B2), and
+    a construction argument (a literal is confined with the block; a callee's
+    container is refused by name).
     """
     receivers = struct_receivers(struct_def)
     found: list = []
@@ -4104,14 +5250,60 @@ def frame_field_premise_note(struct_def) -> str:
                                     containers)
             _container_write(getattr(m, "body", None), receivers, found,
                              containers)
-    if not found:
-        return ""
-    field, spelling = found[0]
-    return (f"{struct_def.name}.__init__ assigns {spelling} to self.{field}, "
+    parts = []
+    if found:
+        field, spelling = found[0]
+        parts.append(
+            f"{struct_def.name}.__init__ assigns {spelling} to self.{field}, "
             f"which is a blob in the constructor's scratch rather than a word; "
             f"this is safe only because {FRAME_FIELD_BLOB_PREMISE_B2}, so every "
             f"slot in a fresh {struct_def.name} reads as zero where the "
             f"language's constructor would have put that container")
+    literal = _construction_literal_into_field(struct_def)
+    if literal:
+        field, arg = literal
+        parts.append(
+            f"{struct_def.name} can also be built with a container in "
+            f"self.{field} — {_construction_arg_spelling(arg)} at a "
+            f"construction site — and that one is safe for a different reason: "
+            f"a container LITERAL is built by the function whose block is being "
+            f"filled, it is reachable only through that block, and the block "
+            f"cannot leave the function that made it, so the region outlives "
+            f"every read of the slot. The unsafe neighbour is a container "
+            f"returned by a CALLEE, whose region is bump-allocated in the "
+            f"callee's scratch and reclaimed before the store — and that is "
+            f"refused by name")
+    return " ".join(parts)
+
+
+def _construction_literal_into_field(struct_def):
+    """`(field, argument)` when a construction site puts a container LITERAL in
+    a field of this struct, or None.
+
+    The evidence half of `frame_field_premise_note`'s second sentence, and it
+    has to be a real walk rather than a guess in either direction: the note is
+    printed next to a refusal, so a note that fires for a struct nothing builds
+    that way would be sending the reader after a construct their file does not
+    contain.
+
+    The walk is over the struct's OWN methods and over every `S(...)` call in
+    the same function that names it, which is the only place such a call can
+    be: a construction is a call in some function's body, and a function that
+    is not this struct's method is not part of `struct_methods`.  A call
+    anywhere else in the unit is found by the caller that has the unit's
+    statement list; what is here is the part the struct alone can answer.
+    """
+    for m in struct_methods(struct_def):
+        for node in iter_nodes(getattr(m, "body", None)):
+            if not isinstance(node, F.CallExpr) \
+                    or not isinstance(node.func, F.IdentExpr) \
+                    or node.func.name != struct_def.name:
+                continue
+            slots = struct_frame_slots(struct_def)
+            for arg, field in zip(node.args or [], slots):
+                if isinstance(arg, (F.ListExpr, F.DictExpr, F.TupleExpr)):
+                    return (field, arg)
+    return None
 
 
 def frame_field_premise_refusal(struct_def) -> str:

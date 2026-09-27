@@ -394,3 +394,354 @@ dropped in. `PASS=2 FAIL=10`.
 The two guards are labelled as guards and are not demonstrations. They exist
 because the rules they cover have a side where they already worked, and a fix
 that broke that side would otherwise pass every demonstration above.
+
+---
+
+# Wave 5 (E3): the position family, split in three — and the wrong answer that
+# was at the FIRST position the whole time
+
+D4's "Still open" named this one precisely:
+
+> **A frame address in a non-first parameter is implementable** — extend the
+> fixpoint to every position and `take(1, r).a` computes 7. **Not small:** the
+> callee's own escape check then fires on `return y` inside the callee, which
+> needs the "did not create it" wording this change introduces, plus
+> re-derived lifetime reasoning for a parameter the callee did not receive from
+> its caller.
+
+Both halves of that are now done, and the finding that reorganised the work is
+not the one the note was about.
+
+## 6. The finding: the first position was never sound either
+
+Before touching the position rule, the lifetime reasoning D4 asks for was
+re-derived — and it does not hold at index 0 today, in the shipped tree, with
+no check lifted:
+
+```
+struct R: var a: Int; var b: Int
+def f(x: Int, y: Int) -> Int: return x.a
+def main(n: Int) -> Int:
+    var r = R(); r.a = 7; r.b = 8
+    return f(r, 1) + f(2, 3)
+```
+
+**Built, ran, and died with SIGSEGV (exit 139), on both architectures.**  `f` is
+compiled with `x` a frame holder because one call site hands it a frame
+address; `f(2, 3)` arrives with `x = 2`, and `x.a` is a load eight bytes from
+wherever 2 points.
+
+A parameter's being a frame holder is a property of **the whole image at once**,
+and the fixpoint only ever asked one call site. So the rule the position family
+was written about — "a frame only works as the first parameter" — was never the
+thing that was wrong. The rule is **"a frame works at any position, and every
+call site has to agree about it."**
+
+Two more measured holes in the same family, both reachable today with nothing
+lifted, both found while establishing the premise the extension depends on:
+
+| program | arm64 | x86-64 | what it is |
+|---|---|---|---|
+| `var q = [1,2,3]; q[0] = r; return q[0].a` | **0** | **0** | a subscript store; the element is a heap cell, so the address outlives the frame — and it exits 0 |
+| `G = x` in a callee, `return G.a` in the caller | **10** | **0** | a module-level write; see §9, which is why this one is *not* refused |
+
+The subscript store is now refused. The module-level write is not, and §9 says
+why refusing it would be a refusal for a reason that is not operating.
+
+## 7. The three-way split, and which of the 33 files falls in each
+
+The brief's number was 40 (32 stdlib + 8 repo). Measured on the baselines named
+in it: **the family is 33 files, not 40** — 8 in the repo scope and 25 in the
+DEFAULT scope, of which 7 are the same repo files. D4's own table already said
+"all three are wrong answers without the check"; the arithmetic in the brief is
+loose. Nothing else about the brief's description was loose.
+
+| case | verdict | files |
+|---|---|---|
+| **1. a parameter that IS a holder, in any position** | **IMPLEMENTED** | all 7 in-image position files + 20 in-image method-call files moved to their next blocker; see the table below |
+| **2. a variadic position** | refused, with the *variadic* reason | 0 of the corpus reached it — it was unreachable before, because the old loop only asked the value question at index 0 |
+| **3. a genuinely opaque position** | refused, marked as a limit of the analysis | 21 (the 20 method-call-on-a-value-receiver files + the 1 cross-module non-first) |
+
+Per file, on the two baselines (`/tmp/s6_arm64.txt`, `/tmp/s6_stdlib.txt`):
+
+| file | before | after | case |
+|---|---|---|---|
+| `detect_real_type_errors.py` | position 1 of 5 | **opaque** — the callee is compiled into an imported module | 3 |
+| `test_type_system.py` | position 2 of 4 | **opaque** — same | 3 |
+| `module_loader.py` | position 3 of 5 | **disagreement** in `ModuleLoader_load_module` (§8) | 1→new |
+| `mojo/middle/solvers.py` | position 1 of 4 | next blocker (a field of a field) | 1 |
+| `fire_compiler.py` | position 1 of 2 | next blocker (a receiver returned) | 1 |
+| `tools/suite.py` | position 2 of 3 | next blocker | 1 |
+| `ownership_destruct.py` | position 1 of 4 | **host-import** — the position refusal is gone and the real blocker surfaces | 1 |
+| `gimple_codegen.py` | method call, no callee name | opaque, now naming the method and the position | 3 |
+| `base64.mojo` | position 1 of 2 | `_b64encode` is **imported** — "no definition in hand", which is true | 3 |
+| `interval.mojo` | position 2 of 6 | same (`debug_assert` is not this module's) | 3 |
+| `string/format.mojo` | position 1 of 4 | opaque method call | 3 |
+| `string/string.mojo` | position 1 of 2 | `String()` is a value-only constructor | 2-class |
+| `numpy.mojo` | position 2 of 3 | **class move** `codegen → codegen/dependency` | 1 |
+| `philox.mojo` | (was dependency) | **class move** `codegen/dependency → codegen`, now a *disagreement* | 1 |
+| 20 more (`debug_assert`, `format_int`, `simd`, `string_literal`, …) | "a position whose meaning this path cannot see" | opaque, naming the callee and the position | 3 |
+
+**Zero files gained a PASS and zero lost one**, in either scope, on either
+architecture — see §10.
+
+## 8. The lifetime argument, stated once, and what it does and does not licence
+
+> A frame belongs to the function that created it, and reclaimed when that
+> function returns. An address only ever travels **down an active call chain**:
+> it is created in some activation, passed as an argument to a callee nested
+> inside it, and passed on only to callees nested inside that one. So the
+> creator of a holder that arrived as an argument is an **ancestor of the callee**,
+> and its bytes are live for every instant of the callee's activation.
+
+From that, the callee may **read and write** through the word. Measured, both
+architectures:
+
+```
+def take(x: Int, y: Int) -> Int: return y.a * 10 + y.b   # 78, source says 78
+def put(x, y, v): y.a = v; return y.a                     # 52, source says 52
+```
+
+`put` is the stronger of the two: a read would still come out right if the word
+were a *copy* of the frame, but a write through a copy lands in the copy and the
+caller's `r.a` would still read 1. Both are pinned with the creator **one frame
+deeper** as well (`main` holds no frame in either), which is the case that would
+catch a lifetime error rather than a missing slot table.
+
+What the argument does **not** licence is letting the word **leave** the callee.
+`return`, a container, a field, a subscript are each refused by name, and the
+fixpoint is what makes two of them visible at all: before it, `y` was not a
+holder inside `stash`, so the container check had nothing to fire on and the
+address went into a list and was read back after its frame was gone.
+
+**D4's literal program, and why it is refused rather than computing 7.**
+`def take(x, y): return y` *returns* the address, so `take(1, r).a` is the
+RETURN family wearing the position family's clothes. It is now refused by
+`frame_return_refusal` with the wording that says what is true — "returned from
+a function that did not create it: the address arrived as one of its
+parameters". With only the position check lifted it built, ran, and returned
+**10 on arm64 and 0 on x86-64** where the source says 7: a use-after-free, and
+the two architectures disagreeing about what the reused bytes held. The
+implementable form of the same idea is `def take(x, y): return y.a`, and that one
+computes 78.
+
+**Lifting the return refusal for a received holder is sound, and is not done
+here.** The §8 argument says the creator is always an ancestor of the *caller*,
+so handing the address back to the caller is safe, and each channel that would
+let it outlive the creator is refused. What stops it is that the argument is
+about the whole image and two of the channels it leans on are not yet refusals
+(§9), and rule 4 of the wave-5 brief is explicit: *"the callee can read it but
+must not outlive it."* The next step is named in §11.
+
+## 9. Found, deliberately NOT fixed: module-level names are not module-level
+
+`G = 5` at module level, read from a function, returns **10 on arm64 and 0 on
+x86-64** where the source says 5. Three shapes measured, all the same answer:
+a plain module-level `G = 5`; `f()` doing `G = 5` and `main` doing `return G`;
+and `var H = 5` in `f`, `return H` in `main`.
+
+This is **not a frame problem**, and it is why the frame analysis must not
+touch it. `_load_var` falls back to X19 for a name it does not recognise as a
+local, so a name written in one function and read in another is not shared
+storage — it is two unrelated registers. And **a name that is only ever
+introduced by `x = …` is indistinguishable from a module-level one**, so any
+refusal keyed on "not a local of this function" would refuse correct code: it
+would call `g = r` in `main` a global store. That is a refusal for a reason
+that is not operating, which is the defect this whole file is about.
+
+The next step is a module-level symbol table published by
+`_prepare_functions` and read by **both** backends' local collection, so that a
+name declared at module level and a local are two different things in the
+register allocator. Until then the honest position is that a module-level
+binding is a **name-resolution gap, not a frame-lifetime one**, and no frame
+refusal should claim to speak for it.
+
+Two repo files hit this in the sweep and are reported with it rather than
+refused by it: `module_loader.py`'s `_module_loader = ModuleLoader()` and
+`philox.mojo`'s `Random_step(self._rng)`.
+
+## 10. Verification
+
+Judged by the `detail` text, not the class label. The baseline is
+`/tmp/e3base`, a copy of this tree as it stood when wave 5 (E3) started, with
+E1's, E2's, D1's, D2's, D3's and D4's work landed. **It is not `/tmp/s6_*`**:
+E1's `refuse_module_level_mlir_templates` landed after those baselines were
+taken and costs `std/builtin/type_aliases.mojo` a PASS, so 105 → 104 is E1's
+and not this change's.
+
+| command | baseline (`/tmp/e3base`) | after |
+|---|---|---|
+| `formal_sweep --no-stdlib` arm64 | 284 files, `PASS=80`, 80/120 = 66.7% | 284 files, **`PASS=80`**, 80/119 = **67.2%** |
+| `formal_sweep --no-stdlib --arch x86-64` | 284 files, `PASS=79`, 79/119 = 66.4% | 284 files, **`PASS=79`**, 79/118 = **66.9%**, **0 of 205 shared files differ in detail text** (was 0 of 205) |
+| `formal_sweep` (DEFAULT) arm64 | 578 files, `PASS=104`, 104/403 = 25.8% | 578 files, **`PASS=104`**, 104/402 = **25.9%** |
+| `formal_sweep --arch x86-64` (DEFAULT) | 578 files, `PASS=102`, 102/403 = 25.4% | 578 files, **`PASS=102`**, 102/402 = **25.4%**, 58 of 474 shared files differ (was **59**) — **0 new** |
+
+**Zero files gained a PASS and zero lost one, on all four axes.** Three class
+moves, all this change's, all in the good direction or net-zero:
+`ownership_destruct.py` `codegen → not-answerable/host-import` (the position
+refusal is fixed and the real blocker surfaces — the file leaves the `codegen`
+denominator **without becoming answerable**, which is the direction of drift
+that flatters a number, so the coverage percentages above rising by 0.5 points
+is *not* a gain); `numpy.mojo` `codegen → codegen/dependency` and
+`philox.mojo` `codegen/dependency → codegen`, which cancel.
+
+`not-pass` counts are identical on all four axes: 206/206, 207/207, 476/476,
+478/478.
+
+**Byte-identical machine code for a program that already worked**, which is the
+standard `CLAUDE.md` sets for a behaviour-preserving change — and the analogue
+here, since this path emits Mach-O and not C. `struct Pair` + `def bump(x)`,
+pre-change against pre-change-plus-only-this-diff, same output filename:
+
+```
+arm64    BYTE-IDENTICAL Mach-O (51056 bytes)
+x86_64   BYTE-IDENTICAL Mach-O (51056 bytes)
+```
+
+(The first attempt at this reported 124 differing bytes and it was the
+**dylib id string**: the output *filename* is embedded in the image, and the two
+runs used different names. Worth recording because "124 bytes differ" read like
+a codegen change.)
+
+### The suites
+
+| command | result |
+|---|---|
+| `make check` | **7 passed, 0 failed, 0 skipped** |
+| `test_formal_run.py` | **PASS=233 FAIL=1** — 14 added or re-pointed, **12 fail pre-change and 2 are labelled guards**. The one failure is **E4's**, in flight: `over_refusal_zero_arg_string_constructor_is_the_empty_string` has the same source text as in `/tmp/e3base` and only its *expected stdout* changed there (`"len=%d\\n 0"` → `"len=%d\n 0"`); the program prints a literal `\n`. Not this lane. |
+| `test_formal_dylib.py` | **PASS=10 FAIL=1** — `default path emits a checked proof`, and it is **E5's**: `lib/ProofLib.lean:4865` does not compile (`Application type mismatch … mem_read_after_write_u64_ne`). The generated proof for `def triple` is **byte-identical** before and after this change and so is the dylib (34736 bytes), which is the receipt that this change did not reach it. |
+| `test_formal_imports.py` | **PASS=37 EXPECTED=0 FAIL=0** |
+| `test_formal_sweep.py` | **Ran 55 tests … OK** |
+| `python3 test_suite.py` | **43 passed, 0 failed** |
+| `formal/x86_64_model_test.py` | **agree 43 WRONG 0 NO-RUN 0 build-fail 0** on `/tmp/e3base`; on the working tree it cannot run at all, for E5's `ProofLib.lean` reason above. Reported, not fixed, not waited on. |
+| `test_formal.py` / `--backend x86_64` | see the note in the report — blocked on the same `ProofLib.lean` |
+
+### The new cases, and which eleven fail before the change
+
+`/tmp/e3base` with this change's `test_formal_run.py` dropped in: `PASS=2
+FAIL=12`. The two that pass before and after are the guards, and both are
+labelled as such in the file.
+
+| case | pre-change | why |
+|---|---|---|
+| `byref_nonfirst_holder_reads_correctly` | FAIL — refused | the position rule |
+| `byref_nonfirst_holder_reads_with_creator_one_frame_deeper` | FAIL — refused | the same; the use-after-free guard |
+| `byref_nonfirst_holder_writes_through_to_the_caller` | FAIL — refused | the same; a write proves it is the frame and not a copy |
+| `byref_refuse_a_received_frame_address_returned` | FAIL — different words | "a position whose meaning this path cannot see" |
+| `byref_refuse_a_received_frame_address_stored` | FAIL — different words | the same |
+| `byref_refuse_a_variadic_position_as_variadic` | FAIL — different words | the same |
+| `byref_refuse_two_call_sites_that_disagree` | **FAIL — it BUILT** | the shipped-tree SIGSEGV |
+| `byref_refuse_a_disagreement_in_a_frame_free_caller` | FAIL — different words | the same, from a function holding no frame |
+| `byref_refuse_a_frame_address_stored_through_a_subscript` | **FAIL — it BUILT** | returned 0 where the source says 7 |
+| `byref_refuse_nonfirst_position_names_it` | FAIL — different words | D4's case, re-pointed at the return refusal that is now what fires |
+| `byref_refuse_c_entry_point_in_a_position` | FAIL — different words | D4's case, re-pointed at the variadic reason |
+| `byref_address_ctor_is_not_called_variadic` | FAIL — different words | §13: `Pointer()` was called "a C library entry point … variadic", every clause false |
+| `byref_refuse_an_opaque_position_as_opaque` | **PASS — GUARD** | the narrow case was already refused; it is here so the split has to keep it narrow |
+| `byref_address_ctor_stays_the_identity_in_a_nonfirst_position` | **PASS — GUARD** | `Pointer(to=s)` in a non-first position; it passed before only because the position rule refused the file first, so the exclusion in §13 had to be checked against it |
+
+## 11. The next step, and the proof-side lemma E5 should specify rather than
+## me land
+
+**The next code step** is lifting the return refusal for a holder that arrived as
+a parameter, which §8 argues is sound. It is gated on two things and both are
+named so nobody has to re-derive them:
+
+1. **§9's module-level symbol table.** The argument is "every channel that would
+   let the word outlive its creator is refused", and a module-level write is not
+   currently one of them. Until it is, lifting the return refusal would let
+   `def stash(x, y): G = y` through, and the measured answer to that program is
+   10.
+2. **A `*args` / `**kwargs` parameter list.** `params` records a flat list of
+   names with no `vararg` and no `kwonlyargs`, so a call `f(1, 2, r)` against
+   `def f(x, *rest)` is read as three fixed parameters. The fixpoint is safe
+   today only because `plist[pos]` on a two-element list cannot reach a third
+   index; a real `*args` would make position 1 name a *tuple* of arguments, and
+   a frame address inside one is a container store, which is refused by a
+   different name. `formal/../fire_compiler.py`'s `FunctionDef` already carries
+   `param_has_default`/`param_defaults`, so the same treatment is available.
+
+**The proof-side lemma** (E5's `lib/`, not mine — specified, not landed):
+
+> For a frame holder `h` in function `f` that arrived as parameter `i` of `f`,
+> every word at `[h + 8k]` for `k < slot_count(struct(h))` is the same word at
+> every instant of `f`'s activation.
+
+Stated over the model `Frame.frame_frames_no_alias` already provides: a frame
+address is absolute, and a callee's own frames and blobs are below every frame
+the caller owns, so nothing `f` does can scribble on the region the address
+names, and nothing the caller does between the call and the return can move it.
+The part that is **not** in the model and would have to be added is the
+*reachability* half — that the creator is an ancestor of the callee — because
+`Frame`'s theorems are about disjointness of two frames at one instant and say
+nothing about which activations are live. A caller/callee relation on
+`Arm64State` (or a `LiveFrames` set threaded through the step function) is the
+honest encoding, and until it exists the disjunction "the frame is live" is not
+something the proof can state.
+
+## 12. Where the code is
+
+| what | where |
+|---|---|
+| the fixpoint edge, every position, keywords by name | `formal/build.py` `_frame_receivers`, with `_frame_argument_slots` |
+| the callee-first dispatch (the split) | `formal/build.py` `_check_frame_escapes`, the argument loop |
+| the whole-image agreement pass | `formal/build.py` `_check_holder_agreements` |
+| the subscript-store channel, recorded not raised | `formal/build.py` `_defer_subscript_escape` + `check_frame_subscript_escapes` |
+| the three messages | `formal/model.py` `frame_variadic_refusal`, `frame_opaque_position_refusal`, `frame_holder_disagreement_refusal` |
+| `_who` / `_where`, shared by all three | `formal/model.py` |
+
+
+## 13. Two defects this change found in ITSELF, after the suites were green
+
+Both were found by reading the diff rather than by a test, and both had the
+shape the brief calls the worst outcome: **a refusal whose stated reason is
+entirely false.** Recorded because the process is the point — the suite was
+`PASS=231 FAIL=1` at the moment both were found.
+
+**`Pointer()` was called a C library entry point, and said to be variadic.**
+`_callee_wants_a_value` decided "does this callee read its argument as a value"
+from `type_constructor_kind`, and `Pointer` is an `identity` type constructor,
+so the answer came back yes. But `Pointer` is in `FRAME_ADDRESS_CTORS`:
+handing it a frame address is the **answer**, and `frame_receiver_escape_refusal`
+returns `None` for it. The `or M.frame_variadic_refusal(...)` that stood behind
+it — a second copy of a message the model already owns — caught the `None`:
+
+```
+$ Pointer(0, r)
+before: a R receiver is passed to Pointer(), a C library entry point, in argument
+        position 1 of 2. This is not a question about the position: Pointer() is
+        variadic and takes its arguments as values …
+after:  Pointer(...) takes exactly one value to convert on this path (got 2 argument(s))
+```
+
+Every clause of the "before" is wrong: `Pointer` is not a C entry point, it is
+not variadic, and the mechanism actually operating is an arity check. That is
+strictly worse than "a position whose meaning this path cannot see", which at
+least admitted ignorance. Fixed by excluding `FRAME_ADDRESS_CTORS` first — and
+`frame_variadic_refusal` is **deleted**, not repaired: a predicate and the
+function that answers it can only agree, so the fallback arm was dead as well as
+dangerous, and the surviving message is `frame_receiver_escape_refusal`'s own
+`FRAME_C_VALUE_CALLS` branch, which already says the variadic thing.
+
+**The subscript message printed the AST.** `_subscript_chain` spelled the index
+with `str(index)`, and a `MemberExpr` has no `__str__`, so
+`REGISTRY[s.name] = spec` was reported as
+
+```
+is stored through "REGISTRY[MemberExpr(obj=IdentExpr(name='s', line=255, col=9), …)]"
+```
+
+A reader sent to a repr has to go and find the source to work out what the
+compiler was looking at, which is the entire cost the spelling exists to remove.
+Both spellings now go through one `_expr_spelling`, and a shape neither has a
+short name for degrades to the same honest placeholder rather than to a repr.
+
+**And a process finding worth more than either.** The subscript refusal was
+first written as a fourth branch of `_check_frame_escapes`, which raised it from
+`_prepare_functions` — and the sweep immediately showed `mojo/middle/closures.py`
+moving `not-answerable/host-import → codegen`. That is the exact defect
+`check_frame_field_blob_premises` and `check_construction_shapes` were moved out
+to fix, re-introduced by a new branch. The branch now *records* and
+`check_frame_subscript_escapes` raises it from the entry points beside the other
+two, and `closures.py` is back to its import diagnosis. **A new refusal channel
+in this pass is a new responsibility for the ORDER of the checks, not just for
+the set of them**, and the sweep is what showed it.

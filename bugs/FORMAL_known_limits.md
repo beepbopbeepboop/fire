@@ -1,7 +1,7 @@
-# FORMAL_known_limits: the sweep residue, audited — which refusals are true, and which were lies
+# FORMAL_known_limits: the sweep residue, audited — which refusals are true
 
-**Date: 2026-09-26 (wave 4, agent D5).** This is the single home for the
-*verified* limits behind the residue of the formal sweep's codegen classes,
+**Last audited: 2026-09-26 (wave 5, agent E1).** This is the single home for
+the *verified* limits behind the residue of the formal sweep's codegen classes,
 and for the audit that established which of them are true. It replaces the
 "what is still open" list that used to live at the bottom of
 `FORMAL_module_exports_nothing.md` for the one item that belonged here (the
@@ -14,39 +14,51 @@ sends the next reader looking for a construct that is not there, and it
 inflates the sweep's finding count with a non-bug. `no_public_api_reason` was
 written for exactly this reason ("a message that is false about the file is
 worse than no message") and then, in three of its six branches, said something
-false about the file. That is the same class of defect D1, D2 and D3 found in
-wave 4's other lanes — a plausible-looking answer where the honest one was a
-refusal — and it is the reason the audit below is a table and not a summary.
+false about the file. Those three are CLOSED and their sections are gone
+(below, under "What wave 5 closed"); what is left here is what is still open,
+with the counts as they measure on this tree.
+
+Two more classes of defect were closed in the same wave and are recorded the
+same way: two constructs that **fabricated a value** — a dotted MLIR template
+and a module-level `comptime` initializer, which between them made
+`std/builtin/type_aliases.mojo` a **false PASS**, the worst outcome this
+project has — and a crash in `reflect.collect_exports_src` that stopped the
+export probe dead on any module with a dataclass field carrying a default.
 
 ## The three families, and what each one actually is
 
 Measured on the four sweeps of this tree (`tools/formal_sweep.py`, both
-architectures, both scopes; the two arm64 baselines reproduce the recorded
-284/80 and 578/105 exactly).
+architectures, both scopes).
 
 | family | files (arm64, stdlib scope) | distinct causes | it is really |
 |---|---|---|---|
-| 1. `formal dylib has no public functions` | **33** (was 30) | **8** terminal modules | 7 true limits + 1 reached by a separate bug |
-| 2. `__mlir_attr[...]` assembles an MLIR attribute | **36** (was 35) | **1** terminal module | 1 true limit + 3 wrong-answer holes around it |
-| 3. the small shapes nobody else claimed | 10 | 7 | 5 true limits + 2 false refusals |
+| 1. `formal dylib has no public functions` | **30** | **8** terminal modules | 7 true limits + 1 reached by a separate bug |
+| 2. `__mlir_attr[...]` assembles an MLIR attribute | **46** | **1** terminal module | 1 true limit |
+| 3. the small shapes nobody else claimed | 8 | 6 | 6 true limits |
 
 Two facts about the *shape* of these families matter more than their sizes,
 and neither is visible from the finding count:
 
-- **Family 1 is 33 files and 8 files.** Every one of the 33 is blocked by one
+- **Family 1 is 30 files and 8 files.** Every one of the 30 is blocked by one
   of eight modules, and the largest of those (`_assembly.mojo`) accounts for
-  19. Nothing here is 33 separate problems.
-- **Family 2 is 36 files and 1 file.** Thirty-four of the 36 are
-  `CODEGEN/DEPENDENCY` through `std/sys/info.mojo`; the 36th is `info.mojo`
-  itself. On x86-64 the family is **1 file**, because that backend refuses
-  `ComptimeIfStmt` in `info.mojo` *before* it reaches the MLIR template — the
-  limit is identical, the cascade order is not. Any future work on family 2
-  should start from `std/sys/info.mojo` and expect the other 35 to follow or
-  not follow it.
+  17. Nothing here is 30 separate problems. **All 30 are now at DEPTH** — not
+  one of them is a direct finding, because `std/sys/info.mojo` now refuses
+  before any of them reaches the point of building a dylib, so the family is
+  entirely measured through import chains.
+- **Family 2 is 46 files and 1 file.** Thirty-five of the 46 are
+  `CODEGEN/DEPENDENCY`, nearly all of them through `std/sys/info.mojo`; the
+  other **11 are direct** — files whose OWN module-level `comptime` bindings
+  carry the template (`sys/info.mojo`, `builtin/{coroutine,dtype,float_literal,
+  rebind,simd,type_aliases,variadics}.mojo`, `reflection/reflect.mojo`,
+  `gpu/_utils.mojo`, `_plugin/selector.mojo`). On x86-64 the
+  family is the same 46 files with byte-identical messages (measured, §5.1),
+  because the refusal is arch-free text and now fires before the
+  architecture-specific gaps that used to shadow it. Any future work on family
+  2 should start from `std/sys/info.mojo` and expect the rest to follow.
 
 ---
 
-# 1. `formal dylib has no public functions` — 33 files, 8 causes
+# 1. `formal dylib has no public functions` — 30 files, 8 causes
 
 ## 1.1 The audit table
 
@@ -56,13 +68,13 @@ bind*. The evidence column is what was measured, not what the message says.
 
 | terminal module | files | what the file actually declares | verdict |
 |---|---|---|---|
-| `std/sys/_assembly.mojo` | 19 | one public `def inlined_assembly[…]` (generic, variadic over `*types: AnyType`, body is `__mlir_op.\`pop.inline_asm\``) | **true limit** |
-| `std/reflection/function.mojo` | 5 | one `struct ReflectedFn[func_type, func]` (generic); a `comptime reflect_fn[…] = ReflectedFn[func]` alias; two `@staticmethod` methods, `display_name()` concrete and `linkage_name[…]` generic | **true limit** |
+| `std/sys/_assembly.mojo` | 17 | one public `def inlined_assembly[…]` (generic, variadic over `*types: AnyType`, body is `__mlir_op.\`pop.inline_asm\``) | **true limit** |
+| `std/reflection/function.mojo` | 4 | one `struct ReflectedFn[func_type, func]` (generic); a `comptime reflect_fn[…] = ReflectedFn[func]` alias; two `@staticmethod` methods, `display_name()` concrete and `linkage_name[…]` generic | **true limit** |
 | `std/sys/_io.mojo` | 3 | three `comptime` constants (`stdin`/`stdout`/`stderr`), no declaration at all | **true limit** |
 | `std/algorithm/backend/tile.mojo` | 2 | four overloads of `def tile[…]`, all generic | **true limit** |
-| `std/utils/_select.mojo` | 1 | one `def _select_register_value[…]` — private *and* generic | **true limit**; the message names only the privacy, which is the operative rule but not the whole truth |
 | `std/collections/string/_unicode_lookups.mojo` | 1 | eight `comptime` lookup tables, no declaration at all | **true limit** |
-| `std/gpu/host/nvidia/__init__.mojo` | 1 | a docstring, no declaration at all | **true limit, but it should not be reached** — see 1.4 |
+| `std/utils/_select.mojo` | 1 | one `def _select_register_value[…]` — private *and* generic | **true limit**; the message names the privacy, which is the operative rule and is now the only rule it needs |
+| `std/gpu/host/nvidia/__init__.mojo` | 1 | a docstring, no declaration at all | **true limit, but it should not be reached** — see 1.3 |
 | `std/stat/stat.mojo` | 1 | seven `def S_ISxxx[intable: Intable]` | **true limit** |
 
 Measured evidence for all eight, run on this tree:
@@ -88,6 +100,18 @@ name; a generic template (`fn name[…]`, `struct S[T]`); an overloaded name;
 and a `_CLIB_SYMS` name. Every one of the eight above falls under one of those
 four, so **the refusal is true in all eight cases**, and no fix to the export
 rule would make any of them build.
+
+**One decision changed in wave 5 and it is a real one.** The `_CLIB_SYMS`
+exclusion is right for a CALL — the symbol is already reachable with `dlsym` out
+of the system dylibs — and WRONG for a DEFINITION. `std/sys/terminate.mojo`
+**defines** `exit`; if that module also exported one other symbol, an importer's
+`exit()` would bind libSystem's, silently, with no diagnostic. So a module that
+*defines* a `_CLIB_SYMS` name arguably must export its own. That is a change to
+what the compiler accepts, so it is NOT made here; it is recorded because it is
+the one place in this document where the export rule itself, rather than the
+message about it, is wrong. Cost: small in code, and it needs a decision about
+whether a dylib may shadow a libc symbol an importer would also resolve by
+`dlsym`.
 
 ## 1.2 What would close it, and what it costs
 
@@ -116,10 +140,10 @@ instantiations of one template get two entries, and (d) a decision about
 `ReflectedFn.display_name` — a *concrete* method on a *parametric* type, whose
 symbol name is only determined once the type arguments are. Items (a)–(c) are
 the project; (d) falls out of it. This is weeks, not an afternoon, and it is
-the single largest lever in the whole residue: it alone would unblock **27 of
-family 1's 33 files**.
+the single largest lever in the whole residue: it alone would unblock **24 of
+family 1's 30 files**.
 
-The six files that would *not* be unblocked by it, and why:
+The files that would *not* be unblocked by it, and why:
 
 - `std/sys/_io.mojo`, `std/collections/string/_unicode_lookups.mojo`,
   `std/gpu/host/nvidia/__init__.mojo` declare no function at all. Monomorphizing
@@ -128,143 +152,14 @@ The six files that would *not* be unblocked by it, and why:
   its use site and crosses no boundary). **Cost to close: nothing — and that is
   the point.** They should be read as a *fact about those modules*, not as work.
 - `std/utils/_select.mojo`'s only declaration is `_`-prefixed (and also
-  generic — the message names only the privacy, which is the operative rule).
+  generic — the message names the privacy, which is the operative rule).
   doc/ABI.md's public-symbol rule excludes it on purpose. Permanent, by design.
 
-So the **decisions** in family 1 decompose as **27 blocked on Stage 5, 6
-permanent, 0 wrong.** What is wrong is the *reporting*, in three branches of
-one function — §1.3 — and that is a separate axis from whether a refusal should
-fire. The 6 permanent ones are the cheapest thing in this whole document: they
-cost nothing to close, because the correct state is the one they are already
-in.
+So the **decisions** in family 1 decompose as **21 blocked on Stage 5, 6
+permanent, 0 wrong.** What was wrong was the *reporting*, and that is closed —
+see "What wave 5 closed".
 
-## 1.3 The message is false about the file in three branches
-
-`no_public_api_reason` (`formal/build.py`) exists to name *which* of the ways a
-module has no boundary symbol it has hit. Three of its branches assert
-something that is not true of the file they are reported against. All three
-are on the **current** tree, and all three fire on a real stdlib module. None
-of the three changes a verdict — the module is refused either way — so no
-sweep number moves; the cost is entirely in what it tells the next reader.
-
-**Bug 1a — a name with BOTH a concrete and a generic definition is filed as
-purely generic.** `_declared_api_shape` collects generics into a `set` of
-*names* (`re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', text)`) and then looks each
-parsed `FunctionDef` up in it, so a name that is concrete in one place and a
-template in another is counted as a template in both places. The real file is
-`std/sys/terminate.mojo`:
-
-```mojo
-def exit():                        # CONCRETE, public, no template parameters
-    exit(0)
-
-def exit[intable: Intable](code: intable):   # GENERIC
-    libc.exit(c_int(Int(code)))
-```
-
-and the message it gets is:
-
-> `terminate.mojo` … every public function in it is a GENERIC template (exit)
-
-Half of that sentence is false, and it is false in the direction that matters:
-`def exit():` is a complete, concrete, public function with a body.
-
-*Minimal reproducer* (two definitions, nothing else — no stdlib, no build):
-
-```python
-import sys; sys.path.insert(0, ".")
-import formal.build as B
-open("/tmp/mod_a.mojo", "w").write(
-    "def exit():\n    return 0\n\ndef exit[intable: Intable](code: intable):\n    return 0\n")
-print(B._export_entries(["/tmp/mod_a.mojo"]))        # []   — correct
-print(B._declared_api_shape(open("/tmp/mod_a.mojo").read()))
-# {'generic_funcs': ['exit', 'exit']}                — WRONG: one is concrete
-print(B.no_public_api_reason(["/tmp/mod_a.mojo"]))
-# … every public function in it is a GENERIC template (exit) …
-```
-
-*What it should be instead.* Two things, and the first is the load-bearing one.
-(a) `_declared_api_shape` must classify **per definition**, not per name: a
-`FunctionDef` is generic only if *its own* source span carries a bracket list.
-The parser drops `[...]`, so the honest implementation reads the def's text
-span rather than the file's name set — or, cheaper and exactly as sound, keys
-the generic set on `(name, ordinal)` so the first and second `exit` are
-distinguished. (b) The real reason this module exports nothing is neither of
-the four named ones: it is that **`exit` is in `reflect._CLIB_SYMS`**, whose
-stated reason is "already available via dlsym from the system dylibs". That
-reason is right for a *call* and wrong for a *definition* — `terminate.mojo`
-**defines** `exit`, and if it also exported one other name, the importer's
-`exit()` would bind **libSystem's** `exit`, silently, with no diagnostic. A
-fifth branch is needed, and the guard it implies is the more valuable half:
-a `_CLIB_SYMS` name that the module *defines* must be exported, because
-libc's is not the same function.
-
-**Bug 1b — the fall-through branch names a privacy rule against a file with no
-private declarations.** `no_public_api_reason` ends in an unconditional
-`return` that says *"every declaration in it is private (a leading `_`)"*. It
-is reached by **every module with at least one concrete public function that
-nevertheless exports nothing** — because all four named branches are gated on
-`not concrete_funcs`. `std/memory/memory.mojo` is one: it declares fifteen
-public functions (`memcmp`, `unsafe_memcpy`, `memcpy`, `memmove`, `memset`,
-`memset_zero`, `is_trivially_movable`, …) and four private ones, and it is told:
-
-> `memory.mojo` … every declaration in it is private (a leading `_`)
-
-*Minimal reproducer* — one function, no private declaration anywhere:
-
-```python
-open("/tmp/mod_b.mojo", "w").write("def strlen(s: String) -> Int:\n    return 1\n")
-print(B._export_entries(["/tmp/mod_b.mojo"]))   # []  — strlen is in _CLIB_SYMS
-print(B.no_public_api_reason(["/tmp/mod_b.mojo"]))
-# … every declaration in it is private (a leading `_`) …   ← there are none
-```
-
-*What it should be instead.* The fall-through must not assert a reason it has
-not checked. The minimum honest change is to make it state the *rule* that
-actually excluded each name, computed from the same `collect_exports_src`
-decision the refusal came from: "its public names are all excluded by
-doc/ABI.md's export rule — `strlen` because it is a C library symbol this
-path resolves with `dlsym`, and a module that DEFINES one must export its
-own". Better still, the fall-through should be unreachable: every combination
-of `(concrete_funcs, concrete_structs, gen_funcs, gen_structs)` should map to
-a named branch, and anything left over should be an internal error rather than
-a sentence about a rule that was not applied.
-
-**Bug 1c — the "both private and parametric" branch fires on a module with no
-private generics.** Its condition is `not concrete_funcs and gen_funcs and
-private` — i.e. the module has *any* private declaration — and its text then
-says *"the only function it declares is the generic template … which is both
-private and parametric"*. `std/memory/unsafe.mojo` declares two **public**
-generic functions and one private helper, and is told:
-
-> `unsafe.mojo` … the only function it declares is the generic template
-> bitcast, pack_bits, which is both private and parametric
-
-Both halves are false: there are two, and neither is private. The same
-set-non-empty / element-asserted mistake as 1a, in a different branch.
-
-*Minimal reproducer:*
-
-```python
-open("/tmp/mod_c.mojo", "w").write(
-    "def bitcast[T: Copyable](x: T) -> T:\n    return x\n\n"
-    "def _helper(x: Int) -> Int:\n    return x\n")
-print(B.no_public_api_reason(["/tmp/mod_c.mojo"]))
-# … the ONLY function it declares is … which is BOTH private and parametric
-```
-
-*What it should be instead.* Gate on the intersection, not the union:
-`set(gen_funcs) & set(private)`. If the intersection is empty the module's
-public API is *all* generic and the "every public function is a GENERIC
-template" branch is the correct one.
-
-**Cost of fixing 1a/1b/1c: small** — three condition changes and one new branch
-in one function, plus a real classification of `_CLIB_SYMS` names. **Why it
-still matters:** `no_public_api_reason` had **no test at all** before this wave
-(`grep -rn no_public_api_reason test_formal*.py` was empty), which is how three
-of six branches went untested. The pins in §4.1 are what close that.
-
-## 1.4 One of the 33 should not be in the family at all
+## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
 module `from ..` resolves to is `std/gpu/host/nvidia/__init__.mojo` — the
@@ -291,7 +186,7 @@ The `nvidia/__init__.mojo` refusal is *true* (the file declares nothing) and it
 is a limit that will never close. But **`tma.mojo` should not be blocked by it**,
 and the same defect inflates the `NOT-ANSWERABLE/UNRESOLVED-IMPORT` class too
 (`…/gpu/memory/__init__.mojo` "imports `.memory`", `…/os/path/__init__.mojo`
-"imports `.path`"). This is already recorded as open in
+"imports `.path`"). This is also recorded as open in
 `FORMAL_module_exports_nothing.md`; it is repeated here because it is a
 *count* correction, not a limit: **fixing `_candidates` removes at least one
 file from family 1 and is a prerequisite for trusting the family's size.**
@@ -303,20 +198,21 @@ document's lane — it belongs to whoever owns `formal/imports.py`.
 
 ---
 
-# 2. MLIR attribute templates — 36 files, 1 cause, and 3 holes beside it
+# 2. MLIR attribute templates — 46 files, 1 cause
 
 ## 2.1 The refusal is true, and it is the right refusal
 
-`formal/model.py`'s `multi_index_kind` reads a bracket-with-commas on one of
-four names (`__mlir_attr`, `__mlir_deferred_attr`, `__mlir_deferred_type`,
-`__mlir_type`) as an MLIR attribute template, and `multi_index_refusal` says
-why: the elements are backtick-quoted literal fragments interleaved with
-compile-time sub-expressions, the whole thing denotes a *dialect attribute*,
-and **there is no MLIR in a freestanding image for the template to become**.
-Materializing it as a container "would turn an attribute into a pointer to a
-frame blob and disagree with the compiler that does have MLIR."
+`formal/model.py`'s `is_mlir_template` reads a bracket or a dotted member
+access on one of four names (`__mlir_attr`, `__mlir_deferred_attr`,
+`__mlir_deferred_type`, `__mlir_type`) as an MLIR attribute template, and
+`mlir_template_refusal` says why: the elements are backtick-quoted literal
+fragments interleaved with compile-time sub-expressions, the whole thing denotes
+a *dialect attribute*, and **there is no MLIR in a freestanding image for the
+template to become**. Materializing it as a container "would turn an attribute
+into a pointer to a frame blob and disagree with the compiler that does have
+MLIR."
 
-Verified: the construct in the wild is a multi-line bracket, e.g.
+Verified: the construct in the wild is both spellings, e.g.
 `std/sys/info.mojo:86`
 
 ```mojo
@@ -325,15 +221,21 @@ var res = __mlir_attr[
 ]
 ```
 
-and the refusal fires on both architectures. **Verdict: true limit, and
-permanent on this path.** A formal image links libSystem and nothing else,
+and `std/sys/info.mojo:32`
+
+```mojo
+return __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`
+```
+
+and the refusal fires on both architectures for both. **Verdict: true limit,
+and permanent on this path.** A formal image links libSystem and nothing else,
 embeds no C runtime and no MLIR; there is no target for the template to
 become, and a "best effort" string would be a number the source never wrote.
 
 Wave 3's C4 established the complement, and it is the reason this is a limit
 rather than a bug: across all 294 stdlib files plus this repository, `a[i, j]`
 occurs ~2000 times as a generic's **explicit template parameter list**, ~90
-times as `__mlir_attr[…]`, and **zero** times as an index. There is no 2-D
+times as an `__mlir_attr[…]`, and **zero** times as an index. There is no 2-D
 index to lower hiding behind these.
 
 **What would close it, and what it costs.** Nothing on this path. The only
@@ -341,125 +243,9 @@ honest closure is a *different target*: a build that embeds an MLIR dialect
 registry and evaluates `#kgen.*` attributes to concrete values at compile time
 — which is what the real compiler does and is the entire content of the formal
 backend's premise. Until then this refusal is the correct answer, and its cost
-is 36 files of coverage that are unreachable by construction. **The one thing
-worth doing is making the file count honest** (see §2.2): 36 findings, 1 file.
+is 46 files of coverage that are unreachable by construction.
 
-## 2.2 Hole 1 — the same construct in its single-element spelling fabricates a value
-
-`multi_index_kind` is reached only for a **multi-element** subscript, and it
-keys on the base name. So the *dotted* spelling of the identical construct —
-`__mlir_attr.\`#kgen.param.expr<…>\`` — and the single-element bracket
-spelling `__mlir_attr[x]` both fall through to the generic member-read
-lowering, which reads a name that has no definition and produces **whatever
-word is in the register**. It builds. It runs. It prints a number.
-
-```mojo
-# /tmp/pc.mojo — three DIFFERENT templates, one program
-def main():
-    var a = __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`
-    var b = __mlir_attr.`#kgen.param.expr<accelerator_arch> : !kgen.string`
-    var c = __mlir_attr.`#lit.zzz<qqq> : !kgen.bogus`
-    print("a = %llu\n", a); print("b = %llu\n", b); print("c = %llu\n", c)
-```
-
-```
-$ fire.py build --formal --no-prove --backend=arm64  -o pc.arm64 pc.mojo && ./pc.arm64
-a = 10
-b = 10
-c = 10
-$ fire.py build --formal --no-prove --backend=x86_64 -o pc.x86   pc.mojo && ./pc.x86
-a = 0
-b = 0
-c = 0
-```
-
-Three facts, each worse than the last:
-
-1. **The value is fabricated.** Three different templates, including a
-   deliberately bogus one, all produce the same number. The template is not
-   read at all.
-2. **The two backends disagree.** arm64 says 10, x86-64 says 0, for the same
-   source. `formal/model.py` goes out of its way to prevent exactly this —
-   "the text is deliberately ARCH-FREE: arm64 and x86-64 return the same
-   string, so the two architectures cannot drift on what a subscript means" —
-   and here they drift on a *value*, which no shared-text discipline can catch
-   because there is no refusal to share.
-3. **The value is program-shape dependent, not a constant.** Add five locals to
-   the program and the same expression yields **1**. So it cannot even be
-   mistaken for a stable wrong answer that a test might accidentally agree
-   with; it is arbitrary.
-
-All four MLIR names are affected, in the dotted spelling:
-
-```
-__mlir_attr            Built
-__mlir_deferred_attr   Built
-__mlir_deferred_type   Built
-__mlir_type            Built
-```
-
-**This is reachable from real stdlib source today.** `std/sys/info.mojo:32` is
-the dotted form (`return __mlir_attr.\`#kgen.param.expr<current_target> :
-!kgen.target\``), and 24 swept `std/` files use a dotted `__mlir_attr.`/
-`__mlir_type.`.
-
-**What it should be instead.** `MLIR_TEMPLATE_NAMES` already names the four
-constructs. The check must be on the **base**, not on the base-plus-comma-list:
-any `SubscriptExpr` or `MemberExpr` whose base is one of those four names is an
-MLIR template and gets `MULTI_INDEX_MLIR_TEMPLATE`, whatever the index looks
-like. That is a two-line change in `multi_index_kind` plus moving the
-`is_multi_index` gate out of the path that reaches it — and it converts three
-fabricated answers and one segfault into the refusal that is already written
-and already correct. **Cost: hours.** This is in `formal/model.py`, which is
-hot with four other agents, so it is reported rather than fixed here.
-
-## 2.3 Hole 2 — a module-level `comptime X = __mlir_type[…]` is never even looked at
-
-The refusal lives in the expression walk, and a module-level `comptime`
-initializer is not part of it. So the multi-element bracket form — the exact
-shape the refusal exists for — builds when it appears in a `comptime` binding:
-
-```mojo
-# /tmp/r4.mojo — the construct the refusal is FOR
-comptime OriginSet = __mlir_type[
-    `!lit.origin<`, 1, `>`
-]
-def main():
-    var v = OriginSet
-    print("v = %llu\n", v)
-```
-
-```
-$ fire.py build --formal --no-prove --backend=arm64  -o r4.arm64 r4.mojo && ./r4.arm64
-Built: r4.arm64
-v = 10
-$ fire.py build --formal --no-prove --backend=x86_64 -o r4.x86   r4.mojo && ./r4.x86
-Built: r4.x86
-v = 0
-```
-
-Compare the identical expression in a *local* `var`, which **is** refused:
-
-```
-$ fire.py build --formal --no-prove --backend=arm64 -o p5 p5.mojo
-build: __mlir_attr[`#kgen.param.expr<`, n, `> : !kgen.string`] assembles an MLIR
-attribute from a template of backtick-quoted literal fragments and
-compile-time sub-expressions: it is not a subscript, and there is no MLIR on
-this path for the template to become. …
-```
-
-**And this one is a false PASS in the baseline.** `std/builtin/type_aliases.mojo`
-is not in the sweep's findings at all — it builds, it is counted in the 105 —
-and it contains, at lines 146/149/153/157, three dotted `__mlir_type.\`…\``
-aliases and one multi-element `__mlir_type[…]` template. Any program that
-imports `OriginSet`, `Never` or `EllipsisType` from it gets a fabricated word.
-
-**What it should be instead.** The `comptime` initializer is a compile-time
-expression and must go through the same `_emit_expr` walk as any other; the
-walk's *refusals* are what is missing, not its lowering. **Cost: hours**, and
-it is the same file as §2.2. Together: one predicate, two call sites.
-
-## 2.4 Hole 3 — `__mlir_op` builds and segfaults
+## 2.2 `__mlir_op` still builds and segfaults
 
 `__mlir_op` is deliberately *absent* from `MLIR_TEMPLATE_NAMES`, on the stated
 ground that "it is a real side-effecting op, lowered as a call". The call it
@@ -474,255 +260,192 @@ def main():
 ```
 $ fire.py build --formal --no-prove --backend=arm64 -o m2 m2.mojo && ./m2
 Built: m2.aout
-Segmentation fault: 11
+Segmentation fault: 11                                    # exit 139
+$ fire.py build --formal --no-prove --backend=x86_64 -o m2x m2.mojo && ./m2x
+Built: m2x.aout
+Segmentation fault: 11                                    # exit 139
 ```
 
-`std/sys/_assembly.mojo` — the module that heads 19 of family 1's files — is
-built out of exactly this construct. **Verdict: refusal-logic bug (a gap, not
-a false refusal).** `__mlir_op` needs to be *refused* with the same
-MLIR-template wording, and the honest reason is the one its own comment
+`std/sys/_assembly.mojo` — the module that heads 17 of family 1's 30 files — is
+built out of exactly this construct. **Verdict: a gap, not a false refusal, and
+it is the largest remaining hole in this document**: a construct that builds,
+links, and dies at the first instruction. **What it should be:** refused with
+the same MLIR-template wording, and the honest reason is the one its own comment
 contradicts: the bracketed list is MLIR op attributes, which is a different
-node, and the `pop.inline_asm` body is `__mlir_attr` again, so there is no
-call to lower either. **Cost: minutes**, once §2.2's predicate exists.
-
-## 2.5 The pins
-
-§4.2. The true limit (the multi-element template) is pinned by a `refuse:`
-case, which **fails when the limit is lifted** — the intended anti-rot
-direction. The three holes above are **not** pinned as limits, because pinning
-them would cement a fabricated answer as intended behaviour; they are written
-up here with reproducers and left for the owning agent.
+node, and the `pop.inline_asm` body is `__mlir_attr` again, so there is no call
+to lower either. **Cost: minutes**, now that `is_mlir_template` exists and
+`mlir_template_refusal` is one call — it needs `__mlir_op` added to the name
+set and its "deliberately absent" comment deleted. Not done in wave 5: it was
+not in that wave's brief, and adding a fifth name to a set whose other four
+entries are each pinned by a `refuse:` case deserves its own case rather than a
+drive-by.
 
 ---
 
-# 3. The small shapes — 10 files, 7 causes, 2 false refusals
+# 3. The small shapes — 8 files, 6 causes
 
-| shape | files | verdict | evidence / what it should be |
+| shape | files (arm64, stdlib scope) | verdict | evidence / what it should be |
 |---|---|---|---|
-| `constructing Error has no representation` | 3 (`std/testing/prop/{__init__,random,runner}.mojo`) | **refusal TRUE, route WRONG** | `Error` really is 2 fields, so it does not fit one word. But it is refused by a **hard-coded name list** (`model.UNREPRESENTABLE_TYPE_CTORS`) that fires *before* the shape check — see 3.1 |
-| `constructing DType has no representation` | 0 today; reachable | **REFUSAL-LOGIC BUG** | `DType` is a **one-field** struct. See 3.1 |
-| `String(...) takes exactly one value to convert (got 0)` | 1 (`std/format/repr.mojo`) | **REFUSAL-LOGIC BUG** (over-refusal) | `String()` is the language's empty-string constructor and a string is a `char *`; `String("")` builds and `len` is 0. See 3.2 |
-| `comptime X = ... does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/algorithm/backend/tile.mojo`) | **true limit**, with **arch drift** | `comptime n = len(coefficients)` over a *runtime* parameter. arm64 refuses with this; **x86-64 refuses with `unsupported statement ComptimeVarStmt on the formal x86-64 path`**, so the two architectures name different limits for one construct |
-| `S(...) takes no arguments on this path` | 1 (`std/gpu/host/func_attribute.mojo`) + the `DType` case | **true limit** | a struct is default-initialized and its fields assigned; a positional-argument construction is not a shape this backend honours. Same message on both arches. **Already pinned** by `struct_ctor_args_both_backends` (`test_formal_run.py:308`) |
+| `constructing X has no representation: this image has no declaration of X` | 4 — `stdlib_core.mojo` (`StringRef`, direct) and `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth) | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
+| `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit** | §2 |
+| `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/algorithm/backend/tile.mojo`) | **true limit**, with **arch drift** | `comptime n = len(coefficients)` over a *runtime* parameter. arm64 refuses with this. x86-64 refuses **earlier and differently** — `unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo` and `unsupported statement ComptimeForStmt` for `tile.mojo` — so the two architectures name different limits for one construct. **Already pinned** by `limit_comptime_over_a_runtime_parameter` with `refuse_either:` |
 | `unsupported expression EllipsisLiteral` | 1 (`std/builtin/len.mojo`) | **true limit**, **weak message** | `def len(value: StringSlice) -> Int: ...` has no instructions. The message does not say what to do. (A `...` in a *trait* method that is never called builds, so the refusal is reach-dependent, not spelling-dependent — correct, but worth knowing) |
-| `a Optional receiver is stored in a container` | 1 (`std/iter/__init__.mojo`) | **true limit** | by-reference receiver work; **already pinned** by `byref_refuse_stored_in_a_list` (`test_formal_run.py:1672`). Not duplicated here |
+| `a Optional receiver is stored in a container` | 1 (`std/iter/__init__.mojo`) | **true limit** | by-reference receiver work; **already pinned** by `byref_refuse_stored_in_a_list` (`test_formal_run.py`). Not duplicated here |
 
-## 3.1 `UNREPRESENTABLE_TYPE_CTORS` is a name list where the backend already knows the answer
-
-`model.UNREPRESENTABLE_TYPE_CTORS` is a 14-name tuple. The backend does not
-need it: `model.struct_fields` reads a struct's field count, and "a formal
-value is one 64-bit word, so the field count is the whole of the decision" is
-already the stated rule everywhere else in that file. The list is a hand-kept
-duplicate of a derived fact, and it has a false entry:
-
-```
-std/builtin/dtype.mojo    DType   nfields=1  ['_mlir_value: Self._mlir_type']
-```
-
-**One field. A formal value is one 64-bit word. So a `DType` *is* one thing**
-and the message "a formal value is one 64-bit word, and DType is not one thing"
-is false. Minimal reproducer — two programs, identical apart from the struct's
-name:
-
-```mojo
-# /tmp/t_d3.mojo — named DType
-struct DType:
-    var _mlir_value: Int
-def main():
-    var d = DType()
-    d._mlir_value = 7
-    print("v = %d\n", d._mlir_value)
-```
-```
-build: constructing DType has no representation on this path (a formal value is
-one 64-bit word, and DType is not one thing) — previously this emitted a call
-to a symbol named 'DType' that nothing defines
-```
-
-```mojo
-# /tmp/t_d5.mojo — the SAME struct, renamed
-struct DTypeX:
-    var _mlir_value: Int
-def main():
-    var d = DTypeX()
-    d._mlir_value = 7
-    print("v = %d\n", d._mlir_value)
-```
-```
-Built: t_d5.aout
-v = %d\n 7
-```
-
-Same shape, opposite verdict, decided by a spelling. And the `DType` refusal is
-not even the *operative* one: the 1-argument form `DTypeX(7)` is refused by the
-shape rule anyway (`DTypeX(...) takes no arguments on this path`), so what
-actually stops the program is the arity rule, and the name list gets there first
-and says something else.
-
-**What it should be instead.** Delete the tuple and ask the struct: if the name
-is not a struct in this image, it is an extern (today's fall-through); if it is
-a struct, `_emit_struct_constructor` already knows whether its fields fit. A
-name that is a struct *template* (`SIMD`, `List`, `Optional`, `Tuple`, …) is
-the genuine unrepresentable case and should be recognised as such, by asking
-whether the name is a generic — not by being typed into a list. **Cost: an
-afternoon**, and the list stops being something a future edit has to remember
-to update. Reported, not fixed: `formal/model.py` is hot, and D4 already has a
-case in `test_formal_run.py` waiting on a reworded version of this very
-message.
-
-## 3.2 `String()` — a constructor mistaken for a conversion
-
-`std/format/repr.mojo:28` is `var string = String()`. The refusal is:
-
-> `String(...)` takes exactly one value to convert on this path (got 0
-> argument(s))
-
-The reason given is that "a conversion has one operand" — but `String()` is not
-a conversion, it is the language's **zero-argument empty-string constructor**,
-and a string on this path is a bare `char *` to NUL-terminated bytes interned
-into `__TEXT,__text`. The empty string is the interned `""`, which this path
-already has:
-
-```
-$ cat t_str.mojo
-def main():
-    var s = String("")
-    print("len=%d\n", len(s))
-$ fire.py build --formal --no-prove --backend=arm64 -o t_str t_str.mojo && ./t_str
-Built
-len=%d\n 0
-```
-
-So the value is representable, the correct answer is available, and the
-refusal is over-strict with a reason that does not apply to the construct.
-**Verdict: refusal-logic bug (over-refusal). What it should be:** route
-`String()` / `StringRef()` with zero operands to the interned empty literal
-rather than through the identity-conversion arity check, which should apply
-only when there *is* an operand. **Cost: a few lines** in
-`_emit_type_constructor`, in a file four agents are editing — reported.
+Two rows this table used to carry are **gone** and not replaced, because both
+were over-refusals rather than limits: `constructing DType has no representation`
+(`DType` is a ONE-field struct, and the name list that refused it also masked
+the arity rule that actually stops the neighbouring case) and
+`String(...) takes exactly one value to convert (got 0)` (`String()` is the
+language's zero-argument empty-string constructor, and a string on this path is
+a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
+0). Both are closed; see below.
 
 ---
 
-# 4. The pins
+# 4. What wave 5 closed
 
-Every true limit above is pinned by a case whose expected outcome is a
-**refusal**, using the repo's existing mechanism: a `refuse:<needle>` entry in
-`test_formal_run.py`'s `CASES` for the codegen limits, and a check in
-`test_formal_imports.py` for the export rule. A `refuse:` case asserts that the
-build **fails with that text**; so if the limit is closed — the refusal stops
-firing — the case goes red, which is the same anti-rot direction `expect=`
-markers use in `tools/suite.py` and the reason they are not a silenced test.
-**Verified fail-when-removed for every pin listed here** — see §5.
+Recorded here because the *pins* are the durable artefact and a reader
+revisiting this document needs to know which of its numbers are now
+load-bearing assertions. The analysis, reproducers and reasoning live with the
+code and in the test files named here.
 
-## 4.1 Family 1, in `test_formal_imports.py`
-
-| pin | asserts | fails when |
+| closed | what it was | pinned by |
 |---|---|---|
-| `test_a_module_with_no_boundary_symbol_is_refused` | a module whose only public decl is a generic template builds to a **non-zero exit**, and the message names the module and says GENERIC | Stage 5 lands, or the export rule is relaxed |
-| `test_a_generic_template_is_not_exported_under_its_base_name` | `_export_entries` on a generic-only module is `{}`, while the same module with one concrete function exports exactly that name | someone "fixes" the 33 files by exporting templates — the wrong answer this mechanism exists to prevent |
-| `test_a_clib_named_definition_is_refused_not_blamed_on_privacy` | a module defining only `strlen` is refused, and the message does **not** say "every declaration in it is private" | bug 1b is fixed, or regresses |
-| `test_a_concrete_and_a_generic_of_one_name_are_told_apart` | `_declared_api_shape` on `def f()` + `def f[T](…)` counts one concrete and one generic | bug 1a is fixed, or regresses |
-| `test_a_public_generic_is_not_reported_as_private` | a module with two public generics and one private helper is not told "the only function it declares … which is both private and parametric" | bug 1c is fixed, or regresses |
+| the dotted and single-element MLIR spellings built and printed a fabricated word (10 on arm64, 0 on x86-64, program-shape dependent) | `is_multi_index` was reached only for a comma list, so `__mlir_attr.\`…\`` and `__mlir_type[x]` fell through to a member read of an undefined name | `limit_mlir_template_dotted_spelling`, `limit_mlir_template_single_element_bracket` |
+| a module-level `comptime X = __mlir_type[…]` was never walked — a **false PASS** for `std/builtin/type_aliases.mojo`, which the baseline counted among its 105 | the module-level `comptime` initializer is not part of the function-body expression walk, so the walk's *refusals* were missing, not its lowering | `limit_module_level_comptime_mlir_template`, `limit_module_level_comptime_nested_mlir_template` |
+| `no_public_api_reason`'s four named branches were all gated on `not concrete_funcs`, so any module with a concrete public function that exported nothing fell through to a sentence asserting "every declaration in it is private" | the fall-through now computes each public name's reason from `reflect.export_exclusions`, the same function `_export_entries` builds the table from, and a fifth branch names the `_CLIB_SYMS` exclusion | `the fall-through names a rule for each public name`, `a C-library-named definition is reported as a definition`, `a C-library-only module takes the dedicated branch` |
+| `_declared_api_shape` filed a concrete and a generic of one name as two generics (`def exit():` reported as a template) | classification is per DEFINITION now, from the parser's own `FunctionDef.comptime_params` | `a concrete and a generic of one name are told apart` |
+| a privacy-gated branch asserted properties of the generics — `std/memory/unsafe.mojo` (two public generics, one private helper) told its only function was "both private and parametric" | the branch is **deleted**, not re-gated: its two facts come from disjoint sets, so `set(gen_funcs) & set(private)` is empty for every possible module and the suggested repair would have made it unreachable | `a public generic is not reported as private`, `a private generic module is told it is private` |
+| `reflect.collect_exports_src` raised `AttributeError: 'AssignStmt' object has no attribute 'name'`, so `gimple_codegen.py` and `fire_compiler.py` could not be built at all | a struct field's declared name is on `.target.name` for the `AssignStmt` shape the parser deliberately keeps for `x: T = default` | `a dataclass field with a default is in a struct layout`, `every module here survives the export probe` |
+| `constructing DType has no representation … DType is not one thing` — false, `DType` has one field and one field is one word | `S()` with no arguments is Mojo's own struct syntax, so a name this image knows as a struct is decided by `_emit_struct_constructor`, which asks the struct | `over_refusal_one_field_struct_spelled_like_an_unrepresentable_type` (+ its guard) |
+| `constructing X has no representation … X is not one thing` — a claim about a type the image cannot see | the message now states the one thing it checked, that there is no declaration here | `over_refusal_undeclared_type_says_it_is_undeclared`, `over_refusal_no_longer_claims_a_type_is_not_one_thing` |
+| `String(...) takes exactly one value to convert (got 0)` | `String()` is the zero-argument empty-string constructor and materializes the interned `""` | `over_refusal_zero_arg_string_constructor_is_the_empty_string` |
+| the private / C-library / overloaded / generic decisions were computed twice, in `reflect` and in the refusal text about them | one table, `reflect.export_exclusions`, read by both; the export SET is unchanged, measured over 578 modules | `the exclusion table does not change the export set` |
 
-## 4.2 Families 2 and 3, as `refuse:` cases in `test_formal_run.py`
+**One consolidation deliberately NOT made.** `formal/model.py:struct_field_name`
+and `reflect._struct_layout_sig` now both answer "what name does this struct
+field introduce", and they cannot import each other: `formal/model.py` is
+deliberately leaf-most (`os` and `fire_compiler` only, so the two formal
+architectures cannot drift), and `reflect.py` is the SHARED export rule that
+`formal/build.py` reads, so an edge from it into `formal/` would make the
+gimple dylib's reflection table depend on the formal backends. The home that
+would let them share is `fire_compiler.py`, beside the `struct_field_*` shims it
+already declares. Recorded rather than done, because `fire_compiler.py` is the
+AST source of truth and changing it owes the full quality gate.
 
-| case | construct | needle |
-|---|---|---|
-| `limit_mlir_multi_element_template` | `__mlir_attr[\`x\`, n, \`y\`]` | `refuse:assembles an MLIR attribute from a template` |
-| `limit_comptime_over_a_runtime_parameter` | `comptime n = len(xs)` in a function | `refuse_either:does not fold to a compile-time constant\|unsupported statement ComptimeVarStmt` |
-| `limit_ellipsis_function_body` | `def f(v): ...` | `refuse:unsupported expression EllipsisLiteral` |
-
-Three, not four, and the fourth is deliberately absent: a struct's
-positional-argument construction is **already pinned** by
-`struct_ctor_args_both_backends` (`test_formal_run.py:308`) — same needle, both
-backends, same refusal — so a second case asserting the same thing would be a
-parallel implementation of a pin that already exists rather than extra
-coverage. Same for the `Optional`-receiver-in-a-container shape, pinned by
-`byref_refuse_stored_in_a_list` (`test_formal_run.py:1672`).
+**One residual, measured rather than assumed.** `_declared_api_shape` (per
+definition) and `reflect.export_exclusions` (the export rule, keyed by name)
+disagree on exactly ONE top-level public concrete definition across 380
+`.mojo`/`.py` files: `join` in `std/os/path/path.mojo`, where a NESTED
+`def join[…]` inside another function puts the name in the regex's set. Every
+other name the regex excludes is excluded anyway — private, a C library symbol,
+overloaded, or genuinely a template. Reconciling it means changing the export
+rule, which changes which symbols reach a dylib; it is not done, and it is why
+every message that could be contradicted by it is computed from
+`export_exclusions` rather than from the shape buckets.
 
 ---
 
 # 5. Verification
 
-## 5.1 The sweeps reproduce, and nothing moved
+## 5.1 The four sweeps, and the set diff
 
-Four runs of `tools/formal_sweep.py` on this tree, both architectures, both
-scopes:
+| sweep | wave-4 baseline | this tree | file-level set diff |
+|---|---|---|---|
+| `--no-stdlib` (repo) arm64 | 284 files, PASS=80, 80/120 | **284 files, PASS=80, 80/120** | 0 new, 0 fixed, 0 class changes, 2 detail-text changes |
+| `--no-stdlib --arch x86_64` | 284 files, PASS=79, 79/119 | **284 files, PASS=79, 79/119** | — |
+| default (repo + `std/`) arm64 | 578 files, PASS=105, 105/403 | **578 files, PASS=104, 104/403** | **1 new** (`std/builtin/type_aliases.mojo` — the false PASS, now honestly a `CODEGEN` finding), 0 fixed, 7 class changes, 70 detail-text changes |
+| default `--arch x86_64` | 578 files, PASS=103, 103/403 | **578 files, PASS=102, 102/403** | the same one file |
 
-| sweep | result |
-|---|---|
-| `--no-stdlib` (repo) arm64 | 284 files, PASS=80, coverage 80/120 = 66.7% |
-| default (repo + `std/`) arm64 | 578 files, PASS=105, coverage 105/403 = 26.1% |
-| `--no-stdlib --arch x86_64` | 284 files, PASS=79, coverage 79/119 = 66.4% |
-| default `--arch x86_64` | 578 files, PASS=103, coverage 103/403 = 25.6% |
+Every one of those movements is accounted for:
 
-The two arm64 file/PASS counts reproduce the wave-start baselines exactly
-(284/80 and 578/105). The coverage *denominators* are smaller than the
-baseline's (120 vs 131, 403 vs 414) because three other agents' changes landed
-in `formal/` between the baseline and this run — that is their movement, not
-this document's.
-
-File-level set diff against the baselines, both arm64 scopes: **0 new findings,
-0 fixed, 33 class changes.** All 33 are D4's by-reference work in flight — 11
-`CODEGEN → CODEGEN/DEPENDENCY` and 11 `CODEGEN → HOST-IMPORT`, plus the 11
-duplicated across the two scopes. Three of the 33 are why family 1 reads 33
-here and 30 in the baseline: `std/atomic/atomic.mojo`,
-`std/gpu/sync/semaphore.mojo` and `std/utils/lock.mojo` had a *direct* refusal
-replaced by a dependency chain whose terminal is `_assembly.mojo`. They were
-already findings; only the blocking reason moved.
+- **The one new finding is the point.** `std/builtin/type_aliases.mojo` is no
+  longer a false PASS. It was in the baseline's 105 for the wrong reason: four
+  MLIR templates in module-level `comptime` bindings, none of which anything
+  looked at. It is now refused, on both architectures, by a message that names
+  the construct (`comptime AnyOrigin = Origin[0, _mlir_origin=__mlir_attr[…]]()`
+  — the template is two levels down, and the walk recurses).
+- **PASS 105 → 104 is that file and nothing else.** No file left the findings
+  set on either scope, so no verdict was lost.
+- **The 7 class changes are all `CODEGEN/DEPENDENCY` → `CODEGEN`**, and all
+  seven are files whose OWN module-level `comptime` binding now refuses before
+  the import chain does: `sys/info.mojo`, `builtin/{coroutine,dtype,rebind}.mojo`,
+  `reflection/reflect.mojo`, `gpu/_utils.mojo`, `_plugin/selector.mojo`. A
+  finding that moves from a dependency to the file that contains the construct
+  is the classifier getting more accurate, not a regression.
+- **The 70 detail-text changes split as 44 + 19 + 4 + 3**: 44 files that now
+  name the MLIR template instead of something else, 19 more whose
+  dependency-chain text now terminates in that same message, 4 whose
+  unrepresentable-type message was reworded, and 3 that are another agent's
+  by-reference work in flight. Ten more files name the actual construct than
+  did before (36 → 46).
+- **Arch symmetry is exact for the new refusals**: the same 46 files name the
+  MLIR template on x86-64 as on arm64, and **all 46 messages are byte-identical
+  between the two architectures**. The two x86-only findings
+  (`builtin/swap.mojo`, `builtin/value.mojo`) are pre-existing drift, verified
+  identical on `dbf3abb` and untouched by this work.
 
 ## 5.2 The pins, and the fail-when-removed demonstration
 
-Every pin in §4 was shown to go **red** when its limit is removed. The limits
-were removed in a scratch copy of the tree (`tar` to `/tmp`, `formal/` patched
-there, this tree untouched), because `formal/` is shared with four other
-agents:
-
-| pin | how the limit was removed | result |
-|---|---|---|
-| `limit_mlir_multi_element_template` | `multi_index_kind` returns `None` for an MLIR base | **FAIL** — `--backend=arm64 BUILT a construct that has no representation … the binary is the real answer here` |
-| `limit_comptime_over_a_runtime_parameter` | the `resolved is None` raise replaced by `resolved = ("int", 0)` | **FAIL** — same "BUILT" message |
-| `limit_ellipsis_function_body` | `EllipsisLiteral` lowers to `mov x0, #0` on arm64 / a different message on x86-64 | **FAIL** — same "BUILT" message |
-| `struct_ctor_args_both_backends` (pre-existing) | both `raise CodegenError` sites for positional struct construction disabled, both backends | **FAIL** — "refused, but not with the expected words", i.e. it now falls through to a deeper refusal, which is exactly what the needle is there to catch |
-| `test_a_generic_template_is_not_exported_under_its_base_name` | `reflect.collect_exports_src` relaxed to admit generics | **FAIL** |
-| `test_a_module_with_no_boundary_symbol_is_refused` | demonstrated differentially, because `build()` runs `fire.py` in a **subprocess** and an in-process patch of the export rule cannot reach it: the same harness over two modules differing only in genericity | `generic-only → rc=1` (refused), `concrete → rc=0` (builds), so the `returncode != 0` assertion is discriminating |
-
-The three message-accuracy guards in `test_formal_imports.py` are the
-anti-rot-in-both-directions demonstration for the expected-failure mechanism
-itself, which was checked by deliberately breaking it in a copy of the test
-file:
+Every pin in §4 was shown to go **red** when its fix is removed, by running
+the new cases against `git archive dbf3abb` plus **only the two test files** and
+no production change (`/tmp/e1pre`). 8 of the 9 new `test_formal_run.py` cases
+and 9 of the 11 new `test_formal_imports.py` cases are red there, each for the
+right reason:
 
 ```
-FAIL  a package dylib exports nothing and says namespace
-      marked expect=… but it PASSES — drop the marker
-STALE  a test that does not exist
-      marked expect=… but is not in TESTS — drop the marker
-formal imports: PASS=25 EXPECTED=3 FAIL=2      exit=1
+FAIL  limit_mlir_template_dotted_spelling: --backend=arm64 BUILT a construct
+      that has no representation (expected a refusal naming 'assembles an MLIR
+      attribute from a template'); the binary is the real answer here
+FAIL  limit_module_level_comptime_mlir_template: --backend=arm64 BUILT …
+FAIL  over_refusal_one_field_struct_spelled_like_an_unrepresentable_type:
+      build: constructing DType has no representation on this path (a formal
+      value is one 64-bit word, and DType is not one thing) …
+FAIL  over_refusal_no_longer_claims_a_type_is_not_one_thing: --backend=arm64
+      still says ['is not one thing'] — the refusal asserts a fact that is not
+      true of the file it is reported against
+FAIL  over_refusal_zero_arg_string_constructor_is_the_empty_string:
+      build: String(...) takes exactly one value to convert on this path (got 0)
+FAIL  a concrete and a generic of one name are told apart: the concrete
+      `def exit()` was not counted as concrete: {'funcs': [], …,
+      'generic_funcs': ['exit', 'exit'], …}
+FAIL  a public generic is not reported as private: two PUBLIC generic templates
+      were reported as private: … the only function it declares is the generic
+      template bitcast, pack_bits, which is both private and parametric …
+FAIL  a C-library-only module takes the dedicated branch: … did not take the
+      dedicated branch: … every declaration in it is private (a leading `_`) …
+ERROR a dataclass field with a default is in a struct layout
+ERROR the exclusion table does not change the export set
+      AttributeError: 'AssignStmt' object has no attribute 'name'
 ```
 
-So a marker that goes green is a failure, a marker for a test that no longer
-exists is a failure, and neither can rot.
+The two `ERROR`s are the `reflect.py` crash reproducing inside the harness,
+which is the defect rather than a broken test. The cases that pass on **both**
+trees are the four labelled **guards** in §4, which is what a guard is for.
+
+`test_formal_imports.py`'s three `expect=` markers from wave 4 reported
+`marked expect=… but it PASSES` the moment the messages were corrected, and were
+removed; `EXPECTED_FAILURES` is now empty, and the three tests are ordinary
+passing cases.
 
 ## 5.3 The suites
 
 | command | result |
 |---|---|
 | `make check` | 7 passed, 0 failed, 0 skipped |
-| `make check-formal` | 3 passed, 0 failed — `test_formal.py`: **PASS=40 KNOWN-GAP=3 FAIL=0** |
-| `make check-formal-x86` | 3 passed, 0 failed — `test_formal.py --backend x86_64`: **PASS=43 KNOWN-GAP=0 FAIL=0** |
-| `make check-formal-run` | 2 passed, 0 failed — `test_formal_run.py`: **PASS=161 FAIL=0** |
-| `make check-formal-dylib` | 3 passed, 0 failed — `test_formal_dylib.py`: **PASS=11 FAIL=0** |
-| `make check-formal-imports` | 3 passed, 0 failed — `test_formal_imports.py`: **PASS=26 EXPECTED=3 FAIL=0** (was 24/0) |
-| `make check-formal-sweep` | 3 passed, 0 failed — `test_formal_sweep.py`: **Ran 55 tests … OK** |
+| `test_formal.py` | **PASS=40 KNOWN-GAP=3 FAIL=0** |
+| `test_formal.py --backend x86_64` | **PASS=43 KNOWN-GAP=0 FAIL=0** |
+| `test_formal_run.py` | **PASS=196 FAIL=0** (162 at wave 4; the growth is four other agents' cases in flight) |
+| `test_formal_dylib.py` | **PASS=11 FAIL=0** |
+| `test_formal_imports.py` | **PASS=37 EXPECTED=0 FAIL=0** (was 26 with 3 EXPECTED) |
+| `test_formal_sweep.py` | Ran 55 tests … OK |
 | `python3 test_suite.py` | **43 passed, 0 failed** |
+| `formal/x86_64_model_test.py` | **agree 43 WRONG 0** |
+| `make check-gimple`, `make check-modcache` | 1 passed each; re-run with `--no-cache` after the `reflect.py` change and **81 passed, 0 failed** |
+| `stdlib-dylib` (required: `reflect.py` feeds the gimple dylib's reflection table) | **0 modules skipped before, 0 after**, and the 244-line stderr is byte-identical. `reflect.py` IS in `cas._COMPILER_SOURCES`, so the after-run genuinely rebuilt rather than replaying. `check-modcache`'s `checked_run` key does NOT include `reflect.py` even though `test_module_cache.py` imports it — a real cache gap, reported, not fixed (`tools/suite.py` is not this wave's lane) |
 
 **No stale `EXPECTED_FAILURES` entry.** `test_formal.py`'s three arm64 markers
 (`either`, `both`, `fib`) all still fail — `KNOWN-GAP=3` — and
-`EXPECTED_FAILURES_X86_64` is empty and stays empty. `test_formal_run.py` has
-no expected-failure list. The three new markers in `test_formal_imports.py` are
-the only ones added, and all three fail for the reason each records.
-
-`prooflib` built cleanly throughout (0.0 s, exit 0) — another agent's
-`lib/ProofLib.lean` is in flight per `git status`, but the lock-and-recheck
-from `c85c001` meant this wave never waited on it.
-
+`EXPECTED_FAILURES_X86_64` is empty and stays empty. `test_formal_run.py` has no
+expected-failure list.
