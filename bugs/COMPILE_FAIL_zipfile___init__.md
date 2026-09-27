@@ -320,8 +320,7 @@ and the RHS is a `MojoBytes *`. `_lower_binary_tail` has no
 arithmetic by the *address* of the bytes object. Pure garbage even if
 GCC accepted it.
 
-**Real fix = the bytes value type project**
-(`bugs/hard/CODEGEN_bytes_value_type.md`): `buf` must be a real bytes
+**Real fix = the bytes value type**, which landed: `buf` must be a real bytes
 value (`MojoBytes *`) end-to-end so `buf += data` routes to
 `mojo_bytes_concat`, which the existing `MojoBytes * + MojoBytes *`
 case in `_lower_binary_tail` already handles. A narrow
@@ -407,8 +406,7 @@ Still not `git rm`'d — does not compile end-to-end.
 ## Status (2026-09-06, bytes-value-type Stage 3): ordinary-path memoryview NOW implemented; coroutine-body memoryview still refused
 
 `bytes`/`bytearray`/`memoryview` value types landed in the ordinary
-GIMPLE path this session (Stages 2b + 3 of
-`bugs/hard/CODEGEN_bytes_value_type.md`): `memoryview(<bytes|bytearray>)`,
+GIMPLE path: `memoryview(<bytes|bytearray>)`,
 `mv[i]`, `mv[a:b]` (non-copying sub-view), `len`, iteration, `.tobytes`,
 `.hex`, `.cast`, `mv == b'...'`, `bytes(mv)` all compile + run.
 

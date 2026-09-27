@@ -313,8 +313,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # analysis already keys on, so `param.decode(...)` / `param.hex()` is
     # unambiguous "param is bytes" evidence — the only body-usage signal
     # conservative enough to act on (indexing / `in` / `+` / iteration all
-    # look identical to str/list and must NOT flip a param to bytes). See
-    # bugs/hard/CODEGEN_bytes_value_type.md Stage 2b.
+    # look identical to str/list and must NOT flip a param to bytes).
     BYTES_ONLY_METHODS = {'decode', 'hex'}
 
     # Method names shared across the builtin containers. When one of these

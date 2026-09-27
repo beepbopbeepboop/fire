@@ -1576,7 +1576,6 @@ def main():
 """, "1\n13\n")
 
     # ── struct module (binary pack/unpack) ──────────────────────────────
-    # bugs/hard/CODEGEN_struct_module.md — Stage 1 (module-level fns).
     test_gimple_stdout("gimple_struct_calcsize", """\
 fn main():
     print(struct.calcsize('<HH'))
@@ -1620,7 +1619,9 @@ fn main():
     # bits (1 4607182418800017408). The format is a compile-time constant,
     # so each slot's real kind IS statically known — the per-slot kinds are
     # recorded and the subscript picks the right accessor per index.
-    # See bugs/hard/CODEGEN_struct_module.md.
+    # NOTE: this case only covers the assigned-to-a-local spelling; the
+    # inline `struct.unpack('<if', ...)` form still returns raw IEEE bits
+    # -- see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
     test_gimple_stdout("gimple_struct_mixed_int_float_formats", """\
 fn main():
     var m = struct.unpack('<if', b'\\x01\\x00\\x00\\x00\\x00\\x00\\x80?')
@@ -1694,7 +1695,7 @@ fn main():
     # passes. A `var` field got a struct field with NO initializer anywhere,
     # so it stayed NULL and the first read was a live segfault; a scalar
     # `var` field was typed as a `struct <Cls> *` (the "unknown field"
-    # fallback) and read back 0. See bugs/hard/CODEGEN_struct_module.md.
+    # fallback) and read back 0.
     test_gimple_stdout("gimple_struct_var_declared_class_field", """\
 struct CentralDir:
     var FIELD_STRUCT = struct.Struct('<HH')

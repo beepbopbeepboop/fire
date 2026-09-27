@@ -8,8 +8,8 @@ members hit the same default-to-0 stub.
 
 ## Status (2026-09-26 — confirmed reproducible and PRE-EXISTING; silent wrong value, not a compile failure; not fixed)
 
-Surfaced while closing out
-`CODEGEN_struct_module.md`'s residual items. That doc had recorded it as
+Surfaced while closing out the `struct` module's residual items, back when
+that work lived in a doc that has since been removed. It had recorded this as
 "`.format` read through a class-attribute-held `Struct` returns garbage" —
 **both halves of that were wrong**, and this entry replaces it:
 
@@ -64,8 +64,8 @@ class Holder:
         return self.F.format(v)      # compiled: 0
 ```
 
-Note this is a *different* defect from the NULL-initializer crash fixed in
-`CODEGEN_struct_module.md` for `var F = struct.Struct(...)`: that one left
+Note this is a *different* defect from the NULL-initializer crash that
+landed for `var F = struct.Struct(...)`: that one left
 the field NULL and `self.F.size` segfaulted. This one is reached through a
 correctly-initialised `Struct` — `s.size`, `s.format` and `s.unpack(...)`
 all behave correctly on the very same object — so it is an independent hole
@@ -73,7 +73,7 @@ in call dispatch, not a consequence of the field-registration fix.
 
 ## Correcting the record
 
-`CODEGEN_struct_module.md` previously recorded this as "`.format` returns a
+The removed `struct` module doc recorded this as "`.format` returns a
 pointer-sized integer rather than the format string ... and a LOCAL
 `s = struct.Struct('<HH'); s.format` is correct too". **Both claims were
 wrong** on re-test: the local case fails identically to the class-attribute

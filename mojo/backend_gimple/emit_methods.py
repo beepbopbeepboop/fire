@@ -578,7 +578,7 @@ def _struct_slot_kinds(codes):
     the CONTAINER is untyped. Recording the per-slot kinds lets the
     subscript path pick the right accessor per index instead of one
     accessor for the whole list. See
-    bugs/hard/CODEGEN_struct_module.md.
+    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
     """
     out = []
     for c in codes or ():
@@ -595,7 +595,10 @@ def _struct_elem_ctype(codes):
     """Uniform MojoList element ctype for an unpack tuple, or 'int64_t'
     when the codes are mixed / unknown (the common integer-format case is
     exact; a genuinely mixed int+float format degrades to int64 slots —
-    documented in bugs/hard/CODEGEN_struct_module.md)."""
+    see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md, which also
+    records that the degradation is NOT confined to the assigned-to-a-local
+    spelling: `struct.unpack('<if', ...)` used inline still returns the
+    float's raw IEEE-754 bits)."""
     if not codes:
         return 'int64_t'
     kinds = set()
@@ -1630,8 +1633,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         module_name = func.obj.name
         method_name = func.member
 
-        # `struct` module (binary pack/unpack) — see
-        # bugs/hard/CODEGEN_struct_module.md. Guarded so a local variable
+        # `struct` module (binary pack/unpack). Guarded so a local variable
         # named `struct` (or a real Mojo `struct` type used as a value)
         # can't be hijacked: `struct` must not be a known local/param.
         if (module_name == 'struct' and method_name in _STRUCT_METHODS

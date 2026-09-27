@@ -2297,7 +2297,7 @@ def main():
 """, "1\n3\n6\n10\n")
 
     # bytes / bytearray / memoryview VALUE TYPES inside a compiled
-    # generator body (bugs/hard/CODEGEN_bytes_value_type.md Stage 4). The
+    # generator body. The
     # A3 stack-switch cutover routes a generator body through ordinary
     # codegen, which gained full bytes/bytearray/memoryview support in
     # Stages 1-3 -- these lock in that it actually works end-to-end from

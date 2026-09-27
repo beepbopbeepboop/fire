@@ -1564,8 +1564,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
     # bytearray(...): mutable bytes. Same C representation as bytes
     # (MojoBytes *), so every read op is inherited — only construction and
-    # the mutation ops differ. See bugs/hard/CODEGEN_bytes_value_type.md
-    # Stage 3.
+    # the mutation ops differ.
     if (fname_raw == 'bytearray' and not gen._locally_binds_name('bytearray')
             and len(node.args) <= 3):
         if len(node.args) == 0:
@@ -2238,8 +2237,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         # C-type level they are indistinguishable — `isinstance(x, bytes)`
         # and `isinstance(x, bytearray)` both match any MojoBytes * value.
         # A type tag on MojoBytes would be needed to discriminate; not
-        # worth the struct-layout churn for this compiler (documented in
-        # bugs/hard/CODEGEN_bytes_value_type.md Stage 3).
+        # worth the struct-layout churn for this compiler.
         'bytes': ('MojoBytes *',),
         'bytearray': ('MojoBytes *',),
         'memoryview': ('MojoMemoryView *',),

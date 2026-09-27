@@ -120,8 +120,11 @@ landed, all with regression coverage in `test_generators.py` (interpreter),
 - `CODEGEN_container_free_registry_dangling_entries.md` — resolved.
 - `CODEGEN_container_no_deallocation_unbounded_growth.md` — resolved.
 - `CODEGEN_large_dict_accumulation_exit_crash.md` — no longer reproduces.
-- `hard/CODEGEN_struct_module.md` — landed.
-- `hard/CODEGEN_bytes_value_type.md` — landed.
+- the `struct` module and the `bytes` value type — both landed, and their
+  hard-bug reports have since been removed per the fully-fixed-is-deleted
+  rule. Live residue found while verifying them lives in
+  `hard/CODEGEN_struct_kwargs_and_inline_unpack.md` and
+  `hard/CODEGEN_bytes_silent_wrong_values.md`.
 - `hard/CODEGEN_coro_nested_async_closure_capture.md` — landed.
 - `COMPILE_FAIL_Tools_build_umarshal.md` and `COMPILE_FAIL_Tools_build_deepfreeze.md` — compile blockers resolved; remaining items are runtime/adjacent and need a new doc if pursued.
 - `hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` — excluded from this queue because the documented candidate optimizations are unsafe without a new design.

@@ -19,6 +19,8 @@ Last updated 2026-09-26.
 | `CODEGEN_generator_consuming_generator_value_ctype.md` | a generator consuming a sibling generator types the yielded value `int64_t` instead of the callee's real `value_ctype`. Silent, and it compounds along a consumption chain. Root-caused to `lower()` running before `register()`; needs a fixpoint, and the existing retry is structurally blind to it (the consumer never raises). **New 2026-09-26.** |
 | `CODEGEN_struct_format_shadowed_by_format_attribute.md` | `Struct.format(x)` returns `0` where CPython *and this repo's own reference interpreter* both raise `TypeError`. Pre-existing (confirmed on a clean `HEAD~1`). The attribute *read* is correct — only the call is wrong. **New 2026-09-26.** |
 | `CODEGEN_same_bare_name_struct_collision_across_modules.md` | two same-named structs in sibling modules collide on an unqualified field table / typedef name. Deprioritised since 2026-08-09, untouched since. |
+| `CODEGEN_bytes_silent_wrong_values.md` | six `bytes`/`memoryview` paths that return plausible wrong values with exit 0: `ljust`/`rjust`/`center` with a bytes fill (emits a heap-address byte, so it changes run to run), every empty-bytes predicate `True`, `memoryview.readonly` `False`, and `dict.get`/`dict.pop` reading the str domain for a bytes key. **Two of the repo's own regression tests assert the CPython-wrong answers as expected output**, which is why they survived. **New 2026-09-26.** |
+| `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments are silently DROPPED, not refused — `unpack_from(..., offset=2)` reads offset 0 and returns well-formed wrong data — and the mixed int+float closure only holds for the assigned-to-a-local spelling, so inline `struct.unpack('<if', ...)` still returns the float's raw IEEE-754 bits. **New 2026-09-26.** |
 
 ## PARTIAL — the recorded gap is fixed; named residue remains
 
@@ -27,15 +29,41 @@ Last updated 2026-09-26.
 | `CODEGEN_generator_lambda_expr_unsupported.md` | variadic (`*args`/`**kwargs`) captures, and capturing lambdas that **escape** or are rebound — both still lose their captures. These need the env-struct / callable-value representation that nested `def` closures already use. Also deliberately excluded: capturing lambdas inside a coroutine body (that body model is scalar-only). |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | 5 of its 6 recorded shapes are already fixed upstream. The 6th is not fsutil-specific — it is the `value_ctype` bug above, which this doc now only points at. |
 
-## CLOSED — verified landed
+## Closed reports are deleted, not kept as monuments
 
-`CODEGEN_bytes_value_type.md` ·
+A doc for a bug that is fully fixed is **removed**, per CLAUDE.md's "Bug
+docs" rule. There is deliberately no CLOSED section listing them: a fixed bug
+still listed is indistinguishable from an open one, and the "re-verified
+unchanged" entries that accumulate in a long-lived doc cost the next session
+real time to re-derive and change nothing.
+
+An earlier version of this file said the opposite — that closed docs must be
+kept because they record *mechanisms* that are easy to reintroduce. That was
+a reasonable argument and it was wrong, for a reason the verification pass
+made concrete: on 2026-09-26 two closed reports were re-tested and **both
+still had live, silent, wrong-value residue** that their own text did not
+have. Keeping the file did not prevent that; it hid it, behind a CLOSED
+banner that everyone had stopped reading. The residue is now two new OPEN
+docs above (`CODEGEN_bytes_silent_wrong_values.md`,
+`CODEGEN_struct_kwargs_and_inline_unpack.md`), which is the honest home for
+it. Mechanistic knowledge that still matters lives in the source comment
+that explains the mechanism, not in a doc about a bug that no longer exists.
+
+Verified-closed and removed on 2026-09-26:
+`CODEGEN_bytes_value_type.md`, `CODEGEN_struct_module.md`.
+
+Still to be verified and removed the same way:
 `CODEGEN_coro_nested_async_closure_capture.md` ·
 `CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md` ·
 `CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md` ·
-`CODEGEN_struct_module.md` ·
-`CODEGEN_unannotated_init_param_field_type_defaults_int64.md` ·
-`PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+`CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+
+`PERF_nested_module_compile_walk_ast_quadratic_rescan.md` is **not** in that
+list despite still being listed here historically: the AST-node rescan it is
+named for is genuinely fixed and linear, but a fresh 2026-09-26 measurement
+found the remaining per-level rescan over generated C text is still
+superlinear (`_dedup_variadic_externs`, halved and cached in Phase 7 but
+still ~n^1.7), so the doc stays OPEN.
 
 ## Notes for future sessions
 

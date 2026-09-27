@@ -1720,7 +1720,8 @@ class GimpleGen:
         # single element ctype, but a struct format has one kind PER SLOT
         # and the format is a compile-time constant, so recording them
         # separately is what lets a mixed int/float format read back
-        # correctly. See bugs/hard/CODEGEN_struct_module.md.
+        # correctly -- but ONLY when the result is bound to a local;
+        # see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
         self._struct_slot_kinds: dict[str, list] = {}
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}

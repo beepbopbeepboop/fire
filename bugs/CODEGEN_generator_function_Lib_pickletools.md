@@ -469,9 +469,8 @@ def main():
 main()
 ```
 
-This is the **Stage 2 "unannotated param inferred `bytes` from body
-usage"** item in `bugs/hard/CODEGEN_bytes_value_type.md`, which is still
-listed as "later" and evidently not implemented for the slice case. Note
+This is the **"unannotated param inferred `bytes` from body usage"**
+item, which is still unimplemented for the slice case. Note
 `_lower_slice` ALREADY handles a genuinely-`MojoBytes *` receiver
 correctly (emit_calls.py:4777) — the whole problem is that `p` is never
 inferred to BE bytes. There is currently **no runtime bytes-vs-list

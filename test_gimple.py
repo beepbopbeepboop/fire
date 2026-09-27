@@ -2122,7 +2122,7 @@ print(list(g("hi")))
 """)
 
     # bytes / bytearray / memoryview value types inside a compiled
-    # generator body (bugs/hard/CODEGEN_bytes_value_type.md Stage 4). The
+    # generator body. The
     # A3 stack-switch backend routes the body through ordinary codegen,
     # which has full bytes support (Stages 1-3) -- these guard that a
     # `yield`ing body compiles clean.
