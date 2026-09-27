@@ -275,6 +275,18 @@ def fanout(*a, **kw) -> Fanout:
 test('gimple', [PY, 'test_gimple.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
      desc='GIMPLE unit suite (python-interpreted codegen)')
+# Registered 2026-09-26. Both `test_gimple_runner.py` and
+# `test_gimple_generator_runner.py` were in NO bucket — no `make check`, no
+# `make gate` ran a single case in them — for as long as they existed. That
+# is not a theoretical gap: on 2026-09-26 a correct fix sat RED in
+# test_gimple_runner.py for a full pass (`gimple_escaping_capturing_lambda_
+# still_lifted` expected "1" where the landed fix now correctly produces
+# "8", CPython's answer) because nothing executed it, and a whole wave of
+# new regression tests would likewise have gone in and never run. The
+# Makefile's old `check-gimple-runner` was a stray alias nothing referenced.
+# Registered here as `gimplerunner`/`gimplegenerators` (below, with `runner`
+# and the rest) rather than right after `gimple` — see that comment for the
+# full rationale and the `extra` cache-invalidation list.
 test('runner', [PY, 'test_runner.py'], cache=True,
      extra=['test_runner.py', 'myinterpreter.py', 'fire.py', 'fire_main.py',
             RUNTIME_SRC, RUNTIME_HDR],

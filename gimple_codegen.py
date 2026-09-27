@@ -171,6 +171,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_contains_bytes':   'int',
     'mojo_dict_setdefault_bytes_int': 'int64_t',
     'mojo_dict_pop_bytes_int':    'int64_t',
+    'mojo_dict_pop_bytes_str':    'char *',
+    'mojo_dict_pop_bytes_double': 'double',
     'mojo_dict_len':              'int64_t',
     'mojo_dict_iter_new':         'MojoDictIter *',
     'mojo_dict_iter_next':        'int',
@@ -247,6 +249,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_rjust':           'MojoBytes *',
     'mojo_bytes_center':          'MojoBytes *',
     'mojo_bytes_zfill':           'MojoBytes *',
+    'mojo_bytes_fill_byte':       'int',
     'mojo_bytes_partition':       'MojoList *',
     'mojo_bytes_rpartition':      'MojoList *',
     'mojo_bytes_fromhex':         'MojoBytes *',
@@ -269,6 +272,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_reverse':         'MojoBytes *',
     'mojo_bytearray_new':         'MojoBytes *',
     'mojo_bytearray_copy':        'MojoBytes *',
+    'mojo_bytearray_mark':        'MojoBytes *',
     'mojo_bytearray_pop':         'int64_t',
     'mojo_bytearray_insert':      'void',
     'mojo_bytearray_remove':      'void',
@@ -286,6 +290,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_memoryview_itemsize':   'int64_t',
     'mojo_memoryview_format':     'char *',
     'mojo_memoryview_obj':        'MojoBytes *',
+    'mojo_memoryview_readonly':   'int',
     # struct module (binary pack/unpack)
     'mojo_struct_compile':        'MojoStructFmt *',
     'mojo_struct_new':            'MojoStructFmt *',
@@ -1720,9 +1725,22 @@ class GimpleGen:
         # single element ctype, but a struct format has one kind PER SLOT
         # and the format is a compile-time constant, so recording them
         # separately is what lets a mixed int/float format read back
-        # correctly -- but ONLY when the result is bound to a local;
-        # see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+        # correctly. It is a property of the VALUE, not of whether the
+        # value was bound to a local: a bare
+        # `print(struct.unpack('<if', buf))` reprs through
+        # `mojo_repr_list_kinds` on exactly this table. What it does NOT
+        # cover is a read with no compile-time slot index — iteration and a
+        # computed subscript both need ONE static C type for a read whose
+        # slot is not known; see
+        # bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
         self._struct_slot_kinds: dict[str, list] = {}
+        # `struct.Struct(...)` result C value -> its const-folded format
+        # string, so the INSTANCE methods can derive the same per-slot kinds
+        # the module functions get for free from their own format argument.
+        # Without it `_lower_struct_instance_method` had no codes at all and
+        # `s.unpack(struct.pack('<if', 1, 1.0))` degraded exactly like the
+        # module-function spelling used to.
+        self._struct_formats: dict[str, str] = {}
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}
@@ -2304,6 +2322,7 @@ class GimpleGen:
         'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
         'mojo_repr_list_ints':       ('char *',    ['MojoList *']),
         'mojo_repr_list_bytes':      ('char *',    ['MojoList *']),
+        'mojo_repr_list_kinds':      ('char *',    ['MojoList *', 'const char *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
         'mojo_python_init':      ('void',       []),
@@ -2374,6 +2393,10 @@ class GimpleGen:
         'mojo_str_isdigit':      ('int',       ['char *']),
         'mojo_str_isalpha':      ('int',       ['char *']),
         'mojo_str_isspace':      ('int',       ['char *']),
+        'mojo_str_istitle':      ('int',       ['char *']),
+        'mojo_str_isascii':      ('int',       ['char *']),
+        'mojo_str_isprintable':  ('int',       ['char *']),
+        'mojo_str_isnumeric':    ('int',       ['char *']),
         # zlib binding (mojo_zlib.h)
         'mojo_zlib_compress':      ('void *',    ['char *', 'int64_t', 'int64_t']),
         'mojo_zlib_decompress':    ('void *',    ['char *', 'int64_t']),
@@ -3913,6 +3936,8 @@ class GimpleGen:
         return ginf._scan_container_elems(self, body)
     def _list_repr_fn(self, rav: str) -> str:
         return ginf._list_repr_fn(self, rav)
+    def _list_repr_call(self, key: str, lst: str | None = None) -> tuple[str, list]:
+        return ginf._list_repr_call(self, key, lst)
     def _stringify_value(self, et: str, ev: str) -> str:
         return ginf._stringify_value(self, et, ev)
     def _apply_fstring_spec(self, part_val: str, spec: str) -> str:

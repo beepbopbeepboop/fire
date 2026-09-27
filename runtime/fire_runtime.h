@@ -355,6 +355,14 @@ int mojo_str_isalpha(char *s);
 int mojo_str_isspace(char *s);
 int mojo_str_isupper(char *s);
 int mojo_str_islower(char *s);
+/* The remaining str.isX() predicates CPython defines on `str` but NOT on
+ * `bytes` (see mojo_bytes_is's header comment for why the two sets
+ * differ). All ten go through ONE kernel (mojo_is_kind in
+ * fire_runtime.c) so the str and bytes answers cannot drift apart. */
+int mojo_str_istitle(char *s);
+int mojo_str_isascii(char *s);
+int mojo_str_isprintable(char *s);
+int mojo_str_isnumeric(char *s);
 int mojo_str_endswith(char *s, char *suffix);
 int mojo_str_startswith_char(char *s, char c);
 int mojo_str_endswith_char(char *s, char c);
@@ -383,10 +391,18 @@ char *mojo_stdin_read(void);
  * boundary, exactly like MojoStr/MojoList.  `data` is NOT
  * NUL-significant — it may contain embedded 0 bytes; always use `len`.
  * `data` is over-allocated by one trailing NUL purely so debug prints and
- * accidental char* reads don't run off the end. */
+ * accidental char* reads don't run off the end.
+ * `readonly` records MUTABILITY, not the view question: 1 for every
+ * `bytes` object, 0 for a `bytearray`. It exists because `bytearray`
+ * shares this struct, so with nothing in the C type to tell the two
+ * apart a `memoryview` built over one could not answer `.readonly`
+ * (CPython: True over bytes, False over a bytearray) without guessing.
+ * Set once, at construction — every bytearray mutator keeps it 0, and no
+ * bytes operation ever flips it back. */
 typedef struct {
     uint8_t *data;
     int64_t  len;
+    int      readonly;
 } MojoBytes;
 
 MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` bytes */
@@ -435,6 +451,13 @@ MojoBytes *mojo_bytes_ljust(MojoBytes *b, int64_t width, int fill);
 MojoBytes *mojo_bytes_rjust(MojoBytes *b, int64_t width, int fill);
 MojoBytes *mojo_bytes_center(MojoBytes *b, int64_t width, int fill);
 MojoBytes *mojo_bytes_zfill(MojoBytes *b, int64_t width);
+/* ljust/rjust/center's `fillchar` resolved to the single byte VALUE it
+ * stands for. CPython accepts ONLY a one-byte `bytes` here (`TypeError`
+ * otherwise) and this compiler additionally accepts the bare int, so the
+ * length check belongs at runtime — the fill expression is not a constant.
+ * Passing a wrong length raises TypeError rather than silently padding
+ * with the first byte. */
+int         mojo_bytes_fill_byte(MojoBytes *fill);
 /* partition/rpartition -> a 3-element list of (head, sep, tail). */
 MojoList  *mojo_bytes_partition(MojoBytes *b, MojoBytes *sep);
 MojoList  *mojo_bytes_rpartition(MojoBytes *b, MojoBytes *sep);
@@ -444,9 +467,14 @@ MojoBytes *mojo_bytes_fromhex(char *s);
 char      *mojo_bytes_cstr_key(MojoBytes *b);
 MojoBytes *mojo_bytes_maketrans(MojoBytes *from, MojoBytes *to);
 MojoBytes *mojo_bytes_translate(MojoBytes *b, MojoBytes *table);
-/* The bytes.isX() predicates, selected by `kind` (the MOJO_BYTES_IS_*
- * codes above mojo_bytes_is in fire_runtime.c). Python defines only the
- * ASCII versions of these for bytes. */
+/* The bytes.isX() predicates, selected by `kind` (the MOJO_IS_* codes in
+ * fire_runtime.c). `kind` is deliberately restricted to the eight
+ * predicates CPython actually defines on `bytes` — isalnum isalpha
+ * isascii isdigit islower isspace istitle isupper. `isprintable` and
+ * `isnumeric` are `str`-only and reach the kernel through
+ * mojo_str_isprintable / mojo_str_isnumeric instead; a `bytes` receiver
+ * asking for them is an AttributeError (raised in the backend, matching
+ * both CPython and the interpreter reference). */
 int        mojo_bytes_is(MojoBytes *b, int kind);
 MojoBytes *mojo_bytes_replace(MojoBytes *b, MojoBytes *from, MojoBytes *to);
 /* `.replace(old, new, count)` — count < 0 or MOJO_SLICE_STOP_OMITTED replaces
@@ -471,6 +499,13 @@ MojoBytes *mojo_bytes_reverse(MojoBytes *src);/* reversed(<bytes>) */
  * the bytes path since the C type is identical. These add mutation. */
 MojoBytes *mojo_bytearray_new(void);
 MojoBytes *mojo_bytearray_copy(MojoBytes *src);
+/* Mark an already-constructed MojoBytes as a bytearray (i.e. clear its
+ * `readonly` flag). A separate call rather than a parameter on every
+ * constructor because most bytearray sources are built by SHARING a
+ * bytes-producing helper (`bytearray(b'x')`, `bytearray("x")`,
+ * `bytearray([1,2])` all reuse the immutable ones' code); the flag is a
+ * property of the CONSTRUCTOR SPELLING, which only the caller knows. */
+MojoBytes *mojo_bytearray_mark(MojoBytes *b);
 void       mojo_bytearray_setitem(MojoBytes *b, int64_t i, int64_t v);
 void       mojo_bytearray_append(MojoBytes *b, int64_t v);
 void       mojo_bytearray_extend(MojoBytes *b, MojoBytes *other);
@@ -481,10 +516,17 @@ void       mojo_bytearray_insert(MojoBytes *b, int64_t i, int64_t v);
 void       mojo_bytearray_remove(MojoBytes *b, int64_t v);
 
 /* ── memoryview (non-copying 1-D byte view, itemsize 1 / format 'B') ─────*/
+/* `readonly` is inherited from the object the view was taken over (a
+ * bytes is immutable, a bytearray is not) and is a real field rather
+ * than a constant fold: this struct keeps only a raw window, so a view
+ * over a bytearray and a view over a bytes are otherwise the same three
+ * numbers, and folding `.readonly` to a constant got `memoryview(
+ * bytearray(...)).readonly` backwards. `cast()` and slicing carry it. */
 typedef struct {
     uint8_t *data;
     int64_t  len;
     int64_t  itemsize;
+    int      readonly;
 } MojoMemoryView;
 
 MojoMemoryView *mojo_memoryview_new(uint8_t *data, int64_t len, int64_t itemsize);
@@ -501,6 +543,7 @@ int64_t         mojo_memoryview_itemsize(MojoMemoryView *m);
 int64_t         mojo_memoryview_nbytes(MojoMemoryView *m);
 char           *mojo_memoryview_format(MojoMemoryView *m, char *fmt);
 MojoBytes      *mojo_memoryview_obj(MojoMemoryView *m);
+int             mojo_memoryview_readonly(MojoMemoryView *m);
 
 /* ── struct module (binary pack / unpack) ───────────────────────────────
  * Format mini-language, a subset of CPython's `struct`:
@@ -677,6 +720,13 @@ void        mojo_raise_key_error(char *key);
  * (struct.Struct's `format`/`size`), which it previously answered with a
  * silent 0. */
 void        mojo_raise_type_error(char *detail);
+/* Raises a real, catchable ValueError for `detail` — the same mechanism and
+ * the same tag derivation (crc32("ValueError") & 0x7fffffff) as
+ * mojo_raise_attribute_error / mojo_raise_key_error / mojo_raise_type_error
+ * above, so a compiled `except ValueError:` catches it. Used where a Python
+ * operation rejects its ARGUMENT rather than failing to find something
+ * (mojo_bytes_partition's empty separator). */
+void        mojo_raise_value_error(char *detail);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
  *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
@@ -711,6 +761,12 @@ double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
 int         mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key);
 int64_t     mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 int64_t     mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
+/* str/double siblings of pop_bytes_int — same domain, read back as their own
+ * type. A MISSING key pops nothing and yields 0/NULL/0.0 (the absent-box
+ * convention mojo_dict_get_* already uses; Python's KeyError is not
+ * modelled). */
+char       *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key);
+double      mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
 
@@ -821,6 +877,10 @@ char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);
 char *mojo_repr_list_ints(MojoList *l);
 char *mojo_repr_list_bytes(MojoList *l);
+/* A list whose per-slot kinds are known but NOT uniform — a `struct.unpack`
+   result for a format mixing int/float/bytes fields. `kinds` is one byte per
+   slot: 'i' int, 'd' double, 's' bytes (see mojo_repr_list_kinds). */
+char *mojo_repr_list_kinds(MojoList *l, const char *kinds);
 /* Lists of 2-element PAIR lists (enumerate/zip): `[(0, 7), (1, 8)]`. The
    second slot's type is fixed at codegen time, hence one wrapper per
    kind — the raw slot cannot tell an int from a double. */

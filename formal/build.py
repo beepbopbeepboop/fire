@@ -833,7 +833,25 @@ def compile_formal(source_path: str, output: str = None,
     # raising it earlier would report the secondary problem in 67 files and
     # move the coverage denominator for it.  See
     # `check_frame_field_blob_premises`.
-    check_frame_field_blob_premises(structs)
+    #
+    # …and `check_construction_shapes`, for the same measured reason: from
+    # inside `_prepare_functions` it preempted the import diagnosis for 14
+    # files of this repository, every one of them a file that imports a host
+    # module.
+    #
+    # BOTH wrapped, and the wrapping is a fix rather than a courtesy: this
+    # function's `except CodegenError` is around `_prepare_functions`, so a
+    # refusal from either late check reached the caller as a raised exception
+    # and was classified `backend-crash` — a verdict for a compiler bug, on a
+    # construct that is a refusal.  Measured: with the construction check
+    # outside the wrapper, `std/gpu/host/func_attribute.mojo` went from a
+    # named `codegen` finding to `backend-crash`.
+    try:
+        check_frame_field_blob_premises(structs)
+        check_frame_subscript_escapes(functions)
+        check_construction_shapes(functions, {st.name: st for st in structs})
+    except CodegenError as e:
+        raise FormalBuildError(str(e))
     if import_dylibs:
         have = {d["install_name"] for d in linked}
         linked = linked + [d for d in load_dylib_manifests(import_dylibs)
@@ -927,7 +945,25 @@ def _formal_module_functions(source_path: str) -> tuple[str, list]:
     # of its own to be preempted by, and the check has to apply to a dylib
     # exactly as it does to an executable or the invariant is a property of one
     # front end.  Marked as a call site so the pair stays findable.
-    check_frame_field_blob_premises(structs)
+    #
+    # …and the other of the two call sites of `check_construction_shapes`, for
+    # the same two reasons: this is the dylib path, and a refusal raised from
+    # `_prepare_functions` would report a construction gap in a file whose
+    # import is the more fundamental fact.
+    #
+    # BOTH wrapped, and the wrapping is a fix rather than a courtesy: this
+    # function's caller has its `except CodegenError` around the CODEGEN step
+    # only, so a refusal from either check reached the sweep as a raised
+    # exception and was classified `backend-crash` — a verdict for a compiler
+    # bug, on a construct that is a refusal.  Measured: with the check outside
+    # the wrapper, `std/gpu/host/func_attribute.mojo` went from a named
+    # `codegen` finding to `backend-crash`.
+    try:
+        check_frame_field_blob_premises(structs)
+        check_frame_subscript_escapes(functions)
+        check_construction_shapes(functions, {st.name: st for st in structs})
+    except CodegenError as e:
+        raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
     return module, functions, source, structs
@@ -1028,6 +1064,42 @@ def _root_ident(node):
     return None
 
 
+def _frame_argument_slots(call, params):
+    """`(position, expression, keyword_name)` for every argument of `call`.
+
+    The position is a PARAMETER index, not an index into `args + kwargs`.  A
+    positional argument's is its own index; a keyword argument's is looked up
+    BY NAME, and a keyword naming no parameter yields nothing — that argument
+    then has no position in the callee, which is the opaque case
+    `model.frame_opaque_position_refusal` describes rather than a position
+    question.
+
+    A parameter list of `None` (a callee this image does not have) yields only
+    the positional indices, so a caller can still say *which* argument it is
+    looking at; whether that argument lands on a parameter is the caller's
+    separate question.
+
+    Why the keyword is resolved by name and not by its place in
+    `args + kwargs`: the position of a keyword argument is the parameter list's
+    statement about where it lands, and the concatenated list is this pass's.
+    `take(x=1, y=r)` has `y` at index 1 of the concatenation, which happens to
+    be right; `take(y=r, x=1)` has it at index 1 as well, which is wrong — `y`
+    is the SECOND parameter there and `x` the first, and following index 1
+    would make `x` a frame holder.  A wrong holder is a wrong answer, not a
+    refusal, so the name is the only thing safe to go on.  The keyword's own
+    name is carried out as well because a diagnostic that quotes an index is
+    quoting this list, and a reader comparing it against `take(y=r, x=1)` in
+    their own source is being sent to the wrong argument."""
+    out = []
+    for i, a in enumerate(call.args or []):
+        if i < len(params) or not params:
+            out.append((i, a, None))
+    for kwname, value in (call.kwargs or []):
+        if kwname in params:
+            out.append((params.index(kwname), value, kwname))
+    return out
+
+
 def _member_chain(node) -> str:
     """`a.b.c` for a MemberExpr chain, spelled the way the source spells it.
 
@@ -1044,6 +1116,218 @@ def _member_chain(node) -> str:
     parts.append(node.name if isinstance(node, F.IdentExpr) else "?")
     parts.reverse()
     return ".".join(parts)
+
+
+def _subscript_chain(node) -> str:
+    """`q[0]`, `REGISTRY[s.name]`, spelled the way the source spells it.
+
+    A separate function from `_member_chain` rather than a branch of it, for
+    the reason that function's docstring gives: the diagnostic is read by
+    someone looking for the source they wrote, and `q.?` is not it.
+
+    Which is a thing that was got wrong here and is worth recording: the first
+    version printed `str(index)`, and a MemberExpr index has no `__str__`, so
+    `REGISTRY[s.name] = spec` was reported as
+
+        is stored through "REGISTRY[MemberExpr(obj=IdentExpr(name='s', line=255, ..."
+
+    which is the AST.  A reader sent to a repr has to go and find the source to
+    work out what the compiler was looking at, which is the whole cost the
+    spelling exists to remove.  `_expr_spelling` is the one spelling function
+    and this delegates to it, so a shape neither of them has a short name for
+    degrades to the same honest placeholder rather than to a repr."""
+    base = node.obj if isinstance(node, F.SubscriptExpr) else node
+    idx = node.index if isinstance(node, F.SubscriptExpr) else None
+    if isinstance(idx, (F.TupleExpr, F.ListExpr)):
+        inner = ", ".join(_expr_spelling(e) for e in (idx.elements or []))
+    else:
+        inner = _expr_spelling(idx)
+    if isinstance(base, F.IdentExpr):
+        return f"{base.name}[{inner}]"
+    if isinstance(base, F.MemberExpr):
+        return f"{_member_chain(base)}[{inner}]"
+    return f"[{inner}]"
+
+
+def _callee_wants_a_value(callee: str) -> bool:
+    """Does `callee()` read its argument as a VALUE, whatever the position?
+
+    POSITIVE, and the word matters: `frame_receiver_escape_refusal` answers for
+    five cases and its fifth is "a name with no definition in hand", which is
+    not a statement about what the callee wants with its argument — it is a
+    statement about there being no callee.  Asking that function whether the
+    callee wants a value therefore answers YES for every name in the image,
+    because every name this module compiles reaches its fifth case, and a
+    predicate like that refuses the entire hand-off family.  So the four cases
+    that really are about the argument are named here, and the fifth is left to
+    `_check_frame_escapes`'s own "is it in this image" question, which is the
+    question that decides it.
+
+    The tables are the model's, read at call time rather than copied: a
+    hand-written copy of a sort this file and `formal/model.py` both make is
+    how the two come apart, and they are the same question."""
+    # `FRAME_ADDRESS_CTORS` is excluded FIRST and it is not a detail.
+    # `Pointer` and its siblings are `identity` type constructors, so
+    # `type_constructor_kind` calls them "identity" and the `kind` test below
+    # would say they want a value — when handing one a frame address is the
+    # ONE hand-off in this family that is simply correct, and
+    # `frame_receiver_escape_refusal` returns None for it.  Measured, with the
+    # exclusion missing: `Pointer(0, r)` was refused with
+    #
+    #   a R receiver is passed to Pointer(), a C library entry point, in
+    #   argument position 1 of 2. This is not a question about the position:
+    #   Pointer() is variadic and takes its arguments as values …
+    #
+    # Every clause of which is false: `Pointer` is not a C entry point, it is
+    # not variadic, and the thing that refuses it is an arity check two frames
+    # away.  A message that asserts a mechanism which is not operating sends
+    # the reader after a non-bug, which is the whole defect this file exists to
+    # stop — and it is a worse one than the sentence it replaced, because the
+    # sentence it replaced at least said "a position this path cannot see".
+    if callee in M.FRAME_ADDRESS_CTORS:
+        return False
+    if callee in M.FRAME_C_LIBRARY_CALLS or callee in M.FRAME_C_VALUE_CALLS:
+        return True
+    if callee in M.FRAME_VALUE_ONLY_CALLS:
+        return True
+    kind = M.type_constructor_kind(callee)
+    return kind is not None and kind[0] in ("unsupported", "identity")
+
+
+def _check_holder_agreements(functions, holders, hstruct, params_of) -> None:
+    """Refuse a parameter reached with a frame address at one call site and
+    with something else at another.  A WHOLE-IMAGE pass, and that is the whole
+    content of where it runs.
+
+    The measurable half of "a frame only works as the first parameter", and it
+    is measurable at the FIRST position too, which is why it is here and not
+    beside the non-first rule.  A parameter is a frame holder or it is not, and
+    that is a property of every call site at once:
+
+    ```
+    struct R: var a: Int; var b: Int
+    def f(x: Int, y: Int) -> Int: return x.a
+    def main(n: Int) -> Int:
+        var r = R(); r.a = 7; r.b = 8
+        return f(r, 1) + f(2, 3)
+    ```
+
+    `f` is compiled with `x` a frame holder, so `x.a` is a load at `base + 0` —
+    and `f(2, 3)` arrives with `x = 2`, where there is no frame.  **Measured on
+    both architectures, with nothing lifted: it builds, runs, and dies with
+    SIGSEGV, exit 139.**  That is in the shipped tree and predates every
+    position rule; the family was written about the wrong defect.
+
+    WHY A SEPARATE PASS AND NOT A BRANCH IN `_check_frame_escapes`, which is
+    where every other channel out of a frame is caught: that function is called
+    once per function and only for the functions that HOLD a frame, because
+    every branch in it needs a non-empty holder set to have anything to say.
+    The call site that has to be caught here can be in a function that holds no
+    frame at all — `f(r, 1) + f(2, 3)` with the second call in a function that
+    never mentions `r` — and skipping those is not a small omission: it is
+    precisely the case where the disagreement is invisible from the frame's own
+    function.  Measured: with the check inside `_check_frame_escapes`, that
+    program built and died with SIGSEGV on both architectures.
+    """
+    for fn in functions:
+        hs = holders.get(fn.name) or ()
+        by_name = hstruct.get(fn.name) or {}
+        for node in M.iter_nodes(fn.body):
+            if not isinstance(node, F.CallExpr) \
+                    or not isinstance(node.func, F.IdentExpr):
+                continue
+            callee = node.func.name
+            params = params_of.get(callee)
+            if not params:
+                continue
+            for position, arg, _kw in _frame_argument_slots(node, params):
+                pname = params[position] if position < len(params) else None
+                if not pname:
+                    continue
+                here = isinstance(arg, F.IdentExpr) and arg.name in hs
+                there = pname in holders.get(callee, ())
+                if here == there:
+                    # Both frame addresses, or neither.  A parameter reached one
+                    # way at every call site is the case the by-reference
+                    # design exists for, and it says nothing here.
+                    continue
+                # Every call site of this parameter, sorted into the two kinds
+                # and spelled as the source spells it.  BOTH lists go into the
+                # message rather than "this one and the others", because either
+                # site can be the one the reader is standing at and a message
+                # that names the wrong one of the pair is the same defect as a
+                # message that names the wrong reason: it sends the reader to a
+                # call that is fine.
+                holder_spellings, plain_spellings, structs = [], [], []
+                for site_fn in functions:
+                    for site in M.iter_nodes(site_fn.body):
+                        if not isinstance(site, F.CallExpr) \
+                                or not isinstance(site.func, F.IdentExpr) \
+                                or site.func.name != callee:
+                            continue
+                        for i, a, _k in _frame_argument_slots(site, params):
+                            if i != position:
+                                continue
+                            site_holder = isinstance(a, F.IdentExpr) \
+                                and a.name in holders.get(site_fn.name, ())
+                            spelling = _call_spelling(site, a, position, pname)
+                            bucket = (holder_spellings if site_holder
+                                      else plain_spellings)
+                            if spelling not in bucket:
+                                bucket.append(spelling)
+                            for st in (hstruct.get(site_fn.name, {})
+                                       .get(a.name) or ()) if site_holder \
+                                    else ():
+                                if st.name not in structs:
+                                    structs.append(st.name)
+                if not holder_spellings or not plain_spellings:
+                    continue
+                raise CodegenError(M.frame_holder_disagreement_refusal(
+                    callee, position, pname, structs, holder_spellings,
+                    plain_spellings))
+
+
+def _expr_spelling(node) -> str:
+    """The source's own spelling of an expression, as far as a name needs one.
+
+    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
+    reader to the AST to find the call, which is the opposite of what a
+    diagnostic quoting a call site is for.  A shape with no short spelling is
+    named by its type, which is at least a true statement and is obviously a
+    placeholder to anyone who reads it."""
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
+        return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
+    if isinstance(node, F.MemberExpr):
+        return _member_chain(node)
+    for attr in ("value", "name"):
+        v = getattr(node, attr, None)
+        if isinstance(v, (str, int, float, bool)):
+            return str(v)
+    return type(node).__name__
+
+
+def _call_spelling(call, arg, position, pname) -> str:
+    """`f(2, 3)` — the call as the source spells it, for the disagreement."""
+    parts = [_expr_spelling(a) for a in (call.args or [])]
+    for k, v in (call.kwargs or []):
+        parts.append(f"{k}={_expr_spelling(v)}")
+    return f"{call.func.name}({', '.join(parts)})"
+
+
+# Every function in the image under analysis, published by `_frame_receivers`.
+#
+# `_check_holder_agreement` has to name the OTHER call sites of a callee, and a
+# call site is a node inside some function's body — so it needs the function
+# OBJECTS, which the holder maps (keyed by name, holding name sets) do not
+# carry.  A module-level list rather than a parameter because the disagreement
+# is a property of the whole image and threading the image through every
+# `_check_frame_escapes` call to reach one message would put a global's worth of
+# plumbing in the way of the common case.  It is REBOUND, never appended to, so
+# a second unit in the same process (the dylib build compiles several) cannot
+# see the first one's functions.
+_IMAGE_FUNCTIONS = ()
 
 
 def _call_receivers(fn):
@@ -1097,6 +1381,8 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     `model.struct_frame_slot_candidates` for the two-struct counterexample and
     `model` for why the answer is agree-or-refuse."""
     structs = list(structs_by_name.values())
+    global _IMAGE_FUNCTIONS
+    _IMAGE_FUNCTIONS = tuple(functions)
     framed = M.framed_struct_names(structs)
     if not framed:
         return
@@ -1110,21 +1396,39 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     for st in structs:
         for m in M.struct_methods(st):
             by_method.setdefault(m.name, []).append(st)
+    # `param0[fn]` is the name of `fn`'s FIRST parameter, and `params_of[fn]`
+    # is the whole parameter list in order.  The full list is here for the
+    # same reason the fixpoint below walks every position rather than the
+    # first: a parameter is a parameter wherever it sits, and there was never
+    # a reason to look only at index 0 except that `self` is at index 0.
+    # `param0` is kept because `known = set(param0)` is the "is a function in
+    # this image" test `_check_frame_escapes` makes, and it is spelled once.
     param0 = {}
+    params_of = {}
     for fn in functions:
-        params = list(getattr(fn, "params", None) or [])
-        if params and isinstance(params[0], (tuple, list)) and params[0] \
-                and isinstance(params[0][0], str):
-            param0[fn.name] = params[0][0]
+        names = []
+        for p in (list(getattr(fn, "params", None) or [])):
+            names.append(p[0] if isinstance(p, (tuple, list)) and p
+                         and isinstance(p[0], str) else None)
+        params_of[fn.name] = names
+        if names and names[0]:
+            param0[fn.name] = names[0]
     # `holders[fn]` is the set of names in `fn` holding a frame address, and
     # `hstruct[fn][name]` is the SET of structs it might be — carried through
     # the fixpoint rather than re-derived afterwards, because a holder that
-    # arrived as a callee's first parameter has no binding left to re-derive it
+    # arrived as a callee's parameter has no binding left to re-derive it
     # from. A candidate set that is EMPTY means the name was bound from a
     # constructor this path does not frame, so it holds a plain word and its
     # `.<field>` accesses are not frame accesses at all.
     holders = {fn.name: set() for fn in functions}
     hstruct = {fn.name: {} for fn in functions}
+    # The declared return annotations, read ONCE for the whole unit and handed
+    # to the construction decision below.  They are the evidence that tells a
+    # construction argument that is an ordinary value from one that is a
+    # container returned by a callee, and the two backends read the same table
+    # (`formal/model.py`'s `function_return_types`) so the three callers of
+    # `struct_construction_plan` cannot answer differently.
+    rets = M.function_return_types(functions)
     for fn in functions:
         owner = owners.get(fn.name)
         if owner is not None and owner.name in framed:
@@ -1152,17 +1456,52 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                     hs.add(target)
                     hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
                     changed = True
-                if isinstance(node, F.CallExpr) and node.args \
-                        and isinstance(node.func, F.IdentExpr) \
-                        and node.func.name in param0:
-                    r = _root_ident(node.args[0])
-                    if r and r[0] in hs and r[1] == 0:
-                        callee = param0[node.func.name]
-                        if callee not in holders.get(node.func.name, ()):
-                            holders[node.func.name].add(callee)
-                            hstruct[node.func.name][callee] = \
-                                list(hstruct[fn.name][r[0]])
-                            changed = True
+                if not isinstance(node, F.CallExpr) \
+                        or not isinstance(node.func, F.IdentExpr):
+                    continue
+                # EVERY argument position, not just the first, and a keyword
+                # resolved BY NAME — the position a keyword lands in is the
+                # parameter list's business, and reading it off the
+                # concatenated `args + kwargs` list would follow a frame
+                # address into the wrong parameter.
+                #
+                # The lifetime reasoning this needs, and it is the whole
+                # reason it is safe: a frame belongs to the function that
+                # created it, and an address only ever travels DOWN an active
+                # call chain, so the creator of a holder that arrived as an
+                # argument is an ancestor of the callee and its frame is live
+                # for every instant of the callee's activation. The callee may
+                # therefore read and write through it — which is the same
+                # licence a method receiver has, and the same one the
+                # cross-module hand-off relies on. What it may NOT do is let
+                # the word leave, because then it outlives the call and the
+                # creator may be gone: `return y`, a container, a field, a
+                # subscript and a module-level name are all refused by name in
+                # `_check_frame_escapes`.
+                #
+                # `r[1] == 0` is kept: a field read is a VALUE and not an
+                # address, so only a bare name hands the frame over.
+                #
+                # `plist` is the callee's OWN parameter list, and the edge is
+                # only taken for a position that list has: a callee this image
+                # does not have has no parameter to make a holder, and that is
+                # the opaque case `_check_frame_escapes` says so about.
+                plist = params_of.get(node.func.name)
+                if not plist:
+                    continue
+                for pos, pname, _kw in _frame_argument_slots(node, plist):
+                    if pos >= len(plist):
+                        continue
+                    r = _root_ident(pname)
+                    if not (r and r[0] in hs and r[1] == 0):
+                        continue
+                    callee = plist[pos]
+                    if not callee or callee in holders.get(node.func.name, ()):
+                        continue
+                    holders[node.func.name].add(callee)
+                    hstruct[node.func.name][callee] = \
+                        list(hstruct[fn.name][r[0]])
+                    changed = True
     for fn in functions:
         hs = holders[fn.name]
         if not hs:
@@ -1412,21 +1751,38 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                     f"one is a wrong answer rather than a failure")
             slots[f"{base}.{node.member}"] = slot
         # Which of this function's holders were built HERE, as opposed to
-        # arriving as a method receiver or as a callee's first parameter.  It
-        # is the difference between "returned from the function that created it"
-        # and "returned from a function that received it", and the second is the
-        # larger half of the family: the holder fixpoint makes a first parameter
-        # a holder, so `def fwd(r): return r` in a program whose object `main`
-        # built was reported as a return from the creator.  A constructor
-        # binding is the one way a frame is created in this function, and it is
-        # the same enumeration the fixpoint started from, so the two cannot
-        # disagree about which names those are.
+        # arriving as a method receiver or as a callee's parameter.  It is the
+        # difference between "returned from the function that created it" and
+        # "returned from a function that received it", and the second is the
+        # larger half of the family: the holder fixpoint makes a callee's
+        # parameter a holder, so `def fwd(r): return r` in a program whose
+        # object `main` built was reported as a return from the creator.  A
+        # constructor binding is the one way a frame is created in this
+        # function, and it is the same enumeration the fixpoint started from,
+        # so the two cannot disagree about which names those are.
+        #
+        # `holders`/`hstruct`/`params_of` are the WHOLE IMAGE's tables, not
+        # this function's, and that is the point of passing them: whether an
+        # argument is refused depends on what the CALLEE was compiled to
+        # believe about the parameter it lands in, which is not a fact this
+        # function can see.  `params_of` is complete before the fixpoint runs,
+        # so it is complete here.
         _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
-                             set(_constructor_bindings(fn, framed)))
+                             set(_constructor_bindings(fn, framed)), rets,
+                             holders, hstruct, params_of)
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
         fn._frame_slots = slots
+        # `by_name` itself, published, and the reason is a CONSTRUCTION rather
+        # than a field read: a copy construction `S(x)` needs to know what `x`
+        # IS, and the holder analysis is the only thing in the compiler that
+        # can say a word is a frame address.  Without it the emitters would
+        # have to re-derive the recognition, and two recognitions of "is this
+        # name a frame" is exactly the kind of pair that agrees until the day
+        # it does not.  `model.struct_construction_plan` is the single decision
+        # and both backends call it with this table.
+        fn._frame_candidates = dict(by_name)
         # LAST for this function, and after the walk above rather than inside
         # it: the rewrite MUTATES the tree the walk is iterating, and a walk
         # that mutates what it is walking is how a pass ends up seeing a node
@@ -1436,6 +1792,11 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
         # guessing a nested receiver there is exactly the name-dispatch bug
         # `_check_method_receiver_types` exists for.
         _rewrite_nested_method_calls(fn, nested_fields)
+    # AFTER the loop, over every function including the ones that hold no frame.
+    # A parameter's being a frame holder is a fact about the whole image, and
+    # the call site that disagrees with it can be in a function the loop above
+    # skipped — see `_check_holder_agreements` for the program that measures it.
+    _check_holder_agreements(functions, holders, hstruct, params_of)
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
@@ -1584,6 +1945,53 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     return nested
 
 
+def _defer_subscript_escape(fn, value, holders, by_name, spelled) -> None:
+    """Record a frame address stored through a subscript, for a LATE refusal.
+
+    Nothing is raised here.  The refusal is real and the finding is kept, but
+    `_check_frame_escapes` runs inside `_prepare_functions`, which is before the
+    imports resolve, and a refusal raised there is reported INSTEAD of the
+    import diagnosis — the defect `check_frame_field_blob_premises` and
+    `check_construction_shapes` are placed outside the wrapper to avoid, for
+    the same measured reason.  So the finding is parked on the function and
+    `check_frame_subscript_escapes` raises it from the entry points, beside the
+    other two.
+
+    The measured cost of getting this wrong, on this branch: with it raising
+    here, `mojo/middle/closures.py` was reported as a `codegen` finding about
+    `self.dispatch_patterns[pattern_key]` when what the reader needs first is
+    "imports 'fire_compiler', which … imports 're', which is a host module".
+    One file moved the wrong way and the wrong message won."""
+    if not isinstance(value, F.IdentExpr) or value.name not in holders:
+        return
+    cands = by_name.get(value.name) or []
+    who = ", ".join(st.name for st in cands) if cands else value.name
+    fn._frame_subscript_escapes = list(
+        getattr(fn, "_frame_subscript_escapes", ())) + [(
+            who, value.name, spelled, fn.name)]
+
+
+def check_frame_subscript_escapes(functions) -> None:
+    """Raise the frame addresses `_check_frame_escapes` parked on the functions.
+
+    The third of the three late frame checks, and it is here for the same reason
+    as the other two: a refusal raised before the imports resolve is reported
+    in place of the import diagnosis, which is the more useful of the two
+    answers and the one that says whether the file is reachable at all."""
+    for fn in functions:
+        for who, name, spelled, where in (
+                getattr(fn, "_frame_subscript_escapes", ()) or ()):
+            raise CodegenError(
+                f"a {who} receiver is stored through {spelled!r} in {where}(), "
+                f"so it outlives the frame it names: the list's element is a "
+                f"heap cell, so the word survives the call the frame was "
+                f"created in, and the read that follows it is a read of "
+                f"reused bytes. Measured on both architectures with nothing "
+                f"lifted, before this check existed: the shape builds, runs, "
+                f"and returns 0 where the source says 7 — silently, with the "
+                f"program exiting 0")
+
+
 def check_frame_field_blob_premises(structs) -> None:
     """Refuse a method that puts a CONTAINER into a field of a framed receiver.
 
@@ -1637,6 +2045,59 @@ def check_frame_field_blob_premises(structs) -> None:
         writes = M.struct_field_container_writes(st)
         if writes:
             raise CodegenError(M.frame_field_premise_refusal(st))
+
+
+def check_construction_shapes(functions, structs_by_name) -> None:
+    """Decide every `S(...)` in the unit, and refuse the ones with no shape.
+
+    Called by the ENTRY POINTS, beside `check_frame_field_blob_premises`, and
+    for the SAME measured reason: `_prepare_functions` runs before
+    `_resolve_imports`, so a refusal raised from inside it preempts the import
+    diagnosis.  This one fired on **14 of this repository's 284 files** from
+    there — every one of them a file that imports a CPython host module, so
+    every one of them a file that is out of reach whatever its codegen says —
+    and all 14 moved `not-answerable/host-import` → `codegen`, which puts 14
+    unbuildable files into the measured denominator.  The same drift in the same
+    direction, one function over.
+
+    It is a separate function rather than a branch of `_check_frame_escapes`
+    for a second reason, and this one is about ORDER rather than diagnosis: a
+    struct-constructor call has to be SKIPPED by the escape check's
+    argument-position loop, because `S(a, r)` has a frame address in a
+    non-first position and that loop would refuse it as "a position whose
+    meaning this path cannot see" — a sentence about a construct that is a
+    perfectly ordinary positional construction.  So the skip has to be here,
+    in the loop, and the decision has to be somewhere that can run after the
+    loop has had its say.
+
+    The DECISION is `model.struct_construction_plan`, the same function both
+    backends call before they emit, and the same text — which is what lets one
+    `refuse:` case in `test_formal_run.py` hold both architectures and the
+    build pass at once.
+
+    `functions` rather than `structs`, because a construction is a call in
+    some function's body.  `fn._frame_candidates` is the holder table
+    `_frame_receivers` published, and it is what tells a COPY construction what
+    its source is; a function with no holders has none published, and an empty
+    table is the right answer there — a name that is not a holder is a plain
+    word, and the copy decision refuses exactly that.
+    """
+    if not structs_by_name:
+        return
+    rets = M.function_return_types(functions)
+    for fn in functions or ():
+        cands = getattr(fn, "_frame_candidates", None) or {}
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.CallExpr) \
+                    or not isinstance(node.func, F.IdentExpr):
+                continue
+            st = structs_by_name.get(node.func.name)
+            if st is None or M.type_constructor_kind(node.func.name) is not None:
+                continue
+            _plan, refusal = M.struct_construction_plan(
+                st, node, structs_by_name, cands, rets)
+            if refusal is not None:
+                raise CodegenError(refusal)
 
 
 # `_check_nested_frame_writes` USED to live here, refusing any write to a field
@@ -1772,16 +2233,19 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
 
 
 def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
-                         structs_by_name=None, created_here=frozenset()) -> None:
+                         structs_by_name=None, created_here=frozenset(),
+                         rets=None, all_holders=None, all_hstruct=None,
+                         params_of=None) -> None:
     """Refuse every construct a frame ADDRESS may not take part in.
 
     A frame belongs to the function that created it and is reclaimed when that
     function returns, so a holder that outlives its creator — returned, put in
-    a container, stored through a subscript, parked in another frame's field, or
-    handed to something that wants a value — would be dereferenced after its
-    bytes had been reused. The program would build, run, and produce a number
-    the source never wrote, which is the outcome this backend exists to make
-    impossible, so each of these is a refusal that names the construct.
+    a container, stored through a subscript or a module-level name, parked in
+    another frame's field, or handed to something that wants a value — would
+    be dereferenced after its bytes had been reused. The program would build,
+    run, and produce a number the source never wrote, which is the outcome this
+    backend exists to make impossible, so each of these is a refusal that names
+    the construct.
 
     The one that was MISSING here, and the reason this function grew a case
     rather than a reason: parking a frame address in another object's field.
@@ -1800,7 +2264,13 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
 
     `created_here` is the set of holder names this function BUILT; a holder
     outside it arrived from a caller, and the return refusal says so rather than
-    naming this function as the creator."""
+    naming this function as the creator.
+
+    `all_holders`/`all_hstruct`/`params_of` are the whole image's tables, and
+    they are what the CALL half is decided from.  A parameter is a frame holder
+    or it is not, and that is a property of every call site at once — see
+    `model.frame_holder_disagreement_refusal` for the measured program that
+    says what happens when only one of them agrees."""
     known = set(param0)
     # `<Struct>_<method>` for every method of every struct in hand, MINUS the
     # ones this module compiles.  The difference is exactly the set of callees
@@ -1812,6 +2282,13 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     # same thing on both sides of the boundary.
     cross_module = set(owners or ()) - known
     struct_names = structs_by_name or {}
+    # The dylib path calls this with none of the three, and a missing table
+    # must not turn into a `KeyError` in the middle of a diagnostic: without
+    # them the call half can still refuse a variadic or an unknown callee, and
+    # the holder-agreement check simply has nothing to compare against.
+    all_holders = all_holders if all_holders is not None else {}
+    all_hstruct = all_hstruct if all_hstruct is not None else {}
+    params_of = params_of if params_of is not None else {}
 
     def _names(node):
         return [st.name for st in (by_name.get(node.name) or [])] \
@@ -1820,11 +2297,12 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is not None:
             # Whether the returning function CREATED the frame is not a thing
-            # this walk knows: a holder may have arrived as the first parameter,
-            # in which case the creator is up the call chain.  `owners` says
-            # which case this is, and the message says so, because "returned
-            # from the function that created it" is false for the second and
-            # sends the reader to the wrong function looking for it.
+            # this walk knows: a holder may have arrived as one of its
+            # parameters, in which case the creator is up the call chain.
+            # `owners` says which case this is, and the message says so,
+            # because "returned from the function that created it" is false for
+            # the second and sends the reader to the wrong function looking for
+            # it.
             owner = (owners or {}).get(fn.name)
             if isinstance(node.value, F.IdentExpr) \
                     and node.value.name in holders:
@@ -1848,21 +2326,140 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                 f"outlives the frame it names by however long that object "
                 f"lives: the slot belongs to the function that created THAT "
                 f"frame, and nothing here can say the two lifetimes agree")
+        elif isinstance(node, (F.AssignStmt, F.AugAssignStmt)) \
+                and isinstance(getattr(node, "target", None), F.SubscriptExpr):
+            # A SUBSCRIPT store, `q[0] = r`.  It reads as an ordinary
+            # assignment and it is the same hole as the container literal one
+            # level along: the list's element is a heap cell, so the frame
+            # address outlives the frame by however long the list lives.
+            #
+            # Measured before this branch existed, on both architectures, with
+            # nothing lifted: `var q = [1, 2, 3]; q[0] = r; return q[0].a`
+            # builds, runs, and returns **0** where the source says 7 — a
+            # wrong answer, silently, with the program exiting 0.
+            #
+            # RECORDED, NOT RAISED, and that is the reason this branch is not
+            # shaped like the four above it.  A refusal raised from
+            # `_prepare_functions` preempts the import diagnosis, which is the
+            # defect `check_frame_field_blob_premises` and
+            # `check_construction_shapes` were moved out to fix: 14 files of
+            # this repository that import a host module were being reported as
+            # codegen gaps because of it.  Measured here, the same way: with
+            # this branch raising from `_prepare_functions`, `mojo/middle/
+            # closures.py` went from `not-answerable/host-import` — "imports
+            # 'fire_compiler', which … imports 're', which is a host module" —
+            # to a `codegen` finding about a subscript.  So it is collected
+            # here and raised by `check_frame_subscript_escapes`, which the
+            # entry points call beside the other two.
+            _defer_subscript_escape(
+                fn, getattr(node, "value", None), holders, by_name,
+                _subscript_chain(node.target))
         elif isinstance(node, F.CallExpr):
-            args = list(node.args or []) + [v for _k, v in (node.kwargs or [])]
             callee = node.func.name if isinstance(node.func, F.IdentExpr) else None
+            # A struct CONSTRUCTOR carries NO escape to check, and the reason is
+            # worth stating because it is the whole reason the other two shapes
+            # are representable.  `S(...)`'s block belongs to the function the
+            # site is in, and this object cannot leave that activation — every
+            # channel out is refused above — so a word read into one of its
+            # slots came from a live local of this function or of an ancestor
+            # of it and outlives every read of the slot.  That is exactly what
+            # the ASSIGNMENT branch above cannot say: there `o` may be an
+            # object an ANCESTOR built, so the slot outlives `i`'s creator.
+            #
+            # It used to be a branch here, refusing `R(r)` as "a copy
+            # construction", and the refusal was a missing lowering.  The
+            # lowering exists now, so the question is not WHETHER to refuse but
+            # WHICH shape this is — and that is
+            # `check_construction_shapes`, which is LATER, next to
+            # `check_frame_field_blob_premises`, for the same reason that one
+            # is: a refusal raised from `_prepare_functions` preempts the
+            # import diagnosis, and 14 files of this repository that import a
+            # host module were being reported as codegen gaps because of it.
+            #
+            # Skipping the whole argument loop rather than only the frame case
+            # also matters for ORDER: `S(a, r)` has a frame address in a
+            # non-first position, which the loop below would refuse as
+            # "a position whose meaning this path cannot see" — a sentence
+            # about a construct that is now a positional construction and
+            # perfectly representable.
+            if callee in struct_names \
+                    and M.type_constructor_kind(callee) is None:
+                continue
             # A METHOD call's own name, for the message: `recv.m(x)` that the
             # rewriting did not lift has no callee name to report, and "a call
             # this path does not recognise" sends the reader looking for a
             # missing function rather than at the method the source names.
             method = (_member_chain(node.func)
                       if isinstance(node.func, F.MemberExpr) else None)
-            for i, a in enumerate(args):
-                if i or callee is None:
+            # ONE loop over the arguments, and what each one is decided BY is
+            # the CALLEE, not its position.  The old loop asked the position
+            # first and used it as the catch-all, which put three unrelated
+            # things under one sentence and made the commonest of them
+            # unreachable: a variadic C entry point, a callee with no
+            # definition in hand, and a method call on a value receiver were
+            # each reported as "a position whose meaning this path cannot
+            # see", and so was a parameter that is a perfectly good holder in
+            # any position but the first.
+            #
+            # The order below is the order the question is actually decided
+            # in, and the first three are the ones that do not depend on the
+            # position at all:
+            #
+            #   0. there is no callee NAME at all (a method call the
+            #      rewriting did not lift)          -> case 3, opaque;
+            #   1. the callee wants a VALUE, or is variadic  -> case 2;
+            #   2. the callee is not in this image            -> case 3;
+            #   3. the callee's parameter list is in hand and the
+            #      parameter IS a holder                     -> followed;
+            #   4. …and if it is NOT                          -> the
+            #      disagreement, which is a fact about the program.
+            #
+            # 0 is FIRST and the ordering is load-bearing rather than
+            # tidy: `callee` is None for a method call, and None is not in
+            # `known` and not in `all_holders` either, so leaving it to step 2
+            # printed the "no definition in hand" sentence with no name in it
+            # — a refusal about a function that does not exist, for a method
+            # call the source plainly writes.  Measured: `mk().take(r)` came
+            # back as "a R receiver is passed to (), which is a name with no
+            # definition in hand".
+            for i, a, kwname in _frame_argument_slots(
+                    node, params_of.get(callee) if callee in all_holders
+                    else ()):
+                if callee is None:
+                    # 0. A METHOD call on a value receiver: the one case where
+                    #    the declaration genuinely is not in hand, so it is the
+                    #    narrow case rather than the catch-all.
                     _refuse_holder_use(
                         fn, a, holders, by_name, "",
-                        M.frame_position_refusal(callee, i, len(args),
-                                                 _names(a), method))
+                        M.frame_opaque_position_refusal(
+                            where_the=method or "the call", callee=None,
+                            position=i, total=len(node.args or []),
+                            struct_names=_names(a), method=method,
+                            why="a method call on a value receiver is "
+                                "dispatched by NAME, so `recv.m(x)` carries no "
+                                "type and the parameter list this argument "
+                                "lands in belongs to a declaration this walk "
+                                "has not read"))
+                    continue
+                # 1. A value-taking callee, in ANY position.  This is the
+                #    check that was unreachable, because the old loop only
+                #    asked it at position 0 and a `printf` in any other
+                #    position got the position sentence instead.
+                if _callee_wants_a_value(callee):
+                    # The model's own classification is the WHOLE message here,
+                    # with no fallback arm.  An `or <something else>` was in
+                    # this spot and was dead as well as dangerous: a predicate
+                    # that asks "does this callee want a value" and a function
+                    # that answers it can only ever agree, so the second call
+                    # could never be reached — and had it been, it would have
+                    # printed a sentence about a mechanism that is not
+                    # operating.  `frame_receiver_escape_refusal`'s
+                    # `FRAME_C_VALUE_CALLS` branch already IS the variadic
+                    # message, and a second copy of it here is how the two would
+                    # come apart.
+                    _refuse_holder_use(
+                        fn, a, holders, by_name, "",
+                        M.frame_receiver_escape_refusal(callee, _names(a)))
                     continue
                 if callee in cross_module:
                     # A method of an imported struct, called on a frame of a
@@ -1872,34 +2469,47 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                     # for, and it needs nothing special: see
                     # `_method_exports`, which is the other half — the export
                     # that makes the symbol bindable at all.
-                    continue
-                if callee not in known:
-                    if callee in struct_names \
-                            and M.type_constructor_kind(callee) is None:
-                        # A struct CONSTRUCTOR, not a function: `Repeat`,
-                        # `IdentExpr`, `StringSlice`, `ElementFn` in this
-                        # repository.  It was reported as a name this module
-                        # does not compile, which is false twice over — the
-                        # struct is declared here, and a struct has no body to
-                        # compile.  See `model.frame_constructor_refusal`.
-                        #
-                        # The `type_constructor_kind` half is load-bearing and
-                        # was a measured miss: `Pointer` is ALSO a struct some
-                        # files declare, and `Pointer(to=stat)` is an IDENTITY
-                        # conversion rather than a construction, so without it
-                        # `std/os/_macos.mojo` was reported as a copy
-                        # construction — a strictly worse message than the one
-                        # it replaced, and about a construct the source does not
-                        # contain.  The test is the model's own, so a name added
-                        # to the type-constructor tables is classified correctly
-                        # here without this file being told.
-                        _refuse_holder_use(
-                            fn, a, holders, by_name, "",
-                            M.frame_constructor_refusal(callee, _names(a)))
+                    #
+                    # …but only at the RECEIVER.  Further along, the argument
+                    # lands on one of that method's own parameters, and whether
+                    # the imported module's analysis made it a frame holder is
+                    # a fact about THAT module's compilation, which this pass
+                    # has not read and cannot: its body is in the dylib.  So
+                    # this is the opaque case, and it is refused as opaque
+                    # rather than as a position.
+                    if i == 0:
                         continue
+                    _refuse_holder_use(
+                        fn, a, holders, by_name, "",
+                        M.frame_opaque_position_refusal(
+                            f"{callee}()", callee, i, len(node.args or []),
+                            _names(a), method, kwname,
+                            f"{callee}() is compiled into "
+                            f"{struct_names and 'an imported module' or 'another image'}"
+                            f", and whether ITS analysis made that parameter a "
+                            f"frame holder is a fact about that module's "
+                            f"compilation, which this pass has not read"))
+                    continue
+                if callee not in known and callee not in all_holders:
+                    # 2. Not in this image, whatever position.  Saying so is
+                    #    true at every position; the old loop only said it at
+                    #    position 0 and let the position sentence cover the
+                    #    rest.
                     reason = M.frame_receiver_escape_refusal(callee, _names(a))
                     if reason is not None:
                         _refuse_holder_use(fn, a, holders, by_name, "", reason)
+                    continue
+                # 4. A function of this image, and its parameter list is in
+                #    hand.  Either the parameter IS a frame holder — which is
+                #    the case the fixpoint now follows in EVERY position, and
+                #    nothing to refuse — or it is not, and the argument is a
+                #    frame address going into a slot the callee reads as a
+                #    plain value.  That last one is the disagreement, and it
+                #    is a whole-image fact rather than a local one, so it is
+                #    asked by `_check_holder_agreements` below rather than
+                #    here: the call site that has to be caught can be in a
+                #    function that holds no frame at all, and those are skipped
+                #    by the `if not hs` guard above.
 
 
 def _container_values(node) -> list:
@@ -2138,6 +2748,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
 
     Returns (functions, structs) — the structs are passed to the codegen so a
     `S(...)` constructor and a `self.<field>` access can be recognised."""
+    # A module-level `comptime X = __mlir_type[…]` is a compile-time binding the
+    # function-body expression walk never sees — this pipeline lowers
+    # FunctionDefs and nothing else — so the MLIR-template refusal has to be
+    # asked HERE, where the module statements still are. Before, the binding
+    # compiled away silently and every use site read an undefined name, which
+    # built and printed a fabricated word (10 on arm64, 0 on x86-64, for the
+    # same source): `std/builtin/type_aliases.mojo` declares four and was
+    # counted in the sweep as a file that built. HERE and not in either
+    # backend's `compile()` because that is handed the prepared FUNCTION list
+    # and never sees the module statements, and here rather than at either
+    # front end because this is the one pipeline both of them go through.
+    M.refuse_module_level_mlir_templates(stmts)
     functions = _extract_functions(stmts, synthetic=synthetic)
     owners = _method_owners(stmts, extra_structs)
     # This file's own declarations win over an imported one of the same name:
@@ -2448,22 +3070,41 @@ def _declared_api_shape(text: str) -> dict:
     """What this source DECLARES, ignoring doc/ABI.md's rules — the input to
     `no_public_api_reason`.
 
-    Four counts and the names behind them, because the question "why does this
-    module export nothing" has four different true answers and picking the
+    Eight buckets and the names behind them, because the question "why does this
+    module export nothing" has several different true answers and picking the
     wrong one is what made the old single-sentence refusal useless:
 
       funcs / generic_funcs / private_funcs   top-level FunctionDefs
       structs / generic_structs / private_structs   top-level StructDefs
 
-    Generics are detected from the source text with the SAME regex
-    `reflect.collect_exports_src` uses (`(?:fn|def)\\s+(\\w+)\\s*\\[`), because
-    the parser drops the bracket list and so cannot tell a template from a
-    concrete definition. It has to be the same test: a name counted as generic
-    here and concrete there would produce a message that contradicts the rule
-    that produced the refusal.
+    A definition is filed as a GENERIC TEMPLATE **per definition**, and for a
+    function the test is the parser's own `FunctionDef.comptime_params` — the
+    bracket list, recorded on that one def. It used to be a set of NAMES
+    collected by regex over the whole text, which cannot tell `def exit():` from
+    `def exit[intable: Intable](…)`: both were filed as templates, so
+    `std/sys/terminate.mojo` was described as having no concrete public function
+    when it defines one. `std/memory/memory.mojo` had the same defect on
+    `memset_zero`, which it defines twice, once each way.
+
+    For a STRUCT the text regex is still the only test, because `StructDef`
+    carries no `comptime_params` at all — `fire_compiler.Parser` records a
+    function's bracket list and drops a struct's. So this function and
+    `reflect.export_exclusions` (the export rule itself) can disagree, and the
+    disagreement is measured rather than assumed: over 380 .mojo/.py files, the
+    name-keyed regex excludes exactly ONE top-level public concrete definition
+    that a per-definition test would not — `join` in `std/os/path/path.mojo`,
+    where a nested `def join[...]` inside another function puts the name in the
+    set. Every other name the regex excludes is excluded anyway (it is private,
+    a C library symbol, overloaded, or genuinely a template), so the two tests
+    agree on every export decision in the corpus today.
+
+    That residual is left alone on purpose. Reconciling it means changing
+    `reflect`'s export rule, which changes which symbols reach a dylib — a
+    change to what the compiler accepts, and not this function's to make. It is
+    why every message below that could be contradicted by it is computed from
+    `reflect.export_exclusions` rather than from these buckets.
     """
-    generic_names = set(re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', text))
-    generic_names |= set(re.findall(r'\bstruct\s+(\w+)\s*\[', text))
+    generic_names = set(re.findall(r'\bstruct\s+(\w+)\s*\[', text))
     shape = {"funcs": [], "structs": [], "generic_funcs": [],
              "generic_structs": [], "private_funcs": [],
              "private_generic_funcs": [], "private_structs": [],
@@ -2474,10 +3115,15 @@ def _declared_api_shape(text: str) -> dict:
         return shape
     for st in stmts:
         if isinstance(st, F.FunctionDef):
-            key = "generic_funcs" if st.name in generic_names else "funcs"
+            # Per DEFINITION: the parser recorded this def's own bracket list.
+            # Keying on a name set instead filed `def exit():` as a template
+            # because some other `exit` in the same file spelled one.
+            key = ("generic_funcs" if st.comptime_params else "funcs")
             (shape[key] if not st.name.startswith("_")
              else shape["private_" + key]).append(st.name)
         elif isinstance(st, F.StructDef):
+            # No per-definition signal exists for a struct (see the docstring),
+            # so this one is still the name-keyed text test.
             key = "generic_structs" if st.name in generic_names else "structs"
             (shape[key] if not st.name.startswith("_")
              else shape["private_" + key]).append(st.name)
@@ -2490,9 +3136,9 @@ def no_public_api_reason(source_paths: list) -> str:
     Every one of these files is a real module that a real file imports, so the
     refusal is load-bearing: it is what stops a program from being handed a
     link line with nothing on it. What it must therefore also do is SAY which
-    of the four ways a module can have no boundary symbol it has hit, because
-    they need different work and the reader cannot tell them apart from the
-    old wording:
+    of the ways a module can have no boundary symbol it has hit, because they
+    need different work and the reader cannot tell them apart from the old
+    wording:
 
       * it declares nothing at all (module-level `comptime` constants only —
         `std/sys/_io.mojo`'s `stdin`/`stdout`/`stderr`): there is no
@@ -2506,7 +3152,10 @@ def no_public_api_reason(source_paths: list) -> str:
         is its layout in the reflection table (which this backend does not
         emit), so a type alone gives a dylib nothing to export;
       * every declaration is private (`_`-prefixed), which doc/ABI.md's
-        public-symbol rule excludes on purpose.
+        public-symbol rule excludes on purpose;
+      * every public name is a C LIBRARY SYMBOL (`std/sys/terminate.mojo`'s
+        `exit`), which this path resolves with `dlsym` out of the system
+        dylibs and so does not advertise.
 
     The generic case is the one worth being careful about in the OTHER
     direction: exporting a template under its base name would be easy and
@@ -2516,16 +3165,36 @@ def no_public_api_reason(source_paths: list) -> str:
     can silently bind the wrong body is the failure this whole mechanism
     exists to prevent, so the honest answer is the refusal until the
     instantiation keying lands.
-    """
+
+    **A branch may only claim what it checked.** Three of the branches below
+    used to assert a fact that is not true of the file they fired on, which is
+    worse than no message: it sends the next reader looking for a construct the
+    file does not contain. Two of them gated a claim about a SET on the set
+    being NON-EMPTY and then asserted something about its ELEMENTS, and the
+    third was reached by every module the four named branches did not cover, so
+    it described a rule (privacy) that had never been applied. Hence the two
+    changes here: the "private and parametric" branch gates on the
+    INTERSECTION, and the fall-through computes each name's reason from
+    `reflect.export_exclusions` — the same function the export table is built
+    from, so a message cannot name a rule the export did not apply."""
+    import reflect          # lazy, as in _export_entries — one rule, not two
     names = [os.path.basename(p) for p in source_paths]
     head = f"formal dylib has no public functions: {', '.join(names)}"
     shapes = []
+    excluded: dict = {}
     for p in source_paths:
         try:
             with open(p) as f:
-                shapes.append((os.path.basename(p), _declared_api_shape(f.read())))
+                text = f.read()
         except OSError:
-            shapes.append((os.path.basename(p), _declared_api_shape("")))
+            text = ""
+        shapes.append((os.path.basename(p), _declared_api_shape(text)))
+        try:
+            excluded.update(reflect.export_exclusions(text))
+        except Exception:
+            # An unparseable file has no shape to report; the fall-through then
+            # says so rather than inventing a reason for it.
+            pass
     concrete_funcs = [n for _f, s in shapes for n in s["funcs"]]
     concrete_structs = [n for _f, s in shapes for n in s["structs"]]
     gen_funcs = [n for _f, s in shapes for n in s["generic_funcs"]]
@@ -2548,19 +3217,49 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"constants, which are inlined at their use site and cross no "
                 f"boundary. There is nothing an importer could bind, and "
                 f"nothing this backend could add.")
-    if not concrete_funcs and gen_funcs and private:
-        listed = ", ".join(sorted(set(gen_funcs))[:6])
-        return (f"{head} exports nothing under doc/ABI.md's rules: the only "
-                f"function it declares is the generic template {listed}, which "
-                f"is both private and parametric. doc/ABI.md is explicit that a "
-                f"generic is not a single boundary symbol — each "
-                f"INSTANTIATION is, keyed in the CAS by its type arguments — and "
-                f"that is Stage 5, which this path does not implement. There is "
-                f"no name here an importer could bind, and exporting the "
-                f"template under its base name would be wrong rather than "
-                f"conservative: one trie entry cannot be two instantiations, so "
-                f"a call with different type arguments would silently bind the "
-                f"first one's body.")
+    # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
+    # the only rule that is a NAME test rather than a shape test, so it can hold
+    # whatever the declarations look like. Its exclusion is right for a CALL and
+    # wrong for a DEFINITION, which is worth saying: `terminate.mojo` DEFINES
+    # `exit`, and if it also exported one other name then an importer's `exit()`
+    # would bind libSystem's, silently, with no diagnostic. So the message names
+    # the hazard instead of only the rule.
+    public_names = [n for n in (concrete_funcs + concrete_structs
+                                + gen_funcs + gen_structs)]
+    clib_only = sorted({n for n in public_names
+                        if excluded.get(n) == reflect.EXCL_CLIB})
+    if public_names and len(clib_only) == len(set(public_names)):
+        listed = ", ".join(clib_only[:6])
+        return (f"{head} exports nothing under doc/ABI.md's rules: every name "
+                f"it declares ({listed}{' …' if len(clib_only) > 6 else ''}) is "
+                f"a C library symbol, which this path resolves with `dlsym` out "
+                f"of the system dylibs and so does not advertise. The rule is "
+                f"right for a CALL and wrong for a DEFINITION, and this file "
+                f"DEFINES the name: if it also exported one other symbol, an "
+                f"importer's `{clib_only[0]}()` would bind the system's, "
+                f"silently, with no diagnostic. Nothing in this module needs "
+                f"exporting until it declares a name the C library does not "
+                f"already provide.")
+    # A branch that said "the ONLY function it declares is the generic template
+    # …, which is both private and parametric" used to live here, gated on the
+    # module having ANY private declaration. It is DELETED rather than
+    # re-gated, and the reason is worth keeping: its two facts come from
+    # disjoint sets, so no input reaches it. `gen_funcs` holds only names that
+    # do NOT start with `_` and `private` holds only names that do, so
+    # `set(gen_funcs) & set(private)` is empty for every possible module — the
+    # suggested repair (gate on the intersection) would have made the branch
+    # unreachable, which is the same defect wearing a fix.
+    #
+    # And nothing is lost: the module that branch was written for,
+    # `std/utils/_select.mojo`, whose only declaration is the private template
+    # `_select_register_value`, is caught by the FIRST branch above, which says
+    # the true thing and says it in one sentence — every declaration in it is
+    # private, and here it is. Its false readings were on the two shapes the
+    # gate let through: `std/memory/unsafe.mojo` (two PUBLIC generics and one
+    # private helper, told its only function was "bitcast, pack_bits … both
+    # private and parametric") and anything with a public struct beside a
+    # private template. Both now take a branch whose claim is about names it
+    # has actually looked at.
     if not concrete_funcs and gen_funcs:
         listed = ", ".join(sorted(set(gen_funcs))[:6])
         return (f"{head} exports nothing under doc/ABI.md's rules: every "
@@ -2586,9 +3285,77 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"free function, only the struct type(s) {listed}. A type "
                 f"crosses the boundary as its layout in the reflection table, "
                 f"which this backend does not emit.")
-    return (f"{head} exports nothing under doc/ABI.md's rules: every "
-            f"declaration in it is private (a leading `_`), and a private "
-            f"name is excluded from the boundary on purpose.")
+    return _excluded_names_reason(head, excluded, public_names, reflect)
+
+
+# Why each rule of doc/ABI.md's export rule is what it is, in the words the
+# refusal uses — a function, not a module-level dict, because `reflect` is
+# imported LAZILY here (see `_export_entries` and `_abi_symbol`: the gimple
+# reflection module pulls the whole compiled backend in with it, and the
+# formal backends do not otherwise need it). Keyed by `reflect`'s own
+# constants, so a rule added there and not here shows up as a name with no
+# reason rather than being silently folded into another rule's sentence — which
+# is the failure this function exists to prevent.
+def _exclusion_why(reflect) -> dict:
+    return {
+        reflect.EXCL_PRIVATE: (
+            "a private name (a leading `_`), which the public-symbol rule "
+            "excludes on purpose: the underscore is the source saying this is "
+            "not for another module"),
+        reflect.EXCL_CLIB: (
+            "a C library symbol this path resolves with `dlsym` out of the "
+            "system dylibs — right for a call, wrong for a definition, since an "
+            "importer's call would bind the system's rather than this "
+            "module's"),
+        reflect.EXCL_OVERLOADED: (
+            "declared more than once with different signatures, and one trie "
+            "entry cannot be two instantiations"),
+        reflect.EXCL_GENERIC: (
+            "a GENERIC template, and a generic is not a single boundary symbol "
+            "— each INSTANTIATION is, keyed in the CAS by its type arguments, "
+            "which is Stage 5 and this path does not do it"),
+    }
+
+
+def _excluded_names_reason(head: str, excluded: dict, public_names: list,
+                           reflect) -> str:
+    """The fall-through: name the rule that excluded each public name, or say so.
+
+    This is what every module the named branches do not cover lands on, and it
+    used to be a sentence about PRIVACY — "every declaration in it is private (a
+    leading `_`)" — reached by any module with at least one concrete public
+    function that exports nothing. `std/memory/memory.mojo` has fifteen public
+    functions and four private ones and was told it had none.
+
+    So it states, per name, the rule `reflect.export_exclusions` applied, which
+    is the same function `_export_entries` builds the table from: the message
+    cannot name a rule the export did not apply, and every clause in it is
+    computed rather than assumed. When the exclusion table has nothing to say —
+    an unparseable file, or a name whose only declaration is nested — it says
+    that instead of inventing a reason, because a refusal that asserts a
+    falsehood is worse than one that admits it does not know."""
+    why_of = _exclusion_why(reflect)
+    groups: dict = {}
+    for name in sorted(set(public_names)):
+        why = excluded.get(name)
+        if why in why_of:
+            groups.setdefault(why, []).append(name)
+    if not groups:
+        return (f"{head} exports nothing under doc/ABI.md's rules. Its public "
+                f"declarations ({', '.join(sorted(set(public_names))[:6])}) are "
+                f"not excluded by any of the four rules of the public-symbol "
+                f"rule, so this is not a fact about the module's shape and "
+                f"nothing here names the cause — report it rather than trusting "
+                f"this sentence, which is saying that it does not know.")
+    clauses = []
+    for why in sorted(groups, key=lambda k: sorted(groups[k])):
+        listed = ", ".join(groups[why][:6])
+        more = " …" if len(groups[why]) > 6 else ""
+        clauses.append(f"{listed}{more} because it is {why_of[why]}")
+    return (f"{head} exports nothing under doc/ABI.md's rules. Each of its "
+            f"public declarations is excluded by the public-symbol rule, and "
+            f"the rule that excluded it is named here rather than assumed: "
+            f"{'; '.join(clauses)}.")
 
 
 def _method_exports(source_paths: list, structs_by_file: dict,

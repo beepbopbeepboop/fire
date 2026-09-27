@@ -301,10 +301,9 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # `get` belongs here for the same reason as the other four: among this
     # runtime's builtin containers only a dict has it (list/set/tuple/str
     # do not), so `param.get(...)` is unambiguous "param is a dict"
-    # evidence. It is already in BUILTIN_CONTAINER_METHODS below, so a
-    # struct that happens to define its own `get` method is already
-    # excluded from the accessed-field struct match and cannot be
-    # misidentified by adding it here.
+    # evidence. A struct that happens to define its own `get` method is not
+    # misidentified by adding it here, because `called_methods` (below) keeps
+    # every method name out of the accessed-field struct match.
     DICT_ONLY_METHODS = {'items', 'keys', 'values', 'setdefault', 'get'}
 
     # Methods that exist ONLY on Python `bytes` (never on str/list/dict/set):
@@ -316,24 +315,17 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # look identical to str/list and must NOT flip a param to bytes).
     BYTES_ONLY_METHODS = {'decode', 'hex'}
 
-    # Method names shared across the builtin containers. When one of these
-    # is CALLED on the param, it is method-dispatch evidence, NOT evidence
-    # of a struct whose FIELD happens to share the name — excluded from the
-    # accessed-field struct match below for exactly the WithStmt.items
-    # reason documented at DICT_ONLY_METHODS.
-    BUILTIN_CONTAINER_METHODS = {
-        'append', 'extend', 'insert', 'remove', 'pop', 'clear', 'sort',
-        'reverse', 'copy', 'index', 'count', 'keys', 'values', 'items',
-        'get', 'update', 'setdefault', 'add', 'discard',
-    }
-
     def analyze_param_usage(nodes: list, param_name: str):
         """Analyze how a parameter is used in a list of statements."""
         accessed_fields = set()
         # Members CALLED as methods on the param (`param.items(...)`) —
-        # method dispatch, distinct from bare field reads. Consulted to
-        # keep builtin-container method names out of the struct-field
-        # match (see BUILTIN_CONTAINER_METHODS above).
+        # method dispatch, distinct from bare field reads. Consulted to keep
+        # every method name out of the struct-field match below, for the
+        # WithStmt.items reason documented at DICT_ONLY_METHODS. This used to
+        # record only the builtin-container method names
+        # (append/extend/.../keys/values/items/get/update/setdefault/add/
+        # discard), which left the other str-only and bytes-only names able to
+        # poison the evidence set; see the `called_methods.add` site.
         called_methods: set = set()
         # Each entry is `function_name + _FC_SEP + str(arg_index)` — a
         # composite STRING, deliberately NOT a `(name, idx)` 2-tuple: a
@@ -713,8 +705,31 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     if _efunc_obj_name == param_name:
                         if _efunc.member in DICT_ONLY_METHODS:
                             _F['is_dict_method'] = True
-                        if _efunc.member in BUILTIN_CONTAINER_METHODS:
-                            called_methods.add(_efunc.member)
+                        # EVERY method called on the param is recorded as
+                        # method dispatch, not as a FIELD read — not just the
+                        # builtin-container names. `param.<m>(...)` is a
+                        # CallExpr whose `func` is a MemberExpr, and
+                        # `scan_expr(expr.func)` walks that MemberExpr
+                        # through the generic branch, which adds `<m>` to
+                        # `accessed_fields`. So without this, a method call
+                        # POISONED the very counter the struct-inference
+                        # branch gates on (`len(fields_accessed) > 0`): a
+                        # method-only receiver looked like a struct with a
+                        # field named after the method, matched no registered
+                        # struct, and the param fell all the way through to
+                        # the name-based fallbacks below. Concretely `find` —
+                        # a str-only method whose name is in no struct — was
+                        # supposed to reach the string branch at the bottom
+                        # of this function and instead saw a non-empty
+                        # `fields_accessed`, so the `len(...) == 0` guard
+                        # there blocked it and the param defaulted to
+                        # int64_t. Restricting the record to the
+                        # builtin-container method names is what left
+                        # `find`, `format`, `lower`, `upper`, `join`, ...
+                        # able to do that; there is no shape for which a name
+                        # called as a method is also evidence of a field of
+                        # that name.
+                        called_methods.add(_efunc.member)
                     # Handle re.sub(pattern, fn, src) → src (index 2) is char*
                     if (_efunc_obj_name == 're'
                             and _efunc.member == 'sub'
@@ -919,9 +934,31 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 aug_member_targets, is_bytes_method)
 
     _bytes_locals = _collect_bytes_locals(func.body, gen.func_return_types, set())
+    # A @classmethod's FIRST parameter is bound to the class object, not to
+    # any value the body can reveal: `cls.join(x, y)` calls a method ON the
+    # class, which says nothing whatever about the class's own type. It still
+    # has to be pinned explicitly, because every heuristic below reads a
+    # `cls.<name>(...)` shape as receiver evidence: `join` is in
+    # STRING_ONLY_METHODS, so `TypeLattice.join_all`'s `cls` was inferred
+    # `char *` while its sibling `TypeLattice.join`'s `cls` stayed the
+    # `int64_t` default — and `join_all` then passed a `char *` where
+    # `join` declared `int64_t` ("passing argument 1 ... makes integer from
+    # pointer without a cast", self-hosted types.py:201).
+    #
+    # `int64_t` is this codegen's class-handle representation, and it is what
+    # the int64_t default already produced for every classmethod `cls` that
+    # did not happen to call a string-named method — so this pins the one
+    # shape that could disagree instead of inventing a new type.
+    _is_classmethod = (
+        owner_struct is not None
+        and list(getattr(func, 'decorators', None) or []) == ['classmethod'])
     # For each parameter without a type annotation, infer from usage
     for pname, ptype in func.params:
         if ptype is None:
+            if _is_classmethod and pname == (func.params[0][0]
+                                             if func.params else None):
+                inferred[pname] = 'int64_t'
+                continue
             if _has_bytes_destination_param_slice(func.body, pname, _bytes_locals):
                 inferred[pname] = 'MojoBytes *'
                 continue
@@ -1127,30 +1164,41 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         inferred[pname] = 'MojoList *'
                         break
 
+            # A member CALLED as a method on the param (`map.items()`) is
+            # method dispatch, not field evidence — without this exclusion the
+            # single registered struct with a same-named FIELD won
+            # (WithStmt.items → `WithStmt *` for gencodec.py's
+            # marshalmap/python_mapdef_code `map` params).
+            # Build the evidence list from `sorted(<plain set>)` + explicit
+            # membership, NOT `fields_accessed - called_methods` (a set
+            # DIFFERENCE) — those compound set ops lose str-slot tracking on
+            # the self-hosted path, so `sorted(...)` then `_as_str(elem)`
+            # viewed GARBAGE bytes and the `elem not in sfields` check came
+            # out non-deterministic (a struct-type collapse that differs run
+            # to run — the `AssertStmt_parse_module` / spurious
+            # `_funcptr_<S>_<f>` stage2-vs-stage3 diffs).
+            #
+            # The exclusion is every name in `called_methods`, not just the
+            # builtin-container ones: a method call is never field evidence
+            # (see the `called_methods.add` comment in analyze_param_usage).
+            # This list is built ONCE and then read by BOTH the struct
+            # inference below and the string-evidence fallback after it —
+            # "no struct evidence" has to mean the same set in both places,
+            # which it did not while one gated on the raw `fields_accessed`
+            # and the other on this filtered list: a `param.find(...)` param
+            # had `'find'` in the raw set (poisoned by the method call) and
+            # so was refused the `char *` its str-only method call had
+            # already proven.
+            _struct_evidence_list = []
+            for _fe in sorted(fields_accessed):
+                _fes = _as_str(_fe)
+                if _fes in called_methods:
+                    continue
+                _struct_evidence_list.append(_fes)
+
             # If no type inferred from functions, try from struct member accesses
             # Only infer struct type if exactly one struct matches (avoid ambiguity)
-            if pname not in inferred and len(fields_accessed) > 0:
-                # A member CALLED as a builtin-container method on the param
-                # (`map.items()`) is method dispatch, not field evidence —
-                # without this exclusion the single registered struct with a
-                # same-named FIELD won (WithStmt.items → `WithStmt *` for
-                # gencodec.py's marshalmap/python_mapdef_code `map` params).
-                # Build the evidence list from `sorted(<plain set>)` +
-                # explicit membership, NOT `fields_accessed - (called_methods
-                # & BUILTIN_CONTAINER_METHODS)` (a set DIFFERENCE of a set
-                # INTERSECTION) — those compound set ops lose str-slot
-                # tracking on the self-hosted path, so `sorted(...)` then
-                # `_as_str(elem)` viewed GARBAGE bytes and the
-                # `elem not in sfields` check came out non-deterministic
-                # (a struct-type collapse that differs run to run — the
-                # `AssertStmt_parse_module` / spurious `_funcptr_<S>_<f>`
-                # stage2-vs-stage3 diffs).
-                _struct_evidence_list = []
-                for _fe in sorted(fields_accessed):
-                    _fes = _as_str(_fe)
-                    if _fes in called_methods and _fes in BUILTIN_CONTAINER_METHODS:
-                        continue
-                    _struct_evidence_list.append(_fes)
+            if pname not in inferred and len(_struct_evidence_list) > 0:
                 # Explicit nested loops, NOT `[sname for sname, sfields in
                 # .items() if all(f in sfields for f in ...)]`: the
                 # comprehension form (2-tuple `.items()` target + an
@@ -1189,8 +1237,9 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # Last resort: string-only evidence (a str-only method call or
             # string concatenation, with no field access suggesting a
             # struct) — see the BinaryOp '+' scan above for the motivating
-            # dyld.py `suffix` shape.
-            if pname not in inferred and is_string_method and len(fields_accessed) == 0:
+            # dyld.py `suffix` shape. The gate is the FILTERED evidence list
+            # for the reason given where that list is built.
+            if pname not in inferred and is_string_method and len(_struct_evidence_list) == 0:
                 inferred[pname] = 'char *'
 
     return inferred

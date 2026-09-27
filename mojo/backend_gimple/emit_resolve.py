@@ -1737,7 +1737,7 @@ def _repr_value(gen, rat: str, rav: str) -> str:
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
-        return gen._call_expr('char *', gen._list_repr_fn(rav), [('MojoList *', rav)])
+        return gen._call_expr('char *', *gen._list_repr_call(rav))
     if rat == 'MojoDict *':
         return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
     if rat == 'MojoBytes *':

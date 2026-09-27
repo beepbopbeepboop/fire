@@ -172,6 +172,7 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
  * AttributeError section further down. */
 #define _MOJO_EXC_TAG_ATTRIBUTEERROR 1471495998
 #define _MOJO_EXC_TAG_TYPEERROR 348628165
+#define _MOJO_EXC_TAG_VALUEERROR 663468903
 #define _MOJO_EXC_TAG_FILENOTFOUND 1834506930
 #define _MOJO_EXC_TAG_OSERROR 2131477727
 
@@ -1173,12 +1174,20 @@ char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i < 0 ? i + s->len
 void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 
 /* ── bytes ──────────────────────────────────────────────────────────────*/
+/* The single MojoBytes allocator, so `readonly` has exactly one default:
+ * immutable. Only the bytearray constructors (mojo_bytearray_new /
+ * mojo_bytearray_copy, plus the mojo_bytearray_mark wrapper the backend
+ * puts around the SHARED bytes constructors) clear it — a value produced
+ * by any bytes operation is immutable, which is what lets every reader
+ * (notably memoryview `.readonly`) trust the flag without asking where
+ * the object came from. */
 static MojoBytes *mojo_bytes_alloc(int64_t len)
 {
     MojoBytes *b = malloc(sizeof(MojoBytes));
     b->len  = len;
     b->data = malloc((size_t)(len < 0 ? 0 : len) + 1);
     b->data[len < 0 ? 0 : len] = 0;
+    b->readonly = 1;
     return b;
 }
 
@@ -1714,6 +1723,15 @@ MojoBytes *mojo_bytes_title(MojoBytes *b)
 /* ljust/rjust/center/zfill. `mode`: 0 = ljust (pad on the right), 1 = rjust
  * (pad on the left), 2 = center. `signbit` is 1 for zfill (pad with '0',
  * keeping a leading sign in front of the zeros, matching Python). */
+/* CPython's `center` split of the pad, shared by the str and bytes padders
+ * below: `marg // 2` on the left, plus one MORE on the left when both
+ * `marg` and `width` are odd — which is literally CPython's
+ * `left = marg // 2 + (marg & width & 1)`. Plain `marg // 2` puts the odd
+ * pad byte on the wrong side whenever it matters: `'ab'.center(5, '_')` is
+ * `__ab_` in CPython, `_ab__` with the floor. */
+static int64_t _center_left(int64_t marg, int64_t width)
+{ return marg / 2 + (marg & width & 1); }
+
 static MojoBytes *mojo_bytes_pad(MojoBytes *b, int64_t width, int fill,
                                  int mode, int signbit)
 {
@@ -1722,9 +1740,8 @@ static MojoBytes *mojo_bytes_pad(MojoBytes *b, int64_t width, int fill,
     int has_sign = signbit && n > 0 && (b->data[0] == '+' || b->data[0] == '-');
     int64_t total = width - n;
     /* `before` = pad bytes placed BEFORE the content: 0 for ljust, all of
-     * them for rjust/zfill, and floor(total/2) for center (Python puts the
-     * odd extra pad byte on the right). */
-    int64_t before = mode == 0 ? 0 : (mode == 1 ? total : total / 2);
+     * them for rjust/zfill, and CPython's center split for center. */
+    int64_t before = mode == 0 ? 0 : (mode == 1 ? total : _center_left(total, width));
     if (has_sign) before++;
     MojoBytes *r = mojo_bytes_alloc(width);
     memset(r->data, fill, (size_t)width);
@@ -1745,36 +1762,87 @@ MojoBytes *mojo_bytes_center(MojoBytes *b, int64_t width, int fill)
 MojoBytes *mojo_bytes_zfill(MojoBytes *b, int64_t width)
 { return mojo_bytes_pad(b, width, '0', 1, 1); }
 
+/* ljust/rjust/center's `fillchar`, as the single byte it names.
+ * CPython accepts ONLY a one-byte bytes here and raises TypeError on
+ * anything else (`b'a'.ljust(4, b'..')`, `b'a'.ljust(4, 46)`), so the
+ * length check has to happen where the value is known — the fill
+ * expression is not a compile-time constant, and the backend used to
+ * read it as a scalar, which for a MojoBytes * meant the LOW BYTE OF A
+ * HEAP ADDRESS: `b'a'.ljust(4, b'.')` printed a different wrong value on
+ * every run. Raising beats silently padding with the first byte, which
+ * is what a length-tolerant version would do. */
+int mojo_bytes_fill_byte(MojoBytes *fill)
+{
+    int64_t n = fill ? fill->len : 0;
+    if (n != 1) {
+        char detail[128];
+        snprintf(detail, sizeof(detail),
+                 "ljust() argument 2 must be a byte string of length 1, not %lld",
+                 (long long)n);
+        mojo_raise_type_error(detail);
+        return ' ';
+    }
+    return (int)fill->data[0];
+}
+
 /* partition/rpartition -> a 3-element list (head, sep, tail). `from_right`
  * searches for the LAST occurrence instead of the first. */
+/* partition/rpartition -> a 3-element TUPLE (head, sep, tail), which is a
+ * MojoList * carrying the mojo_mark_as_tuple marker — the same shape a tuple
+ * LITERAL lowers to (see mojo_mark_as_tuple's doc comment). It used to return
+ * an unmarked list, so `print(b'a=b'.partition(b'='))` showed
+ * `[b'a', b'=', b'b']` where CPython shows `(b'a', b'=', b'b')`. Only the
+ * REPR was wrong: this representation has no separate tuple type, so
+ * indexing, len() and iteration were already correct. The marker is what
+ * _mojo_repr_list consults to pick the brackets. */
 static MojoList *mojo_bytes_partition_go(MojoBytes *b, MojoBytes *sep, int from_right)
 {
     MojoList *l = mojo_list_new();
     int64_t n = b ? b->len : 0;
     int64_t sn = (sep && sep->len) ? sep->len : 0;
     if (sn == 0) {
+        /* An EMPTY separator is a ValueError in CPython, not a
+         * never-found separator: `b'a=b'.partition(b'')` raises, where the
+         * arms below answer `(b'', b'', b'a=b')`. Same distinction `split`
+         * already draws (mojo_bytes_split_max's whitespace-split branch is
+         * only for a genuinely absent sep). */
+        {
+            char detail[96];
+            snprintf(detail, sizeof(detail), "empty separator");
+            mojo_raise_value_error(detail);
+        }
         mojo_bytes_list_push(l, (const uint8_t *)"", 0);
         mojo_bytes_list_push(l, (const uint8_t *)"", 0);
         mojo_bytes_list_push(l, b ? b->data : (const uint8_t *)"", n);
+        mojo_mark_as_tuple(l);
         return l;
     }
     int64_t at = from_right ? mojo_bytes_rfind_from(b, sep, 0, n)
                             : mojo_bytes_find_from(b, sep, 0, n);
     if (at < 0) {
+        /* No separator: CPython's answer is the WHOLE string in the piece
+         * the method searches from, and two empty separators beside it —
+         * `b'abc'.partition(b'=')` is `(b'abc', b'', b'')` and
+         * `b'abc'.rpartition(b'=')` is `(b'', b'', b'abc')`. These two arms
+         * were SWAPPED, so each method returned the other's answer on
+         * exactly the input where they differ; a `sep` that is not present
+         * is the common case, not an edge case. */
         if (from_right) {
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
             mojo_bytes_list_push(l, b ? b->data : (const uint8_t *)"", n);
-            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
-            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
         } else {
-            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
-            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
             mojo_bytes_list_push(l, b ? b->data : (const uint8_t *)"", n);
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
+            mojo_bytes_list_push(l, (const uint8_t *)"", 0);
         }
+        mojo_mark_as_tuple(l);
         return l;
     }
     mojo_bytes_list_push(l, b->data, at);
     mojo_bytes_list_push(l, sep->data, sn);
     mojo_bytes_list_push(l, b->data + at + sn, n - at - sn);
+    mojo_mark_as_tuple(l);
     return l;
 }
 
@@ -1843,55 +1911,111 @@ char *mojo_bytes_cstr_key(MojoBytes *b)
     return s;
 }
 
-/* The `bytes.isX()` predicates. Python defines ONLY the ASCII versions for
- * bytes, so these are pure ASCII tests — `kind` selects which. */
-#define MOJO_BYTES_IS_ALPHA 0
-#define MOJO_BYTES_IS_ALNUM 1
-#define MOJO_BYTES_IS_DIGIT 2
-#define MOJO_BYTES_IS_SPACE 3
-#define MOJO_BYTES_IS_UPPER 4
-#define MOJO_BYTES_IS_LOWER 5
-#define MOJO_BYTES_IS_TITLE  6
-#define MOJO_BYTES_IS_PRINT 7
-#define MOJO_BYTES_IS_ASCII  8
-#define MOJO_BYTES_IS_NUMERIC 9
+/* ── the isX() character-class kernel ─────────────────────────────────────
+ * ONE implementation of the ASCII character-class predicates, shared by
+ * the `str` (char*) and `bytes` (MojoBytes *) families. It used to exist
+ * twice — a hand-written `mojo_str_isX` per predicate and a separate
+ * `mojo_bytes_is` switch — and the two drifted: the bytes copy answered
+ * `b''.isalpha() == True`, `b'ab1'.islower() == False` and
+ * `b'1'.istitle() == True`, all three wrong, while the str copy (which
+ * mirrors CPython's own defs) was right. A silent-wrong-value divergence
+ * between two copies of one rule is exactly what a shared kernel
+ * prevents; every case below is transcribed from CPython's definitions.
+ *
+ * `kind` is a MOJO_IS_* code. The byte-level classes are the C-locale
+ * ASCII ones CPython's `bytes` methods use (`Py_ISALPHA` etc.), so the
+ * answer does not drift with the process locale the way ctype.h's
+ * locale-sensitive `isalpha` would.
+ *
+ * Python's per-predicate rules, which the three "all-X" ones each encode
+ * differently, are the whole content of this function:
+ *   isalpha/isalnum/isdigit/isspace/isascii — every char is in the class
+ *   islower  — at least one cased char, and NO cased char is uppercase
+ *               (digits/underscore/punct are UNCASED: ignored, so
+ *               `b'ab1'.islower()` is True)
+ *   isupper  — the mirror image
+ *   istitle  — at least one cased char, and every run of cased chars
+ *               starts uppercase followed by lowercase (`b'A B'` True,
+ *               `b'AB'` False, `b'1'` False)
+ *   isprintable — every char is a printable char: 0x20..0x7e, plus any
+ *               byte >= 0xa0. That excludes the C1 control block 0x80-0x9f,
+ *               where UTF-8 puts U+0080..U+009F, exactly as CPython does.
+ *               A byte-level test cannot see the Unicode categories, so a
+ *               code point in a separator block (U+00A0, U+2028, ...) is
+ *               answered True here and False by CPython; ASCII and the C1
+ *               controls — every case reachable without a category table —
+ *               are exact.
+ *   isnumeric   — Unicode category N*; over an ASCII window that is
+ *               exactly the digits, i.e. the same test as isdigit
+ * Python's "every char is in C" is False over an EMPTY string — with two
+ * vacuous-True exceptions that are definitional rather than accidental:
+ * isascii ("no char has the high bit set") and isprintable ("no char is
+ * unprintable"). So `''.isprintable()` is True and `b''.isascii()` is. */
+#define MOJO_IS_ALPHA   0
+#define MOJO_IS_ALNUM   1
+#define MOJO_IS_DIGIT   2
+#define MOJO_IS_SPACE   3
+#define MOJO_IS_UPPER   4
+#define MOJO_IS_LOWER   5
+#define MOJO_IS_TITLE   6
+#define MOJO_IS_PRINT   7
+#define MOJO_IS_ASCII   8
+#define MOJO_IS_NUMERIC 9
 
-static int mojo_bytes_is_alpha(uint8_t c)
+static int mojo_is_alpha(uint8_t c)
 { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
-static int mojo_bytes_is_digit(uint8_t c) { return c >= '0' && c <= '9'; }
+static int mojo_is_digit(uint8_t c) { return c >= '0' && c <= '9'; }
+static int mojo_is_upper(uint8_t c) { return c >= 'A' && c <= 'Z'; }
+static int mojo_is_lower(uint8_t c) { return c >= 'a' && c <= 'z'; }
 
-int mojo_bytes_is(MojoBytes *b, int kind)
+static int mojo_is_printable(uint8_t c)
+{ return (c >= 0x20 && c <= 0x7e) || c >= 0xa0; }
+
+static int mojo_is_kind(const uint8_t *d, int64_t len, int kind)
 {
-    if (!b) return 0;
-    if (b->len == 0) return 1; /* every bytes.isX() is True for b'' */
-    int has_cased = 0, all_upper = 1, all_lower = 1, prev_alpha = 0, title = 1;
-    for (int64_t i = 0; i < b->len; i++) {
-        uint8_t c = b->data[i];
-        int a = mojo_bytes_is_alpha(c), d = mojo_bytes_is_digit(c);
-        if (kind == MOJO_BYTES_IS_ALPHA  && !a) return 0;
-        if (kind == MOJO_BYTES_IS_ALNUM  && !a && !d) return 0;
-        if (kind == MOJO_BYTES_IS_DIGIT  && !d) return 0;
-        if (kind == MOJO_BYTES_IS_NUMERIC && !d) return 0;
-        if (kind == MOJO_BYTES_IS_SPACE  && !mojo_bytes_isspace_byte(c)) return 0;
-        if (kind == MOJO_BYTES_IS_PRINT  && (c < 32 || c > 126)) return 0;
-        if (kind == MOJO_BYTES_IS_ASCII  && c > 127) return 0;
-        if (a) {
-            has_cased = 1;
-            if (c >= 'a' && c <= 'z') all_upper = 0; else all_lower = 0;
-        } else if (kind != MOJO_BYTES_IS_DIGIT && kind != MOJO_BYTES_IS_NUMERIC) {
-            all_upper = all_lower = 0;
-        }
-        if (kind == MOJO_BYTES_IS_TITLE) {
-            if (prev_alpha) { if (a && c >= 'A' && c <= 'Z') title = 0; }
-            else if (a && c >= 'a' && c <= 'z') title = 0;
-            prev_alpha = a;
+    if (len == 0) return kind == MOJO_IS_ASCII || kind == MOJO_IS_PRINT;
+    if (kind == MOJO_IS_ASCII) {
+        for (int64_t i = 0; i < len; i++) if (d[i] > 127) return 0;
+        return 1;
+    }
+    int has_cased = 0, prev_cased = 0;
+    for (int64_t i = 0; i < len; i++) {
+        uint8_t c = d[i];
+        int a = mojo_is_alpha(c), dg = mojo_is_digit(c);
+        switch (kind) {
+        case MOJO_IS_ALPHA:   if (!a) return 0; break;
+        case MOJO_IS_ALNUM:   if (!a && !dg) return 0; break;
+        case MOJO_IS_DIGIT:
+        case MOJO_IS_NUMERIC: if (!dg) return 0; break;
+        case MOJO_IS_SPACE:   if (!mojo_bytes_isspace_byte(c)) return 0; break;
+        case MOJO_IS_PRINT:   if (!mojo_is_printable(c)) return 0; break;
+        case MOJO_IS_UPPER:   if (mojo_is_lower(c)) return 0;
+                              if (mojo_is_upper(c)) has_cased = 1; break;
+        case MOJO_IS_LOWER:   if (mojo_is_upper(c)) return 0;
+                              if (mojo_is_lower(c)) has_cased = 1; break;
+        case MOJO_IS_TITLE:   /* an uncased char ends the current word, so the
+                               * next cased one starts a fresh title run */
+                              if (!a) { prev_cased = 0; break; }
+                              if (prev_cased) { if (!mojo_is_lower(c)) return 0; }
+                              else            { if (!mojo_is_upper(c)) return 0; }
+                              prev_cased = has_cased = 1; break;
         }
     }
-    if (kind == MOJO_BYTES_IS_UPPER) return has_cased && all_upper;
-    if (kind == MOJO_BYTES_IS_LOWER) return has_cased && all_lower;
-    if (kind == MOJO_BYTES_IS_TITLE)  return title;
+    if (kind == MOJO_IS_UPPER || kind == MOJO_IS_LOWER || kind == MOJO_IS_TITLE)
+        return has_cased;
     return 1;
 }
+
+int mojo_bytes_is(MojoBytes *b, int kind)
+{ return b ? mojo_is_kind(b->data, b->len, kind) : 0; }
+
+/* The char*-typed half of the same question. A NUL-terminated string has
+ * no embedded NULs, so its length is strlen — the same byte window
+ * mojo_is_kind walks. A NULL string (an unset str field reaching a
+ * predicate) answers False, as every one of these did before. */
+static int mojo_cstr_is(char *s, int kind)
+{ return s ? mojo_is_kind((const uint8_t *)s, (int64_t)strlen(s), kind) : 0; }
+
 
 /* split/rsplit with a maxsplit bound (MOJO_SLICE_STOP_OMITTED = unbounded).
  * Python splits from the right for rsplit, and neither form drops a
@@ -1977,16 +2101,20 @@ static void mojo_bytearray_resize(MojoBytes *b, int64_t newlen)
     b->len = newlen;
 }
 
-MojoBytes *mojo_bytearray_new(void) { return mojo_bytes_alloc(0); }
+MojoBytes *mojo_bytearray_new(void) { return mojo_bytearray_mark(mojo_bytes_alloc(0)); }
 
 MojoBytes *mojo_bytearray_copy(MojoBytes *src)
 {
     int64_t n = src ? src->len : 0;
-    return mojo_bytes_new_lit(src ? (const char *)src->data : "", n);
+    return mojo_bytearray_mark(mojo_bytes_new_lit(src ? (const char *)src->data : "", n));
 }
 
-/* bytes(bytearray) / bytearray(bytes): an explicit independent copy. */
-MojoBytes *mojo_bytes_copy(MojoBytes *src) { return mojo_bytearray_copy(src); }
+/* `bytes(bytearray)` — the one copy that RE-IMMUTABILISES, so it must not
+ * go through mojo_bytearray_copy (its own former body, which is why this
+ * used to inherit a bytearray's mutability flag). */
+MojoBytes *mojo_bytes_copy(MojoBytes *src) { return mojo_bytes_new_lit(src ? (const char *)src->data : "", src ? src->len : 0); }
+
+MojoBytes *mojo_bytearray_mark(MojoBytes *b) { if (b) b->readonly = 0; return b; }
 
 /* reversed(<bytes>) modeled as an eagerly reversed copy. */
 MojoBytes *mojo_bytes_reverse(MojoBytes *src)
@@ -2091,19 +2219,30 @@ void mojo_bytearray_remove(MojoBytes *b, int64_t v)
 }
 
 /* ── memoryview (non-copying 1-D byte view) ─────────────────────────────*/
+/* `readonly` comes from the SOURCE object (see the field's comment in
+ * fire_runtime.h); the raw-window entry point mojo_memoryview_new has no
+ * source object to ask, so it starts at 0 and mojo_memoryview_from_bytes
+ * — the only constructor the backend actually emits — sets the real value.
+ * A derived view (slice) inherits it, which is what CPython does: a
+ * sub-view of a read-only view is still read-only. */
 MojoMemoryView *mojo_memoryview_new(uint8_t *data, int64_t len, int64_t itemsize)
 {
     MojoMemoryView *m = malloc(sizeof(MojoMemoryView));
     m->data = data;
     m->len = len;
     m->itemsize = itemsize > 0 ? itemsize : 1;
+    m->readonly = 0;
     return m;
 }
 
 MojoMemoryView *mojo_memoryview_from_bytes(MojoBytes *b)
 {
-    return mojo_memoryview_new(b ? b->data : NULL, b ? b->len : 0, 1);
+    MojoMemoryView *m = mojo_memoryview_new(b ? b->data : NULL, b ? b->len : 0, 1);
+    m->readonly = b ? b->readonly : 1;
+    return m;
 }
+
+int mojo_memoryview_readonly(MojoMemoryView *m) { return m ? m->readonly : 0; }
 
 int64_t mojo_memoryview_len(MojoMemoryView *m) { return m ? m->len : 0; }
 
@@ -2132,7 +2271,9 @@ MojoMemoryView *mojo_memoryview_slice(MojoMemoryView *m, int64_t start, int64_t 
     if (lo < 0) lo = 0;
     if (hi > n) hi = n;
     if (hi < lo) hi = lo;
-    return mojo_memoryview_new(m ? m->data + lo : NULL, hi - lo, m ? m->itemsize : 1);
+    MojoMemoryView *sub = mojo_memoryview_new(m ? m->data + lo : NULL, hi - lo, m ? m->itemsize : 1);
+    sub->readonly = m ? m->readonly : 0;
+    return sub;
 }
 
 MojoBytes *mojo_memoryview_tobytes(MojoMemoryView *m)
@@ -2499,52 +2640,30 @@ int mojo_str_startswith(char *s, char *prefix) {
  * (empty string → False), and every character must satisfy the class. Used
  * to be codegen stubs hardcoded to 0 (always False) — e.g.
  * `raw[i].isdigit()` / `prev.isalnum()` in mojo_compiler.py's own tokenizer.
- * ctype's is* take an int and misbehave on negative (signed-char) input, so
- * cast through unsigned char. */
-int mojo_str_isalnum(char *s) {
-    if (!s || !*s) return 0;
-    for (unsigned char *p = (unsigned char *)s; *p; p++)
-        if (!isalnum(*p)) return 0;
-    return 1;
-}
-int mojo_str_isdigit(char *s) {
-    if (!s || !*s) return 0;
-    for (unsigned char *p = (unsigned char *)s; *p; p++)
-        if (!isdigit(*p)) return 0;
-    return 1;
-}
-int mojo_str_isalpha(char *s) {
-    if (!s || !*s) return 0;
-    for (unsigned char *p = (unsigned char *)s; *p; p++)
-        if (!isalpha(*p)) return 0;
-    return 1;
-}
-int mojo_str_isspace(char *s) {
-    if (!s || !*s) return 0;
-    for (unsigned char *p = (unsigned char *)s; *p; p++)
-        if (!isspace(*p)) return 0;
-    return 1;
-}
-/* isupper/islower: every CASED character matches, and there is at least one
- * cased character (Python semantics — "A1" is upper, "1" is not, "ABC" is). */
-int mojo_str_isupper(char *s) {
-    if (!s) return 0;
-    int has_cased = 0;
-    for (unsigned char *p = (unsigned char *)s; *p; p++) {
-        if (islower(*p)) return 0;
-        if (isupper(*p)) has_cased = 1;
-    }
-    return has_cased;
-}
-int mojo_str_islower(char *s) {
-    if (!s) return 0;
-    int has_cased = 0;
-    for (unsigned char *p = (unsigned char *)s; *p; p++) {
-        if (isupper(*p)) return 0;
-        if (islower(*p)) has_cased = 1;
-    }
-    return has_cased;
-}
+ * Now thin wrappers over the shared kernel (mojo_is_kind, see the bytes
+ * section): these six and the bytes-side mojo_bytes_is are the SAME
+ * Python rules, and while they were two hand-written copies they drifted —
+ * the bytes copy answered `b'ab1'.islower()` False and `b'1'.istitle()`
+ * True. One kernel, one set of answers, for both families.
+ * istitle/isascii/isprintable/isnumeric are here rather than at the
+ * mojo_bytes_is call site because CPython defines all ten on `str` and
+ * only eight on `bytes`; isprintable/isnumeric did not exist on either
+ * side in this backend and both used to answer a silent 0. */
+int mojo_str_isalnum(char *s) { return mojo_cstr_is(s, MOJO_IS_ALNUM); }
+int mojo_str_isdigit(char *s) { return mojo_cstr_is(s, MOJO_IS_DIGIT); }
+int mojo_str_isalpha(char *s) { return mojo_cstr_is(s, MOJO_IS_ALPHA); }
+int mojo_str_isspace(char *s) { return mojo_cstr_is(s, MOJO_IS_SPACE); }
+int mojo_str_isupper(char *s) { return mojo_cstr_is(s, MOJO_IS_UPPER); }
+int mojo_str_islower(char *s) { return mojo_cstr_is(s, MOJO_IS_LOWER); }
+int mojo_str_istitle(char *s) { return mojo_cstr_is(s, MOJO_IS_TITLE); }
+int mojo_str_isascii(char *s) { return mojo_cstr_is(s, MOJO_IS_ASCII); }
+int mojo_str_isprintable(char *s) { return mojo_cstr_is(s, MOJO_IS_PRINT); }
+/* ASCII-window approximation of Unicode category N* (see the kernel): a
+ * non-ASCII char is not a digit here, so '²'.isnumeric() is False where
+ * CPython says True — the same ASCII-only limit the pre-existing str
+ * isalpha/isdigit have, and strictly better than the unconditional 0
+ * this answered before. */
+int mojo_str_isnumeric(char *s) { return mojo_cstr_is(s, MOJO_IS_NUMERIC); }
 
 int mojo_str_endswith(char *s, char *suffix) {
     if (!s || !suffix) return 0;
@@ -3361,13 +3480,34 @@ int64_t mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt
 
 static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind);
 
-int64_t mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt)
+/* The value-domain siblings of mojo_dict_pop_bytes_int. All three share
+ * this body: a dict slot is one int64_t of bits, so what differs is only
+ * how the caller wants them READ BACK — a double through memcpy (never a
+ * pointer/int punning cast, which strict-aliasing gcc may reorder), a
+ * char* straight through, an int as-is. `pop` on a str-keyed dict only ever
+ * had the int spelling, so a bytes-keyed dict with str values popped its
+ * value as a raw pointer decimal. */
+static int64_t _dict_pop_bytes_raw(MojoDict *d, MojoBytes *key, int64_t dflt)
 {
     if (!d) return dflt;
     if (!mojo_dict_contains_bytes(d, key)) return dflt;
     char *k = mojo_bytes_cstr_key(key);
     int64_t v = _dict_pop_k(d, k, 1 /* bytes key */);
     free(k);
+    return v;
+}
+
+int64_t mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt)
+{ return _dict_pop_bytes_raw(d, key, dflt); }
+
+char *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key)
+{ return (char *)(uintptr_t)_dict_pop_bytes_raw(d, key, 0); }
+
+double mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key)
+{
+    int64_t bits = _dict_pop_bytes_raw(d, key, 0);
+    double v;
+    memcpy(&v, &bits, sizeof(v));
     return v;
 }
 
@@ -4593,6 +4733,42 @@ char *mojo_repr_list_bytes(MojoList *l) {
     return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
+char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
+    /* repr for a MojoList * whose per-slot element kinds are known but NOT
+     * uniform — a `struct.unpack` result for a format that mixes int, float
+     * and bytes fields. The three uniform helpers above each read every slot
+     * through one accessor, which is exact for them because the whole list
+     * really does hold that one kind; for a mixed format that choice is
+     * wrong for the other slots, and a float read as an int prints its raw
+     * IEEE-754 bit pattern (`(1, 4607182418800017408)` for '<if'). Here
+     * `kinds` carries one byte per slot — 'i' int, 'd' double, 's' bytes —
+     * which the CALLER knows because a `struct` format string is a
+     * compile-time constant (mojo/backend_gimple/emit_methods.py's
+     * _struct_slot_kinds). A slot kind the string does not cover (a longer
+     * list than the format describes, which no real call produces) falls
+     * back to the int accessor, the same answer the uniform int helper
+     * gives. Mirrors mojo_repr_list_doubles' exact structure (tuple parens,
+     * single-element trailing comma, [..] otherwise). */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        char _k = (kinds && !kinds[_i]) ? 'i' : kinds[_i];
+        if (_k == 'd') {
+            _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(l, _i)));
+        } else if (_k == 's') {
+            MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
+            _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
+        } else {
+            _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+        }
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
 char *mojo_repr_obj(int64_t addr) {
     /* Fallback for anything that isn't a plain scalar or a string: a real
      * struct/list/dict/set pointer. A full Python-style field-by-field repr
@@ -4941,7 +5117,7 @@ static char *_str_pad(char *s, int64_t width, char *fill, int mode) {
     size_t left = 0, right = 0;
     if (mode == 0) { left = pad; }
     else if (mode == 1) { right = pad; }
-    else { left = pad / 2; right = pad - left; }
+    else { left = (size_t)_center_left((int64_t)pad, width); right = pad - left; }
     char *out = (char *)malloc(width + 1);
     if (!out) return s;
     size_t p = 0;
@@ -5247,6 +5423,20 @@ void mojo_raise_type_error(char *detail) {
     snprintf(msg, sizeof msg, "TypeError: %s", detail ? detail : "?");
     char *heap_msg = strdup(msg);
     mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* `ValueError: <detail>` — same sequence, same tag derivation, next to its
+ * three siblings above. Needed because an operation that REJECTS ITS
+ * ARGUMENT is not one of those three: mojo_bytes_partition on an empty
+ * separator is the live caller. */
+void mojo_raise_value_error(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "ValueError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_VALUEERROR);
     mojo_exc_msg_set(heap_msg);
     mojo_exc_obj_set(heap_msg);
     mojo_raise();

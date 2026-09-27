@@ -2223,6 +2223,16 @@ def _list_repr_fn(gen, rav: str) -> str:
     # different shape from the enumerate/zip pairs handled above.
     if gen._elem_types.get(rav) == 'MojoList *' and nested == 'int64_t':
         return 'mojo_repr_list_intlists'
+    # A `struct.unpack` result whose format MIXES kinds goes FIRST, before the
+    # uniform branches below: its one container ctype is the degraded
+    # 'int64_t' _struct_elem_ctype returns for any non-uniform format, so the
+    # int helper would claim it and print a float slot's raw IEEE-754 bits
+    # and a bytes slot's pointer as a decimal address. The per-slot kinds are
+    # statically known from the format, so hand them to the kinds-aware helper
+    # instead. UNIFORM formats are not routed here — `_struct_slot_kind_bytes`
+    # answers None for them, and their uniform helper is already exact.
+    if _struct_slot_kind_bytes(gen, rav) is not None:
+        return 'mojo_repr_list_kinds'
     et = gen._elem_types.get(rav)
     if et == 'double':
         return 'mojo_repr_list_doubles'
@@ -2231,6 +2241,39 @@ def _list_repr_fn(gen, rav: str) -> str:
     if et == 'MojoBytes *':
         return 'mojo_repr_list_bytes'
     return '_mojo_repr_list'
+
+
+# The one-byte-per-slot spelling of a `struct.unpack` result's per-slot kinds
+# ('i'/'d'/'s'), interned as a string-pool constant, or None when the value has
+# no known kinds or its kinds are all the same (see _list_repr_fn's last branch).
+# The bytes are from a fixed alphabet, so the pooled string needs no C escaping.
+_STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's'}
+
+
+def _struct_slot_kind_bytes(gen, rav: str) -> str | None:
+    kinds = gen._struct_slot_kinds.get(rav)
+    if not kinds or len(set(kinds)) == 1:
+        return None
+    return ''.join(_STRUCT_KIND_BYTE[k] for k in kinds)
+
+
+def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
+    """The `_list_repr_fn` call for a `MojoList *` value: (function, arguments).
+
+    All the uniform helpers take the list alone. `mojo_repr_list_kinds`
+    additionally needs the slot-kind string, and the kinds live under the
+    ORIGINAL value's name while the call may have to pass a coerced copy of
+    it (a boxed `int64_t` handle, or a `void *`), which is what `key` and
+    `lst` are for. Pairing the choice with its argument list in one function
+    is what keeps them from disagreeing — a helper picked in one place and an
+    argument list built in another is exactly how a one-parameter function
+    ends up being called with two arguments.
+    """
+    fn = gen._list_repr_fn(key)
+    args = [('MojoList *', lst if lst is not None else key)]
+    if fn == 'mojo_repr_list_kinds':
+        args.append(('const char *', gen._intern_string(_struct_slot_kind_bytes(gen, key))))
+    return fn, args
 
 
 def _stringify_value(gen, et: str, ev: str) -> str:
@@ -3087,7 +3130,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit_label(bb_chk3)
             gen._emit(f'  if ({_tag} == 3) goto {bb_list}; else goto {bb_chk2};')
             gen._emit_label(bb_list)
-            _lrepr = gen._call_expr('char *', gen._list_repr_fn(_lp), [('MojoList *', _lp)])
+            _lrepr = gen._call_expr('char *', *gen._list_repr_call(_lp))
             gen._emit(f'  {_res} = {_lrepr};')
             gen._emit(f'  goto {bb_done};')
             gen._emit_label(bb_chk2)
@@ -3115,10 +3158,10 @@ def _gen_print(gen, args: list, kwargs: list = None):
             elif real in ('MojoList *', 'MojoSet *'):
                 lp = gen._new_val(real, f'({real}){aval}')
                 if real == 'MojoList *':
-                    fn = gen._list_repr_fn(aval)
+                    fn, fn_args = gen._list_repr_call(aval, lp)
                 else:
-                    fn = '_mojo_repr_set'
-                rv = gen._call_expr('char *', fn, [(real, lp)])
+                    fn, fn_args = '_mojo_repr_set', [(real, lp)]
+                rv = gen._call_expr('char *', fn, fn_args)
                 aval = rv
                 atype = 'char *'
         resolved_parts.append((atype, aval))
@@ -3145,7 +3188,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # the raw boxed pointer as a decimal address — Python prints
             # a real `[elem, ...]` repr. Reuse the reflection-generated
             # list repr rather than a separate formatter.
-            rv = gen._call_expr('char *', gen._list_repr_fn(aval), [('MojoList *', aval)])
+            rv = gen._call_expr('char *', *gen._list_repr_call(aval))
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoDict *':
             rv = gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', aval)])
@@ -3168,8 +3211,11 @@ def _gen_print(gen, args: list, kwargs: list = None):
             else:
                 _lp = gen._coerce_to_type(atype if atype in ('int64_t', 'int', 'void *') else 'int64_t',
                                           _stat, aval)
-                _fn = gen._list_repr_fn(aval) if _stat == 'MojoList *' else '_mojo_repr_set'
-                rv = gen._call_expr('char *', _fn, [(_stat, _lp)])
+                if _stat == 'MojoList *':
+                    _fn, _fargs = gen._list_repr_call(aval, _lp)
+                else:
+                    _fn, _fargs = '_mojo_repr_set', [(_stat, _lp)]
+                rv = gen._call_expr('char *', _fn, _fargs)
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == '_Bool' or (_stat == '_Bool' and atype in ('int', 'int64_t', 'char *', 'long')):
             # Python prints True/False; the generic numeric path below would

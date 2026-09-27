@@ -122,10 +122,23 @@ landed, all with regression coverage in `test_generators.py` (interpreter),
 - `CODEGEN_large_dict_accumulation_exit_crash.md` — no longer reproduces.
 - the `struct` module and the `bytes` value type — both landed, and their
   hard-bug reports have since been removed per the fully-fixed-is-deleted
-  rule. Live residue found while verifying them lives in
-  `hard/CODEGEN_struct_kwargs_and_inline_unpack.md` and
-  `hard/CODEGEN_bytes_silent_wrong_values.md`.
-- `hard/CODEGEN_coro_nested_async_closure_capture.md` — landed, report removed 2026-09-26; live residue is in `hard/CODEGEN_coro_captured_param_capture_crashes.md` (capturing an enclosing function's *parameter* crashes the compiler, and this doc's own regression file is orphaned at 0/9).
+  rule. `hard/CODEGEN_struct_kwargs_and_inline_unpack.md` had both its items
+  **closed 2026-09-27** (keyword arguments bound per CPython 3.14's measured
+  signature table; mixed int/float formats correct through every
+  statically-indexed read), and keeps only the residue it names: a read with
+  no compile-time slot index has no single right C type in a `MojoList`, and a
+  `Struct` reached through a class attribute has no recoverable format. The
+  `f"{list}"`/`str(list)` gap found on the way is its own doc,
+  `CODEGEN_fstring_and_str_of_a_list_are_garbage.md`.
+  `hard/CODEGEN_bytes_silent_wrong_values.md` had **items 1-5 and 6b closed
+  2026-09-27** (plus three more wrong values found on the way:
+  `partition`'s swapped no-match arms, its empty-separator case, and four
+  `str` predicates that did not exist and answered `0`), and keeps only
+  **item 6a**: `partition`/`rpartition`'s container TYPE, which cannot be
+  fixed without introducing a tuple type — this runtime has none, and a
+  tuple literal is a marked `MojoList`. Two test expectations that asserted
+  the CPython-wrong answers were corrected, not worked around.
+- `hard/CODEGEN_coro_nested_async_closure_capture.md` — landed, report removed 2026-09-26; live residue is in `hard/CODEGEN_coro_captured_param_capture_crashes.md` — whose item 1 (capturing an enclosing function's *parameter* crashed the compiler) was **fixed 2026-09-27**, leaving items 2 (the regression file still orphaned at 0/9, one case still asserting the pre-Increment-E answer) and 3 (a capture-independent `async for`-over-a-generator gap) open in that same doc.
 - `COMPILE_FAIL_Tools_build_umarshal.md` and `COMPILE_FAIL_Tools_build_deepfreeze.md` — compile blockers resolved; remaining items are runtime/adjacent and need a new doc if pursued.
 - `hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` — excluded from this queue because the documented candidate optimizations are unsafe without a new design.
 - `hard/CODEGEN_same_bare_name_struct_collision_across_modules.md` — deferred as high-risk shared machinery until a reachable default-path repro is identified.

@@ -164,6 +164,41 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
                 pass
 
 
+def test_gimple_runtime_error(name: str, mojo_src: str, expected_substr: str):
+    """Assert the compiled program FAILS at RUNTIME with `expected_substr` on
+    stderr — the shape of a wrong-but-compiles bug's correct counterpart: a
+    call CPython rejects outright (`b'a'.isprintable()`, a `ljust` fill of
+    the wrong length). `test_gimple_stdout` cannot see these, because the
+    program exits non-zero with the message on stderr rather than printing;
+    `test_gimple_execution`'s exit-code check cannot either, because it
+    would also pass for a segfault or an unrelated gcc failure."""
+    global _PASS, _FAIL, _TIMEOUT
+    exe_path = None
+    try:
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        result = subprocess.run([exe_path], capture_output=True, timeout=10)
+        err = result.stderr.decode('utf-8', errors='replace')
+        if result.returncode != 0 and expected_substr in err:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected a non-zero exit with {expected_substr!r} "
+                  f"on stderr, got rc={result.returncode} err={err[-300:]!r}")
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except:
+                pass
+
+
 def run_tests():
     """Run GIMPLE-specific tests."""
 
@@ -1397,25 +1432,147 @@ fn main():
     print(b'a'.ljust(5, 46))
     print(b'a'.rjust(5, 46))
     print(b'a'.center(5, 46))
+    print(b'a'.ljust(5, b'.'))
+    print(b'a'.rjust(5, b'-'))
+    print(b'a'.center(5, b'*'))
+    print(b'ab'.ljust(5, b'.'))
+    print(b'ab'.center(5, b'.'))
+    print(b'a'.ljust(2, b'.'))
+    print(b'a'.ljust(fillchar=b'#', width=4))
     print(b'42'.zfill(5))
     print(b'-42'.zfill(5))
     print(b'42'.zfill(2))
-""", "b'Hello World'\nb'Hello'\nb'hELLO'\nb'cabc'\nb'abca'\nb'abc'\nb'a....'\nb'....a'\nb'..a..'\nb'00042'\nb'-0042'\nb'42'\n")
+""", "b'Hello World'\nb'Hello'\nb'hELLO'\nb'cabc'\nb'abca'\nb'abc'\n"
+     "b'a....'\nb'....a'\nb'..a..'\n"
+     "b'a....'\nb'----a'\nb'**a**'\nb'ab...'\nb'..ab.'\nb'a.'\nb'a###'\n"
+     "b'00042'\nb'-0042'\nb'42'\n")
 
+    # `isprintable` and `isnumeric` are `str` methods. CPython raises
+    # AttributeError for them on a `bytes` receiver, and so does this
+    # compiler's own interpreter reference (myinterpreter.py leaves them to
+    # Python's bytes). They used to be IMPLEMENTED here anyway, on the
+    # stated grounds that "Python defines only the ASCII flavours of these on
+    # bytes" — which is not what CPython does — so `b'a'.isprintable()`
+    # answered True and the two families disagreed with the reference. The
+    # honest answer is the raise, which is what CPython gives; a wrong-length
+    # fill is the same shape of error.
+    test_gimple_runtime_error("gimple_bytes_isprintable_raises", """\
+fn main():
+    print(b'a'.isprintable())
+""", "AttributeError: 'bytes' object has no attribute 'isprintable'")
+
+    test_gimple_runtime_error("gimple_bytes_isnumeric_raises", """\
+fn main():
+    print(b'1'.isnumeric())
+""", "AttributeError: 'bytes' object has no attribute 'isnumeric'")
+
+    test_gimple_runtime_error("gimple_bytes_bad_fill_length_raises", """\
+fn main():
+    print(b'a'.ljust(4, b'..'))
+""", "TypeError: ljust() argument 2 must be a byte string of length 1, not 2")
+
+    # `ljust`/`rjust`/`center`'s fillchar is a ONE-BYTE value, and in
+    # CPython the only spelling that produces one is a one-byte `bytes` —
+    # the bare int these two cases use is a fire extension (kept: the
+    # corpus and the case above both use it), and it must not have
+    # displaced the CPython spelling. It used to: the bytes fill was read
+    # as a scalar, so `b'a'.ljust(4, b'.')` padded with the low byte of a
+    # HEAP ADDRESS and printed a different wrong value on every run.
+    # A wrong LENGTH is a TypeError, at runtime (the fill is not a
+    # compile-time constant) — see gimple_bytes_bad_fill_length_raises.
+    test_gimple_stdout("gimple_bytes_affix_bytes_fillchar", """\
+fn main():
+    print(b'ab'.ljust(6, b'_'))
+    print(b'ab'.rjust(6, b'_'))
+    print(b'ab'.center(6, b'_'))
+    print(b'x'.ljust(4, b'\\x00'))
+    var f = b'='
+    print(b'ab'.ljust(5, f))
+    print(b'ab'.ljust(5, b'xy'[0:1]))
+""", "b'ab____'\nb'____ab'\nb'__ab__'\nb'x\\x00\\x00\\x00'\nb'ab==='\nb'abxxx'\n")
+
+    # CPython's `bytes` predicates, transcribed. Three of these EXPECTED
+    # strings were wrong and this case is why the bugs survived:
+    #   * `b''.isalpha()`/`b''.isdigit()` were expected True. Python's
+    #     "every char is in C" is False over an empty string; only isascii
+    #     (and isprintable, which `bytes` does not have) is vacuously True.
+    #   * `b'a b'.isprintable()` was expected True. `isprintable` is a
+    #     `str` method: `b'a b'.isprintable()` is an AttributeError in
+    #     CPython AND in this compiler's own interpreter reference, so
+    #     asking it of a `bytes` receiver is now a real raise, pinned by
+    #     gimple_bytes_str_only_predicates_raise below. Its slot here is
+    #     taken by isascii on a non-ASCII byte.
+    # The islower/isupper/istitle rows are new and were all wrong: a
+    # `bytes` predicate ignores UNCASED characters, so `b'ab1'.islower()`
+    # is True, and istitle needs at least one cased char and a fresh title
+    # run after every uncased one.
     test_gimple_stdout("gimple_bytes_predicates", """\
 fn main():
     print(b'abc'.isalpha(), b'a1'.isalnum(), b'12'.isdigit())
     print(b' '.isspace(), b'AB'.isupper(), b'ab'.islower())
-    print(b'Hello World'.istitle(), b'hi'.isascii(), b'a b'.isprintable())
+    print(b'Hello World'.istitle(), b'hi'.isascii(), b'\xff'.isascii())
     print(b'ab1'.isalpha(), b'ab'.isupper(), b'Hello world'.istitle())
     print(b''.isalpha(), b''.isdigit())
-""", "True True True\nTrue True True\nTrue True True\nFalse False False\nTrue True\n")
+    print(b''.isalnum(), b''.isspace(), b''.islower(), b''.isupper())
+    print(b''.istitle(), b''.isascii())
+    print(b'ab1'.islower(), b'AB1'.isupper(), b'1ab'.islower(), b'1AB'.isupper())
+    print(b'1'.istitle(), b'_'.istitle(), b'A1B'.istitle(), b'a1B'.istitle())
+    print(b'Hello_World'.istitle(), b'Hello world'.istitle())
+""", "True True True\nTrue True True\nTrue True False\nFalse False False\n"
+     "False False\nFalse False False False\nFalse True\n"
+     "True True True True\nFalse False True False\nTrue False\n")
 
+    # The `str` half of the same ten predicates. `isprintable`/`isnumeric`
+    # are `str`-only in CPython and were NOT implemented on this side at
+    # all: `"1".isnumeric()` fell to the generic unknown-method stub and
+    # answered a raw int `0` — printed as `0`, not `False`, and wrong for
+    # `"1"` (True) and for `"a".isprintable()` (also True). `istitle` and
+    # `isascii` were missing the same way. They now share the bytes
+    # predicates' kernel, so the two families cannot drift again.
+    # LIMITATION, stated here because it is a real divergence: the kernel
+    # works over a UTF-8 byte window and has no Unicode category table, so
+    # a non-ASCII char is "not in any ASCII class" — `'é'.isalpha()` is
+    # False here and True in CPython, and `'²'.isnumeric()` likewise. That
+    # limit already applied to isalpha/isalnum/isdigit/isspace before this
+    # change; isprintable is exact over ASCII and the C1 control block.
+    test_gimple_stdout("gimple_str_predicates", """\
+fn main():
+    print('a'.isalpha(), ''.isalpha(), 'a1'.isalpha())
+    print('12'.isdigit(), ''.isdigit(), '1a'.isdigit())
+    print('a1'.isalnum(), ''.isalnum(), 'a-'.isalnum())
+    print('a b'.isspace(), ''.isspace(), 'a'.isspace())
+    print('A1'.isupper(), '1'.isupper(), ''.isupper(), 'A1'.islower())
+    print('a1'.islower(), '_'.islower(), ''.islower(), 'A_1'.islower())
+    print('Hello World'.istitle(), '1'.istitle(), ''.istitle())
+    print('A1B'.istitle(), 'a1B'.istitle(), 'Hello world'.istitle())
+    print('hi'.isascii(), ''.isascii(), chr(0xff).isascii())
+    print('a'.isprintable(), ' '.isprintable(), ''.isprintable())
+    print(chr(9).isprintable(), chr(0x7f).isprintable())
+    print('1'.isnumeric(), 'a'.isnumeric(), ''.isnumeric(), '12x'.isnumeric())
+""", "True False False\nTrue False False\nTrue False False\nFalse False False\n"
+     "True False False False\nTrue False False False\n"
+     "True False False\nTrue False False\nTrue True False\n"
+     "True True True\nFalse False\nTrue False False False\n")
+
+    # partition/rpartition return a TUPLE in CPython and were returning an
+    # unmarked list here, so the three expected strings below said `[...]`
+    # where CPython says `(...)`. Two more divergences in the same function,
+    # both found while fixing that one and neither in the original report:
+    #   * the no-match arms were SWAPPED between the two methods, so
+    #     `b'abc'.partition(b'=')` and `b'abc'.rpartition(b'=')` each
+    #     returned the other's answer — on the common case of a separator
+    #     that is not present, not an edge case;
+    #   * an EMPTY separator is a ValueError in CPython and was answered
+    #     `(b'', b'', b'a=b')` here (pinned by the raise case below).
     test_gimple_stdout("gimple_bytes_partition_split_limits", """\
 fn main():
     print(b'a=b'.partition(b'='))
     print(b'a=b=c'.rpartition(b'='))
     print(b'abc'.partition(b'='))
+    print(b'abc'.rpartition(b'='))
+    print(b''.partition(b'='))
+    print(b'=a'.partition(b'='))
+    print(b'a==b'.rpartition(b'='))
     print(b'a,b,c'.split(b',', 1))
     print(b'a,b,c'.rsplit(b',', 1))
     print(b'a,b,c'.split(b',', maxsplit=1))
@@ -1423,7 +1580,15 @@ fn main():
     print(b'a\\nb\\n'.splitlines(True))
     print(b'aaa'.replace(b'a', b'b', 2))
     print(b'aaa'.replace(b'a', b'b', 0))
-""", "[b'a', b'=', b'b']\n[b'a=b', b'=', b'c']\n[b'', b'', b'abc']\n[b'a', b'b,c']\n[b'a,b', b'c']\n[b'a', b'b,c']\n[b'a', b'b', b'c']\n[b'a\\n', b'b\\n']\nb'bba'\nb'aaa'\n")
+""", "(b'a', b'=', b'b')\n(b'a=b', b'=', b'c')\n(b'abc', b'', b'')\n(b'', b'', b'abc')\n"
+     "(b'', b'', b'')\n(b'', b'=', b'a')\n(b'a=', b'=', b'b')\n"
+     "[b'a', b'b,c']\n[b'a,b', b'c']\n[b'a', b'b,c']\n[b'a', b'b', b'c']\n"
+     "[b'a\\n', b'b\\n']\nb'bba'\nb'aaa'\n")
+
+    test_gimple_runtime_error("gimple_bytes_partition_empty_sep_raises", """\
+fn main():
+    print(b'a=b'.partition(b''))
+""", "ValueError: empty separator")
 
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
@@ -1450,6 +1615,25 @@ fn main():
         print(x)
 """, "1\n0\n1 1\n1 2\n2\nb'a'\nb'b'\n")
 
+    # A needle in a DIFFERENT domain than the container's elements is not a
+    # comparison the runtime can perform, and the domains already imply the
+    # answer: `b'a' == 'a'` is False in Python, so `'a' in [b'a', b'b']` is
+    # False. The list case used to cast the `char *` needle to `MojoBytes *`
+    # instead, which gcc -fgimple rejects outright — a hard compile error,
+    # not a wrong value. Separate case from the set iteration above because
+    # set iteration ORDER is not part of what is being pinned here, and
+    # adding locals to that program perturbs it.
+    test_gimple_stdout("gimple_bytes_membership_across_domains", """\
+fn main():
+    print(1 if 'a' in [b'a', b'b'] else 0)
+    print(1 if b'a' in ['a', 'b'] else 0)
+    print(1 if 'a' in {'a', 'b'} else 0)
+    var d = {}
+    d[b'a'] = 1
+    print(1 if 'a' in d else 0, 1 if b'a' in d else 0)
+    print(1 if 'a' in (b'q',) else 0, 1 if b'a' in ('q',) else 0)
+""", "0\n0\n1\n0 1\n0 0\n")
+
     # A bytes KEY is its own dict key domain, so `d[b'a']` and `d['a']` are
     # two distinct entries (Python's answer) rather than one aliasing the
     # other — and a bytes-keyed read finds what a bytes-keyed write stored.
@@ -1470,6 +1654,72 @@ fn main():
     print(len(f), 1 if 'a' in f else 0, 1 if b'a' in f else 0)
 """, "1 2 2\n1 1\n1.5\nz\n7 7\n2 1 1\n")
 
+    # ...and so must get/pop, which read the same domain they wrote. They
+    # did not: both called `_char_to_cstr` on the `MojoBytes *` — casting
+    # the POINTER to a char* — and then emitted the str-domain runtime
+    # helper, so `d[b'a'] = 7; d.get(b'a')` answered 0 and `d.pop(b'a')`
+    # neither found the key nor removed it. `setdefault` already guarded on
+    # the key type, which is exactly why only these two were wrong. The
+    # runtime halves (mojo_dict_get_bytes_*, mojo_dict_pop_bytes_int) were
+    # already there and correct; the call sites just never named them.
+    test_gimple_stdout("gimple_bytes_dict_get_pop_bytes_key", """\
+fn main():
+    var d = {}
+    d[b'a'] = 7
+    print(d.get(b'a'), d.get(b'z'), d.get(b'z', -1))
+    print(d.pop(b'a'), len(d), 1 if b'a' in d else 0)
+    var e = {}
+    e[b'a'] = 7
+    e[b'b'] = 8
+    print(e.pop(b'z', -1), len(e))
+    print(e.pop(b'a'), e.pop(b'b'), len(e))
+    var f = {}
+    f[b'k'] = 3
+    print(f.setdefault(b'k', 9), f.get(b'k'), len(f))
+    var g = {}
+    g[b'k'] = 3
+    print(g.setdefault(b'j', 9), g.get(b'j'), g.get(b'k'), len(g))
+    var h = {b's': 'v'}
+    print(h.get(b's'), h.pop(b's'), len(h))
+    var m = {b'f': 1.5}
+    print(m.get(b'f'))
+    # a str key and a bytes key are still two distinct entries
+    var n = {}
+    n[b'a'] = 1
+    n['a'] = 2
+    print(n.get(b'a'), n.get('a'), n.pop(b'a'), len(n), n['a'])
+""", "7 0 -1\n7 0 0\n-1 2\n7 8 0\n3 3 1\n9 9 3 2\nv v 0\n1.5\n1 2 1 1 2\n")
+
+    # A set's loop TARGET is a fresh binding, not a read of an existing
+    # name, so two loops over sets of different element domains in one
+    # function must both work. They did not: `_declare_var` is
+    # first-decl-wins (deliberately, for every other caller), so the second
+    # loop wrote its `char *` elements into the first loop's `MojoBytes *`
+    # target and gcc -fgimple rejected the assignment — a hard compile
+    # error. Not a bytes/set peculiarity: the int-then-str pair failed
+    # identically. Accumulate rather than print: set ITERATION ORDER is not
+    # what is under test and is not stable.
+    test_gimple_stdout("gimple_set_loop_target_rebinds_across_domains", """\
+fn main():
+    var n = 0
+    for x in {b'a', b'b'}:
+        n = n + 1
+    for x in {'p', 'q'}:
+        n = n + len(x)
+    for x in {1, 2}:
+        n = n + x
+    for x in {10, 20}:
+        n = n + x
+    print(n)
+    print(x)
+    var s = {b'z', b'y'}
+    for x in s:
+        n = n + 1
+    for x in {'one', 'two'}:
+        n = n + len(x)
+    print(n, len(s))
+""", "37\n20\n45 2\n")
+
     test_gimple_stdout("gimple_bytearray_index_remove_insert", """\
 fn main():
     var ba = bytearray(b'abcb')
@@ -1481,6 +1731,12 @@ fn main():
     print(bytes(ba[1:3]))
 """, "1 2 3\nb'acb'\nb'aXcb'\nb'Xc'\n")
 
+    # `readonly` used to be constant-folded to False here, on the reasoning
+    # that "this representation is always a writable 1-D byte window" — a
+    # true statement about the WINDOW and an irrelevant one about the
+    # ANSWER, which is the mutability of the object the view was taken
+    # over. CPython: True for a bytes-backed view, False for a
+    # bytearray-backed one, and True again after `bytes(...)` re-wraps it.
     test_gimple_stdout("gimple_memoryview_descriptors", """\
 fn main():
     var mv = memoryview(b'abcd')
@@ -1488,7 +1744,13 @@ fn main():
     print(mv.obj)
     print(mv.readonly, mv.c_contiguous)
     print(len(mv.cast('B')))
-""", "4 1 B\nb'abcd'\nFalse True\n4\n")
+    var ba = bytearray(b'abcd')
+    print(memoryview(ba).readonly, memoryview(ba).c_contiguous)
+    print(memoryview(bytes(ba)).readonly, memoryview(bytearray(b'xy')).readonly)
+    print(mv.cast('B').readonly, mv[1:3].readonly)
+    ba[0] = 90
+    print(memoryview(ba).readonly)
+""", "4 1 B\nb'abcd'\nTrue True\n4\nFalse True\nTrue False\nTrue True\nFalse\n")
 
     # ── constructor-call-site inference reaches METHOD bodies and
     # MemberExpr/BinaryOp arguments ───────────────────────────────────────
@@ -1624,10 +1886,17 @@ fn main():
     # degrade wholesale to int64 slots and hand back the float's raw IEEE
     # bits (1 4607182418800017408). The format is a compile-time constant,
     # so each slot's real kind IS statically known — the per-slot kinds are
-    # recorded and the subscript picks the right accessor per index.
-    # NOTE: this case only covers the assigned-to-a-local spelling; the
-    # inline `struct.unpack('<if', ...)` form still returns raw IEEE bits
-    # -- see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    # recorded and every statically-indexed read of the result picks the
+    # right accessor per index. `print(m)` is the whole-result repr, which
+    # reads EVERY slot and so needs its own accessor per slot (see
+    # mojo_repr_list_kinds); the un-assigned `print(struct.unpack(...))`
+    # spelling is here too, because per-slot kinds are a property of the
+    # VALUE and not of whether it was bound to a local.
+    # NOT covered, and deliberately: iteration and a computed subscript.
+    # Both read a slot whose index is not known at compile time, so the
+    # consumer needs ONE static C type for a read that has no single right
+    # answer — the same limit a heterogeneous `[1, 2.5]` literal has. See
+    # bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
     test_gimple_stdout("gimple_struct_mixed_int_float_formats", """\
 fn main():
     var m = struct.unpack('<if', b'\\x01\\x00\\x00\\x00\\x00\\x00\\x80?')
@@ -1640,21 +1909,133 @@ fn main():
     var b = struct.unpack('<Bd', b'\\x07\\x00\\x00\\x00\\x00\\x00\\x00\\xf0?')
     print(b[0])
     print(b[1])
-""", "1\n1.0\n1.0\n2\n1\n7\n1.0\n")
+    print(struct.unpack('<if', struct.pack('<if', 1, 1.0)))
+    var n = struct.unpack('<if', struct.pack('<if', 1, 1.0))
+    print(n)
+    var c, d = struct.unpack('<if', struct.pack('<if', 1, 1.0))
+    print(c)
+    print(d)
+    var s = struct.Struct('<if')
+    print(s.unpack(struct.pack('<if', 1, 1.0)))
+    var e, f = struct.unpack('<2sH', struct.pack('<2sH', b'ab', 7))
+    print(e)
+    print(f)
+""", "1\n1.0\n1.0\n2\n1\n7\n1.0\n(1, 1.0)\n(1, 1.0)\n1\n1.0\n(1, 1.0)\nb'ab'\n7\n")
 
-    # The uniform cases must be unchanged by the per-slot-kind path.
+    # The uniform cases must be unchanged by the per-slot-kind path — and the
+    # whole-result repr has to stay right for them too, which is a different
+    # helper from the one a mixed format takes.
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():
     var d = struct.unpack('<2f', b'\\x00\\x00\\x80?\\x00\\x00\\x00@')
     print(d[0])
     print(d[1])
+    print(d)
     var i = struct.unpack('<3i', b'\\x01\\x00\\x00\\x00\\x02\\x00\\x00\\x00\\x03\\x00\\x00\\x00')
     print(i[0])
     print(i[1])
     print(i[2])
+    print(i)
     var s = struct.unpack('<4s', b'ab\\x00\\x00')
     print(s[0])
-""", "1.0\n2.0\n1\n2\n3\nb'ab\\x00\\x00'\n")
+    print(s)
+    print(struct.unpack('>dhh', struct.pack('>dhh', 1.0, 2, 1)))
+    print(struct.unpack('<Bd', struct.pack('<Bd', 7, 1.0)))
+    print(struct.unpack('<2sH', struct.pack('<2sH', b'ab', 7)))
+""", "1.0\n2.0\n(1.0, 2.0)\n1\n2\n3\n(1, 2, 3)\nb'ab\\x00\\x00'\n(b'ab\\x00\\x00',)\n(1.0, 2, 1)\n(7, 1.0)\n(b'ab', 7)\n")
+
+    # `struct`'s call surface is positional-only, with three measured
+    # exceptions (`Struct(format=)`, and `buffer=`/`offset=` on both
+    # `unpack_from`s). Before the arguments were bound, `node.kwargs` was
+    # never read at all: `s.unpack_from(b, offset=2)` read offset 0 and
+    # returned a well-formed tuple of the WRONG fields, and
+    # `struct.calcsize(fmt='<HH')` returned 0 where CPython raises. Every
+    # entry point is exercised here, and the exception text is compared
+    # because the silent 0 was the whole failure.
+    test_gimple_stdout("gimple_struct_keyword_arguments", """\
+fn main():
+    var b = b'\\x00\\x00\\x05\\x00\\x06\\x00'
+    var s = struct.Struct('<HH')
+    print(struct.unpack_from('<HH', b, offset=2)[0])
+    print(struct.unpack_from('<HH', b, offset=2)[1])
+    print(struct.unpack_from('<HH', buffer=b, offset=2)[0])
+    print(s.unpack_from(b, offset=2)[0])
+    print(s.unpack_from(buffer=b, offset=2)[0])
+    print(struct.Struct(format='<HH').size)
+    try:
+        print(struct.calcsize(fmt='<HH'))
+    except TypeError as e:
+        print('calcsize:', e)
+    try:
+        print(struct.pack(fmt='<H', v=1))
+    except TypeError as e:
+        print('pack:', e)
+    try:
+        print(struct.unpack(fmt='<HH', buffer=b))
+    except TypeError as e:
+        print('unpack:', e)
+    try:
+        print(struct.iter_unpack(fmt='<HH', buffer=b))
+    except TypeError as e:
+        print('iter_unpack:', e)
+    try:
+        struct.pack_into('<HH', bytearray(8), offset=0, v=1, w=2)
+        print('pack_into: no-error')
+    except TypeError as e:
+        print('pack_into:', e)
+    try:
+        print(s.pack(v=1, w=2))
+    except TypeError as e:
+        print('Struct.pack:', e)
+    try:
+        print(s.unpack(buffer=b))
+    except TypeError as e:
+        print('Struct.unpack:', e)
+    try:
+        s.pack_into(bytearray(8), offset=0, v=1, w=2)
+        print('Struct.pack_into: no-error')
+    except TypeError as e:
+        print('Struct.pack_into:', e)
+    try:
+        print(struct.unpack_from('<HH', b, bogus=2))
+    except TypeError as e:
+        print('unpack_from bogus:', e)
+    try:
+        print(struct.unpack_from('<HH', b, buffer=b))
+    except TypeError as e:
+        print('unpack_from twice:', e)
+    try:
+        print(struct.unpack_from(buffer=b, offset=2))
+    except TypeError as e:
+        print('unpack_from no fmt:', e)
+    try:
+        print(s.unpack_from(offset=2))
+    except TypeError as e:
+        print('Struct.unpack_from no buf:', e)
+    try:
+        print(struct.Struct(bogus=1))
+    except TypeError as e:
+        print('Struct bogus:', e)
+    # The expected text carries the compiled runtime's `TypeError: ` prefix
+    # on `str(e)`, where CPython's `str(e)` is the bare message. That prefix
+    # is a general, pre-existing divergence of this runtime's Exception
+    # __str__ (it is there for a plain `raise ValueError('x')` too) and is
+    # not what this test is about: the MESSAGE after the prefix is
+    # character-for-character CPython's.
+""", "5\n6\n5\n5\n5\n4\n"
+        "calcsize: TypeError: _struct.calcsize() takes no keyword arguments\n"
+        "pack: TypeError: _struct.pack() takes no keyword arguments\n"
+        "unpack: TypeError: _struct.unpack() takes no keyword arguments\n"
+        "iter_unpack: TypeError: _struct.iter_unpack() takes no keyword arguments\n"
+        "pack_into: TypeError: _struct.pack_into() takes no keyword arguments\n"
+        "Struct.pack: TypeError: Struct.pack() takes no keyword arguments\n"
+        "Struct.unpack: TypeError: Struct.unpack() takes no keyword arguments\n"
+        "Struct.pack_into: TypeError: Struct.pack_into() takes no keyword arguments\n"
+        "unpack_from bogus: TypeError: unpack_from() got an unexpected keyword argument 'bogus'\n"
+        "unpack_from twice: TypeError: argument for unpack_from() given by name ('buffer') and position (2)\n"
+        "unpack_from no fmt: TypeError: unpack_from() takes at least 1 positional argument (0 given)\n"
+        "Struct.unpack_from no buf: TypeError: unpack_from() missing required argument 'buffer' (pos 1)\n"
+        "Struct bogus: TypeError: Struct() missing required argument 'format' (pos 1)\n")
 
     test_gimple_stdout("gimple_struct_unpack_from_and_error", """\
 fn main():
@@ -1727,6 +2108,151 @@ fn main():
     except AttributeError:
         print('nosuch AttributeError')
 """, "4 <HH\nformat TypeError\nsize TypeError\nnosuch AttributeError\n")
+
+    # A module-level runtime CONSTRUCTOR's result, returned from a function.
+    # The lowering builds a real `MojoStructFmt *` (mojo_struct_new) and knows
+    # its type exactly, but the type ESTIMATOR that writes the function's C
+    # prototype had no row for it and answered `int64_t` — so the body was
+    # obliged to box the handle through `void *` to satisfy the declaration,
+    # and every consumer of the returned value degraded: `s.size` became
+    # `_mojo_dispatch_getattr` on an untyped value and raised
+    # `AttributeError: size` (exit 1) from a program CPython runs cleanly.
+    # Both sides now read one table (mojo/middle/types.py's
+    # _STRUCT_MODULE_FN_RETVALS), so they cannot disagree again.
+    test_gimple_stdout("gimple_struct_ctor_result_returned_from_function", """\
+fn make():
+    return struct.Struct('<HH')
+
+fn main():
+    var s = make()
+    print(s.size)
+    print(s.format)
+
+main()
+""", "4\n<HH\n")
+
+    # A method call on a struct passed as a free-function PARAMETER. Only the
+    # method's NAME varies below, and nothing else about each class does: a
+    # parameter used as a method receiver contributes no field accesses, so
+    # the struct-inference branch never ran for it and the parameter was
+    # decided entirely by a chain of name-based builtin-container fallbacks.
+    # `get`/`items`/`keys` -> `MojoDict *`, `hex`/`decode` -> `MojoBytes *`,
+    # `append`/`other` -> the `int64_t` default, `find` -> `int64_t` too
+    # (its own name poisoned the field-access counter the string heuristic
+    # gates on). Four of these eight crashed in a builtin container's runtime
+    # helper; the other four boxed the `Box *` and printed it as a decimal
+    # with exit 0. The call site is the only place this codegen ever knows
+    # the argument's type, so that is where the answer now comes from.
+    test_gimple_stdout("gimple_method_call_on_struct_param_not_mistyped", """\
+class G:
+    def __init__(self, v):
+        self.v = v
+    def get(self, a):
+        return 1
+class I:
+    def __init__(self, v):
+        self.v = v
+    def items(self, a):
+        return 2
+class K:
+    def __init__(self, v):
+        self.v = v
+    def keys(self, a):
+        return 3
+class A:
+    def __init__(self, v):
+        self.v = v
+    def append(self, a):
+        return 4
+class F:
+    def __init__(self, v):
+        self.v = v
+    def find(self, a):
+        return 5
+class H:
+    def __init__(self, v):
+        self.v = v
+    def hex(self, a):
+        return 6
+class D:
+    def __init__(self, v):
+        self.v = v
+    def decode(self, a):
+        return 7
+class O:
+    def __init__(self, v):
+        self.v = v
+    def other(self, a):
+        return 8
+
+def use_g(p):
+    return p.get(0)
+def use_i(p):
+    return p.items(0)
+def use_k(p):
+    return p.keys(0)
+def use_a(p):
+    return p.append(0)
+def use_f(p):
+    return p.find(0)
+def use_h(p):
+    return p.hex(0)
+def use_d(p):
+    return p.decode(0)
+def use_o(p):
+    return p.other(0)
+
+def main():
+    print(use_g(G('s')), use_i(I('s')), use_k(K('s')), use_a(A('s')))
+    print(use_f(F('s')), use_h(H('s')), use_d(D('s')), use_o(O('s')))
+
+main()
+""", "1 2 3 4\n5 6 7 8\n")
+
+    # The sharpest form of the same defect: BOTH spellings in one binary, on
+    # the same object, one line apart. The local receiver was always right
+    # (`self` is a known struct pointer, so `_lower_struct_method_call`
+    # resolves it); the identical call arriving as an argument was not. There
+    # was no diagnostic and the exit code was 0.
+    test_gimple_stdout("gimple_method_call_on_struct_param_matches_local", """\
+class Box:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+        return self.v
+
+def meth(b):
+    return b.get()
+
+def main():
+    b = Box('str')
+    print(meth(b))
+    print(b.get())
+
+main()
+""", "str\nstr\n")
+
+    # A field read through the same parameter is unaffected (`char *` and no
+    # builtin-container mis-typing), and a method on a REAL dict parameter
+    # still resolves as a dict — the fix decides from the call site's argument
+    # type, not from a blanket "prefer a user struct over a container".
+    test_gimple_stdout("gimple_struct_param_field_and_dict_receiver_unaffected", """\
+class Box:
+    def __init__(self, v):
+        self.v = v
+
+def field(b):
+    return b.v
+
+def dict_size(d):
+    return len(d)
+
+def main():
+    print(field(Box('str')))
+    print(dict_size({'a': 1, 'b': 2}))
+
+main()
+""", "str\n2\n")
 
     # The `var` spelling of a class-body field. To Python this is the SAME
     # declaration as the bare `NAME = ...` above — `var` only suppresses a

@@ -679,6 +679,19 @@ class X86_64Codegen:
         self._frame_nested_slots = dict(
             getattr(f, "_frame_nested_slots", None) or {})
         self._frame_holders = set(getattr(f, "_frame_holders", None) or ())
+        # `{holder name: [StructDef, …]}` — formal/build.py's recognition table,
+        # published so a COPY construction can ask what the word it is handed
+        # actually is.  The x86-64 twin of arm64's, and it is the same table
+        # rather than a re-derivation: a copy's soundness rests entirely on
+        # recognising the source, and two recognitions could disagree.
+        self._frame_candidates = dict(
+            getattr(f, "_frame_candidates", None) or {})
+        # The x86-64 twin of arm64's, from the same function table: a
+        # construction argument has to be told apart from a container returned
+        # by a callee, and the declared return type is the only evidence there
+        # is.
+        self._return_types = M.function_return_types(
+            self._functions.values())
         self._list_cursor = self._blob_base + self._frame_recv_bytes
         self._frame_bytes = _align16(self._top_bytes + _BLOB_BYTES
                                      + _TEMP_SLACK)
@@ -1187,6 +1200,18 @@ class X86_64Codegen:
                 f"formal x86-64 path (got {type(stmt.target).__name__})")
         op = stmt.op[:-1] if stmt.op.endswith("=") and stmt.op != "==" \
             else stmt.op
+        # The same refusal `_emit_binop` makes, asked HERE because an augmented
+        # assignment is a separate emitter that never went through it. That is
+        # not a hypothetical: `s += t` built, ran, and printed `[]` on arm64
+        # and segfaulted on x86-64 — the same non-answer as `s = s + t`, which
+        # BOTH backends refused, from the same line of source. `stmt.op` is
+        # the spelling to quote, so the diagnostic names the `+=` the reader
+        # is looking at rather than the `+` the table is keyed on.
+        reason = M.string_binary_refusal(
+            op, self._expr_str_kind(stmt.target),
+            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+        if reason is not None:
+            raise CodegenError(reason)
         ttype = self._ttype(stmt.target)
         # The accumulator is R11, not RAX: for `-` and `>>` the variable's
         # OLD value is the left operand and the assigned expression the right
@@ -2016,6 +2041,144 @@ class X86_64Codegen:
         self._pop_slot(Reg.R11)
         self.asm.label(end)
 
+    def _emit_str_membership(self, left, right, invert: bool) -> None:
+        """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.
+
+        The measured state of this before it existed, on BOTH backends: `if
+        "ell" in s:` for `s = "hello"` terminated the process with SIGBUS. A
+        string haystack had no case here at all, so the blob scan read the
+        first eight bytes of the CHARACTERS as a `[count]` header and walked
+        off the end of the mapping — and where the count it read happened to
+        be small enough not to fault, it returned FALSE, which is a wrong
+        answer rather than a crash.
+
+        Two libc calls, one per needle shape, and which one is decided by
+        `model.string_membership_lowering` so that this backend and the arm64
+        one cannot disagree about what a given `in` is:
+
+            needle is a char *   ->  strstr(HAYSTACK, NEEDLE) != NULL
+            needle is a byte     ->  strchr(HAYSTACK, BYTE)    != NULL
+
+        THE ARGUMENT ORDER IS THE WHOLE METHOD for `strstr`, and it is the
+        reason this is not a one-liner: `strstr("bc", "abcabcabc")` is a
+        well-defined NULL, so getting it backwards does not crash, does not
+        look wrong in the image, and returns FALSE for every haystack that
+        contains its needle — which is every real use of `in`. SysV puts the
+        haystack in RDI and the needle in RSI, and an expression leaves its
+        value in RAX, so both operands are moved across explicitly.
+
+        Two libc calls rather than a hand-written scan, for the reason the
+        `strspn` change gives for `lstrip`: the call IS the algorithm, it
+        cannot be half-right, and there is then nothing here to keep in step
+        between two architectures.
+
+        THE RESULT IS 0/1 IN RAX, and that is not a detail: there is no BOOL
+        kind distinct from INT on this path (which is why `__mlir_bool__` is
+        refused), so "0/1" and "a bool" are the same thing here. `not in`
+        inverts at the end, once, rather than at each exit.
+
+        EDGE CASES, all of which the caller reaches:
+
+          * an EMPTY needle is TRUE, and `strstr` agrees: it returns the
+            haystack itself, which is non-NULL. A membership test that says an
+            empty needle is absent is wrong in the direction that HIDES bugs.
+          * a needle LONGER than the haystack is FALSE, and `strstr` agrees:
+            the terminator cannot match a non-terminator byte.
+          * a needle at offset 0 and a needle at the very END both come back
+            non-NULL, and both are TRUE.
+          * the byte case with byte == 0 is the ONE thing libc gets wrong for
+            this representation: `strchr(s, 0)` returns a pointer to the
+            terminator, so a bare `!= NULL` would make `0 in "abc"` TRUE where
+            Python says FALSE — and on this path it is certainly false, since
+            the only NUL in a string is the one that ends it. So the byte is
+            tested against zero IN FRONT of the call and the answer is
+            materialised without calling anything. The test is `je` to the
+            absent block and not `jne`: the inverted test inverts the whole
+            table, so every real byte comes back absent and only `0 in s`
+            comes back present.
+        """
+        # Both operands literal is a COMPILE-TIME answer, taken first because
+        # it is the one case where the answer is not a question about the
+        # representation. The empty needle is TRUE here, which is Python's
+        # rule and also what `strstr` would say, so the constant and the call
+        # cannot disagree.
+        if isinstance(left, F.StringLiteral) and isinstance(right, F.StringLiteral):
+            # The EMPTY needle is TRUE, which is Python's rule and what
+            # `strstr` returns for it (the haystack itself, non-NULL). Folding
+            # it to False because `bool("")` is False made the
+            # both-operands-literal case disagree with the call the same
+            # expression makes when either side is a name.
+            found = left.value == "" or left.value in right.value
+            self._emit_mov_imm(Reg.RAX, (0 if found else 1) if invert
+                               else (1 if found else 0))
+            return
+        how = M.string_membership_lowering(
+            self._expr_str_kind(left), self._expr_str_kind(right))
+        if how is None:
+            # The caller only routes here for a string haystack, so `how` is
+            # None exactly when the NEEDLE is neither a string nor an integer:
+            # no `strstr` and no `strchr` can be called, and the blob scan the
+            # caller would otherwise use would read the needle's bytes at
+            # whatever integer it happens to hold. Refused by name.
+            raise CodegenError(
+                f"`{'not in' if invert else 'in'}` with a string on the right "
+                f"and {M.spelled(left)} on the left is refused: the needle's "
+                f"kind is neither a string nor an integer, so there is no "
+                f"`{M.STRING_SEARCH_SYMBOL}` and no "
+                f"`{M.STRING_BYTE_SEARCH_SYMBOL}` to make the call with. "
+                f"Annotate it, or bind it to a string or a byte this path can "
+                f"see the type of")
+        self._if_counter += 1
+        mid = self._if_counter
+        fn = self.func_name
+        hit = f"{fn}_smh{mid}"
+        miss = f"{fn}_smn{mid}"
+        end = f"{fn}_smx{mid}"
+        # push haystack, then needle  =>  [rsp] = needle, [rsp+16] = haystack.
+        # Both have to survive the call, and every register is caller-saved
+        # across one, so both go to the stack — the same discipline
+        # `_emit_str_find` and `_emit_str_count` use, and for the same reason.
+        self._emit_expr(right)
+        self._push_slot(Reg.RAX)                      # [rsp+16] = haystack
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                      # [rsp]    = needle
+        if how == M.STRING_MEMBERSHIP_BYTE:
+            # The needle is a byte VALUE, not a pointer, so it is masked here
+            # rather than dereferenced: `s[1]` and a subscript are how a byte
+            # is spelled, and both are integers that may be wider than 8 bits.
+            self.asm.emit(encode_and_r64_imm8(Reg.RAX, 8))
+            self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))
+            self.asm.emit(encode_test_r64_r64(Reg.RSI, Reg.RSI))
+            self._emit_jcc(COND_E, miss)              # 0 in s is False
+        else:
+            self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))
+        self._emit_extern_call(M.STRING_BYTE_SEARCH_SYMBOL if how ==
+                               M.STRING_MEMBERSHIP_BYTE
+                               else M.STRING_SEARCH_SYMBOL)
+        self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+        self._emit_jcc(COND_NE, hit)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._emit_mov_imm(Reg.RAX, 0)                # NULL → absent
+        self._emit_jmp(end)
+        self.asm.label(miss)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._emit_mov_imm(Reg.RAX, 0)
+        self._emit_jmp(end)
+        self.asm.label(hit)
+        self._pop_slot(Reg.R11)
+        self._pop_slot(Reg.R11)
+        self._emit_mov_imm(Reg.RAX, 1)                # non-NULL → present
+        self.asm.label(end)
+        if invert:
+            # NOT as a TEST/SETcc on the 0/1 already in RAX rather than as
+            # three separate inverted constants at the three exits: three
+            # inversions is three chances for one of them to be the missing one.
+            self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+            self._emit_setcc_bool(Reg.RAX, "sete")
+
     def _emit_list_append(self, e) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
 
@@ -2287,11 +2450,14 @@ class X86_64Codegen:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
                 "formal x86-64 path")
-        if M.is_multi_index(e.index):
-            why = M.multi_index_refusal_for(
-                e, self._is_dict_subscript(e.obj), self._functions)
-            if why is not None:
-                raise CodegenError(why)
+        # Unconditional, because `multi_index_refusal_for` now decides the MLIR
+        # case on the BASE name rather than on a comma list — see its
+        # docstring. A single-element `__mlir_type[x]` used to skip this call
+        # entirely and fabricate a word.
+        why = M.multi_index_refusal_for(
+            e, self._is_dict_subscript(e.obj), self._functions)
+        if why is not None:
+            raise CodegenError(why)
         if self._is_dict_subscript(e.obj):
             self._emit_dict_lookup_addr(e)
             return
@@ -2300,6 +2466,16 @@ class X86_64Codegen:
         self._emit_expr(e.index)
         self._pop_slot(Reg.R11)                     # R11 = base
         if self._is_string_subscript(e.obj):
+            # A string INDEX would make this `s + i` with two addresses. Asked
+            # HERE, in the single choke point a read, a store and an augmented
+            # assignment all pass through, so all three are covered by one
+            # call. Measured on both backends: `s[t]` segfaulted here and
+            # printed an address's low byte on arm64.
+            ireason = M.string_index_refusal(
+                self._expr_str_kind(e.obj), self._expr_str_kind(e.index),
+                M.spelled(e.index))
+            if ireason is not None:
+                raise CodegenError(ireason)
             # A string is a plain byte run: no header, no count, so there is
             # nothing to bounds-check the index against and (deliberately) no
             # check emitted — reading the NUL terminator is the same answer a
@@ -2508,11 +2684,38 @@ class X86_64Codegen:
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
 
     def _emit_membership(self, left, right, invert: bool) -> None:
-        """`needle in haystack` — a linear scan of the blob's elements.
+        """`needle in haystack` / `needle not in haystack`, list blob or string.
 
-        The needle stays in its 16-byte stack slot for the whole scan and is
-        read (not popped) each iteration, because every register is scratch
+        Two haystacks, and which one this is has to be decided BEFORE anything
+        is emitted, because the two share no code at all: a list haystack is a
+        frame-allocated blob whose first 8 bytes are its count, and a string
+        haystack is a `char *` into the image's read-only text.
+
+        THIS BACKEND HAD NO STRING CASE AT ALL, which is the measured state and
+        not an oversight in the reading of it: `"ell" in s` for `s = "hello"`
+        terminated the process with SIGBUS on BOTH architectures, and where it
+        did not fault — `"bc" in "abcd"` on this one — it returned FALSE, which
+        is a wrong answer rather than a crash. The blob scan read the first
+        eight bytes of the CHARACTERS as a `[count]` header and walked off the
+        end of the mapping looking for elements.
+
+        The decision itself is `model.string_membership_lowering`, shared with
+        the arm64 backend, so the two architectures cannot come apart on which
+        of the two a given haystack is, nor on which libc call a given needle
+        shape makes. Neither can they come apart on the RESULT: 0/1 in RAX,
+        `not in` inverted, and a bool is an int on this path because there is
+        no BOOL kind distinct from INT (which is why `__mlir_bool__` is
+        refused) — the same 0/1 the blob scan has always produced.
+
+        The needle stays in its 16-byte stack slot for the whole blob scan and
+        is read (not popped) each iteration, because every register is scratch
         inside the loop; it is released once, on whichever exit is taken."""
+        if (isinstance(right, F.StringLiteral)
+                or M.string_membership_lowering(
+                    self._expr_str_kind(left),
+                    self._expr_str_kind(right)) is not None):
+            self._emit_str_membership(left, right, invert=invert)
+            return
         self._emit_expr(left)
         self._push_slot(Reg.RAX)                   # needle
         self._emit_expr(right)
@@ -2746,6 +2949,18 @@ class X86_64Codegen:
     # ── expressions (result in RAX) ──────────────────────────────────
 
     def _emit_expr(self, expr) -> None:
+        # An MLIR attribute/type template is refused HERE, at the top of the
+        # walk, and for the same reason arm64's twin is: the construct's dotted
+        # spelling is a plain member read, so it reaches no subscript and no
+        # address computation and used to fall through to a load of a name
+        # nothing defines. `is_mlir_template` keys on the base name, so this one
+        # call covers the dotted spelling, the single-element bracket and the
+        # multi-element bracket, and the text is the shared arch-free one — the
+        # two architectures cannot drift on what a template means, which is the
+        # failure `limit_mlir_multi_element_template` is pinned against.
+        why = M.mlir_template_refusal(expr)
+        if why is not None:
+            raise CodegenError(why)
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm(Reg.RAX, expr.value)
             return
@@ -2935,6 +3150,18 @@ class X86_64Codegen:
                 f"container and string values are not")
 
     def _emit_unary(self, expr) -> None:
+        # `-s` is negation of an address and `~s` is a bit complement of one,
+        # and `not s` is FALSE for every string including the empty one,
+        # because a pointer is never zero. Measured on both backends: `~s`
+        # returned 8881076 on arm64 and 3236815 on x86-64, and `not ""`
+        # returned 0 where Python returns 1. `model` holds the messages and
+        # the measurements; asking here is what makes the two architectures
+        # refuse the same thing.
+        ureason = M.string_unary_refusal(
+            expr.op, self._expr_str_kind(expr.operand),
+            M.spelled(expr.operand))
+        if ureason is not None:
+            raise CodegenError(ureason)
         if expr.op == "not":
             self._emit_expr(expr.operand)
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
@@ -2968,13 +3195,17 @@ class X86_64Codegen:
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
-        # `+` on two strings is refused, and this is the only place that knows
-        # both operand kinds before the ALU table adds the two addresses
-        # together. Measured on the pre-change tree, on BOTH backends:
-        # `print("ab" + "cd")` printed `[]` on arm64 and segfaulted on x86-64 —
-        # one wrong answer and one crash from one line of source. See
-        # `model.string_concat_refusal` for why it cannot be made right here.
-        reason = M.string_concat_refusal(
+        # Any operator that reaches the integer ALU or the flag-setting compare
+        # with a `char *` operand is refused, and this is the only place that
+        # knows both operand kinds before that happens. Measured on the
+        # pre-change tree, on BOTH backends: `print("ab" + "cd")` printed `[]`
+        # on arm64 and segfaulted on x86-64 — one wrong answer and one crash
+        # from one line of source — and `s ^ t` returned 4 on arm64 and 28 on
+        # x86-64, which is the same defect with the crash replaced by two
+        # architectures disagreeing about a number neither computed. See
+        # `model.string_binary_refusal`, which is the one table both backends
+        # ask and which holds the measurements.
+        reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right))
         if reason is not None:
             raise CodegenError(reason)
@@ -3868,11 +4099,20 @@ class X86_64Codegen:
         # shared tables); x86-64 did not, so the same source either refused on
         # one architecture and produced an unloadable binary on the other, or
         # silently agreed to something neither backend meant.
+        #
+        # The one exception, and it is arm64's rule read from the same shared
+        # predicate: a name in `UNREPRESENTABLE_TYPE_CTORS` that this module
+        # also declares as a struct, called with that struct's field count, is
+        # a construction of that struct.  `model.type_constructor_prefers_local
+        # _struct` is where the arity rule and the two exclusions live.
         if name not in self._functions:
-            tkind = M.type_constructor_kind(name)
-            if tkind is not None:
-                self._emit_type_constructor(e, name, tkind)
-                return
+            nargs = len(e.args) + len(e.kwargs or [])
+            if not M.type_constructor_prefers_local_struct(
+                    name, self._structs, nargs):
+                tkind = M.type_constructor_kind(name)
+                if tkind is not None:
+                    self._emit_type_constructor(e, name, tkind)
+                    return
         if name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
@@ -3995,10 +4235,15 @@ class X86_64Codegen:
         kind, info = tkind
         if kind == "unsupported":
             raise CodegenError(
-                f"constructing {name} has no representation on this path (a "
-                f"formal value is one 64-bit word, and {name} is not one "
-                f"thing) — previously this emitted a call to a symbol named "
-                f"{name!r} that nothing defines")
+                f"constructing {name} has no representation on this path: this "
+                f"image has no declaration of {name} to construct — it is not a "
+                f"struct in this module or in anything it imports, so there is "
+                f"no field list to bring up, and a formal value is one 64-bit "
+                f"word. A name that IS declared as a struct here is decided by "
+                f"`_emit_struct_constructor` instead, which asks the struct: a "
+                f"one-field struct is a plain word and constructs. (Emitting a "
+                f"call to a symbol named {name!r} that nothing defines is not "
+                f"the alternative — that built and then failed to load.)")
         # A keyword argument names the same single value a positional one does,
         # so it is accepted as the operand — arm64 has always done this and its
         # comment says why: `String(unsafe_from_utf8_ptr=…)` is how
@@ -4019,6 +4264,28 @@ class X86_64Codegen:
         # conversion has one operand, and two of them, positioned or named, is
         # not a conversion.
         operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+        if not operands:
+            # The ONE zero-operand conversion this path can answer, and the
+            # reason is a property of STRINGS and of nothing else: a literal
+            # here is interned and NUL-terminated, so the address of `""` IS
+            # the empty string, `strlen` of it is 0 and `printf("%s")` of it
+            # prints nothing.  So `String()` is `String("")` by another
+            # spelling, and refusing it refused a representable program over a
+            # word COUNT rather than over the value.  A zero operand for any
+            # other type is still refused — 0 is not the empty `Pointer` and
+            # not the empty `Int` in any sense this value model can state.
+            if name in M.STRING_TYPE_CTORS:
+                self._emit_expr(F.StringLiteral(value=""))
+                return
+            raise CodegenError(
+                f"{name}() with no operand is refused on this path: a "
+                f"conversion of a value takes the value to convert, and 0 is "
+                f"not the empty {name} in any sense this one-word value model "
+                f"can state — a zero pointer is a null dereference and a zero "
+                f"integer is a value the source never wrote. "
+                + (f"Pass the value to convert"
+                   if name in M.IDENTITY_TYPE_CTORS else
+                   f"Build the value first and pass it"))
         if len(operands) != 1:
             raise CodegenError(
                 f"{name}(...) takes exactly one value to convert on this path "
@@ -4065,29 +4332,52 @@ class X86_64Codegen:
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        if e.args or e.kwargs:
-            # Positional/keyword construction is not Mojo's struct syntax, and
-            # silently ignoring a supplied value would lose data.
-            raise CodegenError(
-                f"{name}(...) takes no arguments on this path: a struct is "
-                f"default-initialized and its fields assigned, and a "
-                f"{len(e.args) + len(e.kwargs)}-argument construction is not a "
-                f"shape this backend can honour")
+        if e.kwargs:
+            raise CodegenError(M.construction_keyword_refusal(
+                name, [k for k, _v in e.kwargs]))
+        if e.args:
+            # A ONE-FIELD struct with an argument: the receiver IS the field, so
+            # the argument is not stored, it is the result.  What is refused is
+            # what the shared DECISION refuses, by name — see
+            # `model.struct_construction_plan`, which is the same function
+            # arm64 calls, so the two architectures cannot disagree about which
+            # of the three shapes this is or about why one of them is refused.
+            plan, refusal = M.struct_construction_plan(
+                st, e, self._structs, self._frame_candidates,
+                self._return_types)
+            if refusal is not None:
+                raise CodegenError(refusal)
+            self._emit_expr(e.args[0])
+            return
         self._emit_fresh_one_word(name, st)
 
     def _emit_frame_constructor(self, e: F.CallExpr, name: str, st) -> None:
-        """`S()` for a struct of more than one field — an address, not a value.
+        """`S()`, `S(a, b, …)` or `S(x)` — the x86-64 half of the three shapes.
 
-        The x86-64 twin of arm64's `_emit_frame_constructor`, and the decision
-        is shared (`formal.model.struct_frame_representable` /
-        `struct_frame_defaults`) so a default one machine can bring up and the
-        other cannot is not expressible."""
-        if e.args or e.kwargs:
+        The DECISION is shared (`formal/model.py`'s `struct_construction_plan`,
+        `struct_frame_representable`, `struct_frame_defaults`), so which of the
+        three shapes a call is — and which of them is refused, and why — is not
+        expressible differently on the two machines.  What differs is the
+        instruction: arm64 emits `LDR`/`STR Xt, [Xn, #8k]` for the same layout
+        and this emits `mov` to and from `[RBP + 8k]`."""
+        plan, refusal = M.struct_construction_plan(
+            st, e, self._structs, self._frame_candidates, self._return_types)
+        if refusal is not None:
+            raise CodegenError(refusal)
+        shape = plan[0]
+        site = self._frame_sites.get(id(e))
+        if site is None:
             raise CodegenError(
-                f"{name}(...) takes no arguments on this path: a struct is "
-                f"default-initialized and its fields assigned, and a "
-                f"{len(e.args) + len(e.kwargs)}-argument construction is not a "
-                f"shape this backend can honour")
+                f"constructing {name} at a site this function did not reserve "
+                f"a receiver frame for — the frame layout and the body "
+                f"disagree, which is a compiler bug, not a program error")
+        base = self._blob_base + site[1]
+        if shape == M.CONSTRUCTION_COPY:
+            self._emit_frame_copy(e, name, st, base, plan[1])
+            return
+        if shape == M.CONSTRUCTION_POSITIONAL:
+            self._emit_frame_positional(e, name, st, base, site, plan[1])
+            return
         ok, bad = M.struct_frame_representable(st)
         if not ok:
             raise CodegenError(
@@ -4096,13 +4386,6 @@ class X86_64Codegen:
                 f"this constructor has no scope to evaluate it in (assign the "
                 f"field explicitly after `S()` instead, which is the same "
                 f"program with a representation)")
-        site = self._frame_sites.get(id(e))
-        if site is None:
-            raise CodegenError(
-                f"constructing {name} at a site this function did not reserve "
-                f"a receiver frame for — the frame layout and the body "
-                f"disagree, which is a compiler bug, not a program error")
-        base = self._blob_base + site[1]
         # Nested frames FIRST, in the same order arm64 does it and for the same
         # reason: the block is laid out with the object's own slots at the
         # bottom, and the outer base is recomputed per store anyway.  The
@@ -4126,6 +4409,50 @@ class X86_64Codegen:
                                               Reg.RAX))
         # The address is the RESULT and every store above left something else
         # in RAX, so it is materialized last.
+        self._emit_blob_base(base, Reg.RAX)
+
+    def _emit_frame_positional(self, e: F.CallExpr, name: str, st, base: int,
+                               site, fields) -> None:
+        """`S(a, b, …)` — one store per argument, at `base + 8k` in declaration order.
+
+        The x86-64 twin of arm64's.  The register discipline is the existing
+        one: the argument is evaluated into RAX and stored straight to
+        `[RBP + 8k]`, with no base register to recompute because the
+        destination is RBP-relative and therefore fixed.  That is also why
+        evaluating an argument between two stores is safe here — a call or a
+        string LEA cannot move RBP.
+        """
+        for _fname, _slot, _child, child_off in site[2]:
+            self._emit_nested_frame_init(_child, child_off + self._blob_base)
+        for arg, (_field, slot) in zip(e.args, fields):
+            self._emit_expr(arg)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
+                                              Reg.RAX))
+        for _fname, slot, _child, child_off in site[2]:
+            self._emit_blob_base(child_off + self._blob_base, Reg.RAX)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
+                                              Reg.RAX))
+        # The address is the RESULT and every store above left something else
+        # in RAX, so it is materialized last — the same last line the default
+        # constructor ends with, and for the same reason.
+        self._emit_blob_base(base, Reg.RAX)
+
+    def _emit_frame_copy(self, e: F.CallExpr, name: str, st, base: int,
+                         nslots: int) -> None:
+        """`S(x)` — a fresh block and an `n`-slot copy of the source's slots.
+
+        The x86-64 twin of arm64's, and the shallowness, the confinement and
+        the three closed doors onto a dead blob are all argued there; what
+        differs is only that the two bases are R11 (the source, live across the
+        loop) and RBP-relative (the destination, never in a register at all),
+        so this loop is two instructions per slot with nothing recomputed.
+        """
+        self._emit_expr(e.args[0])
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        for slot in range(nslots):
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, 8 * slot))
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
+                                              Reg.RAX))
         self._emit_blob_base(base, Reg.RAX)
 
     def _emit_nested_frame_init(self, st, base: int, depth: int = 0) -> None:

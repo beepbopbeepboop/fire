@@ -687,6 +687,24 @@ theorem u64_add_ofNat_zero_r (v : UInt64) : v + UInt64.ofNat 0 = v := by
   rw [u64_ofNat_zero]
   exact u64_add_zero_r v
 
+/-- **The second word of a pre-indexed pair, in canonical form.**
+    `(sp - K) + 8 = sp - (K - 8)`, for the `8 ≤ K < 2^64` range a frame store
+    is in.  `u64_sub_add` states the same identity but leaves the subtraction
+    on the right as a `UInt64` expression that the NEXT rewrite cannot match:
+    `UInt64.ofNat 16 - 8` is not syntactically `UInt64.ofNat 16 - UInt64.ofNat 8`,
+    so `u64_ofNat_sub` does not fire and the address stays in a shape no frame
+    lemma recognises.  Stating it over `Nat`s and producing a literal
+    `UInt64.ofNat (K - 8)` is the form the frame peels want.
+
+    Needed by the by-reference receiver's method contracts: a method's `STP`
+    writes its pair's second word at `((sp - K) + 8)`, and the contract's
+    premises are stated about `(sp - (K - 8))`. -/
+theorem u64_sub_pair (sp : UInt64) (K : Nat) (h : 8 ≤ K) (hM : K < 2 ^ 64) :
+    (sp - UInt64.ofNat K) + (8 : UInt64) = sp - UInt64.ofNat (K - 8) := by
+  rw [u64_sub_add]
+  congr 1
+  exact u64_ofNat_sub K 8 h hM
+
 theorem u64_sub_zero (v : UInt64) : v - (0:UInt64) = v := by
   simp
 
@@ -1592,14 +1610,23 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 8)
     some (arm64_set_reg rt s (mem_read_u64 s.mem addr.toNat))
-  -- LDR Xt, [SP], #imm: 0xB9000000
+  -- STR Wt, [Xn, #imm]: 0xB9000000 (unsigned-offset 32-bit STORE, no writeback)
+  --
+  -- The THIRD mis-modelled single-register memory form, and the last one: this
+  -- case was labelled `LDR Xt, [SP], #imm` and implemented as a post-index LOAD
+  -- from `SP` -- it read memory, moved `rt`, and moved `sp`.  None of those is
+  -- what the encoding does.  Bit 22 separates the pair, so with the `size`
+  -- field at 10 the store is 0xB9000000 and it is `mem32[Xn + imm*4] := Wt`
+  -- with no register and no writeback.  `formal/arm64.py` has no
+  -- `encode_str_wt_xn_imm` and no example emits the word, which is the same
+  -- "the examples never reach it" hole that hid the 0xF9400000 and 0xF9000000
+  -- bugs; the difference is that this one is now closed rather than written up.
   else if (insn &&& 0xffe00000) = 0xB9000000 then
     let rt := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    let addr := s.sp.toNat
-    let val := mem_read_u64 s.mem addr
-    let s' := arm64_set_reg rt s val
-    some { s' with sp := s.sp + UInt64.ofNat (imm12 * 8) }
+    let addr := arm64_reg rn s + UInt64.ofNat (imm12 * 4)
+    some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
   -- ADRP Xd, #page: 0x90000000 (Xd = page(PC) + sign_extend(imm21) << 12)
   else if (insn &&& 0x9f000000) = 0x90000000 then
     let rd := (insn &&& 0x1f).toNat
@@ -3648,11 +3675,21 @@ theorem work_step_ldr_pre : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Na
         + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) :=
   work_step_ldr_uoff
 
-/-- Per-instruction step: `work_step_ldr_post`. -/
-theorem work_step_ldr_post (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+/-- Per-instruction step: `work_step_str_uoff32`.
+
+    `STR Wt, [Xn, #imm]` (0xB9000000): `mem32[Xn + imm*4] := Wt`, and nothing
+    else moves -- in particular neither `Rt` nor `sp`.  The base is the
+    instruction's `Rn`, and the scale is 4 not 8 because this is the 32-bit
+    form.  This replaces `work_step_ldr_post`, which asserted a post-index
+    *load* from `SP`; see the `arm64_step` case it routes to. -/
+theorem work_step_str_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xb9000000) :
-    arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem s.sp.toNat)) with sp := s.sp + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8) } := by
+    arm64_step s code = some { s with
+      mem := mem_write_u64 s.mem
+        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat
+        (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3677,6 +3714,20 @@ theorem work_step_ldr_post (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   have hne_19 : ¬ ((w &&& 0xffe00000) = 0xf9400000) := by intro t; bv_decide
   have hne_bcond : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_pos h, if_neg hne_bcond]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldr_post` -- HISTORICAL NAME.  The word
+    0xB9000000 is `STR Wt, [Xn, #imm]`, not a post-index load, so this used to
+    state something false; the statement is now `work_step_str_uoff32`'s and the
+    name is kept only so an older `_WORK_STEP` entry still resolves. -/
+theorem work_step_ldr_post : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xb9000000),
+    arm64_step s code = some { s with
+      mem := mem_write_u64 s.mem
+        ((arm64_reg ((w >>> 5) &&& 0x1f).toNat) s
+          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat
+        (arm64_reg ((w &&& 0x1f).toNat) s) } :=
+  work_step_str_uoff32
 
 /-- Per-instruction step: `work_step_adrp`. -/
 theorem work_step_adrp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
@@ -4865,6 +4916,40 @@ theorem frameWrites_read_above_sp (mem : Nat → UInt8) (base sp : UInt64) (n : 
         exact hks kv' (by simp; exact Or.inr hkv')
       exact (ih (frameWrite mem base kv.1 kv.2) hrest).trans
         (frameWrite_read_above_sp mem base sp n kv.1 kv.2 hbelow hkv j hj)
+
+/-- **A method's own stack store is disjoint from its receiver's frame.**
+
+    The one obligation a leaf method contract cannot avoid.  A method that
+    reads `self.<f>` executes, before that read, the prologue's `STP`s -- four
+    words at `sp - 32`, `sp - 24`, `sp - 64`, `sp - 56` for the current
+    backend -- and the value the source says is in the receiver's slot `k` is
+    read out of the memory *after* those writes.  So the terminal value flow
+    has to peel them, and each peel needs a disjointness fact about an address
+    that is a `sp`-relative subtraction on one side and the receiver's base on
+    the other.  That is the fact no existing lemma supplied, and the generator
+    emitted its proofs around the gap.
+
+    `hbelow` is `FrameBelow (sp - j) base 1`, i.e. "the receiver frame starts
+    at or above the top of this store" -- the calling convention, stated in the
+    vocabulary the frame layout already has rather than in a new predicate.
+    `hfit` is the usual no-wrap premise on the receiver side; it is what makes
+    `frameAddr base k` the plain `Nat` sum `base.toNat + 8*k`, and without it
+    the claim is false (a frame running off the top of the address space can
+    have a slot whose wrapped address coincides with a store's). -/
+theorem frameRead_write_below (mem : Nat → UInt8) (sp base : UInt64)
+    (j k : Nat) (v : UInt64)
+    (hfit : FrameFits base (k + 1))
+    (hbelow : FrameBelow (sp - UInt64.ofNat j) base 1) :
+    frameRead (mem_write_u64 mem (sp - UInt64.ofNat j).toNat v) base k
+      = frameRead mem base k := by
+  unfold frameRead
+  refine mem_read_after_write_u64_ne _ _ _ _ (Or.inr ?_)
+  have haddr : frameAddr base k = base.toNat + frameOffset k :=
+    frameAddr_eq base k hfit
+  rw [haddr]
+  have hb := hbelow
+  simp only [FrameBelow, frameBytes, SLOT] at hb
+  omega
 
 /-- **The receiver frame, read into the source-level field environment.**  The
     bridge from machine memory to the `String → UInt64` map the source semantics

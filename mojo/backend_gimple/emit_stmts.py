@@ -402,6 +402,13 @@ def _gen_stmt_VarDecl(gen, node):
         # exactly, including the `type_ann is None` guard.
         if node.type_ann is None and v in gen._struct_slot_kinds:
             gen._struct_slot_kinds[node.name] = gen._struct_slot_kinds[v]
+        # Same propagation for a `struct.Struct(...)` handle's format string,
+        # which is what lets `var s = struct.Struct('<if')` then
+        # `s.unpack(buf)` recover the per-slot kinds. Same shape, same
+        # `type_ann is None` guard, same reason: without it only the inline
+        # `struct.Struct('<if').unpack(buf)` spelling would know its format.
+        if node.type_ann is None and v in gen._struct_formats:
+            gen._struct_formats[node.name] = gen._struct_formats[v]
         # `var g = counter(3)` / `var task = create_task(f())` — the
         # `var`-keyword spelling of a declaration lowers through THIS
         # method (VarDecl), not the plain AssignStmt path a few lines

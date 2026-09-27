@@ -13,7 +13,7 @@ codegen uses, so the declared signature matches the emitted symbol exactly.
 import re
 
 import hashlib
-from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, VarDecl
+from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, VarDecl, IdentExpr
 from gimple_codegen import _mojo_type, _safe_name, GimpleGen
 from mojo.backend_gimple.emit_funcs import dup_def_signature_key
 from mojo.middle.types import _c_field_name
@@ -95,17 +95,67 @@ def _c_signature(name: str, return_type, params, struct_names=frozenset()) -> st
     return f"{cret} {name} ({cparams})"
 
 
+def _struct_field_declared_name(field):
+    """The name this one `StructDef` field introduces, or None if it has none.
+
+    A struct body reaches here in the two shapes `fire_compiler.Parser` puts in
+    `StructDef.fields`, and they carry the name in different places:
+
+      * `VarDecl` — written as an annotation, `x: int`. The name is `.name`.
+      * `AssignStmt` — written as a class-level assignment. `x = 1` and
+        `__slots__ = (...)` are fields on this path, and so is `x: int = 0`,
+        which the parser deliberately keeps as an `AssignStmt` CARRYING
+        `type_ann` rather than a `VarDecl` (see the annotated-assignment branch
+        in `Parser.parse_stmt` for why switching it would move every
+        `isinstance(stmt, AssignStmt)`-keyed piece of machinery). The name is
+        `.target.name`, and `.target` is an `IdentExpr` only for a real
+        declaration — a class-level `obj.attr = 1` binds none.
+
+    Reading `.name` directly works for the first shape and raises
+    `AttributeError` on the second, and that is not a diagnostic but a traceback
+    out of a function with no way to name the file: it killed
+    `collect_exports_src` — and with it the whole export probe — on
+    `gimple_codegen.py` and `fire_compiler.py`, both of which declare dataclass
+    fields in the `x: Type = default` shape, so neither module could be built at
+    all.
+
+    This is the SAME fact `formal/model.py:struct_field_name` states for the
+    formal backends, and it is stated twice because the two cannot import each
+    other: `formal/model.py` is deliberately leaf-most (it imports only `os` and
+    `fire_compiler`, so the two formal architectures cannot drift), and
+    `reflect.py` is the SHARED export rule `formal/build.py` reads — an edge from
+    it into `formal/` would make the gimple dylib's reflection table depend on
+    the formal backends. The home that would let them share is
+    `fire_compiler.py`, beside the `struct_field_*` shims it already declares.
+    """
+    if isinstance(field, VarDecl):
+        return field.name
+    target = getattr(field, "target", None)
+    if isinstance(target, IdentExpr):
+        return target.name
+    return None
+
+
 def _struct_layout_sig(s, struct_names) -> str:
     """Encode a concrete struct's field layout as a C-ABI descriptor string:
     `struct Name { ctype field; ... }`. The importer parses this back into a
     typedef so it can materialize the type without re-reading source — the real
-    import boundary is the reflection table, not the .mojo file (ABI.md)."""
+    import boundary is the reflection table, not the .mojo file (ABI.md).
+
+    A field that has a type but no declarator is left OUT rather than emitted as
+    a bare `int64_t ;`, which is not a C declaration at all:
+    `_register_reflected_struct` parses these pairs back with
+    `decl.rsplit(' ', 1)` and keeps only the ones that split into two, so an
+    unnameable field is one this consumer already ignores. Omitting it is also
+    the only honest option — inventing a declarator would put a field in the
+    importer's typedef that the defining module does not have."""
     fields = []
     for f in getattr(s, 'fields', []):
         ann = getattr(f, 'type_ann', None)
-        if ann is None:
+        name = _struct_field_declared_name(f)
+        if ann is None or not name:
             continue
-        fields.append(f"{_mt(ann, struct_names)} {f.name};")
+        fields.append(f"{_mt(ann, struct_names)} {name};")
     return f"struct {s.name} {{ {' '.join(fields)} }}"
 
 
@@ -313,13 +363,24 @@ _CLIB_SYMS = frozenset({
 })
 
 
-def collect_exports_src(src: str, module_prefix: str = '', known_structs=None) -> list:
-    """Exports of a module's source — minus generic templates. A `fn name[...]`
-    is parametric: it has no single concrete symbol to put in the dylib, so it is
-    NOT a reflection export. Instead, importers see it as a generic and elaborate
-    it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
-    from the source text.) `module_prefix` and `known_structs` are passed straight
-    through to collect_exports — see its docstring."""
+# The four rules of doc/ABI.md's public-symbol rule, as names a diagnostic can
+# print. `export_exclusions` below reports WHICH one excluded each declaration,
+# and a refusal that has to explain itself has to be able to name the rule that
+# actually fired — an unexplained "this module exports nothing" sends the next
+# reader looking for a construct the file does not contain.
+EXCL_PRIVATE = "private"
+EXCL_GENERIC = "generic-template"
+EXCL_OVERLOADED = "overloaded"
+EXCL_CLIB = "c-library-symbol"
+
+
+def _excluded_name_sets(src: str, parsed) -> tuple:
+    """(generic, overloaded): the two name sets `collect_exports_src` skips on.
+
+    Split out of `collect_exports_src` so `export_exclusions` can report the
+    same two sets, and so there is exactly one computation of each: the export
+    table and the refusal that explains it cannot then disagree about which
+    names are templates."""
     # Mojo functions may be declared `fn` or `def` — both forms must be
     # detected here, or an `def`-declared overload/generic slips past this
     # filter as a normal single export while gimple_codegen (whose own
@@ -353,24 +414,81 @@ def collect_exports_src(src: str, module_prefix: str = '', known_structs=None) -
     # unrelated structs (a free `add` plus two structs' `add` methods read as
     # "overloaded"), silently un-advertising perfectly concrete free
     # functions. Top-level scope here matches the pre-pass's exactly.
-    _parsed = Parser(py_tokenize(src)).parse_module()
-    _dup_defs: dict = {}
-    for _s in _parsed:
+    dup_defs: dict = {}
+    for _s in parsed:
         if isinstance(_s, FunctionDef):
-            _dup_defs.setdefault(_s.name, []).append(_s)
+            dup_defs.setdefault(_s.name, []).append(_s)
     overloaded = set()
-    for _name, _defs in _dup_defs.items():
+    for _name, _defs in dup_defs.items():
         if len(_defs) >= 2 and \
                 len({dup_def_signature_key(_d) for _d in _defs}) != 1:
             overloaded.add(_name)
-    skip = generic | overloaded
+    return generic, overloaded
+
+
+def export_exclusions(src: str, parsed=None) -> dict:
+    """{declared name: which rule of doc/ABI.md's export rule excluded it}.
+
+    The four rules, in the order they are tested — a name that several exclude
+    is reported under the FIRST, so every name in the result has one reason and
+    that reason is one the rule really applied to it:
+
+      EXCL_PRIVATE     a leading `_` (checked here rather than in
+                       `collect_exports`, which never emits the name at all, so
+                       that a diagnostic can still say the file HAS a private
+                       declaration it is otherwise about to deny having).
+      EXCL_CLIB        a C library symbol this path resolves with `dlsym`.
+      EXCL_OVERLOADED  more than one definition of the name.
+      EXCL_GENERIC     a template.
+
+    A name absent from the result is exported. This is the ONE place the rule
+    is stated, and `collect_exports_src` filters through it — so the exclusion
+    table and the export table are two views of one decision rather than two
+    implementations that can drift, which is what let a refusal come to name
+    "every declaration in it is private" about a file with fifteen public
+    functions in it (bugs/FORMAL_known_limits.md §1.3).
+
+    The generic test is `collect_exports_src`'s own, regex over source text and
+    keyed by NAME, and it stays that way here: a per-definition test would
+    change which names reach a dylib, which is a change to what the compiler
+    accepts, and it is not this function's to make. The known imprecision is
+    that the regex also matches a NESTED `def name[...]` inside a function body,
+    so a name can be filed as a template when the only generic spelling of it is
+    a local one. That is recorded rather than fixed, for the reason above."""
+    if parsed is None:
+        parsed = Parser(py_tokenize(src)).parse_module()
+    generic, overloaded = _excluded_name_sets(src, parsed)
+    out = {}
+    for s in parsed:
+        if not isinstance(s, (FunctionDef, StructDef)):
+            continue
+        name = s.name
+        if name.startswith('_'):
+            out[name] = EXCL_PRIVATE
+        elif name in _CLIB_SYMS:
+            out[name] = EXCL_CLIB
+        elif name in overloaded:
+            out[name] = EXCL_OVERLOADED
+        elif name in generic:
+            out[name] = EXCL_GENERIC
+    return out
+
+
+def collect_exports_src(src: str, module_prefix: str = '', known_structs=None) -> list:
+    """Exports of a module's source — minus generic templates. A `fn name[...]`
+    is parametric: it has no single concrete symbol to put in the dylib, so it is
+    NOT a reflection export. Instead, importers see it as a generic and elaborate
+    it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
+    from the source text.) `module_prefix` and `known_structs` are passed straight
+    through to collect_exports — see its docstring."""
+    _parsed = Parser(py_tokenize(src)).parse_module()
+    excluded = export_exclusions(src, _parsed)
     # An export's base name is the symbol before any `.` (a method export is
-    # `Struct.method`); skip a generic struct's TYPE entry *and* all its METHOD
-    # entries — the parser drops `[T]`, so `collect_exports` cannot tell they are
-    # parametric on its own.
+    # `Struct.method`); a generic struct's TYPE entry *and* all its METHOD
+    # entries are skipped together — the parser drops `[T]`, so `collect_exports`
+    # cannot tell they are parametric on its own.
     return [e for e in collect_exports(_parsed, module_prefix, known_structs)
-            if e['name'].split('.', 1)[0] not in skip
-            and e['name'].split('.', 1)[0] not in _CLIB_SYMS]
+            if e['name'].split('.', 1)[0] not in excluded]
 
 
 def _cstr(s: str) -> str:

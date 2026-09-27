@@ -79,7 +79,7 @@ build, so these were isolated):
 
 - `set(<generator expression>)` — **works**: `set(filt([1, 2]))` → `2`. So the `set(...)` half of Shape 6 was indeed already fixed upstream.
 - A 4-tuple `yield filename, relfile, check, solo` — **works**: unpacks per slot correctly. So the tuple-yield half of Shape 6 is fixed too.
-- One residue there, and it is NOT this file's: a `bool` in a tuple-yield slot reads back as `1`/`0`, not `True`/`False` (`x True False` → `x 1 0`). Tracked in `CODEGEN_generator_value_slot_loses_bool.md`. `fsutil`'s `check` is a bool, so it would hit this — but only after the kw-only blocker is cleared.
+- One residue there, and it is NOT this file's: a `bool` in a tuple-yield slot read back as `1`/`0`, not `True`/`False` (`x True False` → `x 1 0`). That was `CODEGEN_generator_value_slot_loses_bool.md`; it was **fixed 2026-09-27** (the generator value-slot KIND lattice gained a `'b'`/`_Bool` entry, so a bool-yielding generator's scalar and tuple slots are `_Bool` and `print` renders `True`/`False`), so this residue is gone. `fsutil`'s `check` is a bool, so it would have hit it — but only after the kw-only blocker is cleared anyway.
 
 ### Not attempted
 

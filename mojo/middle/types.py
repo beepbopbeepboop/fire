@@ -259,6 +259,40 @@ _SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int
 _CONTAINER_KIND_TYPES = frozenset({'MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *'})
 _EMPTY_CONTAINER_CTOR = {'MojoDict *': 'mojo_dict_new ()', 'MojoList *': 'mojo_list_new ()', 'MojoSet *': 'mojo_set_new ()'}
 
+def _seedable_local_ctype(t) -> bool:
+    """True when `_infer_local_var_types`' answer for a local is real
+    EVIDENCE and may therefore be seeded into `var_types` so a
+    `return <local>` (and the local's own uses) stop falling to the
+    int64_t default.
+
+    The rule is "any POINTER-shaped answer", which is the one class that
+    cannot BE the no-evidence default: `_quick_type` returns the bare
+    `int64_t` default — never a pointer — for everything it cannot resolve,
+    so a `*`-suffixed ctype is a resolved struct field, container, builtin
+    result or `char *`. This generalises what the three call sites had each
+    written out separately as a literal `== 'MojoBytes *'` (two in
+    `module_gen`'s Pass 2b / `_struct_method_signatures`, one in
+    `emit_funcs._gen_struct_method`), which was the COMPILE_FAIL_zipfile
+    bytes-accumulator case and nothing else: the same `t = self.<field>;
+    return t` shape with a `char *` or `MojoList *` field lost the type
+    identically and silently, printing the pointer as a decimal address.
+
+    Deliberately still excludes every SCALAR answer, including `double` and
+    `_Bool`. Those are where `_infer_local_var_types` is most likely reading
+    a genuinely ambiguous name (a parameter, an opaque receiver, a builtin
+    whose result type is only a guess), and a wrong scalar declaration
+    silently changes arithmetic — whereas a wrong pointer declaration was
+    already the status quo for everything but bytes, so this widens nothing
+    that was previously correct.
+
+    Lives here — the shared C-type-shape module both `module_gen` and
+    `emit_funcs` already import — because the two of them both need it and
+    `module_gen` imports `emit_funcs` (either of those as a home would be a
+    circular import)."""
+    _ts = _as_str(t)
+    return bool(_ts) and _ts.endswith(' *')
+
+
 def container_kind(ctype: str) -> str | None:
     """DESIGN.html R1's canonical predicate: 'dict'/'list'/'set'/'bytes' for
     one of this codegen's container pointer ctypes, else None (not a
@@ -298,8 +332,40 @@ def reify_empty_container_literal(gen, value_type: str, declared_type: str, valu
     if getattr(value_node, 'elements', None) or getattr(value_node, 'pairs', None):
         return None
     return gen._new_val(declared_type, _EMPTY_CONTAINER_CTOR[declared_type])
-_RUNTIME_FUNCS: dict[str, str] = {'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_contains_bytes': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_setdefault_int': 'int64_t', 'mojo_dict_setdefault_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_set_bytes_int': 'void', 'mojo_dict_set_bytes_str': 'void', 'mojo_dict_set_bytes_double': 'void', 'mojo_dict_get_bytes_int': 'int64_t', 'mojo_dict_get_bytes_str': 'char *', 'mojo_dict_get_bytes_double': 'double', 'mojo_dict_contains_bytes': 'int', 'mojo_dict_setdefault_bytes_int': 'int64_t', 'mojo_dict_pop_bytes_int': 'int64_t', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_add_bytes': 'void', 'mojo_set_contains_bytes': 'int', 'mojo_set_val_bytes': 'MojoBytes *', 'mojo_set_iter_pos': 'int64_t', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_cstr_slice': 'char *', 'mojo_cstr_region_eq': 'int', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double', 'mojo_bytes_new_lit': 'MojoBytes *', 'mojo_bytes_empty': 'MojoBytes *', 'mojo_bytes_zeros': 'MojoBytes *', 'mojo_bytes_from_list': 'MojoBytes *', 'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *', 'mojo_bytes_len': 'int64_t', 'mojo_bytes_get': 'int64_t', 'mojo_bytes_eq': 'int', 'mojo_bytes_truthy': 'int', 'mojo_bytes_repr': 'char *', 'mojo_bytes_concat': 'MojoBytes *', 'mojo_bytes_repeat': 'MojoBytes *', 'mojo_bytes_slice': 'MojoBytes *', 'mojo_bytes_contains': 'int', 'mojo_bytes_find': 'int64_t', 'mojo_bytes_rfind': 'int64_t', 'mojo_bytes_find_from': 'int64_t', 'mojo_bytes_rfind_from': 'int64_t', 'mojo_bytes_index_int': 'int64_t', 'mojo_bytes_rindex_int': 'int64_t', 'mojo_bytes_count_int': 'int64_t', 'mojo_bytes_count': 'int64_t', 'mojo_bytes_count_from': 'int64_t', 'mojo_bytes_startswith': 'int', 'mojo_bytes_endswith': 'int', 'mojo_bytes_decode': 'char *', 'mojo_bytes_hex': 'char *', 'mojo_bytes_removeprefix': 'MojoBytes *', 'mojo_bytes_removesuffix': 'MojoBytes *', 'mojo_bytes_title': 'MojoBytes *', 'mojo_bytes_capitalize': 'MojoBytes *', 'mojo_bytes_swapcase': 'MojoBytes *', 'mojo_bytes_ljust': 'MojoBytes *', 'mojo_bytes_rjust': 'MojoBytes *', 'mojo_bytes_center': 'MojoBytes *', 'mojo_bytes_zfill': 'MojoBytes *', 'mojo_bytes_partition': 'MojoList *', 'mojo_bytes_rpartition': 'MojoList *', 'mojo_bytes_fromhex': 'MojoBytes *', 'mojo_bytes_cstr_key': 'char *', 'mojo_bytes_maketrans': 'MojoBytes *', 'mojo_bytes_translate': 'MojoBytes *', 'mojo_bytes_is': 'int', 'mojo_bytes_replace': 'MojoBytes *', 'mojo_bytes_replace_n': 'MojoBytes *', 'mojo_bytes_strip': 'MojoBytes *', 'mojo_bytes_upper': 'MojoBytes *', 'mojo_bytes_lower': 'MojoBytes *', 'mojo_bytes_split': 'MojoList *', 'mojo_bytes_rsplit': 'MojoList *', 'mojo_bytes_split_max': 'MojoList *', 'mojo_bytes_splitlines': 'MojoList *', 'mojo_bytes_splitlines_keep': 'MojoList *', 'mojo_bytes_join': 'MojoBytes *', 'mojo_bytes_copy': 'MojoBytes *', 'mojo_bytearray_new': 'MojoBytes *', 'mojo_bytearray_copy': 'MojoBytes *', 'mojo_bytearray_pop': 'int64_t', 'mojo_bytearray_insert': 'void', 'mojo_bytearray_remove': 'void', 'mojo_memoryview_new': 'MojoMemoryView *', 'mojo_memoryview_from_bytes': 'MojoMemoryView *', 'mojo_memoryview_len': 'int64_t', 'mojo_memoryview_get': 'int64_t', 'mojo_memoryview_slice': 'MojoMemoryView *', 'mojo_memoryview_tobytes': 'MojoBytes *', 'mojo_memoryview_eq': 'int', 'mojo_memoryview_hex': 'char *', 'mojo_memoryview_cast': 'MojoMemoryView *', 'mojo_memoryview_repr': 'char *', 'mojo_memoryview_nbytes': 'int64_t', 'mojo_memoryview_itemsize': 'int64_t', 'mojo_memoryview_format': 'char *', 'mojo_memoryview_obj': 'MojoBytes *', 'mojo_struct_compile': 'MojoStructFmt *', 'mojo_struct_new': 'MojoStructFmt *', 'mojo_struct_calcsize': 'int64_t', 'mojo_struct_size': 'int64_t', 'mojo_struct_format': 'char *', 'mojo_struct_pack_list': 'MojoBytes *', 'mojo_struct_pack_h': 'MojoBytes *', 'mojo_struct_unpack': 'MojoList *', 'mojo_struct_unpack_from': 'MojoList *', 'mojo_struct_unpack_h': 'MojoList *', 'mojo_struct_unpack_from_h': 'MojoList *', 'input': 'char *', 'string_lower': 'char *', 'string_strip': 'char *', 'string_upper': 'char *', 'compile_to_gimple': 'char *', 'py_tokenize': 'MojoList *', 'Parser': 'Parser *', 'Interpreter': 'Interpreter *'}
+_RUNTIME_FUNCS: dict[str, str] = {'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_contains_bytes': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_setdefault_int': 'int64_t', 'mojo_dict_setdefault_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_set_bytes_int': 'void', 'mojo_dict_set_bytes_str': 'void', 'mojo_dict_set_bytes_double': 'void', 'mojo_dict_get_bytes_int': 'int64_t', 'mojo_dict_get_bytes_str': 'char *', 'mojo_dict_get_bytes_double': 'double', 'mojo_dict_contains_bytes': 'int', 'mojo_dict_setdefault_bytes_int': 'int64_t', 'mojo_dict_pop_bytes_int': 'int64_t', 'mojo_dict_pop_bytes_str': 'char *', 'mojo_dict_pop_bytes_double': 'double', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_add_bytes': 'void', 'mojo_set_contains_bytes': 'int', 'mojo_set_val_bytes': 'MojoBytes *', 'mojo_set_iter_pos': 'int64_t', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_cstr_slice': 'char *', 'mojo_cstr_region_eq': 'int', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double', 'mojo_bytes_new_lit': 'MojoBytes *', 'mojo_bytes_empty': 'MojoBytes *', 'mojo_bytes_zeros': 'MojoBytes *', 'mojo_bytes_from_list': 'MojoBytes *', 'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *', 'mojo_bytes_len': 'int64_t', 'mojo_bytes_get': 'int64_t', 'mojo_bytes_eq': 'int', 'mojo_bytes_truthy': 'int', 'mojo_bytes_repr': 'char *', 'mojo_bytes_concat': 'MojoBytes *', 'mojo_bytes_repeat': 'MojoBytes *', 'mojo_bytes_slice': 'MojoBytes *', 'mojo_bytes_contains': 'int', 'mojo_bytes_find': 'int64_t', 'mojo_bytes_rfind': 'int64_t', 'mojo_bytes_find_from': 'int64_t', 'mojo_bytes_rfind_from': 'int64_t', 'mojo_bytes_index_int': 'int64_t', 'mojo_bytes_rindex_int': 'int64_t', 'mojo_bytes_count_int': 'int64_t', 'mojo_bytes_count': 'int64_t', 'mojo_bytes_count_from': 'int64_t', 'mojo_bytes_startswith': 'int', 'mojo_bytes_endswith': 'int', 'mojo_bytes_decode': 'char *', 'mojo_bytes_hex': 'char *', 'mojo_bytes_removeprefix': 'MojoBytes *', 'mojo_bytes_removesuffix': 'MojoBytes *', 'mojo_bytes_title': 'MojoBytes *', 'mojo_bytes_capitalize': 'MojoBytes *', 'mojo_bytes_swapcase': 'MojoBytes *', 'mojo_bytes_ljust': 'MojoBytes *', 'mojo_bytes_rjust': 'MojoBytes *', 'mojo_bytes_center': 'MojoBytes *', 'mojo_bytes_zfill': 'MojoBytes *', 'mojo_bytes_fill_byte': 'int', 'mojo_bytes_partition': 'MojoList *', 'mojo_bytes_rpartition': 'MojoList *', 'mojo_bytes_fromhex': 'MojoBytes *', 'mojo_bytes_cstr_key': 'char *', 'mojo_bytes_maketrans': 'MojoBytes *', 'mojo_bytes_translate': 'MojoBytes *', 'mojo_bytes_is': 'int', 'mojo_bytes_replace': 'MojoBytes *', 'mojo_bytes_replace_n': 'MojoBytes *', 'mojo_bytes_strip': 'MojoBytes *', 'mojo_bytes_upper': 'MojoBytes *', 'mojo_bytes_lower': 'MojoBytes *', 'mojo_bytes_split': 'MojoList *', 'mojo_bytes_rsplit': 'MojoList *', 'mojo_bytes_split_max': 'MojoList *', 'mojo_bytes_splitlines': 'MojoList *', 'mojo_bytes_splitlines_keep': 'MojoList *', 'mojo_bytes_join': 'MojoBytes *', 'mojo_bytes_copy': 'MojoBytes *', 'mojo_bytearray_new': 'MojoBytes *', 'mojo_bytearray_copy': 'MojoBytes *', 'mojo_bytearray_mark': 'MojoBytes *', 'mojo_bytearray_pop': 'int64_t', 'mojo_bytearray_insert': 'void', 'mojo_bytearray_remove': 'void', 'mojo_memoryview_new': 'MojoMemoryView *', 'mojo_memoryview_from_bytes': 'MojoMemoryView *', 'mojo_memoryview_len': 'int64_t', 'mojo_memoryview_get': 'int64_t', 'mojo_memoryview_slice': 'MojoMemoryView *', 'mojo_memoryview_tobytes': 'MojoBytes *', 'mojo_memoryview_eq': 'int', 'mojo_memoryview_hex': 'char *', 'mojo_memoryview_cast': 'MojoMemoryView *', 'mojo_memoryview_repr': 'char *', 'mojo_memoryview_nbytes': 'int64_t', 'mojo_memoryview_itemsize': 'int64_t', 'mojo_memoryview_format': 'char *', 'mojo_memoryview_obj': 'MojoBytes *', 'mojo_memoryview_readonly': 'int', 'mojo_struct_compile': 'MojoStructFmt *', 'mojo_struct_new': 'MojoStructFmt *', 'mojo_struct_calcsize': 'int64_t', 'mojo_struct_size': 'int64_t', 'mojo_struct_format': 'char *', 'mojo_struct_pack_list': 'MojoBytes *', 'mojo_struct_pack_h': 'MojoBytes *', 'mojo_struct_unpack': 'MojoList *', 'mojo_struct_unpack_from': 'MojoList *', 'mojo_struct_unpack_h': 'MojoList *', 'mojo_struct_unpack_from_h': 'MojoList *', 'input': 'char *', 'string_lower': 'char *', 'string_strip': 'char *', 'string_upper': 'char *', 'compile_to_gimple': 'char *', 'py_tokenize': 'MojoList *', 'Parser': 'Parser *', 'Interpreter': 'Interpreter *'}
 _FLOAT_TYPES = {'double', 'float', '__fp16'}
+# The `struct` module's module-level function surface, mapped to the C type
+# each call's VALUE has. This is the SINGLE source of that answer, consulted by
+# BOTH the authoritative lowering (`_lower_struct_module_call` in
+# mojo/backend_gimple/emit_methods.py, which gates on these keys and returns
+# these values) and the side-effect-free type ESTIMATOR (`_quick_type` in
+# mojo/middle/resolve_shared.py, which writes the C prototype via
+# `_collect_return_types`/`_infer_return_type`).
+#
+# The two MUST agree, and the reason is a value-identity bug, not a tidiness
+# one: the estimator runs FIRST and its answer becomes the declared return
+# type, so the body is then obliged to CONVERT its real value to whatever the
+# prototype says. With no row consulted by the estimator, a function whose only
+# `return` is `struct.Struct("<HH")` was declared `int64_t`, its body boxed the
+# real `MojoStructFmt *` through `void *` to satisfy that prototype, and every
+# consumer of the returned handle — including the `s.size` attribute read that
+# emit_exprs.py routes to `mojo_struct_size` — degraded to
+# `_mojo_dispatch_getattr` on an untyped value and raised AttributeError. A
+# table only the lowering consulted would reopen exactly that hole the next
+# time a function returns one of these calls.
+#
+# `calcsize` is listed even though `int64_t` is also the estimator's fallback:
+# it is the lowering's real answer, and keeping it here is what lets the two
+# sides be checked for agreement by construction rather than by coincidence.
+_STRUCT_MODULE_FN_RETVALS = {
+    'Struct': 'MojoStructFmt *',
+    'calcsize': 'int64_t',
+    'pack': 'MojoBytes *',
+    'unpack': 'MojoList *',
+    'unpack_from': 'MojoList *',
+    'iter_unpack': 'MojoList *',
+    'pack_into': 'int',
+}
 _SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
