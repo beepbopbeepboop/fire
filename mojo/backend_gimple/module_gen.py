@@ -52,7 +52,7 @@ from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _SELFHOST_MODGLOBAL_CACHE, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
     _collect_import_modules, _collect_import_modules_rec, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
-    _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime,
+    _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_container_ctype, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime,
     _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
@@ -778,6 +778,26 @@ def _is_dispatch_name(_n) -> bool:
     _ns = _as_str(_n)
     for _dn in _DISPATCH_TABLE_NAMES:
         if _ns == _dn:
+            return True
+    return False
+
+
+# The container C types a constructor argument is allowed to resolve a
+# struct field to. A field is pinned to exactly ONE ctype
+# (`struct_field_types[struct][field]`), which is why the constructor-argument
+# observation passes below must be conservative in a way the free-function
+# parameter pass (`_infer_param_types`, which types a parameter per use site
+# and is free to widen) is not: an answer here is acted on only when it is
+# unanimous across every call site, and "no evidence" always beats a guess.
+# Kept as a tuple + explicit `==` chain (not a `in <set literal>` test) for
+# the same self-hosted reason `_DISPATCH_TABLE_NAMES` above documents.
+_CTOR_CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
+
+
+def _gmi_is_ctor_container_ctype(t) -> bool:
+    _ts = _as_str(t)
+    for _ct in _CTOR_CONTAINER_CTYPES:
+        if _ts == _ct:
             return True
     return False
 
@@ -2308,6 +2328,14 @@ def gen_module_impl(self, stmts):
         self._bytes_subclass_payload_argidx[_bsc_name] = _bsc_idx
 
     self._ctor_lit_param_types: dict[str, dict[str, str]] = {}
+    # Raw container-literal evidence from the pass above, kept for the
+    # `_arg_scalar_type`-based observer to VETO on (a field holds exactly one
+    # ctype, so a slot seen as a list by one observer and a string by the
+    # other is a conflict, not a preference). Declared here rather than
+    # created inside that pass so the veto is always defined, including when
+    # no struct has an `__init__` at all.
+    self._ctor_container_lit_obs: dict = {}
+    self._ctor_container_lit_conflict: dict = {}
     _ctor_init_params = {}
     _ctor_init_methods = {}
     for _s in all_struct_defs:
@@ -2354,6 +2382,25 @@ def gen_module_impl(self, stmts):
         # `dict[str, bool]`, the shape this codebase compiles reliably.
         _obs_kind: dict = {}
         _obs_conflict: dict = {}
+        # The RAW, pre-unanimity container evidence, kept so the LATER
+        # `_arg_scalar_type`-based observer (the method-body / free-body
+        # scan, `_ctor_scalar_obs` further down) cannot resolve a slot this
+        # one saw as a container. The two observers are separate because
+        # they see different things -- this one only syntactic literals, the
+        # other anything `_arg_scalar_type` can type -- and a field holds
+        # exactly ONE ctype, so `Thing([1, 2])` beside `Thing("s")` is a
+        # conflict exactly as `Thing("s")` beside `Thing(3.5)` already is.
+        # Without this the scalar channel saw only its own half of the
+        # evidence, found it unanimous, and typed the field `char *` -- a
+        # silent wrong answer where the documented rule is "not unanimous →
+        # leave unresolved". Consulted as a VETO only, never as a source:
+        # the container answer itself still has to travel through
+        # `_ctor_lit_param_types` (the channel that provably reaches the
+        # field type in the module that owns the struct).
+        # Aliased, not copied: these are the SAME dicts the later
+        # `_arg_scalar_type` observer reads as its veto (see their comment).
+        _obs_container = self._ctor_container_lit_obs
+        _obs_container_conflict = self._ctor_container_lit_conflict
         _ctor_calls: list = []
         self._calls_in_stmts(stmts, _ctor_calls)
         if self.do_imports or self.link_imports:
@@ -2373,9 +2420,28 @@ def gen_module_impl(self, stmts):
                     _lit_ct = 'char *'
                 elif isinstance(_a, FloatLiteral):
                     _lit_ct = 'double'
+                else:
+                    # A container LITERAL argument is a PROOF, exactly like a
+                    # string/float literal is: `[1, 2, 3]` passed to
+                    # `__init__(self, items)` makes the field a `MojoList *`,
+                    # not the `int64_t` default this observation used to leave
+                    # it -- a field the compiler then happily iterated as a
+                    # raw integer (SIGSEGV). Same rule, same unanimity
+                    # bookkeeping, same annotation/default respect below; the
+                    # only thing this adds is a third answer to "what C type is
+                    # this argument", drawn from the one shared classifier
+                    # `_gmi_collect_self_assigns` already uses for the direct
+                    # `self.<f> = [1, 2, 3]` spelling of the same assignment.
+                    _lit_ct = _gmi_container_ctype(_a) or ''
                 if not _lit_ct:
                     continue
                 _okey = _cs_cname + '::' + _pnames[_i]
+                if _gmi_is_ctor_container_ctype(_lit_ct):
+                    _cprev = _obs_container.get(_okey, '')
+                    if not _cprev:
+                        _obs_container[_okey] = _lit_ct
+                    elif _cprev != _lit_ct:
+                        _obs_container_conflict[_okey] = True
                 _prev = _obs_kind.get(_okey, '')
                 if not _prev:
                     _obs_kind[_okey] = _lit_ct
@@ -2391,9 +2457,10 @@ def gen_module_impl(self, stmts):
             for _pname in _ctor_init_params[_cs_name2]:
                 _okey2 = _cs_name2 + '::' + _pname
                 _kind = _obs_kind.get(_okey2, '')
-                if _kind != 'char *' and _kind != 'double':
+                if _kind != 'char *' and _kind != 'double' \
+                        and _kind not in _CTOR_CONTAINER_CTYPES:
                     continue                    # none, or not unanimous
-                if _obs_conflict.get(_okey2):
+                if _obs_conflict.get(_okey2) or _obs_container_conflict.get(_okey2):
                     continue                    # mixed char*/double evidence
                 if _ann.get(_pname) is not None:
                     continue                    # respect explicit annotation
@@ -3481,15 +3548,15 @@ def gen_module_impl(self, stmts):
                                 self.var_types[pname] = f"{s.name} *"
                             else:
                                 self.var_types[pname] = self._resolve_type(ptype)
-                        # Seed inferred LOCAL var types (see the matching
-                        # comment at the _struct_method_signatures pass
-                        # below): `return <local>` where the local holds
-                        # a pointer value (bytes accumulator, sliced
-                        # field, ...) must not fall to the int64_t
-                        # default. COMPILE_FAIL_zipfile___init__.md.
+                        # Seed inferred LOCAL var types (see
+                        # `gimple_ctypes._seedable_local_ctype` for the rule
+                        # and for why the three call sites share it):
+                        # `return <local>` where the local holds a pointer
+                        # value must not fall to the int64_t default.
+                        # COMPILE_FAIL_zipfile___init__.md.
                         try:
                             for _vn, _vt in self._infer_local_var_types(m).items():
-                                if _vt == 'MojoBytes *':
+                                if gimple_ctypes._seedable_local_ctype(_vt):
                                     self.var_types.setdefault(_vn, _vt)
                         except Exception:
                             pass
@@ -3614,15 +3681,18 @@ def gen_module_impl(self, stmts):
                     for _pn, _pt in real_params:
                         self.var_types[_pn] = self._resolve_type(_pt)
                     # Seed inferred LOCAL variable types too, so a
-                    # `return <local>` whose local holds a non-int64_t
-                    # value (e.g. `out = self._buf[a:]; out += chunk;
-                    # return out` -> MojoBytes *) picks the right C
-                    # return type instead of the int64_t default — a
-                    # wrong int64_t return then makes every caller treat
-                    # the pointer as a scalar (COMPILE_FAIL_zipfile).
+                    # `return <local>` whose local holds a pointer value
+                    # (`out = self._buf[a:]; out += chunk; return out` ->
+                    # MojoBytes *, or the plain `t = self.<field>; return
+                    # t` -> char *) picks the right C return type instead
+                    # of the int64_t default — a wrong int64_t return then
+                    # makes every caller treat the pointer as a scalar
+                    # (COMPILE_FAIL_zipfile). Same shared rule as the
+                    # Pass-2b site above; see
+                    # `gimple_ctypes._seedable_local_ctype`.
                     try:
                         for _vn, _vt in self._infer_local_var_types(m).items():
-                            if _vt == 'MojoBytes *':
+                            if gimple_ctypes._seedable_local_ctype(_vt):
                                 self.var_types.setdefault(_vn, _vt)
                     except Exception:
                         pass
@@ -3871,6 +3941,99 @@ def gen_module_impl(self, stmts):
                                     caller_struct) == 'char *':
                     if isinstance(a.left, StringLiteral) or isinstance(a.right, StringLiteral):
                         return 'char *'
+            return None
+        return None
+
+    def _arg_struct_ptr_type(caller_name, a):
+        """Observed STRUCT-POINTER C type of one call argument, or None.
+
+        The struct-typed sibling of `_arg_scalar_type`, kept separate rather
+        than folded into it because the two feed DIFFERENT application rules:
+        `_scalar_obs` resolves a param to `char *`/`double` only when that is
+        the unanimous observation, and a struct pointer mixed into the same
+        set would suppress an otherwise-unanimous `char *` — a real behaviour
+        change to a pass that has its own history. This observer's answers
+        only ever reach the struct contract below.
+
+        The case that matters is a struct CONSTRUCTOR passed straight to the
+        call — `use(Box('x'))`, and its cross-module spelling `show(insp.
+        Parameter('v', 7))`. The call site is the only place this codegen ever
+        learns the argument's struct type: a free-function parameter used as a
+        method RECEIVER contributes no field accesses, so
+        `_infer_param_types`' struct-inference branch (which requires
+        `len(fields_accessed) > 0`) never runs for it, and the parameter fell
+        through to a chain of name-based builtin-container heuristics that
+        cannot express "user struct" at all. A user class defining a method
+        named `get`/`items`/`keys` was therefore declared `MojoDict *` and
+        either crashed in a dict runtime helper or — silently, exit 0 — was
+        boxed and printed as a decimal address.
+
+        Deliberately FREE-FUNCTION-only, so there is no `caller_struct` /
+        `self.<field>` arm: the only caller of this is the free-function
+        call-site walk, whose callers have no owning struct, and a `self`
+        field of one of a METHOD's parameters is already resolved by the
+        struct-method contract (Pass 1.3e) that owns that case.
+
+        `IdentExpr` delegates to `_arg_scalar_type` (whose IdentExpr arm
+        already returns the caller's own inferred type verbatim, whatever it
+        is) and keeps only the `<Struct> *` answers. Everything it cannot
+        prove is None — no-evidence, never wrong evidence, matching every
+        sibling pass.
+        """
+        if isinstance(a, gimple_ctypes.IdentExpr):
+            # All FIVE arguments passed explicitly, not just the two this
+            # call needs: a call into a sibling nested closure from inside
+            # another nested closure does not get its DEFAULTS filled in on
+            # the self-hosted path (`too few arguments to function
+            # 'gen_module_impl__arg_scalar_type'; expected 6, have 3`), and
+            # the one existing in-closure recursion in this file already
+            # forwards all of them for the same reason.
+            st = _arg_scalar_type(caller_name, a, False, False, None)
+            if not (isinstance(st, str) and st.endswith(' *')):
+                return None
+            if st[:-2] in self.struct_field_types:
+                return st
+            return None
+        if isinstance(a, gimple_ctypes.MemberExpr):
+            # `<local>.<field>` whose local is a known `<Struct> *` — the
+            # shape a receiver forwards most often. Same resolution
+            # `_arg_scalar_type`'s MemberExpr arm does, minus its
+            # `char *`/`double` whitelist.
+            _obj = a.obj
+            if not isinstance(_obj, gimple_ctypes.IdentExpr):
+                return None
+            _ot = self._inferred_var_types.get(_as_str(caller_name), {}).get(
+                _as_str(_obj.name))
+            if not (isinstance(_ot, str) and _ot.endswith(' *')):
+                return None
+            _ft = self.struct_field_types.get(_ot[:-2], {}).get(_as_str(a.member))
+            if (isinstance(_ft, str) and _ft.endswith(' *')
+                    and _ft[:-2] in self.struct_field_types):
+                return _ft
+            return None
+        if isinstance(a, gimple_ctypes.CallExpr):
+            # `Box('x')` / `insp.Parameter('v', 7)`. `_as_str` on the callee
+            # name for the same reason the IdentExpr arm needs it: an untyped
+            # AST field read is an int64_t box, and a boxed pointer never
+            # matches a string dict key. The `.name`/`.member` reads are
+            # direct, matching `_collect_method_scalar_obs`'s own receiver
+            # read below, which is the same shape.
+            _cname = None
+            if isinstance(a.func, gimple_ctypes.IdentExpr):
+                _cname = _as_str(a.func.name)
+            elif isinstance(a.func, gimple_ctypes.MemberExpr):
+                _cname = _as_str(a.func.member)
+            if (_cname is not None
+                    and _cname in self.struct_field_types
+                    # The scalar newtypes (Int, UInt8, Bool, ...) ARE real
+                    # `struct X(...)` definitions in the stdlib and so can
+                    # appear in struct_field_types, but the codegen erases
+                    # them to raw C scalars everywhere via _TYPE_MAP; that
+                    # convention must win or `Int64(n)` would be observed as a
+                    # boxed struct. Same exclusion `_resolve_type` and
+                    # `_quick_type`'s `_SCALAR_CTORS` row apply.
+                    and _cname not in gimple_ctypes._TYPE_MAP):
+                return f'{_cname} *'
             return None
         return None
 
@@ -4225,6 +4388,10 @@ def gen_module_impl(self, stmts):
         if isinstance(_fbn_s, FunctionDef):
             _fn_by_name[_as_str(_fbn_s.name)] = _fbn_s
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
+    # Struct-pointer observations, collected in their own map (see
+    # `_arg_struct_ptr_type`'s docstring for why they must not share
+    # `_scalar_obs`' set) and applied by the struct contract below.
+    _struct_obs: dict[str, dict[str, set]] = {}
 
     for caller_name, body in _caller_bodies:
         elem, nested, _ = self._scan_container_elems(body)
@@ -4258,6 +4425,13 @@ def gen_module_impl(self, stmts):
                     _so_inner = _scalar_obs.setdefault(callee, {})
                     _so_set = _so_inner.setdefault(pnames[i], set())
                     _so_set.add(_gmi_as_str(st))
+                spt = _arg_struct_ptr_type(caller_name, a)
+                if spt:
+                    # Same "split the chained setdefault so the intermediate
+                    # result has a static type" reason as the block above.
+                    _sp_inner = _struct_obs.setdefault(callee, {})
+                    _sp_set = _sp_inner.setdefault(pnames[i], set())
+                    _sp_set.add(_gmi_as_str(spt))
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
@@ -4324,6 +4498,90 @@ def gen_module_impl(self, stmts):
             if cur in (None, 'int', 'int64_t'):
                 resolved_type = 'double' if _has_dbl else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
+
+    # Pass 1.3d-struct: the same unanimity-over-call-sites contract as the
+    # loop above, for a REGISTERED STRUCT pointer.
+    #
+    # The override policy is deliberately WIDER than the scalar loop's, and
+    # that is the whole point: the types it replaces are not inferences, they
+    # are the name-based builtin-container FALLBACKS. `_infer_param_types` has
+    # no way to express "this receiver is a user struct", so a parameter used
+    # as a method receiver — which contributes no field accesses, so the
+    # struct-inference branch requiring `len(fields_accessed) > 0` never even
+    # runs — was decided purely by the method's NAME: `get`/`items`/`keys` ->
+    # `MojoDict *`, `hex`/`decode` -> `MojoBytes *`, `find`/... -> `char *` or
+    # nothing, everything else -> the `int64_t` default. A user class may
+    # define a method with any of those names, and when it does the callee's
+    # receiver reached a dict/bytes runtime helper (SIGBUS/SIGSEGV) or, worse,
+    # was boxed and passed straight through (`4328331776` — the `Box *`
+    # printed as a decimal, exit 0).
+    #
+    # So the entries that may be replaced are exactly the no-evidence ones.
+    # A param `_infer_param_types` resolved to anything else — a real struct
+    # from the field match, `char *` from a subscription or a `char`-compare,
+    # a container from iteration — was decided on evidence this pass does not
+    # have, and unanimity over call sites is not grounds to overturn it.
+    #
+    # And the refinement is scoped to parameters that are actually used as a
+    # METHOD RECEIVER (`p.<m>(...)`), because that is the shape whose only
+    # other possible typing is a name-based guess. Widening it to every
+    # unanimous struct argument retypes dynamic-attribute receivers too:
+    # `def get_or_init(cls): cls.__slot_names__` called as
+    # `get_or_init(Holder())` is a DYNAMIC attribute read whose whole point
+    # is that it must stay opaque until an AttributeError says otherwise, and
+    # typing it `Holder *` turned `_mojo_dispatch_getattr` into a direct
+    # `->__slot_names__` field read on a struct with no such field — a hard
+    # GCC "'Holder' has no member named '__slot_names__'" failure
+    # (test_gimple_runner.py's
+    # `gimple_dynamic_attribute_real_storage_and_attributeerror`). A method
+    # call, by contrast, has exactly one lowering — the struct's own mangled
+    # method — so there is nothing for the name-based fallback to get right.
+    _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
+                         'MojoStr *', 'char *', 'int', 'int64_t')
+    for callee in sorted(_struct_obs):
+        pmap = _struct_obs[callee]
+        fn = _fn_by_name.get(callee)
+        if not fn:
+            continue
+        ann: dict = {}
+        for _an_pn, _an_pt in (fn.params or []):
+            ann[_as_str(_an_pn)] = _an_pt
+        # Direct receiver only — NOT rooted at a subscript/slice of the param,
+        # which is a container (`p[0].m()`) and not this param at all.
+        receiver_params: set = set()
+        _rcalls: list = []
+        self._calls_in_stmts(fn.body, _rcalls)
+        for _rc in _rcalls:
+            if not isinstance(_rc.func, MemberExpr):
+                continue
+            if isinstance(_rc.func.obj, IdentExpr):
+                receiver_params.add(_as_str(_rc.func.obj.name))
+        for pname in sorted(pmap):
+            if pname not in receiver_params:
+                continue
+            types = pmap[pname]
+            # Not unanimous -> the parameter is genuinely polymorphic here and
+            # nothing about it is provable; same refusal the scalar loop makes.
+            if len(types) != 1:
+                continue
+            # `sorted(...)` + index, NOT `next(iter(...))`: iterating a
+            # str-SET lowers to mojo_set_iter_val_int (0 for every string
+            # slot) on the self-hosted path, exactly as the struct-evidence
+            # list in `_infer_param_types` documents. It sorts string CONTENT.
+            _sole = sorted(types)
+            if len(_sole) != 1:
+                continue
+            _st = _gmi_as_str(_sole[0])
+            if not _st.endswith(' *'):
+                continue
+            if _st[:-2] not in self.struct_field_types:
+                continue
+            if ann.get(pname) is not None:
+                continue                         # respect explicit annotation
+            cur = self._inferred_param_types.get(callee, {}).get(pname)
+            if cur is not None and cur not in _STRUCT_FALLBACKS:
+                continue
+            self._inferred_param_types.setdefault(callee, {})[pname] = _st
 
     # Coroutine-bound functions (generators/async defs about to go down the
     # C++20-coroutine pre-pass) never get an ordinary gen_func compile, so
@@ -4431,6 +4689,19 @@ def gen_module_impl(self, stmts):
         _init_defaults = getattr(_init, 'param_defaults', {}) or {}
         for pname in _ctor_init_params[_csn]:
             _skey2 = _csn + '::' + pname
+            # VETO: this observer only ever produces `char *` / `double`
+            # / a `<Struct> *`, so it cannot see the container-literal
+            # evidence the pass above collected. Without the veto,
+            # `Thing([1, 2])` beside `Thing("s")` found this observer's own
+            # evidence unanimous and typed the field `char *` — a silent
+            # wrong answer where the documented rule is "not unanimous →
+            # leave unresolved, the int64_t default". Veto-only by
+            # construction: it can refuse a slot, never resolve one, so it
+            # cannot widen what this pass already accepted.
+            _lit_ct_obs = self._ctor_container_lit_obs.get(_skey2, '')
+            if self._ctor_container_lit_conflict.get(_skey2) or (
+                    _lit_ct_obs and _lit_ct_obs != _ctor_scalar_obs.get(_skey2, '')):
+                continue
             _st2 = _ctor_scalar_obs.get(_skey2, '')
             # FLAT dicts + string comparison, NOT `types not in ({'double'},
             # {'char *'})` over a nested `dict[str, dict[str, set]]`: the
@@ -4441,11 +4712,11 @@ def gen_module_impl(self, stmts):
                 continue                        # none, or not unanimous
             if _ctor_scalar_conflict.get(_skey2):
                 continue                        # mixed scalar evidence
+            _resolved_type = _st2
             if _ann.get(pname) is not None:
                 continue                        # respect explicit annotation
             if pname in _init_defaults:
                 continue                        # respect default-value inference
-            _resolved_type = _st2
             self._ctor_lit_param_types[_csn + '::' + pname] = _resolved_type
             for node in _walk_ast(_init.body):
                 if not isinstance(node, AssignStmt):

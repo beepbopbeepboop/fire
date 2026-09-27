@@ -269,6 +269,30 @@ def fanout(*a, **kw) -> Fanout:
 test('gimple', [PY, 'test_gimple.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple.py'],
      desc='GIMPLE unit suite (python-interpreted codegen)')
+# Registered 2026-09-26. BOTH of these were in NO bucket — no `make check`,
+# no `make gate` ran a single case in them — for as long as they existed.
+# That is not a theoretical gap: on 2026-09-26 a correct fix sat RED in
+# test_gimple_runner.py for a full pass (`gimple_escaping_capturing_lambda_
+# still_lifted` expected "1" where the landed fix now correctly produces
+# "8", CPython's answer) because nothing executed it, and a whole wave of
+# new regression tests would likewise have gone in and never run. The
+# Makefile's old `check-gimple-runner` was a stray alias nothing referenced.
+#
+# They are the only steps that COMPILE AND RUN the generated binary and
+# compare stdout, which is a different and complementary check from `gimple`
+# (codegen shape) or `runner` (the hand-written corpus): every silent
+# wrong-value bug found in the 2026-09-26 bugs/hard campaign — a heap address
+# where a float belongs, `1` where `True` belongs, a raw IEEE-754 bit pattern
+# where a struct slot belongs — was invisible to C-level assertions and
+# visible only here.
+test('gimple-runner', [PY, 'test_gimple_runner.py'], cache=True,
+     extra=GIMPLE_SOURCES + ['test_gimple_runner.py'],
+     desc='GIMPLE compile-AND-EXECUTE suite: runs the built binaries, '
+          'asserts their stdout (was in no bucket at all)')
+test('gimple-generator-runner', [PY, 'test_gimple_generator_runner.py'],
+     cache=True, extra=GIMPLE_SOURCES + ['test_gimple_generator_runner.py'],
+     desc='GIMPLE compile-AND-EXECUTE suite for generators/async '
+          '(was in no bucket at all)')
 test('runner', [PY, 'test_runner.py'], cache=True,
      extra=['test_runner.py', 'myinterpreter.py', 'fire.py', 'fire_main.py',
             RUNTIME_SRC, RUNTIME_HDR],
@@ -514,8 +538,9 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 # twice, and there is no second copy of any test's name to keep in sync.
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
-              'linkmode', 'no-new-casts'],
+    'check': ['gimple', 'gimple-runner', 'gimple-generator-runner', 'runner',
+              'modcache', 'selfhost', 'runtimediff', 'linkmode',
+              'no-new-casts'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

@@ -1821,7 +1821,21 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
         _loop_ctype, _read = 'char *', 'mojo_set_iter_val_str'
     else:
         _loop_ctype, _read = 'int64_t', 'mojo_set_iter_val_int'
-    gen._declare_var(var, _loop_ctype, force=(var == shadow_name))
+    # `_declare_var` is first-decl-wins (load-bearing for every OTHER
+    # caller: later reads of a name must keep coercing to the type it was
+    # first given), but a loop target is not a read of an existing name —
+    # `for x in <A>` followed by `for x in <B>` REBINDS x, and if A and B
+    # have different element domains the second loop wrote a char* into
+    # the first loop's MojoBytes * target: gcc -fgimple rejects that as
+    # `assignment to 'MojoBytes *' from incompatible pointer type 'char *'`
+    # and the whole program fails to compile. It is not a bytes/set
+    # peculiarity — `for x in {1,2}` then `for x in {'p','q'}` fails the
+    # same way — it is the loop TARGET's type being pinned per function.
+    # force=True mints a fresh C name and repoints `_c_names[var]` at it,
+    # which is also the correct Python reading: after the second loop, x
+    # holds the second loop's last element.
+    _retype = gen.var_types.get(var) not in (None, _loop_ctype)
+    gen._declare_var(var, _loop_ctype, force=(var == shadow_name) or _retype)
     # If it_val is int64_t (boxed pointer), cast to MojoSet * (matches dict path)
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
         it_val = gen._coerce_to_type('int64_t', 'MojoSet *', it_val)

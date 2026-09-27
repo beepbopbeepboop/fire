@@ -5755,13 +5755,21 @@ def root_cas_hash_call(parts) -> str:
 
     def test_conflicting_callsite_yield_kind_refused_not_miscompiled():
         """A generator has ONE fixed C value-slot, so a generator that
-        YIELDS a parameter whose call sites pass provably different kinds
-        has no sound lowering. Both backends used to pick int64_t anyway and
-        silently print a truncated float or a string's ADDRESS. Now both
-        refuse, naming the parameter. See
-        bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md -- that
-        refusal only fires on PROVABLE disagreement; a call site the static
-        scan cannot type is a separate, still-silent case.
+        YIELDS a parameter whose call sites do not all pass the same
+        statically-known kind has no sound lowering. Both backends used to
+        pick int64_t anyway and silently print a truncated float or a
+        string's ADDRESS. Now both refuse, naming the parameter. See
+        bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+
+        That doc's residual -- "the refusal only fires on PROVABLE
+        disagreement; a call site the static scan cannot type is a separate,
+        still-silent case" -- is what `_scan_callsite_param_kinds` used to
+        do by emptying the kind set on a `None`, so the slot was neither
+        resolved nor a conflict and took `_KIND_TO_SLOT_CTYPE[None]`. A hole
+        is now a conflict too, which is why the message names BOTH causes
+        and the expectation below is the one shared string (built by
+        `coro._ambiguous_slot_message`, used by both backends) rather than
+        only the disagreement half.
         """
         global _PASS, _FAIL
         name = "conflicting_callsite_yield_kind_refused_not_miscompiled"
@@ -5775,7 +5783,7 @@ def main():
     for v in g("hi"):
         print(v)
 """
-        expect = "yields ['x'], whose call sites pass conflicting types"
+        expect = "yields ['x'], whose call sites do not all pass the same"
         # The refusal is a module-level compile error on the A3 stack-switch
         # backend, and an _UnsupportedGeneratorShape the C++ backend
         # surfaces the same way — so either way the message must name the
@@ -5920,6 +5928,314 @@ def outer():
     t.wait()
 """,
         "capture box cannot be threaded into a driven consumer")
+
+    # ------------------------------------------------------------------
+    # A container-typed constructor argument. bugs/hard/
+    # CODEGEN_ctor_arg_field_type_scalars_only.md item 1: the call-site
+    # observation pass only ever produced `char *` / `double`, so
+    # `Box([1, 2, 3])` into `__init__(self, items): self.items = items`
+    # left the FIELD `int64_t` -- `len` and `[i]` happened to re-derive the
+    # real type from the literal and print the right answer, but `for x in
+    # b.items` dereferenced the boxed list pointer AS an int64_t and
+    # SIGSEGVed. Assert the field's declared C type, which is the only
+    # thing the fix changes; the program was already exit-0-wrong.
+    # ------------------------------------------------------------------
+    def _ctor_arg_container_field_ctype(src, struct_name, field):
+        """Declared C type of one struct field in generated C, or None."""
+        c = compile_to_gimple(src)
+        start = c.find(f'typedef struct {struct_name} {{')
+        if start < 0:
+            return None, c
+        end = c.find('\n}', start)
+        for line in c[start:end].splitlines():
+            body = line.strip()
+            if not body.endswith(field + ';'):
+                continue
+            return body[:-len(field) - 1].strip(), c
+        return None, c
+
+    def test_ctor_arg_container_literal_field_is_container_typed():
+        """`Box([1, 2, 3])` with an UNANNOTATED `items` parameter must type
+        the field `MojoList *`, exactly as the annotation `items: list`
+        does -- the two spellings of the same assignment, and before the
+        fix only the annotated one produced a container field."""
+        global _PASS, _FAIL
+        name = "ctor_arg_container_literal_field_is_container_typed"
+        tmpl = """\
+class Box:
+    def __init__(self, items{ann}):
+        self.items = items
+
+def main():
+    b = Box([1, 2, 3])
+    for x in b.items:
+        print(x)
+"""
+        for ann, want in (('', 'MojoList *'), (': list', 'MojoList *')):
+            ft, c = _ctor_arg_container_field_ctype(tmpl.format(ann=ann),
+                                                    'Box', 'items')
+            if ft != want:
+                print(f"FAIL  {name}: annotation {ann or '(none)'!r} gave field "
+                      f"{ft!r}, want {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_ctor_arg_dict_and_set_literal_fields_are_container_typed():
+        """The same pass, the other two container literals. Each used to
+        leave the field `int64_t` for the same reason; each is a latent
+        segfault of the identical shape as the list one (a dict field read
+        as an integer, a set field iterated as one)."""
+        global _PASS, _FAIL
+        name = "ctor_arg_dict_and_set_literal_fields_are_container_typed"
+        for lit, want in (("{'a': 1}", 'MojoDict *'), ("{1, 2}", 'MojoSet *')):
+            src = f"""\
+class Box:
+    def __init__(self, v):
+        self.v = v
+
+def main():
+    b = Box({lit})
+    print(b.v)
+"""
+            ft, c = _ctor_arg_container_field_ctype(src, 'Box', 'v')
+            if ft != want:
+                print(f"FAIL  {name}: Box({lit}) gave field {ft!r}, want {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_ctor_arg_mixed_container_and_scalar_stays_int64():
+        """The unanimity rule must still win over the new container case.
+        A slot observed as a list at one call site and a string at another
+        has no single field type, so it must keep the `int64_t` default
+        rather than silently preferring one of the two -- the same
+        documented refusal the scalar channel already made."""
+        global _PASS, _FAIL
+        name = "ctor_arg_mixed_container_and_scalar_stays_int64"
+        src = """\
+class Thing:
+    def __init__(self, v):
+        self.v = v
+
+def main():
+    print(Thing([1, 2]).v)
+    print(Thing("s").v)
+"""
+        ft, c = _ctor_arg_container_field_ctype(src, 'Thing', 'v')
+        if ft != 'int64_t':
+            print(f"FAIL  {name}: mixed list/str call sites gave field {ft!r}, "
+                  f"want the int64_t default")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    # ------------------------------------------------------------------
+    # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md item 2: a field
+    # value round-tripped through a LOCAL lost its type, so
+    # `t = self.v; return t` inferred an `int64_t` return and `print`
+    # rendered the `char *` as a decimal address. The three sites that seed
+    # `_infer_local_var_types`' answer into `var_types` each used to admit
+    # ONLY `MojoBytes *` (the COMPILE_FAIL_zipfile bytes-accumulator case),
+    # so every other pointer-shaped field answer was dropped on the floor.
+    # ------------------------------------------------------------------
+    def test_field_value_through_local_keeps_char_star_return_type():
+        """Both spellings must infer `char *`, and they must agree: the
+        difference between them was purely whether the value passed through
+        a local, which is a two-line change from a working getter."""
+        global _PASS, _FAIL
+        name = "field_value_through_local_keeps_char_star_return_type"
+        for label, body in (
+                ("direct", "        return self.v"),
+                ("via local", "        t = self.v\n        return t"),
+                ("via two locals",
+                 "        t = self\n        u = t.v\n        return u"),
+        ):
+            src = f"""\
+class Holder:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+{body}
+
+def main():
+    print(Holder("hello").get())
+"""
+            c = compile_to_gimple(src)
+            # The DEFINITION, not the forward declaration: the declaration
+            # is emitted from the same registry, but matching on it would
+            # silently pass if only one of the two were ever fixed.
+            start = c.find('__GIMPLE Holder_get (')
+            if start < 0:
+                print(f"FAIL  {name}: {label} getter definition was never "
+                      f"emitted")
+                _FAIL += 1
+                return
+            end = c.find('\n}', start)
+            sig = c[c.rfind('\n', 0, start) + 1:c.find('\n', start)]
+            if 'char *' not in sig:
+                print(f"FAIL  {name}: {label} getter signature is {sig.strip()!r}, "
+                      f"want a char * return")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    # ------------------------------------------------------------------
+    # The generator value slot's KIND lattice (mojo/middle/coro.py) had no
+    # bool, so `yield True` typed the slot
+    # `int64_t`. The stored value was a correct 0/1, so every consistency
+    # check passed and the only symptom was the RENDERED TEXT -- `print`
+    # dispatches on the slot's C type (`emit_infra`'s `_Bool` branch calls
+    # `mojo_repr_bool`), so an `int64_t` slot prints `1`. Its doc
+    # (bugs/hard/CODEGEN_generator_value_slot_loses_bool.md) was DELETED on
+    # fix, per CLAUDE.md's "Bug docs" rule — the two decisions it left open
+    # (mixed bool/int yields, unannotated call-site params) are recorded in
+    # `_generator_value_kind`'s comment and pinned by
+    # `generator_mixed_bool_and_int_yields_widen_to_int` below.
+    # ------------------------------------------------------------------
+    def test_generator_bool_yield_slot_is_bool():
+        """`for b in <bool-yielding gen>(): print(b)` must declare the loop
+        target `_Bool`, not `int64_t`. The C++20 escape-hatch path already
+        did (`_infer_simple_expr_ctype` answers `_Bool` for a BoolLiteral,
+        and `MOJO_CORO=cpp` prints `True`) -- this is the stackswitch
+        lattice catching up, and the two must not disagree."""
+        global _PASS, _FAIL
+        name = "generator_bool_yield_slot_is_bool"
+        c = compile_to_gimple("""\
+def y():
+    yield True
+    yield False
+
+def main():
+    for b in y():
+        print(b)
+""")
+        if 'value_kind=b' not in c:
+            print(f"FAIL  {name}: value slot is not the 'b' kind "
+                  f"(no `value_kind=b` marker in the trampolines)")
+            _FAIL += 1
+            return
+        acc = c.find('__mgco_y_value (MojoGenerator *__g)')
+        if acc < 0:
+            print(f"FAIL  {name}: the value accessor was never emitted")
+            _FAIL += 1
+            return
+        ret = c[c.rfind('\n', 0, acc - 1) + 1:acc].strip()
+        if ret != '_Bool':
+            print(f"FAIL  {name}: value accessor returns {ret!r}, want _Bool")
+            _FAIL += 1
+            return
+        if '_Bool b;' not in c:
+            print(f"FAIL  {name}: the consumer's loop target is not a "
+                  f"`_Bool` local (no `_Bool b;` declaration)")
+            _FAIL += 1
+            return
+        if 'mojo_repr_bool (b)' not in c:
+            print(f"FAIL  {name}: print(b) is not routed through "
+                  f"mojo_repr_bool, so the value still renders as 1/0")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_generator_bool_tuple_slot_is_bool():
+        """A `True` in a TUPLE yield slot came back as `1` for the same
+        reason -- one missing kind in the shared lattice, not two bugs.
+        Assert the per-slot ctype the consumer unpacks with."""
+        global _PASS, _FAIL
+        name = "generator_bool_tuple_slot_is_bool"
+        c = compile_to_gimple("""\
+def tup():
+    yield ("x", True, False)
+
+def main():
+    for a, b, d in tup():
+        print(a, b, d)
+""")
+        if 'mojo_repr_bool (b)' not in c or 'mojo_repr_bool (d)' not in c:
+            print(f"FAIL  {name}: tuple slots are not `_Bool` (print does not "
+                  f"route the bool slots through mojo_repr_bool)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_generator_int_yield_slot_stays_int64():
+        """The control for the two tests above: an int-yielding generator
+        must keep the `int64_t` slot, or `print` would render a genuine
+        integer as `True`/`False`."""
+        global _PASS, _FAIL
+        name = "generator_int_yield_slot_stays_int64"
+        c = compile_to_gimple("""\
+def y():
+    yield 1
+    yield 0
+
+def main():
+    for i in y():
+        print(i)
+""")
+        if 'value_kind=i' not in c:
+            print(f"FAIL  {name}: the int generator's slot kind is not 'i'")
+            _FAIL += 1
+            return
+        acc = c.find('__mgco_y_value (MojoGenerator *__g)')
+        ret = c[c.rfind('\n', 0, acc - 1) + 1:acc].strip()
+        if ret != 'int64_t':
+            print(f"FAIL  {name}: value accessor returns {ret!r}, want int64_t")
+            _FAIL += 1
+            return
+        if 'int64_t i;' not in c:
+            print(f"FAIL  {name}: the consumer's loop target is not an "
+                  f"`int64_t` local")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_generator_mixed_bool_and_int_yields_widen_to_int():
+        """The RECORDED DECISION for mixed bool/int yields, pinned so a
+        later change to it has to be deliberate: `bool` is a subclass of
+        `int`, so `if c: yield True else: yield 1` has no single right
+        answer for one slot and the answer is `i` -- it reproduces CPython's
+        text exactly on the int path, whereas a refusal would disqualify
+        the whole module from the stackswitch path over rendered text
+        alone. Compare the mixed int/STRING case, which DOES refuse,
+        because there one slot kind means one of the two values is read
+        through the wrong accessor (a measured SIGSEGV)."""
+        global _PASS, _FAIL
+        name = "generator_mixed_bool_and_int_yields_widen_to_int"
+        c = compile_to_gimple("""\
+def mixed(c):
+    if c:
+        yield True
+    else:
+        yield 1
+
+def main():
+    for m in mixed(True):
+        print(m)
+""")
+        if 'value_kind=i' not in c:
+            print(f"FAIL  {name}: mixed bool/int yields did not widen to the "
+                  f"'i' kind")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_ctor_arg_container_literal_field_is_container_typed()
+    test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
+    test_ctor_arg_mixed_container_and_scalar_stays_int64()
+    test_field_value_through_local_keeps_char_star_return_type()
+    test_generator_bool_yield_slot_is_bool()
+    test_generator_bool_tuple_slot_is_bool()
+    test_generator_int_yield_slot_stays_int64()
+    test_generator_mixed_bool_and_int_yields_widen_to_int()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

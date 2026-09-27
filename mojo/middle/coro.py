@@ -70,13 +70,27 @@ _OLD_MODE = 'cpp'
 
 ARG_SHIM     = '__mojo_gen_arg'
 SETRET_SHIM  = '__mojo_gen_set_return'
-_KIND_CTYPE  = {'i': 'int64_t', 'p': 'char *', 'd': 'double', 'tuple': 'MojoList *'}
+# The value-slot lattice. 'b' is NOT redundant with 'i': the slot's C type IS
+# the type the consumer's loop target / tuple slot / `next()` result is
+# declared with, and `print` dispatches on it (`emit_infra`'s `_Bool` branch
+# calls `mojo_repr_bool`). A `yield True` therefore has to land in a `_Bool`
+# slot or Python's `True` is rendered `1` -- with a CORRECT 0/1 in a
+# CORRECTLY-typed int64_t, so every consistency check in the pipeline passes
+# and only the printed text is wrong. The C++20 escape-hatch path already
+# had this (`exprtypes._infer_simple_expr_ctype` returns `_Bool` for a
+# `BoolLiteral`, `MOJO_CORO=cpp` prints `True`); this lattice was the
+# divergent copy, so 'b' exists to make the two agree rather than because
+# the ABI needed a fifth channel -- it does not: see `_yield_shim`, a `_Bool`
+# is already a lossless int64_t 0/1 on the wire, exactly like 'i'.
+_KIND_CTYPE  = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
+                'tuple': 'MojoList *'}
 
 
 def _yield_shim(kind: str) -> str:
-    # int/pointer both go through the int64_t yield -- _emit_call coerces a
-    # char*/pointer arg to int64_t via the registered param types. Only a
-    # genuine double needs the bitcast variant.
+    # int/bool/pointer all go through the int64_t yield -- _emit_call coerces
+    # a char*/pointer arg to int64_t via the registered param types, and a
+    # `_Bool` promotes to its own 0/1 losslessly. Only a genuine double needs
+    # the bitcast variant.
     return '__mojo_coro_yield_d' if kind == 'd' else '__mojo_coro_yield_i'
 
 
@@ -146,12 +160,82 @@ _STRING_ANNS = {'String', 'StringLiteral', 'StringSlice', 'str'}
 _INT_ANNS    = {'Int', 'Int64', 'Int32', 'Int16', 'Int8', 'UInt', 'UInt64', 'UInt32',
                 'Bool', 'int', 'bool'}
 
+# Builtins whose instances are SEQUENCES OF INTEGERS by definition, so a
+# `('list', 'i')` env entry for one is a fact about the type rather than an
+# inference about a value -- which is why it is safe where an inference would
+# not be. Consulted by `_static_env`'s initializer branch, so
+# `var b = bytes([10, 20, 30])` types `b` (and therefore a generator
+# parameter it is passed to) as an int list. Without it that argument was an
+# untypable call-site hole, i.e. a refusal under
+# `_scan_callsite_param_kinds`' hole-is-a-conflict rule.
+_BYTE_CONTAINERS = {'bytes', 'bytearray', 'memoryview'}
+
+# `Bool`/`bool` annotations deliberately stay in `_INT_ANNS` above (== 'i')
+# rather than joining the new 'b' kind, and that is the whole of
+# `_ann_kind`'s bool policy — restated here because it is the one place a
+# reader will look for it. An ANNOTATION is not proof of a canonical 0/1 at
+# the point this module consumes the kind: `_outer_boxable_locals` feeds an
+# annotated local's kind into the nested-async capture boxes, whose `i64`
+# cell is documented (`_BOX_SHIMS`) as the one home for int-OR-bool, so
+# reclassifying bool as 'b' there would silently DROP those captures rather
+# than type them. A bool LITERAL is 0/1 by syntax, and that is what earns 'b'
+# in `_literal_kind`/`_yield_kind`. Consequence, stated so it is not
+# rediscovered as a bug: `def g(x: bool): yield x` still types its value
+# slot 'i' and prints 1, exactly as before.
+
+# The comparison operators whose result `_yield_kind` scores as the 'b' kind.
+# `gimple_ctypes._CMP_OPS` minus 'and'/'or' -- see `_yield_kind`'s own comment
+# for why those two are excluded (they yield an operand, not a bool).
+_YIELD_CMP_OPS = gimple_ctypes._CMP_OPS - {'and', 'or'}
+
+# Builtin scalar CONSTRUCTORS -> the kind of value they provably return. One
+# table for both callers: `_argkind` (a call-site argument `g(int(x))` /
+# `g(Bool(x))`) and `_yield_kind` (a yielded `yield int(x)`). They were two
+# answers to the same question and had drifted -- the arg path knew `bool(x)`
+# normalises to a 0/1, the yield path did not, so `g(bool(5))` printed `True`
+# while `def g(x): yield bool(x)` printed `1`.
+#
+# DECISION (unannotated call-site params): `Bool(x)`/`bool(x)` score 'b', the
+# SAME kind the `True` literal scores. They must agree or a generator called
+# both `g(Bool(x))` and `g(True)` would register a spurious call-site CONFLICT
+# (`_CALLSITE_PARAM_CONFLICTS`, and refuse), and one called only with
+# `g(Bool(x))` would resolve its unannotated param to 'i' and print 1. The
+# annotation spelling `x: bool` deliberately does NOT get this -- see
+# `_ann_kind`.
+_NUMERIC_CTORS = {'Float64': 'd', 'Float32': 'd', 'Float': 'd', 'float': 'd',
+                  'Int': 'i', 'Int64': 'i', 'Int32': 'i', 'int': 'i',
+                  'Bool': 'b', 'bool': 'b',
+                  'String': 'p', 'StringSlice': 'p', 'str': 'p'}
+
+
+def _callee_return_kind(expr) -> str | None:
+    """Scalar kind of `expr`'s value when `expr` is a call to a BARE name whose
+    return type this module knows: a builtin scalar CONSTRUCTOR
+    (`float(x)` -> 'd') or a same-module `def` that states one, by annotation
+    (`_FUNC_RET_KIND`, fed by `_scan_func_ret_kinds`).
+
+    One function for the three places that answer this question -- a yielded
+    expression (`_yield_kind`), a call-site ARGUMENT (`_argkind`) and a local's
+    INITIALIZER (`_static_env`) -- because they were three answers that had
+    drifted: the initializer path knew neither, so `var v = compute()` bound
+    `v` to no kind at all, and `g(v)` was then an untypable call site, i.e.
+    (under `_scan_callsite_param_kinds`' hole rule) a refusal over a program
+    whose every kind was in fact knowable. Only a BARE name is matched, so
+    `x.float()` and `self.compute()` are deliberately not answered here.
+    """
+    if not (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)):
+        return None
+    return _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
+
 
 def _ann_kind(ann) -> str | None:
     """Map a (purely syntactic) parameter / field type annotation to a yield
     C kind ('i'/'p'/'d'), or None when the annotation is missing or not a
     recognised scalar. `ann` is normally the annotation *string* carried in
-    FunctionDef.params / VarDecl.type_ann, but tolerate an IdentExpr node."""
+    FunctionDef.params / VarDecl.type_ann, but tolerate an IdentExpr node.
+
+    Deliberately has no `'b'` arm even though `_yield_kind` does — see
+    below."""
     if ann is None:
         return None
     if not isinstance(ann, str):
@@ -174,7 +258,13 @@ def _literal_kind(expr) -> str | None:
         return 'p'
     if isinstance(expr, N.FloatLiteral):
         return 'd'
-    if isinstance(expr, (N.IntLiteral, N.BoolLiteral)):
+    if isinstance(expr, N.BoolLiteral):
+        # Must be tested BEFORE IntLiteral and kept as its own kind: a bool
+        # is the one scalar whose Python rendering is not its int64_t
+        # rendering, so widening it to 'i' here is what loses `True` (see
+        # `_KIND_CTYPE`).
+        return 'b'
+    if isinstance(expr, N.IntLiteral):
         return 'i'
     if isinstance(expr, N.ListExpr):
         eks = {_literal_kind(e) for e in expr.elements}
@@ -207,7 +297,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # Fill unannotated params from the unanimous cross-call-site kind
     # contract (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_
     # inference.md repro 1: `def g(x): yield x` called only `g(3.5)`).
-    for pname, k in _CALLSITE_PARAM_KINDS.get(getattr(fn, 'name', None), {}).items():
+    # `_PLAIN_CALLSITE_PARAM_KINDS` is the same contract for an ordinary
+    # `def`, consulted for the same reason: a synthesized genexp body is a
+    # module-level generator that receives its ENCLOSING function's
+    # parameters, so typing them is what types its yield slot.
+    _fname = getattr(fn, 'name', None)
+    for pname, k in _CALLSITE_PARAM_KINDS.get(_fname, {}).items():
+        env.setdefault(pname, k)
+    for pname, k in _PLAIN_CALLSITE_PARAM_KINDS.get(_fname, {}).items():
         env.setdefault(pname, k)
     list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
     for n in _walk(fn):
@@ -222,6 +319,24 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 k = _literal_kind(val)
             if k is None and val is not None:
                 k = _yield_kind(val)          # BinaryOp / literal fallthrough
+                # A bare call to a same-module `def` that states its return
+                # type (`var v = compute()`), via the shared
+                # `_callee_return_kind` -- see that function for why this
+                # third answer to the same question is the one that had
+                # drifted.
+                if k is None:
+                    k = _callee_return_kind(val)
+            # `var b = bytes([...])` / `bytearray(...)` / `memoryview(...)`:
+            # a byte container, so its element kind is 'i' BY DEFINITION --
+            # not an inference, so it is safe to record even though the
+            # argument is an opaque call. Without it, passing such a local
+            # to a generator became an untypable call-site HOLE
+            # (`_scan_callsite_param_kinds`), i.e. a refusal, over
+            # `def g(data): yield memoryview(data)[0]`.
+            if (k is None and isinstance(val, N.CallExpr)
+                    and isinstance(val.func, N.IdentExpr)
+                    and val.func.name in _BYTE_CONTAINERS):
+                k = ('list', 'i')
             # `it = iter(<list-local>)` — carry the source list's element
             # kind onto the iterator local, so `yield next(it)` /
             # `for x in it:` in the body resolve their yield-kind (string /
@@ -310,10 +425,12 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
 
 
 def _yield_kind(expr, env: dict | None = None) -> str | None:
-    """Best-effort C kind of a yielded value: 'i' int/bool/pointer (the
-    yield call always coerces to int64_t, so 'i' vs 'p' only affects the
-    <base>_value RETURN type), 'p' string pointer, 'd' float, 'tuple' a
-    tuple literal (not handled yet). None == can't tell (treated as 'i').
+    """Best-effort C kind of a yielded value: 'i' int (the yield call always
+    coerces to int64_t, so 'i' vs 'p' only affects the <base>_value RETURN
+    type), 'b' a bool literal / bool-typed local ('i' narrowed to `_Bool`, so
+    the consumer renders `True` not `1` — see `_KIND_CTYPE`), 'p' string
+    pointer, 'd' float, 'tuple' a tuple literal (not handled yet). None ==
+    can't tell (treated as 'i').
 
     `env` (from `_static_env`) resolves a bare identifier / `self.<field>` /
     `<list-local>[idx]` reference to a kind when a syntactic type source is
@@ -329,7 +446,9 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         return 'p'
     if isinstance(expr, N.FloatLiteral):
         return 'd'
-    if isinstance(expr, (N.IntLiteral, N.BoolLiteral)):
+    if isinstance(expr, N.BoolLiteral):
+        return 'b'
+    if isinstance(expr, N.IntLiteral):
         return 'i'
     if isinstance(expr, N.IdentExpr):
         v = env.get(expr.name)
@@ -352,6 +471,15 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
         return None
+    # A builtin scalar CONSTRUCTOR call yields exactly the kind it returns
+    # (`bool(x)` is a 0/1, `float(x)` a double, ...), and a call to a
+    # same-module `def` that states its return type does too -- see
+    # `_callee_return_kind`, which both this and `_argkind` and
+    # `_static_env` now share so the three cannot disagree about the same
+    # expression. Only a BARE name is matched, so `x.bool()` / `self.flag()`
+    # are not.
+    if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
+        return _callee_return_kind(expr)
     if isinstance(expr, N.TernaryExpr):
         tk, ek = _yield_kind(expr.then_val, env), _yield_kind(expr.else_val, env)
         if tk == ek:
@@ -362,16 +490,39 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
             return 'd'
         return None
     if isinstance(expr, N.BinaryOp):
+        # A COMPARISON is a bool by Python's own typing, whatever it compares
+        # -- checked BEFORE the operand widening below, because
+        # `yield a == b` over two strings would otherwise widen to 'p' and
+        # hand the consumer a `char *` slot holding 0/1. `_YIELD_CMP_OPS` is
+        # `gimple_ctypes._CMP_OPS` minus 'and'/'or': those two are in the
+        # set only because the same table also drives statement-condition
+        # dispatch, and real Python `and`/`or` return the selected OPERAND,
+        # never a bare bool (`resolve_shared._quick_type` makes exactly this
+        # exclusion for ordinary variable typing). 'in'/'not in' are the
+        # documented `_CMP_OPS` gap there, added back because they are
+        # unambiguously bool.
+        if expr.op in _YIELD_CMP_OPS or expr.op in ('in', 'not in'):
+            return 'b'
         lk, rk = _yield_kind(expr.left, env), _yield_kind(expr.right, env)
         if 'p' in (lk, rk):
             return 'p'
         if 'd' in (lk, rk):
             return 'd'
         return 'i'
+    # `not <anything>` is a bool, and a chained comparison (`a < b < c`) is
+    # one bool however it short-circuits -- the same two shapes
+    # `resolve_shared._quick_type` answers `_Bool` for, so this lattice
+    # stops disagreeing with ordinary variable typing about the very same
+    # expression.
+    if isinstance(expr, N.UnaryOp) and expr.op == 'not':
+        return 'b'
+    if isinstance(expr, N.CompareChain):
+        return 'b'
     return None
 
 
-_KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'p': 'char *', 'd': 'double', None: 'int64_t'}
+_KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
+                       None: 'int64_t'}
 
 
 def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
@@ -496,6 +647,21 @@ def _generator_value_kind(fn: N.FunctionDef,
         return None, 'mixed int / string yields (v0)'
     if 'p' in kinds:
         return 'p', ''
+    # DECISION (mixed bool/int): widen to 'i', do NOT refuse. `bool` is a
+    # subclass of `int` in Python, so `if c: yield True else: yield 1` is a
+    # legal, ordinary generator whose CPython values are `True` then `1` --
+    # and one `_Bool` slot cannot render both correctly (the int could be 5,
+    # which must not become `True`). Widening to 'i' reproduces CPython's
+    # text exactly on the int path and loses `True` only on the bool one.
+    # Unlike mixed int/string above this cannot be a crash: both kinds share
+    # one value layout, one slot kind and one accessor, so the only possible
+    # consequence is the rendered text of the bool yields -- whereas a
+    # refusal here would disqualify the whole module from the stackswitch
+    # path (falling back to the interpreter) over exactly that text.
+    if 'b' in kinds and (kinds - {'b', None}):
+        return 'i', ''
+    if 'b' in kinds:
+        return 'b', ''
     return 'i', ''
 
 
@@ -657,8 +823,11 @@ def _resolve_gen_kind(name):
 # box that the consumer unpacks into SEVERAL targets, so a single loop
 # variable's kind is not 'tuple' — the tuple-unpacking machinery has its
 # own per-slot types (`_generator_tuple_slots`) and is not what a for-loop
-# target's scalar kind is about.
-_SCALAR_GEN_KINDS = ('i', 'p', 'd')
+# target's scalar kind is about. 'b' IS in here: a `for v in <bool-
+# yielding sibling>():` target is a `_Bool`, and `_sibling_gen_kind`
+# returning 'b' is what lets the re-yielding generator's own value slot
+# keep the bool rather than widening to int64_t.
+_SCALAR_GEN_KINDS = ('i', 'b', 'p', 'd')
 
 
 def _sibling_gen_kind(iterable):
@@ -786,12 +955,29 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, why
     _amb = _ambiguous_yielded_params(fn, struct_name)
     if _amb:
-        return False, (f'yields {sorted(_amb)!r}, whose call sites pass '
-                       'conflicting types (a stack-switch generator has ONE '
-                       'fixed C value-slot, so this cannot be represented '
-                       'without silently truncating a float to int64_t or '
-                       'printing a string as its address)')
+        return False, _ambiguous_slot_message(_amb, 'stack-switch')
     return True, ''
+
+
+def _ambiguous_slot_message(names: set, slot_noun: str) -> str:
+    """The one user-facing diagnostic for an ambiguous yield slot, shared by
+    BOTH backends (`_eligible` here and `cpp_async`'s copy of the same gate)
+    so the two cannot drift into naming different causes.
+
+    It has to cover BOTH ways a slot can end up in
+    `_CALLSITE_PARAM_CONFLICTS`: two call sites that provably DISAGREE, and a
+    call site the static scan could not type AT ALL. A message that said only
+    "conflicting types" described the first and misdescribed the second, which
+    is the case that used to miscompile silently -- so the wording names both
+    rather than leaving the reader to wonder why two apparently-compatible
+    call sites were rejected. `slot_noun` is the backend's own name for the
+    one-fixed-C-value-slot property ("stack-switch"/"compiled")."""
+    return (f'yields {sorted(names)!r}, whose call sites do not all pass the '
+            f'same statically-known type (they disagree, or one of them the '
+            f'static scan could not type at all) — a {slot_noun} generator '
+            f'has ONE fixed C value-slot, so this cannot be represented '
+            f'without silently truncating a float to int64_t or printing a '
+            f'string as its address')
 
 
 def _ambiguous_yielded_params(fn: N.FunctionDef,
@@ -802,10 +988,11 @@ def _ambiguous_yielded_params(fn: N.FunctionDef,
     which the single fixed `_KIND_TO_SLOT_CTYPE` slot has no sound answer.
 
     Deliberately narrow: a param that is NOT yielded is irrelevant (its value
-    never crosses the yield ABI), and a yielded param with UNAMBIGUOUS call
-    sites was already resolved by `_scan_callsite_param_kinds` into
-    `_CALLSITE_PARAM_KINDS` and typed correctly by `_static_env`. Only the
-    genuinely ambiguous remainder is reported."""
+    never crosses the yield ABI), and a yielded param whose call sites all
+    agree on a statically-known kind was already resolved by
+    `_scan_callsite_param_kinds` into `_CALLSITE_PARAM_KINDS` and typed
+    correctly by `_static_env`. Only the genuinely ambiguous remainder — a
+    provable disagreement OR a single untypable call site — is reported."""
     bad = _CALLSITE_PARAM_CONFLICTS.get(getattr(fn, 'name', None)) or set()
     if not bad:
         return set()
@@ -856,6 +1043,19 @@ _PARAM_NAMES: dict[str, list[str]] = {}
 # kind_identifier_inference.md repro 1.
 _CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 
+# The SAME contract for ORDINARY `def`s: name -> {unannotated-param-name:
+# yield-kind}, from the same single scan (`_scan_callsite_param_kinds` walks
+# both halves in one pass, because the evidence is literally the same
+# `_argkind` answer). Recorded so that an ordinary function's own parameters
+# can be typed where a module-level GENERATOR is passed one of them -- the
+# synthesized generator-expression body is exactly that case, since
+# `(x * k for x in xs)` inside `def scaled(k)` becomes a top-level
+# `__genexp_0(k)` whose `k` is `scaled`'s unannotated parameter. A conflict is
+# NOT recorded here: an ordinary function's parameter types are settled later
+# by GimpleGen's own inference, and only the unanimous, hole-free half is
+# needed to fill the gap `_static_env` would otherwise leave.
+_PLAIN_CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
+
 # Generator/async-def name -> set of unannotated param names whose call-site
 # arguments DISAGREE (or include one the static scan could not type at all),
 # so `_CALLSITE_PARAM_KINDS` deliberately left them unresolved. A generator
@@ -863,9 +1063,12 @@ _CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 # stack-switch ABI fixes one C type per generator, so the default would
 # silently truncate a float to int64_t or print a `char *` as its address.
 # `_eligible` refuses those rather than emitting wrong code — see
-# bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md, which is also
-# where the still-unimplemented "(or include one the static scan could not
-# type at all)" half of the sentence above is tracked.
+# bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md, which recorded
+# that the "or include one the static scan could not type at all" half of the
+# sentence above was specified here but not implemented: a `None` used to
+# EMPTY the kind set, so it was neither resolved nor a conflict and the slot
+# took `_KIND_TO_SLOT_CTYPE[None]`. It is implemented now; the doc is kept
+# only for its two narrower contributing causes and its stdlib measurements.
 _CALLSITE_PARAM_CONFLICTS: dict[str, set] = {}
 
 # Local/param names bound from create_task/create_raising_task in the async
@@ -2083,63 +2286,141 @@ def _looks_like_stmt_list(v: list) -> bool:
 
 # ── lowering ───────────────────────────────────────────────────────────
 
-_NUMERIC_CTORS = {'Float64': 'd', 'Float32': 'd', 'Float': 'd', 'float': 'd',
-                  'Int': 'i', 'Int64': 'i', 'Int32': 'i', 'int': 'i',
-                  'Bool': 'i', 'bool': 'i',
-                  'String': 'p', 'StringSlice': 'p', 'str': 'p'}
-
-
-def _argkind(expr, caller_env: dict | None = None) -> str | None:
+def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     """Static yield-C-kind of a call ARGUMENT expression, or None when it
     can't be told purely syntactically. Literals, a unary +/- of a literal,
-    a numeric/string constructor call, and (via `caller_env`, a _static_env
-    of the calling function) a bare identifier / self.<field> reference."""
+    a numeric/string constructor call, a call to a same-module function with
+    a scalar return annotation, and (via `caller_env`, a _static_env of the
+    calling function) a bare identifier / self.<field> reference.
+
+    A `('list', <elem kind>)` answer is load-bearing rather than decorative,
+    and it is what closes most of the "call site the static scan could not
+    type" holes that `_scan_callsite_param_kinds` now treats as conflicts.
+    Two shapes produce it, and both used to record a `None` instead:
+
+      * a homogeneous list LITERAL, `rows([1.5, 2.5])`. The
+        `isinstance(k, str)` filter that used to sit above dropped the tuple
+        on the floor and fell through to `_yield_kind`, which cannot type a
+        whole list either -- so `def rows(data): for r in data: yield r`
+        printed the two floats' raw IEEE-754 bit patterns as 19-digit
+        integers, because the yield slot took the int64_t default.
+      * a bare IDENTIFIER the caller's env already types as a list, `g(xs)`
+        where `xs = [1, 2, 3]`. `_yield_kind`'s IdentExpr arm deliberately
+        answers None for a container (a whole list has no scalar slot kind),
+        which is right for a YIELD and wrong for a PARAMETER: the
+        parameter's consumer is `for r in data:` / `d[0]`, and both of those
+        read the `('list', k)` entry.
+
+    See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md."""
     k = _literal_kind(expr)
-    if isinstance(k, str):
+    if isinstance(k, (str, tuple)):
         return k
     if isinstance(expr, N.UnaryOp) and expr.op in ('-', '+'):
         return _argkind(expr.operand, caller_env)
     if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
-        return _NUMERIC_CTORS.get(expr.func.name)
-    if caller_env:
-        return _yield_kind(expr, caller_env)
-    return None
+        return _callee_return_kind(expr)
+    # `is not None`, not truthiness: an EMPTY caller env is still a caller
+    # env, and every shape below is answered from the EXPRESSION alone when
+    # the env has nothing to add. Gating on truthiness instead made
+    # `_argkind(x, {})` disagree with `_argkind(x, {'anything': 'i'})` for
+    # the same `x` -- e.g. a `n - step` argument read as 'i' (via
+    # `_yield_kind`'s own documented "can't tell, treat as int" convention)
+    # in a function that happens to have one typed local, and as a HOLE in
+    # one that does not. A hole is now a refusal, so that inconsistency
+    # became a difference between compiling and refusing.
+    if caller_env is None:
+        return None
+    v = caller_env.get(expr.name) if isinstance(expr, N.IdentExpr) else None
+    if isinstance(v, tuple) and v[0] == 'list':
+        return v
+    return _yield_kind(expr, caller_env)
 
 
 def _scan_callsite_param_kinds(stmts: list) -> None:
-    """Populate _CALLSITE_PARAM_KINDS from a whole-module scan of every call
-    to a generator / async def, mapping each unannotated positional (or
-    keyword) parameter to the unanimous static kind of the arguments passed
-    for it across all call sites. See _CALLSITE_PARAM_KINDS' docstring."""
-    _CALLSITE_PARAM_KINDS.clear()
-    _CALLSITE_PARAM_CONFLICTS.clear()
-    # gen name -> [(pname, pann), ...] (receiver dropped for methods)
+    """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
+    `_CALLSITE_PARAM_CONFLICTS` (the same, minus the resolvable cases) and
+    `_PLAIN_CALLSITE_PARAM_KINDS` (ordinary `def`s) from a whole-module scan
+    of every call, mapping each unannotated positional (or keyword) parameter
+    to the unanimous static kind of the arguments passed for it across all
+    call sites. See each registry's docstring.
+
+    Generators and ordinary functions are collected by the same
+    `_record`/`_visit_call` pair and separated only at classification time,
+    because the classification differs in exactly one respect: a conflict is
+    a REFUSAL for a generator (its value slot has one fixed C type) and
+    simply a non-answer for an ordinary function (whose parameter types come
+    from GimpleGen's own inference later), so only the generator half records
+    one. What the ordinary half buys is the ENCLOSING function's params: a
+    synthesized generator-expression body is a module-level generator called
+    with its enclosing function's own unannotated parameters
+    (`(x * k for x in ...)` in `def scaled(k)` lowers to `__genexp_0(k)`), so
+    without it that call is an untypable hole -- and a hole is now a
+    refusal."""
+    # callee name -> [(pname, pann), ...] (receiver dropped for methods)
     gen_params: dict[str, list] = {}
+    # the same, for ordinary defs, and the names in each
+    plain_params: dict[str, list] = {}
+    gen_names: set = set()
+    plain_names: set = set()
 
     def _record(fd, drop_self):
         ps = fd.params[1:] if drop_self else fd.params
         gen_params.setdefault(fd.name, list(ps))
+        gen_names.add(fd.name)
+
+    def _record_plain(fd, drop_self):
+        ps = fd.params[1:] if drop_self else fd.params
+        plain_params.setdefault(fd.name, list(ps))
+        plain_names.add(fd.name)
 
     for s in stmts:
-        if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
-                                             or getattr(s, 'is_async', False)):
-            _record(s, drop_self=False)
+        if isinstance(s, N.FunctionDef):
+            if getattr(s, 'is_generator', False) or getattr(s, 'is_async', False):
+                _record(s, drop_self=False)
+            else:
+                _record_plain(s, drop_self=False)
         if isinstance(s, N.StructDef):
             for m in s.methods:
-                if isinstance(m, N.FunctionDef) and (getattr(m, 'is_generator', False)
-                                                     or getattr(m, 'is_async', False)):
-                    _record(m, drop_self=bool(m.params) and m.params[0][0] in ('self', 'cls'))
-    if not gen_params:
+                if not isinstance(m, N.FunctionDef):
+                    continue
+                _drop = bool(m.params) and m.params[0][0] in ('self', 'cls')
+                if getattr(m, 'is_generator', False) or getattr(m, 'is_async', False):
+                    _record(m, drop_self=_drop)
+                else:
+                    _record_plain(m, drop_self=_drop)
+    if not gen_params and not plain_params:
         return
 
-    # per gen: param name -> set of kinds seen (a None poisons the slot)
-    seen: dict = {g: {} for g in gen_params}
+    def _unannotated(pann) -> bool:
+        """True for a parameter this scan has any business typing.
+
+        The test is "has an annotation at all", NOT "has a SCALAR
+        annotation" (`_ann_kind(...) is not None`, which is what sat here).
+        The distinction matters now that a `None` observation is a conflict
+        rather than something to discard: `_ann_kind` returns None both for
+        "no annotation" and for "annotated with something that is not a
+        recognised scalar", and only the first is a hole. A `tk: Ticker`
+        parameter whose value is yielded as a struct POINTER is not
+        un-typable -- it is typed, just not with a scalar, and the
+        struct-pointer yield machinery (`_field_dict_val_types` and the C++
+        companion emitter's own struct inference) is what types its slot.
+        Recording a `None` hole for it, and refusing, would have taken
+        `def gen(tk: Ticker): yield tk` -- which compiles and prints the
+        right answer today -- out of the compiled path for a type we
+        actually know. This is also literally the registry's documented
+        scope: both `_CALLSITE_PARAM_KINDS` and `_CALLSITE_PARAM_CONFLICTS`
+        describe themselves in terms of UNANNOTATED params."""
+        return pann is None or pann == ''
 
     def _visit_call(node, caller_env):
         fn = node.func
         gname = fn.name if isinstance(fn, N.IdentExpr) else \
             (fn.member if isinstance(fn, N.MemberExpr) else None)
-        pinfo = gen_params.get(gname)
+        pinfo = None
+        if gname in gen_names:
+            pinfo = gen_params[gname]
+        elif gname in plain_names:
+            pinfo = plain_params[gname]
         if pinfo is None:
             return
         cenv = caller_env
@@ -2148,54 +2429,144 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
             if i >= len(pinfo):
                 break
             pname, pann = pinfo[i]
-            if _ann_kind(pann) is not None:
+            if not _unannotated(pann):
                 continue
             slot.setdefault(pname, set()).add(_argkind(a, cenv))
         kw = {p: a for p, a in getattr(node, 'kwargs', []) or []}
         by_name = {p: pa for p, pa in pinfo}
         for pname, a in kw.items():
-            if pname not in by_name or _ann_kind(by_name[pname]) is not None:
+            if pname not in by_name or not _unannotated(by_name[pname]):
                 continue
             slot.setdefault(pname, set()).add(_argkind(a, cenv))
 
-    for s in stmts:
-        fns = []
-        if isinstance(s, N.FunctionDef):
-            fns.append(s)
-        elif isinstance(s, N.StructDef):
-            fns.extend(m for m in s.methods if isinstance(m, N.FunctionDef))
-        for fn in fns:
-            cenv = _static_env(fn)
-            for n in _walk(fn):
-                if isinstance(n, N.CallExpr):
-                    _visit_call(n, cenv)
-        # module-level calls (rare, e.g. a bare generator call in a stmt)
-        if not isinstance(s, (N.FunctionDef, N.StructDef)):
-            for n in _walk(s):
-                if isinstance(n, N.CallExpr):
-                    _visit_call(n, None)
+    # per callee: param name -> set of kinds seen (a None poisons the slot)
+    seen: dict = {}
 
-    for gname, slot in seen.items():
-        resolved = {}
-        conflicted = set()
-        for pname, kinds in slot.items():
-            kinds = {k for k in kinds if k is not None} if None not in kinds else set()
-            # avoid `next(iter(...))` -- a known self-host miscompile trigger
-            # (see _generator_tuple_slots' identical note / project memory:
-            # "next(iter(...)) -> _next undefined-symbol regression")
-            if len(kinds) == 1:
-                resolved[pname] = list(kinds)[0]
-            elif len(kinds) > 1:
-                # Genuinely ambiguous: two call sites pass provably different
-                # kinds for the same slot. Record it so `_eligible` can
-                # refuse a generator that YIELDS this param, rather than
-                # defaulting the yield slot to int64_t and silently
-                # truncating a float / printing a pointer as an address.
-                conflicted.add(pname)
-        if resolved:
-            _CALLSITE_PARAM_KINDS[gname] = resolved
-        if conflicted:
-            _CALLSITE_PARAM_CONFLICTS[gname] = conflicted
+    def _one_pass():
+        """Collect every call's argument kinds. Split out of the driver
+        because the driver runs it more than once (below) and the per-pass
+        state must not leak between runs. Deliberately does NOT clear the
+        registries: pass 2 has to READ what pass 1 classified, which is the
+        entire reason it exists."""
+        for _n in list(gen_params.keys()) + list(plain_params.keys()):
+            seen[_n] = {}
+        _collect()
+
+    def _collect():
+        for s in stmts:
+            fns = []
+            if isinstance(s, N.FunctionDef):
+                fns.append((s, None))
+            elif isinstance(s, N.StructDef):
+                for m in s.methods:
+                    if isinstance(m, N.FunctionDef):
+                        fns.append((m, s))
+            for fn, sdef in fns:
+                # The `struct_def` is load-bearing, not decoration:
+                # `_static_env` populates its `self.<field>` keys ONLY when it
+                # is handed the enclosing struct (see its `if struct_def is
+                # not None` tail), and `_argkind` resolves a `self.<field>`
+                # argument exclusively through those keys. Calling it with no
+                # struct therefore made `g(self.k)` untypable inside EVERY
+                # method even when `k` carries a class-body `Float64`
+                # annotation -- i.e. a `None` hole, which used to silently drop
+                # the yield slot to int64_t. Passing the same env the YIELD
+                # sites of a method already get (`_eligible` ->
+                # `_static_env(fn, struct_def)`) is what makes the two agree
+                # about `self.k`.
+                cenv = _static_env(fn, sdef)
+                for n in _walk(fn):
+                    if isinstance(n, N.CallExpr):
+                        _visit_call(n, cenv)
+            # module-level calls (rare, e.g. a bare generator call in a stmt)
+            if not isinstance(s, (N.FunctionDef, N.StructDef)):
+                for n in _walk(s):
+                    if isinstance(n, N.CallExpr):
+                        _visit_call(n, None)
+
+    def _classify():
+        # Replace, not merge: a pass that no longer finds a conflict must
+        # CLEAR the previous pass's, or the two accumulate and a param
+        # resolved by the later pass stays refused by the earlier one.
+        _CALLSITE_PARAM_KINDS.clear()
+        _CALLSITE_PARAM_CONFLICTS.clear()
+        _PLAIN_CALLSITE_PARAM_KINDS.clear()
+        for gname, slot in seen.items():
+            resolved = {}
+            conflicted = set()
+            for pname, kinds in slot.items():
+                # A `None` in the evidence is a HOLE, not a kind: `_argkind`
+                # could not type that one argument syntactically, so the
+                # slot's real kind is simply unknown. The stack-switch ABI
+                # fixes ONE C type per generator, so there is no sound way to
+                # keep going -- not even "the majority kind", because the
+                # untypable argument is exactly the one carrying the other
+                # type.
+                #
+                # The old code turned a `None` into an EMPTY set, which was
+                # then neither resolved (`len != 1`) nor a conflict (`len <=
+                # 1`): the slot fell through both branches to
+                # `_KIND_TO_SLOT_CTYPE[None] == 'int64_t'` and the generator
+                # miscompiled silently -- a float truncated to an int, a `char
+                # *` printed as its address, exit 0. That is the identical
+                # failure the refusal below exists to prevent, so a hole is
+                # recorded the same way a disagreement is. This is the "or
+                # include one the static scan could not type at all" half of
+                # `_CALLSITE_PARAM_CONFLICTS`' own docstring, which was
+                # specified there and never implemented; see
+                # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+                if None in kinds:
+                    conflicted.add(pname)
+                    continue
+                # avoid `next(iter(...))` -- a known self-host miscompile
+                # trigger (see _generator_tuple_slots' identical note /
+                # project memory: "next(iter(...)) -> _next
+                # undefined-symbol regression")
+                if len(kinds) == 1:
+                    resolved[pname] = list(kinds)[0]
+                elif len(kinds) > 1:
+                    # Genuinely ambiguous: two call sites pass provably
+                    # different kinds for the same slot. Record it so
+                    # `_eligible` can refuse a generator that YIELDS this
+                    # param, rather than defaulting the yield slot to int64_t
+                    # and silently truncating a float / printing a pointer as
+                    # an address.
+                    conflicted.add(pname)
+            if gname in plain_names:
+                # An ordinary function's parameter types are decided later, by
+                # GimpleGen's own inference -- there is no fixed-slot hazard
+                # here, so a conflict is just a non-answer. Record the
+                # unanimous, hole-free half and drop the rest;
+                # `_static_env` seeds from this with `setdefault`, so it only
+                # ever fills a gap an annotation left.
+                if resolved:
+                    _PLAIN_CALLSITE_PARAM_KINDS[gname] = resolved
+                continue
+            if resolved:
+                _CALLSITE_PARAM_KINDS[gname] = resolved
+            if conflicted:
+                _CALLSITE_PARAM_CONFLICTS[gname] = conflicted
+
+    # TWO passes, not one, and the reason is the ordinary-function half:
+    # typing the call `__genexp_0(k)` inside `def scaled(k)` needs `k`'s kind,
+    # which is itself learned from the call `scaled(10)` -- and when `scaled`
+    # is defined ABOVE `main` (the ordinary source order) that call has not
+    # been seen yet. One pass therefore leaves the synthesized generator's
+    # only argument a hole, which under the rule above is a refusal.
+    #
+    # Two, and not "until stable": a later pass can also SHRINK a registry
+    # entry (new evidence that disagrees with what an earlier pass resolved
+    # turns that param into a conflict instead), so the iteration is not
+    # monotone and a `while changed` loop has no termination argument. What a
+    # third pass would add is a call chain three deep -- an ordinary function
+    # whose param types come only from a generator's param types, which come
+    # only from another ordinary function's -- and the residue of stopping at
+    # two is a HOLE, i.e. an honest refusal, never a miscompile. That is the
+    # direction to be wrong in.
+    _one_pass()
+    _classify()
+    _one_pass()
+    _classify()
 
 
 def lower(stmts: list) -> tuple[list, list]:
@@ -2216,6 +2587,9 @@ def lower(stmts: list) -> tuple[list, list]:
     # value kind can be derived from has to be known to every one of them,
     # not just to `_register_generator_value_kinds` further down.
     _register_generator_defs(stmts)
+    # Before `_scan_callsite_param_kinds`, which reaches the table through
+    # `_argkind` to type a call argument that is itself a call.
+    _scan_func_ret_kinds(stmts)
     _scan_callsite_param_kinds(stmts)
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _prop_names = _seed_prop_names(stmts)
@@ -2344,10 +2718,107 @@ _BOX_SHIMS = {
 
 
 # Same-module `def name(...) -> <ann>` -> scalar box kind ('i'/'d'/'p'),
-# populated fresh at the top of each `_hoist_nested_async` pass. Lets
-# `var x = compute()` (Increment A) pick up its kind from the callee's
-# return annotation. Same single-module/single-pass lifetime as _PARAM_NAMES.
+# populated fresh by `_scan_func_ret_kinds` -- called from `lower()` BEFORE
+# `_scan_callsite_param_kinds` as well as from `_hoist_nested_async`, because
+# there are now two consumers with different lifetimes. Lets `var x =
+# compute()` (Increment A) pick up its kind from the callee's return
+# annotation, and lets `_argkind` type a call ARGUMENT that is itself a call
+# to such a function (`for v in gen(f(x))`) instead of recording a hole --
+# which, now that a hole is a refusal, is the difference between compiling
+# and refusing an ordinary shape. Same single-module lifetime as
+# _PARAM_NAMES.
 _FUNC_RET_KIND: dict[str, str] = {}
+
+
+def _literal_return_kind(fn: N.FunctionDef) -> str | None:
+    """The scalar kind of `fn`'s return value, or None when the body does not
+    establish one unanimously.
+
+    The unannotated-`return` counterpart of `_ann_kind(fn.return_type)`, for
+    the same syntactic-confidence reason and at the same syntactic altitude:
+    `def compute(): return 3.5` states its return type as plainly as
+    `def compute() -> Float64: return 3.5` does, and this module has always
+    accepted the second spelling of that fact. Requiring ALL of
+
+      * at least one `return <expr>` (a bare `return`, or no return at all,
+        means "None or unknown", not a scalar),
+      * every one of them a bare scalar literal -- so a function that returns
+        different things on different paths, or returns a computed value, is
+        left alone rather than guessed at, and
+      * all of them the SAME kind (int and float are not merged; the
+        `_yield_kind` BinaryOp widening does that for arithmetic, not for a
+        type contract),
+
+    is what keeps this from being an inference: it reads a repeated literal
+    as a declaration, and says nothing when the body does not repeat itself.
+
+    Nested `def`s inside the body are NOT this function's returns, so the
+    walk stops at them. Generators and `async def`s are excluded by the
+    caller: their `return` sets a stop/result value that never crosses as a
+    scalar."""
+    # A one-element list rather than a `nonlocal` flag: this file
+    # self-compiles, and rebinding a name from a nested function is the one
+    # construct here that would be new to it (mutating a container is not --
+    # `_scan_callsite_param_kinds` and `_collect` mutate `seen` throughout).
+    # `kinds` is likewise only ever added to.
+    kinds: set = set()
+    found: list = []
+
+    def _visit(node) -> bool:
+        """Depth-first over `node` and its statement children, stopping at a
+        nested `def`. Uses the `vars()`-and-stmt-list idiom
+        `_capture_scan_body` and friends use, for the same reason: a
+        `ReturnStmt` can only ever be a member of a statement list in this
+        AST, so there is nothing to gain from walking into expression
+        subtrees."""
+        if isinstance(node, N.ReturnStmt):
+            k = _literal_kind(node.value)
+            if not isinstance(k, str):
+                return False              # a non-literal: no contract
+            kinds.add(k)
+            found.append(k)
+            return True
+        d = getattr(node, '__dict__', None)
+        if not d:
+            return True
+        for _key, v in vars(node).items():
+            if not (isinstance(v, list) and v and _looks_like_stmt_list(v)):
+                continue
+            for child in v:
+                if isinstance(child, N.FunctionDef):
+                    continue              # a nested def's own returns
+                if not _visit(child):
+                    return False
+        return True
+
+    for st in getattr(fn, 'body', []) or []:
+        if isinstance(st, N.FunctionDef):
+            continue
+        if not _visit(st):
+            return None
+    if not found or len(kinds) != 1:
+        return None
+    return list(kinds)[0]
+
+
+def _scan_func_ret_kinds(stmts: list) -> None:
+    """Populate `_FUNC_RET_KIND` for every top-level ordinary `def` in
+    `stmts`, from its return annotation when it has one and from
+    `_literal_return_kind` otherwise. Its own function, rather than an inline
+    loop in `_hoist_nested_async`, because `lower()` must run it earlier than
+    that: `_scan_callsite_param_kinds` consults the table through `_argkind`
+    and a half-populated table there means untypable call arguments."""
+    _FUNC_RET_KIND.clear()
+    for s in stmts:
+        if not isinstance(s, N.FunctionDef):
+            continue
+        if getattr(s, 'is_generator', False) or getattr(s, 'is_async', False):
+            continue
+        _rk = _ann_kind(getattr(s, 'return_type', None))
+        if _rk is None:
+            _rk = _literal_return_kind(s)
+        if _rk:
+            _FUNC_RET_KIND[s.name] = _rk
 
 
 def _capsrc_name(n: str) -> str:
@@ -2404,8 +2875,47 @@ def _strict_init_kind(value, env: dict) -> str | None:
     return None
 
 
+class _Capture:
+    """One entry of a `_nested_async_capture_plan` result: a name a nested
+    `async def` captures from its enclosing function, and how to box it.
+
+    A NAMED shape, not the positional `(decl, kind, struct_name)` tuple this
+    used to be, and that is the whole point of it. Three passes in
+    `_apply_nested_async_capture` unpacked that tuple blind, so the tuple
+    could grow a field in one place without the others noticing: Increment E
+    added `struct_name` for struct captures and widened all three consumers,
+    while the Increment B producer -- the captured-PARAMETER branch, whose
+    `decl` is absent by construction -- kept building the old 2-tuple. Being
+    in the same file did not help; nothing type-checks a tuple's arity. The
+    cost was not a compile error at the producer but a
+    `ValueError: not enough values to unpack (expected 3, got 2)` raised out
+    of `module_gen.gen_module_impl` into the user's terminal the first time a
+    nested `async def` captured an annotated parameter -- and it survived
+    because that branch was, separately, recorded as already-landed (see
+    bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md). With named
+    fields a missing one is a missing attribute at the producer, and the two
+    producers below cannot disagree about the shape at all.
+
+      decl        -- the `VarDecl` to wrap in a box-init IN PLACE, or None
+                     for a captured PARAMETER: there is no declaration to
+                     mutate, so `_apply_nested_async_capture` renames the raw
+                     param (`_capsrc_name`) and prepends the box-init instead.
+      kind        -- the box cell's element kind, a `_BOX_SHIMS` key. NOT
+                     `_KIND_CTYPE` (which is the slot's C type): this is
+                     which `__mojo_box_new_*`/`_get_*`/`_set_*` trio runs.
+      struct_name -- when the captured value is a struct POINTER, the struct
+                     to round-trip the cell back through at each read/write
+                     (`_box_get_call` / `_box_set_args`), else None. Only
+                     Increment E's struct captures set it."""
+
+    def __init__(self, decl, kind, struct_name=None):
+        self.decl = decl
+        self.kind = kind
+        self.struct_name = struct_name
+
+
 def _outer_boxable_locals(outer: N.FunctionDef) -> dict:
-    """`{name: (VarDecl, kind)}` for every top-level `var name = <init>`
+    """`{name: _Capture}` for every top-level `var name = <init>`
     directly in `outer`'s own body whose value v0's capture box can
     represent -- kind 'i' (int/bool, Increment 0), 'd' (float) or 'p'
     (string) (Increment C). Increment A: the initializer no longer has to
@@ -2432,7 +2942,7 @@ def _outer_boxable_locals(outer: N.FunctionDef) -> dict:
                 if _cs in _STRUCT_NAMES:
                     sname = _cs
         if k in ('i', 'd', 'p'):
-            out[s.name] = (s, k, sname)
+            out[s.name] = _Capture(s, k, sname)
     return out
 
 
@@ -2496,7 +3006,7 @@ def _capture_scan_body(stmts: list) -> list:
 
 def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> dict | None:
     """`{}` if `inner` captures nothing from `outer` (the common case --
-    proceed exactly as before); a non-empty `{name: VarDecl}` are the
+    proceed exactly as before); a non-empty `{name: _Capture}` are the
     captures to box; `None` when `inner` captures something from `outer`
     that v0 cannot support -- distinct from "no captures at all" so the
     caller can refuse (fall through to the cpp path) instead of silently
@@ -2528,13 +3038,20 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
     plan: dict = {}
     for n in captured_names:
         if n in boxable:
-            decl, k, sname = boxable[n]
-            plan[n] = (decl, k, sname)
+            plan[n] = boxable[n]
             continue
         if n in outer_param_names:      # Increment B: a captured PARAMETER
             k = penv.get(n)
             if k in ('i', 'd', 'p'):
-                plan[n] = (None, k)
+                # No `decl` -- a parameter has no VarDecl to wrap in place,
+                # and no struct to round-trip (`_capsrc_name` + a prepended
+                # box-init is all a param capture needs). Both are spelled
+                # out here rather than left to a shorter tuple so this
+                # branch cannot produce a shape the three passes in
+                # `_apply_nested_async_capture` do not expect; that is
+                # exactly the arity drift this branch is the subject of,
+                # see `_Capture`.
+                plan[n] = _Capture(None, k)
                 continue
         return None                     # something v0 can't box -- refuse
     return plan
@@ -2730,8 +3247,10 @@ def _append_cap_args(call, cap_map: dict) -> None:
 
 def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_map: dict):
     """Wires a non-empty `_nested_async_capture_plan` result: boxes each
-    captured outer local (mutating its declaring VarDecl in place),
-    rewrites the REST of `outer`'s own body to read/write the box instead
+    captured outer local (mutating its declaring VarDecl in place, or --
+    for a captured PARAMETER, which has no declaration -- renaming the raw
+    param and prepending a box-init that reads it), rewrites the REST of
+    `outer`'s own body to read/write the box instead
     of a plain scalar, rewrites `inner`'s body to read/write the SAME box
     through a hidden trailing parameter, and appends that hidden
     parameter (plain `Int`, so `_lower_one_async`'s ordinary
@@ -2755,7 +3274,7 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     ordinary compiled path's own 2026-07-27 fix solved for plain
     `{mut}` closures, done here as a pure AST rewrite over the plain
     `int64_t` box handle."""
-    box_kind = {n: k for n, (_d, k, _s) in cap_map.items()}
+    box_kind = {n: c.kind for n, c in cap_map.items()}
     hidden = {n: (_hidden_box_name(n), box_kind[n]) for n in cap_map}
     outer_box = {n: (n, box_kind[n]) for n in cap_map}
     # Increment E: register which box handle carries a struct POINTER, so
@@ -2763,17 +3282,17 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     # / `.address`. The handle name is scope-local and unique, so both the
     # enclosing scope's box and the nested body's hidden param register
     # under their own key.
-    for _n, (_d, _k, _s) in cap_map.items():
-        if _s is None:
+    for _n, _c in cap_map.items():
+        if _c.struct_name is None:
             continue
-        _BOX_STRUCT_OF[_n] = _s
-        _BOX_STRUCT_OF[_hidden_box_name(_n)] = _s
+        _BOX_STRUCT_OF[_n] = _c.struct_name
+        _BOX_STRUCT_OF[_hidden_box_name(_n)] = _c.struct_name
 
     prepend: list = []
-    for name, (decl, k, _sname) in cap_map.items():
-        newshim = _BOX_SHIMS[k][0]
-        if decl is not None:
-            decl.value = _call(newshim, [decl.value])
+    for name, c in cap_map.items():
+        newshim = _BOX_SHIMS[c.kind][0]
+        if c.decl is not None:
+            c.decl.value = _call(newshim, [c.decl.value])
         else:
             # Increment B: a captured PARAMETER has no declaring VarDecl --
             # rename the raw param and prepend a box-init reading it, so the
@@ -2880,12 +3399,7 @@ def _hoist_nested_async(stmts: list, meta: list):
     {enclosing_fn_name: {nested_name: qualified_base}})."""
     hoisted = []
     local_maps: dict[str, dict[str, str]] = {}
-    _FUNC_RET_KIND.clear()
-    for s in stmts:
-        if isinstance(s, N.FunctionDef):
-            _rk = _ann_kind(getattr(s, 'return_type', None))
-            if _rk:
-                _FUNC_RET_KIND[s.name] = _rk
+    _scan_func_ret_kinds(stmts)
     for s in stmts:
         if not (isinstance(s, N.FunctionDef) and not getattr(s, 'is_generator', False)
                 and not getattr(s, 'is_async', False)):
@@ -3137,7 +3651,11 @@ def emit_c(meta_entry: dict) -> str:
     new_params = ', '.join(['int64_t'] + ['int64_t'] * nslots)
     new_fn = (f'__mojo_gen_new_m{nslots - 1}' if is_method
               else f'__mojo_gen_new_{nslots}')
-    if kind == 'p':
+    if kind in ('p', 'b'):
+        # 'b' re-narrows the int64_t channel to `_Bool`; 'p' re-widens it
+        # back to `char *`. Both are plain casts on the SAME int64_t slot --
+        # no new runtime shim, and symmetric with `_yield_shim` sending a
+        # bool as its own lossless 0/1.
         value_unbox = f'({vct})__mojo_gen_value ((int64_t)__g)'
     elif kind == 'tuple':
         # DESIGN.html R3 exception, NOT routed through gen._coerce_to_type:

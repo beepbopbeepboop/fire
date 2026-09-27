@@ -1560,10 +1560,23 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if node.member == 'obj':
             return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
                                                  [('MojoMemoryView *', mp)])
-        # This representation is always a writable 1-D byte window over
-        # contiguous memory, so these descriptors are constant-folded (the
-        # call form folds them identically — see _lower_memoryview_method).
-        return '_Bool', gen._new_val('_Bool', '0' if node.member == 'readonly' else '1')
+        if node.member == 'readonly':
+            # A real query, not a constant fold: the answer is the
+            # MUTABILITY of the object the view was taken over, which the
+            # view records from its source (see MojoMemoryView's `readonly`
+            # field in fire_runtime.h) — True over a bytes, False over a
+            # bytearray, exactly as CPython. Folding it to a constant
+            # answered `memoryview(b'abcd').readonly` False: the fold's own
+            # reasoning ("this representation is always a writable window")
+            # is a true statement about the WINDOW and an irrelevant one
+            # about the ANSWER. The call form asks the same question
+            # (_lower_memoryview_method).
+            t = gen._call_expr('int', 'mojo_memoryview_readonly',
+                               [('MojoMemoryView *', mp)])
+            return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+        # A 1-D byte window over contiguous memory is C-contiguous by
+        # construction, so these two really are constant.
+        return '_Bool', gen._new_val('_Bool', '1')
 
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
@@ -3736,13 +3749,26 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
         # garbage overload key (`Counter_inc_0_2`).
         if list_elem == 'int64_t' and xt == 'char *':
             list_elem = 'char *'
+        if list_elem == 'MojoBytes *' and xt != 'MojoBytes *':
+            # A non-bytes needle against a list of bytes is not a comparison
+            # the runtime can even perform: `b'a' == 'a'` is False for every
+            # pair in Python, so the membership question is already decided.
+            # It used to be answered by casting the `char *` needle to
+            # `MojoBytes *` — a pointer cast gcc rejects outright
+            # ("assignment to 'MojoBytes *' from incompatible pointer type
+            # 'char *'"), so `'a' in [b'a', b'b']` was a hard compile error
+            # rather than the False CPython gives. Folding to the answer the
+            # domains already imply is also what the dict branch does below
+            # for the same shape.
+            gen._emit(f"  {ti} = 0;")
+            return 'int', ti
         if list_elem == 'MojoBytes *' or xt == 'MojoBytes *':
             # Elements are boxed `MojoBytes *` pointers, so the generic
             # mojo_list_contains_int would compare POINTER identity — two
             # separately-constructed `b'a'` values are different pointers, so
             # `b'a' in [b'a']` was always False. Python defines `in` in terms
             # of `==`, which for bytes is bytewise.
-            xv_b = gen._new_val('MojoBytes *', xv) if xt != 'MojoBytes *' else xv
+            xv_b = xv
             gen._emit_call('int', ti, 'mojo_list_contains_bytes',
                            [('MojoList *', rv), ('MojoBytes *', xv_b)])
             return 'int', ti

@@ -591,6 +591,37 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
         elif isinstance(_n, WithStmt):
             _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
 
+def _gmi_container_ctype(v):
+    """Container C type a container LITERAL expression provably evaluates
+    to, or None when `v` is not one. The single answer to "is this
+    argument/expression a list, a dict or a set?", shared by
+    `_gmi_collect_self_assigns`'s `self.<f> = <container>` chain below and
+    the constructor-argument observers in `module_gen.py` (which need it
+    for the `self.<f> = <param>` shape the pass cannot see through).
+
+    Purely syntactic, so an answer here is a PROOF, never a guess -- which
+    is what lets the constructor-argument observer act on it despite a
+    struct field being pinned to exactly one C type
+    (`struct_field_types[struct][field]`). A tuple display answers
+    `MojoList *`: a tuple IS a MojoList carrying a tuple tag at runtime
+    (`mojo_is_tuple` / `_mojo_repr_list`), the same representation the
+    generator tuple-slot box uses.
+
+    Returns None for a `Comprehension` whose `kind` is not one of the three
+    display forms, leaving that caller's own fallback in charge -- the
+    shape is unknowable, not list-typed."""
+    if isinstance(v, (ListExpr, TupleExpr)):
+        return 'MojoList *'
+    if isinstance(v, DictExpr):
+        return 'MojoDict *'
+    if isinstance(v, SetExpr):
+        return 'MojoSet *'
+    if isinstance(v, Comprehension):
+        return {'list': 'MojoList *', 'set': 'MojoSet *',
+                'dict': 'MojoDict *'}.get(v.kind)
+    return None
+
+
 def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Not recursive (walks via _walk_ast), but a
@@ -628,15 +659,16 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                     ft = 'MojoBytes *' if getattr(v, 'is_bytes', False) else 'char *'
                 elif isinstance(v, BoolLiteral):
                     ft = '_Bool'
-                elif isinstance(v, DictExpr):
-                    ft = 'MojoDict *'
-                elif isinstance(v, (ListExpr, TupleExpr)):
+                elif isinstance(v, Comprehension) and _gmi_container_ctype(v) is None:
+                    # An unrecognised comprehension `kind` still builds a
+                    # LIST at runtime -- this pass's long-standing default,
+                    # kept rather than dropped to int64_t, because
+                    # `_gmi_container_ctype` returning None means "cannot
+                    # tell", which is not the same answer as "not a
+                    # container".
                     ft = 'MojoList *'
-                elif isinstance(v, SetExpr):
-                    ft = 'MojoSet *'
-                elif isinstance(v, Comprehension):
-                    ft = {'list': 'MojoList *', 'set': 'MojoSet *',
-                          'dict': 'MojoDict *'}.get(v.kind, 'MojoList *')
+                elif _gmi_container_ctype(v) is not None:
+                    ft = _gmi_container_ctype(v)
                 elif isinstance(v, CallExpr):
                     cfn = v.func
                     # `deque()` / `deque[T]()` / `collections.deque(...)`

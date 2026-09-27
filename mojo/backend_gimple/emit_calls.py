@@ -1564,7 +1564,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
     # bytearray(...): mutable bytes. Same C representation as bytes
     # (MojoBytes *), so every read op is inherited — only construction and
-    # the mutation ops differ.
+    # the mutation ops differ. Mutability is a property of the CONSTRUCTOR
+    # SPELLING, not of the source value, and C cannot tell the two apart
+    # once both are a MojoBytes *, so every result here goes through
+    # mojo_bytearray_mark — including the ones that reuse an immutable
+    # constructor. It is what lets `memoryview(ba).readonly` answer False
+    # (CPython) instead of whatever the shared constructor happened to say.
     if (fname_raw == 'bytearray' and not gen._locally_binds_name('bytearray')
             and len(node.args) <= 3):
         if len(node.args) == 0:
@@ -1573,27 +1578,26 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         for _extra in node.args[1:]:
             gen.lower_expr(_extra)
         if at == 'MojoBytes *':
-            return 'MojoBytes *', gen._call_expr(
-                'MojoBytes *', 'mojo_bytearray_copy', [('MojoBytes *', av)])
-        if at == 'MojoMemoryView *':
-            _tb = gen._call_expr('MojoBytes *', 'mojo_memoryview_tobytes',
-                                 [('MojoMemoryView *', av)])
-            return 'MojoBytes *', _tb
-        if at in ('char *', 'MojoStr *'):
+            _b = gen._call_expr('MojoBytes *', 'mojo_bytearray_copy', [('MojoBytes *', av)])
+        elif at == 'MojoMemoryView *':
+            _b = gen._call_expr('MojoBytes *', 'mojo_memoryview_tobytes',
+                                [('MojoMemoryView *', av)])
+        elif at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
-            return 'MojoBytes *', gen._call_expr(
-                'MojoBytes *', 'mojo_bytes_from_str',
-                [('char *', sv), ('char *', enc)])
-        if at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
+            _b = gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
+                                [('char *', sv), ('char *', enc)])
+        elif at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytearray(a_dict)`/`bytearray(a_set)` of ints - same real
             # Python shape as bytes() above.
             lv = gen._materialize_as_list(at, av)
-            return 'MojoBytes *', gen._call_expr(
-                'MojoBytes *', 'mojo_bytes_from_list', [('MojoList *', lv)])
-        nv = gen._to_int64(at, av)
+            _b = gen._call_expr('MojoBytes *', 'mojo_bytes_from_list',
+                                [('MojoList *', lv)])
+        else:
+            nv = gen._to_int64(at, av)
+            _b = gen._call_expr('MojoBytes *', 'mojo_bytes_zeros', [('int64_t', nv)])
         return 'MojoBytes *', gen._call_expr(
-            'MojoBytes *', 'mojo_bytes_zeros', [('int64_t', nv)])
+            'MojoBytes *', 'mojo_bytearray_mark', [('MojoBytes *', _b)])
 
     # memoryview(<bytes|bytearray>): a non-copying 1-D byte view.
     if (fname_raw == 'memoryview' and not gen._locally_binds_name('memoryview')

@@ -276,6 +276,37 @@ def _quick_type(gen, node) -> str:
             return 'char *'
         return gen.func_return_types.get(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):
+        # A receiver this codegen KNOWS is a registered user struct resolves
+        # through its own mangled method symbol, and it has to be checked
+        # BEFORE every name-keyed row below.
+        #
+        # Those rows are keyed on the method's NAME alone, because at this
+        # point the receiver's type is usually still unknown (this pre-pass
+        # runs before a function's own local types exist — the blind spot
+        # `.read()`'s own comment documents). But a user class is free to
+        # define a method called `items`, `keys`, `values`, `split`, `read`
+        # or `decode`, and when the receiver IS known, the name is no longer
+        # evidence of anything. Leaving the order as it was, `Box.items(...)`
+        # quick-typed `MojoList *` and the enclosing `def use(b): return
+        # b.items(1)` was DECLARED `MojoList *` while its body dispatched the
+        # real `Box_items` returning an int64_t — a wrong prototype against a
+        # correct body, which is the same value-identity failure this row
+        # exists to prevent, one level below the parameter it fixed.
+        #
+        # Gated on `var_types` actually naming a registered struct, so every
+        # still-unknown receiver keeps exactly the old behaviour and only a
+        # provable one changes.
+        if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
+            _sot = gen.var_types.get(node.func.obj.name, '')
+            if _sot.endswith(' *'):
+                _ssn = gimple_exprtypes._struct_name_of(_sot)
+                if _ssn in gen.struct_field_types:
+                    _smeth = node.func.member
+                    if (_ssn, _smeth) in gen._generator_method_api:
+                        return 'MojoGenerator *'
+                    _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
+                    if _srt:
+                        return _srt
         # .read()/.readline()/.readlines() on ANY receiver shape (not just
         # a plain IdentExpr file handle) — e.g. `sys.stdin.read()` (obj is
         # itself a MemberExpr) or `open(path).read()` (obj is a CallExpr).
@@ -357,6 +388,28 @@ def _quick_type(gen, node) -> str:
             if mod == 'os' and meth == 'listdir': return 'MojoList *'
             if mod == 'sysconfig' and meth == 'get_config_var': return 'char *'
             if mod == 'sys': return 'int'
+            # `struct.Struct(...)` / `struct.pack(...)` / `struct.unpack(...)`:
+            # the module-level runtime constructors whose results are NAMED,
+            # non-container handle types with their own attribute reads
+            # (`MojoStructFmt *`'s `format`/`size` and its five pack/unpack
+            # methods), which is what makes the erasure VISIBLE for them —
+            # unlike a returned `MojoBytes *`, whose contents still read fine
+            # through a wrongly-boxed int64_t on this runtime.
+            #
+            # This is the table `_lower_struct_module_call` (the authoritative
+            # lowering) is itself driven by, read here so the two cannot
+            # disagree; the guards mirror that branch's exactly — a known
+            # local/param named `struct` is not the module, and a call with
+            # keyword arguments is not one it lowers. Without this row a
+            # function whose only `return` is `struct.Struct("<HH")` was
+            # declared `int64_t`, so its body boxed the real handle through
+            # `void *` to satisfy the prototype, and the consumer's `s.size`
+            # degraded to `_mojo_dispatch_getattr` on an untyped value —
+            # `AttributeError: size` from a program CPython runs cleanly.
+            if (mod == 'struct' and meth in gimple_ctypes._STRUCT_MODULE_FN_RETVALS
+                    and mod not in gen.var_types
+                    and not getattr(node, 'kwargs', None)):
+                return gimple_ctypes._STRUCT_MODULE_FN_RETVALS[meth]
             # dict.keys()/.values()/.items(): _lower_dict_method (below)
             # lowers all three to a real `MojoList *` (mojo_dict_keys/
             # _values/_items) — but this pre-pass had no case for them at
@@ -383,23 +436,10 @@ def _quick_type(gen, node) -> str:
             # modulefinder.md.
             if meth in ('keys', 'values', 'items') and not node.args:
                 return 'MojoList *'
-            # Try as struct instance method call: resolve receiver type then look up mangled name
-            ot = gen.var_types.get(mod, '')
-            if ot and ot.endswith(' *'):
-                sn = gimple_exprtypes._struct_name_of(ot)
-                # obj.method(...) where `method` is a supported compiled
-                # GENERATOR method (Milestone C step 3,
-                # self._generator_method_api) — same "returns
-                # MojoGenerator*, doesn't run the body" reasoning as the
-                # free-function generator case above, checked before the
-                # ordinary mangled-name func_return_types lookup below (a
-                # generator method has no such ordinary entry either).
-                if (sn, meth) in gen._generator_method_api:
-                    return 'MojoGenerator *'
-                mangled = f"{sn}_{meth}"
-                rt = gen.func_return_types.get(mangled)
-                if rt:
-                    return rt
+            # A receiver that IS a registered user struct was already resolved
+            # through its mangled method symbol at the TOP of this branch —
+            # see that block's comment for why the name-keyed rows above must
+            # not be allowed to answer first. Nothing left to do here.
         # os.path.basename(...)/.splitext(...)/etc.: node.func.obj here is
         # itself a MemberExpr (os.path), not a plain IdentExpr, so the
         # `mod == 'os'` branch above never matches this chained shape at

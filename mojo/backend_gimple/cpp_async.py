@@ -411,22 +411,21 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             "driver is the remaining work)")
     # SHARED ambiguity gate with the A3 stack-switch backend. Both backends
     # fix ONE C value-slot type per generator, so a generator that yields a
-    # parameter whose call sites pass provably DIFFERENT kinds cannot be
-    # represented by either: the slot defaults to int64_t and a yielded
-    # float is silently truncated while a yielded string prints as its
-    # address. `gimple_gen_coro._scan_callsite_param_kinds` records exactly
-    # those params in `_CALLSITE_PARAM_CONFLICTS` (populated once per
-    # module, before either backend runs), and its own `_eligible` refuses
-    # them; this is the same refusal for the C++ backend, so neither can
-    # silently miscompile what the other rejects. See
+    # parameter whose call sites do not all pass the same statically-known
+    # kind cannot be represented by either: the slot defaults to int64_t and
+    # a yielded float is silently truncated while a yielded string prints as
+    # its address. `gimple_gen_coro._scan_callsite_param_kinds` records
+    # exactly those params in `_CALLSITE_PARAM_CONFLICTS` (populated once per
+    # module, before either backend runs) -- both the provable-disagreement
+    # ones and the ones with a call site it could not type at all -- and its
+    # own `_eligible` refuses them; this is the same refusal for the C++
+    # backend, so neither can silently miscompile what the other rejects. The
+    # message is built by the same helper so the two cannot drift. See
     # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
     _bad = gimple_gen_coro._ambiguous_yielded_params(fn, struct_name)
     if _bad:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
-            f"yields {sorted(_bad)!r}, whose call sites pass conflicting "
-            "types (a compiled generator has ONE fixed C value-slot, so "
-            "this cannot be represented without silently truncating a "
-            "float to int64_t or printing a string as its address)")
+            gimple_gen_coro._ambiguous_slot_message(_bad, 'compiled'))
     if struct_name is not None:
         if not fn_params or fn_params[0][0] not in ('self', 'cls'):
             raise gimple_exprtypes._UnsupportedGeneratorShape(

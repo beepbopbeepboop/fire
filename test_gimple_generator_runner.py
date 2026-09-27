@@ -2938,6 +2938,145 @@ def main():
 main()
 """, "one.txt!\ntwo.txt!\none.txt\ntwo.txt\n2\n")
 
+    # ── a nested `async def` capturing an enclosing PARAMETER ───────────
+    # bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md. The
+    # capture-plan producer for a captured PARAMETER built a 2-tuple while
+    # the three consumers in `_apply_nested_async_capture` unpacked
+    # 3-tuples, so every annotated-parameter capture raised
+    # `ValueError: not enough values to unpack (expected 3, got 2)` out of
+    # the compiler -- on a feature that had been separately recorded as
+    # already-landed. Asserted on STDOUT, not on the generated C: the C
+    # cannot distinguish a right value from a plausible wrong one here (the
+    # bug doc makes that point about the struct-capture test that shipped
+    # with it), and "does not raise" would have passed against a plan that
+    # silently dropped the mutation.
+    test_generator_stdout("nested_async_captures_enclosing_param_int", """\
+def run(seed: Int) raises:
+    @parameter
+    async def bump():
+        seed += 2
+    var t0 = create_task(bump())
+    t0.wait()
+    print(seed)
+
+def main():
+    run(10)
+""", "12\n")
+
+    # ... and the same shape for the other two boxable scalar param kinds
+    # plus a struct local in the SAME nested async, which is the case that
+    # mixes both plan producers: before the plan entries were a named shape,
+    # the struct local's 3-tuple and the parameter's 2-tuple met in one
+    # `cap_map` and the pass that unpacked them could not tell which was
+    # which.
+    test_generator_stdout("nested_async_captures_param_and_struct_local", """\
+class Point:
+    def __init__(self, x):
+        self.x = x
+
+def run(n: Int, ratio: Float64, tag: String) raises:
+    var p = Point(1)
+
+    @parameter
+    async def bump():
+        n += 1
+        ratio += 1.0
+        tag += "b"
+        p.x += 1
+
+    var t0 = create_task(bump())
+    t0.wait()
+    print(n, ratio, tag, p.x)
+
+def main():
+    run(1, 1.0, "a")
+""", "2 2.0 ab 2\n")
+
+    # ── call-site yield-kind evidence: the holes and the fixes ─────────
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md. A call
+    # site the static scan cannot type used to leave the slot neither
+    # resolved nor conflicting, so the yield slot defaulted to int64_t and
+    # truncated (or printed an address) with exit 0. It now propagates
+    # through the caller's own unannotated parameter instead, because the
+    # same whole-module scan that types a generator's params also types an
+    # ordinary function's -- and the synthesized generator-expression body
+    # is a module-level generator called with its ENCLOSING function's
+    # parameters, which is the shape below.
+    test_generator_stdout("generator_callsite_through_unannotated_caller_param", """\
+def g(x):
+    yield x
+
+def caller(v):
+    for r in g(v):
+        print(r)
+
+def main():
+    for r in g(3.5):
+        print(r)
+    caller(9.5)
+""", "3.5\n9.5\n")
+
+    # The same route with a STRING, which is the case that used to print
+    # the pointer's own address as a decimal (measured 4340503928) rather
+    # than the string.
+    test_generator_stdout("generator_callsite_string_through_caller_param", """\
+def g(x):
+    yield x
+
+def caller(v):
+    for r in g(v):
+        print(r)
+
+def main():
+    caller("hi")
+""", "hi\n")
+
+    # `self.<field>` at a CALL site: `_scan_callsite_param_kinds` used to
+    # build the caller's env with no `struct_def`, so `g(self.k)` was
+    # untypable inside every method even with `k: Float64` in the class
+    # body -- a hole, hence (before the hole rule) a silent int64_t slot
+    # printing `3`.
+    test_generator_stdout("generator_callsite_self_field_kind", """\
+class C:
+    def __init__(self, k: Float64):
+        self.k = k
+
+    def go(self):
+        for r in g(self.k):
+            print(r)
+
+def g(x):
+    yield x
+
+def main():
+    var c = C(3.5)
+    c.go()
+""", "3.5\n")
+
+    # A hole that genuinely cannot be closed, refused rather than
+    # miscompiled -- and refused even though a SECOND, textbook-resolvable
+    # call site (`g(3.5)`) is right there in the module. That combination
+    # is the doc's sharpest claim: the old rule dropped the untypable
+    # argument's `None` and let the surviving literal evidence resolve the
+    # slot, so a program with a clean float call site still truncated
+    # whenever one other caller was opaque. Here the opaque argument is a
+    # call to a function whose return is computed rather than a literal,
+    # which no amount of widening reaches -- there is no evidence to widen
+    # into -- and a computed return could be a float.
+    test_generator_refused("generator_callsite_untypable_argument_refused", """\
+def pick(a, b):
+    return a
+
+def g(x):
+    yield x
+
+def main():
+    for r in g(3.5):
+        print(r)
+    for r in g(pick(1, 2)):
+        print(r)
+""", "yields ['x'], whose call sites do not all pass the same")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

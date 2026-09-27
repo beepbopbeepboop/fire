@@ -3425,15 +3425,18 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     else:
         # Seed inferred LOCAL var types so `return <local>` where the
         # local holds a pointer value (e.g. a bytes accumulator built
-        # from a sliced self.<field> + `+=`) infers the real C return
+        # from a sliced self.<field> + `+=`, or the plain
+        # `t = self.<field>; return t`) infers the real C return
         # type instead of int64_t — otherwise the definition's declared
         # return type disagrees with the body (which declares the local
         # correctly from _inferred_var_types) and every caller treats
-        # the returned pointer as a scalar. COMPILE_FAIL_zipfile.
+        # the returned pointer as a scalar. COMPILE_FAIL_zipfile. The
+        # rule is `gimple_ctypes._seedable_local_ctype`, shared by all three
+        # call sites (not three private whitelists).
         _saved_lv = dict(gen.var_types)
         try:
             for _lvn, _lvt in gen._infer_local_var_types(node).items():
-                if _lvt == 'MojoBytes *':
+                if gimple_ctypes._seedable_local_ctype(_lvt):
                     gen.var_types.setdefault(_lvn, _lvt)
         except Exception:
             pass

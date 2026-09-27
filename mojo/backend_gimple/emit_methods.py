@@ -525,9 +525,6 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
     return ret_type, t
 
 
-_STRUCT_METHODS = ('calcsize', 'pack', 'unpack', 'unpack_from', 'pack_into', 'Struct',
-                   'iter_unpack')
-
 # The two `struct.Struct` attributes that are DATA, not methods — name mapped
 # to the Python type CPython's "not callable" message names for its value.
 # See _lower_struct_attr_call, which is the only consumer.
@@ -580,9 +577,14 @@ def _struct_slot_kinds(codes):
     back as its raw IEEE bits (`struct.unpack('<if', ...)` giving
     `1 4607182418800017408`). But the format string is a compile-time
     constant here, so each slot's real kind is statically known and only
-    the CONTAINER is untyped. Recording the per-slot kinds lets the
-    subscript path pick the right accessor per index instead of one
-    accessor for the whole list. See
+    the CONTAINER is untyped. Recording the per-slot kinds lets every
+    statically-indexed read of the result pick the right accessor for that
+    slot: the subscript (emit_calls.py's MojoList branch), the `a, b = t`
+    destructuring target (loops_shared._tuple_elem_value), and the
+    whole-result repr (`_list_repr_fn` -> `mojo_repr_list_kinds`). It is a
+    property of the VALUE, not of whether it was bound to a local; a read
+    with no compile-time slot index (iteration, a computed subscript) still
+    has no single right C type, which is the residue named in
     bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
     """
     out = []
@@ -599,11 +601,13 @@ def _struct_slot_kinds(codes):
 def _struct_elem_ctype(codes):
     """Uniform MojoList element ctype for an unpack tuple, or 'int64_t'
     when the codes are mixed / unknown (the common integer-format case is
-    exact; a genuinely mixed int+float format degrades to int64 slots —
-    see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md, which also
-    records that the degradation is NOT confined to the assigned-to-a-local
-    spelling: `struct.unpack('<if', ...)` used inline still returns the
-    float's raw IEEE-754 bits)."""
+    exact; a genuinely mixed int+float format degrades to int64 slots).
+
+    That degradation is now confined to reads with no compile-time slot
+    index: `_struct_slot_kinds` carries the real per-slot kinds, and the
+    subscript, the `a, b = t` destructuring target and the whole-result repr
+    all consult it. See
+    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md."""
     if not codes:
         return 'int64_t'
     kinds = set()
@@ -659,6 +663,205 @@ def _struct_build_value_list(gen, arg_nodes, codes):
     return lst
 
 
+# ── `struct` argument binding: which parameters may arrive BY NAME ──────────
+#
+# `struct`'s call surface is POSITIONAL-ONLY, with three exceptions. This
+# table is a MEASUREMENT of CPython 3.14, not an inference from the docs: every
+# candidate name below was passed to the real module and to a real
+# `struct.Struct` instance, and only the three rows with a non-empty `kw` came
+# back without a TypeError. Getting this wrong is not cosmetic in either
+# direction — the omission this replaces read `node.args` and never looked at
+# `node.kwargs` at all, so `struct.unpack_from(fmt, buf, offset=2)` ran with
+# offset 0 and returned well-formed data read from the WRONG PLACE, and
+# `struct.calcsize(fmt='<HH')` returned 0 where CPython raises
+# (bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md).
+#
+# Per entry point:
+#   kw       parameter name -> its positional index. A name absent from this
+#            map is rejected with CPython's own message (see _struct_bind_args).
+#   pos      the leading parameter names, in order (only used to name a
+#            required parameter that a keyword left unfilled).
+#   req      how many leading parameters are REQUIRED.
+#   posonly  how many of those required leading parameters are
+#            POSITIONAL-ONLY. This is why `struct.unpack_from` can accept
+#            `offset=` but not `format=`: format is positional-only there, so
+#            leaving it to a keyword reports "takes at least 1 positional
+#            argument" rather than binding.
+#   msg      the name CPython puts in its own message. Not derivable: the
+#            module functions are `_struct.calcsize`/`_struct.pack`/... but
+#            BOTH `unpack_from`s report as bare `unpack_from()`, because
+#            `Struct.unpack_from` is the same C function reached through a
+#            bound method.
+_STRUCT_CALL_SIGS = {
+    'calcsize':           {'kw': {}, 'pos': ('format',), 'req': 1, 'posonly': 1,
+                          'msg': '_struct.calcsize'},
+    'pack':               {'kw': {}, 'pos': ('format',), 'req': 1, 'posonly': 1,
+                          'msg': '_struct.pack'},
+    'unpack':             {'kw': {}, 'pos': ('format', 'buffer'), 'req': 2, 'posonly': 2,
+                          'msg': '_struct.unpack'},
+    'unpack_from':        {'kw': {'buffer': 1, 'offset': 2},
+                          'pos': ('format', 'buffer', 'offset'), 'req': 2, 'posonly': 1,
+                          'msg': 'unpack_from'},
+    'iter_unpack':        {'kw': {}, 'pos': ('format', 'buffer'), 'req': 2, 'posonly': 2,
+                          'msg': '_struct.iter_unpack'},
+    'pack_into':          {'kw': {}, 'pos': ('format', 'buffer', 'offset'),
+                          'req': 3, 'posonly': 3, 'msg': '_struct.pack_into'},
+    'Struct':             {'kw': {'format': 0}, 'pos': ('format',), 'req': 1, 'posonly': 0,
+                          'msg': 'Struct'},
+    'Struct.pack':        {'kw': {}, 'pos': (), 'req': 0, 'posonly': 0,
+                          'msg': 'Struct.pack'},
+    'Struct.unpack':      {'kw': {}, 'pos': ('buffer',), 'req': 1, 'posonly': 1,
+                          'msg': 'Struct.unpack'},
+    'Struct.unpack_from': {'kw': {'buffer': 0, 'offset': 1},
+                          'pos': ('buffer', 'offset'), 'req': 1, 'posonly': 0,
+                          'msg': 'unpack_from'},
+    'Struct.pack_into':   {'kw': {}, 'pos': ('buffer', 'offset'), 'req': 2, 'posonly': 2,
+                          'msg': 'Struct.pack_into'},
+}
+
+# The never-taken value a `mojo_raise_type_error` call site hands back: a
+# zero of whatever ctype the entry point's return type is, which is every
+# ctype in `_STRUCT_MODULE_FN_RETVALS` plus the instance methods' `int`. A
+# bare `0` initializes all of them, pointer temps included (C's null-pointer
+# constant), so one entry covers the whole set.
+_STRUCT_RAISE_STUB = '0'
+
+
+def _struct_kwarg_rejection(sig, key, kw_name, npos, nkw):
+    """CPython's TypeError text for a keyword `struct` call cannot accept.
+
+    Which shape applies is decided by the ENTRY POINT, not by the name: an
+    entry point with no nameable parameter at all is arg-clinic's
+    `_struct.calcsize() takes no keyword arguments`, the two `unpack_from`s
+    are hand-written FASTCALL|KEYWORDS C functions that name the offending
+    keyword, and `struct.Struct` is arg-clinic over a single `format`
+    parameter, whose first check is the total argument COUNT — so an unknown
+    name there is reported as an overflow, never as an unknown keyword.
+    """
+    if not sig['kw']:
+        return f"{sig['msg']}() takes no keyword arguments"
+    if key == 'Struct':
+        # `format` supplied positionally makes it a positional-argument
+        # count; supplied by keyword (or absent) it is a keyword count.
+        if npos:
+            return f'Struct() takes at most 1 argument ({npos + nkw} given)'
+        return f'Struct() takes at most 1 keyword argument ({nkw} given)'
+    return f"{sig['msg']}() got an unexpected keyword argument '{kw_name}'"
+
+
+def _struct_missing_required(sig, slots, npos):
+    """CPython's TypeError text for a required parameter left unfilled, or
+    None. A parameter that is POSITIONAL-ONLY and unfilled cannot be named,
+    so CPython reports the whole call as short of positionals instead
+    (`unpack_from() takes at least 1 positional argument (0 given)`); one
+    that could have arrived by name is named outright (`unpack_from() missing
+    required argument 'buffer' (pos 1)`)."""
+    first_empty = 0
+    while first_empty < len(slots) and slots[first_empty] is not None:
+        first_empty += 1
+    if first_empty >= sig['req']:
+        return None
+    if first_empty < sig['posonly']:
+        plural = '' if sig['posonly'] == 1 else 's'
+        return (f"{sig['msg']}() takes at least {sig['posonly']} positional "
+                f"argument{plural} ({npos} given)")
+    return (f"{sig['msg']}() missing required argument "
+            f"'{sig['pos'][first_empty]}' (pos {first_empty + 1})")
+
+
+def _struct_bind_args(node, key):
+    """Bind a `struct` call's arguments into CPython's positional order.
+
+    Returns `(slots, err)`: `slots[i]` is the expression node bound to
+    positional parameter `i` (None where nothing was supplied), and `err` is
+    CPython's TypeError text, or None when the call binds.
+
+    Arguments are bound positionals-first and then keywords-by-name, because
+    that is the order in which Python both evaluates the argument expressions
+    and fills the parameters — so a rejected call still runs its arguments'
+    side effects, which is what `_lower_struct_attr_call` already does for the
+    same reason.
+
+    The ORDER the three possible errors are reported in is CPython's, not
+    this function's convenience, and it is measurable: an entry point with no
+    nameable parameter refuses every keyword before anything else is
+    examined (that is where `struct.unpack(fmt=..., buffer=...)` gets "takes
+    no keyword arguments" rather than a complaint about a format it never
+    received), while on `unpack_from` an unfilled REQUIRED parameter outranks
+    an unknown keyword (`s.unpack_from(offset=2, bogus=1)` reports the missing
+    `buffer`). A keyword that names an already-filled slot is third.
+
+    Only the errors a KEYWORD can cause are reported. A purely positional call
+    that is short an argument keeps reaching the lowerings below and fails
+    there, exactly as it did before: CPython's own text for those is a
+    different string per entry point ("unpack expected 2 arguments, got 1",
+    "missing format argument", "pack_into expected offset argument"), and
+    reproducing that catalogue is not what the keyword bug was about. The one
+    exception is a required parameter left empty *by* a keyword, which is this
+    function's own doing and is therefore its own message.
+    """
+    sig = _STRUCT_CALL_SIGS[key]
+    npos = len(node.args)
+    slots = list(node.args)
+    kws = list(getattr(node, 'kwargs', None) or [])
+    if kws and not sig['kw']:
+        return slots, f"{sig['msg']}() takes no keyword arguments"
+    if kws and key == 'Struct' and npos + len(kws) > 1:
+        # `struct.Struct` takes at most ONE argument, and its binder checks
+        # that COUNT before it looks at any name — so a second argument is
+        # the same "takes at most 1 ..." message whether it is a positional,
+        # a second keyword, or `format` supplied twice.
+        return slots, _struct_kwarg_rejection(sig, key, kws[0][0], npos, len(kws))
+    unknown = None
+    conflict = None
+    for kwname, kwexpr in kws:
+        if kwname not in sig['kw']:
+            if unknown is None:
+                unknown = kwname
+            continue
+        i = sig['kw'][kwname]
+        while len(slots) <= i:
+            slots.append(None)
+        if slots[i] is not None:
+            if conflict is None:
+                conflict = (kwname, i + 1)
+            continue
+        slots[i] = kwexpr
+    err = _struct_missing_required(sig, slots, npos)
+    if err is None:
+        if conflict is not None:
+            err = (f"argument for {sig['msg']}() given by name "
+                   f"('{conflict[0]}') and position ({conflict[1]})")
+        elif unknown is not None:
+            err = _struct_kwarg_rejection(sig, key, unknown, npos, len(kws))
+    return slots, err
+
+
+def _struct_bind_or_raise(gen, node, key, rtype):
+    """`_struct_bind_args`, with a rejected call turned into the CPython
+    exception at RUNTIME.
+
+    A call-arity error is a runtime raise, not a codegen error: real Python
+    raises it while binding, and the surrounding program is expected to catch
+    it (`try: struct.calcsize(fmt=f) except TypeError:`), which a codegen-time
+    abort could not express. `mojo_raise` longjmps, so the zero this returns
+    is only ever read on a path that cannot be reached — it exists so the
+    enclosing expression still typechecks, the same convention
+    `_lower_struct_attr_call` uses.
+    """
+    slots, err = _struct_bind_args(node, key)
+    if err is None:
+        return slots, None
+    for a in node.args:
+        gen.lower_expr(a)
+    for _k, v in (getattr(node, 'kwargs', None) or []):
+        gen.lower_expr(v)
+    gen._emit_call('void', '', 'mojo_raise_type_error',
+                   [('char *', gen._intern_string(gimple_ctypes._c_escape(err)))])
+    return slots, gen._stub_result(rtype, _STRUCT_RAISE_STUB,
+                                   f'struct {key} — {err}')
+
+
 def _struct_buffer_arg(gen, node_arg):
     """Lower a struct unpack/pack_into buffer argument to a MojoBytes*."""
     bt, bv = gen.lower_expr(node_arg)
@@ -685,17 +888,37 @@ def _struct_tag_unpack_result(gen, t, codes):
 
 
 def _lower_struct_module_call(gen, node, method_name):
-    """`struct.<fn>(...)` module-level call lowering (Stage 1/2/3)."""
-    args = list(node.args)
+    """`struct.<fn>(...)` module-level call lowering (Stage 1/2/3).
+
+    Every `return` below yields the C type this codegen assigns to the call's
+    VALUE, taken from `gimple_ctypes._STRUCT_MODULE_FN_RETVALS` rather than
+    spelled out again: the type estimator `_quick_type` consults the same table
+    to write the enclosing function's PROTOTYPE, and a prototype the body must
+    box its real value to satisfy is how a returned `MojoStructFmt *` used to
+    arrive at its consumers as an `int64_t` (and `s.size` with it). One table,
+    both sides, no second place to forget to update.
+    """
+    _RT = gimple_ctypes._STRUCT_MODULE_FN_RETVALS
+    rtype = _RT[method_name]
+    # Bind positionals and keywords BEFORE touching `args`: a keyword the
+    # entry point does not accept is CPython's TypeError, and the arguments
+    # must still have been evaluated when it is raised.
+    args, raised = _struct_bind_or_raise(gen, node, method_name, rtype)
+    if raised is not None:
+        return raised
     if method_name == 'Struct':
-        if args:
-            st, sv = gen.lower_expr(args[0])
-            if st != 'char *':
-                sv = gen._new_val('char *', f'(char *){sv}')
-        else:
-            sv = gen._intern_string('')
-        t = gen._call_expr('MojoStructFmt *', 'mojo_struct_new', [('char *', sv)])
-        return 'MojoStructFmt *', t
+        st, sv = gen.lower_expr(args[0])
+        if st != 'char *':
+            sv = gen._new_val('char *', f'(char *){sv}')
+        t = gen._call_expr(rtype, 'mojo_struct_new', [('char *', sv)])
+        # Remember a const-foldable format against the handle it produced, so
+        # the INSTANCE methods can recover the same per-slot kinds the module
+        # functions read straight off their own format argument (see
+        # _lower_struct_instance_method).
+        _sfmt = gen._try_const_fold_str(args[0])
+        if _sfmt is not None:
+            gen._struct_formats[t] = _sfmt
+        return rtype, t
 
     fmt_node = args[0]
     fmt_codes = _struct_value_codes(gen._try_const_fold_str(fmt_node))
@@ -704,29 +927,29 @@ def _lower_struct_module_call(gen, node, method_name):
         fv = gen._new_val('char *', f'(char *){fv}')
 
     if method_name == 'calcsize':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_struct_calcsize', [('char *', fv)])
+        return _RT['calcsize'], gen._call_expr(_RT['calcsize'], 'mojo_struct_calcsize', [('char *', fv)])
 
     if method_name == 'pack':
         lst = _struct_build_value_list(gen, args[1:], fmt_codes)
-        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_struct_pack_list',
-                                             [('char *', fv), ('MojoList *', lst)])
+        return _RT['pack'], gen._call_expr(_RT['pack'], 'mojo_struct_pack_list',
+                                           [('char *', fv), ('MojoList *', lst)])
 
     if method_name in ('unpack', 'unpack_from', 'iter_unpack'):
         buf = _struct_buffer_arg(gen, args[1])
         if method_name == 'unpack_from' and len(args) >= 3:
             ot, ov = gen.lower_expr(args[2])
             off = gen._new_val('int64_t', f'(int64_t){ov}') if ot != 'int64_t' else ov
-            t = gen._call_expr('MojoList *', 'mojo_struct_unpack_from',
+            t = gen._call_expr(_RT['unpack_from'], 'mojo_struct_unpack_from',
                                [('char *', fv), ('MojoBytes *', buf), ('int64_t', off)])
         elif method_name == 'unpack_from':
             zero = gen._new_val('int64_t', '(int64_t)0')
-            t = gen._call_expr('MojoList *', 'mojo_struct_unpack_from',
+            t = gen._call_expr(_RT['unpack_from'], 'mojo_struct_unpack_from',
                                [('char *', fv), ('MojoBytes *', buf), ('int64_t', zero)])
         else:
-            t = gen._call_expr('MojoList *', 'mojo_struct_unpack',
+            t = gen._call_expr(_RT[method_name], 'mojo_struct_unpack',
                                [('char *', fv), ('MojoBytes *', buf)])
         _struct_tag_unpack_result(gen, t, fmt_codes)
-        return 'MojoList *', t
+        return _RT[method_name], t
 
     if method_name == 'pack_into':
         buf = _struct_buffer_arg(gen, args[1])
@@ -735,35 +958,50 @@ def _lower_struct_module_call(gen, node, method_name):
         lst = _struct_build_value_list(gen, args[3:], fmt_codes)
         gen._emit_call('void', '', 'mojo_struct_pack_into',
                        [('char *', fv), ('MojoBytes *', buf), ('int64_t', off), ('MojoList *', lst)])
-        return 'int', gen._new_val('int', '0')
+        return _RT['pack_into'], gen._new_val(_RT['pack_into'], '0')
 
     raise RuntimeError(f'struct.{method_name}: unsupported')
 
 
 def _lower_struct_instance_method(gen, fmt_val, method, node):
     """`s.<method>(...)` where `s` holds a `MojoStructFmt *` (struct.Struct)."""
-    args = list(node.args)
+    rtype = {'pack': 'MojoBytes *', 'unpack': 'MojoList *', 'unpack_from': 'MojoList *',
+             'iter_unpack': 'MojoList *', 'pack_into': 'int'}[method]
+    # Same keyword binding as the module functions, against the `Struct.*`
+    # rows of _STRUCT_CALL_SIGS: `s.unpack_from(buf, offset=2)` is a real
+    # CPython call whose offset used to be dropped, so the unpack read offset
+    # 0 and returned a well-formed tuple of the wrong fields.
+    args, raised = _struct_bind_or_raise(gen, node, f'Struct.{method}', rtype)
+    if raised is not None:
+        return raised
     fp = gen._ensure_local('MojoStructFmt *', fmt_val)
     if method == 'pack':
         lst = _struct_build_value_list(gen, args, None)
-        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_struct_pack_h',
-                                             [('MojoStructFmt *', fp), ('MojoList *', lst)])
+        return rtype, gen._call_expr(rtype, 'mojo_struct_pack_h',
+                                     [('MojoStructFmt *', fp), ('MojoList *', lst)])
     if method in ('unpack', 'unpack_from', 'iter_unpack'):
         buf = _struct_buffer_arg(gen, args[0])
         if method == 'unpack_from' and len(args) >= 2:
             ot, ov = gen.lower_expr(args[1])
             off = gen._new_val('int64_t', f'(int64_t){ov}') if ot != 'int64_t' else ov
-            t = gen._call_expr('MojoList *', 'mojo_struct_unpack_from_h',
+            t = gen._call_expr(rtype, 'mojo_struct_unpack_from_h',
                                [('MojoStructFmt *', fp), ('MojoBytes *', buf), ('int64_t', off)])
         elif method == 'unpack_from':
             zero = gen._new_val('int64_t', '(int64_t)0')
-            t = gen._call_expr('MojoList *', 'mojo_struct_unpack_from_h',
+            t = gen._call_expr(rtype, 'mojo_struct_unpack_from_h',
                                [('MojoStructFmt *', fp), ('MojoBytes *', buf), ('int64_t', zero)])
         else:
-            t = gen._call_expr('MojoList *', 'mojo_struct_unpack_h',
+            t = gen._call_expr(rtype, 'mojo_struct_unpack_h',
                                [('MojoStructFmt *', fp), ('MojoBytes *', buf)])
-        _struct_tag_unpack_result(gen, t, None)
-        return 'MojoList *', t
+        # The instance's format is only known at RUNTIME (it lives in the
+        # compiled MojoStructFmt), so the per-slot kinds come from the
+        # const-folded format recorded when this handle was built — the
+        # same answer the module functions get for free, and the difference
+        # between `s.unpack(buf)` reading a mixed format's float slot as its
+        # IEEE-754 bits and reading it as a float.
+        _struct_tag_unpack_result(
+            gen, t, _struct_value_codes(gen._struct_formats.get(fmt_val)))
+        return rtype, t
     if method == 'pack_into':
         buf = _struct_buffer_arg(gen, args[0])
         ot, ov = gen.lower_expr(args[1])
@@ -771,7 +1009,7 @@ def _lower_struct_instance_method(gen, fmt_val, method, node):
         lst = _struct_build_value_list(gen, args[2:], None)
         gen._emit_call('void', '', 'mojo_struct_pack_into_h',
                        [('MojoStructFmt *', fp), ('MojoBytes *', buf), ('int64_t', off), ('MojoList *', lst)])
-        return 'int', gen._new_val('int', '0')
+        return rtype, gen._new_val(rtype, '0')
     raise RuntimeError(f'struct.Struct.{method}: unsupported')
 
 
@@ -1713,10 +1951,18 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
         # `struct` module (binary pack/unpack). Guarded so a local variable
         # named `struct` (or a real Mojo `struct` type used as a value)
-        # can't be hijacked: `struct` must not be a known local/param.
-        if (module_name == 'struct' and method_name in _STRUCT_METHODS
-                and module_name not in gen.var_types
-                and not getattr(node, 'kwargs', None)):
+        # can't be hijacked: `struct` must not be a known local/param. The
+        # name set IS the shared return-type table (see
+        # mojo/middle/types.py) — the lowering's gate and the type estimator's
+        # rows are one dict, so a method this branch accepts can never be one
+        # `_quick_type` answers `int64_t` for. Keyword arguments are NOT
+        # excluded here: `_struct_bind_args` binds the three names CPython
+        # accepts and raises CPython's TypeError for the rest, which is both
+        # correct and strictly better than letting the call fall through to
+        # the generic receiver dispatch (that answered `0`).
+        if (module_name == 'struct'
+                and method_name in gimple_ctypes._STRUCT_MODULE_FN_RETVALS
+                and module_name not in gen.var_types):
             return _lower_struct_module_call(gen, node, method_name)
 
         # Self-hosting bootstrap: a module-qualified call to one of this
@@ -3327,6 +3573,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return gen._lower_struct_method_call(ov, ot, method, node)
 
 
+def _dict_key_probe(gen, key_type: str, key_val: str) -> tuple[str, str, bool]:
+    """Normalise a dict KEY operand to the domain it is probed in, as
+    `(ctype, cvalue, is_bytes)`.
+
+    A `bytes` key lives in its own key domain in the runtime (see
+    _DictSlot.keykind) precisely so that `d[b'x']` and `d['x']` stay the two
+    distinct entries Python says they are. Every read path therefore has to
+    ask which domain it is in BEFORE choosing a runtime helper, and this is
+    that one question: the old code had each of get/pop/setdefault answer
+    it separately, and only setdefault remembered — the other two ran
+    `_char_to_cstr` on the `MojoBytes *`, casting the POINTER to a `char *`
+    and probing the str domain under an address, so `d[b'a'] = 7;
+    d.get(b'a')` read 0 and `d.pop(b'a')` neither found nor removed the
+    key. One function, so the next reader cannot forget."""
+    if key_type == 'MojoBytes *':
+        return 'MojoBytes *', key_val, True
+    kt, kv = gen._char_to_cstr(key_type, key_val)
+    return kt, kv, False
+
+
 def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
     """Lower MojoDict * method calls."""
     if method == 'keys':
@@ -3359,13 +3625,11 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._dict_items_val_elems[t] = gen._dict_val_of(ov)
         return 'MojoList *', t
     if method == 'get' and args:
-        key_type, key_val = gen.lower_expr(args[0])
+        key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
         default_ty = None
         default_val = None
         if len(args) > 1:
             default_ty, default_val = gen.lower_expr(args[1])
-        # Ensure key is char * for dict operations
-        key_type, key_val = gen._char_to_cstr(key_type, key_val)
         val_type = gen._dict_val_of(ov)
         # `dict.get(k, <char* default>)` on a dict whose value type is
         # unknown (int64_t): the default must NOT be coerced through a
@@ -3375,12 +3639,19 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # self-hosted `--dump myinterpreter.py`).
         if val_type == 'int64_t' and default_ty == 'char *':
             val_type = 'char *'
+        # The runtime keeps a bytes key in its own domain, so the VALUE
+        # accessor has to be the bytes one too — the `_bytes` suffixed
+        # helpers are the only ones that probe that domain at all. Pairing
+        # the key domain with the value domain is the whole fix: both
+        # halves existed and only the pairing was missing, so
+        # `d[b'a'] = 7; d.get(b'a')` read the str domain and answered 0.
+        _sfx = '_bytes' if key_is_bytes else ''
         if val_type == 'char *':
-            raw = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (key_type, key_val)])
+            raw = gen._call_expr('char *', f'mojo_dict_get{_sfx}_str', [('MojoDict *', ov), (key_type, key_val)])
         elif val_type == 'double':
-            raw = gen._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (key_type, key_val)])
+            raw = gen._call_expr('double', f'mojo_dict_get{_sfx}_double', [('MojoDict *', ov), (key_type, key_val)])
         else:
-            raw = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (key_type, key_val)])
+            raw = gen._call_expr('int64_t', f'mojo_dict_get{_sfx}_int', [('MojoDict *', ov), (key_type, key_val)])
         if default_val is not None:
             # dict.get(key, default) must return the default when the key
             # is ABSENT — the plain mojo_dict_get_* helpers return 0/NULL
@@ -3484,8 +3755,32 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")
         return 'int', gen._new_val('int', '0')
     if method == 'pop' and args:
-        key_type, key_val = gen.lower_expr(args[0])
-        key_type, key_val = gen._char_to_cstr(key_type, key_val)
+        # A bytes key pops from the bytes key domain, and its runtime
+        # helper is the only one that takes the `dflt` argument Python's
+        # `pop(k, default)` needs — the str-domain mojo_dict_pop_int
+        # answers 0 for an absent key and cannot express a default at all.
+        key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
+        val_type = gen._dict_val_of(ov)
+        if key_is_bytes:
+            # The bytes-domain pop helpers take the `dflt` Python's
+            # `pop(k, default)` needs — the str-domain mojo_dict_pop_int
+            # has no such parameter and answers 0 for an absent key, so a
+            # default could not even be expressed there. The str/double
+            # siblings exist because the slot is one int64_t of bits: without
+            # them a bytes-keyed dict holding strings popped its value as a
+            # raw pointer decimal.
+            if val_type == 'char *':
+                return 'char *', gen._call_expr(
+                    'char *', 'mojo_dict_pop_bytes_str',
+                    [('MojoDict *', ov), (key_type, key_val)])
+            if val_type == 'double':
+                return 'double', gen._call_expr(
+                    'double', 'mojo_dict_pop_bytes_double',
+                    [('MojoDict *', ov), (key_type, key_val)])
+            dflt = gen._to_int64(*gen.lower_expr(args[1])) if len(args) > 1 else '0'
+            return 'int64_t', gen._call_expr(
+                'int64_t', 'mojo_dict_pop_bytes_int',
+                [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt)])
         return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_pop_int', [('MojoDict *', ov), (key_type, key_val)])
     if method in ('copy',):
         return 'MojoDict *', gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
@@ -3500,14 +3795,12 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # `d.setdefault(k, []).append(x)` accumulator pattern (this compiler's
         # own `gen_module_impl` uses it) appended to a NULL list and
         # segfaulted the self-hosted binary.
-        key_type, key_val = gen.lower_expr(args[0])
-        if key_type != 'MojoBytes *':
-            key_type, key_val = gen._char_to_cstr(key_type, key_val)
+        key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
         if len(args) >= 2:
             dt, dv = gen.lower_expr(args[1])
         else:
             dt, dv = 'int64_t', '0'
-        if key_type == 'MojoBytes *':
+        if key_is_bytes:
             # bytes keys live in their own dict key domain — see
             # _DictSlot.keykind. `_char_to_cstr` would have cast the
             # MojoBytes POINTER to char*, so the insert went into the str
@@ -4028,10 +4321,19 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
     # Character-class predicates (str.isalnum/isdigit/...) — real runtime
     # helpers, previously hardcoded-0 stubs (always False), which broke
     # e.g. fire_compiler.py's own `raw[i].isdigit()` / `prev.isalnum()`.
+    # All ten go through the runtime's one shared kernel, so this table and
+    # the `bytes` one (_bytes_is_kind) cannot drift apart — they are the
+    # same Python rules, and while they were two hand-written copies the
+    # bytes copy answered `b''.isalpha()` True and `b'ab1'.islower()` False.
+    # istitle/isascii/isprintable/isnumeric were missing here entirely and
+    # fell to the generic stub as a raw int 0 — printed as `0`, not `False`,
+    # and `True`/`False`-incompatible for `"".isprintable()`.
     _STR_PREDICATES = {
         'isalnum': 'mojo_str_isalnum', 'isdigit': 'mojo_str_isdigit',
         'isalpha': 'mojo_str_isalpha', 'isspace': 'mojo_str_isspace',
         'isupper': 'mojo_str_isupper', 'islower': 'mojo_str_islower',
+        'istitle': 'mojo_str_istitle', 'isascii': 'mojo_str_isascii',
+        'isprintable': 'mojo_str_isprintable', 'isnumeric': 'mojo_str_isnumeric',
     }
     if method in _STR_PREDICATES and not arg_vals:
         t = gen._new_temp('int')
@@ -4096,15 +4398,42 @@ def _coerce_to_bytes(gen, t: str, v: str) -> str:
 
 
 def _bytes_is_kind(method: str) -> int | None:
-    """Map a `bytes.isX()` predicate name to its MOJO_BYTES_IS_* code (see
-    mojo_bytes_is in fire_runtime.c). Returns None for a non-predicate name.
-    Python defines only the ASCII flavours of these on `bytes`, which is
-    exactly what the runtime implements."""
+    """Map a `bytes.isX()` predicate name to its MOJO_IS_* code (see
+    mojo_is_kind in fire_runtime.c). Returns None for a non-predicate name.
+
+    This is EXACTLY CPython's set for `bytes` — isalnum, isalpha, isascii,
+    isdigit, islower, isspace, istitle, isupper — and nothing else. The
+    list used to carry ten names on the strength of "Python defines only
+    the ASCII flavours of these on bytes", which is not what CPython does:
+    `isprintable` and `isnumeric` are `str`-only and `b'a'.isprintable()`
+    is an AttributeError in CPython and in this compiler's own interpreter
+    reference (myinterpreter.py leaves it to Python's bytes). Implementing
+    them here answered a question nobody asked with a value that could not
+    be right, so they are raised instead (_BYTES_STR_ONLY_PREDICATES)."""
     return {
         'isalpha': 0, 'isalnum': 1, 'isdigit': 2, 'isspace': 3,
-        'isupper': 4, 'islower': 5, 'istitle': 6, 'isprintable': 7,
-        'isascii': 8, 'isnumeric': 9,
+        'isupper': 4, 'islower': 5, 'istitle': 6, 'isascii': 8,
     }.get(method)
+
+
+# `str`-only predicates: real names that are NOT `bytes` methods, so the
+# honest answer is the same AttributeError the interpreter gives. Raising
+# beats both alternatives this used to have — implementing them (a silent
+# value that disagrees with CPython on the only inputs that reach it) and
+# dropping them (the generic unknown-method stub, a silent int 0 that also
+# happens to be `False` for two of the ten and not for the rest).
+_BYTES_STR_ONLY_PREDICATES = ('isprintable', 'isnumeric')
+
+
+def _raise_bytes_str_only_predicate(gen, method: str) -> None:
+    """Emit the real AttributeError for a `str`-only predicate asked of a
+    `bytes` receiver. `_lower_struct_attr_call` uses the same
+    mojo_raise_attribute_error + dead-value convention: the raise longjmps,
+    so the value the surrounding expression wants is dead on every path
+    that reaches it and only has to typecheck."""
+    gen._emit_call(
+        'void', '', 'mojo_raise_attribute_error',
+        [('char *', gen._intern_string(f"'bytes' object has no attribute '{method}'"))])
 
 
 def _opt_arg(gen, args, kwargs, name, want, default):
@@ -4130,6 +4459,43 @@ def _opt_arg(gen, args, kwargs, name, want, default):
         if lo is not None and len(args) > lo:
             return _coerce_to_bytes(gen, *gen.lower_expr(args[lo]))
     return default
+
+
+def _bytes_fill_char(gen, args, kwargs) -> str:
+    """`ljust`/`rjust`/`center`'s `fillchar`, as the C `int` byte value the
+    runtime's pad helper wants.
+
+    CPython accepts ONE spelling: a one-byte `bytes` (`b'a'.ljust(4, b'.')`);
+    an int is a TypeError there. This compiler also accepts the bare int
+    (a fire extension, kept because the repo's own corpus and its
+    `gimple_bytes_case_and_affix_methods` case use it), so both spellings
+    have to resolve — and they are different C domains.
+
+    The bytes spelling used to be resolved by asking `_opt_arg` for an
+    `int64_t`, i.e. running `_to_int64` on a `MojoBytes *`: a
+    pointer-to-integer cast whose low byte is a heap address, so
+    `b'a'.ljust(4, b'.')` emitted a DIFFERENT wrong byte on every run. The
+    length check cannot live here — the fill is not a compile-time
+    constant — so it is mojo_bytes_fill_byte's, in the runtime, where it
+    raises TypeError instead of silently padding with the first byte."""
+    lo, _hi = _OPT_SLOTS['fillchar']
+    for k, v in (kwargs or []):
+        if k == 'fillchar':
+            ft, fv = gen.lower_expr(v)
+            break
+    else:
+        if len(args) <= lo:
+            return '32'  # Python's default fillchar is a single space
+        ft, fv = gen.lower_expr(args[lo])
+    if ft == 'MojoBytes *':
+        return gen._call_expr('int', 'mojo_bytes_fill_byte', [('MojoBytes *', fv)])
+    if ft == 'char *':
+        # A str fillchar is what `b'a'.ljust(4, '.')` writes in Mojo's own
+        # spelling; take its first byte, which for the one-character fill
+        # this is written for is the whole thing.
+        fv = _coerce_to_bytes(gen, ft, fv)
+        return gen._call_expr('int', 'mojo_bytes_fill_byte', [('MojoBytes *', fv)])
+    return gen._to_int64(ft, fv)
 
 
 # Optional-parameter positional slots, per method family: (first_positional,
@@ -4344,11 +4710,21 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
                                              [('MojoBytes *', ov)])
 
     if method in ('ljust', 'rjust', 'center', 'zfill'):
-        width = gen._to_int64(*arg_pairs[0]) if arg_pairs else '0'
+        # `width` is a named parameter, so `b'a'.ljust(width=4, fillchar=b'.')`
+        # is legal Python and must not read the KEYWORD's value as the width:
+        # taking arg_pairs[0] unconditionally made that call pad with the
+        # width taken from `fillchar` and answered b'a'. The keyword wins,
+        # then the first positional, as in Python.
+        width = None
+        for k, v in (kwargs or []):
+            if k == 'width':
+                width = gen._to_int64(*gen.lower_expr(v))
+        if width is None:
+            width = gen._to_int64(*arg_pairs[0]) if arg_pairs else '0'
         if method == 'zfill':
             return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_zfill',
                                                 [('MojoBytes *', ov), ('int64_t', width)])
-        fill = _opt_arg(gen, args, kwargs, 'fillchar', 'int64_t', '32')
+        fill = _bytes_fill_char(gen, args, kwargs)
         return 'MojoBytes *', gen._call_expr('MojoBytes *', f'mojo_bytes_{method}',
                                              [('MojoBytes *', ov), ('int64_t', width),
                                               ('int', fill)])
@@ -4367,6 +4743,10 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
     if _is_kind is not None:
         t = gen._call_expr('int', 'mojo_bytes_is', [('MojoBytes *', ov), ('int', str(_is_kind))])
         return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+
+    if method in _BYTES_STR_ONLY_PREDICATES:
+        _raise_bytes_str_only_predicate(gen, method)
+        return gen._stub_result('_Bool', '0', f'bytes.{method}() — raises at runtime')
 
     if method in ('encode',):
         return 'MojoBytes *', ov
@@ -4439,10 +4819,22 @@ def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None)
     if method == 'obj':
         return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
                                              [('MojoMemoryView *', ov)])
-    if method in ('readonly', 'c_contiguous', 'f_contiguous', 'contiguous'):
-        # This representation is always a writable 1-D byte window over
-        # contiguous memory, so these descriptors are constant-folded.
-        return '_Bool', gen._new_val('_Bool', '0' if method == 'readonly' else '1')
+    if method == 'readonly':
+        # A real query, not a fold: the answer is the mutability of the
+        # object the view was taken over, which MojoMemoryView records from
+        # its source (`readonly` field, see fire_runtime.h). It used to be
+        # constant-folded to `0` on the grounds that "this representation is
+        # always a writable 1-D byte window" — true of the WINDOW, wrong for
+        # the ANSWER, and it made `memoryview(b'abcd').readonly` False where
+        # CPython (correctly) says True, because the view is over an
+        # immutable object.
+        t = gen._call_expr('int', 'mojo_memoryview_readonly', [('MojoMemoryView *', ov)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
+        # Genuinely constant: a 1-D byte window over contiguous memory is
+        # C-contiguous by construction, and `f_contiguous`/`contiguous` are
+        # the same fact under this representation.
+        return '_Bool', gen._new_val('_Bool', '1')
     if method in ('release', '__enter__', '__exit__'):
         # No refcount model — context-manager / release is a no-op that
         # yields the view itself (so `with memoryview(x) as m:` binds m).

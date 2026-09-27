@@ -43,6 +43,31 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             # MojoList* temp before the accessor call, or GIMPLE rejects
             # "passing int64_t where MojoList * expected".
             lp = gen._coerce_to_type('int64_t', 'MojoList *', v)
+        # A `struct.unpack(...)` result has ONE container ctype but a
+        # per-slot real kind, statically known from the format string. The
+        # subscript path already prefers that per-slot kind (emit_calls.py's
+        # MojoList branch); this is the SAME preference for the other
+        # statically-indexed read of a tuple, the `a, b = t` destructuring
+        # target, which read every slot with `mojo_list_get_int` and so handed
+        # `a, b = struct.unpack('<if', buf)` the float's raw IEEE-754 bits.
+        # `idx` is always a literal here (the target list is walked in order),
+        # so the slot kind is a compile-time fact — unlike a computed
+        # subscript, which genuinely has none.
+        _sk = gen._struct_slot_kinds.get(v)
+        if _sk is not None and 0 <= idx < len(_sk):
+            if _sk[idx] == 'double':
+                return 'double', gen._new_val(
+                    'double', f"mojo_list_get_double ({lp}, {idx64})")
+            if _sk[idx] == 'bytes':
+                # A bytes slot is a `MojoBytes *` stored in the raw int64_t
+                # slot (see fire_runtime.h's MojoList comment), so the read
+                # goes back through the coercion chokepoint rather than an
+                # ad-hoc pointer cast — DESIGN.html R2/R3.
+                _bp = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+                return 'MojoBytes *', gen._coerce_to_type(
+                    'int64_t', 'MojoBytes *', _bp)
+            return 'int64_t', gen._new_val(
+                'int64_t', f"mojo_list_get_int ({lp}, {idx64})")
         if suf == 'str':
             return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
         if suf == 'double':
