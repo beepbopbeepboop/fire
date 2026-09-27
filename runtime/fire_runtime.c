@@ -171,6 +171,7 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
  * than next to their users: mojo_open (line ~319) needs them before the
  * AttributeError section further down. */
 #define _MOJO_EXC_TAG_ATTRIBUTEERROR 1471495998
+#define _MOJO_EXC_TAG_TYPEERROR 348628165
 #define _MOJO_EXC_TAG_FILENOTFOUND 1834506930
 #define _MOJO_EXC_TAG_OSERROR 2131477727
 
@@ -5160,6 +5161,31 @@ void mojo_raise_key_error(char *key) {
     snprintf(msg, sizeof msg, "KeyError: %s", key ? key : "?");
     char *heap_msg = strdup(msg);
     mojo_exc_type_set(_MOJO_EXC_TAG_KEYERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* Real `TypeError: <detail>` — the same typed-exception mechanism as
+ * mojo_raise_attribute_error / mojo_raise_key_error above, with the same
+ * hardcoded-tag rationale (the tag is `(zlib.crc32(b"TypeError") &
+ * 0x7fffffff) or 1`).
+ *
+ * It exists for the one shape the codegen used to answer with a SILENT wrong
+ * value: calling an attribute that is not callable, on a type whose attribute
+ * namespace the codegen models as CLOSED. The canonical case is
+ * `struct.Struct.format` — in real Python that is a getset descriptor holding
+ * the format STRING (there is no `Struct.format` method for it to shadow; the
+ * struct module has no formatting entry point at all), so `s.format` reads as
+ * a `str` and `s.format(70)` is a TypeError. Before this existed, such a call
+ * became mojo_obj_call1() — a hardcoded `return 0` — and returned 0 with exit
+ * 0. `detail` is the tail CPython puts after "TypeError: ", e.g. "'str' object
+ * is not callable". */
+void mojo_raise_type_error(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "TypeError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
     mojo_exc_msg_set(heap_msg);
     mojo_exc_obj_set(heap_msg);
     mojo_raise();

@@ -202,7 +202,9 @@ MultiplexedPath(*filter(bool, map(self._resolve, namespace_path)))`.
 
 Root-caused: this is a confirmed real-world instance of the
 already-documented hard bug
-`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md` (which
+supersedes the removed
+`CODEGEN_unannotated_init_param_field_type_defaults_int64.md`)
 — `__init__(self, namespace_path)`'s unannotated `namespace_path`
 parameter defaults to `int64_t` regardless of the real (iterable)
 argument type. Confirmed via the generated `.ci`: the parameter is

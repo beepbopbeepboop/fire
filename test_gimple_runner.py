@@ -352,10 +352,16 @@ fn main():
 """, "7\n3\n8\n")
 
     # The inline reduction must NOT fire when the lambda's local escapes —
-    # there is no call site to inline into, so the lambda stays lifted and
-    # the capture is lost. The result is WRONG (1, not 8); this is pinned
-    # deliberately, so the env-struct work that should fix it flips this
-    # test instead of changing it silently.
+    # there is no call site to inline into, so the lambda stays lifted. The
+    # lifted capturing lambda used to LOSE the capture (its body is a
+    # top-level C function that does not contain `n`, and the read stubbed
+    # to 0), printing 1 instead of 8. That expectation was pinned
+    # deliberately so the env-struct work would flip this test instead of
+    # changing it silently — and it has now landed: `_lower_LambdaExpr`
+    # gives a capturing lambda a heap env (a `MojoBoundMethod`, env as its
+    # first parameter), so it is correct whether or not it escapes. Expected
+    # output is now CPython's answer. See
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
     test_gimple_stdout("gimple_escaping_capturing_lambda_still_lifted", """\
 fn apply(f, v):
     return f(v)
@@ -364,7 +370,7 @@ fn main():
     var n = 7
     var e = lambda x: n + x
     print(apply(e, 1))
-""", "1\n")
+""", "8\n")
 
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
@@ -1687,6 +1693,40 @@ fn main():
     var c = CentralDir()
     c.read(b'\\x01\\x00\\x02\\x00')
 """, "1 2 4\n")
+
+    # `Struct.format` and `Struct.size` are DATA attributes (CPython models
+    # both as getset_descriptors on the type), not methods: reading one
+    # gives the format string / the byte count, and CALLING one is a
+    # TypeError. The call used to escape the struct-receiver dispatch
+    # entirely — `format` is spelled like a container method, so it reached
+    # the container-method name-guess and became `mojo_obj_call1(handle,
+    # "format", 70)`, a runtime function that is a documented hardcoded
+    # `return 0`: a silent wrong value with exit 0, indistinguishable from a
+    # real 0. `size` is not in that list and instead fell through to a call
+    # to the phantom C symbol `_MojoStructFmt_size`, a LINK failure. The
+    # namespace is closed and fully modelled, so both are now the
+    # determinate exception they are in CPython, and a name that is not an
+    # attribute of the type at all is the AttributeError.
+    test_gimple_stdout("gimple_struct_Struct_data_attr_call_raises", """\
+fn main():
+    var s = struct.Struct('<HH')
+    print(s.size, s.format)
+    try:
+        s.format(70)
+        print('no-error')
+    except TypeError:
+        print('format TypeError')
+    try:
+        s.size()
+        print('no-error')
+    except TypeError:
+        print('size TypeError')
+    try:
+        s.nosuch(1)
+        print('no-error')
+    except AttributeError:
+        print('nosuch AttributeError')
+""", "4 <HH\nformat TypeError\nsize TypeError\nnosuch AttributeError\n")
 
     # The `var` spelling of a class-body field. To Python this is the SAME
     # declaration as the bare `NAME = ...` above — `var` only suppresses a

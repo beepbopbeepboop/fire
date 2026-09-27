@@ -399,7 +399,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # where it does not exist -- a hard "'acc' was not declared in this
     # scope" from the generated .cpp, which blames generated code rather
     # than the program. Refuse honestly instead. See
-    # bugs/hard/CODEGEN_coro_nested_async_closure_capture.md.
+    # bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3).
     if (getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS
             or (struct_name and f'{struct_name}_{fn.name}'
                 in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS)):
@@ -419,7 +419,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # module, before either backend runs), and its own `_eligible` refuses
     # them; this is the same refusal for the C++ backend, so neither can
     # silently miscompile what the other rejects. See
-    # bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md.
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
     _bad = gimple_gen_coro._ambiguous_yielded_params(fn, struct_name)
     if _bad:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -2705,7 +2705,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     body referenced the captured name in a scope where it does not exist —
     a hard "'acc' was not declared in this scope" from the generated .cpp,
     blaming generated code rather than the program. See
-    bugs/hard/CODEGEN_coro_nested_async_closure_capture.md.
+    bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3).
     """
     if getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS:
         raise gimple_exprtypes._UnsupportedGeneratorShape(

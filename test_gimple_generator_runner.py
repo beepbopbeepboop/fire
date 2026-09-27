@@ -1985,7 +1985,7 @@ def main():
 """, "1\n2\n3\n4\n")
 
     # ── yield-kind inference for identifier / self.field / list-local refs ──
-    # (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md)
+    # (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md)
     # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare
     # IdentExpr / `self.<field>` / `<list-local>[idx]` reference, so a
     # Float64/String value yielded through one of those silently defaulted
@@ -2839,6 +2839,104 @@ def main():
 
 main()
 """, "1 3\n2 4\n")
+
+    # ── a generator CONSUMING a sibling generator ──────────────────────────
+    # `_static_env` is the purely-syntactic name -> yield-kind map that
+    # decides a generator's `value_ctype`, and its for-loop branch only knew
+    # list-typed locals and list literals. A `for f in <sibling gen>():`
+    # iterable is a CallExpr, so the loop target got no entry, `yield f`
+    # inferred None, and the consumer's OWN value_ctype fell to the int64_t
+    # default. The bytes were always right — only the static type was lost —
+    # so this printed the yielded string's ADDRESS as a decimal integer,
+    # exit 0, and the wrong value_ctype was registered for every downstream
+    # consumer, compounding along a chain. The `yield from` twin of this was
+    # already resolved; this is the consuming twin. See
+    # `_sibling_gen_kind` in mojo/middle/coro.py for the mechanism.
+
+    # the minimal case: one hop. Used to print a pointer's bit pattern.
+    test_generator_stdout("generator_consuming_generator_string_kind", """\
+def inner():
+    yield "a.txt"
+
+def outer(g):
+    for f in inner():
+        if f.endswith(".txt"):
+            yield f
+
+def main():
+    for v in outer("x"):
+        print(v)
+
+main()
+""", "a.txt\n")
+
+    # THREE hops, plus a double-yielding callee. The chain is the point:
+    # the defect compounded, so one hop would not have caught a fix that
+    # only repaired the immediate callee. The `double` is the OTHER wrong
+    # answer from the same root cause — an int64_t slot truncating a float
+    # to 2 rather than a pointer printed as an address — so it pins the
+    # fix as being about the KIND, not about strings specifically.
+    test_generator_stdout("generator_consumption_chain_and_float_kind", """\
+def leaf():
+    yield "deep.txt"
+
+def mid():
+    for x in leaf():
+        yield x
+
+def top():
+    for x in mid():
+        yield x
+
+def half():
+    yield 2.5
+
+def wrap():
+    for x in half():
+        yield x
+
+def main():
+    for v in top():
+        print(v)
+    for w in wrap():
+        print(w)
+
+main()
+""", "deep.txt\n2.5\n")
+
+    # A generator METHOD consuming a module-level sibling, and a consumer
+    # whose yield is a DERIVED value rather than the loop target itself.
+    # The derived case is the interesting one: `_yield_kind`'s BinaryOp
+    # branch reported 'p' for `f + "!"` even while the loop target `f` was
+    # untyped, so it came out RIGHT by accident and would have kept passing
+    # under a narrower fix.
+    test_generator_stdout("generator_method_consuming_generator_kind", """\
+def leaf():
+    yield "one.txt"
+    yield "two.txt"
+
+def derived():
+    for f in leaf():
+        yield f + "!"
+
+class Box:
+    def __init__(self):
+        self.items = 0
+    def take(self):
+        for f in leaf():
+            self.items = self.items + 1
+            yield f
+
+def main():
+    for w in derived():
+        print(w)
+    b = Box()
+    for z in b.take():
+        print(z)
+    print(b.items)
+
+main()
+""", "one.txt!\ntwo.txt!\none.txt\ntwo.txt\n2\n")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

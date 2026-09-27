@@ -53,7 +53,7 @@ info_gen.cpp:236: invalid conversion from 'int64_t' to 'char*'
 (unannotated init param → int64_t default) makes `.render(fmt)` a
 member call on int64_t, etc. The `self.item` half is squarely the
 HIGH-RISK unannotated-init-param-type family
-(bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md)
+(bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md)
 this session is instructed NOT to attempt; the rest is the same
 coroutine-path inference-parity gap tracked below. Doc stays open on
 that family.

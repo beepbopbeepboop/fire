@@ -243,7 +243,7 @@ not this file's own code:
 
 Same root cause as `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md`
 (comprehension-assigned struct field defaulting to `int` — see
-`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
+`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`).
 Nothing specific to `parsing.py` itself was found. Not fixed here.
 
 ```

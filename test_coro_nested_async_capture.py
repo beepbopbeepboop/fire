@@ -1,6 +1,14 @@
 """test_coro_nested_async_capture.py -- real behavioral test for the A3
 stack-switch coroutine backend's mutable closure capture into a nested
-`async def` (bugs/hard/CODEGEN_coro_nested_async_closure_capture.md).
+`async def` (bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md).
+
+!! THIS FILE IS CURRENTLY 0/9 AND NOT REGISTERED IN tools/suite.py.
+Its `_RUNTIME_SRCS` below still names the pre-rename mojo_*.c runtime files
+(they are fire_*.c now), so 7 of the 9 cases die compiling the runtime before
+the program under test is ever compiled; `test_captured_parameter` is a real
+compiler crash (coro.py:2666) and `test_struct_capture_refused_to_cpp` asserts
+the PRE-Increment-E behaviour. See the bug doc's item 2 before touching any
+expectation here.
 
 Exercises the bug doc's own headline shape verbatim (also the real
 `test_async_with_lock_guard.py::test_simple_with_lock_guard_single_task`

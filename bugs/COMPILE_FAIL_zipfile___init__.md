@@ -568,8 +568,10 @@ by memoryview above):
 - **pwd caller/callee disagreement x2 (read/testzip → mojo_open)** —
   unchanged in substance: callee `open(..., pwd=None)`'s slot resolved
   int64_t while `read`'s forwarded `pwd` is inferred 'char *'. Confirmed
-  this is exactly the unannotated-None-default-param family (
-  bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md);
+  this is exactly the unannotated-None-default-param family
+  (bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md, which
+  supersedes the removed
+  CODEGEN_unannotated_init_param_field_type_defaults_int64.md);
   explicitly out of scope this session per campaign rules. Still open.
 - **`_sanitize_windows_name` "non-trivial conversion in 'mem_ref'" x2**
   — different root cause than the (now-fixed) member-store error: the
@@ -711,13 +713,12 @@ error: passing argument 3 of 'PyZipFile_mojo_open' makes integer from
    parameter (also `bytes | None = None`). The call site's `pwd` value
    resolves to `int64_t` (the standard "unannotated param defaulting
    from a bare `None` literal infers int64_t" gap, same family as
-   `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_
-   int64.md`), while the callee's OWN declared parameter type for
+   `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`), while the
+   callee's OWN declared parameter type for
    `pwd` apparently resolved differently (a pointer type, from some
    OTHER call site elsewhere in the file that passes a real bytes
    value) — a caller/callee signature disagreement, "makes integer
-   from pointer without a cast". Same structural class as `bugs/hard/
-   CODEGEN_unannotated_init_param_field_type_defaults_int64.md`; not
+   from pointer without a cast". Same structural class; not
    attempted here for the same reason as issue 2 above (shared
    call-argument type-inference machinery).
 

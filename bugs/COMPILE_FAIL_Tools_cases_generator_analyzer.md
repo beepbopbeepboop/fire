@@ -284,8 +284,10 @@ not this file's own code:
 
 Root-caused in `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (a
 comprehension-assigned struct field defaulting to `int` instead of
-`MojoList *` — new sibling gap added to
-`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
+`MojoList *` — new sibling gap originally recorded in
+`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, the doc that
+supersedes the removed
+`CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
 `analyzer.py` imports `lexer`/`cwriter` transitively; nothing specific
 to `analyzer.py` itself was found. Not fixed here — see that doc.
 

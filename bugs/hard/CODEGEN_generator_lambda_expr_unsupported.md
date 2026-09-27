@@ -1,13 +1,118 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
-**State: PARTIAL.** The real underlying defect (ANY capturing lambda silently returned 0) is FIXED for the
-dominant shape by beta-reduction. Still open, and deliberately so: variadic
-(*args/**kwargs) captures, and capturing lambdas that ESCAPE or are rebound. Those need
-the env-struct/callable-value representation nested `def` closures already use. A
-capturing lambda inside a coroutine body is also excluded on purpose -- that body model
-is scalar-only. `*_a, **k` and the `sorted(key=lambda...)` struct-pointer case are the
-two named stdlib targets.
+**State: PARTIAL.** The real underlying defect (ANY capturing lambda silently returned 0) is FIXED, and so is what this doc
+recorded as the remaining escape/rebound half: a capturing lambda now gets a heap env, so it is correct whether or
+not it escapes. What is left is the variadic shape (`*args`/`**kwargs`), and the residue is worse than this doc
+recorded — it is a SEGFAULT, not a lost capture, because the call sites never pack the varargs. A capturing lambda
+inside a coroutine body remains deliberately excluded (that body model is scalar-only). `*a, **k` and the
+`sorted(key=lambda...)` struct-pointer case are the two named stdlib targets.
 
+## Status (2026-09-26 re-verification — the escape/rebound residue is FIXED; the variadic residue is a SEGFAULT, re-scoped with a precise mechanism)
+
+Both halves of what the 2026-09-26 entry below named as "still open" were
+re-tested against the current tree, and one of them is closed.
+
+### CLOSED: a capturing lambda that ESCAPES or is REBOUND no longer loses its capture
+
+The 2026-09-26 entry recorded this as open residue, on the reasoning that it
+"needs the env-struct / callable-value representation that nested `def`
+closures already use". **That machinery has since landed** for the LIFTED path:
+`_lower_LambdaExpr` (`mojo/backend_gimple/emit_calls.py`) now computes a real
+capture set from the lambda body's free names, gives the lifted function a
+`_env` struct as its first parameter, and materializes the value at the
+reference site as `mojo_bound_method_new(fn, env)` — a `MojoBoundMethod`, the
+same "self, then N ordinary args" shape every compiled struct method already
+uses, so `mojo_fnptr_call_N` dispatches through it unchanged. The env struct is
+built from the `_env-><name>` reads scanned out of the EMITTED body, not from
+the pre-computed capture list, which is what keeps struct and body in
+agreement.
+
+So the escape analysis in `mojo/middle/lambdareduce.py` is now only choosing
+between two correct lowerings (inline at the call site, or lifted-with-env),
+not deciding correctness at all.
+
+Measured, all compiling, linking and running:
+
+| shape | before | now | CPython |
+|---|---|---|---|
+| `apply(e, 1)` — passed as an argument (escapes) | `1` | `8` | `8` |
+| rebound on a second assignment, then called | `1` | `108` | `108` |
+
+The first row is `gimple_escaping_capturing_lambda_still_lifted` in
+`test_gimple_runner.py`, which pinned the WRONG answer (`"1\n"`) on purpose so
+this fix would flip it loudly rather than silently. It did — and because
+`test_gimple_runner.py` is in no `tools/suite.py` bucket, nothing noticed, so
+the expectation was still stale. Corrected to `"8\n"` on 2026-09-26; the file
+is 120/120.
+
+### STILL OPEN, and re-scoped: a variadic lambda SEGFAULTS at the call site
+
+The doc recorded this as "still lifted, still loses its captures, and still
+returns a wrong value". **The value is right; the call convention is broken, and
+it crashes.** Re-measured, 2026-09-26, with `/tmp`-resident files:
+
+| program | CPython | compiled |
+|---|---|---|
+| `e = lambda *a: add(a[0], a[1]); e(4, 5)` | `9` | **SIGSEGV (139)** |
+| `e = lambda *a: addall(a); e(1, 2, 3)` | `6` | **SIGSEGV (139)** |
+| `e = lambda *args, **kwargs: add(n, args[0]); e(1)` (captures `n`) | `8` | **SIGSEGV (139)** |
+
+Note the third row: it is not about CAPTURES at all. A variadic lambda with no
+capture crashes identically, so this is a separate axis from the capture work
+above and would have survived a capture-only fix.
+
+The mechanism, from the emitted C. The lifted DEFINITION is correct — the
+varargs are packed into a `MojoList *`, exactly as the code's own comment says
+they should be (`mojo/backend_gimple/emit_loops.py`, `_gen_lifted_closure`:
+`*args -> one MojoList* param; callers pack the loose args into it`):
+
+```c
+int64_t main_lambda_1 (MojoList * a) {
+  _t2 = mojo_list_get_int (a, 0);
+  _t4 = mojo_list_get_int (a, 1);
+  return add_2dbb98 (_t2, _t4);
+}
+```
+
+The lifted CALL SITE is not. It chooses the runtime helper by the number of
+arguments written at the call, and passes them **positionally as scalars** —
+they are never packed into the `MojoList *` the callee expects:
+
+```c
+_t2 = (int64_t)4;
+_t3 = (int64_t)5;
+_t4 = mojo_fnptr_call_2 (e, _t2, _t3);   /* callee wants mojo_fnptr_call_1(e, <MojoList*>) */
+```
+
+So the callee receives `a = 4`, reads address 4 as a `MojoList *`, and
+dereferences it. `mojo_fnptr_call_N` is arity-based, and nothing at the call
+site knows the callee's real signature — which is exactly the
+"signature-carrying callable-value representation with runtime args/kwargs
+packing and named-slot call-site binding" this doc has twice called
+feature-sized. The definition side is done; the call side is the whole of what
+remains.
+
+Real-corpus occurrences, grepped against the CPython tree at
+`/Users/mrs/net/Python-3.14.6` (2026-09-26) — three, not the one this doc
+names:
+
+- `Tools/c-analyzer/c_common/fsutil.py:285` — `get_files = (lambda *a, **k: _walk(*a, walk=_files, **k))`, the occurrence this doc has always named. Unreachable today: `fsutil.py` is refused for unrelated reasons (`COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`).
+- `Lib/importlib/util.py:247` — LazyLoader's `return lambda *args, **kwargs: cls(loader(*args, **kwargs))`. Returned, so it also escapes.
+- `Lib/doctest.py:1566` — `_colorize.can_colorize = lambda *args, **kwargs: False`. Note this one is assigned to an **attribute**, not a local, and its body ignores the arguments entirely — so the value is right and only the (crashing) call convention is wrong. Any fix must therefore also handle a variadic lambda held in a field, not just in a local.
+
+**Not attempted.** The fix is new call-site lowering in shared
+call-argument machinery, keyed on a signature, which is the class of change
+CLAUDE.md's own history (the "_tuplegetter incidents", the recorded
+`gimple_codegen`/interpreter divergence) warns causes broad regressions when
+attempted narrowly — and it could not be shown to break nothing without the
+full `make gate`, whose `native`/`bootstrap` half is exclusive. A partial fix
+here is worse than none: it would turn a loud SIGSEGV into a silent wrong
+value. The precedent for the packing convention already exists at
+`mojo/backend_gimple/emit_calls.py` (`_vararg_trailing_param_types`, the
+`mojo_list_new` + `mojo_list_append_int` sequence), for a *named* function
+with a C varargs tail; a lambda's `*a` is the same packing with no
+`_vararg_trailing_param_types` entry to key off, which is precisely the
+missing piece.
 
 ## Status (2026-09-26 — CAPTURING lambdas called through their local now WORK; `*a, **k` still open, with the root cause re-scoped)
 

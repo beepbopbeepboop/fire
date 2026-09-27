@@ -289,7 +289,7 @@ type isn't inferred from the dict's actual value type and defaults to
 (plus 3 more instances of the same class at lines 661/712/789). This
 is the same recurring "unannotated local defaults to `int64_t`" family
 already tracked in `bugs/hard/` (e.g.
-`CODEGEN_unannotated_init_param_field_type_defaults_int64.md`,
+`CODEGEN_ctor_arg_field_type_scalars_only.md`,
 `CODEGEN_multi_assign_local_var_type_not_inferred.md`), just for a
 for-loop dict-unpacking target specifically rather than a parameter or
 chained assignment — a distinct, separate gap from this doc's original

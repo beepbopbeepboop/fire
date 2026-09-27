@@ -659,6 +659,15 @@ void        mojo_raise_file_not_found(char *path);
  * used by runtime dict-keyed %-formatting (mojo_str_format_dict) on a
  * missing key, matching real Python's `"...%(k)s..." % {}` behavior. */
 void        mojo_raise_key_error(char *key);
+/* Raises a real, catchable TypeError for calling something that is not
+ * callable — the same mechanism as mojo_raise_attribute_error /
+ * mojo_raise_key_error above (typed via the class-name CRC32 tag).
+ * `detail` is the text CPython puts after "TypeError: ", e.g. "'str' object
+ * is not callable". Used by the codegen for a call on a non-callable
+ * attribute of a type whose attribute namespace it models as closed
+ * (struct.Struct's `format`/`size`), which it previously answered with a
+ * silent 0. */
+void        mojo_raise_type_error(char *detail);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
  *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);

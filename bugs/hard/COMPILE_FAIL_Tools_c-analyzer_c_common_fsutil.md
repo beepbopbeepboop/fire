@@ -1,11 +1,96 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
-**State: PARTIAL.** 5 of 6 recorded refusal shapes are already fixed
-upstream. The 6th is a silent miscompile whose real cause is a general
-generator bug, split out into its own doc (see Shape 5 below). Nothing in
-this entry is a compile failure any more.
+**State: PARTIAL, and the previous audit of it was wrong.** The real file still does not compile, but for
+one reason the 2026-09-26 entry mis-attributed: the blocker is **calling a keyword-only callable-valued
+parameter**, not "a generator call". Four of the six shapes it recorded as fixed are still refused on the
+real file, and its Shape-5 mapping onto the `value_ctype` bug is withdrawn (that refusal fires first, so
+the miscompile is unreachable there).
 
-## Status (2026-09-26 audit — 5 of the 6 recorded refusal shapes are GONE; the 6th is a `value_ctype` derivation gap, split into its own doc)
+## Status (2026-09-26 second pass — built the REAL file; the "5 of 6 fixed" conclusion is withdrawn)
+
+The entry immediately below said fsutil.py was "no longer present in this
+checkout" and reconstructed each of the six recorded refusal shapes as a
+minimal Mojo program. That was the error: **the real file is on disk**, at
+`/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/fsutil.py`, and
+building it gives a completely different picture. Every reconstructed shape
+below differs from the real one by dropping the same thing — a
+**keyword-only parameter that holds the callee**.
+
+```
+$ cd /tmp/fx4 && MOJO_DEBUG=1 python3 .../fire.py build -o fsutil \
+    /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/fsutil.py
+Error building: cannot compile module: function(s) _walk_tree, glob_tree,
+iter_files, iter_files_by_suffix, process_filenames, walk_tree ...
+Unsupported shape(s):
+  _walk_tree:           unsupported for-loop iterable type: CallExpr
+  glob_tree:            unsupported for-loop iterable type: CallExpr
+  iter_files:           a `lambda` with more than one parameter, a
+                        `*`/`**`-forwarding parameter, or a parameter default
+  iter_files_by_suffix: call to unresolved callee '_iter_files(...)'
+  process_filenames:    call to unresolved callee 'Exception(...)'
+  walk_tree:            unsupported for-loop iterable type: CallExpr
+```
+
+### Per-shape, against the real file
+
+| # | generator | the real shape in the source | the real blocker | the entry below claimed |
+|---|---|---|---|---|
+| 1–3 | `_walk_tree` / `walk_tree` / `glob_tree` | `for … in _walk(root)` / `walk(root)` / `_glob(…)`, where each callee is a **kw-only parameter** defaulting to the function (`_walk=os.walk`, `walk=walk_tree`, `_glob=glob.iglob`) | stackswitch refuses at `kwonly params (v0)`, so the cpp fallback reports the derived `unsupported for-loop iterable type: CallExpr` | "**WORKS** — `for x in <a generator call>()` lowers and runs" |
+| 4 | `iter_files` | `get_files = (lambda *a, **k: _walk(*a, walk=_files, **k))` | the variadic lambda — **correct as recorded** | "still open" ✓ |
+| 5 | `iter_files_by_suffix` | `yield from _iter_files(root, suffix, relparent)`, `_iter_files` a **kw-only parameter** | `call to unresolved callee '_iter_files(...)'` — a hard refusal | "compiles and runs, but **produces a wrong value**" |
+| 6 | `process_filenames` | `onempty = Exception('no filenames provided')` inside the body | `call to unresolved callee 'Exception(...)'` | "`set(...)` + tuple-yield — **WORKS**" |
+
+The entry below's shape-1–3 reconstruction was `for f in leaf():` with `leaf` a
+plain module-level generator. That does compile and run correctly (verified) —
+it is simply not fsutil's shape. With the kw-only indirection it is refused:
+
+```python
+def consume(root, *, walk=leaf):
+    for f in walk(root):   # CPython: TypeError only because leaf takes 0 args;
+        yield f             # the compiled path refuses the CALL, whatever it resolves to
+```
+```
+Unsupported shape(s): consume: unsupported for-loop iterable type: CallExpr
+```
+
+Isolated further: a generator with a kw-only parameter that is **not** called
+compiles and runs fine (`def consume(root, *, extra=None): … else: yield
+"without"` → `without`). So the blocker is not "has kw-only params" — it is
+**invoking a kw-only parameter as a callee**. A callable-valued higher-order
+parameter has no representation in the compiled generator body model, which is
+the same missing piece `CODEGEN_generator_lambda_expr_unsupported.md` names
+(signature-carrying callable values), reached from a different direction.
+
+### Shape 5's mapping onto the `value_ctype` bug is WITHDRAWN
+
+The entry below split Shape 5 out into
+`CODEGEN_generator_consuming_generator_value_ctype.md` as "the real cause
+behind that doc's `iter_files_by_suffix` entry". That general bug was real and
+is now **fixed** (its doc is deleted; see `_sibling_gen_kind` in
+`mojo/middle/coro.py`), but it is **not** what `iter_files_by_suffix` was
+exhibiting: `_iter_files` is refused outright, so no value is ever produced and
+no `value_ctype` is ever consumed. The two docs were never the same bug, and
+fsutil is not a witness to that one.
+
+### What IS confirmed fixed
+
+Re-tested 2026-09-26 as standalone minimal programs (the real file cannot
+build, so these were isolated):
+
+- `set(<generator expression>)` — **works**: `set(filt([1, 2]))` → `2`. So the `set(...)` half of Shape 6 was indeed already fixed upstream.
+- A 4-tuple `yield filename, relfile, check, solo` — **works**: unpacks per slot correctly. So the tuple-yield half of Shape 6 is fixed too.
+- One residue there, and it is NOT this file's: a `bool` in a tuple-yield slot reads back as `1`/`0`, not `True`/`False` (`x True False` → `x 1 0`). Tracked in `CODEGEN_generator_value_slot_loses_bool.md`. `fsutil`'s `check` is a bool, so it would hit this — but only after the kw-only blocker is cleared.
+
+### Not attempted
+
+Fixing the kw-only-callable-parameter blocker is the same feature-sized
+callable-value representation the sibling lambda doc declines, and it would
+unblock nothing on its own: `iter_files` (variadic lambda), `process_filenames`
+(`Exception(...)` — a call to an exception *constructor* used as a value, a
+distinct shape) and the other two remain regardless. Per `gen_module`'s
+whole-module escalation, this file stays unbuildable until all are addressed.
+
+## Status (2026-09-26 audit — SUPERSEDED by the entry above, which built the real file and got a different answer; kept for the per-shape table and the `set()`/tuple-yield confirmations, NOT for its "5 of 6 fixed" conclusion)
 
 `Tools/c-aalyzer/c_common/fsutil.py` is **no longer present in this
 checkout**, so this pass could not build the real file. Instead each of the
@@ -21,25 +106,28 @@ was written, not by anything here.
 | 5 | `iter_files_by_suffix`: `call to unresolved callee '_iter_files(...)'` | compiles and runs, but **produces a wrong value** — see below |
 | 6 | `process_filenames`: `call to unresolved callee 'set(...)'` + tuple-yield | **WORKS** — mixed-arity tuple yields (`yield "store", ("name",)` / `yield "rel", (1, 2, 3)`) unpack correctly, giving `store 2` / `rel 6` |
 
-### Shape 5: NOT fsutil-specific — it is a general generator bug, now its own doc
+### Shape 5: RETRACTED — the general `value_ctype` bug was real, but fsutil is not a witness to it
+
+> **Superseded 2026-09-26.** The general bug described below
+> (a generator that consumes a sibling generator typed the callee's yielded
+> value as the `int64_t` default) was real, and is now **FIXED** — its doc is
+> deleted, and the mechanism and regression tests live in the source (see
+> `_sibling_gen_kind` in `mojo/middle/coro.py`). But the mapping asserted here
+> is **wrong**: `iter_files_by_suffix` does not reach that code. Its
+> `_iter_files` is a kw-only parameter, so the generator is refused outright and
+> never produces a value at all. See the current entry at the top of this file.
 
 The `iter_files_by_suffix` entry ("call to unresolved callee
-'_iter_files(...)'") is a **silent miscompile**, not a compile failure, and
-its real cause is general: a generator that consumes a sibling generator
-types the callee's yielded value as the `int64_t` default, so a yielded
-string comes out as a pointer's bit pattern. That has been split out into
+'_iter_files(...)'") was recorded as a **silent miscompile**, not a compile
+failure, with a general cause: a generator that consumes a sibling generator
+types the callee's yielded value as the `int64_t` default, so a yielded string
+comes out as a pointer's bit pattern. That cause is real and general, and it was
+tracked separately. What is wrong is only the claim that this file exhibits it.
 
-- `CODEGEN_generator_consuming_generator_value_ctype.md` — the general
-  bug, its minimal repro, the full evidence chain, the root cause
-  (`gimple_codegen.py` runs `gimple_gen_coro.lower(stmts)` — which derives
-  `value_ctype` — BEFORE `register()` populates `_generator_api`), why the
-  existing fixpoint retry is structurally blind to it (the consumer never
-  raises, it just gets the wrong type), and the fix direction.
-
-`fsutil` is simply where it became visible: those generators yield **file
-paths**, so a string-typed value collapsed to `int64_t` reads exactly like
-a dangling pointer. The two docs should not be kept in sync by hand — this
-one records only that the fsutil shape maps onto that bug.
+`fsutil` looked like a natural witness — those generators yield **file paths**,
+so a string-typed value collapsed to `int64_t` would read exactly like a
+dangling pointer — but the reconstruction that suggested the mapping also
+dropped the kw-only indirection, so it never had the shape the mapping requires.
 
 ## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
 

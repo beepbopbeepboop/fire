@@ -5702,9 +5702,12 @@ def root_cas_hash_call(parts) -> str:
         file with the base's line number — a diagnostics bug (the emitted C
         was correct), originally found as Lib/weakref.py's error cluster
         reporting lines up to ~962 in a file only 574 lines long, when the
-        real source was _collections_abc.py. See
-        bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
-        mismatches.md's "Not fixed" item 1."""
+        real source was _collections_abc.py. FIXED; the report that recorded
+        it (bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+        mismatches.md) was removed 2026-09-26 after verification. Its live
+        residue is bugs/hard/CODEGEN_function_scoped_import_module_not_inlined
+        .md, a different mechanism (a function-scoped import never inlines its
+        module) that does not own this test."""
         global _PASS, _FAIL
         name = "inherited_method_line_directive_names_its_own_module"
         with tempfile.TemporaryDirectory() as wd:
@@ -5756,7 +5759,9 @@ def root_cas_hash_call(parts) -> str:
         has no sound lowering. Both backends used to pick int64_t anyway and
         silently print a truncated float or a string's ADDRESS. Now both
         refuse, naming the parameter. See
-        bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md.
+        bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md -- that
+        refusal only fires on PROVABLE disagreement; a call site the static
+        scan cannot type is a separate, still-silent case.
         """
         global _PASS, _FAIL
         name = "conflicting_callsite_yield_kind_refused_not_miscompiled"
@@ -5851,7 +5856,7 @@ def main():
         (`UnsafePointer[T](...)` / `.address`). Before this, a struct
         capture was refused outright, so the async def fell through to the
         C++ path and failed to compile at all.
-        See bugs/hard/CODEGEN_coro_nested_async_closure_capture.md.
+        See bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md.
         """
         global _PASS, _FAIL
         name = "nested_async_struct_capture_boxes_pointer"

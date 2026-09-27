@@ -145,8 +145,8 @@ the only thing still blocking this file.
      element of an unannotated `*args` tuple, called as a function.
    Both are the SAME gap: this codegen's cross-call type-inference
    pass for unannotated free-function params ("Pass 1.3d", see
-   `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_
-   int64.md`'s "Why this doesn't affect free functions the same way"
+   `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`'s "Why this
+   doesn't affect free functions the same way"
    section) only recognizes SCALAR contracts (`double`/`char *`); a
    callable-typed parameter isn't one of those, so both `working_dir`
    and `step` still default to `int64_t`, and calling that int64_t

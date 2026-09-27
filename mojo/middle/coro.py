@@ -249,7 +249,8 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for nm, eks in list_elem.items():
         if len(eks) == 1 and nm not in env:
             env[nm] = ('list', list(eks)[0])
-    # `for <v> in <list-local-or-literal>:` binds <v> to the element kind
+    # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
+    # <v> to the element kind
     for n in _walk(fn):
         if not isinstance(n, N.ForStmt):
             continue
@@ -263,6 +264,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             v = env.get(it.name)
             if isinstance(v, tuple) and v[0] == 'list':
                 ek = v[1]
+        elif isinstance(it, N.CallExpr):
+            # A sibling generator's call — the consuming twin of `yield
+            # from`. See `_sibling_gen_kind`, which is where the recursion
+            # and the cycle rule live. Split out as its own `elif` (rather
+            # than folded into the literal branch below) so the IdentExpr
+            # and literal paths keep their exact previous reach: a call can
+            # never be a list literal, so the two cannot both apply.
+            ek = _sibling_gen_kind(it)
         else:
             lk = _literal_kind(it)
             if isinstance(lk, tuple) and lk[0] == 'list':
@@ -582,55 +591,129 @@ def _property_call_ok(fn: N.FunctionDef, struct_name, struct_def,
 
 
 _GEN_VALUE_KINDS: dict[str, tuple[str | None, str]] = {}
+# This module's top-level generator FunctionDefs, by name. Populated by
+# `_register_generator_defs` at the very top of `lower()` — i.e. BEFORE
+# `_scan_callsite_param_kinds`, which calls `_static_env` too — so that
+# every `_static_env` caller in the pipeline sees the same sibling set.
+_GEN_DEFS: dict[str, object] = {}
+# Names whose kind is being computed RIGHT NOW, module-level so that the
+# recursion guard covers `_static_env` -> `_sibling_gen_kind` -> resolve ->
+# `_static_env` re-entry as well as the direct `resolve` -> `resolve` case.
+_GEN_RESOLVING: set = set()
+
+
+def _register_generator_defs(stmts) -> None:
+    """Register this module's top-level generator defs, and drop the
+    previous module's kind answers.
+
+    Per-MODULE, not per-process: the driver compiles many modules in one
+    process, and these keys are bare function NAMES. Left populated, a
+    module B whose `gen` yields ints would inherit module A's `gen` kind
+    (a string one) and refuse a generator that is perfectly consistent.
+
+    Split out of `_register_generator_value_kinds` (which now only drives
+    the resolution) so the *set of siblings* is known before ANY kind is
+    resolved — the resolution is recursive, and the consumer side of it
+    (`_static_env`'s for-loop branch) is reached from passes that run
+    before kind registration would otherwise have happened.
+    """
+    _GEN_DEFS.clear()
+    _GEN_VALUE_KINDS.clear()
+    _GEN_RESOLVING.clear()
+    for s in stmts:
+        if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
+            _GEN_DEFS[s.name] = s
+
+
+def _resolve_gen_kind(name):
+    """`(kind, why)` for this module's top-level generator `name`, computed
+    on demand and memoized in `_GEN_VALUE_KINDS`.
+
+    RECURSIVE on purpose: a generator's kind depends on the kinds of the
+    generators it consumes (by `yield from` or by a for-loop), so the
+    answers have to be computed as a set rather than one function at a
+    time. `_GEN_RESOLVING` breaks a consumption CYCLE (`a` consumes `b`,
+    `b` consumes `a`), which has no fixed point: the re-entrant name
+    answers None (unknown), so the cycle keeps the pre-existing `int64_t`
+    default rather than converging on whatever the last iteration happened
+    to say. That is the honest answer for a cycle, not a guess.
+    """
+    if name in _GEN_VALUE_KINDS:
+        return _GEN_VALUE_KINDS[name]
+    fn = _GEN_DEFS.get(name)
+    if fn is None or name in _GEN_RESOLVING:
+        return (None, '')
+    _GEN_RESOLVING.add(name)
+    try:
+        r = _generator_value_kind(fn, _static_env(fn, None), _delegated)
+    finally:
+        _GEN_RESOLVING.discard(name)
+    _GEN_VALUE_KINDS[name] = r
+    return r
+
+
+# The kinds a for-loop target can carry in `_static_env`: the scalar
+# yield kinds only. A 'tuple' generator packs its value as a `MojoList *`
+# box that the consumer unpacks into SEVERAL targets, so a single loop
+# variable's kind is not 'tuple' — the tuple-unpacking machinery has its
+# own per-slot types (`_generator_tuple_slots`) and is not what a for-loop
+# target's scalar kind is about.
+_SCALAR_GEN_KINDS = ('i', 'p', 'd')
+
+
+def _sibling_gen_kind(iterable):
+    """Yield kind of `for <target> in <iterable>():` when `iterable` is a
+    call to one of THIS MODULE's top-level generators, else None.
+
+    This is the consuming twin of `yield from <sibling>()`. Without it a
+    generator that iterates a sibling and re-yields the loop variable had
+    no way to learn what the sibling yields: `_static_env`'s for-loop
+    branch only knew list-typed locals and list literals, so the target got
+    no entry, `yield <target>` inferred None, and the generator's own
+    `value_ctype` fell to the `int64_t` default. The VALUE was always
+    correct — only the static type was lost — so the damage showed up in
+    every downstream consumer as a pointer's bit pattern printed as a
+    decimal integer, with exit 0, and compounded along a consumption chain.
+    Regression tests: `generator_consuming_generator_string_kind`,
+    `generator_consumption_chain_and_float_kind` and
+    `generator_method_consuming_generator_kind` in
+    `test_gimple_generator_runner.py` (all three fail without this branch —
+    the last one covers a generator METHOD, the second a three-hop chain and
+    a `double`-yielding callee, which is the OTHER wrong answer from the
+    same root cause, an int64_t slot truncating 2.5 to 2).
+
+    Only the CALL form is recognised. A bare `for v in inner:` names the
+    generator FUNCTION, not an instance, so it is not a generator call at
+    all and must keep falling through to unknown.
+    """
+    if not (isinstance(iterable, N.CallExpr)
+            and isinstance(iterable.func, N.IdentExpr)):
+        return None
+    name = iterable.func.name
+    if name not in _GEN_DEFS:
+        return None
+    k = _resolve_gen_kind(name)[0]
+    return k if k in _SCALAR_GEN_KINDS else None
 
 
 def _register_generator_value_kinds(stmts) -> None:
-    """Value kind of every MODULE-LEVEL generator function in `stmts`,
-    resolved through `yield from` delegation, memoized in
-    `_GEN_VALUE_KINDS` for `_generator_value_kind` to consult.
-
-    Delegation is what makes this a separate pass: a generator's kind
-    depends on the kinds of the generators it yields FROM, so the answers
-    have to be computed as a set rather than one function at a time. A
-    delegation CYCLE (`a` yields from `b`, `b` from `a`) has no fixed point
-    here, so it resolves to None (unknown) and keeps the pre-existing
-    behavior rather than refusing on a guess.
+    """Resolve the value kind of every module-level generator in this
+    module through `_GEN_DEFS` (registered by `_register_generator_defs`),
+    memoizing into `_GEN_VALUE_KINDS` for `_generator_value_kind` to
+    consult. See `_resolve_gen_kind` for the recursion and the cycle rule.
     """
-    defs = {s.name: s for s in stmts
-            if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False)}
+    for _n in _GEN_DEFS:
+        _resolve_gen_kind(_n)
 
-    in_progress: set[str] = set()
-    # Per-MODULE, not per-process: the driver compiles many modules in one
-    # process, and these keys are bare function NAMES. Left populated, a
-    # module B whose `gen` yields ints would inherit module A's `gen` kind
-    # (a string one) and refuse a generator that is perfectly consistent.
-    _GEN_VALUE_KINDS.clear()
 
-    def resolve(name):
-        if name in _GEN_VALUE_KINDS:
-            return _GEN_VALUE_KINDS[name]
-        fn = defs.get(name)
-        if fn is None or name in in_progress:
-            return (None, '')
-        in_progress.add(name)
-        try:
-            r = _generator_value_kind(fn, _static_env(fn, None), _delegated)
-        finally:
-            in_progress.discard(name)
-        _GEN_VALUE_KINDS[name] = r
-        return r
-
-    def _delegated(value):
-        # `yield from sub` / `yield from sub(...)` where `sub` is a
-        # module-level generator in this module. Anything else (a method
-        # call, an attribute, a computed callable) stays unknown, as before.
-        target = value.func if isinstance(value, N.CallExpr) else value
-        if isinstance(target, N.IdentExpr) and target.name in defs:
-            return resolve(target.name)[0]
-        return None
-
-    for _n in defs:
-        resolve(_n)
+def _delegated(value):
+    # `yield from sub` / `yield from sub(...)` where `sub` is a module-level
+    # generator in this module. Anything else (a method call, an attribute, a
+    # computed callable) stays unknown, as before.
+    target = value.func if isinstance(value, N.CallExpr) else value
+    if isinstance(target, N.IdentExpr) and target.name in _GEN_DEFS:
+        return _resolve_gen_kind(target.name)[0]
+    return None
 
 
 def _delegated_yield_kind(value):
@@ -780,7 +863,9 @@ _CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 # stack-switch ABI fixes one C type per generator, so the default would
 # silently truncate a float to int64_t or print a `char *` as its address.
 # `_eligible` refuses those rather than emitting wrong code — see
-# bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md.
+# bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md, which is also
+# where the still-unimplemented "(or include one the static scan could not
+# type at all)" half of the sentence above is tracked.
 _CALLSITE_PARAM_CONFLICTS: dict[str, set] = {}
 
 # Local/param names bound from create_task/create_raising_task in the async
@@ -815,7 +900,10 @@ _STRUCT_NAMES: set = set()
 # consulted by the C++ generator emitter (`cpp_async._gen_cpp_generator_
 # unit`), which has no capture model of its own and would otherwise emit a
 # body referencing the captured name where it does not exist. See
-# bugs/hard/CODEGEN_coro_nested_async_closure_capture.md, Increment D.
+# bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3), which
+# records the neighbouring shape this guard does NOT cover: the same nested
+# async generator driven by `async for` in its OWN enclosing function, which
+# still builds and prints a wrong value.
 _UNTHREADABLE_NESTED_ASYNC_GENS: set = set()
 
 
@@ -2124,6 +2212,10 @@ def lower(stmts: list) -> tuple[list, list]:
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _detect_native_future_classes(stmts)
     stmts = _rewrite_native_future_refs(stmts)
+    # Before anything calls `_static_env`: the sibling set a generator's
+    # value kind can be derived from has to be known to every one of them,
+    # not just to `_register_generator_value_kinds` further down.
+    _register_generator_defs(stmts)
     _scan_callsite_param_kinds(stmts)
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _prop_names = _seed_prop_names(stmts)

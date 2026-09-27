@@ -292,7 +292,9 @@ Re-verified fresh against this worktree (the 2026-08-24 `%`-format fix
 is present/holding). ipaddress.py's own isolated `.cpp` still has exactly
 the 1 remaining error: `if ((other == self))` — an ISO C++ pointer/int
 comparison, the same unannotated-parameter-defaults-to-int64_t hard bug
-(`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`)
+(`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, which
+supersedes the removed
+`CODEGEN_unannotated_init_param_field_type_defaults_int64.md`)
 extended to ordinary function params. Not this pass's to fix (same
 high-regression-risk shared machinery that doc's own history documents).
 Whole-program build still separately blocked by transitively-imported-
@@ -334,7 +336,7 @@ of the generic numeric-modulo fallback.
 Verified: `ipaddress.py`'s own isolated `.cpp` errors 15 -> 1 (the
 remaining one, `if ((other == self))` — an ISO C++ pointer/int comparison
 — is the SAME unannotated-parameter-defaults-to-int64_t hard bug tracked
-in `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+in `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`
 extended to ordinary function params, not this fix's concern). Also fixed
 the same crash class in `enum.py` (`_iter_bits_lsb`'s `%r`) and
 `ftplib.py` (`FTP.mlsd`'s `"MLSD %s" % path`) — see those docs.
@@ -496,13 +498,17 @@ from this OTHER top-level generator (ipaddress.py:200), whose own
 summarize_address_range(first, last):`) and default to `int64_t`, then
 get used as real objects (`first.version`, `first._ip`, ...) —
 the same general "unannotated parameter/field defaults to int64_t"
-family as the already-tracked, already-repeatedly-re-verified-unchanged
-`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
-hard bug (that doc's own title is about `__init__` params/fields
-specifically; this is the same root architecture applying to an
-ORDINARY function's own parameters instead — confirmed as the same
-class, not re-investigated as a separate hard-bug doc here, per this
-session's time budget). Not attempted.
+family; for the ORDINARY-function-parameter half of it — a parameter
+used as a real object's receiver, which is what `first.version`
+is — see `bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md`
+(verified 2026-09-26: a method call on a struct passed as a
+free-function parameter is mis-typed in every case, giving a wrong
+value with exit 0 for some method names and SIGSEGV/SIGBUS for
+others; the struct-typed-parameter half is
+`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, which
+supersedes the removed
+`CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
+Not attempted.
 
 Both (a) and (b) are genuinely separate from the `MultiAssignStmt`
 gap this pass fixed, and from each other — `_find_address_range` and

@@ -528,6 +528,11 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
 _STRUCT_METHODS = ('calcsize', 'pack', 'unpack', 'unpack_from', 'pack_into', 'Struct',
                    'iter_unpack')
 
+# The two `struct.Struct` attributes that are DATA, not methods — name mapped
+# to the Python type CPython's "not callable" message names for its value.
+# See _lower_struct_attr_call, which is the only consumer.
+_STRUCT_FMT_DATA_ATTRS = {'format': 'str', 'size': 'int'}
+
 
 def _struct_value_codes(fmt: str | None):
     """The per-VALUE format codes of a const-foldable struct format string
@@ -768,6 +773,79 @@ def _lower_struct_instance_method(gen, fmt_val, method, node):
                        [('MojoStructFmt *', fp), ('MojoBytes *', buf), ('int64_t', off), ('MojoList *', lst)])
         return 'int', gen._new_val('int', '0')
     raise RuntimeError(f'struct.Struct.{method}: unsupported')
+
+
+# `struct.Struct`'s instance namespace is CLOSED, and this codegen models all
+# of it, so a member call on a `MojoStructFmt *` receiver that is not one of
+# the five pack/unpack methods is not "unknown" — it is a determinate error
+# with a determinate exception, and this is the only place that can say which.
+#
+# Two shapes, and the split is real Python's, not a guess:
+#
+#   * `format` and `size` are DATA attributes. In CPython both are
+#     getset_descriptors on the type (`struct.Struct.format` is the format
+#     STRING, `struct.Struct.size` the computed byte count) — there is no
+#     `Struct.format()` method for either to shadow, and the struct module
+#     has no formatting entry point at all, so reading one is a `str`/`int`
+#     and CALLING one is `TypeError: '<type>' object is not callable`. The
+#     READ half is already correct and routed to `mojo_struct_format` /
+#     `mojo_struct_size` (see emit_exprs.py's `MojoStructFmt *` +
+#     ('size', 'format') attribute case); this is the call half of the same
+#     fact.
+#   * any other name is not an attribute of the type at all, so it is an
+#     `AttributeError` — the same answer `mojo_obj_getattr` already gives on
+#     a miss (see fire_runtime.c's mojo_raise_attribute_error).
+#
+# Before this, the caller's method-name whitelist let both shapes escape to
+# the generic receiver dispatch, where they landed in one of two wrong
+# places depending on nothing more than the spelling of the name:
+#
+#   * `format` is in the container-method name list further down in
+#     `_lower_method_call`, so `s.format(70)` emitted
+#     `mojo_obj_call1(handle, "format", 70)` — a runtime function that is a
+#     documented hardcoded `return 0` ("Stub: dynamic method call on opaque
+#     Python object"). A silent 0, exit 0, for a call CPython rejects
+#     outright: the worst possible outcome, since nothing distinguishes it
+#     from a real 0.
+#   * `size` is NOT in that list, so `s.size()` fell all the way through to
+#     `_lower_struct_method_call` and emitted a call to the phantom C symbol
+#     `_MojoStructFmt_size` that nothing ever defines — a link failure on a
+#     shape whose correct answer is a two-line try/except.
+#
+# Neither is reachable from real stdlib code, which is why both survived, but
+# the point of closing the branch is that the NEXT name added to that
+# container list cannot silently reopen the same hole on this closed type.
+# Arguments are still lowered first: real Python evaluates them before it
+# discovers the callee is not callable, so `s.format(side_effect())` must
+# run `side_effect()`.
+def _lower_struct_attr_call(gen, method, node):
+    for a in node.args:
+        gen.lower_expr(a)
+    for _, kv in (getattr(node, 'kwargs', None) or []):
+        gen.lower_expr(kv)
+    # `_emit_call`, not a raw `gen._emit`: the detail is a string-pool global,
+    # and passing a `_slit_N` straight as a call argument is rejected inside a
+    # `__GIMPLE`-tagged function ("invalid argument to gimple call", gcc
+    # -fgimple strict mode) — the pool global has to be loaded into a local
+    # first, which is exactly what `_emit_call`'s coercion loop does for a
+    # `_slit_` operand.
+    if method in _STRUCT_FMT_DATA_ATTRS:
+        # The CPython text names the type of the VALUE read, not the
+        # receiver: `s.format` is a str and `s.size` is an int, so those are
+        # the two messages, in the same order as the table.
+        detail = f"'{_STRUCT_FMT_DATA_ATTRS[method]}' object is not callable"
+        raiser = 'mojo_raise_type_error'
+    else:
+        detail = f"'_struct.Struct' object has no attribute '{method}'"
+        raiser = 'mojo_raise_attribute_error'
+    gen._emit_call('void', '', raiser,
+                   [('char *', gen._intern_string(gimple_ctypes._c_escape(detail)))])
+    # mojo_raise() longjmps and never returns, so this value is dead on every
+    # path that reaches it; it exists only so the surrounding expression still
+    # typechecks, exactly as the other never-taken raise sites in this file
+    # return a zero of the shape their caller wanted.
+    return gen._stub_result('int64_t', '(int64_t)0',
+                            f'struct.Struct.{method}() — raises at runtime')
 
 
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -2242,11 +2320,14 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if api is not None:
             return ggc._lower_generator_next(gen, ov, api)
 
-    # struct.Struct instance methods (s.pack / s.unpack / s.unpack_from /
-    # s.pack_into) — receiver holds a compiled `MojoStructFmt *`.
-    if ot == 'MojoStructFmt *' and method in (
-            'pack', 'unpack', 'unpack_from', 'pack_into', 'iter_unpack'):
-        return _lower_struct_instance_method(gen, ov, method, node)
+    # struct.Struct instance namespace — receiver holds a compiled
+    # `MojoStructFmt *`. Deliberately TOTAL (not gated on a method-name
+    # whitelist that falls through): see _lower_struct_attr_call.
+    if ot == 'MojoStructFmt *':
+        if method in ('pack', 'unpack', 'unpack_from', 'pack_into',
+                      'iter_unpack'):
+            return _lower_struct_instance_method(gen, ov, method, node)
+        return _lower_struct_attr_call(gen, method, node)
 
     # ── Awaitable protocol (Future/Event) — sync (non-coroutine) call sites ──
     # gimple_gen_coro.py's `_rewrite_async_expr` already rewrites

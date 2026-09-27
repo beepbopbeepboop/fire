@@ -63,9 +63,13 @@ def gen_stmt(gen, node):
         # e.g. Lib/weakref.py's inherited `Mapping.__eq__` reported as
         # "weakref.py:962" when weakref.py is only 574 lines long and the
         # real source is _collections_abc.py:819. A pure diagnostics defect
-        # (the emitted C itself was correct); see
+        # (the emitted C itself was correct). FIXED; regression test
+        # `inherited_method_line_directive_names_its_own_module` in
+        # test_gimple.py. (The bug report that recorded it,
         # bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
-        # mismatches.md's "Not fixed" item 1.
+        # mismatches.md, was removed 2026-09-26 once verified; its remaining
+        # live residue is bugs/hard/CODEGEN_function_scoped_import_module_not_
+        # inlined.md, which is a different mechanism and does not own this.)
         filename = '' + (getattr(gen, '_line_src_file', '')
                          or getattr(gen, '_current_filename', ''))
         emitted_pairs = getattr(gen, '_emitted_line_pairs', set())

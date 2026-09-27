@@ -1,11 +1,206 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
-**State: OPEN.** NOT fixed. Deprioritised since 2026-08-09 and untouched since. Needs module-qualified
-field-table keys / typedef-name qualification so two same-named structs in sibling
-modules stop colliding. This is the last wholly-unstarted item in bugs/hard.
+**State: OPEN.** NOT fixed. The 4-step plan below (module-qualified field-table
+keys / value-identity propagation / per-owner tables in Phase 2a / typedef-name
+qualification) is still the right fix and is still unattempted — it remains
+foundational, shared struct-identity machinery rated moderate-to-high risk by
+this doc's own Risk section.
 
+**Re-derived 2026-09-26.** The mechanism is unchanged and the plan below still
+stands, but **three of this doc's load-bearing claims are now false** and are
+corrected in place below: the documented C error no longer occurs; the
+`mod_a.Dialog(...)` / `ADialog(...)` call sites no longer reach the collision
+at all (a *different, larger* bug intercepts them first — see "Why it is
+unreachable end-to-end"); and the one genuinely **silent** residue is now
+identified and reproduced at the artifact level, which is a sharper target than
+anything the earlier entries describe.
+
+
+## Re-derived 2026-09-26: mechanism intact, documented symptom STALE, silent residue isolated, and a bigger bug found in front of it
+
+Method: re-derived the root cause from the current source rather than trusting
+any entry below, then reproduced each shape on the current tree (HEAD `b463d61`).
+Everything here is a fresh measurement; the entries further down are kept as
+history and are explicitly superseded where they disagree.
+
+### 1. The mechanism is unchanged, and still where this doc says it is
+
+`mojo/backend_gimple/module_gen.py:2422-2425` is the first-wins bare-name
+registration, verbatim as documented:
+
+```python
+for s in all_struct_defs:
+    s = _as_structdef_node(s)
+    if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
+        self._struct_name_owner[s.name] = s
+```
+
+and `:2434` is the loser's skip: `if self._struct_name_owner.get(s.name) is not
+s: continue`. `_struct_by_name` at `:2817` filters to the owner too, so the
+loser's own field scan is dropped as well. Phase 2a still compiles **every**
+StructDef's methods. All of that is as documented.
+
+### 2. The documented C error is GONE. Field access in a loser's methods now degrades dynamically
+
+Every entry below (2026-08-08, 2026-08-20, 2026-08-23, 2026-08-26) claims
+`mod_b_Dialog___init__` emits `self->result = ...` against mod_a's `Dialog`,
+producing `mod_b.py:3:7: error: 'Dialog' has no member named 'result'`. **That
+no longer happens.** `/tmp/b2d` (the doc's own repro: `mod_a.Dialog{widgetName}`,
+`mod_b.Dialog{result}`, both constructed from `main.py`), `--dump-full` on the
+current tree:
+
+```c
+typedef struct Dialog {          /* ONE winner, mod_a's field set */
+  int64_t __mojo_type_id;
+  int64_t widgetName;
+} Dialog;
+
+void __GIMPLE mod_b_Dialog___init__ (Dialog * self, int64_t result)
+{
+  ...
+  _mojo_dispatch_setattr (_t6, _t1, _t2);   /* NOT self->result = ... */
+}
+int64_t __GIMPLE mod_b_Dialog_show (Dialog * self)
+{
+  ...
+  _t2 = _mojo_dispatch_getattr (_t1, _t3);  /* NOT self->result */
+}
+```
+
+The loser's field names are simply **not in the winner's table**, so the
+read/write lowering takes the dynamic getattr/setattr branch it already had for
+unknown members. Net effect: the C-level corruption became a **runtime
+`AttributeError: widgetName`, exit 1** — loud and catchable, not silent and not
+a compile refusal. That is a real improvement over what this doc recorded, and
+it means "fix the C error" is no longer a describable goal.
+
+### 3. The one genuinely SILENT residue: a field name both structs share
+
+The dynamic fallback only covers names the two structs do *not* share. When they
+do share a name, the loser's access resolves against the **winner's** field
+table — including the winner's ctype — and the value is coerced into it. That is
+the doc's own "or, worse, silently reads/writes the wrong offset" prediction,
+and it is real. `/tmp/b2j`:
+
+```python
+# mod_a.py                          # mod_b.py
+class Dialog:                      class Dialog:
+    def __init__(self, n):             def __init__(self):
+        self.n = n                        self.n = "hello"
+```
+
+`--dump-full main.py` (`import mod_a` + `import mod_b` + one construction from
+`mod_a`), generated C:
+
+```c
+typedef struct Dialog { int64_t __mojo_type_id; int64_t n; } Dialog;  /* mod_a won */
+void __GIMPLE mod_b_Dialog___init__ (Dialog * self)
+{
+  char * _t1;  int64_t _t2;  void * _t3;  int64_t _t4;
+  _t1 = _slit_10000;                          /* "hello" */
+  _t3 = (void *)_t1;
+  _t4 = (int64_t)_t3;                         /* the STRING's pointer bits */
+  _t2 = _t4;
+  self->n = _t2;                              /* into mod_a's int64_t field */
+}
+```
+
+`mod_b.Dialog.n` is a `str`; the compiled artifact stores a raw pointer in an
+`int64_t` slot. Any consumer that reads it as an integer gets a **heap address
+— a different value on every run (ASLR), exit 0, no diagnostic**. Nothing in
+the generated C is wrong enough for gcc to notice. This is the shape to fix,
+and it is strictly narrower than the general plan below: it needs the loser's
+own field to have its own slot, nothing more.
+
+### 4. Why it is unreachable end-to-end — and the bigger bug in front of it
+
+No runnable repro of this bug exists on ANY path today, and the reason is not
+the one this doc gives. It is **not** that link mode keeps each module in its
+own translation unit (true, and still the reason the stdlib corpus never sees
+it). It is that a class reached through its module never gets constructed at
+all, collision or not. `/tmp/b2e` — a SINGLE module, no second `Dialog`
+anywhere:
+
+```python
+# mod_a.py
+class Dialog:
+    def __init__(self, widgetName):
+        self.widgetName = widgetName
+# main.py
+import mod_a
+def main():
+    var x = mod_a.Dialog("a")
+    print(x.widgetName)
+```
+
+emits `_t7 = _t2;  /* int64_t.Dialog() stubbed */`. The `from mod_a import
+Dialog as ADialog` spelling is worse — `/tmp/b2f` compiles
+`ADialog("a")` to the *string literal* `"a"`, and `x.widgetName` then reads a
+string's bytes as an object. Confirmed on the **link-mode** path too:
+`driver.compile_linked` on the same `main.py` returns `dylibs: []` and the same
+`int64_t.Dialog() stubbed`.
+
+So `module.Class(...)` construction through a module object is unresolved
+independent of this bug, on both paths. That is a strictly larger and more
+valuable bug, it is what currently makes this one unobservable at runtime, and
+**fixing it is what would force this one to be fixed** — the moment a real
+program can build a `mod_b.Dialog`, section 3's silent miscompile becomes a
+live silent miscompile. Sequence them in that order.
+
+### 5. Reachability of the inline path, re-checked
+
+- The compiler's own `--dump-full` closure — the one whole-program inline
+  compile the bootstrap actually performs — was walked for duplicate bare class
+  names: 49 files, exactly one duplicate, `StringLiteral`, and **both
+  definitions are in `fire_compiler.py` itself** (`class StringLiteral` at
+  lines 233 and 252, byte-identical bodies). No cross-module duplicate, so the
+  bootstrap is not a live instance. Note the consequence for any fix: the
+  in-tree duplicate means `_struct_name_owner` really does drop a definition
+  that the gate exercises, so a blanket "refuse when a struct loses the name
+  race" would fire inside the bootstrap. It happens to be harmless there only
+  because a `@dataclass` with no method bodies has no `self.<field>` access to
+  refuse — that is luck, not a property, and any fix must key on the *field
+  access*, not on the name loss.
+- The two real-world triggers this doc names are both dead for unrelated
+  reasons now: `Lib/typing.py` no longer builds at all (it fails in
+  `_collections_abc` / `re._compiler` / `enum` / `dis` / `dataclasses` /
+  `argparse` on `cannot coerce MojoList * to MojoSet *`-shaped errors, and then
+  in typing.py itself on `cannot coerce MojoDict * to MojoList *` at
+  `globalns`), so its `_CallableGenericAlias` collision cannot be observed
+  either way.
+
+### Verdict
+
+NOT FIXED, no code change, and the reason is sharper than "moderate-to-high
+risk": **there is no program that can exhibit it**, so any fix would be landed
+unvalidated. The two candidate narrow fixes and why neither is landable today:
+
+- *Refuse the loser's `self.<field>` outright* (turning the silent
+  type-punned write into a compile error). Provably scoped — it can only fire
+  inside a genuine bare-name loser's own method bodies — but it converts a
+  miscompile into a **refusal**, and this repo classes "a compile refusal on a
+  shape real stdlib code actually uses" as a hard bug in its own right. With
+  section 5's `fire_compiler.py` duplicate showing the loser's path is
+  genuinely exercised, "no real file hits it" is not demonstrable here.
+- *Route the loser's shared-name field access to the dynamic getattr/setattr
+  path its own body already uses for its non-shared names.* This is strictly
+  better than refusing (it makes the loser self-consistent instead of merely
+  loud) and cannot introduce a new failure mode, since it only reuses a path
+  the same function already emits. But it is still **unvalidatable**: with
+  section 4 in force there is no program whose behaviour could be shown to
+  change, so "did I break anything" has no experiment attached to it.
+
+Once section 4's bug is fixed and a runnable repro exists, the second of those
+is the first thing to try, and the general 4-step plan below is the fallback for
+the case where the loser's fields turn out to need genuinely separate slots
+rather than a side dict.
 
 ## Re-verified 2026-08-26 (branch fix/rest-remainder15): minimal repro still corrupts identically; general plan remains DOCUMENTED-NOT-FIXED, deliberately not attempted
+
+> **SUPERSEDED by the 2026-09-26 entry above.** Its central claim — that
+> `mod_b_Dialog___init__` emits `self->result = ...` and gcc rejects it with
+> `'Dialog' has no member named 'result'` — no longer reproduces. Kept as
+> history; do not re-derive from it.
 
 Re-ran the exact minimal 2-file repro (`mod_a.Dialog{widgetName}` /
 `mod_b.Dialog{result}`, both constructed from a `main.py`) fresh against
