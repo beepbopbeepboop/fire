@@ -189,6 +189,78 @@ def encode_mov_r64_rm64(dst: Reg, base: Reg, disp: int = 0) -> bytes:
     return bytes([rex, 0x8B, modrm]) + extra
 
 
+def encode_mov_r32_rm32(dst: Reg, base: Reg, disp: int = 0) -> bytes:
+    """mov dst32, [base + disp] — 8B /r with NO REX.W, so it zero-extends.
+
+    The unsigned 4-byte load of the pointer value model (`Pointer[UInt32]`,
+    `Pointer[SIMDSize]`).  The REX.W form of the same opcode is the 8-byte load,
+    which over-reads a 4-byte pointee by four — the same hazard the arm64 side
+    had with `LDR Xt` for `LDR Wt`.  Verified against clang: `unsigned int *p;
+    return *p;` compiles to `8b 07  movl (%rdi), %eax`.
+    """
+    modrm, extra = _mem_modrm(base, disp, dst)
+    rex = _rex(r=1 if dst.value >= 8 else 0, b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x8B, modrm]) + extra
+
+
+def encode_movzx_r64_rm8(dst: Reg, base: Reg, disp: int = 0) -> bytes:
+    """movzx dst, [base + disp] — 0F B6 /r, a byte zero-extended to a qword.
+
+    The unsigned 1-byte load of the pointer value model (`Pointer[UInt8]`,
+    `Pointer[Byte]`).  No REX.W: the destination is written as a 32-bit
+    register, which zero-extends, and a formal value is one 64-bit word.
+    Verified against clang: `movzbl (%rdi), %eax` = `0f b6 07`.
+    """
+    modrm, extra = _mem_modrm(base, disp, dst)
+    rex = _rex(r=1 if dst.value >= 8 else 0, b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x0F, 0xB6, modrm]) + extra
+
+
+def encode_movsx_r64_rm8(dst: Reg, base: Reg, disp: int = 0) -> bytes:
+    """movsx dst, [base + disp] — REX.W 0F BE /r, a signed byte to a qword.
+
+    REX.W is what distinguishes this from the unsigned byte load: without it
+    the destination is 32 bits and `Int8(-1)` would read back as 255.  Verified
+    against clang: `movsbq (%rdi), %rax` = `48 0f be 07`.
+    """
+    modrm, extra = _mem_modrm(base, disp, dst)
+    rex = _rex(w=1, r=1 if dst.value >= 8 else 0, b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x0F, 0xBE, modrm]) + extra
+
+
+def encode_movzx_r64_rm16(dst: Reg, base: Reg, disp: int = 0) -> bytes:
+    """movzx dst, [base + disp] — 0F B7 /r, a halfword zero-extended to a qword.
+
+    Verified against clang: `movzwl (%rdi), %eax` = `0f b7 07`.
+    """
+    modrm, extra = _mem_modrm(base, disp, dst)
+    rex = _rex(r=1 if dst.value >= 8 else 0, b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x0F, 0xB7, modrm]) + extra
+
+
+def encode_movsx_r64_rm16(dst: Reg, base: Reg, disp: int = 0) -> bytes:
+    """movsx dst, [base + disp] — REX.W 0F BF /r, a signed halfword to a qword.
+
+    Verified against clang: `movswq (%rdi), %rax` = `48 0f bf 07`.
+    """
+    modrm, extra = _mem_modrm(base, disp, dst)
+    rex = _rex(w=1, r=1 if dst.value >= 8 else 0, b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x0F, 0xBF, modrm]) + extra
+
+
+def encode_movsx_r64_rm32(dst: Reg, base: Reg, disp: int = 0) -> bytes:
+    """movsxd dst, [base + disp] — REX.W 63 /r, a signed 32-bit to a qword.
+
+    The signed 4-byte load (`Pointer[Int32]`, `Pointer[c_int]`).  REX.W 63 is
+    the memory form of the register-form `encode_movsx_r64_r32` that already
+    existed here; the memory form is what a dereference needs.  Verified against
+    clang: `movslq (%rdi), %rax` = `48 63 07`.
+    """
+    modrm, extra = _mem_modrm(base, disp, dst)
+    rex = _rex(w=1, r=1 if dst.value >= 8 else 0, b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x63, modrm]) + extra
+
+
 def encode_mov_rm64_r64(base: Reg, disp: int, src: Reg) -> bytes:
     """mov [base + disp], src — REX.W 89 /r."""
     modrm, extra = _mem_modrm(base, disp, src)

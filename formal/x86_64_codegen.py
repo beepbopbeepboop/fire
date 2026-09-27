@@ -442,6 +442,10 @@ class X86_64Codegen:
 
         self._functions = {}
         self._current_function = None
+        # The FUNCTION NODE, not just its name — the pointer value model reads
+        # a receiver's declared pointee from the function being emitted.  See
+        # arm64's `_emit_function`.
+        self._cur_fn = None
         self._if_counter = 0
         self._while_counter = 0
         self._var_regs = {}
@@ -629,6 +633,7 @@ class X86_64Codegen:
 
     def _emit_function(self, f: F.FunctionDef) -> None:
         self._current_function = f.name
+        self._cur_fn = f
         self.asm.label(f.name)
 
         var_names = _collect_var_names(f)
@@ -802,8 +807,18 @@ class X86_64Codegen:
 
     def _load_var(self, name: str, dst: Reg) -> None:
         """dst = local `name`. Register homes MOV; spill slots load from
-        [RBP + off]. An unknown name reads 0 rather than whatever register
-        happens to hold — formal has no globals.
+        [RBP + off]. A name in none of those tables is REFUSED, with the name.
+
+        It used to read 0, and arm64's answer to the same name was X19 — the
+        two architectures disagreeing about one program, which is the failure
+        this project cannot have. The immediate 0 was the more plausible of
+        the two and the more dangerous: `G = 5` at module level, read from a
+        function, returned 0 here and 10 on arm64 where the source says 5.
+        Neither was an answer; both were a register. A global needs storage
+        with static duration and this path has none, so the name is placed by
+        `formal/model.py`'s module symbol table (a folded literal is
+        substituted at the read, in `formal/build.py`) or it is not placed at
+        all, and "not placed" is a refusal.
 
         A FRAME SLOT (`h.x`, `h` holding the address of `x`'s frame) is a
         memory access rather than a local: `mov dst, [h + 8*slot]`. It is
@@ -834,7 +849,22 @@ class X86_64Codegen:
             self.asm.emit(encode_mov_r64_rm64(dst, Reg.RBP,
                                               self._spill_off(name)))
             return
-        self._emit_mov_imm(dst, 0)
+        raise CodegenError(self._no_home(name))
+
+    def _no_home(self, name: str) -> str:
+        """The refusal for a name with no register, spill slot or frame slot.
+
+        The same words arm64's `_no_home` gives, from the same model function,
+        because the two architectures are one language implementation: this
+        read used to be an immediate 0 here and X19 there, for one program."""
+        holder = name.split(".", 1)[0] in self._frame_holders
+        if "." in name:
+            return M.field_access_refusal(name, self.func_name or "<module>",
+                                          name.split(".", 1)[0], holder)
+        return M.unresolved_name_refusal(
+            name, self.func_name or "<module>",
+            "the register allocator collected no home for it, so the emitter "
+            "and the allocation walk disagree about this function's locals")
 
     def _store_var(self, name: str, src: Reg) -> None:
         """local `name` = src. Register homes MOV; spill slots store to
@@ -871,10 +901,7 @@ class X86_64Codegen:
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, self._spill_off(name),
                                               src))
             return
-        raise CodegenError(
-            f"{self.func_name or '<module>'}: no home for {name!r} — it is "
-            f"neither a source-level local nor a loop temp this function "
-            f"reserved (the allocation walk and the emitter disagree)")
+        raise CodegenError(self._no_home(name))
 
     # ── statements ───────────────────────────────────────────────────
 
@@ -919,14 +946,26 @@ class X86_64Codegen:
             # assert cond [, msg]: evaluate cond, exit(1) when falsy. The
             # message is not formatted — there is no printf on this path — and
             # the nonzero status is the signal.
-            self._emit_expr(stmt.value)
-            self._emit_mov_imm(Reg.R11, 1)
+            #
+            # The JMP over the exit is not an optimisation, it is the whole
+            # statement. There was none here: `jcc fail` was immediately
+            # followed by `label fail`, so the branch had nothing to skip and
+            # the FALL-THROUGH path went straight into exit(1). Every `assert`
+            # failed, whatever it asserted — measured on this backend,
+            # `assert 1` printed nothing and exited 1, while arm64 (which has
+            # the same shape with the branch over the exit spelled `b ok`)
+            # printed `passed`. The `_emit_mov_imm(Reg.R11, 1)` was also
+            # dead: R11 is the divisor, the shift count, and the alloc size on
+            # this path, and an `assert` does none of those.
+            self._emit_truthy_word(stmt.value)
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
             self._if_counter += 1
             aid = self._if_counter
             fail_label = f"{self.func_name}_assert{aid}_fail"
             ok_label = f"{self.func_name}_assert{aid}_ok"
+            self._record_cond_branch()
             self._emit_jcc(COND_E, fail_label)
+            self._emit_jmp(ok_label)
             self.asm.label(fail_label)
             self._emit_call_exit(1)
             self.asm.label(ok_label)
@@ -1035,9 +1074,23 @@ class X86_64Codegen:
                         # thing this pair is not allowed to do.
                         self._note_binding(key, stmt.value)
                         return
+                    # REFUSED, not dropped.  This used to evaluate both sides
+                    # and return, which is a SILENTLY DISCARDED STORE: the
+                    # program built, ran, and the write was simply not there.
+                    # arm64's `_store_var` had no slot either and fell through
+                    # to `mov x19, src`, so the two architectures disagreed
+                    # about the same source — one dropped it, one put it in a
+                    # register the next function reads as its first parameter.
+                    # Wave 5's rule exactly: on x86-64 a missing branch is a
+                    # dropped store, not a wrong value.  The words are the
+                    # shared model's, so both arches print the same line.
                     self._emit_expr(stmt.target.obj)
-                    self._emit_expr(stmt.value)
-                    return
+                    key = _member_slot_key(stmt.target)
+                    spelled = key or M.member_chain_text(stmt.target)
+                    root = spelled.split(".", 1)[0] if spelled else "this"
+                    raise CodegenError(M.field_access_refusal(
+                        spelled, self.func_name or "<module>", root,
+                        root in self._frame_holders))
                 raise CodegenError(
                     f"assignment to {type(stmt.target).__name__} is not "
                     f"lowered on the formal x86-64 path; only a plain name "
@@ -1287,6 +1340,81 @@ class X86_64Codegen:
         self._cond_branch_pcs.append(
             self.asm._org + len(self.asm.sections["text"]))
 
+    def _emit_truthy_word(self, expr, reg: Reg = Reg.RAX) -> None:
+        """Evaluate `expr` into `reg` so that its ZERONESS is its truthiness.
+
+        THE truthiness conversion, and every site that tests a condition for
+        truth rather than for equality goes through it. What it produces is a
+        WORD whose zero/nonzero is the answer — not a 0/1 — so a branch site
+        can keep the `test reg,reg` / `jcc` pair it already had and a value
+        site (`s and k`) can use the word directly, which is what Python's
+        `and`/`or` want anyway (they return an operand, not a bool).
+
+        Three lowerings, chosen by `model.truthy_lowering` on the operand's
+        kind, and the ZERONESS is the same for all of them:
+
+          TRUTHY_NONZERO         the word itself. Right for an integer (the
+                                only falsy integer is 0) and for a FRAME
+                                ADDRESS, whose truthiness is pointer
+                                truthiness — a frame is never mapped at 0.
+          TRUTHY_FROM_STRLEN     `strlen(s)`. The empty string is a NON-NULL
+                                pointer, so the row above would say it is
+                                truthy; `strlen("") == 0` is the answer, and
+                                it is the same computation `len(s)` makes
+                                with a symbol this backend already calls.
+          TRUTHY_FROM_BLOB_FIELD one load from offset 0. A list blob is
+                                `[count:i64][elem…]`, so its truthiness IS
+                                its count.
+
+        The row names are arm64's, x86-64's and the model's at once because
+        they are the MODEL's — `model.truthy_lowering` returns one of the two
+        `len_operand_lowering` rows or `nonzero` — and a second private copy of
+        this decision per backend is how `~s` came to mean `s` on one
+        architecture and be refused on the other. The empty string is the case
+        that separates a correct lowering from a null test, so it is the case
+        to check any change here against.
+
+        A SHORT-CIRCUIT CHAIN is handled here rather than in the three rows
+        above, and it is the row that is easy to miss: `a and b` is a value
+        whose truthiness is not the truthiness of the word it evaluates to.
+        Python's `and`/`or` return an OPERAND, and the operand that survives
+        can be an empty string or an empty list — so `if f and e:` with
+        `e = []` selects `e`, and testing the selected word for zeroness says
+        truthy because an empty list blob lives in a frame at a non-zero
+        address. Measured on both backends, that printed `1` where Python
+        prints `0`. The rule is the honest one and needs no kind at all:
+
+            truthy(a and b)  =  truthy(a) and truthy(b)
+            truthy(a or b)   =  truthy(a) or  truthy(b)
+
+        — so this RECURSES into both operands and never materialises the chain
+        as a value, which is what makes the answer independent of which operand
+        the chain happens to return.
+        """
+        if isinstance(expr, F.BinaryOp) and expr.op in ("and", "or"):
+            self._if_counter += 1
+            tid = self._if_counter
+            fn = self.func_name
+            join = f"{fn}_trv{tid}_j"
+            self._emit_truthy_word(expr.left)
+            self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+            # or: nonzero → the left's word is already the answer; and: zero →
+            # the left's word is already the answer. Only the right operand is
+            # ever evaluated, which is the whole of short-circuiting.
+            self._emit_jcc(COND_NE if expr.op == "or" else COND_E, join)
+            self._emit_truthy_word(expr.right)
+            self.asm.label(join)
+            return
+        how = M.truthy_lowering(self._expr_str_kind(expr), expr)
+        self._emit_expr(expr)
+        if reg is not Reg.RAX:
+            self.asm.emit(encode_mov_r64_r64(reg, Reg.RAX))
+        if how == M.TRUTHY_FROM_STRLEN:
+            self.asm.emit(encode_mov_r64_r64(Reg.RDI, reg))
+            self._emit_extern_call(M.STRING_LENGTH_SYMBOL)
+        elif how == M.TRUTHY_FROM_BLOB_FIELD:
+            self.asm.emit(encode_mov_r64_rm64(reg, reg, 0))
+
     def _emit_branch_if_false(self, label: str) -> None:
         """Jump to `label` when RAX is zero (the condition is falsy)."""
         self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
@@ -1314,7 +1442,7 @@ class X86_64Codegen:
 
         for i, (cond, body) in enumerate(tests):
             self.asm.label(f"{fn}_if{if_id}_alt_{i}")
-            self._emit_expr(cond)
+            self._emit_truthy_word(cond)
             fail = f"{fn}_if{if_id}_alt_{i + 1}" if i + 1 < len(tests) else (
                 else_label if has_else else end_label)
             self._emit_branch_if_false(fail)
@@ -1392,7 +1520,7 @@ class X86_64Codegen:
                 cc = COND_LE if descending else COND_GE
                 self._emit_jcc(cc, false_label)
             else:
-                self._emit_expr(cond)
+                self._emit_truthy_word(cond)
                 self._emit_branch_if_false(false_label)
 
             for s in body:
@@ -1765,8 +1893,82 @@ class X86_64Codegen:
             self._emit_str_affix(e, at_end=how == "str_endswith")
         elif how == "str_find":
             self._emit_str_find(e)
-        else:
+        elif how == "str_count":
+            # EXPLICIT, and it was implicit until this wave: `count`'s lowering
+            # was the `else` below, so every method name with no lowering of its
+            # own was answered by calling `str.count` on its receiver.  The
+            # arm64 backend carries the full reasoning; see its `else`.
             self._emit_str_count(e)
+        else:
+            # `_emit_str_count` WAS this arm; `count` is an explicit arm above
+            # now.  The arm64 backend carries the full reasoning — the short
+            # version is that a zero-argument method with no lowering was
+            # reported as `str.count() takes exactly one argument (got 0)`,
+            # which is how a `value()` newly made answerable by the pointer
+            # value model reported `str.count` as its blocker.  Both backends
+            # now say what the arm means, and both name `how`, so a table entry
+            # with no arm is visible on either architecture.
+            raise CodegenError(
+                f"{_dotted(e.func)}() is a method call on a value and this "
+                f"backend has no lowering for {method!r}, which reached the "
+                f"value-method dispatch with `how` = {how!r}. Every lowering "
+                f"both tables name is matched by an explicit arm above, so this "
+                f"is a table entry with no arm rather than a construct: "
+                f"`method` resolved to {how!r} and nothing claimed it. Refused "
+                f"rather than lowered as the nearest arm, which is how a "
+                f"zero-argument method came to be reported as "
+                f"`str.count() takes exactly one argument (got 0)`")
+
+    # ── the pointer value model: a DEREFERENCE ─────────────────────────────
+    #
+    # The arm64 backend carries the reasoning; the DECISION is
+    # `model.dereference_lowering`, shared, so the two architectures cannot
+    # disagree about a load's width — which is the failure mode that matters
+    # here, because a disagreement is not a diagnostic that differs but a
+    # `movzbl` on one side and a `movq` on the other over the same bytes.
+    #
+    #   ("load", 1, unsigned)  movzbl (%rax), %eax      0F B6  — UInt8/Byte
+    #   ("load", 1, signed)    movsbq (%rax), %rax      48 0F BE — Int8
+    #   ("load", 2, unsigned)  movzwl (%rax), %eax      0F B7  — UInt16
+    #   ("load", 2, signed)    movswq (%rax), %rax      48 0F BF — Int16
+    #   ("load", 4, unsigned)  movl   (%rax), %eax      8B     — UInt32
+    #   ("load", 4, signed)    movslq (%rax), %rax      48 63  — Int32/c_int
+    #   ("load", 8, *)         movq   (%rax), %rax      48 8B  — Int64/a pointer
+    #
+    # A STRUCT pointee has no instruction here and that is a decision, not an
+    # omission: the derivation says the answer is the receiver (a struct's value
+    # IS its frame address), and emitting it today returns 0 where the source
+    # says 22 on both architectures, because nothing recognises a name bound
+    # through a pointer as a frame holder.  `model.dereference_lowering` says so
+    # at length; the next step is one line in the holder fixpoint.
+    def _emit_dereference(self, e, method: str) -> None:
+        if e.args or e.kwargs:
+            raise CodegenError(
+                f"{_dotted(e.func)}() takes no arguments on the formal x86-64 "
+                f"path (got {[M.dotted_receiver(a) for a in e.args]})")
+        obj = e.func.obj
+        how, why = M.dereference_lowering(
+            self._cur_fn, obj, self._structs, self._functions, self._structs)
+        if how is None:
+            raise CodegenError(M.dereference_refusal(
+                method, why,
+                M.receiver_declared_is_pointer(self._cur_fn, obj, self._structs)
+            ).format(dotted=_dotted(e.func)))
+        _load, width, signed = how
+        self._emit_expr(obj)                    # RAX = the address
+        base = Reg(0)
+        dst = Reg(0)
+        if width == 1:
+            self.asm.emit(encode_movsx_r64_rm8(dst, base) if signed
+                          else encode_movzx_r64_rm8(dst, base))
+        elif width == 2:
+            self.asm.emit(encode_movsx_r64_rm16(dst, base) if signed
+                          else encode_movzx_r64_rm16(dst, base))
+        elif width == 4:
+            self.asm.emit(encode_movsx_r64_rm32(dst, base) if signed
+                          else encode_mov_r32_rm32(dst, base))
+        else:
+            self.asm.emit(encode_mov_r64_rm64(dst, base))
 
     # ── methods on a string ───────────────────────────────────────────────
     #
@@ -3028,7 +3230,7 @@ class X86_64Codegen:
             fn = self.func_name
             else_label = f"{fn}_tern{tid}_else"
             end_label = f"{fn}_tern{tid}_end"
-            self._emit_expr(expr.condition)
+            self._emit_truthy_word(expr.condition)
             self._emit_branch_if_false(else_label)
             self._emit_expr(expr.then_val)
             self._emit_jmp(end_label)
@@ -3132,8 +3334,21 @@ class X86_64Codegen:
                     f"the slot is a value, and this path will not read a word "
                     f"as though it were a struct's storage")
             self._emit_expr(expr.obj)
-            self._emit_mov_imm(Reg.RAX, 0)
-            return
+            # …and a field access whose base is NOT a frame holder is REFUSED,
+            # not read as 0.  This is the x86-64 half of
+            # `byref_one_name_two_widths_agree` / `one_field_struct_field_read_
+            # is_correct_on_arm64`, and it is the same defect the store half
+            # above had: `h.v` through a parameter is a real field read with no
+            # field layout to read from, and 0 is a plausible-looking wrong
+            # number.  Measured on the pre-change tree for ONE program:
+            # arm64 exited 1 (right, by accident — `h` is argument 0, so it is
+            # X19 and `_load_var`'s fall-through read X19) and x86-64 exited 0
+            # (wrong).  Two architectures, one source, two answers.  The words
+            # are the shared model's, so both arches print the same line.
+            root = (key or M.member_chain_text(expr)).split(".", 1)[0]
+            raise CodegenError(M.field_access_refusal(
+                key or M.member_chain_text(expr), self.func_name or "<module>",
+                root, root in self._frame_holders))
 
         raise CodegenError(self._unsupported_expr_message(expr))
 
@@ -3390,7 +3605,7 @@ class X86_64Codegen:
         fn = self.func_name
         end_label = f"{fn}_ao{aid}_end"
         skip_label = f"{fn}_ao{aid}_skip"
-        self._emit_expr(left)
+        self._emit_truthy_word(left)
         self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
         self._record_cond_branch()
         # or: nonzero → done (skip right); and: zero → done.
@@ -3605,7 +3820,19 @@ class X86_64Codegen:
 
         A non-literal step has no compile-time value, so the element stride
         the copy loop folds into its address arithmetic is unknown here; that
-        raises rather than emitting a wrong stride."""
+        raises rather than emitting a wrong stride.
+
+        A STRING base is refused before any of that, and the reason is the
+        count: the loop below reads it from offset 0 of the object, which for a
+        `char *` is the first eight CHARACTERS, so the walk starts inside the
+        string with a length taken from its own first two letters. Measured on
+        both backends, `s = "abcde"; printf("[%s]", s[1:])` died with SIGSEGV
+        (exit 139). `model.string_slice_refusal` holds the message and the
+        argument for lowering the suffix case later."""
+        sreason = M.string_slice_refusal(
+            self._expr_str_kind(obj), M.spelled(obj))
+        if sreason is not None:
+            raise CodegenError(sreason)
         lit_step = self._static_int(step) if step is not None else 1
         if lit_step is None:
             raise CodegenError(
@@ -3830,7 +4057,7 @@ class X86_64Codegen:
                 self._emit_for_unpack(tnames, Reg.RAX, f"{fn}_cgu{wid}")
 
             for cond in gen.conditions or []:
-                self._emit_expr(cond)
+                self._emit_truthy_word(cond)
                 self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
                 self._record_cond_branch()
                 self._emit_jcc(COND_E, step_label)
@@ -4081,6 +4308,21 @@ class X86_64Codegen:
         if M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
+        # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
+        # table below for two reasons, and both are about the RESULT rather than
+        # about the receiver.  A dereference is an EXPRESSION: `return
+        # pointer.unsafe_value()`, `s._ptr = p.value()` — the corpus puts it in
+        # argument, store and return positions, and `_emit_value_method` is a
+        # statement emitter with no result register, so the only place its answer
+        # can land is RAX.  And the decision has to be
+        # `model.dereference_lowering` and not `model.value_method_refusal`,
+        # because the refusal cannot see the function and so cannot see a
+        # declared pointee — which is the whole of the pointer value model.
+        if isinstance(e.func, F.MemberExpr) \
+                and e.func.member in M.DEREFERENCE_TRY_NAMES \
+                and self._expr_str_kind(e.func.obj) != M.STR_KIND:
+            self._emit_dereference(e, e.func.member)
+            return
         # A method on a plain VALUE is not a call to a symbol spelled
         # `recv.method`. `_callee_symbol` flattens both spellings to a dotted
         # name, so the two are told apart by the receiver: a local is a value
@@ -4167,54 +4409,23 @@ class X86_64Codegen:
 
 
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
-        """Reorder args+kwargs into positional form for a known callee.
+        """`e`'s arguments in positional form, for a known callee.
 
-        Gaps left by a kwarg targeting a later parameter take that
-        parameter's default; trailing optional parameters the caller omitted
-        are dropped, since the callee's prologue only reads the registers it
-        is actually passed."""
-        if not e.kwargs:
-            return list(e.args)
+        A THIN CALL into `M.bind_call_arguments` — the same one arm64 calls,
+        and the reason the two backends cannot disagree about which argument
+        lands on which parameter.  This was a second copy of the rule whose
+        `if not e.kwargs: return list(e.args)` skipped the arity check
+        entirely for a call with no keywords."""
         fdef = self._functions.get(name)
         if fdef is None:
-            raise CodegenError(
-                f"keyword arguments are not supported ({[k for k, _ in e.kwargs]})")
-        params = [pname for pname, _ptype in fdef.params]
-        slots: list = list(e.args)
-        if len(slots) > len(params):
-            raise CodegenError(
-                f"call {name}(): too many positional arguments "
-                f"({len(slots)} for {len(params)} parameters)")
-        slots.extend([None] * (len(params) - len(slots)))
-        for k, v in e.kwargs:
-            idx = next((i for i, pname in enumerate(params)
-                        if pname == k or pname.lstrip("*") == k), None)
-            if idx is None:
-                if any(pname.startswith("**") for pname in params):
-                    continue    # **kwargs swallows it; no register to put it in
+            if e.kwargs:
                 raise CodegenError(
-                    f"call {name}(): unexpected keyword argument {k!r}")
-            if idx < len(e.args):
-                raise CodegenError(
-                    f"call {name}(): multiple values for argument {k!r}")
-            if slots[idx] is not None:
-                raise CodegenError(
-                    f"call {name}(): multiple values for argument {k!r}")
-            slots[idx] = v
-        last = max((i for i, s in enumerate(slots) if s is not None),
-                   default=-1)
-        slots = slots[:last + 1]
-        for i, s in enumerate(slots):
-            if s is not None:
-                continue
-            pname = params[i]
-            if pname.startswith("*"):
-                slots[i] = F.IntLiteral(0)
-            elif fdef.param_has_default.get(pname):
-                slots[i] = fdef.param_defaults[pname]
-            else:
-                raise CodegenError(
-                    f"call {name}(): missing required argument {pname!r}")
+                    f"keyword arguments are not supported "
+                    f"({[k for k, _ in e.kwargs]})")
+            return list(e.args or [])
+        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+        if err is not None:
+            raise CodegenError(err)
         return slots
 
     # ── types and immediates ─────────────────────────────────────────

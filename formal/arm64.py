@@ -443,13 +443,37 @@ def encode_orr_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
 
 def encode_orn_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
     """ORN Rd, Rn, Xm. Rd = ~Rn OR Xm (bitwise NOT then OR).
-    Encoding: 000101 0 0 000000 0 0 Rm Rn Rd (sf=1, op=0, m=0) but with negation
-    """
+    Encoding: 0b0 sf=1 opc=01 01010 1 0 Rm imm6 Rn Rd
+
+    The `N` bit (bit 21) is what makes this ORN rather than OR, and the `sf`
+    bit (bit 31) is what makes it the 64-bit form. Verified against the
+    assembler: `orn x2, xzr, x3` assembles to 0xAA2303E2, and this with
+    xd=2, xn=31, xm=3 is 0xAA200000 | (3 << 16) | (31 << 5) | 2. The
+    previous constants here had sf=0 and Rm in the wrong field, so it
+    emitted a 32-bit AND; nothing called it, which is the only reason that
+    went unnoticed."""
     assert 0 <= xd <= 30
     assert 0 <= xn <= 31
     assert 0 <= xm <= 30
-    insn = 0x0A200000 | (xm << 16) | (xn << 10) | xd
+    insn = 0xAA200000 | (xm << 16) | (xn << 5) | xd
     return struct.pack('<I', insn)
+
+
+def encode_mvn_xd_xn(xd: int, xn: int) -> bytes:
+    """MVN Rd, Rn. Rd = ~Rn (bitwise NOT). The unary `~`.
+
+    MVN is an alias of `ORN Rd, ZR, Rn` — ~Rn OR 0 — so this is `encode_orn`
+    with the first source register fixed at 31, and it is spelled as that
+    rather than as a second copy of the constant so the two cannot come
+    apart. Verified against the assembler: `mvn x0, x1` is 0xAA2103E0, and
+    this with xd=0, xn=1 is 0xAA200000 | (31 << 5) | (1 << 5) | 0.
+
+    This is the arm64 half of `~x`; before it existed the arm64 backend had
+    no `~` branch at all, so `~` on an integer could only be refused (or, on
+    the pre-lexer-fix tree, silently dropped by the tokenizer)."""
+    assert 0 <= xd <= 30
+    assert 0 <= xn <= 31
+    return encode_orn_xd_xn_xm(xd, 31, xn)
 
 
 def encode_eor_xd_xn_xm(xd: int, xn: int, xm: int) -> bytes:
@@ -876,6 +900,22 @@ def encode_stur_xt_xn_imm(xt: int, xn: int, imm: int) -> bytes:
     assert 0 <= xt <= 30 and 0 <= xn <= 31
     assert -256 <= imm <= 255
     return struct.pack('<I', 0xF8000000 | ((imm & 0x1ff) << 12) | (xn << 5) | xt)
+
+
+def encode_ldr_wt_wn_imm(wt: int, wn: int, imm: int = 0) -> bytes:
+    """LDR Wt, [Xn, #imm] — load 32 bits, ZERO-extended into Xt.
+
+    The one load of the set that had no encoder here, and it is the unsigned
+    4-byte case of the pointer value model's load: `Pointer[UInt32]` and
+    `Pointer[SIMDSize]` are 4 bytes, and the alternative was the 8-byte
+    `encode_ldr_xt_xn_imm`, which over-reads them by four.  Verified against
+    `as`: `ldr w0, [x0]` = 0xb9400000.  Writing Wt rather than Xt is what makes
+    it a zero-extend: the 32-bit write clears the top half of Xt, so a formal
+    value that is one 64-bit word reads back as the unsigned 32-bit number.
+    """
+    assert 0 <= wt <= 30 and 0 <= wn <= 31
+    assert 0 <= imm <= 16380 and imm % 4 == 0
+    return struct.pack('<I', 0xB9400000 | ((imm >> 2) << 10) | (wn << 5) | wt)
 
 
 def encode_ldrh_wt_wn_imm(wt: int, wn: int, imm: int = 0) -> bytes:
