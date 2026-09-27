@@ -1701,7 +1701,20 @@ def _seed_mut_captured_local_types(gen, func_name: str):
     dereference instead of a bare identifier."""
     for ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
         cap_types = dict(ci.captures)
-        for mn in ci.mut_names:
+        # SORTED, and load-bearing. `ci.mut_names` is a frozenset, so
+        # iterating it directly emitted the boxed-pointer declarations in
+        # Python string-hash order — which changes with PYTHONHASHSEED,
+        # i.e. between processes on the same machine and the same source.
+        # Measured on stdlib test/runtime/test_locks.mojo: seeds 0/1/2/4/6/
+        # 7/10/12 emit `int64_t * _;` before `int64_t * rawCounter;` and
+        # seeds 3/5/8/9/11 emit them the other way round — two byte-
+        # different .ci files for one module, stable only within a process.
+        # That is a reproducibility bug with teeth: it makes every
+        # "generated C is byte-identical" claim seed-dependent unless the
+        # seed was pinned, and bootstrap's stage1 == stage2 == stage3
+        # comparison is exactly the check it can silently defeat. Same
+        # reason as the sorted() in _emit_mut_local_box_allocs below.
+        for mn in sorted(ci.mut_names):
             if mn in cap_types and mn not in gen.var_types:
                 ctype = cap_types[mn]
                 gen._boxed_mut_locals[mn] = ctype
