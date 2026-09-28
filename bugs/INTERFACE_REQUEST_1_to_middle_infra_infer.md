@@ -69,3 +69,66 @@ BLOCKS: Turning the R2 refusal on at the `_emit_call` site. With the guard
        the boxed runtime dispatch, `reversed()` over an untyped value, and
        the `re.findall` lowering) are independent of it and are already
        landing.
+
+---
+
+## INTEGRATOR NOTE — the addressee is wrong; the fix is [1]'s own, in a file [1] owns
+
+Added at the merge of [1]+[2] (468fc8a). [1]'s text above is unaltered.
+
+**The rule as worded cannot be implemented in `mojo/middle/infra_infer.py`,
+because the data it needs is not in that scope.** Verified, not inferred:
+
+* `analyze_param_usage(nodes, param_name)`
+  (`mojo/middle/infra_infer.py:318`) takes the CALLEE's own statement nodes and
+  one parameter name. It is a body scan.
+* `_infer_param_types` (`:213`) reads exactly these off `gen`: `_KNOWN_SIGS`,
+  `func_return_types`, `struct_field_types`, `conditions`, `iterable`,
+  `_param_usage_scan_cache`. Every one is callee-side. There is no call-site
+  map, and "unanimity across call sites" has nothing to be unanimous about.
+
+So "require unanimity across call sites" is not a rule `infra_infer.py` can
+apply. It would have to be applied where the call sites are enumerated.
+
+**They are enumerated in `mojo/backend_gimple/module_gen.py` — [1]'s own write
+set** — in the loop over `_caller_bodies` / `all_functions` (~:4694), which
+already builds two per-callee-per-parameter observation MAPS:
+
+    _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
+    _struct_obs: dict[str, dict[str, set]] = {}
+
+and applies the "only if unanimous" rule to the first of them. `_scalar_obs`
+IS the precedent this request cites — its own docstring at ~:4244 spells out
+the exact semantics wanted here ("a struct pointer mixed into the set must
+SUPPRESS an otherwise-unanimous `char *` rather than lose it"). Two working
+implementations of the rule, in the same loop, in the same file [1] edits.
+
+**So the work is:** add `_container_obs` beside those two in that loop (same
+`callee -> {pname -> {types}}` shape, fed by a container-kind observer
+alongside `_arg_scalar_type` / `_arg_struct_ptr_type`), and apply the unanimity
+rule where the container kind is chosen — falling back to `int64_t`, which the
+backend already dispatches correctly through `_gen_for_iter`'s
+`mojo_is_registered_dict` / `mojo_is_registered_list` arms. No new owner, no
+cross-boundary coordination, no unassigned file.
+
+**Consequences of the repoint, stated so the next agent does not have to
+re-derive them:**
+
+* §11.2 lists `mojo/middle/*` as DELIBERATELY UNOWNED this round. As written the
+  request has no addressee at all, which is why it could not land and why it
+  sat. Repointed at `module_gen.py` it is [1]'s own follow-up.
+* `_convert_container_kind`'s two real conversions
+  (`mojo_set_to_list`, `mojo_dict_keys`) are unaffected and stay either way —
+  they are exact, not casts.
+* The residual cast in `emit_infra.py:1383` and its comment stay until the
+  container-kind parameter is UNANIMOUS, i.e. until the two measured sites stop
+  disagreeing. Do not delete the cast as part of landing this: the 738-error
+  measurement in the BLOCKS section is the reason, and it is a property of the
+  closure, not of the rule.
+* Cheapest first step, worth measuring before writing the rule: the
+  disagreement is between the callee's body-derived kind and each caller's own
+  kind of the argument. So the two sites may be fixable AT THE CALL SITE (an
+  explicit annotation on `state` / `known_structs`, or reordering so the empty
+  literal is not the only evidence) for a fraction of the cost, with the
+  inference rule as the general fix behind it. That is a measurement, not a
+  claim, and it is [1]'s to make.
